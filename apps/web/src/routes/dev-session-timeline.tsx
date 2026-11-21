@@ -21,8 +21,8 @@ function param(name: string): string | null {
 // The lab has no workspace: inline HTML previews render as in the app, and a
 // Site reference shows the preview's own "could not load" state.
 const noSites: SiteSnapshotClient = {
-  getWorkspaceArtifact: () => Promise.reject(new Error("The lab has no Sites")),
-  getWorkspaceArtifactHtml: () => Promise.reject(new Error("The lab has no Sites")),
+  getWorkspaceArtifact: () => Promise.reject(new Error("The lab has no apps")),
+  getWorkspaceArtifactHtml: () => Promise.reject(new Error("The lab has no apps")),
 };
 
 const labSend = async () => true;

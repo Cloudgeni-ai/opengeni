@@ -924,7 +924,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           return c.json(
             {
               code: "SITE_SESSION_TOOLS_FORBIDDEN",
-              message: "This session field must be set in the console, not by a Site page",
+              message: "This session field must be set in the console, not by an app page",
               details: { code: "site_frame_field_forbidden", field: refused },
             },
             403,
@@ -6620,10 +6620,10 @@ export function sessionListQuery(
     (!z.string().uuid().safeParse(siteAccessId).success || originSiteId !== undefined)
   )
     throw new HTTPException(400, {
-      message: "siteAccessId must name one Site without an origin filter",
+      message: "siteAccessId must name one app without an origin filter",
     });
   if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
-    throw new HTTPException(400, { message: "originSiteId must be a Site id" });
+    throw new HTTPException(400, { message: "originSiteId must be an app id" });
   const siteConversations = query.siteConversations;
   if (siteConversations !== undefined) {
     if (siteConversations !== "include" && siteConversations !== "group")
@@ -6633,7 +6633,7 @@ export function sessionListQuery(
     // A Site's own history is already explicit; Site frames never reach this.
     if (originSiteId !== undefined || siteAccessId !== undefined)
       throw new HTTPException(400, {
-        message: "siteConversations cannot be combined with a Site filter",
+        message: "siteConversations cannot be combined with an app filter",
       });
     if (
       siteConversations === "group" &&

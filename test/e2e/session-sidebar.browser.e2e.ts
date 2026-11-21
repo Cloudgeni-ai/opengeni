@@ -983,7 +983,7 @@ const conversationId = (n: number) => `00000000-0000-4000-9000-${String(n).padSt
 const sidebar = () => page.getByRole("complementary", { name: "Workspace sidebar" });
 const sitePanel = () => page.getByRole("complementary", { name: "Chat", exact: true });
 const siteRow = (title: string) =>
-  sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\. Site`) });
+  sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\. App`) });
 const railConversation = (title: string) =>
   sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\.`) });
 const usageConversations = [
@@ -1056,7 +1056,7 @@ test("a Site a chat made sits in that chat's project, and opening a Site keeps i
   // "Pricing page copy" made it in Website redesign; nobody has asked it
   // anything, so the row has no count and nothing to disclose.
   await group("Website redesign")
-    .getByRole("link", { name: "Open Pricing calculator. Site", exact: true })
+    .getByRole("link", { name: "Open Pricing calculator. App", exact: true })
     .waitFor();
   expect(
     await sidebar()
@@ -1217,7 +1217,7 @@ test("the Site view starts below the desktop window bar", async () => {
     if (desktop === "macos" && rail === "collapsed") {
       await capture("site-view-macos-collapsed-rail");
       // Full screen starts below the bar too, with its usual spacing.
-      await page.getByRole("button", { name: "Open Site full screen" }).click();
+      await page.getByRole("button", { name: "Open app full screen" }).click();
       const back = await page.getByRole("button", { name: "Back", exact: true }).boundingBox();
       expect(back!.x).toBeLessThan(30);
       expect(back!.y).toBeGreaterThanOrEqual(WINDOW_BAR_HEIGHT);
@@ -1302,7 +1302,7 @@ test("every row shows Pin and Archive over its time on hover or focus, without m
     {
       box: siteRowBox(usageSiteId),
       actions: siteRowBox(usageSiteId).locator("[data-site-quick-actions]"),
-      names: ["Pin Site", "Archive Site"],
+      names: ["Pin app", "Archive app"],
     },
   ];
   for (const row of targets) {
@@ -1328,7 +1328,7 @@ test("every row shows Pin and Archive over its time on hover or focus, without m
   }
 
   // Tooltips name each action.
-  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin Site", exact: true }).hover();
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin app", exact: true }).hover();
   expect((await page.getByRole("tooltip").first().innerText()).trim()).toBe("Pin");
   await capture("row-actions-site-hover");
 
@@ -1342,11 +1342,11 @@ test("every row shows Pin and Archive over its time on hover or focus, without m
   );
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-    "Pin Site",
+    "Pin app",
   );
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-    "Archive Site",
+    "Archive app",
   );
 }, 30_000);
 
@@ -1354,16 +1354,16 @@ test("Pin moves a Site row and a spawned row into Pinned and back", async () => 
   await openRowActions();
   const pinned = () => group("Pinned");
   await siteRowBox(usageSiteId).hover();
-  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin Site", exact: true }).click();
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin app", exact: true }).click();
   await pinned()
-    .getByRole("link", { name: /^Open Opengeni usage\. Site\. Pinned/u })
+    .getByRole("link", { name: /^Open Opengeni usage\. App\. Pinned/u })
     .waitFor();
   expect(await siteRow("Opengeni usage").count()).toBe(1);
   await page.waitForFunction(() =>
     window.sessionSidebarQa.siteSidebarCalls.some((call) => call.pinned === true),
   );
   // The toggle names its next action instead of also announcing a state.
-  const unpin = pinned().getByRole("button", { name: "Unpin Site", exact: true });
+  const unpin = pinned().getByRole("button", { name: "Unpin app", exact: true });
   expect(await unpin.getAttribute("aria-pressed")).toBeNull();
 
   // A spawned chat is pinned as its own shortcut, by keyboard.
@@ -1379,15 +1379,15 @@ test("Pin moves a Site row and a spawned row into Pinned and back", async () => 
     return !folder?.querySelector("[data-site-row]");
   });
   await group("Default")
-    .getByRole("link", { name: /^Open Opengeni usage\. Site,/u })
+    .getByRole("link", { name: /^Open Opengeni usage\. App,/u })
     .waitFor();
 }, 30_000);
 
 test("Archive hides a Site row for this person with Undo; a spawned row archives its workstream", async () => {
   await openRowActions();
   await siteRowBox(usageSiteId).hover();
-  await siteRowBox(usageSiteId).getByRole("button", { name: "Archive Site", exact: true }).click();
-  await page.getByText("Site archived", { exact: true }).waitFor();
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Archive app", exact: true }).click();
+  await page.getByText("App archived", { exact: true }).waitFor();
   await page.getByText("Hidden from your sidebar only.", { exact: true }).waitFor();
   expect(await siteRow("Opengeni usage").count()).toBe(0);
   // Its conversations leave with it.
@@ -1404,7 +1404,7 @@ test("Archive hides a Site row for this person with Undo; a spawned row archives
   // Archiving from the right-click menu hands focus to the next row, not <body>.
   await siteRowBox(usageSiteId).click({ button: "right" });
   await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
-  await page.getByText("Site archived", { exact: true }).waitFor();
+  await page.getByText("App archived", { exact: true }).waitFor();
   await page.waitForFunction((siteId) => {
     const active = document.activeElement;
     return Boolean(
@@ -1471,7 +1471,7 @@ test("a Site row moves to another project or Default like a chat row, by menu or
     "Copy title",
     "Pin",
     "Duplicate",
-    "Site details",
+    "App details",
     "Archive",
     "Default",
     "Website redesign",
@@ -1531,7 +1531,7 @@ test("a Site row moves to another project or Default like a chat row, by menu or
     .click({ button: "right" });
   await page.getByRole("menuitem", { name: "Bugfixes", exact: true }).click();
   await page
-    .getByText("Couldn't move the Site. Its previous project was restored.", { exact: true })
+    .getByText("Couldn't move the app. Its previous project was restored.", { exact: true })
     .waitFor();
   await siteInProject("Website redesign", pricingSiteId).waitFor();
   expect(await siteInProject("Bugfixes", pricingSiteId).count()).toBe(0);

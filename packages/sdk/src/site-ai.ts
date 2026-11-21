@@ -175,7 +175,7 @@ export function createOpenGeniSiteAi(
         // Byte-limited short pages are not EOF; follow durable coverage.
         after = Math.max(after, page.nextAfter ?? page.coveredSequence?.last ?? 0);
         if (after <= previous)
-          throw new Error("The Site AI event replay did not reach the session cursor.");
+          throw new Error("The app AI event replay did not reach the session cursor.");
       }
     };
     const waiting = (session: Session) =>
@@ -236,12 +236,12 @@ export function createOpenGeniSiteAi(
           const next = await observe(() => stream!.next(), upstream.signal);
           if (next.done) {
             if (!waitingThrough)
-              throw new Error("The Site AI event stream ended before the turn settled.");
+              throw new Error("The app AI event stream ended before the turn settled.");
             // A wait can outlast one stream: reopen while the turn still waits.
             closeStream();
             session = await readSession();
             if (!waiting(session) && session.lastSequence <= after)
-              throw new Error("The Site AI event stream ended before the turn settled.");
+              throw new Error("The app AI event stream ended before the turn settled.");
             if (after === opened) {
               await pause(reopenDelay(quietReopens), upstream.signal);
               quietReopens += 1;

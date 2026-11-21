@@ -75,7 +75,7 @@ export async function probeAccess(site: SiteContext): Promise<AccessProbe> {
       }),
     );
   } catch {
-    throw new UpstreamError("Site access check failed", null);
+    throw new UpstreamError("App access check failed", null);
   }
   if (response.status === 401) return discard(response, { kind: "signin" });
   if (response.status === 403) return discard(response, { kind: "forbidden" });
@@ -83,7 +83,7 @@ export async function probeAccess(site: SiteContext): Promise<AccessProbe> {
     return discard(response, { kind: "missing" });
   if (!response.ok) {
     await response.body?.cancel();
-    throw new UpstreamError("Site access check failed", response.status);
+    throw new UpstreamError("App access check failed", response.status);
   }
   const body = await response.json().catch(() => null);
   const viewer = viewerFrom(body);

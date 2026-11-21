@@ -2,6 +2,9 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   ToolGatewaySiteConsentReview,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
+  currentFirstPartyToolIdentity,
+  firstPartyMcpToolAliasTarget,
+  firstPartyMcpToolAliasesOf,
   ToolGatewayInvokeResponse,
   ToolGatewayTargetApprovalResponse,
   ToolGatewaySiteConsentResponse,
@@ -127,6 +130,10 @@ const sameIdentity = (a: ToolGatewayIdentity, b: ToolGatewayIdentity) => key(a) 
 const samePath = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((part, index) => part === b[index]);
 
+/** "Always allow" saved before a first-party rename names the current tool. */
+const allowanceToolName = (allowance: { serverId: string; toolName: string }) =>
+  currentFirstPartyToolIdentity(allowance).toolName;
+
 function projectedPath(identity: ToolGatewayIdentity) {
   const alias =
     identity.serverId === "opengeni"
@@ -228,7 +235,7 @@ function siteConsentError(
   if (isPublishedSiteToolAuthorization(authorization))
     return new ApiHttpError(409, {
       code: "conflict",
-      message: "Open this Site in Opengeni to confirm this action.",
+      message: "Open this app in Opengeni to confirm this action.",
       retryable: false,
       outcomeUnknown: false,
       details: { code: "site_tool_consent_requires_opengeni" },
@@ -303,7 +310,11 @@ async function readSiteVersionDeclarations(
       request.siteVersionId,
     );
     if (status !== "active" || version.id !== request.siteVersionId) throw notAuthorized();
-    const declared: readonly ToolGatewayIdentity[] = version.requestedTools;
+    // A version declaring a first-party tool by its former name (site_*)
+    // declares the current tool (app_*).
+    const declared: readonly ToolGatewayIdentity[] = version.requestedTools.map(
+      currentFirstPartyToolIdentity,
+    );
     return { visible, declared };
   } catch (error) {
     // A missing, unseen or replaced Site version is a refusal; anything else
@@ -318,8 +329,17 @@ function declaredTarget(
   declared: readonly ToolGatewayIdentity[],
   target: ToolGatewayTarget,
 ): ToolGatewayIdentity {
-  if ("identity" in target) return target.identity;
-  const matches = declared.filter((item) => samePath(projectedPath(item), target.path));
+  if ("identity" in target) return currentFirstPartyToolIdentity(target.identity);
+  let matches = declared.filter((item) => samePath(projectedPath(item), target.path));
+  // A path written with a first-party tool's former name.
+  const leaf = target.path.at(-1);
+  const current = leaf === undefined ? undefined : firstPartyMcpToolAliasTarget(leaf);
+  if (matches.length === 0 && current !== undefined) {
+    const path = [...target.path.slice(0, -1), current];
+    matches = declared.filter(
+      (item) => item.serverId === "opengeni" && samePath(projectedPath(item), path),
+    );
+  }
   if (matches.length !== 1) throw notAuthorized();
   return matches[0]!;
 }
@@ -415,7 +435,7 @@ async function siteTarget(
         allowances.some(
           (allowance) =>
             allowance.serverId === candidate.canonicalServerId &&
-            allowance.toolName === candidate.identity.toolName &&
+            allowanceToolName(allowance) === candidate.identity.toolName &&
             allowance.connectionId === candidate.connectionId,
         ),
       );
@@ -706,9 +726,19 @@ export async function invokeWorkspaceToolTarget(
           // chose "Always allow for this Site" for this tool and connection.
           // A Block never reaches here (`prepareCall` refuses it).
           if (!routing) throw approvalRequiredError();
-          allowedForSite = await (options.hasAllowance ?? hasSiteToolAllowance)(deps.db, {
-            ...siteAllowanceKey(authorization, request, routing),
-          });
+          // A choice saved before a first-party rename names the former tool.
+          const allowanceKey = siteAllowanceKey(authorization, request, routing);
+          const names =
+            allowanceKey.serverId === "opengeni"
+              ? [allowanceKey.toolName, ...firstPartyMcpToolAliasesOf(allowanceKey.toolName)]
+              : [allowanceKey.toolName];
+          for (const toolName of names) {
+            allowedForSite = await (options.hasAllowance ?? hasSiteToolAllowance)(deps.db, {
+              ...allowanceKey,
+              toolName,
+            });
+            if (allowedForSite) break;
+          }
           if (!allowedForSite)
             throw siteConsentError(authorization, "tool_gateway_approval_required");
           approvalRequired = false;
@@ -907,8 +937,13 @@ export async function resolveWorkspaceToolManifest(
 ) {
   requireWorkspaceToolGatewayAuthorization(authorization);
   options.signal?.throwIfAborted();
+  // Former first-party names (site_*) ask for the current tools (app_*).
   const identities = [
-    ...new Map(request.identities.map((identity) => [key(identity), identity])).values(),
+    ...new Map(
+      request.identities
+        .map(currentFirstPartyToolIdentity)
+        .map((identity) => [key(identity), identity]),
+    ).values(),
   ];
   const fence = createTargetFence(deps, authorization, options, false);
   let prepared: PreparedWorkspaceToolGateway | undefined;
@@ -1173,7 +1208,7 @@ export async function describeWorkspaceSiteToolReadiness(
     allowances.some(
       (candidate) =>
         candidate.serverId === allowance.serverId &&
-        candidate.toolName === allowance.toolName &&
+        allowanceToolName(candidate) === allowance.toolName &&
         candidate.connectionId === allowance.connectionId,
     );
   // Asking needs a person in an Opengeni frame; a service key has no one to ask.

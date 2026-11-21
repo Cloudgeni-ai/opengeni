@@ -257,7 +257,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     if (currentSiteSessionOrigin())
-      throw new HTTPException(403, { message: "A Site page cannot record opening a Site" });
+      throw new HTTPException(403, { message: "An app page cannot record opening an app" });
     const siteId = artifactId(context);
     const viewer = await siteViewerForGrant(deps.db, grant);
     if (!viewer.subjectId)
@@ -285,7 +285,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     if (currentSiteSessionOrigin())
-      throw new HTTPException(403, { message: "A Site page cannot change the sidebar" });
+      throw new HTTPException(403, { message: "An app page cannot change the sidebar" });
     const siteId = artifactId(context);
     const change = await body(context, UpdateSiteSidebarStateRequest);
     const viewer = await siteViewerForGrant(deps.db, grant);
@@ -316,7 +316,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
     if (currentSiteSessionOrigin())
-      throw new HTTPException(403, { message: "A Site page cannot change the sidebar" });
+      throw new HTTPException(403, { message: "An app page cannot change the sidebar" });
     const siteId = artifactId(context);
     const change = await body(context, UpdateSiteProjectRequest);
     const viewer = await siteViewerForGrant(deps.db, grant);
@@ -329,7 +329,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
       channelId: change.fromChannelId,
     });
     if (sessionIds.length > SITE_PROJECT_MOVE_LIMIT)
-      throw new HTTPException(422, { message: "This Site has too many conversations to move" });
+      throw new HTTPException(422, { message: "This app has too many conversations to move" });
     if (sessionIds.length > 0) {
       const decisions = await requireSessionAuthorizations(deps, grant, {
         sessionIds,
@@ -340,7 +340,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         if (decision.status === "fulfilled") continue;
         if (decision.reason instanceof SessionAuthorizationDeniedError)
           throw new HTTPException(403, {
-            message: "You can't move every conversation of this Site",
+            message: "You can't move every conversation of this app",
           });
         throw decision.reason;
       }

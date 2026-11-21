@@ -795,7 +795,7 @@ describe("managed personal workspace access", () => {
       body: JSON.stringify({ kind: "unlimited" }),
     });
     expect(denied.status).toBe(403);
-    expect(await denied.text()).toContain("Only a workspace admin can change Site limits");
+    expect(await denied.text()).toContain("Only a workspace admin can change app limits");
   });
 
   test("Personal Knowledge uses the canonical API and validates pagination before retrieval", async () => {

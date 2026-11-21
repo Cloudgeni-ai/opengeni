@@ -300,7 +300,7 @@ describe("WorkspaceDock", () => {
     function SitePanel({ showsSite }: { showsSite: boolean }) {
       useWorkspacePanelOwnsExpand(showsSite);
       return showsSite ? (
-        <button type="button" aria-label="Expand Site to full window">
+        <button type="button" aria-label="Expand app to full window">
           Site
         </button>
       ) : (
@@ -339,7 +339,7 @@ describe("WorkspaceDock", () => {
 
     const rendered = await renderComponent(<Dock showsSite />);
     // A Site on screen: its own expand only, not the dock's look-alike.
-    expect(expands(rendered.container)).toEqual(["Expand Site to full window"]);
+    expect(expands(rendered.container)).toEqual(["Expand app to full window"]);
     expect(rendered.container.querySelector('[title="Hide workspace"]')).not.toBeNull();
 
     // Another panel keeps the dock's Maximize; the hidden Site panel's claim
@@ -355,7 +355,7 @@ describe("WorkspaceDock", () => {
     restore?.focus();
     await click(restore);
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    expect(expands(rendered.container)).toEqual(["Expand Site to full window"]);
+    expect(expands(rendered.container)).toEqual(["Expand app to full window"]);
     // Restore removed its own button; focus stays in the dock's controls.
     expect(document.activeElement?.getAttribute("title")).toBe("Hide workspace");
 

@@ -110,6 +110,7 @@ import {
   FIRST_PARTY_MCP_CALLER_META_KEY,
   FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   TOOL_DISCOVERY_CARD_META_KEY,
+  firstPartyMcpToolAliasTarget,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -1270,6 +1271,22 @@ export class PolicyMcpServer extends FirstPartyMcpServer {
         throw error;
       }
     };
+    // Hidden aliases (FIRST_PARTY_MCP_TOOL_ALIASES): a call by a tool's former
+    // name runs the registered tool under its current name. Lookups by name
+    // resolve the alias; listing enumerates only registered names, so
+    // tools/list never shows one. `_registeredTools` is the MCP SDK's private
+    // table: apps/api/test/first-party-tool-aliases.test.ts fails if an SDK
+    // upgrade changes it.
+    const tools = this as unknown as { _registeredTools: Record<string, RegisteredTool> };
+    tools._registeredTools = new Proxy(tools._registeredTools, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && !Object.hasOwn(target, property)) {
+          const current = firstPartyMcpToolAliasTarget(property);
+          if (current !== undefined && Object.hasOwn(target, current)) return target[current];
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
   }
 
   /**
@@ -1711,7 +1728,7 @@ export function buildOpenGeniMcpServer(
     "artifacts_list",
     {
       description:
-        "List the published Sites you can see in this workspace (shared with the workspace, or Only me Sites that belong to the person you act for) and their current versions and audience.",
+        "List the published apps you can see in this workspace (shared with the workspace, or Only me apps that belong to the person you act for) and their current versions and audience.",
       inputSchema: {},
     },
     async () => {
@@ -2975,7 +2992,7 @@ function registerSandboxFileArtifactTool(
     {
       // Sites take the same artifactId path, so they are named only where the
       // grant may change one.
-      description: `Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file${hasPermission(grant.permissions, "artifacts:publish") ? " or Site" : ""}, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.`,
+      description: `Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file${hasPermission(grant.permissions, "artifacts:publish") ? " or app" : ""}, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.`,
       inputSchema: {
         path: z4.string().min(1).max(4_096).optional(),
         artifactId: z4.string().uuid().optional(),
@@ -4257,7 +4274,7 @@ function registerWorkspaceArtifactTools(
       });
   const mutation = async (response: WorkspaceArtifactMutationResponse) => ({
     ...(await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession)),
-    artifactReference: `[Open Site](artifact:${response.artifact.id})`,
+    artifactReference: `[Open app](artifact:${response.artifact.id})`,
   });
   // A published Site follows its Site here exactly as through the API routes:
   // the same hook resyncs the edge and scans a version that became current.
@@ -4310,7 +4327,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_prepare_upload",
     {
       description:
-        "Get signed upload URLs for a Site's HTML and optional source JSON. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source upload may be omitted for HTML-only Sites.",
+        "Get signed upload URLs for an app's HTML and optional source JSON. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source upload may be omitted for HTML-only apps.",
       inputSchema: {},
     },
     async () => {
@@ -4354,7 +4371,7 @@ function registerWorkspaceArtifactTools(
         detail,
         version: projectedVersion,
         downloads,
-        artifactReference: `[Open Site](artifact:${artifactId})`,
+        artifactReference: `[Open app](artifact:${artifactId})`,
       });
     },
   );
@@ -4363,7 +4380,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
+        'Create and publish an app from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the app page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -6208,7 +6225,7 @@ function registerWorkspaceOrchestrationTools(
             .uuid()
             .optional()
             .describe(
-              "Conversations created through this Site, regardless of their project. Keep unchanged when paging.",
+              "Conversations created through this app, regardless of their project. Keep unchanged when paging.",
             ),
           recentHours: z4.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).optional(),
           projectId: z4

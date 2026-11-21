@@ -219,7 +219,7 @@ async function fakeApi(request: Request): Promise<Response> {
     if (suffix !== `/versions/${VERSION}/html` && suffix !== `/versions/${OLD_VERSION}/html`)
       return new Response(null, { status: 404 });
     return new Response(
-      "<!doctype html><html><head><title>Hello</title></head><body><h1>Hello Site</h1></body></html>",
+      "<!doctype html><html><head><title>Hello</title></head><body><h1>Hello app</h1></body></html>",
       { headers: { "content-type": "text/html; charset=utf-8" } },
     );
   }
@@ -479,7 +479,7 @@ describe("site gateway in workerd", () => {
     await unpublished.text();
   });
 
-  test("a suspended Site gets the takedown page with the abuse contact", async () => {
+  test("a suspended app gets the takedown page with the abuse contact", async () => {
     const response = await get("gone", "/anything");
     expect(response.status).toBe(410);
     const html = await response.text();
@@ -488,7 +488,7 @@ describe("site gateway in workerd", () => {
     expect(lastTo("/versions")).toBeUndefined();
   });
 
-  test("members Sites redirect to sign-in, then the callback exchanges the code", async () => {
+  test("members apps redirect to sign-in, then the callback exchanges the code", async () => {
     const redirect = await get("team", "/reports?q=1");
     expect(redirect.status).toBe(302);
     expect(redirect.headers.get("location")).toBe(
@@ -561,7 +561,7 @@ describe("site gateway in workerd", () => {
     await frame.text();
     const anonymousFrame = await get("team", `/_og/v/${VERSION}`, { headers: FRAME });
     expect(anonymousFrame.status).toBe(401);
-    expect(await anonymousFrame.text()).not.toContain("Hello Site");
+    expect(await anonymousFrame.text()).not.toContain("Hello app");
 
     // GET only asks; a link or an image can't sign anyone out.
     const logoutCalls = received.filter((entry) => entry.path.endsWith("/auth/logout")).length;
@@ -597,7 +597,7 @@ describe("site gateway in workerd", () => {
     expect(lastTo("/auth/logout")?.headers.get(SITE_GATEWAY_SESSION_HEADER)).toBe(SESSION);
   });
 
-  test("a signed-in viewer without access gets 403, not the Site", async () => {
+  test("a signed-in viewer without access gets 403, not the app", async () => {
     const response = await get("team", "/", {
       headers: { cookie: `__Host-og_session=${NO_ACCESS_SESSION}` },
     });
@@ -631,7 +631,7 @@ describe("site gateway in workerd", () => {
         expect(denied.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
         expect(denied.headers.get("content-security-policy")).toContain("default-src 'none'");
         const html = await denied.text();
-        expect(html).not.toContain("Hello Site");
+        expect(html).not.toContain("Hello app");
         expect(html).not.toContain("__opengeniSiteBridgeBootstrapV2");
         expect(html).not.toContain("<script");
         expect(html).toContain(
@@ -643,7 +643,7 @@ describe("site gateway in workerd", () => {
         headers: { ...FRAME, cookie: `__Host-og_session=${SESSION}` },
       });
       expect(member.status).toBe(200);
-      expect(await member.text()).toContain("Hello Site");
+      expect(await member.text()).toContain("Hello app");
     } finally {
       RECORDS.set(host, original);
     }
@@ -683,7 +683,7 @@ describe("site gateway in workerd", () => {
     expect(first.status).toBe(200);
     expect(first.headers.get("x-opengeni-site-cache")).toBe("MISS");
     const html = await first.text();
-    expect(html).toContain("Hello Site");
+    expect(html).toContain("Hello app");
     expect(html).toContain("__opengeniSiteBridgeBootstrapV2");
     expect(first.headers.get("cache-control")).toBe("private, no-cache");
     expect(first.headers.get("vary")).toBe("Sec-Fetch-Dest");
@@ -739,7 +739,7 @@ describe("site gateway in workerd", () => {
     expect(gone.status).toBe(410);
     expect(gone.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
     expect(gone.headers.get("x-frame-options")).toBe("SAMEORIGIN");
-    expect(await gone.text()).not.toContain("Hello Site");
+    expect(await gone.text()).not.toContain("Hello app");
   });
 
   test("a revalidation the edge cache can't answer asks the API, so a stale host record can't extend a takedown", async () => {
@@ -789,13 +789,13 @@ describe("site gateway in workerd", () => {
         headers: { ...FRAME, "if-none-match": etag },
       });
       expect(refused.status).toBe(404);
-      expect(await refused.text()).not.toContain("Hello Site");
+      expect(await refused.text()).not.toContain("Hello app");
     } finally {
       takenDown.clear();
     }
   });
 
-  test("Site HTML streams through: the first bytes arrive before the page has", async () => {
+  test("App HTML streams through: the first bytes arrive before the page has", async () => {
     // Over plain HTTP: Bun's fetch (and so dispatchFetch) holds small chunked
     // bodies back, which would hide whether the gateway streams.
     const base = new URL(await mf!.ready);
@@ -873,7 +873,7 @@ describe("site gateway in workerd", () => {
     expect((await second.text()) === expected).toBe(true);
   }, 60_000);
 
-  test("a Site page over the size limit gets a clear page in the frame, not a Worker error", async () => {
+  test("an app page over the size limit gets a clear page in the frame, not a Worker error", async () => {
     const response = await get("huge", `/_og/v/${HUGE_VERSION}`, { headers: FRAME });
     expect(response.status).toBe(502);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -881,17 +881,17 @@ describe("site gateway in workerd", () => {
     expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
     const html = await response.text();
-    expect(html).toContain("<h1>Site too large</h1>");
-    expect(html).toContain("257 MB, more than the 256 MB a Site page can be");
+    expect(html).toContain("<h1>App too large</h1>");
+    expect(html).toContain("257 MB, more than the 256 MB an app page can be");
     expect(html).not.toContain("never finished");
   });
 
-  test("browsers that send no Fetch Metadata still get the sandboxed Site HTML", async () => {
+  test("browsers that send no Fetch Metadata still get the sandboxed app HTML", async () => {
     const response = await get("pub", `/_og/v/${VERSION}`);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
-    expect(await response.text()).toContain("Hello Site");
+    expect(await response.text()).toContain("Hello app");
   });
 
   test("IPv6 clients share one budget per /64", async () => {
@@ -921,7 +921,7 @@ describe("site gateway in workerd", () => {
     await response.text();
   });
 
-  test("noindex Sites send X-Robots-Tag and a disallow-all robots.txt", async () => {
+  test("noindex apps send X-Robots-Tag and a disallow-all robots.txt", async () => {
     const page = await get("hidden", "/");
     expect(page.headers.get("x-robots-tag")).toBe("noindex");
     expect(await page.text()).toContain('<meta name="robots" content="noindex">');
@@ -982,7 +982,7 @@ describe("site gateway in workerd", () => {
     expect(lastTo("/tools/catalog")?.verified).toBe(true);
   });
 
-  test("a signed-out guest of a public Site reads shared Site files through the gateway", async () => {
+  test("a signed-out guest of a public app reads shared app files through the gateway", async () => {
     const shell = await get("pub", "/");
     await shell.text();
     const visitorCookie = cookiePair(
@@ -1132,7 +1132,7 @@ describe("site gateway in workerd", () => {
     const sentPage = await sent.text();
     expect(sentPage).toContain("Report sent");
     expect(sentPage).toContain(
-      "sent to the Site&#39;s owners and to the abuse team of this service",
+      "sent to the app&#39;s owners and to the abuse team of this service",
     );
     expect(sentPage).toContain(`mailto:abuse@${DOMAIN}`);
     const upstream = lastTo("/site/reports")!;
@@ -1276,7 +1276,7 @@ describe("site gateway in workerd", () => {
     }
   });
 
-  test("served requests are counted and reported in signed batches on the Sites apex", async () => {
+  test("served requests are counted and reported in signed batches on the apps apex", async () => {
     const reportsBefore = received.filter((entry) =>
       entry.path.endsWith("/platform/requests"),
     ).length;

@@ -161,7 +161,7 @@ export function writeSiteDataPath(
   value: unknown,
 ): Record<string, unknown> {
   if (segments.length === 0 || !segments.every(isSiteDataPathSegment))
-    throw new Error("Invalid Site Data path");
+    throw new Error("Invalid app data path");
   const root: Record<string, unknown> = { ...data };
   let current = root;
   segments.forEach((segment, index) => {

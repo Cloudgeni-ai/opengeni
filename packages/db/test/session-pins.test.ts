@@ -1865,14 +1865,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         limit: 1,
         cursor: discovery.nextCursor!,
       }),
-    ).rejects.toThrow("cursor Site filter does not match");
+    ).rejects.toThrow("cursor app filter does not match");
     await expect(
       listSessionDiscoverySummaries(db, workspace.workspaceId, {
         subjectId,
         limit: 1,
         cursor: discovery.nextCursor!,
       }),
-    ).rejects.toThrow("cursor Site filter does not match");
+    ).rejects.toThrow("cursor app filter does not match");
     const remaining = await listSessionDiscoverySummaries(db, workspace.workspaceId, {
       subjectId,
       originSiteId: siteId,

@@ -30,7 +30,7 @@ Lead with the outcome rather than the steps you took. Calibrate to the user's ba
 
 function workingWithTheUser(context: AgentPromptContext): string {
   const reserve = context.capabilities.artifacts
-    ? "Reserve audits, second sources, extra verification, documents, Sites, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
+    ? "Reserve audits, second sources, extra verification, documents, apps, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
     : "Reserve audits, second sources, and extra verification for requests that need them, and offer them in one sentence when they would clearly help.";
   // Ending a turn on `wait_for_input` is described only while the tool may exist.
   const waitForInput = toolAvailable(context, "wait_for_input");
@@ -93,7 +93,7 @@ Answer questions directly and briefly; after making changes, say what changed, h
     "Your answer is rendered by an application for the user:",
     bullets(
       "You may format with GitHub-flavored Markdown.",
-      // Chat is the default only where a document or Site could be the alternative.
+      // Chat is the default only where a document or app could be the alternative.
       context.capabilities.artifacts &&
         "Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.",
     ),
@@ -126,7 +126,7 @@ const PRIVACY_FACTS_RULE =
 
 function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
-    ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
+    ? "First check whether the workspace already provides the capability natively (for example, an app reaches the model and workspace tools through the host bridge and needs no server of its own)."
     : "First check whether an available tool already provides the capability natively.";
   // A setting the person could change in the app is changed here through an
   // app action (confirmed in the chat) whenever the app-action tools may exist.
@@ -155,7 +155,7 @@ function autonomy(context: AgentPromptContext): string {
     ? "- Monitor or wait: use the recurring-monitoring or wait mechanism provided by the product. Unchanged external state is expected and is not by itself a blocker.\n"
     : "";
   // Design guidance applies where the agent can build something: compute,
-  // artifacts and Sites, a browser, connectors, or workspace setup.
+  // artifacts and apps, a browser, connectors, or workspace setup.
   const builds =
     hasSandbox(context) ||
     context.capabilities.artifacts ||

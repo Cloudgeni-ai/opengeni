@@ -173,7 +173,7 @@ async function renderInRouter(root: ReturnType<typeof createRoot>, node: () => R
   });
 }
 
-test("a Site still blocks scripts and the network before any of the Site's markup", () => {
+test("an app still blocks scripts and the network before any of the app's markup", () => {
   const still = siteStillDocument(
     "<html><head><script>alert(1)</script></head><body>Hi</body></html>",
   );
@@ -205,7 +205,7 @@ test("the gallery is the default; List shows flush rows and is remembered", asyn
     const cards = container.querySelectorAll("ul[aria-label=Artifacts] > li");
     expect(cards).toHaveLength(2);
     expect(container.querySelector('[data-slot="list-row"]')).toBeNull();
-    expect(cards[0]!.textContent).toContain("Site · updated");
+    expect(cards[0]!.textContent).toContain("App · updated");
     const list = container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="List"]');
     await act(async () => list!.click());
     expect(localStorage.getItem("opengeni:artifact-library:view:v1")).toBe("list");
@@ -231,7 +231,7 @@ test("the gallery is the default; List shows flush rows and is remembered", asyn
   }
 });
 
-test("shared library lists the type as a word and never executes Sites", async () => {
+test("shared library lists the type as a word and never executes apps", async () => {
   const selected: string[] = [];
   let setKind: (kind: "all" | "document") => void = () => {};
   function Fixture() {
@@ -258,7 +258,7 @@ test("shared library lists the type as a word and never executes Sites", async (
     expect(rows()).toHaveLength(2);
     expect(container.querySelector("iframe")).toBeNull();
     expect(rows()[0]!.textContent).toContain("Document");
-    expect(rows()[1]!.textContent).toContain("Site");
+    expect(rows()[1]!.textContent).toContain("App");
     await act(async () => setKind("document"));
     expect(rows()).toHaveLength(1);
     await act(async () =>
@@ -370,7 +370,7 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
   }
 });
 
-test("hidden Sites and documents are explained instead of reported as missing", async () => {
+test("hidden apps and documents are explained instead of reported as missing", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -383,7 +383,7 @@ test("hidden Sites and documents are explained instead of reported as missing", 
   };
   const access = "You need access to artifacts in this workspace. Ask a workspace admin.";
   try {
-    // A Sites tab without artifacts:read is a permission gap, never "No sites yet".
+    // A Sites tab without artifacts:read is a permission gap, never "No apps yet".
     await renderInRouter(root, () => (
       <ArtifactLibrary
         {...props}
@@ -391,9 +391,9 @@ test("hidden Sites and documents are explained instead of reported as missing", 
         filters={{ ...defaultArtifactFilters, kind: "site" }}
       />
     ));
-    expect(container.textContent).toContain("You can't see sites here.");
+    expect(container.textContent).toContain("You can't see apps here.");
     expect(container.textContent).toContain(access);
-    expect(container.textContent).not.toContain("No sites yet");
+    expect(container.textContent).not.toContain("No apps yet");
     await renderInRouter(root, () => (
       <ArtifactLibrary
         {...props}
@@ -414,7 +414,7 @@ test("hidden Sites and documents are explained instead of reported as missing", 
     await renderInRouter(root, () => (
       <ArtifactLibrary {...props} items={[file]} filters={defaultArtifactFilters} />
     ));
-    expect(container.textContent).toContain("Sites and documents are hidden");
+    expect(container.textContent).toContain("Apps and documents are hidden");
     expect(container.textContent).toContain(access);
     expect(container.textContent).toContain("notes.txt");
     await renderInRouter(root, () => (
@@ -439,7 +439,7 @@ test("hidden Sites and documents are explained instead of reported as missing", 
     await renderInRouter(root, () => (
       <ArtifactLibrary {...props} items={[file, site]} filters={defaultArtifactFilters} />
     ));
-    expect(container.textContent).not.toContain("Sites and documents are hidden");
+    expect(container.textContent).not.toContain("Apps and documents are hidden");
     // A viewer who can read artifacts sees no notice.
     await renderInRouter(root, () => (
       <ArtifactLibrary
@@ -449,7 +449,7 @@ test("hidden Sites and documents are explained instead of reported as missing", 
         filters={{ ...defaultArtifactFilters, kind: "site" }}
       />
     ));
-    expect(container.textContent).toContain("No sites yet.");
+    expect(container.textContent).toContain("No apps yet.");
     expect(container.textContent).not.toContain(access);
   } finally {
     await act(async () => root.unmount());
@@ -562,7 +562,7 @@ test("Only me documents and spreadsheets are marked in the list; shared ones are
   }
 });
 
-test("a Site in the Artifacts list opens in the Site view; other artifacts keep their page", async () => {
+test("an app in the Artifacts list opens in the app view; other artifacts keep their page", async () => {
   localStorage.setItem("opengeni:artifact-library:view:v1", "list");
   const container = document.createElement("div");
   document.body.append(container);

@@ -92,7 +92,7 @@ const ORGANIZATION_SETTINGS: Destination[] = [
   { id: "people", label: "People", icon: UsersIcon },
   { id: "workspaces", label: "Workspaces", icon: FolderKanbanIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
-  { id: "integrations", label: "Integrations", icon: PlugIcon },
+  { id: "integrations", label: "Connected tools", icon: PlugIcon },
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
   { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },

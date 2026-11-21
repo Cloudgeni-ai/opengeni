@@ -46,7 +46,7 @@ export async function resolveSiteSessionOrigin(
     !z.string().uuid().safeParse(siteId).success ||
     !z.string().uuid().safeParse(versionId).success
   )
-    throw new HTTPException(400, { message: "Invalid Site origin" });
+    throw new HTTPException(400, { message: "Invalid app origin" });
   try {
     // Provenance is not a live-version fence: a response-loss retry still belongs
     // to the same Site after it publishes a new version or is archived.
@@ -68,7 +68,7 @@ export async function resolveSiteSessionOrigin(
     return resolved;
   } catch (error) {
     if (error instanceof WorkspaceArtifactNotFoundError)
-      throw new HTTPException(404, { message: "Site origin not found" });
+      throw new HTTPException(404, { message: "App origin not found" });
     throw error;
   }
 }
@@ -143,7 +143,7 @@ export async function resolveSiteRequestOrigin(
     { marker: frame.marker ?? "1", frameId: frame.frameId },
   );
   // Unreachable: a frame always resolves to a published Site or a frame origin.
-  if (!origin) throw new HTTPException(400, { message: "Invalid Site origin" });
+  if (!origin) throw new HTTPException(400, { message: "Invalid app origin" });
   return origin;
 }
 

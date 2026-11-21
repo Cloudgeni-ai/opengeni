@@ -506,7 +506,7 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
           if (!open) setDisconnect(null);
         }}
         title={`Disconnect ${disconnect ? providerLabel(disconnect) : "this sign-in method"}?`}
-        description="You won't be able to sign in with this provider until you explicitly reconnect it here. Your other sign-in methods and workspace integrations are unchanged."
+        description="You won't be able to sign in with this provider until you explicitly reconnect it here. Your other sign-in methods and workspace connected tools are unchanged."
         confirmLabel={`Disconnect ${disconnect ? providerLabel(disconnect) : "provider"}`}
         cancelAutoFocus
         restoreFocusRef={disconnectTrigger}

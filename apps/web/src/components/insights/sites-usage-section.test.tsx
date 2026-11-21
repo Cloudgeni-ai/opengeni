@@ -101,7 +101,7 @@ async function render(node: React.ReactNode) {
   };
 }
 
-test("one flat Sites section even inside the settings shell's grouped cards", async () => {
+test("one flat apps section even inside the settings shell's grouped cards", async () => {
   const { value } = client();
   const view = await render(
     <SectionVariantProvider variant="group">
@@ -113,7 +113,7 @@ test("one flat Sites section even inside the settings shell's grouped cards", as
   expect(sections).toHaveLength(1);
   expect(sections[0]?.getAttribute("data-variant")).toBe("open");
   expect([...container.querySelectorAll("h2, h3")].map((heading) => heading.textContent)).toEqual([
-    "Sites",
+    "Apps",
   ]);
   // Rows sit on the page: no bordered card around the table or the tiles.
   expect(container.querySelector('[data-slot="section-content"]')?.className).not.toContain(
@@ -159,9 +159,9 @@ test("nothing to show renders no heading; failures say what didn't load", async 
     <module.SitesUsageSection client={failing.value} workspaceId={WORKSPACE} range="week" />,
   );
   const text = failed.container.textContent ?? "";
-  expect(text).toContain("Sites");
-  expect(text).toContain("Couldn't load Site model costs.");
-  expect(text).toContain("Couldn't load Site platform activity.");
+  expect(text).toContain("Apps");
+  expect(text).toContain("Couldn't load app model costs.");
+  expect(text).toContain("Couldn't load app platform activity.");
   expect(text).not.toContain("private diagnostics");
   await failed.unmount();
 });

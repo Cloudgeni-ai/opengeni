@@ -37,8 +37,8 @@ can't be published, in a **Personal workspace** too. **Unpublish** takes the
 Site offline at once and keeps its address reserved; publishing again brings
 it back on the same address.
 
-Agents can do the same with the first-party tools `site_publication_get`,
-`site_publication_update` and `site_hostname_check`, within the same
+Agents can do the same with the first-party tools `app_publication_get`,
+`app_publication_update` and `app_hostname_check`, within the same
 permissions as the person they act for.
 
 ## Access modes

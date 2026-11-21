@@ -296,14 +296,14 @@ test("a colleague's Only me Site or schedule is never named; shared ones and you
   const named = async (call: unknown, parameter: string) =>
     (await resolveAppActionTargets(client!.db, scope, call))[parameter];
   expect(await named(unpublish(await site("Roadmap", null)), "artifactId")).toMatchObject({
-    kind: "Site",
+    kind: "app",
     name: "Roadmap",
   });
   expect(await named(unpublish(await site("My notes", person)), "artifactId")).toMatchObject({
     name: "My notes",
   });
   const secret = await named(unpublish(await site("Layoff plan Q4", colleague)), "artifactId");
-  expect(secret).toEqual({ kind: "Site" });
+  expect(secret).toEqual({ kind: "app" });
   expect(await named(removeSchedule(await schedule("Daily digest", null)), "taskId")).toMatchObject(
     {
       kind: "scheduled task",

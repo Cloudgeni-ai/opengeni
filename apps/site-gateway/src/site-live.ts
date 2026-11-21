@@ -90,13 +90,13 @@ export async function handleSiteLive(site: SiteContext): Promise<Response> {
   if (!isSameOriginRequest(site.request, site.siteOrigin))
     return jsonError(
       403,
-      { code: "site_cross_origin", message: "Live updates must come from the Site's own page" },
+      { code: "site_cross_origin", message: "Live updates must come from the app's own page" },
       security,
     );
   if (requiresSignIn(site.config, site.record) && !site.session)
     return jsonError(
       401,
-      { code: "site_sign_in_required", message: "Sign in to use this Site" },
+      { code: "site_sign_in_required", message: "Sign in to use this app" },
       security,
     );
   if (!(await underRateLimit(site, rateLimitKeys(site, "live"))))

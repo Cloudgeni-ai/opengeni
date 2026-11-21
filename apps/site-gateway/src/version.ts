@@ -107,8 +107,8 @@ export function siteTooLargePage(security: { hsts: boolean }, bytes: number): Re
   return messagePage(
     { ...security, frameable: "self" },
     502,
-    "Site too large",
-    `This Site's page is ${megabytes(bytes)} MB, more than the ${megabytes(SITE_FRAME_MAX_BYTES)} MB a Site page can be. If it's your Site, make the page smaller, for example by linking large videos and images instead of embedding them.`,
+    "App too large",
+    `This app's page is ${megabytes(bytes)} MB, more than the ${megabytes(SITE_FRAME_MAX_BYTES)} MB an app page can be. If it's your app, make the page smaller, for example by linking large videos and images instead of embedding them.`,
   );
 }
 
@@ -131,7 +131,7 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
   const security = { hsts: site.hsts, frameable: "self" as const };
   const method = site.request.method;
   if (method !== "GET" && method !== "HEAD")
-    return messagePage(security, 405, "Not allowed", "Site pages are read-only.");
+    return messagePage(security, 405, "Not allowed", "App pages are read-only.");
   if (!UUID.test(versionId)) return neutralPage(security);
   if (!isFrameLoad(site.request)) {
     const response = redirect(site, "/", 302);
@@ -191,7 +191,7 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
       }),
     );
   } catch {
-    throw new UpstreamError("Site HTML fetch failed", null);
+    throw new UpstreamError("App HTML fetch failed", null);
   }
   if (response.status === 404 || response.status === 410) {
     await response.body?.cancel();
@@ -203,7 +203,7 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
   }
   if (!response.ok) {
     await response.body?.cancel();
-    throw new UpstreamError("Site HTML fetch failed", response.status);
+    throw new UpstreamError("App HTML fetch failed", response.status);
   }
   const declared = Number(response.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > SITE_FRAME_MAX_BYTES) {

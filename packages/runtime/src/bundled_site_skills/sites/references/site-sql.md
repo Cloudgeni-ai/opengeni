@@ -1,25 +1,25 @@
-# Site SQL
+# App SQL
 
-## Tables and SQL with Site SQL (optional)
+## Tables and SQL with app SQL (optional)
 
-Where the deployment offers Cloudflare storage, a Site can also have its own
-SQLite database. Prefer Site Data for records with ready-made access modes;
-use Site SQL when the Site needs tables, joins, aggregates, unique keys or
+Where the deployment offers Cloudflare storage, an app can also have its own
+SQLite database. Prefer app data for records with ready-made access modes;
+use app SQL when the app needs tables, joins, aggregates, unique keys or
 counts across viewers (polls, leaderboards, bookings). If
-`opengeni__site_sql_inspect` reports `unavailable`, use Site Data instead.
+`opengeni__app_sql_inspect` reports `unavailable`, use app data instead.
 
-Set it up with agent tools after the first publish (they need the Site id);
-Site HTML never sends SQL:
+Set it up with agent tools after the first publish (they need the app id);
+app HTML never sends SQL:
 
-1. `opengeni__site_sql_enable` with `enabled: true`.
-2. `site_sql_migrate` with a unique `name` and the schema SQL (CREATE TABLE,
+1. `opengeni__app_sql_enable` with `enabled: true`.
+2. `app_sql_migrate` with a unique `name` and the schema SQL (CREATE TABLE,
    CREATE INDEX, ALTER TABLE). Migrations are append-only and replayed when the
    database is rebuilt; schema changes only go through migrations.
-3. `site_sql_define_query` for every query the page runs: exactly one
+3. `app_sql_define_query` for every query the page runs: exactly one
    SELECT, INSERT, UPDATE, DELETE or REPLACE (WITH allowed but not recursive:
    a WITH table may not name itself or use UNION/INTERSECT/EXCEPT; put a
    UNION in the main query instead), `:name` parameters only, and an
-   `audience`: `everyone` (guests of public Sites too), `signed_in` (default;
+   `audience`: `everyone` (guests of public apps too), `signed_in` (default;
    viewers signed in as a person) or `managers` (never from the page).
 
 `:viewer` (the viewer's stable, opaque id: for a person, `user:` followed by
@@ -27,8 +27,8 @@ their subject id, such as `user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`, or
 `guest:<visitor>` for a guest) and these values are bound by the host from
 the verified viewer:
 
-- `:viewer_access`: how the viewer reaches the Site: `member` (workspace
-  member), `invited`, `user` (anyone signed in to a public Site) or `guest`.
+- `:viewer_access`: how the viewer reaches the app: `member` (workspace
+  member), `invited`, `user` (anyone signed in to a public app) or `guest`.
 - `:viewer_email`: the viewer's verified email address in lowercase, or NULL
   (guests, and people without a verified address). Use it to match a person
   to a list kept by email, such as admins or staff.
@@ -83,29 +83,29 @@ host, the query's audience excludes this viewer; `details.reason:
 NULL, CHECK and foreign-key failures),
 `rate_limited`, `quota_exceeded`,
 `disabled` (the owner turned the database off), `unavailable` and
-`site_sql_unsupported` (a host or local preview without Site SQL; test the
-published Site). Results stop at the query's row cap (1,000 rows and 1 MB by
+`app_sql_unsupported` (a host or local preview without app SQL; test the
+published app). Results stop at the query's row cap (1,000 rows and 1 MB by
 default) with `truncated: true`; page with `LIMIT :limit OFFSET :offset` or a
 keyset. Tables that grow will pass any fixed cap, so treat `truncated: true` as
 more rows to page or narrow, not as a failure of the whole page.
 
-Owner tools: `site_sql_inspect` (tables, migrations, pending migrations,
-queries, usage, limits), `site_sql_query` (one read-only statement),
-`site_sql_run` (one named query with params, exactly as the page runs it),
-`site_sql_execute` (one write), `site_sql_export` (`sql`, `csv` for one table,
+Owner tools: `app_sql_inspect` (tables, migrations, pending migrations,
+queries, usage, limits), `app_sql_query` (one read-only statement),
+`app_sql_run` (one named query with params, exactly as the page runs it),
+`app_sql_execute` (one write), `app_sql_export` (`sql`, `csv` for one table,
 or `json`; works while the database is off; returns at most `maxBytes`,
 512 KB by default: while `nextCursor` is set, call again with it as `cursor`
-and keep the pieces in order), `site_sql_import` (`sql`, `csv` or `json` rows
+and keep the pieces in order), `app_sql_import` (`sql`, `csv` or `json` rows
 into an existing table, at most 2 MB per call; import the pieces of a large
-SQL export in order; triggers are added after the rows), and `site_sql_reset`
+SQL export in order; triggers are added after the rows), and `app_sql_reset`
 (`confirm: true`;
 `schema: "keep"` empties and rebuilds from the migrations, `"drop"` forgets
 everything; a failed keep-reset reports `partialRebuild: true`: run it again).
 Export before a reset when the data matters; SQL is the lossless format (CSV
 turns values into text). An export is read piece by piece, not as one
-snapshot: turn Site SQL off first for a consistent copy. To restore a SQL
-export, reset with `schema: "drop"`, then import its pieces in order. Keep migrations to schema: a Site's
-migrations hold at most 6 MB of SQL, so load data with `site_sql_import`.
+snapshot: turn app SQL off first for a consistent copy. To restore a SQL
+export, reset with `schema: "drop"`, then import its pieces in order. Keep migrations to schema: an app's
+migrations hold at most 6 MB of SQL, so load data with `app_sql_import`.
 Statements may not
 use ATTACH, VACUUM, load_extension, transactions or PRAGMA writes, or name
 tables starting with `_cf_` or `_og_` (even as a string such as `'_og_x'`;

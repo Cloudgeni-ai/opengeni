@@ -91,13 +91,13 @@ export function createOpenGeniSiteSql(
       if (Object.keys(params).some((key) => key === "viewer" || key.startsWith("viewer_")))
         throw new OpenGeniSiteSqlError(
           "validation",
-          "viewer parameters are bound by the host, not the Site",
+          "viewer parameters are bound by the host, not the app",
           0,
         );
       if (!(await ready()))
         throw new OpenGeniSiteSqlError(
           "site_sql_unsupported",
-          "This Site host does not provide Site SQL",
+          "This app host does not provide app SQL",
           0,
         );
       const response = await fetchSite(
@@ -148,6 +148,6 @@ function siteSqlErrorFromResponse(status: number, value: unknown): OpenGeniSiteS
   const message =
     typeof record.message === "string" && record.message
       ? record.message
-      : `Site SQL request failed with HTTP ${status}`;
+      : `App SQL request failed with HTTP ${status}`;
   return new OpenGeniSiteSqlError(code, message, status, details);
 }
