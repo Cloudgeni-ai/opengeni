@@ -277,6 +277,41 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
     expect(status.errorCode).toBeUndefined();
   });
 
+  test("the app's own running agent is not ready while the server lists it offline", async () => {
+    const c = computer({ service: false });
+    const app = c.create();
+    await app.boot();
+
+    // The local process can keep running through a loss of its server connection.
+    expect(await app.status(SERVER, "w1", "me")).toMatchObject({
+      state: "connected",
+      error: null,
+    });
+    expect((await app.summary()).running).toBe(true);
+    c.readings.a1 = { online: false };
+    app.invalidate();
+    expect(await app.status(SERVER, "w1", "me")).toMatchObject({
+      state: "connected",
+      reconnecting: true,
+      waitingOn: "server",
+      error: null,
+    });
+
+    c.readings.a1 = { online: true };
+    app.invalidate();
+    const recovered = await app.status(SERVER, "w1", "me");
+    expect(recovered.state).toBe("connected");
+    expect(recovered.reconnecting).toBeUndefined();
+    expect(recovered.waitingOn).toBeUndefined();
+
+    await app.pause();
+    c.readings.a1 = { online: false };
+    app.invalidate();
+    const paused = await app.status(SERVER, "w1", "me");
+    expect(paused.state).toBe("paused");
+    expect(paused.reconnecting).toBeUndefined();
+  });
+
   test("the app's own agent that the server won't sign in is not on, and says why", async () => {
     const c = computer({ service: false });
     const list = join(c.home, "connections.txt");
