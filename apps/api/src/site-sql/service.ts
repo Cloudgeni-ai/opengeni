@@ -1410,8 +1410,11 @@ export async function deleteSiteSqlRowsForSync(
             value === null || ["string", "number", "boolean"].includes(typeof value);
           // A row cut off from the answer (too large), or holding a value
           // that can't be compared again (a blob), is kept.
+          // A row too wide for one conditional delete is kept too.
+          const fits = 1 + request.match.columns.length <= SYNC_DELETE_PARAMS;
           matched = read.rows.filter(
             (row) =>
+              fits &&
               request.match!.owned(row) &&
               request.match!.columns.every((column) => scalar(row[column])),
           );
