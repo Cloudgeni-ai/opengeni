@@ -4,7 +4,6 @@ import {
   AGENT_TRIGGER_EVENT_MESSAGE,
   AGENT_TRIGGER_SCHEDULE_MESSAGE,
   AGENT_TRIGGER_SHARED_DENIED,
-  agentTriggerChats,
   agentTriggerChatWords,
   agentTriggerCreateRequest,
   agentTriggerDraftForPick,
@@ -113,6 +112,52 @@ test("the picker offers a schedule, the person's sources and every kind they can
       githubConnected: true,
     }).map((option) => option.key),
   ).toEqual(["schedule"]);
+});
+
+test("a paused or blocked source stands for its kind, unavailable, with why", () => {
+  const paused = {
+    ...GITHUB,
+    status: "disabled",
+    statusReason: null,
+    statusReasonCode: "turned_off",
+  } as unknown as EventSource;
+  const options = agentTriggerOptions(t, {
+    choices: eventSourceChoices(t),
+    sources: [paused],
+    eventTriggers: true,
+    githubConnected: true,
+  });
+  const tile = options.find((option) => option.key === "source:source-gh");
+  expect(tile?.unavailable).toBe("Turned off.");
+  // Its kind isn't offered again as new.
+  expect(options.map((option) => option.key)).not.toContain("new:github");
+  // An active source comes first and can be picked.
+  const active = { ...GITHUB, id: "source-gh-2", name: "Other GitHub" } as EventSource;
+  const both = agentTriggerOptions(t, {
+    choices: eventSourceChoices(t),
+    sources: [paused, active],
+    eventTriggers: true,
+    githubConnected: true,
+  });
+  expect(both.slice(1, 3).map((option) => [option.key, option.unavailable])).toEqual([
+    ["source:source-gh-2", undefined],
+    ["source:source-gh", "Turned off."],
+  ]);
+  // Blocked without a known code shows the server's sentence.
+  const blocked = {
+    ...paused,
+    status: "blocked",
+    statusReasonCode: null,
+    statusReason: "Sign in again.",
+  } as unknown as EventSource;
+  expect(
+    agentTriggerOptions(t, {
+      choices: eventSourceChoices(t),
+      sources: [blocked],
+      eventTriggers: true,
+      githubConnected: true,
+    }).find((option) => option.key === "source:source-gh")?.unavailable,
+  ).toBe("Sign in again.");
 });
 
 test("a newly registered kind of source shows up in the picker without changes here", () => {
@@ -228,14 +273,6 @@ test("a trigger's runs can keep one chat or continue one of the agent's chats", 
   expect(agentTriggerChatWords(AGENT, { mode: "reusable_session" })).toBe(
     "Each run continues one chat with Bug fixer",
   );
-  expect(
-    agentTriggerChats(AGENT, [
-      { id: "a", agentId: AGENT.id },
-      { id: "b", agentId: "other" },
-      { id: "c", agentId: null },
-      { id: "d" },
-    ]).map((chat) => chat.id),
-  ).toEqual(["a"]);
 });
 
 test("a refused shared trigger says who can add one", () => {

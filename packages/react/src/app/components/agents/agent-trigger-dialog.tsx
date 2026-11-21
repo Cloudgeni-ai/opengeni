@@ -10,7 +10,9 @@
  * optional: each run gets the event and the agent's Instructions do the rest.
  * It saves an ordinary automation shared like the agent; each run starts a
  * new chat with the agent (the server's rule for an agent's automations).
- * "Open full form" keeps every setting and comes back here.
+ * "Open full form" opens the automation form at the suggestion, or at the
+ * source picked; the note and chat choice aren't carried over. Its Cancel
+ * and Save come back here.
  */
 import { useEffect, useMemo, useState } from "react";
 import { GitBranchIcon } from "lucide-react";
@@ -45,8 +47,10 @@ import { Field, FieldStack, TextArea } from "../../../ui/field";
 import { FormDialog } from "../../../ui/form-dialog";
 import { Notice } from "../../../ui/notice";
 import { SelectMenu, type SelectOption } from "../../../ui/select-menu";
+import { userErrorText } from "../../../ui/api-error";
 import { useAppContext } from "../../app-context";
 import { t } from "../../lib/console-text";
+import { githubConnectedOf, githubConnectHref } from "../../lib/github-connect";
 import { useNavigate } from "../../lib/navigation";
 import { gitHubRepositoryResource } from "../../lib/session-tools";
 import {
@@ -82,8 +86,11 @@ export interface AgentTriggerDialogProps {
   onOpenChange: (open: boolean) => void;
   /** The automation it saved. */
   onCreated: (task: ScheduledTask) => void;
-  /** The full New automation form, for settings this dialog doesn't show. */
-  onOpenFullForm: () => void;
+  /**
+   * The full New automation form, for settings this dialog doesn't show,
+   * starting at the source picked here when there is one.
+   */
+  onOpenFullForm: (start: { sourceId?: string | undefined }) => void;
   /** The "Add a source" page, at the kind a trigger needs. */
   onAddSource: (choice?: EventSourceChoice) => void;
 }
@@ -96,12 +103,6 @@ export function AgentTriggerDialog(props: AgentTriggerDialogProps) {
 
 /** Where events don't run: no sources, the same array every render. */
 const NO_SOURCES: EventSource[] = [];
-
-/** Whether GitHub is connected to the workspace; null when unknown, so the server decides. */
-function githubConnectedOf(status: string | undefined): boolean | null {
-  if (status === undefined || status === "disabled") return null;
-  return status === "bound";
-}
 
 function AgentTriggerDialogBody({
   agent,
@@ -237,13 +238,7 @@ function AgentTriggerDialogBody({
     onOpenChange(false);
     go();
   };
-  const connectGitHub = () =>
-    leave(
-      () =>
-        void navigate({
-          href: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`,
-        }),
-    );
+  const connectGitHub = () => leave(() => void navigate({ href: githubConnectHref(workspaceId) }));
 
   /** Adds a source of the chosen kind; its events can start the agent right away. */
   const addSourceHere = async (choice: EventSourceChoice) => {
@@ -281,7 +276,7 @@ function AgentTriggerDialogBody({
         }
         choose({ kind: "source", sourceId: created.source.id });
       } catch (caught) {
-        setError(agentTriggerSaveError(caught, "private"));
+        setError(userErrorText(caught));
       }
       return false;
     }
@@ -294,11 +289,17 @@ function AgentTriggerDialogBody({
       if (found.events) setShowEvents(true);
       return false;
     }
+    // A source the suggestion lacks is added first; its refusal is about the source.
+    let withSource = draft.events;
+    if (missing && missingChoice) {
+      try {
+        withSource = await withAddedSource(draft, missing, missingChoice);
+      } catch (caught) {
+        setError(userErrorText(caught));
+        return false;
+      }
+    }
     try {
-      const withSource =
-        missing && missingChoice
-          ? await withAddedSource(draft, missing, missingChoice)
-          : draft.events;
       const saved = { ...draft, events: await standIns.realEvents(withSource) };
       const created = await client.createScheduledTask(
         workspaceId,
@@ -351,6 +352,11 @@ function AgentTriggerDialogBody({
     : "Add trigger";
   const shownWebhook =
     webhook && pick?.kind === "source" && pick.sourceId === webhook.sourceId ? webhook : null;
+  // The full form can start at a source the person has (not a stand-in).
+  const fullFormSourceId =
+    !suggestion && pick?.kind === "source" && mine?.some((source) => source.id === pick.sourceId)
+      ? pick.sourceId
+      : undefined;
 
   return (
     <FormDialog
@@ -358,11 +364,9 @@ function AgentTriggerDialogBody({
       onOpenChange={onOpenChange}
       size="lg"
       title={suggestion ? suggestion.name : "Add trigger"}
-      description={
-        visibility === "private"
-          ? `${agentTriggerChatWords(agent, chat)}. Only you see it.`
-          : `${agentTriggerChatWords(agent, chat)}, shared with the workspace.`
-      }
+      description={`${agentTriggerChatWords(agent, chat)}. ${
+        visibility === "private" ? "Only you see it." : "Visible to the workspace."
+      }`}
       submitLabel={submitLabel}
       pendingLabel={ready ? "Adding…" : "Working…"}
       onSubmit={submit}
@@ -372,7 +376,7 @@ function AgentTriggerDialogBody({
           type="button"
           className="og-link text-xs"
           data-agent-trigger-full-form=""
-          onClick={() => leave(onOpenFullForm)}
+          onClick={() => leave(() => onOpenFullForm({ sourceId: fullFormSourceId }))}
         >
           Open full form
         </button>

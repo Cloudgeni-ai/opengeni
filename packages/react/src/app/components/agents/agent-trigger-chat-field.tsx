@@ -2,17 +2,23 @@
  * Where a trigger's runs go: a new chat with the agent each run (the
  * default), one chat the trigger keeps, or an existing chat with this agent.
  * The existing chats are read only once that choice is made, and only chats
- * started with this agent are offered.
+ * started with this agent are offered; a failed read says so.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Agent } from "@opengeni/sdk";
 
-type AgentChat = { id: string; title?: string | null | undefined };
-
+import { userErrorText } from "../../../ui/api-error";
 import { Field, FieldStack } from "../../../ui/field";
 import { SelectMenu } from "../../../ui/select-menu";
 import { useAppContext } from "../../app-context";
-import { agentTriggerChats, type AgentTriggerChat } from "./agent-trigger-model";
+import { listAgentChats } from "../../lib/agent-chats";
+import type { AgentTriggerChat } from "./agent-trigger-model";
+
+type AgentChat = { id: string; title?: string | null | undefined };
+type AgentChats =
+  | { status: "loading" }
+  | { status: "ready"; chats: AgentChat[] }
+  | { status: "error"; message: string };
 
 const MODES: { value: AgentTriggerChat["mode"]; label: string }[] = [
   { value: "new_session_per_run", label: "New chat each run" },
@@ -34,7 +40,8 @@ export function AgentTriggerChatField({
   error?: string | undefined;
 }) {
   const existing = value.mode === "existing_session";
-  const chats = useAgentChats(workspaceId, agent, existing);
+  const read = useAgentChats(workspaceId, agent, existing);
+  const chats = read.result.status === "ready" ? read.result.chats : undefined;
   return (
     <FieldStack>
       <Field label="Chat">
@@ -54,7 +61,18 @@ export function AgentTriggerChatField({
       {existing ? (
         <Field
           label="Existing chat"
-          error={error}
+          error={
+            read.result.status === "error" ? (
+              <>
+                {`Couldn't load chats with ${agent.name}. ${read.result.message} `}
+                <button type="button" className="og-link" onClick={read.retry}>
+                  Try again
+                </button>
+              </>
+            ) : (
+              error
+            )
+          }
           hint={chats?.length === 0 ? `No chats with ${agent.name} yet.` : undefined}
         >
           <SelectMenu
@@ -67,7 +85,7 @@ export function AgentTriggerChatField({
             onValueChange={(sessionId) => onChange({ mode: "existing_session", sessionId })}
             placeholder="Choose a chat"
             searchPlaceholder="Search chats"
-            loading={chats === undefined}
+            loading={read.result.status === "loading"}
             className="max-w-full"
           />
         </Field>
@@ -76,24 +94,39 @@ export function AgentTriggerChatField({
   );
 }
 
-/** This agent's chats, read once they are needed; an unreadable list reads as none. */
+/** This agent's chats, read once they are needed. */
 function useAgentChats(
   workspaceId: string,
   agent: Pick<Agent, "id">,
   enabled: boolean,
-): AgentChat[] | undefined {
+): { result: AgentChats; retry: () => void } {
   const { client } = useAppContext();
-  const [chats, setChats] = useState<AgentChat[] | undefined>(undefined);
+  const [result, setResult] = useState<AgentChats>({ status: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  // Read once per agent (and per Try again), not each time the choice is made.
+  const readFor = useRef<string | null>(null);
+  const key = `${workspaceId}:${agent.id}:${attempt}`;
   useEffect(() => {
-    if (!enabled || chats !== undefined) return;
-    let live = true;
-    client.listSessions(workspaceId, { limit: 200 }).then(
-      (sessions) => live && setChats(agentTriggerChats(agent, sessions)),
-      () => live && setChats([]),
-    );
+    if (!enabled || readFor.current === key) return;
+    readFor.current = key;
+    setResult({ status: "loading" });
+    const abort = new AbortController();
+    let done = false;
+    listAgentChats(client, workspaceId, agent.id, { signal: abort.signal })
+      .then(
+        (chats) => !abort.signal.aborted && setResult({ status: "ready", chats }),
+        (caught: unknown) =>
+          !abort.signal.aborted && setResult({ status: "error", message: userErrorText(caught) }),
+      )
+      .finally(() => {
+        done = true;
+      });
     return () => {
-      live = false;
+      // An interrupted read starts again next time.
+      if (done) return;
+      abort.abort();
+      if (readFor.current === key) readFor.current = null;
     };
-  }, [agent, chats, client, enabled, workspaceId]);
-  return chats;
+  }, [agent.id, client, enabled, key, workspaceId]);
+  return { result, retry: () => setAttempt((value) => value + 1) };
 }

@@ -4,7 +4,7 @@
  * listed, each with its logo; Add rule picks a connection (or one of its
  * tools) and a choice. Each change saves on its own.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { PlusIcon } from "lucide-react";
 import type {
   Agent,
@@ -153,6 +153,7 @@ function CanUseRuleRow({
   const all = own.find((rule) => rule.tool === "*")?.permission;
   const toolRules = own.filter((rule) => rule.tool !== "*");
   const [open, setOpen] = useState(false);
+  const toolsId = useId();
   const [tools, setTools] = useState<string[] | null>(null);
   // Read once, the first time the list opens.
   const loadToolsOnce = useRef(loadTools);
@@ -180,6 +181,7 @@ function CanUseRuleRow({
           type="button"
           className="text-xs text-fg-muted underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
           aria-expanded={open}
+          aria-controls={toolsId}
           onClick={() => setOpen((value) => !value)}
         >
           {open ? "Hide tools" : "Choose per tool"}
@@ -196,26 +198,30 @@ function CanUseRuleRow({
         />
       }
     >
-      {toolNames.map((tool) => {
-        const value = toolRules.find((rule) => rule.tool === tool)?.permission;
-        return (
-          <SettingRow
-            key={tool}
-            label={<code className="text-xs">{tool}</code>}
-            controlWidth="select"
-            control={
-              <PermissionSelect
-                label={`${name}: ${tool}`}
-                value={value ?? "default"}
-                disabled={disabled}
-                resetLabel={value ? "Remove" : all ? "Same as all tools" : defaultLabel}
-                onChange={(permission) => onChange(withAgentRule(rules, key, tool, permission))}
+      {toolNames.length > 0 || open ? (
+        <div id={toolsId} className="flex min-w-0 flex-col">
+          {toolNames.map((tool) => {
+            const value = toolRules.find((rule) => rule.tool === tool)?.permission;
+            return (
+              <SettingRow
+                key={tool}
+                label={<code className="text-xs">{tool}</code>}
+                controlWidth="select"
+                control={
+                  <PermissionSelect
+                    label={`${name}: ${tool}`}
+                    value={value ?? "default"}
+                    disabled={disabled}
+                    resetLabel={value ? "Remove" : all ? "Same as all tools" : defaultLabel}
+                    onChange={(permission) => onChange(withAgentRule(rules, key, tool, permission))}
+                  />
+                }
               />
-            }
-          />
-        );
-      })}
-      {open && tools === null ? <SettingRowSkeleton /> : null}
+            );
+          })}
+          {open && tools === null ? <SettingRowSkeleton /> : null}
+        </div>
+      ) : null}
     </SettingRow>
   );
 }

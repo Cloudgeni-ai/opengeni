@@ -68,6 +68,7 @@ import {
   scheduledLearningDestinationKey,
 } from "@/lib/scheduled-tasks";
 import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
+import { listAgentChats } from "@opengeni/react/app/lib/agent-chats";
 import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 import { cn } from "@opengeni/react/app/lib/utils";
@@ -796,6 +797,7 @@ function AgentScheduleForm({
   const needsSessions = inheritsChatSettings && access.canTargetSessions;
   const sourceSessionId = mode.kind === "create" ? mode.sourceSessionId : undefined;
   const targetSessionId = materializedSessionId ?? draft.targetSessionId;
+  const agentId = draft.agentId;
   useEffect(() => {
     if (!needsSessions) return;
     let live = true;
@@ -804,7 +806,11 @@ function AgentScheduleForm({
     void Promise.allSettled([
       materializedSessionId
         ? Promise.resolve([] as Session[])
-        : client.listSessions(workspaceId, { limit: 100 }),
+        : // An agent's automation posts only into that agent's chats: list those,
+          // reading past the newest page until there are enough.
+          agentId
+          ? listAgentChats(client, workspaceId, agentId)
+          : client.listSessions(workspaceId, { limit: 100 }),
       targetSessionId
         ? client.getSession(workspaceId, targetSessionId, { fresh: true })
         : Promise.resolve(null),
@@ -835,7 +841,15 @@ function AgentScheduleForm({
     return () => {
       live = false;
     };
-  }, [client, materializedSessionId, needsSessions, targetSessionId, workspaceId, sessionsRetry]);
+  }, [
+    agentId,
+    client,
+    materializedSessionId,
+    needsSessions,
+    targetSessionId,
+    workspaceId,
+    sessionsRetry,
+  ]);
 
   /* ----- who can see it */
   const [canCreatePrivate, setCanCreatePrivate] = useState<boolean | null>(null);

@@ -347,7 +347,7 @@ function InAppLinkRow({
  * Opens the Sidebar page from the section itself: quiet until the pointer is
  * over the section (always shown on touch screens and to the keyboard).
  */
-function CustomizeRow() {
+export function CustomizeRow() {
   const navigate = useNavigate();
   const rail = useRail();
   return (

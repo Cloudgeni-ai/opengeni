@@ -68,6 +68,7 @@ const { duplicateAgentNames, parseAgentFile, agentErrorCode, agentFile, agentFil
 const { useComposerAgent, AGENT_ONLY_ME_UNAVAILABLE } =
   await import("../src/app/lib/composer-agent");
 const { buildCreateSessionRequest } = await import("../src/app/lib/session-create");
+const { userErrorText } = await import("../src/ui/api-error");
 const { composerLaunchAgentId, parseComposerLaunchSearch } =
   await import("../src/app/lib/composer-launch");
 const { sessionAgentRef, sessionAgentSourceLine } = await import("../src/app/lib/session-agent");
@@ -1254,7 +1255,19 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   );
 });
 
-const GITHUB_SOURCE = { id: "source-gh", name: "Acme GitHub", kind: "github", status: "active" };
+const GITHUB_SOURCE = {
+  id: "source-gh",
+  name: "Acme GitHub",
+  kind: "github",
+  status: "active",
+} as {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  statusReason?: string | null;
+  statusReasonCode?: string | null;
+};
 
 async function openAgentTrigger(
   options: {
@@ -1262,6 +1275,9 @@ async function openAgentTrigger(
     eventTriggers?: boolean;
     eventSources?: (typeof GITHUB_SOURCE)[];
     createTaskError?: unknown;
+    createSourceError?: unknown;
+    sessionsError?: unknown;
+    sessionsPageSize?: number;
     suggestion?: string;
     githubStatus?: string;
     /** Chats in the workspace, given the agent's id. */
@@ -1273,6 +1289,9 @@ async function openAgentTrigger(
     templates: [TRIAGE_TEMPLATE],
     eventSources: options.eventSources ?? [],
     createTaskError: options.createTaskError,
+    createSourceError: options.createSourceError,
+    sessionsError: options.sessionsError,
+    sessionsPageSize: options.sessionsPageSize,
     sessions: options.sessions?.(agent.id),
   });
   let path = "";
@@ -1312,7 +1331,7 @@ test("a suggested trigger is set up in place: its source is filled in and no mes
     suggestion: "When a GitHub issue opens",
   });
   expect(dialog.textContent).toContain("When a GitHub issue opens");
-  expect(dialog.textContent).toContain("shared with the workspace");
+  expect(dialog.textContent).toContain("Visible to the workspace.");
   expect(dialog.textContent).toContain("Acme GitHub");
   // The message is optional and starts at the suggestion's.
   expect(dialog.querySelector("textarea")!.value).toBe("Triage it.");
@@ -1506,6 +1525,83 @@ test("a shared trigger the person may not add says so in the dialog", async () =
   expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
 });
 
+test("a suggestion's source that can't be added says why, not the shared-automation refusal", async () => {
+  const forbidden = Object.assign(new Error("Opengeni API 403: missing permission"), {
+    status: 403,
+  });
+  const { client, dialog } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "bound",
+    createSourceError: forbidden,
+  });
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(client.calls.some((call) => call[0] === "createEventSource")).toBe(true);
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).not.toContain(AGENT_TRIGGER_SHARED_DENIED);
+  expect(dialog.textContent).toContain(userErrorText(forbidden));
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+});
+
+test("a paused GitHub source shows greyed with why, and GitHub isn't offered as new", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [
+      { ...GITHUB_SOURCE, status: "disabled", statusReasonCode: "turned_off", statusReason: null },
+    ],
+  });
+  const tile = dialog.querySelector<HTMLButtonElement>(
+    "[data-agent-trigger-option='source:source-gh']",
+  )!;
+  expect(tile.disabled).toBe(true);
+  expect(tile.textContent).toContain("Turned off.");
+  expect(dialog.querySelector("[data-agent-trigger-option='new:github']")).toBeNull();
+  await act(async () => tile.click());
+  await flush();
+  expect(tile.getAttribute("aria-checked")).toBe("false");
+});
+
+test("Open full form starts the form at the source picked", async () => {
+  const { dialog, path } = await openAgentTrigger({ eventSources: [GITHUB_SOURCE] });
+  await pickTrigger(dialog, "source:source-gh");
+  await flush();
+  const link = dialog.querySelector<HTMLButtonElement>("[data-agent-trigger-full-form]")!;
+  await act(async () => link.click());
+  await flush();
+  const url = new URL(path(), "https://example.test");
+  expect(url.pathname).toBe(`/workspaces/${WORKSPACE_ID}/automations/new`);
+  expect(url.searchParams.get("source")).toBe("source-gh");
+  expect(url.searchParams.get("returnTo")).toBe("agent");
+});
+
+test("An existing chat finds the agent's chats past the first page", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessionsPageSize: 2,
+    sessions: (agentId) => [
+      { id: "chat-1", title: "Other 1", agentId: "another-agent" },
+      { id: "chat-2", title: "Other 2", agentId: null },
+      { id: "chat-3", title: "Old triage", agentId },
+    ],
+  });
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  expect(await chooseFrom(dialog, "Choose a chat", "Old triage")).toEqual([
+    expect.stringContaining("Old triage"),
+  ]);
+});
+
+test("An existing chat that can't be read says so, not that there are none", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessionsError: new Error("Opengeni API 500: down"),
+  });
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  expect(dialog.textContent).toContain("Couldn't load chats with Triage.");
+  expect(dialog.textContent).not.toContain("No chats with Triage yet.");
+  expect(button(dialog, "Try again")).toBeTruthy();
+});
+
 test("a listed GitHub connection's row also offers Opengeni's own GitHub tools", async () => {
   const agent = makeAgent({
     name: "Fixer",
@@ -1534,13 +1630,16 @@ test("a listed GitHub connection's row also offers Opengeni's own GitHub tools",
   await flush();
   const rows = container.querySelectorAll<HTMLElement>("[data-agent-can-use='github.com']");
   expect(rows).toHaveLength(1);
-  await act(async () =>
-    [...rows[0]!.querySelectorAll("button")]
-      .find((b) => b.textContent?.includes("Choose per tool"))!
-      .click(),
-  );
+  const perTool = [...rows[0]!.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes("Choose per tool"),
+  )!;
+  await act(async () => perTool.click());
   await flush();
   expect(rows[0]!.textContent).toContain("search_code");
+  // The toggle names the tool list it opens.
+  expect(document.getElementById(perTool.getAttribute("aria-controls")!)?.textContent).toContain(
+    "search_code",
+  );
   expect(rows[0]!.textContent).toContain("pull_request_merge");
 });
 

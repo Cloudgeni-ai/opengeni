@@ -78,13 +78,15 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
       live = false;
     };
   }, [agent.id, agent.templateKey, client, workspaceId]);
-  const openFullForm = (agentTrigger?: number) =>
+  // The full form starts at the suggestion, or at the source picked in the dialog.
+  const openFullForm = (agentTrigger?: number, sourceId?: string) =>
     void navigate({
       to: "/workspaces/$workspaceId/automations/new",
       params: { workspaceId },
       search: {
         agent: agent.id,
         ...(agentTrigger !== undefined ? { agentTrigger } : {}),
+        ...(sourceId ? { source: sourceId } : {}),
         returnTo: "agent",
       },
     });
@@ -198,7 +200,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
             setAdding(null);
             toast.success("Trigger added", { description: task.name });
           }}
-          onOpenFullForm={() => openFullForm(adding?.suggestion)}
+          onOpenFullForm={(start) => openFullForm(adding?.suggestion, start.sourceId)}
           onAddSource={addSource}
         />
       ) : null}
