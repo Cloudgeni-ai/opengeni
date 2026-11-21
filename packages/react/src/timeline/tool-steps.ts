@@ -468,6 +468,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   site_publication_update: "updateSite",
   site_publication_apply_fix: "updateSite",
   app_install: "updateSite",
+  app_upgrade: "updateSite",
   site_sql_enable: "updateSite",
   site_sql_migrate: "updateSite",
   site_sql_define_query: "updateSite",

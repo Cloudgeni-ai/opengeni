@@ -1079,3 +1079,70 @@ test("an archived App's syncs stop", async () => {
   expect(run.lastRun.error).toContain("archived");
   expect(fake.calls).toHaveLength(0);
 });
+
+test("app upgrades add new syncs paused and change existing ones in place", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const make = async (who: Who, name: string) => {
+    const created = await f.request(who, "POST", `/${f.siteId}/syncs`, {
+      name,
+      collection: "orders",
+      tool,
+      key: "id",
+      schedule: { type: "interval", everySeconds: 3600 },
+    });
+    expect(created.status, JSON.stringify(created.json)).toBe(201);
+    return created.json as { id: string; status: string };
+  };
+  const orders = await make(f.owner, "Orders");
+  await make(f.teammate, "Theirs");
+  await make(f.owner, "Kept");
+  const definitions = await listAppSyncDefinitions(f.deps, f.owner.grant, f.siteId);
+  const packaged = definitions
+    .filter((sync) => sync.name !== "Kept")
+    .map((sync) => ({ ...sync, schedule: { type: "interval", everySeconds: 7200 } }));
+  packaged.push({ ...definitions[0]!, name: "New orders" });
+  const input = { deps: f.deps, grant: f.owner.grant, appId: f.siteId, syncs: packaged as never };
+  const plan = await APP_PACKAGE_SYNC_HOOKS.planUpgrade!(input);
+  expect(plan).toMatchObject({
+    added: ["New orders"],
+    changed: expect.arrayContaining(["Orders", "Theirs"]),
+    unchanged: [],
+    kept: ["Kept"],
+  });
+  // Someone else's sync stays theirs and unchanged.
+  expect(plan.problems).toEqual([expect.objectContaining({ name: "Theirs" })]);
+
+  const applied = await APP_PACKAGE_SYNC_HOOKS.applyUpgrade!({ ...input, upgradeKey: "k" });
+  expect(applied.upgraded.sort()).toEqual(["New orders", "Orders"]);
+  const listed = (await f.request(f.owner, "GET", `/${f.siteId}/syncs`)).json.syncs as Array<{
+    id: string;
+    name: string;
+    status: string;
+    ownerSubjectId: string;
+    schedule: { everySeconds?: number };
+  }>;
+  const byName = new Map(listed.map((sync) => [sync.name, sync]));
+  expect(byName.get("Orders")).toMatchObject({
+    id: orders.id,
+    status: orders.status,
+    ownerSubjectId: f.owner.subjectId,
+    schedule: expect.objectContaining({ everySeconds: 7200 }),
+  });
+  expect(byName.get("Theirs")).toMatchObject({
+    ownerSubjectId: f.teammate.subjectId,
+    schedule: expect.objectContaining({ everySeconds: 3600 }),
+  });
+  expect(byName.get("New orders")?.status).toBe("paused");
+  expect(byName.get("Kept")).toBeDefined();
+
+  // A retry finds it done; someone who doesn't manage the app changes nothing.
+  const again = await APP_PACKAGE_SYNC_HOOKS.planUpgrade!(input);
+  expect(again.added).toEqual([]);
+  expect(again.changed).toEqual(["Theirs"]);
+  await expect(
+    APP_PACKAGE_SYNC_HOOKS.applyUpgrade!({ ...input, grant: f.alice.grant, upgradeKey: "k" }),
+  ).rejects.toThrow();
+});

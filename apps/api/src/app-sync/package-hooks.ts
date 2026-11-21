@@ -1,10 +1,124 @@
-import { AppSyncDefinition, type AppPackageSync } from "@opengeni/contracts";
-import { hasPermission } from "@opengeni/core";
-import { syncName, type AppSyncHooks } from "../app-packages/syncs";
-import { createAppSyncFromDefinition, listAppSyncDefinitions } from "./service";
+import {
+  AppSyncDefinition,
+  stableJson,
+  type AccessGrant,
+  type AppPackageSync,
+} from "@opengeni/contracts";
+import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
+import { syncName, type AppSyncHooks, type AppSyncUpgradePlan } from "../app-packages/syncs";
+import {
+  createAppSyncFromDefinition,
+  listAppSyncDefinitions,
+  listAppSyncs,
+  updateAppSync,
+} from "./service";
 
 function message(error: unknown): string {
   return error instanceof Error && error.message ? error.message.slice(0, 500) : "Unknown error";
+}
+
+const MANAGE_REASON = "Changing syncs needs permission to manage automations in this workspace";
+
+function canManage(grant: AccessGrant): boolean {
+  return hasPermission(grant.permissions, "scheduled_tasks:manage", grant.permissionMode);
+}
+
+/**
+ * A sync's settings as plain JSON for comparing a package with an app: the
+ * definition read with this deployment's defaults, without its name (how
+ * syncs are matched) or event triggers (they name sources of one workspace,
+ * and an upgrade keeps the app's own).
+ */
+function settingsOf(raw: AppPackageSync): Record<string, unknown> | null {
+  const { events: _events, ...withoutEvents } = raw;
+  const parsed = AppSyncDefinition.safeParse(withoutEvents);
+  if (!parsed.success) return null;
+  const {
+    name: _name,
+    events: _parsedEvents,
+    ...settings
+  } = parsed.data as Record<string, unknown>;
+  return settings;
+}
+
+/** The settings whose JSON differs: the patch that upgrades one sync. */
+function changedSettings(
+  current: Record<string, unknown>,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(current), ...Object.keys(next)]))
+    if (key in next && stableJson(current[key]) !== stableJson(next[key])) patch[key] = next[key];
+  return patch;
+}
+
+async function compare(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  appId: string,
+  syncs: AppPackageSync[],
+) {
+  const [definitions, views] = await Promise.all([
+    listAppSyncDefinitions(deps, grant, appId),
+    listAppSyncs(deps, grant, appId),
+  ]);
+  const current = new Map(
+    definitions.map((definition) => [definition.name, settingsOf(definition as AppPackageSync)]),
+  );
+  const byName = new Map(views.map((view) => [view.name, view]));
+  const plan: AppSyncUpgradePlan & {
+    patches: Map<string, { id: string; patch: Record<string, unknown> }>;
+    additions: Map<string, AppPackageSync>;
+  } = {
+    added: [],
+    changed: [],
+    unchanged: [],
+    kept: [],
+    problems: [],
+    patches: new Map(),
+    additions: new Map(),
+  };
+  const named = new Set<string>();
+  for (const [index, raw] of syncs.entries()) {
+    const name = syncName(raw, index);
+    const next = settingsOf(raw);
+    if (!next || typeof raw.name !== "string") {
+      plan.problems.push({
+        name,
+        reason: "This sync isn't in a format this deployment knows",
+      });
+      continue;
+    }
+    const definitionName = String(AppSyncDefinition.shape.name.parse(raw.name));
+    named.add(definitionName);
+    const view = byName.get(definitionName);
+    const existing = current.get(definitionName);
+    if (!view || existing === undefined) {
+      plan.added.push(definitionName);
+      plan.additions.set(definitionName, raw);
+      continue;
+    }
+    const patch = existing ? changedSettings(existing, next) : next;
+    if (Object.keys(patch).length === 0) {
+      plan.unchanged.push(definitionName);
+      continue;
+    }
+    plan.changed.push(definitionName);
+    // Whoever saves a sync becomes its owner and its shared runs use their
+    // connection, so an upgrade changes only syncs the upgrader owns.
+    if (view.ownerSubjectId !== grant.subjectId)
+      plan.problems.push({
+        name: definitionName,
+        reason:
+          "Someone else owns this sync, so it stays as it is. Its owner can upgrade the app, or save the sync yourself to take it over.",
+      });
+    else plan.patches.set(definitionName, { id: view.id, patch });
+  }
+  for (const view of views) if (!named.has(view.name)) plan.kept.push(view.name);
+  if (!canManage(grant))
+    for (const name of [...plan.added, ...plan.patches.keys()])
+      plan.problems.push({ name, reason: MANAGE_REASON });
+  return plan;
 }
 
 /**
@@ -14,6 +128,12 @@ function message(error: unknown): string {
  * the exporting workspace, so an installed sync keeps only its schedule; it
  * can be given triggers after install. A replayed install skips syncs the
  * app already has by name, so it never creates one twice.
+ *
+ * An upgrade matches syncs by name: new ones are added paused like an
+ * install, changed ones are saved with only the settings that differ (their
+ * owner, status and event triggers stay, and the usual rule resets personal
+ * opt-ins when the tool, arguments, collection or mode change), and the
+ * app's other syncs stay. A retried upgrade finds them already done.
  */
 export const APP_PACKAGE_SYNC_HOOKS: AppSyncHooks = {
   list: async ({ deps, grant, appId }) =>
@@ -54,5 +174,39 @@ export const APP_PACKAGE_SYNC_HOOKS: AppSyncHooks = {
       }
     }
     return { created, notCreated };
+  },
+  planUpgrade: async ({ deps, grant, appId, syncs }) => {
+    const {
+      patches: _patches,
+      additions: _additions,
+      ...plan
+    } = await compare(deps, grant, appId, syncs);
+    return plan;
+  },
+  applyUpgrade: async ({ deps, grant, appId, syncs }) => {
+    const plan = await compare(deps, grant, appId, syncs);
+    const upgraded: string[] = [];
+    const notUpgraded = [...plan.problems];
+    if (!canManage(grant)) return { upgraded, notUpgraded };
+    for (const [name, raw] of plan.additions) {
+      const { events: _events, ...withoutEvents } = raw;
+      const parsed = AppSyncDefinition.safeParse(withoutEvents);
+      if (!parsed.success) continue;
+      try {
+        await createAppSyncFromDefinition(deps, grant, appId, parsed.data);
+        upgraded.push(name);
+      } catch (error) {
+        notUpgraded.push({ name, reason: message(error) });
+      }
+    }
+    for (const [name, { id, patch }] of plan.patches) {
+      try {
+        await updateAppSync(deps, grant, appId, id, patch);
+        upgraded.push(name);
+      } catch (error) {
+        notUpgraded.push({ name, reason: message(error) });
+      }
+    }
+    return { upgraded, notUpgraded };
   },
 };

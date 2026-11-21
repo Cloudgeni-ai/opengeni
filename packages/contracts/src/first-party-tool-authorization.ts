@@ -362,6 +362,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   site_hostname_check: { sessionRequired: true, allOf: ["artifacts:read"] },
   app_export: { sessionRequired: true, allOf: ["artifacts:read"] },
   app_install: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  app_upgrade: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_sql_inspect: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_sql_enable: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_sql_migrate: { sessionRequired: true, allOf: ["artifacts:publish"] },
