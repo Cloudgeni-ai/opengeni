@@ -746,16 +746,16 @@ test("files upload, list, download and delete with shared and private scope", as
 });
 
 const SITE_DATA_TOOLS = [
-  "site_data_describe",
-  "site_data_define_collection",
-  "site_data_query",
-  "site_data_write",
-  "site_data_import",
-  "site_data_export",
-  "site_data_reset",
-  "site_files_list",
-  "site_files_upload",
-  "site_files_delete",
+  "app_data_describe",
+  "app_data_define_collection",
+  "app_data_query",
+  "app_data_write",
+  "app_data_import",
+  "app_data_export",
+  "app_data_reset",
+  "app_files_list",
+  "app_files_upload",
+  "app_files_delete",
 ];
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -1000,12 +1000,12 @@ test("an agent defines and feeds a collection the way a schedule would", async (
     expect(own.isError, JSON.stringify(own.value)).toBe(false);
     expect(own.value.count).toBe(4);
     const listed = (await mcp.listTools()).tools;
-    const upload = listed.find((tool) => tool.name === "site_files_upload")!;
+    const upload = listed.find((tool) => tool.name === "app_files_upload")!;
     expect(JSON.stringify(upload.inputSchema)).toContain(
-      "only the uploader and the Site's managers",
+      "only the uploader and the app's managers",
     );
     expect(
-      (listed.find((tool) => tool.name === "site_data_query")!.inputSchema as any).properties.scope,
+      (listed.find((tool) => tool.name === "app_data_query")!.inputSchema as any).properties.scope,
     ).toBeDefined();
     const described = await callTool("site_data_describe", { siteId: created.id });
     expect(described.value.collections[0]).toMatchObject({ name: "companies", recordCount: 4 });

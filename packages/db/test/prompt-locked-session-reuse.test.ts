@@ -168,7 +168,7 @@ test("expired Site admission remains fail closed before prompt acceptance", asyn
       },
       () => send(f),
     ),
-  ).rejects.toThrow("Site conversation admission expired");
+  ).rejects.toThrow("App conversation admission expired");
   expect(await listSessionTurns(client.db, f.grant.workspaceId, f.session.id)).toHaveLength(0);
 });
 

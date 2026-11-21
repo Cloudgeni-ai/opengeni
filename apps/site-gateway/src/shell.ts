@@ -56,7 +56,7 @@ export function shellHtml(init: {
   /** Set while a member previews the Site as a visitor: shows the banner with Exit preview. */
   preview?: { viewAs: SiteViewAs; exitHref: string } | null;
 }): string {
-  const title = escapeHtml(init.title || "Site");
+  const title = escapeHtml(init.title || "App");
   const preview = init.preview
     ? `<span id="og-preview">Viewing as ${VIEW_AS_LABEL[init.preview.viewAs]} · <a href="${escapeHtml(
         init.preview.exitHref,
@@ -120,8 +120,8 @@ async function handleViewAs(
       site,
       403,
       "Preview not available",
-      "Only workspace members can preview this Site as a visitor.",
-      { href: back, label: "Back to the Site" },
+      "Only workspace members can preview this app as a visitor.",
+      { href: back, label: "Back to the app" },
     );
     for (const cookie of cookies) page.headers.append("Set-Cookie", cookie);
     return page;
@@ -173,14 +173,14 @@ export async function handleShell(site: SiteContext): Promise<Response> {
             site,
             403,
             "Not available to this visitor",
-            "People in the role you are previewing as can't open this Site.",
+            "People in the role you are previewing as can't open this app.",
             { href: exitPreviewHref(site.url), label: "Exit preview" },
           )
         : messagePage(
             site,
             403,
             "No access",
-            "You are signed in, but this Site is not shared with your account.",
+            "You are signed in, but this app is not shared with your account.",
             { href: "/_og/auth/logout", label: "Sign out" },
           );
       for (const cookie of cookies) response.headers.append("Set-Cookie", cookie);

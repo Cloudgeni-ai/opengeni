@@ -134,7 +134,7 @@ same vocabulary as Opengeni's other events (migration `1519`,
   nothing, so a sync that refreshes the same data stays quiet. Imports,
   collection resets and collection deletes send none.
 - `app.sql.changed`: a Site SQL write (a saved write query or
-  `site_sql_execute`) that wrote rows. The App's database commits in its
+  `app_sql_execute`) that wrote rows. The App's database commits in its
   Durable Object, outside Postgres, so the API records this fact right after
   the call returns, best effort: a crash in between loses the event, never
   the write.
@@ -404,13 +404,13 @@ CORS policy allows `X-OpenGeni-Site-Frame`, `X-OpenGeni-Site-Id` and
 `X-OpenGeni-Site-Version`, so cross-origin hosts can send bridged requests.
 Stored records are untrusted; the Sites skill requires rendering them as text.
 
-**Agent tools** (MCP and Codemode, family `artifacts`; `site_data_describe`,
-`site_data_query`, `site_data_export` and `site_files_list` need
-`artifacts:read`, the rest `artifacts:publish`): `site_data_describe`,
-`site_data_define_collection` (create, change or delete), `site_data_query`,
-`site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset`
-(needs `confirm: true`), `site_files_list`, `site_files_upload` and
-`site_files_delete`. They run with the attempt's authority, so scheduled tasks
+**Agent tools** (MCP and Codemode, family `artifacts`; `app_data_describe`,
+`app_data_query`, `app_data_export` and `app_files_list` need
+`artifacts:read`, the rest `artifacts:publish`): `app_data_describe`,
+`app_data_define_collection` (create, change or delete), `app_data_query`,
+`app_data_write`, `app_data_import`, `app_data_export`, `app_data_reset`
+(needs `confirm: true`), `app_files_list`, `app_files_upload` and
+`app_files_delete`. They run with the attempt's authority, so scheduled tasks
 use the schedule's. Site-origin agents use the same native role as console agents.
 
 
@@ -550,7 +550,7 @@ profiles decide the rest:
 | Profile  | Used for                  | Rules                                                                 |
 | -------- | ------------------------- | --------------------------------------------------------------------- |
 | `named`  | named queries Sites call  | exactly one SELECT/INSERT/UPDATE/DELETE/REPLACE (WITH allowed, not recursive: no `RECURSIVE`, and no WITH table that names itself or uses UNION, INTERSECT or EXCEPT, at any nesting level); no schema changes, PRAGMA or EXPLAIN; 16K characters |
-| `agent`  | `site_sql_query`/`execute` | exactly one read or write statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration) here and in the Durable Object; 64K characters |
+| `agent`  | `app_sql_query`/`execute` | exactly one read or write statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration) here and in the Durable Object; 64K characters |
 | `script` | migrations and SQL imports | up to 2,000 statements, run in one transaction; schema changes allowed; 2M characters |
 
 Statement boundaries are never guessed. A `CREATE TRIGGER` body starts at
@@ -597,7 +597,7 @@ visitor binds that role with their own email. A request that supplies one is ref
 a Site cannot impersonate another viewer:
 
 ```sql
--- define with site_sql_define_query, audience signed_in
+-- define with app_sql_define_query, audience signed_in
 INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
 ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
 ```
@@ -718,20 +718,20 @@ PUT `/settings`, POST|PUT|DELETE `/queries/:name`, POST `/migrations`, `/query`,
 
 | Tool                    | Does                                                                  |
 | ----------------------- | --------------------------------------------------------------------- |
-| `site_sql_inspect`      | settings, limits, usage, tables, migrations, pending migrations, queries |
-| `site_sql_enable`       | turn the Site's database on or off                                     |
-| `site_sql_migrate`      | append a named schema migration and apply every missing one            |
-| `site_sql_define_query` | create, replace or delete a named query                                |
-| `site_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
-| `site_sql_run`          | one named query with params, as a Site page runs it (`site.sql.run`)    |
-| `site_sql_execute`      | one write statement (schema changes go through migrations)             |
-| `site_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
-| `site_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
-| `site_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
+| `app_sql_inspect`      | settings, limits, usage, tables, migrations, pending migrations, queries |
+| `app_sql_enable`       | turn the Site's database on or off                                     |
+| `app_sql_migrate`      | append a named schema migration and apply every missing one            |
+| `app_sql_define_query` | create, replace or delete a named query                                |
+| `app_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
+| `app_sql_run`          | one named query with params, as a Site page runs it (`site.sql.run`)    |
+| `app_sql_execute`      | one write statement (schema changes go through migrations)             |
+| `app_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
+| `app_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
+| `app_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
 
-Ordinary authoring routes and tools except `site_sql_run` need the manager role on the
+Ordinary authoring routes and tools except `app_sql_run` need the manager role on the
 Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
-`site_sql_run` needs `artifacts:read` and applies the query's audience to the
+`app_sql_run` needs `artifacts:read` and applies the query's audience to the
 agent as to a page viewer (managers run every query). The tools are only
 registered when the gateway origin and secret are configured.
 
@@ -753,7 +753,7 @@ and the tool returns `nextCursor`: pass it back as `cursor` and append the
 pieces in order. Only the first piece holds the header (the SQL schema, the
 CSV header row, the JSON schema) and only the last SQL piece holds the
 triggers, so the pieces of a SQL export re-import one after another
-(`site_sql_import` takes at most 2 MB per call). SQL and JSON exports keep
+(`app_sql_import` takes at most 2 MB per call). SQL and JSON exports keep
 every value (JSON writes blobs as `{ "$base64": "..." }`, which JSON imports
 cannot load back yet, so SQL is the lossless round trip); CSV turns every
 value into text (an empty cell imports as NULL) and blobs into base64. SQL
@@ -763,7 +763,7 @@ single row larger than that needs a JSON export and import.
 
 An export is not a point-in-time snapshot: each piece reads the database as
 it is then, so writes between pieces can show up in later pieces only. For a
-consistent copy, turn Site SQL off (`site_sql_enable` with `enabled: false`;
+consistent copy, turn Site SQL off (`app_sql_enable` with `enabled: false`;
 export keeps working) before a full export and back on afterwards.
 
 To restore a SQL export into the same or another Site, reset with `schema:

@@ -207,8 +207,8 @@ describe("skill_read gateway definition", () => {
               if (text?.type !== "text") throw new Error("missing Skill text");
               const rendered = JSON.parse(text.text).files[0].content as string;
               expect(rendered).toBe(markdown);
-              const start = rendered.indexOf("## Make new Sites readable by default");
-              const build = rendered.indexOf("## Edit an existing Site");
+              const start = rendered.indexOf("## Make new apps readable by default");
+              const build = rendered.indexOf("## Edit an existing app");
               expect(start).toBeGreaterThan(-1);
               expect(start).toBeLessThan(build);
               const guidance = rendered.slice(start, build).replace(/\s+/gu, " ");

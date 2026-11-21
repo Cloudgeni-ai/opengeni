@@ -7,7 +7,7 @@ import type {
 import { SiteDetail, SiteList, loadSiteSnapshot, type SiteClient } from "../src/sites";
 import { actRun, registerDom, renderComponent } from "./render-hook";
 registerDom();
-test("native and embedded Site loader pins the selected version and rejects mismatched authority scope", async () => {
+test("native and embedded app loader pins the selected version and rejects mismatched authority scope", async () => {
   const calls: unknown[] = [];
   const readClient = {
     getWorkspaceArtifact: async () => structuredClone(detail),
@@ -73,7 +73,7 @@ const detail: WorkspaceArtifactDetailResponse = {
     workspaceId: "space",
     accountId: "org",
     slug: "site",
-    title: "My Site",
+    title: "My app",
     description: null,
     status: "active",
     currentVersion: version,
@@ -120,7 +120,7 @@ function button(container: HTMLElement, label: string) {
   if (!result) throw new Error(`Missing ${label}`);
   return result;
 }
-test("Site frame reuses opaque sandbox and disappears on denied refresh", async () => {
+test("App frame reuses opaque sandbox and disappears on denied refresh", async () => {
   let denied = false;
   const source = client({
     getWorkspaceArtifact: async () => {
@@ -136,9 +136,9 @@ test("Site frame reuses opaque sandbox and disappears on denied refresh", async 
     expect(frame).not.toBeNull();
     expect(frame.getAttribute("sandbox")).toContain("allow-scripts");
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
-    expect(view.container.textContent).not.toContain("Manage Site");
+    expect(view.container.textContent).not.toContain("Manage app");
     denied = true;
-    await actRun(() => button(view.container, "Refresh Site").click());
+    await actRun(() => button(view.container, "Refresh app").click());
     expect(view.container.querySelector("iframe")).toBeNull();
     expect(view.container.textContent).toContain("access has changed");
     expect(view.container.textContent).not.toContain("private diagnostic");
@@ -146,7 +146,7 @@ test("Site frame reuses opaque sandbox and disappears on denied refresh", async 
     await view.unmount();
   }
 });
-test("Site changes require confirmation and preserve observed version without unsafe retry", async () => {
+test("App changes require confirmation and preserve observed version without unsafe retry", async () => {
   const calls: unknown[] = [];
   const source = client({
     setWorkspaceArtifactStatus: async (_workspace, _site, request) => {
@@ -158,7 +158,7 @@ test("Site changes require confirmation and preserve observed version without un
     <SiteDetail client={source} workspaceId="space" siteId="site" canPublish />,
   );
   try {
-    await actRun(() => button(view.container, "Archive Site").click());
+    await actRun(() => button(view.container, "Archive app").click());
     expect(calls).toHaveLength(0);
     await actRun(() => button(view.container, "Confirm change").click());
     expect(calls).toHaveLength(1);
@@ -169,7 +169,7 @@ test("Site changes require confirmation and preserve observed version without un
     await view.unmount();
   }
 });
-test("Site actor replacement ignores late content even when a transport ignores cancellation", async () => {
+test("App actor replacement ignores late content even when a transport ignores cancellation", async () => {
   let finish!: (value: string) => void;
   const previous = client({
     getWorkspaceArtifactHtml: () =>
@@ -189,12 +189,12 @@ test("Site actor replacement ignores late content even when a transport ignores 
     await view.rerender(<SiteDetail client={next} workspaceId="space" siteId="site" />);
     await actRun(() => finish(content.html));
     expect(view.container.querySelector("iframe")).toBeNull();
-    expect(view.container.textContent).not.toContain("My Site");
+    expect(view.container.textContent).not.toContain("My app");
   } finally {
     await view.unmount();
   }
 });
-test("Site list keeps navigation in the host and clears inventory on actor change", async () => {
+test("App list keeps navigation in the host and clears inventory on actor change", async () => {
   let selected: unknown;
   const source = client();
   const view = await renderComponent(
@@ -207,7 +207,7 @@ test("Site list keeps navigation in the host and clears inventory on actor chang
     />,
   );
   try {
-    await actRun(() => button(view.container, "My Site").click());
+    await actRun(() => button(view.container, "My app").click());
     expect(selected).toEqual(detail.artifact);
     await view.rerender(
       <SiteList
@@ -222,14 +222,14 @@ test("Site list keeps navigation in the host and clears inventory on actor chang
         onOpen={() => {}}
       />,
     );
-    expect(view.container.textContent).not.toContain("My Site");
-    expect(view.container.textContent).toContain("No active Sites");
+    expect(view.container.textContent).not.toContain("My app");
+    expect(view.container.textContent).toContain("No active apps");
   } finally {
     await view.unmount();
   }
 });
 
-test("an inline Site version keeps its own tool declarations", async () => {
+test("an inline app version keeps its own tool declarations", async () => {
   const old = {
     ...version,
     id: "old",

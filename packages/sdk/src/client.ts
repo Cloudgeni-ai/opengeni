@@ -2457,14 +2457,14 @@ export class OpenGeniClient {
       (!response.originSiteId ||
         (options.originSiteId !== "current" && response.originSiteId !== options.originSiteId))
     ) {
-      throw unsupportedSessionPage("Site-filtered session lists");
+      throw unsupportedSessionPage("app-filtered session lists");
     }
     if (
       options.siteAccessId &&
       (!response.siteAccessId ||
         (options.siteAccessId !== "current" && options.siteAccessId !== response.siteAccessId))
     )
-      throw unsupportedSessionPage("Site access-filtered session lists");
+      throw unsupportedSessionPage("app access-filtered session lists");
     return response;
   }
 

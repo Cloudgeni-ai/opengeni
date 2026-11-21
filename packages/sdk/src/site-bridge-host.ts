@@ -378,7 +378,7 @@ export class SiteBridgeHost {
           portEvent.ports[0]!,
           async (request, signal) => {
             const fetch = this.source.tools()?.fetch;
-            if (!fetch) throw new Error("This Site host does not support the session SDK");
+            if (!fetch) throw new Error("This app host does not support the session SDK");
             return fetch(request, signal);
           },
           controller.signal,
@@ -395,7 +395,7 @@ export class SiteBridgeHost {
           ok: false,
           error: {
             code: "duplicate_request_id",
-            message: "A Site tool request with this id is already running",
+            message: "An app tool request with this id is already running",
             retryable: false,
           },
         } satisfies OpenGeniSiteBridgeResponseMessage);
@@ -469,7 +469,7 @@ export class SiteBridgeRequestRegistry {
     const controllers = this.controllersByPort.get(port);
     const controller = controllers?.get(requestId);
     if (!controller) return;
-    controller.abort(new Error("Site tool request cancelled"));
+    controller.abort(new Error("App tool request cancelled"));
     controllers!.delete(requestId);
   }
 
@@ -482,7 +482,7 @@ export class SiteBridgeRequestRegistry {
     const controllers = this.controllersByPort.get(port);
     if (!controllers) return;
     for (const controller of controllers.values()) {
-      controller.abort(new Error("Site tool bridge port closed"));
+      controller.abort(new Error("App tool bridge port closed"));
     }
     controllers.clear();
     this.controllersByPort.delete(port);
@@ -550,7 +550,7 @@ export async function handleSiteBridgeRequest(
   location?: SiteBridgeLocationHandlers,
 ): Promise<SiteBridgeRequestValue> {
   if (message.method === OPENGENI_SITE_BRIDGE_VIEWER_METHOD) {
-    if (!viewer) throw siteBridgeHostError("viewer_unavailable", "This Site host has no viewer");
+    if (!viewer) throw siteBridgeHostError("viewer_unavailable", "This app host has no viewer");
     return await viewer.viewer({ signal });
   }
   if (message.method === OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD) {
@@ -560,14 +560,14 @@ export async function handleSiteBridgeRequest(
   }
   if (message.method === OPENGENI_SITE_BRIDGE_LOCATION_METHOD) {
     if (!location)
-      throw siteBridgeHostError("location_unsupported", "This Site host has no location");
+      throw siteBridgeHostError("location_unsupported", "This app host has no location");
     return location.get();
   }
   if (message.method === OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD) {
     if (!location)
       throw siteBridgeHostError(
         "location_unsupported",
-        "This Site host does not support navigation",
+        "This app host does not support navigation",
       );
     const to = resolveOpenGeniSiteLocation(
       location.get(),
@@ -577,13 +577,13 @@ export async function handleSiteBridgeRequest(
     if (!to || isOpenGeniReservedSitePath(to.path))
       throw siteBridgeHostError(
         "invalid_location",
-        "Navigate only to this Site's own pages (not /_og or /__opengeni); open other addresses with a link or window.open",
+        "Navigate only to this app's own pages (not /_og or /__opengeni); open other addresses with a link or window.open",
       );
     return await location.navigate(to, { replace: message.payload.replace === true });
   }
   if (message.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD) {
     const connections = bridge?.connections;
-    // Only the projection crosses: no ids or addresses reach Site code.
+    // Only the projection crosses: no ids or addresses reach App code.
     return siteConnectionStatus(connections ? await connections.items({ signal }) : null);
   }
   if (message.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD) {
@@ -598,27 +598,27 @@ export async function handleSiteBridgeRequest(
     const show = bridge?.connections?.show;
     return { shown: show ? (await show({ signal })) === true : false };
   }
-  if (!bridge) throw new Error("Site tool bridge is unavailable");
+  if (!bridge) throw new Error("App tool bridge is unavailable");
   if (message.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD) {
     bridge.watchDataChanges?.();
     return { watching: Boolean(bridge.dataChanges || bridge.subscribeDataChanges) };
   }
   if (message.method === "resolve") {
-    if (!bridge.resolve) throw new Error("Targeted Site tools are unavailable");
+    if (!bridge.resolve) throw new Error("Targeted app tools are unavailable");
     return await bridge.resolve({ target: message.payload.target }, { signal });
   }
   if (message.method === "invoke") {
-    if (!bridge.invoke) throw new Error("Targeted Site tools are unavailable");
+    if (!bridge.invoke) throw new Error("Targeted app tools are unavailable");
     return await bridge.invoke(sanitizeOpenGeniSiteToolInvokeRequest(message.payload), { signal });
   }
   if (message.method === "readiness") {
     if (!bridge.readiness)
-      throw siteBridgeHostError("readiness_unsupported", "This Site host doesn't report readiness");
+      throw siteBridgeHostError("readiness_unsupported", "This app host doesn't report readiness");
     return await bridge.readiness({ targets: [...message.payload.targets] }, { signal });
   }
   if (message.method === "catalog") return await bridge.catalog({ signal });
   if (message.method === "declarations") {
-    if (!bridge.declarations) throw new Error("Site tool declarations are unavailable");
+    if (!bridge.declarations) throw new Error("App tool declarations are unavailable");
     return await bridge.declarations({ signal });
   }
   return await bridge.call(sanitizeOpenGeniSiteToolCallRequest(message.payload!), { signal });
@@ -658,7 +658,7 @@ export function siteBridgeError(
     !knownPreexecution &&
     (candidate?.code === "catalog_stale" || candidate?.code === "tool_definition_stale");
   const message =
-    typeof candidate?.message === "string" ? candidate.message : "Site tool request failed";
+    typeof candidate?.message === "string" ? candidate.message : "App tool request failed";
   // A server answer that already says what the viewer can do next reaches
   // Site code as its typed code, as in the Opengeni frame.
   const typed =

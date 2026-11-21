@@ -77,7 +77,7 @@ export async function serveSiteHttp(
       }
     if (signal.aborted) throw signal.reason;
   } catch (error) {
-    port.postMessage({ error: error instanceof Error ? error.message : "Site request failed" });
+    port.postMessage({ error: error instanceof Error ? error.message : "App request failed" });
   } finally {
     signal.removeEventListener("abort", abort);
     port.removeEventListener("message", onMessage);

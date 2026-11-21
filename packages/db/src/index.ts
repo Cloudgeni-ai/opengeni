@@ -24762,7 +24762,7 @@ export class ChannelNotFoundError extends Error {
  * (1161), so nothing in it is ever visible to anyone else.
  */
 export class ChannelAudienceMismatchError extends Error {
-  constructor(kind: "chat" | "Site") {
+  constructor(kind: "chat" | "app") {
     super(`An Only me project holds only your own Only me ${kind}s.`);
     this.name = "ChannelAudienceMismatchError";
   }
@@ -25224,7 +25224,7 @@ export async function moveSiteToProject(
           limit 1`,
       );
       if (!site || (!site.inAudience && input.sessionIds.length === 0))
-        throw new WorkspaceArtifactNotFoundError("Site not found");
+        throw new WorkspaceArtifactNotFoundError("App not found");
       if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
       if (input.channelId !== null) {
         const [channel] = await scoped
@@ -25245,7 +25245,7 @@ export async function moveSiteToProject(
         // An Only me project takes only its owner's Only me Site, and the
         // conversations that move with a row must fit it too.
         if (channel.visibility === "user_private") {
-          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("Site");
+          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("app");
           const misfits =
             input.sessionIds.length === 0
               ? []
@@ -38772,7 +38772,7 @@ async function readSessionListForSubject(
             options.originSiteId ||
             options.siteAccessId)
         )
-          throw new SessionListCursorError("Site rows require an ordinary, non-archived root page");
+          throw new SessionListCursorError("App rows require an ordinary, non-archived root page");
         // Site rows are a complete section like pins: read once, with page one.
         const siteGroupsRequested = groupSites && !options.cursor;
         const completeTotals =
@@ -40939,7 +40939,7 @@ export async function listSessionDiscoverySummaries(
   const filterHash = relevanceRequested ? sessionDiscoveryFilterHash(filters) : null;
   const readPage = async (scopedDb: Database) => {
     if (options.cursor && (options.cursor.originSiteId ?? null) !== filters.originSiteId) {
-      throw new Error("sessions_list cursor Site filter does not match the request");
+      throw new Error("sessions_list cursor app filter does not match the request");
     }
     const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
     const updatedAfter =
@@ -43088,7 +43088,7 @@ export async function cancelSiteRuntimeConversation(
 ) {
   // Own the complete transaction, including activity finalization. A nested
   // activity gate could otherwise outlive the exact-root visibility witness.
-  if (isTransactionHandle(db)) throw new Error("Site cancellation requires its own transaction");
+  if (isTransactionHandle(db)) throw new Error("App cancellation requires its own transaction");
   return await runIdempotentPersistenceTransaction(
     {
       stage: "site_lifecycle.cancel",
@@ -43140,7 +43140,7 @@ export async function cancelSiteRuntimeConversation(
             for (const eventId of affected.eventIds) {
               const event = await getSessionEvent(tx, input.workspaceId, eventId);
               if (!event || event.sessionId !== affected.sessionId)
-                throw new Error("Site cancellation lost its committed event");
+                throw new Error("App cancellation lost its committed event");
               events.push(event);
             }
           }

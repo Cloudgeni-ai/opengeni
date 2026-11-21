@@ -89,7 +89,7 @@ function SiteLoadError({
   onRetry: () => void;
 }) {
   if (accessDenied)
-    return <Notice title="You can't open this Site">{ARTIFACT_ACCESS_REQUIRED}</Notice>;
+    return <Notice title="You can't open this app">{ARTIFACT_ACCESS_REQUIRED}</Notice>;
   const view = artifactLoadErrorView(t, error, "site");
   return (
     <Notice
@@ -246,7 +246,7 @@ function ArtifactListRoute({
         <PageHeader
           icon={<PanelsTopLeftIcon />}
           title="Artifacts"
-          description={`Sites, images, documents and files made with ${productName}`}
+          description={`Apps, images, documents and files made with ${productName}`}
           actions={
             filters.kind === "site" && canPin ? (
               <>
@@ -399,7 +399,7 @@ function EmbeddedSiteSettings({
             <Skeleton className="h-5 w-40" />
             <Skeleton className="h-48 w-full rounded-lg" />
             <span className="sr-only" role="status">
-              Loading Site settings
+              Loading app settings
             </span>
           </div>
         ) : (
@@ -445,7 +445,7 @@ function EmbeddedSiteDetail({
             onFullScreenChange: controls.onFullScreenChange,
           }
         : {})}
-      archivedMessage="This Site is archived. Restore it from its settings."
+      archivedMessage="This app is archived. Restore it from its settings."
     />
   );
 }
@@ -480,7 +480,7 @@ function OpenSiteView({ workspaceId, artifactId }: { workspaceId: string; artifa
   }, [artifactId, navigate, workspaceId]);
   return (
     <span className="sr-only" role="status">
-      Opening Site
+      Opening app
     </span>
   );
 }
@@ -631,7 +631,7 @@ function ArtifactDetailPage({
           </div>
           <Skeleton className="mt-8 h-96 w-full rounded-[14px]" />
           <span className="sr-only" role="status">
-            Loading Site
+            Loading app
           </span>
         </DetailPage>
       </ContentPage>
@@ -698,7 +698,7 @@ function ArtifactDetailPage({
                         className="rounded-[10px] pointer-coarse:h-11"
                       >
                         <ArchiveRestoreIcon aria-hidden="true" />
-                        {statusBusy ? "Restoring…" : "Restore Site"}
+                        {statusBusy ? "Restoring…" : "Restore app"}
                       </Button>
                     ) : (
                       <Button
@@ -717,8 +717,8 @@ function ArtifactDetailPage({
               </>
             }
             tabs={
-              <LineTabsList aria-label="Site">
-                <LineTabsTrigger value="site">Site</LineTabsTrigger>
+              <LineTabsList aria-label="App">
+                <LineTabsTrigger value="site">App</LineTabsTrigger>
                 <LineTabsTrigger value="versions" count={detail.versions.length}>
                   Versions
                 </LineTabsTrigger>
@@ -734,7 +734,7 @@ function ArtifactDetailPage({
                 <p className="text-sm leading-5 text-fg-muted">{artifact.description}</p>
               ) : null}
               {archived ? (
-                <Notice icon={<ArchiveIcon className="size-4" />} title="This Site is archived">
+                <Notice icon={<ArchiveIcon className="size-4" />} title="This app is archived">
                   It's unpublished. Its source and versions are kept: restore it to edit it or bring
                   back an earlier version.
                 </Notice>

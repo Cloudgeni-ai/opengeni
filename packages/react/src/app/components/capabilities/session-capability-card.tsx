@@ -707,7 +707,7 @@ function SessionCapabilitySetup({
           }
         >
           {catalog.loadError
-            ? "Couldn't load the integration catalog."
+            ? "Couldn't load the connected tool catalog."
             : "This recommendation is no longer in the current catalog."}
         </Notice>
       ) : (

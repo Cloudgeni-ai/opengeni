@@ -54,7 +54,7 @@ import { FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 export type WorkspaceRoleId = WorkspaceAccessLevel | "owner";
 
 const ADMIN_ESCALATION =
-  "They'll be able to change this workspace's settings, integrations and who has access.";
+  "They'll be able to change this workspace's settings, connected tools and who has access.";
 
 export const WORKSPACE_ROLE_OPTIONS: RoleOption<WorkspaceRoleId>[] = [
   ...workspaceAccessLevels.map((level) => ({

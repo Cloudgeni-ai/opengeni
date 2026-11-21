@@ -36,5 +36,5 @@ export async function lockSiteRuntimeAdmission(
     for update`,
   );
   if (row?.pending_admission_id !== admission.admissionId)
-    throw new Error("Site conversation admission expired; retry the request");
+    throw new Error("App conversation admission expired; retry the request");
 }

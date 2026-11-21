@@ -1015,7 +1015,7 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
         },
       );
       expect(response.status).toBe(403);
-      expect(await response.text()).not.toContain("Unsupported Site session API path");
+      expect(await response.text()).not.toContain("Unsupported app session API path");
     }
     const session = await getSession(client.db, grant.workspaceId, attempt.sessionId);
     expect(session?.toolPolicyVersion ?? 1).toBe(1);

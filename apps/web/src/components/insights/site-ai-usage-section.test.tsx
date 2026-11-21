@@ -33,7 +33,7 @@ const usage: InsightsSiteUsageResponse = {
     },
     {
       siteId: null,
-      title: "Private or unavailable Sites",
+      title: "Private or unavailable apps",
       kind: "restricted",
       calls: 4,
       pricedCalls: 4,
@@ -79,20 +79,18 @@ function cellTexts(container: HTMLElement, title: string): string[] {
   );
 }
 
-test("model costs by Site use the Breakdown table with its money formatting", async () => {
+test("model costs by app use the Breakdown table with its money formatting", async () => {
   const view = await render(<components.SiteAiUsageTable usage={usage} />);
   const { container } = view;
   const table = container.querySelector('[role="table"]');
-  expect(table?.getAttribute("aria-label")).toBe("Model costs by Site");
+  expect(table?.getAttribute("aria-label")).toBe("Model costs by app");
   const headers = [...container.querySelectorAll('[role="columnheader"]')].map((cell) =>
     (cell.textContent ?? "").trim(),
   );
-  expect(headers.slice(0, 4)).toEqual(["Site", "Calls", "Charged", "API-equivalent"]);
+  expect(headers.slice(0, 4)).toEqual(["App", "Calls", "Charged", "API-equivalent"]);
   // Estimates carry the page's "~"; a partly priced amount gets the Breakdown asterisk.
   expect(cellTexts(container, "Operations app").join("|")).toContain("20|$3.00|~$9.00*");
-  expect(cellTexts(container, "Private or unavailable Sites").join("|")).toContain(
-    "4|$0.00|~$1.00",
-  );
+  expect(cellTexts(container, "Private or unavailable apps").join("|")).toContain("4|$0.00|~$1.00");
   // Nothing priced: a dash with its reason, never a misleading $0.
   expect(cellTexts(container, "Unpriced app").join("|")).toContain("3|$0.00|—");
   expect(container.querySelector('[aria-label="Not priced"]')).not.toBeNull();
@@ -122,6 +120,6 @@ test("model costs by Site use the Breakdown table with its money formatting", as
 test("an empty period says so instead of drawing an empty table", async () => {
   const view = await render(<components.SiteAiUsageTable usage={{ ...usage, rows: [] }} />);
   expect(view.container.querySelector('[role="table"]')).toBeNull();
-  expect(view.container.textContent).toBe("No model usage attributed to Sites in this period.");
+  expect(view.container.textContent).toBe("No model usage attributed to apps in this period.");
   await view.unmount();
 });

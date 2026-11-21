@@ -1884,7 +1884,7 @@ for (const turnedOnBySignIn of [true, false])
       await flush();
       expect(h.begins).toEqual([expect.objectContaining({ ownership: "personal" })]);
       expect(document.body.textContent).not.toContain(
-        "The authorized account does not match this integration",
+        "The authorized account does not match this connected tool",
       );
       expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
       expect(h.calls).toEqual(

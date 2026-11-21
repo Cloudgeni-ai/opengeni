@@ -57,12 +57,12 @@ export function siteFrameGuard(deps: ApiRouteDeps) {
     }
     const data = SITE_DATA.exec(pathname);
     if (data && !frame.siteId)
-      throw new HTTPException(403, { message: "This Site host does not provide Site Data" });
+      throw new HTTPException(403, { message: "This app host does not provide app data" });
     if (data && data[1] !== frame.siteId)
-      throw new HTTPException(403, { message: "A Site can only use its own data" });
+      throw new HTTPException(403, { message: "An app can only use its own data" });
     const workspaceId = c.req.param("workspaceId") ?? "";
     const match = siteFrameOperation(c.req.method, pathname, workspaceId, frame.siteId);
-    if (!match) throw new HTTPException(404, { message: "Unsupported Site session API path" });
+    if (!match) throw new HTTPException(404, { message: "Unsupported app session API path" });
     // Workspace, model and config reads and Site Data (whose service clamps
     // frames itself) start or reach no session.
     if (!match.operation.id.startsWith("sessions.")) {
@@ -83,7 +83,7 @@ export function siteFrameGuard(deps: ApiRouteDeps) {
         (origins[0] ?? access[0]) !== (origin.siteId ?? SITE_NO_ORIGIN_ID) ||
         (access.length > 0 && frame.marker !== "1")
       )
-        throw new HTTPException(404, { message: "Unsupported Site session API path" });
+        throw new HTTPException(404, { message: "Unsupported app session API path" });
     }
     if (match.sessionId !== null) {
       const check = () => siteMayAccessSession(deps.db, grant, match.sessionId!, origin, true);
@@ -107,7 +107,7 @@ export function siteFrameFieldForbidden(field: string): ApiHttpError {
   return new ApiHttpError(403, {
     code: "forbidden",
     message:
-      "A Site page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
+      "An app page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
     retryable: false,
     outcomeUnknown: false,
     details: { code: "site_frame_field_forbidden", field },

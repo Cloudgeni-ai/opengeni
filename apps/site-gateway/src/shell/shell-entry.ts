@@ -95,7 +95,7 @@ function gatewayError(status: number, body: unknown, mutating: boolean): Error {
   const envelope = (body as { error?: Record<string, unknown> } | null)?.error ?? {};
   return Object.assign(
     new Error(
-      typeof envelope.message === "string" ? envelope.message : `Site request failed (${status})`,
+      typeof envelope.message === "string" ? envelope.message : `App request failed (${status})`,
     ),
     {
       code: typeof envelope.code === "string" ? envelope.code : "site_request_failed",
@@ -226,7 +226,7 @@ function refused(): Response {
       error: {
         status: 403,
         code: "site_operation_not_allowed",
-        message: "This operation is not available to Sites",
+        message: "This operation is not available to apps",
         retryable: false,
         outcomeUnknown: false,
       },

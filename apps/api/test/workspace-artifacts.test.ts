@@ -223,7 +223,7 @@ test("UUID link lookup uses real visibility and file precedence across artifact 
     method: "POST",
     body: JSON.stringify({
       title: "Link resolution",
-      html: "<!doctype html><h1>Site</h1>",
+      html: "<!doctype html><h1>app</h1>",
       idempotencyKey: crypto.randomUUID(),
     }),
   });
@@ -388,7 +388,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       workspaceId: grant.workspaceId,
       artifactId: crypto.randomUUID(),
       slug: `ambiguous-create-${suffix}`,
-      title: "Ambiguously committed Site",
+      title: "Ambiguously committed app",
       description: null,
       visibility: "workspace_shared",
       ownerSubjectId: null,
@@ -696,7 +696,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         body: JSON.stringify({
           status: "archived",
           expectedCurrentVersionId: created.version.id,
-          reason: "Temporarily unpublish the Site",
+          reason: "Temporarily unpublish the app",
           idempotencyKey: "archive-site",
         }),
       },
@@ -713,7 +713,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           body: JSON.stringify({
             status: "archived",
             expectedCurrentVersionId: created.version.id,
-            reason: "Temporarily unpublish the Site",
+            reason: "Temporarily unpublish the app",
             idempotencyKey: "archive-site",
           }),
         })
@@ -738,7 +738,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         body: JSON.stringify({
           status: "active",
           expectedCurrentVersionId: created.version.id,
-          reason: "Restore the Site",
+          reason: "Restore the app",
           idempotencyKey: "restore-site",
         }),
       },
@@ -773,7 +773,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(String(immutableError)).toContain("workspace artifact history is immutable");
   }, 60_000);
 
-  test("duplicates a Site's current version into a new Site, idempotently", async () => {
+  test("duplicates an app's current version into a new app, idempotently", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     const publishPermissions: Permission[] = ["artifacts:publish", "documents:search"];
     const original = WorkspaceArtifactMutationResponse.parse(
@@ -904,7 +904,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     ).toBe(409);
   }, 60_000);
 
-  test("records a person opening a Site, which orders its sidebar row", async () => {
+  test("records a person opening an app, which orders its sidebar row", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     const site = WorkspaceArtifactMutationResponse.parse(
       await (
@@ -952,7 +952,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     ).toBe(422);
   }, 60_000);
 
-  test("pins and archives a Site row in this person's sidebar without changing the Site", async () => {
+  test("pins and archives an app row in this person's sidebar without changing the app", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     const site = WorkspaceArtifactMutationResponse.parse(
       await (
@@ -1010,7 +1010,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     ).toBe(404);
   }, 60_000);
 
-  test("moves a Site row to another project like a chat, without changing the Site", async () => {
+  test("moves an app row to another project like a chat, without changing the app", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     const site = WorkspaceArtifactMutationResponse.parse(
       await (
@@ -1077,7 +1077,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     ).toBe(404);
   }, 60_000);
 
-  test("reads a Site's current version alone, for an open Site view's checks", async () => {
+  test("reads an app's current version alone, for an open app view's checks", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     const site = WorkspaceArtifactMutationResponse.parse(
       await (
@@ -1220,7 +1220,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (createdResult.isError) throw new Error(createdText.text);
       const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
       expect(JSON.parse(createdText.text).artifactReference).toBe(
-        `[Open Site](artifact:${created.artifact.id})`,
+        `[Open app](artifact:${created.artifact.id})`,
       );
       expect(
         JSON.parse(createdText.text).warnings.map((warning: { code: string }) => warning.code),
@@ -1291,7 +1291,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(JSON.parse(sourceText.text).downloads.source).toBeNull();
       expect(JSON.parse(sourceText.text)).not.toHaveProperty("html");
       expect(JSON.parse(sourceText.text).artifactReference).toBe(
-        `[Open Site](artifact:${created.artifact.id})`,
+        `[Open app](artifact:${created.artifact.id})`,
       );
 
       const publishedResult = await mcp.callTool({
@@ -1308,7 +1308,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         throw new Error("missing MCP publish result");
       const published = WorkspaceArtifactMutationResponse.parse(JSON.parse(publishedText.text));
       expect(JSON.parse(publishedText.text).artifactReference).toBe(
-        `[Open Site](artifact:${published.artifact.id})`,
+        `[Open app](artifact:${published.artifact.id})`,
       );
       expect(JSON.parse(publishedText.text)).not.toHaveProperty("warnings");
       expect(published.version.sourceAttemptId).toBe(attempt.attemptId);
@@ -1464,7 +1464,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
   }, 60_000);
 
-  test("an agent's Site on its own account route also declares that connector, and a retry replays", async () => {
+  test("an agent's app on its own account route also declares that connector, and a retry replays", async () => {
     // An agent sees only its own account routes; the turn's frozen binding
     // names the connector behind the route (a workspace account here; a
     // personal one pairs the same way once its sender delegation is frozen).
@@ -1535,7 +1535,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const result = await mcp.callTool({
         name: "artifacts_create",
         arguments: {
-          title: "Paired Site tools",
+          title: "Paired app tools",
           html: "<!doctype html><main>CRM</main>",
           requestedTools,
           idempotencyKey: `paired-${suffix}-${requestedTools.map((tool) => tool.serverId).join("-")}`,
@@ -1581,7 +1581,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
   }, 60_000);
 
-  test("prevents attempts from retaining Site tools outside their immutable catalog", async () => {
+  test("prevents attempts from retaining app tools outside their immutable catalog", async () => {
     const attempt = await seedAttempt(grant, {
       permissions: ["artifacts:publish"],
       tools: ["artifacts_create", "artifacts_publish", "artifacts_rollback", "artifacts_restore"],
@@ -1662,7 +1662,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const deniedCreate = await mcp.callTool({
         name: "artifacts_create",
         arguments: {
-          title: "Unauthorized Site tool",
+          title: "Unauthorized app tool",
           html: "<!doctype html><main>Denied</main>",
           requestedTools: [{ serverId: "inventory", toolName: "delete_item" }],
           idempotencyKey: `denied-create-${suffix}`,
@@ -1696,7 +1696,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const allowedCreate = await mcp.callTool({
         name: "artifacts_create",
         arguments: {
-          title: "Authorized Site tool",
+          title: "Authorized app tool",
           html: "<!doctype html><main>Allowed</main>",
           requestedTools: [{ serverId: "docs", toolName: "search" }],
           idempotencyKey: `allowed-create-${suffix}`,

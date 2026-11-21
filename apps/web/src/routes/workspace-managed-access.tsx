@@ -31,7 +31,7 @@ import {
 type ManagedRole = "viewer" | "member" | "admin";
 
 const ADMIN_ESCALATION =
-  "They'll be able to change this workspace's settings, integrations and who has access.";
+  "They'll be able to change this workspace's settings, connected tools and who has access.";
 
 function managedWorkspaceMemberLabel(member: OrganizationWorkspaceAccessMember): string {
   return member.name ?? member.email ?? member.subjectLabel ?? "Workspace member";

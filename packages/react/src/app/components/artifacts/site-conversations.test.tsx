@@ -108,7 +108,7 @@ test("owner can choose an existing chat, then revoke access without changing the
     await click(button("Allow chat"));
     expect(changes).toEqual([["mine", true]]);
     expect(button("Allowed")?.disabled).toBe(true);
-    await click(button("Back to Site conversations"));
+    await click(button("Back to app conversations"));
     await click(button("Remove access"));
     expect(changes).toEqual([
       ["mine", true],

@@ -256,7 +256,7 @@ export const SiteLimitProfileKind = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["standard", "free", "credits", "unlimited", "custom"])
     .describe(
-      "Limits for people outside the workspace (workspace members are never limited by Site limits). standard: platform defaults ($10 per Site per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults. Any kind may carry overrides, which adjust that kind's limits.",
+      "Limits for people outside the workspace (workspace members are never limited by app limits). standard: platform defaults ($10 per app per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults. Any kind may carry overrides, which adjust that kind's limits.",
     ),
 );
 export type SiteLimitProfileKind = z.infer<typeof SiteLimitProfileKind>;
@@ -275,20 +275,20 @@ const NullableLimit = (description: string) =>
 export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
   z.object({
     requestsPerMinutePerVisitor: NullableLimit(
-      "Site runtime requests per viewer per minute (flood brake; members too).",
+      "App runtime requests per viewer per minute (flood brake; members too).",
     ),
     guestWritesPerMinute: NullableLimit("Data writes per guest visitor per minute."),
     agentsEnabled: primitives.boolean.describe(
-      "People outside the workspace may use the Site's embedded agent. Members always may when the agent is on.",
+      "People outside the workspace may use the app's embedded agent. Members always may when the agent is on.",
     ),
     guestAgentsEnabled: primitives.boolean.describe(
-      "Anonymous guests may use the embedded agent too (public Sites).",
+      "Anonymous guests may use the embedded agent too (public apps).",
     ),
     conversationsPerVisitorPerDay: NullableLimit(
       "Bot guard for anonymous guests: new conversations per visitor per UTC day.",
     ),
     conversationsPerSitePerDay: NullableLimit(
-      "Bot guard for anonymous guests: new conversations per Site per UTC day.",
+      "Bot guard for anonymous guests: new conversations per app per UTC day.",
     ),
     turnsPerConversation: NullableLimit(
       "Bot guard for anonymous guests: messages in one conversation.",
@@ -303,10 +303,10 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
       "Optional per-person limit: spend per person or visitor outside the workspace per UTC month, micro-USD.",
     ).default(null),
     agentMicrosPerSitePerDay: NullableLimit(
-      "The Site limit as a daily amount: spend of everyone outside the workspace together per UTC day, micro-USD.",
+      "The app limit as a daily amount: spend of everyone outside the workspace together per UTC day, micro-USD.",
     ).default(null),
     agentMicrosPerSitePerMonth: NullableLimit(
-      "The Site limit: spend of everyone outside the workspace together per UTC month, micro-USD.",
+      "The app limit: spend of everyone outside the workspace together per UTC month, micro-USD.",
     ),
     agentModels: z
       .array(z.string().min(1).max(200))

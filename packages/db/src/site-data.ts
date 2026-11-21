@@ -1043,7 +1043,7 @@ export function createPostgresSiteDataStore(
    */
   const refuseGuestFileWrites = (caller: SiteDataCaller) => {
     if (caller.guest === true)
-      throw new SiteDataError("forbidden", "Sign in to use this Site's files", {
+      throw new SiteDataError("forbidden", "Sign in to use this app's files", {
         reason: "guest_access",
       });
   };
@@ -1066,10 +1066,10 @@ export function createPostgresSiteDataStore(
     limits: SiteDataLimits,
   ): Array<[string, number, string]> =>
     caller.role === "manager" && !caller.framed
-      ? [["manager:*", limits.managerWritesPerMinute, "This Site's managers are writing too fast."]]
+      ? [["manager:*", limits.managerWritesPerMinute, "This app's managers are writing too fast."]]
       : [
           [caller.principal, limits.viewerWritesPerMinute, "Too many writes."],
-          ["*", limits.siteWritesPerMinute, "This Site is receiving too many writes."],
+          ["*", limits.siteWritesPerMinute, "This app is receiving too many writes."],
         ];
 
   /** Add operations to one fixed one-minute window and return its total. */
@@ -1226,7 +1226,7 @@ export function createPostgresSiteDataStore(
         from site_data_usage where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}
         for update`,
     );
-    if (!row) throw new SiteDataError("not_found", "Site not found");
+    if (!row) throw new SiteDataError("not_found", "App not found");
     return {
       collectionCount: row.collection_count,
       recordCount: num(row.record_count),
@@ -1248,8 +1248,8 @@ export function createPostgresSiteDataStore(
         where workspace_id = ${caller.workspaceId} and id = ${caller.siteId}
         for share`,
     );
-    if (!row) throw new SiteDataError("not_found", "Site not found");
-    if (row.status !== "active") throw new SiteDataError("forbidden", "This Site is archived");
+    if (!row) throw new SiteDataError("not_found", "App not found");
+    if (row.status !== "active") throw new SiteDataError("forbidden", "This app is archived");
   };
 
   const workspaceBytes = async (tx: Database, scope: SiteDataScope) => {
@@ -1337,12 +1337,12 @@ export function createPostgresSiteDataStore(
         { quota: "file_bytes", limit: limits.maxFileBytes },
       );
     if (usage.fileBytes + sizeBytes > limits.fileBytesPerSite)
-      throw new SiteDataError("quota_exceeded", "This Site's file storage is full", {
+      throw new SiteDataError("quota_exceeded", "This app's file storage is full", {
         quota: "site_file_bytes",
         limit: limits.fileBytesPerSite,
       });
     if ((await workspaceBytes(tx, caller)) + sizeBytes > limits.workspaceBytes)
-      throw new SiteDataError("quota_exceeded", "This workspace's Site data is full", {
+      throw new SiteDataError("quota_exceeded", "This workspace's app data is full", {
         quota: "workspace_bytes",
         limit: limits.workspaceBytes,
       });
@@ -1529,13 +1529,13 @@ export function createPostgresSiteDataStore(
         if (site > limits.siteValidationMsPerMinute * 1000)
           throw new SiteDataError(
             "rate_limited",
-            "This Site has used its schema-checking time for this minute. Try again in a minute.",
+            "This app has used its schema-checking time for this minute. Try again in a minute.",
             { retryAfterSeconds: 60, quota: "site_validation_time" },
           );
         if (workspace > limits.workspaceValidationMsPerMinute * 1000)
           throw new SiteDataError(
             "rate_limited",
-            "This workspace's Sites have used their schema-checking time for this minute. Try again in a minute.",
+            "This workspace's apps have used their schema-checking time for this minute. Try again in a minute.",
             { retryAfterSeconds: 60, quota: "workspace_validation_time" },
           );
         return { reservedMs: reserveMs, windowStartedAt };
@@ -1573,7 +1573,7 @@ export function createPostgresSiteDataStore(
 
     async defineCollection(caller, input, limits) {
       if (caller.role !== "manager" || caller.framed)
-        throw new SiteDataError("forbidden", "Only the Site's managers can define collections");
+        throw new SiteDataError("forbidden", "Only the app's managers can define collections");
       const definition = normalizeSiteDataCollectionDefinition(input);
       return writing(caller, async (tx, changes) => {
         const usage = await lockUsage(tx, caller);
@@ -1582,7 +1582,7 @@ export function createPostgresSiteDataStore(
           if (usage.collectionCount >= limits.maxCollectionsPerSite)
             throw new SiteDataError(
               "quota_exceeded",
-              `A Site can have at most ${limits.maxCollectionsPerSite} collections`,
+              `An app can have at most ${limits.maxCollectionsPerSite} collections`,
               { quota: "collections", limit: limits.maxCollectionsPerSite },
             );
           const [row] = await rawRows<CollectionRow>(
@@ -1660,7 +1660,7 @@ export function createPostgresSiteDataStore(
 
     async deleteCollection(caller, name) {
       if (caller.role !== "manager" || caller.framed)
-        throw new SiteDataError("forbidden", "Only the Site's managers can delete collections");
+        throw new SiteDataError("forbidden", "Only the app's managers can delete collections");
       return writing(caller, async (tx, changes) => {
         await lockUsage(tx, caller);
         const collection = await requireCollection(tx, caller, name);
@@ -1683,7 +1683,7 @@ export function createPostgresSiteDataStore(
 
     async resetCollection(caller, name) {
       if (caller.role !== "manager" || caller.framed)
-        throw new SiteDataError("forbidden", "Only the Site's managers can clear collections");
+        throw new SiteDataError("forbidden", "Only the app's managers can clear collections");
       return writing(caller, async (tx, changes) => {
         await lockUsage(tx, caller);
         const collection = await requireCollection(tx, caller, name);
@@ -1946,7 +1946,7 @@ export function createPostgresSiteDataStore(
           if (!mayCreate(caller, collection))
             throw new SiteDataError(
               "forbidden",
-              `Only the Site's managers can add to ${collection.name}`,
+              `Only the app's managers can add to ${collection.name}`,
               { index },
             );
           const size = prepare(collection, data, index);
@@ -2227,7 +2227,7 @@ export function createPostgresSiteDataStore(
           if (usage.recordBytes + summary.byteDelta > options.limits.recordBytesPerSite)
             throw new SiteDataError(
               "quota_exceeded",
-              "This Site's records are full. Delete records to make room.",
+              "This app's records are full. Delete records to make room.",
               { quota: "site_record_bytes", limit: options.limits.recordBytesPerSite },
             );
           if (
@@ -2236,7 +2236,7 @@ export function createPostgresSiteDataStore(
           )
             throw new SiteDataError(
               "quota_exceeded",
-              "This workspace's Site data is full. Delete records or files to make room.",
+              "This workspace's app data is full. Delete records or files to make room.",
               { quota: "workspace_bytes", limit: options.limits.workspaceBytes },
             );
         }
@@ -2396,7 +2396,7 @@ export function createPostgresSiteDataStore(
         if (caller.role !== "manager" && row.owner_principal !== caller.principal)
           throw new SiteDataError(
             "forbidden",
-            "Only the uploader or the Site's managers can delete this file",
+            "Only the uploader or the app's managers can delete this file",
           );
         await tx.execute(
           sql`delete from site_data_files where workspace_id = ${caller.workspaceId} and id = ${fileId}`,

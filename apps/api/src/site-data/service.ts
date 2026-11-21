@@ -858,11 +858,10 @@ function publishedViewerAccess(
   surface: SiteDataSurface,
 ): SiteDataAccess {
   if (viewer.site.id !== siteId)
-    throw new SiteDataError("forbidden", "A Site can only use its own data");
+    throw new SiteDataError("forbidden", "An app can only use its own data");
   if (surface.management)
-    throw new SiteDataError("forbidden", "Only the Site's managers can manage its data");
-  if (viewer.site.status !== "active")
-    throw new SiteDataError("forbidden", "This Site is archived");
+    throw new SiteDataError("forbidden", "Only the app's managers can manage its data");
+  if (viewer.site.status !== "active") throw new SiteDataError("forbidden", "This app is archived");
   const caller: SiteDataCaller = {
     accountId: viewer.accountId,
     workspaceId: viewer.workspaceId,
@@ -917,10 +916,10 @@ export async function resolveSiteDataAccess(
   const scheduledTaskId = scheduledRun?.taskId ?? null;
   const framed = surface.frameSiteId !== undefined && surface.frameSiteId !== null;
   if (surface.frameSiteId != null && surface.frameSiteId !== siteId)
-    throw new SiteDataError("forbidden", "A Site can only use its own data");
+    throw new SiteDataError("forbidden", "An app can only use its own data");
   const viewer = await siteViewerForGrant(deps.db, grant);
   const site = await getSiteDataSite(deps.db, scope, viewer, siteId);
-  if (!site) throw new SiteDataError("not_found", "Site not found");
+  if (!site) throw new SiteDataError("not_found", "App not found");
   // An outside agent (a coding agent connected over MCP) usually has a shell
   // on someone's computer. It reaches only members-only apps, so nothing a
   // guest or an invited outsider wrote can carry instructions to it, and it
@@ -934,13 +933,13 @@ export async function resolveSiteDataAccess(
     (outsideAgent === null || outsideAgent.appData === "manager");
   const role = framed ? "viewer" : manages ? "manager" : "viewer";
   if (site.status !== "active" && (framed || role !== "manager"))
-    throw new SiteDataError("forbidden", "This Site is archived");
+    throw new SiteDataError("forbidden", "This app is archived");
   if (surface.management && (framed || role !== "manager")) {
     if (outsideAgent?.appData === "viewer" && !framed)
       throw new SiteDataError("forbidden", OUTSIDE_AGENT_VIEWER_MESSAGE, {
         code: "outside_agent_viewer",
       });
-    throw new SiteDataError("forbidden", "Only the Site's managers can manage its data");
+    throw new SiteDataError("forbidden", "Only the app's managers can manage its data");
   }
   const caller: SiteDataCaller = {
     accountId: grant.accountId,

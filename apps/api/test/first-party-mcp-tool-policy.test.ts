@@ -813,13 +813,19 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(disabled)).toEqual([]);
   });
 
-  test("Site SQL tools are offered only where a Site SQL gateway is configured", () => {
-    const selected: FirstPartyMcpToolName[] = ["site_sql_inspect", "site_sql_export"];
+  test("app SQL tools are offered only where an app SQL gateway is configured", () => {
+    const selected: FirstPartyMcpToolName[] = ["app_sql_inspect", "app_sql_export"];
     const configured = buildOpenGeniMcpServer(
       deps(),
       grant(["artifacts:read", "artifacts:publish"], selected),
     );
     expect(registeredToolNames(configured)).toEqual([...selected].sort());
+    // A saved selection naming the former site_* names selects the same tools.
+    const former = buildOpenGeniMcpServer(
+      deps(),
+      grant(["artifacts:read", "artifacts:publish"], ["site_sql_inspect", "site_sql_export"]),
+    );
+    expect(registeredToolNames(former)).toEqual([...selected].sort());
 
     const bare = deps();
     bare.settings = testSettings({ sandboxSelfhostedEnabled: true });

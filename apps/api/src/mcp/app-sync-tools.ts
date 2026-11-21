@@ -37,7 +37,7 @@ const SAVE_FIELDS = {
     .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
     .optional()
     .describe(
-      "The App data collection to fill. Define it first with site_data_define_collection: shared or shared_read for a shared sync, per_viewer (ideally privateRecords) for a personal one.",
+      "The App data collection to fill. Define it first with app_data_define_collection: shared or shared_read for a shared sync, per_viewer (ideally privateRecords) for a personal one.",
     ),
   mode: AppSyncMode.optional().describe(
     "shared (default): runs on your connection and fills data everyone in the App shares. personal: each person opts in with app_sync_opt_in and it fills only their own records, from their own account.",

@@ -60,13 +60,13 @@ export function siteToolFailureMessage(code: SiteToolFailureCode, system: string
         ? `${system} didn't allow this for your account.`
         : "This wasn't allowed for your account.";
     case "site_tool_not_available_for_viewer":
-      return "This isn't available to you on this Site.";
+      return "This isn't available to you on this app.";
     case "site_tool_blocked":
       return system
         ? `Your ${system} tool permissions don't allow this.`
         : "Your tool permissions don't allow this.";
     case "site_tool_open_in_opengeni":
-      return "Open this Site in Opengeni to do this.";
+      return "Open this app in Opengeni to do this.";
     case "site_tool_upstream_unavailable":
       return system
         ? `Couldn't reach ${system}. Nothing was sent.`

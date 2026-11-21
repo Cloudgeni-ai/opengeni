@@ -87,7 +87,7 @@ export async function siteSqlBody<S extends z.ZodType>(
 
 function siteId(context: Context): string {
   const parsed = SiteId.safeParse(context.req.param("artifactId"));
-  if (!parsed.success) throw siteSqlHttpError(new SiteSqlError("not_found", "Site not found"));
+  if (!parsed.success) throw siteSqlHttpError(new SiteSqlError("not_found", "App not found"));
   return parsed.data;
 }
 
@@ -101,7 +101,7 @@ function surface(context: Context): SiteDataSurface {
 
 function refuseFramed(context: Context, what: string): void {
   if (surface(context).frameSiteId !== undefined)
-    throw siteSqlHttpError(new SiteSqlError("forbidden", `A Site cannot ${what}`));
+    throw siteSqlHttpError(new SiteSqlError("forbidden", `An app cannot ${what}`));
 }
 
 /**

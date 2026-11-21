@@ -105,7 +105,7 @@ describe("compileSiteSql", () => {
     // Agents change the schema through migrations, so the database can be rebuilt.
     const agentSchema = compileSiteSql("CREATE TABLE x (a)", "agent");
     expect(agentSchema).toMatchObject({ ok: false, problem: "statement_not_allowed" });
-    expect(agentSchema.ok ? "" : agentSchema.message).toContain("site_sql_migrate");
+    expect(agentSchema.ok ? "" : agentSchema.message).toContain("app_sql_migrate");
     expect(problem("DROP TABLE x", "agent")).toBe("statement_not_allowed");
     expect(problem("CREATE TABLE x (a)", "script")).toBeNull();
     expect(problem("EXPLAIN QUERY PLAN SELECT 1", "agent")).toBeNull();

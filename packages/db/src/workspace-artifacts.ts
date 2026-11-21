@@ -100,7 +100,7 @@ export async function getWorkspaceSiteSessionOrigin(
         ),
       )
       .limit(1);
-    if (!origin) throw new WorkspaceArtifactNotFoundError("Site origin not found");
+    if (!origin) throw new WorkspaceArtifactNotFoundError("App origin not found");
     return origin;
   });
 }
@@ -158,7 +158,7 @@ async function retainArtifactUpload(tx: Database, input: PublishMetadata) {
       ),
     )
     .returning();
-  if (!row) throw new WorkspaceArtifactOperationError("Site upload expired or unavailable");
+  if (!row) throw new WorkspaceArtifactOperationError("App upload expired or unavailable");
 }
 
 /** Claim expired uploads before deleting blobs; publication takes the same row lock. */
@@ -218,7 +218,7 @@ export async function recordSiteOpened(
         ),
       )
       .limit(1);
-    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    if (!site) throw new WorkspaceArtifactNotFoundError("App not found");
     const [row] = await scoped
       .insert(schema.siteOpens)
       .values({
@@ -288,7 +288,7 @@ export async function setSiteSidebarState(
         ),
       )
       .limit(1);
-    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    if (!site) throw new WorkspaceArtifactNotFoundError("App not found");
     const stamp = (next: boolean | undefined, column: "pinned_at" | "archived_at") =>
       next === undefined
         ? sql.raw(`site_sidebar_states.${column}`)
@@ -1781,7 +1781,7 @@ export async function updateWorkspaceArtifactVisibility(
     if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
     if (input.viewer.subjectId === null || artifact.ownerSubjectId !== input.viewer.subjectId)
       throw new WorkspaceArtifactOwnerRequiredError(
-        "Only the person who owns this Site can change who can see it",
+        "Only the person who owns this app can change who can see it",
       );
     const [updated] =
       artifact.visibility === input.visibility

@@ -594,7 +594,7 @@ export const ToolGatewayTargetApprovalRequest = /* @__PURE__ */ defineSchema(() 
         ctx.addIssue({
           code: "custom",
           path: ["rememberForSite"],
-          message: "rememberForSite requires a Site context",
+          message: "rememberForSite requires an app context",
         });
     }),
 );

@@ -109,7 +109,7 @@ describe("embedded artifact viewer", () => {
         await page.getByRole("button", { name: "Close", exact: true }).click();
         await viewer.waitFor({ state: "detached" });
 
-        // "Open Site" in the inline preview uses the same host action.
+        // "Open app" in the inline preview uses the same host action.
         await page.locator("[data-og-open-site]").click();
         await viewer.waitFor();
 

@@ -44,7 +44,7 @@ test("expanded Sites start below the desktop window bar", async () => {
         page.on("pageerror", (error) => errors.push(error.message));
         await page.goto(`${baseUrl}/test/artifact-desktop.html`);
         await page
-          .getByRole("button", { name: "Open Site full screen" })
+          .getByRole("button", { name: "Open app full screen" })
           .waitFor({ timeout: 90_000 });
         await page.evaluate((hostPlatform) => {
           document.documentElement.classList.add("dark");
@@ -69,7 +69,7 @@ test("expanded Sites start below the desktop window bar", async () => {
         await frame.getByRole("button", { name: "Try the Site" }).press("Enter");
         await frame.getByRole("button", { name: "Site state preserved" }).waitFor();
         const originalIframe = await page.locator("iframe").elementHandle();
-        await page.getByRole("button", { name: "Open Site full screen" }).click();
+        await page.getByRole("button", { name: "Open app full screen" }).click();
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(true);
         const back = page.getByRole("button", { name: "Back", exact: true });
         const bounds = await back.boundingBox();
@@ -119,11 +119,11 @@ test("expanded Sites start below the desktop window bar", async () => {
           await page.locator("iframe").evaluate((el, original) => el === original, originalIframe),
         ).toBe(true);
         expect(await page.locator("[data-window-drag]").count()).toBe(0);
-        await page.getByRole("button", { name: "Open Site full screen" }).click();
+        await page.getByRole("button", { name: "Open app full screen" }).click();
         await back.focus();
         await page.keyboard.press("Enter");
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
-        await page.getByRole("button", { name: "Open Site full screen" }).click();
+        await page.getByRole("button", { name: "Open app full screen" }).click();
         await page.keyboard.press("Escape");
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
         await frame.getByRole("button", { name: "Site state preserved" }).waitFor();
@@ -194,7 +194,7 @@ test("the macOS app's full-window Site Back stays clickable without the shell br
         page.on("pageerror", (error) => errors.push(error.message));
         await page.goto(`${baseUrl}/test/artifact-desktop.html`);
         await page
-          .getByRole("button", { name: "Open Site full screen" })
+          .getByRole("button", { name: "Open app full screen" })
           .waitFor({ timeout: 90_000 });
         await page.evaluate((dark) => {
           document.documentElement.classList.toggle("dark", dark);
@@ -213,7 +213,7 @@ test("the macOS app's full-window Site Back stays clickable without the shell br
             ).opengeniFixture.offersDesktopDownload(),
           ),
         ).toBe(label !== "macos-app");
-        await page.getByRole("button", { name: "Open Site full screen" }).click();
+        await page.getByRole("button", { name: "Open app full screen" }).click();
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(true);
         const back = page.getByRole("button", { name: "Back", exact: true });
         const bounds = (await back.boundingBox())!;
@@ -252,7 +252,7 @@ test("the macOS app's full-window Site Back stays clickable without the shell br
             page.evaluate(() => void window.open("/test/artifact-desktop.html", "_blank")),
           ]);
           await popup
-            .getByRole("button", { name: "Open Site full screen" })
+            .getByRole("button", { name: "Open app full screen" })
             .waitFor({ timeout: 90_000 });
           expect(
             await popup.evaluate(() => document.documentElement.dataset.desktop ?? null),
@@ -270,7 +270,7 @@ test("the macOS app's full-window Site Back stays clickable without the shell br
             }),
           ]);
           await blank
-            .getByRole("button", { name: "Open Site full screen" })
+            .getByRole("button", { name: "Open app full screen" })
             .waitFor({ timeout: 90_000 });
           expect(await blank.evaluate(() => window.opener)).toBeNull();
           expect(

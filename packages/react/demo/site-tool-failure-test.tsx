@@ -93,7 +93,7 @@ const failure = (code: SiteToolFailure["code"], retryable: boolean): SiteToolFai
   system,
   message:
     code === "site_tool_not_available_for_viewer"
-      ? "This Site uses an account that isn't yours, so it can't run this for you."
+      ? "This app uses an account that isn't yours, so it can't run this for you."
       : siteToolFailureMessage(code, system),
   reconnect:
     code === "site_tool_reconnect_required"
@@ -158,7 +158,7 @@ function Harness() {
           <div className="og-root min-h-screen bg-og-bg text-og-fg">
             {/* Sample Site content behind the Opengeni frame's message. */}
             <main className="mx-auto max-w-2xl px-6 py-10">
-              <p className="text-og-xs text-og-fg-muted">Sample Site</p>
+              <p className="text-og-xs text-og-fg-muted">Sample app</p>
               <h1 className="mt-1 text-og-md font-semibold">Sales pipeline</h1>
               <p className="mt-3 text-og-sm text-og-fg-muted">
                 {answer ?? "Loading opportunities from Microsoft Dynamics…"}

@@ -102,7 +102,7 @@ export function repositoryBindingPresentation(
         : "Create a prefilled app, add the generated values to your .env, then restart the API and worker.",
     emptyDescription:
       setupMode === "platform"
-        ? "GitHub integration is unavailable for this Opengeni deployment."
+        ? "GitHub connected tool is unavailable for this Opengeni deployment."
         : "GitHub App server credentials are not configured. App registration alone does not connect repositories.",
     connectUrl: null,
     connectLabel: "Connect GitHub",

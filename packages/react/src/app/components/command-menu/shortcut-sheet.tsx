@@ -32,7 +32,7 @@ const SHEET_TITLES: Record<string, string> = {
   "go.nextChat": "Next chat",
   "go.pinnedChat": "Pinned chats 1 to 9",
   "meetings.start": "Start recording",
-  "commandMenu.open": "Search chats, Sites and actions",
+  "commandMenu.open": "Search chats, apps and actions",
 };
 
 type SheetRow = {
