@@ -750,6 +750,11 @@ export function SidebarLayoutSection() {
     path: "",
     ids: new Set(),
   });
+  useEffect(() => {
+    setClosedHere((current) =>
+      current.path === pathname ? current : { path: pathname, ids: new Set() },
+    );
+  }, [pathname]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const shownItems = layout ? sidebarItemsShown(layout.items) : [];
   if (rail.collapsed || !layout || shownItems.length === 0) return null;
