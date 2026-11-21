@@ -212,6 +212,11 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-ELIG-04** Credential health and allocator eligibility are separate.
   Reconnecting restores health without silently changing allocator
   eligibility. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
+  A generic Claude subscription HTTP 403 `permission_error` quarantines the
+  connection until reconnect. Automatic
+  work re-places through normal failover. Model suspension, safety refusals,
+  stream permission errors, untyped HTTP failures, and API-key failures don't
+  quarantine a subscription.
 - **SUB-ELIG-05** A personal connection serves only its owner's own work: in
   their Personal workspace, or their own newly accepted turns in another
   workspace after an explicit choice or where they turned the account on for

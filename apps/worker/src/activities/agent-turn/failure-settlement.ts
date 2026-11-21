@@ -985,9 +985,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     coreXaiRefusal = settled.failure;
   }
   // The same for a Claude core turn: a sign-in refusal (after the transport's
-  // one forced refresh) or a model rate limit re-places the same turn; 529
-  // stays in the overload lane below and 403 fails the turn, neither moving
-  // it to another account. The bound counts the core's turn-failure
+  // one forced refresh), a model rate limit, or a subscription HTTP permission
+  // refusal re-places the same turn; 529 stays in the overload lane below.
+  // The bound counts the core's turn-failure
   // receipts (the legacy `claudeAuthRecovery` marker is never read here).
   let coreClaudeRefusal: SubscriptionCoreCodexTurnError | null = null;
   if (coreClaude && !coreRequestOutcomeUnknown && !leases.claude.lost) {

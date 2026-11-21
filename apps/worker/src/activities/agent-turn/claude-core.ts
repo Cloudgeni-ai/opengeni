@@ -491,15 +491,16 @@ export function claudeCoreRequestOutcomeUnknown(
 /**
  * Claude's in-turn failover and refusal settlement on the core (C1b) for a
  * turn of `productModelId`: a 401 after the turn's one forced refresh is a
- * sign-in quarantine, a 429 cools that model of the connection, and both
- * re-place the same turn within the shared bound; 529 (overload) and 403
- * (fatal) record nothing and never move the turn to another account.
+ * sign-in quarantine, a 429 cools that model of the connection, and a
+ * generic HTTP 403 quarantines the connection until reconnect.
+ * These re-place the same turn within the shared bound. A 529 (overload)
+ * does not move the turn to another account.
  * A 429 without the accepted model is not settled (null): it never widens
  * into a whole-connection exhaustion.
  *
  * The transport already spent the turn's one forced refresh before a 401
  * reaches settlement (`refreshedBeforeRefusal`), so the plan never asks for
- * a second one: a refused bearer is a sign-in quarantine.
+ * a second one. A 403 is not a token-expiry signal and doesn't force a refresh.
  */
 export function claudeCoreRefusal(productModelId: string | undefined): CoreRefusalBinding {
   return {
