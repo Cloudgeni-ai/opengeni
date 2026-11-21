@@ -65,6 +65,18 @@ export async function storeSiteAssetBundle(
       `App assets must be JSON {files: [{path, base64}]} with 1 to ${SITE_ASSET_MAX_FILES} files. Correct it and prepare a new upload.`,
     );
   }
+  return await storeSiteAssetFiles(storage, workspaceId, bundle);
+}
+
+/**
+ * Validate a parsed bundle and store its files (an upload, or the asset
+ * files an app package carries). The manifest gets a fresh token.
+ */
+export async function storeSiteAssetFiles(
+  storage: Storage,
+  workspaceId: string,
+  bundle: SiteAssetBundle,
+): Promise<SiteAssetManifest> {
   const seen = new Set<string>();
   const decoded: Array<{ path: string; bytes: Buffer; sha256: string }> = [];
   let total = 0;
@@ -123,6 +135,28 @@ export async function storeSiteAssetBundle(
       )
       .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
   });
+}
+
+/** A version's asset files as a bundle again (for an app package), sorted by path. */
+export async function readSiteAssetBundle(
+  storage: Storage,
+  workspaceId: string,
+  manifest: SiteAssetManifest,
+): Promise<SiteAssetBundle> {
+  const files: SiteAssetBundle["files"] = new Array(manifest.files.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(8, manifest.files.length) }, async () => {
+    for (let index = next++; index < manifest.files.length; index = next++) {
+      const file = manifest.files[index]!;
+      const object = await retryWhileMissing(() =>
+        storage.getObjectBytes(siteAssetObjectKey(workspaceId, file.sha256)),
+      );
+      if (!object) throw new Error(`App asset ${file.path} is unavailable`);
+      files[index] = { path: file.path, base64: Buffer.from(object.bytes).toString("base64") };
+    }
+  });
+  await Promise.all(workers);
+  return { files };
 }
 
 /**

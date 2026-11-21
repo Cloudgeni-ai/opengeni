@@ -1196,6 +1196,119 @@ test("demo data carries shared files and SQL blob values", async () => {
   ]);
 }, 120_000);
 
+const b64 = (text: string) => Buffer.from(text).toString("base64");
+
+/** One asset file of an app's current version, through the console's asset route. */
+async function assetText(f: Fixture, who: Who, workspaceId: string, appId: string, path: string) {
+  const content = await f.call(who, "GET", `${f.appBase(workspaceId, appId)}/content`);
+  expect(content.status, content.text).toBe(200);
+  const base = String(content.json.assetBaseUrl);
+  const response = await f.app.request(`${new URL(base).pathname}${path}`);
+  return { status: response.status, text: await response.text(), base };
+}
+
+test("multi-file apps travel in packages with their files and keep their provenance", async () => {
+  const f = await fixture();
+  const packageId = crypto.randomUUID();
+  const original: Record<string, unknown> = {
+    format: APP_PACKAGE_FORMAT,
+    version: 1,
+    packageId,
+    app: {
+      title: "Split board",
+      html: '<!doctype html><script type="module" src="./assets/index-1.js"></script>',
+      assets: {
+        files: [
+          { path: "assets/index-1.js", base64: b64("export const v = 1;") },
+          { path: "assets/index-1.css", base64: b64("body{margin:0}") },
+        ],
+      },
+    },
+    tools: [],
+    data: { collections: [] },
+    sql: { migrations: [], queries: [] },
+    syncs: [],
+  };
+  // Installed into the source workspace: the copy serves its files and records the package.
+  const first = await f.call(
+    f.author,
+    "POST",
+    `/v1/workspaces/${f.source.id}/app-packages/install`,
+    { package: original, idempotencyKey: crypto.randomUUID() },
+  );
+  expect(first.status, first.text).toBe(201);
+  expect(first.json.packageId).toBe(packageId);
+  const appId = first.json.app.id as string;
+  const served = await assetText(f, f.author, f.source.id, appId, "assets/index-1.js");
+  expect(served).toMatchObject({ status: 200, text: "export const v = 1;" });
+
+  // Exported again: the same files and the same package id.
+  const exported = await f.exportApp(appId);
+  expect(exported.status, exported.text).toBe(200);
+  const pkg = exported.json.package as AppPackage;
+  expect(pkg.packageId).toBe(packageId);
+  expect(pkg.app.assets?.files).toEqual([
+    { path: "assets/index-1.css", base64: b64("body{margin:0}") },
+    { path: "assets/index-1.js", base64: b64("export const v = 1;") },
+  ]);
+
+  // Installed elsewhere: the files under the copy's own token.
+  const copy = await f.install({ package: pkg });
+  expect(copy.status, copy.text).toBe(201);
+  const copyId = copy.json.app.id as string;
+  const copied = await assetText(f, f.installer, f.target.id, copyId, "assets/index-1.css");
+  expect(copied).toMatchObject({ status: 200, text: "body{margin:0}" });
+  expect(copied.base).not.toBe(served.base);
+
+  // An app made here exports with an id of its own, the same every time.
+  const own = await buildBoard(f, { sql: false });
+  const ownIds = await Promise.all([f.exportApp(own), f.exportApp(own)]);
+  expect(ownIds[0].json.package.packageId).toBe(ownIds[1].json.package.packageId);
+  expect(ownIds[0].json.package.packageId).not.toBe(packageId);
+
+  const upgradeCopy = (body: Record<string, unknown>) =>
+    f.call(f.installer, "POST", `${f.appBase(f.target.id, copyId)}/package/upgrade`, body);
+  // A newer version of the same app: the changed files publish under a new token.
+  const next = structuredClone(pkg);
+  next.app.assets!.files[1] = { path: "assets/index-1.js", base64: b64("export const v = 2;") };
+  const planned = await upgradeCopy({ package: next, dryRun: true });
+  expect(planned.status, planned.text).toBe(200);
+  expect(planned.json.plan).toMatchObject({
+    version: { changed: true, html: false, assets: true },
+    package: { id: packageId, current: packageId },
+    destructive: [],
+  });
+  const applied = await upgradeCopy({ package: next, idempotencyKey: crypto.randomUUID() });
+  expect(applied.status, applied.text).toBe(200);
+  expect(applied.json.upgraded.version).toBe(true);
+  const upgraded = await assetText(f, f.installer, f.target.id, copyId, "assets/index-1.js");
+  expect(upgraded).toMatchObject({ status: 200, text: "export const v = 2;" });
+  expect(upgraded.base).not.toBe(copied.base);
+
+  // Another app's package is refused unless confirmed, then becomes the copy's.
+  const other = { ...structuredClone(next), packageId: ownIds[0].json.package.packageId };
+  const refused = await upgradeCopy({ package: other, idempotencyKey: crypto.randomUUID() });
+  expect(refused.status, refused.text).toBe(409);
+  expect(refused.json.error.message).toContain("different app");
+  expect(refused.json.error.details.plan.destructive).toEqual([
+    expect.objectContaining({ part: "package" }),
+  ]);
+  const forced = await upgradeCopy({
+    package: other,
+    allowDestructive: true,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(forced.status, forced.text).toBe(200);
+  const after = await upgradeCopy({ package: other, dryRun: true });
+  expect(after.json.plan.package).toEqual({ id: other.packageId, current: other.packageId });
+
+  // A package's files must be valid: a bad one refuses the install.
+  const broken = structuredClone(original) as any;
+  broken.app.assets.files.push({ path: "../escape.js", base64: b64("x") });
+  const bad = await f.install({ package: broken });
+  expect(bad.status).toBe(422);
+}, 120_000);
+
 test("stored export files are recorded and swept after they expire", async () => {
   const f = await fixture();
   const appId = await buildBoard(f, { sql: false });

@@ -31,8 +31,10 @@ import { resolveNewSiteAudience, siteViewerForGrant, type ApiRouteDeps } from "@
 import {
   artifactRequestedToolsMissingFromAttemptCatalog,
   createWorkspaceArtifact,
+  getAppPackageId,
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
+  setAppPackageId,
   SiteDataError,
   WorkspaceArtifactConflictError,
   WorkspaceArtifactNotFoundError,
@@ -65,6 +67,7 @@ import {
   SiteSqlError,
 } from "../site-sql/service";
 import { connectorToolIdentities, readSiteToolAccountInventory } from "../site-tool-routing";
+import { readSiteAssetBundle, storeSiteAssetFiles } from "../site-assets";
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { siteSqlInsertStatements } from "../site-sql/format";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
@@ -172,16 +175,13 @@ export async function exportAppPackage(
     getWorkspaceArtifactCurrent(deps.db, grant.workspaceId, viewer, appId),
     getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, viewer, appId),
   ]);
-  // Packages carry one HTML file; a multi-file build's files aren't packaged yet.
-  if (ref.assetManifest)
-    throw new AppPackageError(
-      "validation",
-      "This app is a multi-file build, which packages don't support yet",
-    );
   // Managers only: the same check as reading the app's data definitions.
   const data = await describeSiteData(deps, grant, appId);
   const sql = await describeSiteSql(deps, grant, appId);
   const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
+  const assets = ref.assetManifest
+    ? await readSiteAssetBundle(deps.objectStorage, grant.workspaceId, ref.assetManifest)
+    : null;
   const notExported: AppPackageProblem[] = [];
 
   let syncs: AppPackage["syncs"] = [];
@@ -195,6 +195,7 @@ export async function exportAppPackage(
   const pkg: AppPackage = {
     format: APP_PACKAGE_FORMAT,
     version: APP_PACKAGE_VERSION,
+    packageId: (await getAppPackageId(deps.db, grant.workspaceId, appId)) ?? ownPackageId(appId),
     exportedAt: new Date().toISOString(),
     app: {
       title: artifact.title,
@@ -202,6 +203,7 @@ export async function exportAppPackage(
       html: content.html,
       // An HTML-only app has no retained source of its own.
       ...(ref.sourceKey ? { source: content.source } : {}),
+      ...(assets ? { assets } : {}),
     },
     tools: await portableTools(deps, grant, content.requestedTools, notExported),
     data: {
@@ -252,6 +254,16 @@ export async function exportAppPackage(
       );
   }
   return { package: pkg, filename: appPackageFilename(artifact.title), notExported };
+}
+
+/**
+ * The package id of an app made here: derived from its id, so every export
+ * of the app carries the same one (a UUID with version 8, RFC 9562).
+ */
+export function ownPackageId(appId: string): string {
+  const hex = createHash("sha256").update(`opengeni.app-package:${appId}`).digest("hex");
+  const variant = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 const SHARED_ACCESS_MODES: ReadonlySet<SiteDataAccessMode> = new Set(["shared", "shared_read"]);
@@ -592,6 +604,11 @@ export async function installAppPackage(
   });
   const title = (input.title ?? pkg.app.title).trim() || "Installed app";
   const appId = crypto.randomUUID();
+  // A multi-file build's files, stored before the app exists (a bad file
+  // refuses the install); the copy gets its own manifest token.
+  const assetManifest = pkg.app.assets
+    ? await storeSiteAssetFiles(deps.objectStorage, grant.workspaceId, pkg.app.assets)
+    : null;
   const create = async (tools: ToolGatewayIdentity[]) =>
     await createWorkspaceArtifact(deps.db, {
       ...audience,
@@ -607,6 +624,7 @@ export async function installAppPackage(
         ...(pkg.app.source ? { source: pkg.app.source } : {}),
         requestedTools: tools,
       })),
+      ...(assetManifest ? { assetManifest } : {}),
       ...input.provenance,
     });
   let tools = pkg.tools;
@@ -652,6 +670,8 @@ export async function installAppPackage(
   }
   const app = created.artifact;
   installed.tools = tools.length;
+  // Provenance: later upgrades check they come from the same app's package.
+  if (pkg.packageId) await setAppPackageId(deps.db, grant.workspaceId, app.id, pkg.packageId);
 
   // 2. Site Data collections (defining one again is a no-op change).
   for (const { name, ...definition } of pkg.data.collections) {
@@ -793,6 +813,7 @@ export async function installAppPackage(
 
   return {
     app: redactWorkspaceArtifactProvenance(app),
+    packageId: pkg.packageId ?? null,
     replayed: created.replayed,
     installed,
     notInstalled,

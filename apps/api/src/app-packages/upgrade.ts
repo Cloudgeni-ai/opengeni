@@ -14,9 +14,11 @@ import {
 import { siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   artifactRequestedToolsMissingFromAttemptCatalog,
+  getAppPackageId,
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
   publishWorkspaceArtifactVersion,
+  setAppPackageId,
   WorkspaceArtifactOperationError,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
@@ -34,6 +36,7 @@ import {
   requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import { connectorToolIdentity, readSiteToolAccountInventory } from "../site-tool-routing";
+import { storeSiteAssetFiles } from "../site-assets";
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
@@ -92,6 +95,14 @@ type Prepared = {
   queries: AppPackage["sql"]["queries"];
   sqlEnabled: boolean;
 };
+
+/** A version's asset files for comparing: path and content, by path. */
+function assetIdentity(files: ReadonlyArray<{ path: string; sha256: string }>): string {
+  return files
+    .map((file) => `${file.path}\u0000${file.sha256}`)
+    .sort()
+    .join("\n");
+}
 
 /** A collection definition with the store's defaults, for comparing. */
 function collectionShape(collection: {
@@ -190,17 +201,37 @@ async function prepare(
   }
   const added = pkg.tools.filter((tool) => !present.has(toolKey(tool)));
   const toolsChanged = added.length > 0 || removed.length > 0;
+  const assets =
+    assetIdentity(ref.assetManifest?.files ?? []) !==
+    assetIdentity(
+      (pkg.app.assets?.files ?? []).map((file) => ({
+        path: file.path,
+        sha256: createHash("sha256").update(Buffer.from(file.base64, "base64")).digest("hex"),
+      })),
+    );
+
+  // Provenance: a package of another app is confirmed like a destructive
+  // change. Unknown on either side (older packages and copies) isn't checked.
+  const currentPackageId = await getAppPackageId(deps.db, grant.workspaceId, appId);
+  if (pkg.packageId && currentPackageId && pkg.packageId !== currentPackageId)
+    destructive.push({
+      part: "package",
+      reason:
+        "This package is a different app's, not a newer version of the one this app came from",
+    });
 
   // Collections: added, changed or unchanged; the app's others are kept.
   const existingCollections = new Map(data.collections.map((entry) => [entry.name, entry]));
   const collections: AppPackageCollection[] = [];
   const plan: AppPackageUpgradePlan = {
     version: {
-      changed: html || source || toolsChanged,
+      changed: html || source || toolsChanged || assets,
       html,
       source,
       tools: toolsChanged,
+      assets,
     },
+    package: { id: pkg.packageId ?? null, current: currentPackageId },
     tools: { added, removed },
     collections: { added: [], changed: [], unchanged: [], kept: [] },
     migrations: { applied: [], new: [], conflicting: [] },
@@ -429,6 +460,9 @@ export async function upgradeAppFromPackage(
       `The upgrade can't run: ${plan.conflicts[0]!.name ? `${plan.conflicts[0]!.name}: ` : ""}${plan.conflicts[0]!.reason}`,
       plan,
     );
+  const otherApp = plan.destructive.find((entry) => entry.part === "package");
+  if (otherApp && !input.allowDestructive)
+    throw refused(`${otherApp.reason}; confirm with allowDestructive to upgrade anyway`, plan);
   if (plan.destructive.length > 0 && !input.allowDestructive)
     throw refused(
       `The upgrade has changes that could hide or delete existing data (${plan.destructive
@@ -534,6 +568,8 @@ export async function upgradeAppFromPackage(
     await publishVersion(deps, grant, appId, prepared, tools, input.provenance);
     upgraded.version = true;
   }
+  // The app now comes from this package.
+  if (pkg.packageId) await setAppPackageId(deps.db, grant.workspaceId, appId, pkg.packageId);
 
   // 4. Queries the new version no longer has.
   for (const name of plan.queries.removed) {
@@ -647,6 +683,10 @@ async function publishVersion(
     ...(prepared.pkg.app.source ? { source: prepared.pkg.app.source } : {}),
     requestedTools: tools,
   });
+  // A multi-file build's files; the new version gets its own token.
+  const assetManifest = prepared.pkg.app.assets
+    ? await storeSiteAssetFiles(deps.objectStorage!, grant.workspaceId, prepared.pkg.app.assets)
+    : null;
   const result = await publishWorkspaceArtifactVersion(deps.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -654,6 +694,7 @@ async function publishVersion(
     viewer: await siteViewerForGrant(deps.db, grant),
     expectedCurrentVersionId: prepared.currentVersionId,
     ...content,
+    assetManifest,
     ...provenance,
   });
   await afterSiteArtifactMutation(deps, result, { scan: true });

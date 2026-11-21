@@ -10,6 +10,7 @@ import {
   WorkspaceArtifactSourceBundle,
   WorkspaceArtifactVisibility,
 } from "./artifacts";
+import { SiteAssetBundle } from "./app-assets";
 import { SiteDataCollectionDefinitionRequest } from "./site-data";
 import {
   SITE_SQL_IDENTIFIER,
@@ -131,6 +132,12 @@ export type AppPackageDemoFile = z.infer<typeof AppPackageDemoFile>;
 export type AppPackage = {
   format: typeof APP_PACKAGE_FORMAT;
   version: number;
+  /**
+   * The app's id across its packages: every export of one app (and of copies
+   * installed from it) carries the same id, so an upgrade can tell a newer
+   * version of the same app from a different app. Absent in older packages.
+   */
+  packageId?: string | undefined;
   exportedAt: string;
   app: {
     title: string;
@@ -138,6 +145,8 @@ export type AppPackage = {
     html: string;
     /** Retained editable source; absent for HTML-only apps. */
     source?: z.infer<typeof WorkspaceArtifactSourceBundle> | undefined;
+    /** A multi-file build's asset files (JS, CSS, fonts, images) beside the HTML. */
+    assets?: SiteAssetBundle | undefined;
   };
   /** The tools the app declares; installers connect their own accounts. */
   tools: ToolGatewayIdentity[];
@@ -221,6 +230,8 @@ export type AppPackageInstallRequest = z.infer<typeof AppPackageInstallRequest>;
 
 export type AppPackageInstallResponse = {
   app: z.infer<typeof WorkspaceArtifact>;
+  /** The package the app was installed from, or null for a package without one. */
+  packageId?: string | null;
   /** The same request was installed before; this is that app. */
   replayed: boolean;
   installed: {
@@ -269,7 +280,19 @@ export type AppPackageUpgradeRequest = z.infer<typeof AppPackageUpgradeRequest>;
  */
 export type AppPackageUpgradePlan = {
   /** Whether the package's version differs from the app's current one. */
-  version: { changed: boolean; html: boolean; source: boolean; tools: boolean };
+  version: {
+    changed: boolean;
+    html: boolean;
+    source: boolean;
+    tools: boolean;
+    /** Whether the multi-file build's asset files differ (absent from older servers). */
+    assets?: boolean;
+  };
+  /**
+   * The package's id and the one the app came from (null when unknown). A
+   * different one is listed in `destructive`: it is another app's package.
+   */
+  package?: { id: string | null; current: string | null };
   tools: { added: ToolGatewayIdentity[]; removed: ToolGatewayIdentity[] };
   collections: {
     added: string[];
@@ -379,6 +402,17 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
     typeof app.description === "string"
       ? app.description.slice(0, WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS)
       : null;
+  let assets: SiteAssetBundle | undefined;
+  if (app.assets !== undefined && app.assets !== null) {
+    const parsed = SiteAssetBundle.safeParse(app.assets);
+    // The HTML loads these files, so the app would be broken without them.
+    if (!parsed.success)
+      throw new AppPackageFormatError(
+        `This app package's asset files are invalid (${issue(parsed.error)})`,
+      );
+    assets = parsed.data;
+  }
+  const packageId = primitives.uuid.safeParse(root.packageId);
   let source: AppPackage["app"]["source"];
   if (app.source !== undefined && app.source !== null) {
     const parsed = WorkspaceArtifactSourceBundle.safeParse(app.source);
@@ -524,8 +558,15 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
     package: {
       format: APP_PACKAGE_FORMAT,
       version,
+      ...(packageId.success ? { packageId: packageId.data } : {}),
       exportedAt: typeof root.exportedAt === "string" ? root.exportedAt : "",
-      app: { title, description, html: html.data, ...(source ? { source } : {}) },
+      app: {
+        title,
+        description,
+        html: html.data,
+        ...(source ? { source } : {}),
+        ...(assets ? { assets } : {}),
+      },
       tools,
       data: { collections },
       sql: { migrations, queries },

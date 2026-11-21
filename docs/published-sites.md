@@ -575,8 +575,9 @@ in `packages/contracts/src/app-assets.ts`.
   Published multi-file apps need the Sites gateway, like any
   published app; deploy the gateway before the API so it knows the
   `/_og/a/` route when the first such version is published.
-- **Not supported yet.** App packages refuse to export a multi-file app;
-  downloading a version gives only its HTML; the readiness check and the
+- **App packages** carry a version's files ([App packages](app-packages.md));
+  install and upgrade store them again under a new token.
+- **Not supported yet.** Downloading a version gives only its HTML; the readiness check and the
   content scanner read only the HTML; files are kept with the workspace and
   are not removed when a version stops being used.
 

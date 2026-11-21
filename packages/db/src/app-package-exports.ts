@@ -40,6 +40,42 @@ export async function recordAppPackageExport(
   });
 }
 
+/**
+ * The package an app was installed or last upgraded from (migration 1545),
+ * or null for an app made here. Read without access checks: callers have
+ * already opened the app as the person.
+ */
+export async function getAppPackageId(
+  db: Database,
+  workspaceId: string,
+  appId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (tx) => {
+    const [row] = await rawRows<{ package_id: string | null }>(
+      tx,
+      sql`select package_id from workspace_artifacts
+        where workspace_id = ${workspaceId}::uuid and id = ${appId}::uuid`,
+    );
+    return row?.package_id ?? null;
+  });
+}
+
+/** Record the package an app came from (install, or an applied upgrade). */
+export async function setAppPackageId(
+  db: Database,
+  workspaceId: string,
+  appId: string,
+  packageId: string,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (tx) => {
+    await tx.execute(
+      sql`update workspace_artifacts set package_id = ${packageId}::uuid
+        where workspace_id = ${workspaceId}::uuid and id = ${appId}::uuid
+          and package_id is distinct from ${packageId}::uuid`,
+    );
+  });
+}
+
 export type DueAppPackageExport = {
   id: string;
   accountId: string;
