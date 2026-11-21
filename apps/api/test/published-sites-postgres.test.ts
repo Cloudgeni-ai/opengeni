@@ -3478,11 +3478,11 @@ test("a multi-file app serves its files from the gateway and the console, by ver
     { headers: { "if-none-match": etag } },
   );
   expect(revalidated.status).toBe(304);
-  // A wrong token, an unlisted file or another app's host finds nothing.
+  // A wrong token, an unlisted file or another app's host finds nothing (malformed
+  // addresses are covered by the address parser's and the gateway's own tests).
   for (const path of [
     `/assets/${versionId}/${"x".repeat(22)}/assets/reports-2.js`,
     `/assets/${versionId}/${token}/assets/missing.js`,
-    `/assets/${versionId}/${token}/../secret.js`,
   ])
     expect((await f.gatewayRaw(host, "GET", path)).status).toBe(404);
   const other = await f.live("Other app", { access: "public" });

@@ -104,6 +104,9 @@ describe("injectSiteAssetBase", () => {
       `<!DOCTYPE html><base href="${base}">`,
     );
     expect(injectSiteAssetBase("<p>x</p>", base).startsWith(`<base href="${base}">`)).toBe(true);
+    expect(
+      injectSiteAssetBase("\ufeff<p>x</p>", base).startsWith(`\ufeff<base href="${base}">`),
+    ).toBe(true);
   });
 
   test("escapes the base", () => {

@@ -1,11 +1,49 @@
 import type { Hono } from "hono";
+import { compress } from "hono/compress";
 import { HTTPException } from "hono/http-exception";
-import { SITE_ASSET_API_PREFIX, parseSiteAssetAddress } from "@opengeni/contracts";
+import {
+  SITE_ASSET_API_PREFIX,
+  parseSiteAssetAddress,
+  type SiteAssetManifest,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { getSiteVersionAssetManifest } from "@opengeni/db";
 import { siteAssetFile, siteAssetResponse } from "../site-assets";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/**
+ * Manifests of recently loaded versions. A version row never changes, so a
+ * page's chunks need one database read, not one per file. Unknown versions
+ * are not kept.
+ */
+const MANIFEST_CACHE_MAX = 512;
+const manifests = new Map<string, SiteAssetManifest>();
+
+async function versionManifest(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  versionId: string,
+): Promise<SiteAssetManifest | null> {
+  const key = `${workspaceId}/${versionId}`;
+  const cached = manifests.get(key);
+  if (cached) {
+    manifests.delete(key);
+    manifests.set(key, cached);
+    return cached;
+  }
+  const manifest = await getSiteVersionAssetManifest(deps.db, workspaceId, versionId);
+  if (!manifest) return null;
+  manifests.set(key, manifest);
+  if (manifests.size > MANIFEST_CACHE_MAX) manifests.delete(manifests.keys().next().value!);
+  return manifest;
+}
+
+/** Scripts, styles and other text compress well; images and fonts are already compressed. */
+const compressText = compress({
+  contentTypeFilter:
+    /^(?:text\/|application\/(?:json|manifest\+json|wasm)|image\/(?:svg\+xml|x-icon|bmp))(?:;|$)/iu,
+});
 
 /**
  * Asset files of multi-file app versions for the console's app frame:
@@ -38,7 +76,7 @@ export function registerAppAssetRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = slash < 0 ? "" : rest.slice(0, slash);
     const address = slash < 0 ? null : parseSiteAssetAddress(rest.slice(slash + 1));
     if (!UUID.test(workspaceId) || !address) throw notFound();
-    const manifest = await getSiteVersionAssetManifest(deps.db, workspaceId, address.versionId);
+    const manifest = await versionManifest(deps, workspaceId, address.versionId);
     const file = siteAssetFile(manifest, address.token, address.path);
     if (!file) throw notFound();
     return await siteAssetResponse(storage, workspaceId, file, {
@@ -46,5 +84,6 @@ export function registerAppAssetRoutes(app: Hono, deps: ApiRouteDeps): void {
       ifNoneMatch: context.req.header("if-none-match") ?? null,
     });
   };
+  app.use(`${SITE_ASSET_API_PREFIX}/*`, compressText);
   app.get(`${SITE_ASSET_API_PREFIX}/*`, handler);
 }

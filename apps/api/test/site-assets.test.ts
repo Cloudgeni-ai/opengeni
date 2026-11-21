@@ -133,4 +133,22 @@ describe("serving", () => {
     });
     expect(cached.status).toBe(304);
   });
+
+  test("answers HEAD with the file's headers and no body", async () => {
+    const { storage } = memoryStorage();
+    const manifest = await storeSiteAssetBundle(
+      storage,
+      "ws",
+      bundle([{ path: "assets/a.css", text: "body{}" }]),
+    );
+    const file = siteAssetFile(manifest, manifest.token, "assets/a.css")!;
+    const response = await siteAssetResponse(storage, "ws", file, {
+      method: "HEAD",
+      ifNoneMatch: null,
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/css; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(await response.text()).toBe("");
+  });
 });

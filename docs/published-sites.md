@@ -565,7 +565,8 @@ in `packages/contracts/src/app-assets.ts`.
   each app from Opengeni and from other apps.
 - **Self-hosted.** The console path needs no Sites domain: the API serves the
   files itself, at `OPENGENI_PUBLIC_BASE_URL` (or the address the request
-  reached). Published multi-file apps need the Sites gateway, like any
+  reached; set it behind a proxy, where that address may be internal).
+  Published multi-file apps need the Sites gateway, like any
   published app; deploy the gateway before the API so it knows the
   `/_og/a/` route when the first such version is published.
 - **Not supported yet.** App packages refuse to export a multi-file app;

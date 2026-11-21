@@ -219,5 +219,7 @@ export function injectSiteAssetBase(html: string, baseHref: string): string {
   const tag = `<base href="${escapeAttribute(baseHref)}">${HASH_LINK_SCRIPT}`;
   const doctypeEnd = leadingDoctypeEnd(html);
   if (doctypeEnd >= 0) return `${html.slice(0, doctypeEnd + 1)}${tag}${html.slice(doctypeEnd + 1)}`;
-  return `${tag}${html}`;
+  // Without a doctype it goes first, after a byte-order mark.
+  const bom = html.charCodeAt(0) === 0xfeff ? 1 : 0;
+  return `${html.slice(0, bom)}${tag}${html.slice(bom)}`;
 }

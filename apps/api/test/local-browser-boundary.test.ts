@@ -234,6 +234,20 @@ describe("local browser boundary", () => {
     ).toBe("LOCAL_HOST_NOT_ALLOWED");
   });
 
+  test("lets opaque app frames read app files, and nothing else", () => {
+    const local = boundary();
+    const file = "/v1/app-assets/ws-1/v-1/token/assets/a.js";
+    for (const method of ["GET", "HEAD"]) {
+      expect(local.rejection(request("127.0.0.1:8000", "null", method, file))).toBeNull();
+    }
+    expect(local.rejection(request("127.0.0.1:8000", "null", "POST", file))?.code).toBe(
+      "LOCAL_ORIGIN_NOT_ALLOWED",
+    );
+    expect(local.rejection(request("127.0.0.1:8000", "null", "GET"))?.code).toBe(
+      "LOCAL_ORIGIN_NOT_ALLOWED",
+    );
+  });
+
   test("admits explicitly configured origins and addresses", () => {
     const configured = boundary({
       webBaseUrl: "http://homeserver:3000",

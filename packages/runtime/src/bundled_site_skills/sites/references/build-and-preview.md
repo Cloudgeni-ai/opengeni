@@ -124,8 +124,11 @@ stay one file.
 - Every file besides `dist/index.html` is uploaded once as JSON (step 4 of
   "Publish one immutable version"); no HTML pages among them (apps are
   single-page), only `.js`, `.mjs`, `.css`, `.json`, `.map`, `.wasm`, fonts,
-  images, `.txt` and `.webmanifest`. Paths use letters, digits and `._~@+-`.
-  Up to 1,000 files, 16 MB each and 32 MB together.
+  images, `.txt` and `.webmanifest`; keep other media in app files. Paths use
+  letters, digits and `._~@+-`. Up to 1,000 files, 16 MB each and 32 MB
+  together.
+- Every new version rebuilds from the saved source and uploads all its files
+  again; a version without them loses its code. Keep the source.
 
 ```ts
 // assets.ts: bun assets.ts, then PUT assets.json to assets.putUrl
@@ -142,10 +145,10 @@ await Bun.write("assets.json", JSON.stringify({ files }));
 
 Keep using the host's address API for pages (below), not `window.location`.
 Bare `#section` links keep working. The page's base is the files' folder, so
-use absolute paths in `fetch()` and `history.pushState()`, and give routers
-that read `<base href>` (Vue Router's `createWebHistory()`, Angular) an
-explicit base of `/`. Inline web workers (Vite `?worker&inline`, or a `blob:`
-URL): the app's frame can't start a worker from a file.
+move between pages with `site.navigate` or hash routes, never a path router or
+`history.pushState()`, and use absolute paths in `fetch()`. Inline web workers
+(Vite `?worker&inline`, or a `blob:` URL): the app's frame can't start a
+worker from a file.
 
 ## Plain HTML that calls Opengeni
 
