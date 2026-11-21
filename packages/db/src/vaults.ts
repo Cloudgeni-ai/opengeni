@@ -19,7 +19,13 @@ import {
   type VaultSyncStatus,
   type VaultVersionCreatedByKind,
 } from "@opengeni/contracts";
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import {
+  rawRows,
+  setSubjectRlsContext,
+  withoutSessionRlsActor,
+  withRlsContext,
+  type Database,
+} from "./database";
 
 export type VaultDbContext =
   | { kind: "subject"; accountId: string; workspaceId: string; subjectId: string }
@@ -107,15 +113,23 @@ async function inVaultContext<T>(
   fn: (scoped: Database, principal: string | null) => Promise<T>,
 ): Promise<T> {
   const scope = contextScope(context);
-  try {
-    return await withRlsContext(
+  // A shared service connection reads as the workspace itself, never as
+  // whoever's request is running (an API route or a sync acting for a
+  // person): drop the ambient actor and any subject the caller set.
+  const asService = context.kind !== "subject" && context.principal.kind === "service_connection";
+  const run = async () =>
+    await withRlsContext(
       db,
       { accountId: scope.accountId, workspaceId: scope.workspaceId },
       async (scoped) => {
-        if (scope.subjectId) await setSubjectRlsContext(scoped, scope.subjectId);
+        if (asService)
+          await rawRows(scoped, sql`select set_config('opengeni.subject_id', '', true)`);
+        else if (scope.subjectId) await setSubjectRlsContext(scoped, scope.subjectId);
         return await fn(scoped, scope.principal);
       },
     );
+  try {
+    return asService ? await withoutSessionRlsActor(run) : await run();
   } catch (error) {
     throw vaultErrorFromDatabase(error) ?? error;
   }
