@@ -7,7 +7,7 @@ import {
   type SessionLink,
   type SessionLinkLiveStatus,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { personalGitHubReader, type ApiRouteDeps } from "@opengeni/core";
 import {
   type GitHubRead,
   summarizeGitHubChecks,
@@ -81,13 +81,17 @@ const BODY_MAX = 20_000;
 const COMMENT_MAX = 8_000;
 /** A file patch larger than this shows as "too large" rather than inline. */
 const PATCH_MAX = 200_000;
+/** Patch text kept per pull request; later files show as too large. */
+const PATCH_BUDGET = 1_000_000;
 const DETAIL_TTL_MS = 30_000;
 const FRESH_MIN_INTERVAL_MS = 5_000;
-const CACHE_MAX = 200;
+/** A failed read is retried soon, not held for the full TTL. */
+const FAILURE_TTL_MS = 5_000;
+const CACHE_MAX = 50;
 
 const detailCache = new Map<
   string,
-  { at: number; detail: Promise<SessionPullRequestDetail | null> }
+  { at: number; failed?: boolean; detail: Promise<SessionPullRequestDetail | null> }
 >();
 
 function record(value: unknown): Record<string, unknown> {
@@ -113,6 +117,9 @@ function person(value: unknown): SessionPullRequestPerson | null {
 function list(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.map(record) : [];
 }
+
+const BINARY_PATH =
+  /\.(png|jpe?g|gif|webp|ico|bmp|avif|tiff?|pdf|zip|gz|tgz|bz2|xz|7z|jar|wasm|woff2?|ttf|otf|eot|mp3|mp4|mov|webm|wav|ogg|exe|dll|so|dylib|bin|class|pyc)$/i;
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 
@@ -174,11 +181,18 @@ function fileStatus(status: unknown): GitFileDiff["status"] {
   }
 }
 
-function fileDiff(file: Record<string, unknown>): GitFileDiff {
+function fileDiff(file: Record<string, unknown>, budget: { left: number }): GitFileDiff {
   const path = text(file.filename, 4096) ?? "";
   const patch = typeof file.patch === "string" ? file.patch : null;
-  const tooLarge = patch !== null && patch.length > PATCH_MAX;
-  const isBinary = patch === null && count(file.changes) === 0 && file.status !== "renamed";
+  const tooLarge = patch !== null && (patch.length > PATCH_MAX || patch.length > budget.left);
+  if (patch !== null && !tooLarge) budget.left -= patch.length;
+  // GitHub sends no patch for binary files; an empty or mode-only change also
+  // has none, so only a known binary type reads as binary.
+  const isBinary =
+    patch === null &&
+    count(file.changes) === 0 &&
+    file.status !== "renamed" &&
+    BINARY_PATH.test(path);
   return {
     path,
     oldPath: text(file.previous_filename, 4096),
@@ -196,10 +210,19 @@ function fileDiff(file: Record<string, unknown>): GitFileDiff {
 function checkRunState(run: Record<string, unknown>): SessionPullRequestCheckRun["state"] {
   if (run.status !== "completed") return "pending";
   const conclusion = String(run.conclusion ?? "");
-  if (conclusion === "success" || conclusion === "neutral") return "passing";
+  // Matches summarizeGitHubChecks: only these conclusions fail.
+  if (FAILED_CONCLUSIONS.has(conclusion)) return "failing";
   if (conclusion === "skipped") return "skipped";
-  return "failing";
+  return "passing";
 }
+
+const FAILED_CONCLUSIONS = new Set([
+  "failure",
+  "timed_out",
+  "cancelled",
+  "action_required",
+  "startup_failure",
+]);
 
 function reviewState(state: unknown): SessionPullRequestComment["reviewState"] {
   if (state === "APPROVED") return "approved";
@@ -263,10 +286,12 @@ export async function readGitHubPullRequestDetail(
         }),
       ),
   ].sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
-  const fileList = list(files).map(fileDiff);
+  const budget = { left: PATCH_BUDGET };
+  const fileList = list(files).map((file) => fileDiff(file, budget));
   const changedFiles = count(pull.changed_files);
   return {
-    url: text(pull.html_url, 2048) ?? `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`,
+    url:
+      text(pull.html_url, 2048) ?? `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`,
     owner: ref.owner,
     repo: ref.repo,
     number: ref.number,
@@ -331,13 +356,26 @@ export type SessionPullRequestReader = (
   link: SessionLink,
 ) => Promise<SessionPullRequestDetail | null>;
 
-/** The default reader: through the workspace's GitHub App, like the Linked status. */
+/** A person's own GitHub connection, used when the workspace's App can't read the repository. */
+export type SessionPullRequestViewer = {
+  subjectId: string;
+  read: SessionPullRequestReader;
+};
+
+function pullRequestRef(link: SessionLink) {
+  if (link.provider !== "github" || link.kind !== "pull_request") return null;
+  return classifySessionLinkUrl(link.url)?.github ?? parseGitHubLinkRef(link.ref) ?? null;
+}
+
+/**
+ * The default reader: through the workspace's GitHub App, like the Linked
+ * status. Null when the App can't read the repository; a failed read throws.
+ */
 export function workspaceSessionPullRequestReader(
   deps: Pick<ApiRouteDeps, "db" | "settings">,
 ): SessionPullRequestReader {
   return async (workspaceId, link) => {
-    if (link.provider !== "github" || link.kind !== "pull_request") return null;
-    const ref = classifySessionLinkUrl(link.url)?.github ?? parseGitHubLinkRef(link.ref);
+    const ref = pullRequestRef(link);
     if (!ref) return null;
     const read = await workspaceGitHubReader(deps, workspaceId, ref.owner, ref.repo);
     if (!read) return null;
@@ -345,20 +383,65 @@ export function workspaceSessionPullRequestReader(
   };
 }
 
-/** The detail with a short shared cache; `fresh` re-reads at most every few seconds. */
+/** The viewer's own GitHub (Your GitHub), for repositories they let Opengeni use. */
+export function personalSessionPullRequestReader(
+  deps: Pick<ApiRouteDeps, "db" | "settings" | "githubPersonalFetch">,
+  viewer: { accountId: string; workspaceId: string; subjectId: string },
+): SessionPullRequestReader {
+  return async (_workspaceId, link) => {
+    const ref = pullRequestRef(link);
+    if (!ref) return null;
+    const read = await personalGitHubReader(
+      { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+      { ...viewer, repository: `${ref.owner}/${ref.repo}` },
+    ).catch(() => null);
+    if (!read) return null;
+    return await readGitHubPullRequestDetail(read, ref);
+  };
+}
+
+async function cachedRead(
+  key: string,
+  read: () => Promise<SessionPullRequestDetail | null>,
+  fresh: boolean,
+): Promise<SessionPullRequestDetail | null> {
+  const cached = detailCache.get(key);
+  const maxAge = cached?.failed ? FAILURE_TTL_MS : fresh ? FRESH_MIN_INTERVAL_MS : DETAIL_TTL_MS;
+  if (cached && Date.now() - cached.at < maxAge) return await cached.detail;
+  const entry: { at: number; failed?: boolean; detail: Promise<SessionPullRequestDetail | null> } =
+    { at: Date.now(), detail: read() };
+  entry.detail.catch(() => {
+    entry.failed = true;
+  });
+  detailCache.delete(key);
+  detailCache.set(key, entry);
+  while (detailCache.size > CACHE_MAX) detailCache.delete(detailCache.keys().next().value!);
+  return await entry.detail;
+}
+
+/**
+ * The detail with a short shared cache; `fresh` re-reads at most every few
+ * seconds. When the workspace can't read it, the viewer's own GitHub is
+ * tried, cached for that viewer alone. A failed GitHub read rejects (and is
+ * retried soon) so it never reads as "can't read this pull request".
+ */
 export async function cachedSessionPullRequestDetail(
   workspaceId: string,
   link: SessionLink,
   reader: SessionPullRequestReader,
-  options: { fresh?: boolean } = {},
+  options: { fresh?: boolean; viewer?: SessionPullRequestViewer | null } = {},
 ): Promise<SessionPullRequestDetail | null> {
-  const key = `${workspaceId}:${link.url}`;
-  const cached = detailCache.get(key);
-  const maxAge = options.fresh ? FRESH_MIN_INTERVAL_MS : DETAIL_TTL_MS;
-  if (cached && Date.now() - cached.at < maxAge) return await cached.detail;
-  const detail = reader(workspaceId, link).catch(() => null);
-  detailCache.delete(key);
-  detailCache.set(key, { at: Date.now(), detail });
-  while (detailCache.size > CACHE_MAX) detailCache.delete(detailCache.keys().next().value!);
-  return await detail;
+  const fresh = options.fresh === true;
+  const shared = await cachedRead(
+    `${workspaceId}:${link.url}`,
+    () => reader(workspaceId, link),
+    fresh,
+  );
+  if (shared || !options.viewer) return shared;
+  const viewer = options.viewer;
+  return await cachedRead(
+    `${workspaceId}:viewer:${viewer.subjectId}:${link.url}`,
+    () => viewer.read(workspaceId, link),
+    fresh,
+  );
 }

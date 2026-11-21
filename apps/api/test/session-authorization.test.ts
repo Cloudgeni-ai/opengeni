@@ -32,6 +32,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "/visibility/preview", "session.visibility.write"],
   ["POST", "/forks", "session.fork.create"],
   ["GET", "/share-link", "session.read"],
+  ["GET", "/links/link-1/pull-request", "session.read"],
   ["PUT", "/share-link", "session.share_link.write"],
   ["DELETE", "/share-link", "session.share_link.write"],
   ["PUT", "/channel", "session.channel.write"],

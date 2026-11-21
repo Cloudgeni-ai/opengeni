@@ -61,7 +61,12 @@ import { useMachineChip, type MachineChip } from "../hooks/use-machine-chip";
 import { MACHINES_SESSION_POLL_MS, useMachines } from "../hooks/use-machines";
 import type { MachineView } from "../types/machines";
 import type { SandboxFilesProps } from "./sandbox-files";
-import { WorkbenchChanges, type WorkbenchPullRequest } from "./workbench-changes";
+import {
+  WorkbenchChanges,
+  WorkbenchChangesViewMenu,
+  type WorkbenchChangesComparison,
+  type WorkbenchPullRequest,
+} from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 import { useOpenGeniText } from "../messages/runtime";
@@ -315,8 +320,8 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride<ChatClient> & {
    *  omitted the workbench picks Changes-vs-Files from capture or live Git. */
   initialTab?: string | null | undefined;
   /** `"all"` (default) shows every enabled surface as a tab. `"relevant"` shows
-   *  Changes only when there are changes and keeps Files, Terminal, Browser and
-   *  Desktop under the dock's "+" menu until opened (`WorkspaceTab.optional`). */
+   *  only the essentials: Changes when there are changes, with Files, Terminal,
+   *  Browser and Desktop in the dock's menu (`WorkspaceTab.optional`). */
   tabVisibility?: SandboxWorkspaceTabVisibility | undefined;
   /** Actually selected dock tab. Inactive data surfaces retain cache but issue no live reads. */
   activeTab?: string | null | undefined;
@@ -798,7 +803,14 @@ export function useSandboxWorkspaceTabs(
         label: t("sandboxWorkspace.changes"),
         icon: <GitCompareArrowsIcon />,
         badge: dirtyCount > 0 && !relevantOnly ? <DirtyBadge count={dirtyCount} /> : undefined,
-        ...(relevantOnly && dirtyCount === 0 && !captureHasChanges ? { optional: true } : {}),
+        // A comparison the person picked keeps Changes on the strip, even
+        // when that comparison happens to be empty.
+        ...(relevantOnly &&
+        dirtyCount === 0 &&
+        !captureHasChanges &&
+        storedChangesComparison?.sessionId !== sessionId
+          ? { optional: true }
+          : {}),
         content: (
           <ChangesTabBody
             git={git}
@@ -996,6 +1008,7 @@ export function useSandboxWorkspaceTabs(
     captureState.degradedReason,
     dirtyCount,
     captureHasChanges,
+    storedChangesComparison,
     relevantOnly,
     warmTerminal,
     requestedFilePath,
@@ -1081,8 +1094,9 @@ export type SandboxWorkspaceProps = ClientOverride<ChatClient> & {
   /** Override the pre-paint default tab (e.g. a host landing tab id). When
    *  omitted the workbench decides from the durable workspace capture. */
   initialTab?: string | undefined;
-  /** `"relevant"` keeps surfaces without content for this chat under the dock's
-   *  "+" menu; see `UseSandboxWorkspaceTabsOptions.tabVisibility`. */
+  /** `"relevant"` shows only the essentials: surfaces without content for this
+   *  chat, the dock's controls and the machine chip move into one menu; see
+   *  `UseSandboxWorkspaceTabsOptions.tabVisibility`. */
   tabVisibility?: SandboxWorkspaceTabVisibility | undefined;
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
   /** Open a built-in or host-injected tab. A new requestId reopens the same tab. */
@@ -1329,7 +1343,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       tabs={tabs}
       {...(activeTab !== undefined ? { activeTab } : {})}
       onActiveTabChange={selectTab}
-      tabScope={sessionId}
+      essentials={tabVisibility === "relevant"}
       // Browser and Desktop select independent workspace resources, potentially
       // on another placement. Their own viewers report runtime status; the
       // agent-session machine chip must not describe those resources.
@@ -1420,11 +1434,20 @@ const ChangesTabBody = memo(function ChangesTabBody({
   comparison: SandboxGitComparison;
   onComparisonChange: (comparison: SandboxGitComparison) => void;
 } & Omit<Parameters<typeof ChangesTabContent>[0], "picker">) {
-  // A stable element keeps the memoized Changes surface from re-rendering on
+  // A stable value keeps the memoized Changes surface from re-rendering on
   // unrelated session events.
-  const picker = useMemo(
-    () => <ComparisonPicker comparison={comparison} onComparisonChange={onComparisonChange} />,
-    [comparison, onComparisonChange],
+  const t = useOpenGeniText();
+  const picker = useMemo<WorkbenchChangesComparison>(
+    () => ({
+      value: comparison,
+      options: [
+        { value: "branch", label: t("sandboxWorkspace.branch") },
+        { value: "working", label: t("sandboxWorkspace.uncommitted") },
+        { value: "staged", label: t("sandboxWorkspace.staged") },
+      ],
+      onChange: (value) => onComparisonChange(value as SandboxGitComparison),
+    }),
+    [comparison, onComparisonChange, t],
   );
   if (props.git.diff.length > 0) {
     return (
@@ -1435,8 +1458,8 @@ const ChangesTabBody = memo(function ChangesTabBody({
   }
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex min-h-9 shrink-0 items-center border-b border-og-border px-3 py-1">
-        {picker}
+      <div className="flex min-h-9 shrink-0 items-center border-b border-og-border px-2 py-1">
+        <WorkbenchChangesViewMenu comparison={picker} />
       </div>
       <div className="min-h-0 flex-1">
         <ChangesTabContent comparison={comparison} picker={picker} {...props} />
@@ -1444,41 +1467,6 @@ const ChangesTabBody = memo(function ChangesTabBody({
     </div>
   );
 });
-
-/** Branch · Uncommitted · Staged: plain text choices, the active one in full ink. */
-function ComparisonPicker({
-  comparison,
-  onComparisonChange,
-}: {
-  comparison: SandboxGitComparison;
-  onComparisonChange: (comparison: SandboxGitComparison) => void;
-}) {
-  const t = useOpenGeniText();
-  return (
-    <div className="-ml-1.5 flex shrink-0 items-center" data-changes-comparison>
-      {(
-        [
-          ["branch", t("sandboxWorkspace.branch")],
-          ["working", t("sandboxWorkspace.uncommitted")],
-          ["staged", t("sandboxWorkspace.staged")],
-        ] as const
-      ).map(([value, label]) => (
-        <button
-          key={value}
-          type="button"
-          aria-pressed={comparison === value}
-          onClick={() => onComparisonChange(value)}
-          className={cn(
-            "rounded-og-sm px-1.5 py-1 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-            comparison === value ? "text-og-fg" : "text-og-fg-subtle hover:text-og-fg",
-          )}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 function ChangesTabContent({
   git,
@@ -1500,7 +1488,7 @@ function ChangesTabContent({
 }: {
   git: UseSandboxGitResult;
   comparison: SandboxGitComparison;
-  picker: ReactNode;
+  picker: WorkbenchChangesComparison;
   captureAvailable: boolean;
   captureDegraded: boolean;
   captureRevision: number | null;
@@ -1557,7 +1545,7 @@ function ChangesTabContent({
             {...(onOpenFile ? { onOpenFile } : {})}
             pullRequest={pullRequest ?? null}
             {...(onOpenPullRequest ? { onOpenPullRequest } : {})}
-            leading={picker}
+            comparison={picker}
           />
         </div>
       </div>

@@ -370,15 +370,15 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     const groups = Array.from(container(r).querySelectorAll("[data-rail-group]"), (node) =>
       node.textContent?.trim(),
     );
-    expect(groups).toEqual(["api1", "web1"]);
+    expect(groups).toEqual(["api", "web"]);
     const fileRows = Array.from(
       container(r).querySelectorAll("[data-rail-file]"),
       (node) => node.textContent,
     );
     // The rail shows the file name, then its directory (inside the repository).
-    expect(
-      fileRows.every((text) => text?.startsWith("Mfile-000.ts") && text.includes("src")),
-    ).toBe(true);
+    expect(fileRows.every((text) => text?.startsWith("file-000.ts") && text.includes("src"))).toBe(
+      true,
+    );
     await r.unmount();
   });
 

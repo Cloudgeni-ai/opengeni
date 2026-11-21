@@ -28,11 +28,14 @@ export function registerPierreDiffs(
 ): void {
   // A worker moves Shiki highlighting off the main thread: diffs paint as
   // plain text at once and pick up colors when the worker answers.
+  const previousWorker = workerFactory;
   if (options && "worker" in options) workerFactory = next ? (options.worker ?? null) : null;
   if (!next) workerFactory = null;
-  if (next === loader) return;
-  loader = next;
-  loaded = null;
+  if (next === loader && workerFactory === previousWorker) return;
+  if (next !== loader) {
+    loader = next;
+    loaded = null;
+  }
   revision += 1;
   for (const listener of listeners) listener();
 }

@@ -42609,6 +42609,7 @@
       "WORKBENCH_TAB_FILES": "value",
       "WORKBENCH_TAB_TERMINAL": "value",
       "WorkbenchChanges": "value",
+      "WorkbenchChangesComparison": "type",
       "WorkbenchChangesProps": "type",
       "WorkbenchPeerLoader": "type",
       "WorkbenchPullRequest": "type",

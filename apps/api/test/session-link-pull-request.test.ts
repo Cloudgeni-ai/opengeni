@@ -41,11 +41,22 @@ describe("a linked pull request's detail", () => {
         body: "Why",
       },
       "/repos/acme/api/pulls/7/files?per_page=100": [
-        { filename: "a.ts", status: "modified", additions: 1, deletions: 1, changes: 2, patch: "@@ -1 +1 @@\n-a\n+b" },
+        {
+          filename: "a.ts",
+          status: "modified",
+          additions: 1,
+          deletions: 1,
+          changes: 2,
+          patch: "@@ -1 +1 @@\n-a\n+b",
+        },
         { filename: "logo.png", status: "added", additions: 0, deletions: 0, changes: 0 },
       ],
       "/repos/acme/api/pulls/7/commits?per_page=100": [
-        { sha: "abc", author: { login: "ada" }, commit: { message: "Speed up", author: { date: "2026-01-01" } } },
+        {
+          sha: "abc",
+          author: { login: "ada" },
+          commit: { message: "Speed up", author: { date: "2026-01-01" } },
+        },
       ],
       "/repos/acme/api/issues/7/comments?per_page=100": [
         { id: 1, user: { login: "bo" }, body: "Nice", created_at: "2026-01-02" },
@@ -55,14 +66,20 @@ describe("a linked pull request's detail", () => {
         { id: 3, user: { login: "cy" }, body: "", state: "COMMENTED", submitted_at: "2026-01-04" },
       ],
       "/repos/acme/api/commits/abc/check-runs?per_page=100": {
-        check_runs: [{ name: "ci", status: "completed", conclusion: "success", html_url: "https://ci" }],
+        check_runs: [
+          { name: "ci", status: "completed", conclusion: "success", html_url: "https://ci" },
+        ],
       },
     };
     const read = async (path: string) => {
       if (!(path in responses)) throw new Error(`not found ${path}`);
       return responses[path];
     };
-    const detail = await readGitHubPullRequestDetail(read, { owner: "acme", repo: "api", number: 7 });
+    const detail = await readGitHubPullRequestDetail(read, {
+      owner: "acme",
+      repo: "api",
+      number: 7,
+    });
     expect(detail).toMatchObject({
       title: "Faster diffs",
       state: "open",
@@ -120,5 +137,62 @@ describe("a linked pull request's detail", () => {
     expect(merged.files).toEqual([]);
     expect(merged.checks).toBeNull();
     expect(merged.review).toBeNull();
+  });
+
+  test("falls back to the viewer's own GitHub, and a failed read is retried soon", async () => {
+    const link = {
+      id: "l2",
+      url: "https://github.com/acme/private/pull/3",
+      provider: "github",
+      kind: "pull_request",
+    } as never;
+    const viewerReads: string[] = [];
+    const viewer = {
+      subjectId: "user:ada",
+      read: async () => {
+        viewerReads.push("ada");
+        return { title: "Mine" } as never;
+      },
+    };
+    const detail = await cachedSessionPullRequestDetail("ws-c", link, async () => null, {
+      viewer,
+    });
+    expect(detail).toMatchObject({ title: "Mine" });
+    expect(viewerReads).toEqual(["ada"]);
+    // Failures reject (so they never read as "can't read") and aren't held.
+    let failures = 0;
+    const failing = async () => {
+      failures += 1;
+      throw new Error("GitHub 502");
+    };
+    await expect(cachedSessionPullRequestDetail("ws-d", link, failing)).rejects.toThrow();
+    await expect(cachedSessionPullRequestDetail("ws-d", link, failing)).rejects.toThrow();
+    expect(failures).toBe(1);
+  });
+
+  test("patch text is bounded per pull request", async () => {
+    const big = `@@ -1 +1 @@\n+${"x".repeat(150_000)}`;
+    const files = Array.from({ length: 10 }, (_, index) => ({
+      filename: `f${index}.ts`,
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      changes: 1,
+      patch: big,
+    }));
+    const detail = await readGitHubPullRequestDetail(
+      async (path) => {
+        if (path === "/repos/acme/api/pulls/8")
+          return { state: "open", head: {}, changed_files: 10 };
+        if (path === "/repos/acme/api/pulls/8/files?per_page=100") return files;
+        throw new Error("unreadable");
+      },
+      { owner: "acme", repo: "api", number: 8 },
+    );
+    const kept = detail.files.filter((file) => !file.truncated).length;
+    expect(kept).toBe(6);
+    expect(
+      detail.files.slice(kept).every((file) => file.truncated && file.hunks.length === 0),
+    ).toBe(true);
   });
 });

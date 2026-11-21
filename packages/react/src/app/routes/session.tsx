@@ -1959,7 +1959,8 @@ function SessionDockPanel(props: SessionDockProps) {
   const sessionArchived = props.session ? sessionReadOnlyArchive(props.session) !== null : false;
   const canAskAgent = canControlSession && Boolean(props.session) && !sessionArchived;
   // The PR tab shows the chat's pull request; Linked keeps everything else
-  // (issues, threads, records) and appears only when there is something.
+  // (issues, threads, records, other pull requests), in the dock's menu, and
+  // only when there is something.
   const pullRequestLink = useMemo(
     () => pullRequestLinkFromLinks(linkState.links),
     [linkState.links],
@@ -1967,9 +1968,9 @@ function SessionDockPanel(props: SessionDockProps) {
   const otherLinks = useMemo(
     () => ({
       ...linkState,
-      links: linkState.links.filter((link) => link.kind !== "pull_request"),
+      links: linkState.links.filter((link) => link.id !== pullRequestLink?.id),
     }),
-    [linkState],
+    [linkState, pullRequestLink],
   );
   const mergePullRequest = useCallback(
     async (url: string) => {
@@ -2006,10 +2007,15 @@ function SessionDockPanel(props: SessionDockProps) {
           icon: <GitPullRequestIcon />,
           content: (
             <SessionPullRequestPanel
+              // A different chat or pull request starts fresh (view, Merge).
+              key={`${props.sessionId}:${pullRequestLink.id}`}
               workspaceId={props.workspaceId}
               sessionId={props.sessionId}
               link={pullRequestLink}
               {...(canAskAgent ? { onMerge: () => mergePullRequest(pullRequestLink.url) } : {})}
+              {...(canControlSession && !sessionArchived
+                ? { onRemove: () => void linkState.remove(pullRequestLink.id) }
+                : {})}
             />
           ),
         },
@@ -2021,6 +2027,7 @@ function SessionDockPanel(props: SessionDockProps) {
       id: "linked",
       label: "Linked",
       icon: <LinkIcon />,
+      optional: true,
       content: (
         <SessionLinkedPanel
           state={otherLinks}
@@ -2034,44 +2041,42 @@ function SessionDockPanel(props: SessionDockProps) {
       ),
     });
   }
-  trailingTabs.push(
-    {
-      id: "artifacts",
-      label: "Artifacts",
-      icon: <PanelsTopLeftIcon />,
-      ...(artifactSummaries.length > 0 ? {} : { optional: true }),
-      content: (
-        <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
-          <LazySessionEditableArtifactsWorkspace
-            key={props.sessionId}
-            workspaceId={props.workspaceId}
-            sessionId={props.sessionId}
-            artifacts={artifactSummaries}
-            status={artifactState.status}
-            onRetry={artifactState.retry}
-            initialSelectedArtifactId={dockNavigation.artifactId}
-            openArtifactRequest={currentArtifactRequest}
-            onSelectedArtifactIdChange={rememberArtifact}
-            onPin={
-              hasWorkspacePermission(context.accessContext, props.workspaceId, "artifacts:publish")
-                ? async (item, pinned) => {
-                    await context.client.updateArtifactPin(
-                      props.workspaceId,
-                      item.kind,
-                      item.id,
-                      pinned,
-                    );
-                    artifactState.applyPin(item.kind, item.id, pinned);
-                    expireAfterArtifactMutation();
-                    artifactState.retry();
-                  }
-                : undefined
-            }
-          />
-        </LazyPart>
-      ),
-    },
-  );
+  trailingTabs.push({
+    id: "artifacts",
+    label: "Artifacts",
+    icon: <PanelsTopLeftIcon />,
+    optional: true,
+    content: (
+      <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
+        <LazySessionEditableArtifactsWorkspace
+          key={props.sessionId}
+          workspaceId={props.workspaceId}
+          sessionId={props.sessionId}
+          artifacts={artifactSummaries}
+          status={artifactState.status}
+          onRetry={artifactState.retry}
+          initialSelectedArtifactId={dockNavigation.artifactId}
+          openArtifactRequest={currentArtifactRequest}
+          onSelectedArtifactIdChange={rememberArtifact}
+          onPin={
+            hasWorkspacePermission(context.accessContext, props.workspaceId, "artifacts:publish")
+              ? async (item, pinned) => {
+                  await context.client.updateArtifactPin(
+                    props.workspaceId,
+                    item.kind,
+                    item.id,
+                    pinned,
+                  );
+                  artifactState.applyPin(item.kind, item.id, pinned);
+                  expireAfterArtifactMutation();
+                  artifactState.retry();
+                }
+              : undefined
+          }
+        />
+      </LazyPart>
+    ),
+  });
   if (props.session) {
     trailingTabs.push({
       id: "agent",
