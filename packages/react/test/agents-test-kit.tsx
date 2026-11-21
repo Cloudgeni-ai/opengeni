@@ -96,7 +96,11 @@ export function fakeAgentsClient(
     /** Workspace Skills by stable key. */
     skills?: string[];
     /** Event sources automations listen to. */
-    eventSources?: { id: string; name: string }[];
+    eventSources?: { id: string; name: string; kind?: string; status?: string }[];
+    /** Makes createScheduledTask fail with this error. */
+    createTaskError?: unknown;
+    /** Chats in the workspace, with the agent each was started with. */
+    sessions?: { id: string; title: string; agentId?: string | null }[] | undefined;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
@@ -213,6 +217,47 @@ export function fakeAgentsClient(
     },
     catalogAssetUrl(path: string | null) {
       return path ? `/assets/${path}` : null;
+    },
+    async listReadyEventSources(workspaceId: string) {
+      calls.push(["listReadyEventSources", workspaceId]);
+      return [];
+    },
+    async listSessions(workspaceId: string) {
+      calls.push(["listSessions", workspaceId]);
+      return options.sessions ?? [];
+    },
+    async listEventSourceTypes(workspaceId: string, sourceId: string) {
+      calls.push(["listEventSourceTypes", workspaceId, sourceId]);
+      return [];
+    },
+    async createEventSource(workspaceId: string, request: Record<string, unknown>) {
+      calls.push(["createEventSource", workspaceId, request]);
+      const id = uuid();
+      const kind = String(request.kind);
+      return {
+        source: {
+          id,
+          workspaceId,
+          kind,
+          adapter: (request.adapter as string | undefined) ?? null,
+          format: null,
+          name: (request.name as string | undefined) ?? kind,
+          status: "active",
+          mcp: null,
+          webhookUrl: kind === "webhook" ? `https://hooks.example.com/${id}` : null,
+        },
+        ...(kind === "webhook" ? { signingSecret: "whsec_test" } : {}),
+      };
+    },
+    async createScheduledTask(workspaceId: string, request: Record<string, unknown>) {
+      calls.push(["createScheduledTask", workspaceId, request]);
+      if (options.createTaskError) throw options.createTaskError;
+      return {
+        id: uuid(),
+        status: "active",
+        ...request,
+        events: request.events ?? null,
+      };
     },
     async listCapabilities(workspaceId: string) {
       calls.push(["listCapabilities", workspaceId]);

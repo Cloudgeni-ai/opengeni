@@ -569,3 +569,13 @@ test("an agent's own chat says when a change of agent started a new one", async 
   expect(container.textContent).toContain("Previous chat");
   await act(async () => root.unmount());
 });
+
+test("a new automation opened from an agent's page goes back there on Cancel and Save", async () => {
+  const { scheduleFormReturnAgent } = await import("./schedule-form-page");
+  expect(
+    scheduleFormReturnAgent({ kind: "create", agentId: "agent-example", returnTo: "agent" }),
+  ).toBe("agent-example");
+  expect(scheduleFormReturnAgent({ kind: "create", agentId: "agent-example" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "create", returnTo: "agent" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "edit", scheduleId: "task-example" })).toBeUndefined();
+});

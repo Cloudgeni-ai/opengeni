@@ -23,6 +23,7 @@ import { useNavigate } from "../../lib/navigation";
 import { toast } from "../../lib/toast";
 import { AgentCanUse as AgentCanUseSection } from "./agent-can-use";
 import { AgentSkills as AgentSkillsSection } from "./agent-skills";
+import { AgentTriggerDialog } from "./agent-trigger-dialog";
 
 const VERSION_CONFLICT =
   "Someone else changed this agent. Reload to see their change, then try again.";
@@ -50,6 +51,8 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
   const [template, setTemplate] = useState<AgentTemplate | null>(null);
   const [sources, setSources] = useState<{ id: string; name: string }[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  // The light Add trigger dialog, blank or at one suggestion.
+  const [adding, setAdding] = useState<{ suggestion?: number } | null>(null);
   useEffect(() => {
     let live = true;
     client.listScheduledTasks(workspaceId, { limit: 200 }).then(
@@ -72,11 +75,21 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
       live = false;
     };
   }, [agent.id, agent.templateKey, client, workspaceId]);
-  const add = (agentTrigger?: number) =>
+  const openFullForm = (agentTrigger?: number) =>
     void navigate({
       to: "/workspaces/$workspaceId/automations/new",
       params: { workspaceId },
-      search: { agent: agent.id, ...(agentTrigger !== undefined ? { agentTrigger } : {}) },
+      search: {
+        agent: agent.id,
+        ...(agentTrigger !== undefined ? { agentTrigger } : {}),
+        returnTo: "agent",
+      },
+    });
+  const addSource = (kind?: string) =>
+    void navigate({
+      to: "/workspaces/$workspaceId/automations/sources/new",
+      params: { workspaceId },
+      search: kind ? { kind } : {},
     });
   const setOn = async (task: ScheduledTask, on: boolean) => {
     setBusy(task.id);
@@ -111,7 +124,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
       title="Starts when"
       action={
         agent.viewer.canEdit ? (
-          <Button type="button" variant="outline" size="sm" onClick={() => add()}>
+          <Button type="button" variant="outline" size="sm" onClick={() => setAdding({})}>
             <PlusIcon />
             Add trigger
           </Button>
@@ -158,10 +171,34 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
               data-agent-suggested-trigger=""
               label={suggestion.name}
               description="Suggested. Off until you choose where it listens."
-              control={<RowButton onClick={() => add(index)}>Set up</RowButton>}
+              control={
+                <RowButton onClick={() => setAdding({ suggestion: index })}>Set up</RowButton>
+              }
             />
           ))
         : null}
+      {agent.viewer.canEdit ? (
+        <AgentTriggerDialog
+          agent={agent}
+          workspaceId={workspaceId}
+          suggestion={
+            adding?.suggestion !== undefined
+              ? template?.suggestedTriggers[adding.suggestion]
+              : undefined
+          }
+          open={adding !== null}
+          onOpenChange={(open) => {
+            if (!open) setAdding(null);
+          }}
+          onCreated={(task) => {
+            setTasks((list) => [...(list ?? []).filter((row) => row.id !== task.id), task]);
+            setAdding(null);
+            toast.success("Trigger added", { description: task.name });
+          }}
+          onOpenFullForm={() => openFullForm(adding?.suggestion)}
+          onAddSource={addSource}
+        />
+      ) : null}
     </DetailSection>
   );
 }
