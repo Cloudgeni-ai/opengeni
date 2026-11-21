@@ -11,6 +11,7 @@ import {
   activePersonalGitHubConnection,
   personalGitHubReader,
   PersonalGitHubReadError,
+  type PersonalGitHubRead,
 } from "../personal-github-reader";
 import { sha256Hex } from "./delivery-intake";
 import type {
@@ -151,11 +152,126 @@ function time(value: unknown): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+/**
+ * GitHub's times have whole seconds and a wake reads the pull request just
+ * before its trigger is saved: a merge that close to the trigger still counts.
+ * The dedupe key keeps it from firing twice.
+ */
+const SINCE_GRACE_MS = 2 * 60_000;
+
+function happenedBefore(at: Date, since: Date): boolean {
+  return at.getTime() < since.getTime() - SINCE_GRACE_MS;
+}
+
+/** The newest triggers first, so old ones that will never fire don't crowd out new ones. */
+function newestFirst<T extends { since: Date }>(targets: Iterable<T>): T[] {
+  return [...targets].sort((left, right) => right.since.getTime() - left.since.getTime());
+}
+
 /** `owner/name` as GitHub spells it, from a release's page address. */
 function releaseRepository(release: Json, fallback: string): string {
   const url = typeof release.html_url === "string" ? release.html_url : "";
   const match = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/releases\//u.exec(url);
   return match?.[1] ?? fallback;
+}
+
+/**
+ * The merges and releases the targets name that happened since their
+ * triggers were created, read with `readerFor` (null for a repository the
+ * person doesn't allow). Each comes with its dedupe key; a target whose read
+ * failed is in `failures` and doesn't stop the others.
+ */
+export async function githubPersonalReadEvents(
+  targets: ReturnType<typeof githubPersonalTargets>,
+  readerFor: (repository: string) => Promise<PersonalGitHubRead | null>,
+): Promise<{
+  found: Array<{ key: string; event: NormalizedEventInput }>;
+  failures: unknown[];
+  reads: number;
+}> {
+  const found: Array<{ key: string; event: NormalizedEventInput }> = [];
+  // One repository failing (SSO, a revoked grant, GitHub erroring) doesn't
+  // hold up the others; what was found is still recorded.
+  const failures: unknown[] = [];
+  let reads = 0;
+  const attempt = async (work: () => Promise<void>) => {
+    reads += 1;
+    try {
+      await work();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+  for (const target of newestFirst(targets.pullRequests.values()).slice(0, PULL_REQUESTS_MAX)) {
+    await attempt(async () => {
+      const read = await readerFor(target.repository);
+      // A repository the person no longer allows Opengeni to use isn't read.
+      if (!read) return;
+      const pr = object(
+        await unlessGone(() => read(`/repos/${target.repository}/pulls/${target.number}`)),
+      );
+      const closedAt = time(pr?.closed_at);
+      if (!pr || pr.state !== "closed" || !closedAt || happenedBefore(closedAt, target.since)) {
+        return;
+      }
+      const repository = object(object(pr.base)?.repo);
+      const sender = pr.merged === true ? (pr.merged_by ?? pr.user) : pr.user;
+      const key = `pr:${String(repository?.full_name ?? target.repository).toLowerCase()}#${target.number}:${closedAt.toISOString()}`;
+      found.push({
+        key,
+        event: githubReadEvent({
+          event: "pull_request",
+          action: "closed",
+          payload: { action: "closed", repository, pull_request: pr, sender },
+          externalId: key,
+          occurredAt: closedAt,
+        }),
+      });
+    });
+  }
+  for (const target of newestFirst(targets.releases.values()).slice(0, REPOSITORIES_MAX)) {
+    await attempt(async () => {
+      const read = await readerFor(target.repository);
+      if (!read) return;
+      const listed = await unlessGone(() =>
+        read(`/repos/${target.repository}/releases?per_page=${RELEASES_PER_READ}`),
+      );
+      for (const release of (Array.isArray(listed) ? listed : []).map(object)) {
+        const publishedAt = time(release?.published_at);
+        if (
+          !release ||
+          release.draft === true ||
+          !publishedAt ||
+          happenedBefore(publishedAt, target.since)
+        ) {
+          continue;
+        }
+        const fullName = releaseRepository(release, target.repository);
+        const key = `release:${fullName.toLowerCase()}:${String(release.id)}`;
+        found.push({
+          key,
+          event: githubReadEvent({
+            event: "release",
+            action: "published",
+            payload: {
+              action: "published",
+              repository: {
+                full_name: fullName,
+                name: fullName.split("/")[1],
+                owner: { login: fullName.split("/")[0] },
+                html_url: `https://github.com/${fullName}`,
+              },
+              release,
+              sender: release.author,
+            },
+            externalId: key,
+            occurredAt: publishedAt,
+          }),
+        });
+      }
+    });
+  }
+  return { found, failures, reads };
 }
 
 async function readGitHubPersonalFeed(
@@ -192,65 +308,7 @@ async function readGitHubPersonalFeed(
     }
     return readers.get(key) ?? null;
   };
-  const found: Array<{ key: string; event: NormalizedEventInput }> = [];
-  for (const target of [...targets.pullRequests.values()].slice(0, PULL_REQUESTS_MAX)) {
-    const read = await readerFor(target.repository);
-    // A repository the person no longer allows Opengeni to use isn't read.
-    if (!read) continue;
-    const pr = object(
-      await unlessGone(() => read(`/repos/${target.repository}/pulls/${target.number}`)),
-    );
-    const closedAt = time(pr?.closed_at);
-    if (!pr || pr.state !== "closed" || !closedAt || closedAt < target.since) continue;
-    const repository = object(object(pr.base)?.repo);
-    const sender = pr.merged === true ? (pr.merged_by ?? pr.user) : pr.user;
-    const key = `pr:${String(repository?.full_name ?? target.repository).toLowerCase()}#${target.number}:${closedAt.toISOString()}`;
-    found.push({
-      key,
-      event: githubReadEvent({
-        event: "pull_request",
-        action: "closed",
-        payload: { action: "closed", repository, pull_request: pr, sender },
-        externalId: key,
-        occurredAt: closedAt,
-      }),
-    });
-  }
-  for (const target of [...targets.releases.values()].slice(0, REPOSITORIES_MAX)) {
-    const read = await readerFor(target.repository);
-    if (!read) continue;
-    const listed = await unlessGone(() =>
-      read(`/repos/${target.repository}/releases?per_page=${RELEASES_PER_READ}`),
-    );
-    for (const release of (Array.isArray(listed) ? listed : []).map(object)) {
-      const publishedAt = time(release?.published_at);
-      if (!release || release.draft === true || !publishedAt || publishedAt < target.since) {
-        continue;
-      }
-      const fullName = releaseRepository(release, target.repository);
-      const key = `release:${fullName.toLowerCase()}:${String(release.id)}`;
-      found.push({
-        key,
-        event: githubReadEvent({
-          event: "release",
-          action: "published",
-          payload: {
-            action: "published",
-            repository: {
-              full_name: fullName,
-              name: fullName.split("/")[1],
-              owner: { login: fullName.split("/")[0] },
-              html_url: `https://github.com/${fullName}`,
-            },
-            release,
-            sender: release.author,
-          },
-          externalId: key,
-          occurredAt: publishedAt,
-        }),
-      });
-    }
-  }
+  const { found, failures, reads } = await githubPersonalReadEvents(targets, readerFor);
   // One delivery per merge or release, so each fires once however often it is read.
   for (const { key, event } of found) {
     const body = new TextEncoder().encode(JSON.stringify({ type: event.type, data: event.data }));
@@ -271,6 +329,17 @@ async function readGitHubPersonalFeed(
       },
     });
     if (!recorded) throw new Error("The source was removed while its events were read");
+  }
+  // A sign-in that stopped working blocks the source; so does every read failing.
+  const signIn = failures.find(
+    (error) => error instanceof PersonalGitHubReadError && error.status === 401,
+  );
+  if (signIn || (failures.length > 0 && failures.length === reads)) throw signIn ?? failures[0];
+  for (const error of failures) {
+    deps.observability?.warn("A GitHub (your connection) read failed; it will retry", {
+      sourceId: source.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
   return { cursor: "{}", nextActionAt: later };
 }

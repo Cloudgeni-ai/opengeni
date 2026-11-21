@@ -1,3 +1,4 @@
+import { HTTPException } from "hono/http-exception";
 import { createHash } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -1391,9 +1392,7 @@ async function uploadSkills(
       });
       continue;
     }
-    const current = listed.find(
-      (skill) => skill.stableKey === stableKey && skill.scope === scope,
-    );
+    const current = listed.find((skill) => skill.stableKey === stableKey && skill.scope === scope);
     if (current) {
       const read = await action(context, "readWorkspaceSkill", {
         pathParameters: { workspaceId, skillId: current.id },
@@ -1518,6 +1517,11 @@ const skillsSync = tool({
         try {
           snapshot = await context.readSkillRepository(args.repository);
         } catch (error) {
+          if (error instanceof HTTPException && error.status === 429) {
+            return failure(
+              "GitHub's public request limit for this server has been reached. Try again after it resets, or upload the Skills from a local checkout.",
+            );
+          }
           return failure(
             error instanceof Error && error.message
               ? `Couldn't read the repository: ${error.message}`

@@ -288,7 +288,7 @@ has.
 
 ### GitHub (your connection)
 
-Where the workspace has no GitHub App (or it can't read a repository), a
+Where the workspace has no GitHub app (or it can't read a repository), a
 person's own GitHub connection (Your GitHub) can still tell a chat that a
 pull request merged or a release was published: a source of kind
 `github_personal` (migrations `1525` to `1528`), named "GitHub (your
@@ -306,15 +306,20 @@ first use; `POST /event-sources {kind: "github_personal"}` does too.
   `data.repository.full_name` and `data.pull_request.number` (equals), that
   pull request; for a `release.published` trigger naming the repository, its
   latest releases. Only repositories the person allowed Opengeni to use are
-  read, and only with GET. Triggers without those conditions never fire.
-- **Same events as the App's.** A merge or release that happened after the
-  trigger was created is shaped like the App webhook's event (`shape` in
+  read, and only with GET, as for the person's other Your GitHub work. Triggers
+  without those conditions never fire; at most the 25 newest pull requests
+  and 10 newest repositories are read, and one repository failing doesn't
+  hold up the others.
+- **Same events as the app's.** A merge or release that happened after the
+  trigger was created (less two minutes, as GitHub's times have whole
+  seconds) is shaped like the app webhook's event (`shape` in
   `github-events.ts`), so the same conditions match, and is recorded once
   per merge or release (its delivery's dedupe key); the feed keeps no
   cursor. Types: `pull_request.closed` and `release.published`.
-- **Failures.** A disconnected Your GitHub blocks the source's triggers with
-  a reconnect reason; other GitHub errors (such as its rate limit) back off
-  and block after an hour, like other feeds. Its deliveries can't be
+- **Failures.** A disconnected Your GitHub (or GitHub refusing its sign-in)
+  blocks the source's triggers with a reconnect reason; other GitHub errors
+  (such as its rate limit) are retried, and when every read fails they back
+  off and block after an hour, like other feeds. Its deliveries can't be
   replayed.
 
 ### This workspace

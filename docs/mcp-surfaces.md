@@ -206,8 +206,11 @@ connection's access setting; none adds authority.
   it, `/tree/<ref>/<path>`) at one commit, at most 50, and saves them the
   same way, with "Synced from owner/repo@commit" as the change reason; the
   result names the commit and each Skill's `path`, and lists folders it
-  couldn't read. Private repositories are synced with `upload` from a local
-  checkout.
+  couldn't read. It reads at most 40 files per sync: GitHub's public request
+  limit (about 60 an hour) is per server address and shared by everyone on
+  it, so folders past that are listed as skipped (sync a folder URL, or
+  upload). Private repositories are synced with `upload` from a local
+  checkout; self-hosted servers need outbound access to `api.github.com`.
 - **Rate limits.** Each connection (or personal key) may make 120 calls in a
   burst refilling at 2 per second, and 20 `delegate` calls refilling at one
   per 30 seconds (chats started through the generic action tools count only
@@ -215,7 +218,8 @@ connection's access setting; none adds authority.
   nothing ran, so the retry is safe. The limits are shared by every API
   process: each connection's buckets are kept in Postgres
   (`mcp_connection_rate_limits`, migration `1522`), so more replicas don't
-  raise them.
+  raise them. While Postgres can't be reached, each process counts on its
+  own.
 - **Not yet.** MCP Tasks (long-running calls) and MCP event notifications are
   not supported; use `wait_for`.
 

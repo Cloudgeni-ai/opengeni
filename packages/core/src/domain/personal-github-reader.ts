@@ -4,13 +4,9 @@ import {
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
   isPersonalGitHubConnection,
 } from "@opengeni/contracts/personal-github";
-import {
-  buildConnectionTokenResolver,
-  getPersonalGitHubRepositorySelectionState,
-  listConnectionsMetadata,
-  type Database,
-} from "@opengeni/db";
+import { buildConnectionTokenResolver, listConnectionsMetadata, type Database } from "@opengeni/db";
 import { readResponseJsonBounded } from "@opengeni/network";
+import { checkPersonalGitHubRepositoryAccess } from "./personal-github-repository-access";
 
 /**
  * Reads GitHub's REST API as one person, with their own GitHub connection
@@ -63,8 +59,10 @@ export async function activePersonalGitHubConnection(
 }
 
 /**
- * A reader for `owner/name` as the person, or null (see above). `repository`
- * compares case-insensitively with the person's allowed repositories.
+ * A reader for `owner/name` as the person, or null (see above). Whether the
+ * person allowed it is decided as for their other Your GitHub work
+ * (`checkPersonalGitHubRepositoryAccess`: the connection's account, scope
+ * and reconnect state, and their current repository choice), for reading.
  */
 export async function personalGitHubReader(
   deps: PersonalGitHubReaderDeps,
@@ -72,18 +70,6 @@ export async function personalGitHubReader(
 ): Promise<PersonalGitHubRead | null> {
   const connection = await activePersonalGitHubConnection(deps, input);
   if (!connection) return null;
-  const selection = await getPersonalGitHubRepositorySelectionState(deps.db, {
-    accountId: input.accountId,
-    originWorkspaceId: connection.workspaceId,
-    subjectId: input.subjectId,
-    connectionId: connection.id,
-  });
-  if (!selection) return null;
-  const wanted = input.repository.toLowerCase();
-  const allowed =
-    (deps.settings.githubPersonalAllRepositoriesEnabled && selection.allRepositoriesAccess) ||
-    selection.repositories.some((repository) => repository.fullName.toLowerCase() === wanted);
-  if (!allowed) return null;
   const transport = deps.fetch ?? fetch;
   const resolver = buildConnectionTokenResolver(deps.db, deps.settings, undefined, {
     ...(deps.fetch ? { refreshTransport: { fetchImpl: deps.fetch } } : {}),
@@ -112,8 +98,7 @@ export async function personalGitHubReader(
       )?.[1] ?? null
     );
   };
-  return async (path) => {
-    const url = new URL(path, PERSONAL_GITHUB_API_ORIGIN);
+  const get = async (url: URL): Promise<Response> => {
     if (url.origin !== PERSONAL_GITHUB_API_ORIGIN) throw new PersonalGitHubReadError(400);
     const send = async (forceRefresh: boolean) => {
       const header = await authorization(url.toString(), forceRefresh);
@@ -130,11 +115,25 @@ export async function personalGitHubReader(
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     };
-    let response = await send(false);
-    if (response.status === 401) {
-      await response.body?.cancel().catch(() => undefined);
-      response = await send(true);
-    }
+    const response = await send(false);
+    if (response.status !== 401) return response;
+    await response.body?.cancel().catch(() => undefined);
+    return await send(true);
+  };
+  const decision = await checkPersonalGitHubRepositoryAccess({
+    db: deps.db,
+    accountId: input.accountId,
+    originWorkspaceId: connection.workspaceId,
+    ownerSubjectId: input.subjectId,
+    connectionId: connection.id,
+    repository: { fullName: input.repository },
+    access: "read",
+    githubGet: get,
+  }).catch(() => null);
+  if (!decision?.allowed) return null;
+  if (decision.mode === "all" && !deps.settings.githubPersonalAllRepositoriesEnabled) return null;
+  return async (path) => {
+    const response = await get(new URL(path, PERSONAL_GITHUB_API_ORIGIN));
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
       throw new PersonalGitHubReadError(response.status);

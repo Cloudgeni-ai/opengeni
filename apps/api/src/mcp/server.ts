@@ -16,6 +16,7 @@ import {
   assertGoalResumeAllowed,
   createGitHubPersonalEventSource,
   MissingPermissionRefusal,
+  personalGitHubReader,
 } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { registerSidebarLayoutTools } from "./sidebar-layout-tools";
@@ -1693,10 +1694,9 @@ export function buildOpenGeniMcpServer(
       },
       wake: () => sessionLinkWake,
       wakeTarget: async (link) =>
-        await sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link, {
-          accountId: grant.accountId,
-          subjectId:
-            (await scheduledTaskViewerForGrant(deps.db, grant, deps.settings)).subjectId ?? "",
+        await sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link, async () => {
+          const { subjectId } = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+          return subjectId ? { accountId: grant.accountId, subjectId } : null;
         }),
       json,
     });
@@ -2709,15 +2709,44 @@ export function buildOpenGeniMcpServer(
         // The workspace's GitHub App source, or, where only the person's own
         // GitHub connection can read the repository, their "GitHub (your
         // connection)" source, added on first use.
-        const kind = wake.via === "personal" ? "github_personal" : "github";
-        let source: { id: string } | undefined = (
-          await listSessionLinkEventSources(deps.db, grant.workspaceId, viewer.subjectId)
-        ).find(
-          (candidate) =>
-            candidate.kind === kind &&
-            (kind === "github" || candidate.ownerSubjectId === viewer.subjectId) &&
-            sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+        const sources = await listSessionLinkEventSources(
+          deps.db,
+          grant.workspaceId,
+          viewer.subjectId,
         );
+        const usable = (kind: "github" | "github_personal") =>
+          sources.find(
+            (candidate) =>
+              candidate.kind === kind &&
+              (kind === "github" || candidate.ownerSubjectId === viewer.subjectId) &&
+              sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+          );
+        let kind: "github" | "github_personal" =
+          wake.via === "personal" ? "github_personal" : "github";
+        let source: { id: string } | undefined = usable(kind);
+        // The App reads the repository but the workspace has no GitHub event
+        // source: the person's own connection can still watch it.
+        const repository = wake.conditions.find(
+          (condition) => condition.field === "data.repository.full_name",
+        )?.value;
+        if (
+          !source &&
+          kind === "github" &&
+          viewer.subjectId &&
+          typeof repository === "string" &&
+          (await personalGitHubReader(
+            { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              subjectId: viewer.subjectId,
+              repository,
+            },
+          ).catch(() => null))
+        ) {
+          kind = "github_personal";
+          source = usable(kind);
+        }
         if (!source && kind === "github_personal" && viewer.subjectId) {
           source = await createGitHubPersonalEventSource({
             db: deps.db,

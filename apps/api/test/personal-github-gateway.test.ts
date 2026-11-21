@@ -3,6 +3,7 @@ import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
 import {
   createdPullRequest,
   gatewayBearer,
+  linkingCreatedPullRequest,
   gatewayRepositoryDecision,
   handlePersonalGitHubGatewayRequest,
   isPersonalGitHubGatewayRequest,
@@ -1044,5 +1045,44 @@ describe("force updates and deletions of refs", () => {
     ).toEqual({ url: "https://github.com/a/b/pull/3", title: "From input" });
     expect(createdPullRequest({ html_url: "https://evil.example/a/b/pull/3" }, null)).toBeNull();
     expect(createdPullRequest(undefined, null)).toBeNull();
+  });
+
+  test("a created pull request's answer passes through whole, however large", async () => {
+    const authority = {} as PersonalGitHubGatewayAuthority;
+    const linked: string[] = [];
+    const link = async (_: unknown, created: { url: string }) => {
+      linked.push(created.url);
+    };
+    const small = JSON.stringify({ html_url: "https://github.com/a/b/pull/9" });
+    const chunked = (text: string, size: number) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const bytes = new TextEncoder().encode(text);
+            for (let at = 0; at < bytes.byteLength; at += size) {
+              controller.enqueue(bytes.slice(at, at + size));
+            }
+            controller.close();
+          },
+        }),
+        { status: 201 },
+      );
+    const answered = await linkingCreatedPullRequest(link, authority, chunked(small, 7), null);
+    expect(await answered.text()).toBe(small);
+    expect(linked).toEqual(["https://github.com/a/b/pull/9"]);
+    // Past the read limit and without a content-length: nothing is linked,
+    // and every byte still reaches the command.
+    const large = JSON.stringify({
+      html_url: "https://github.com/a/b/pull/10",
+      body: "x".repeat(5 * 1024 * 1024),
+    });
+    const passed = await linkingCreatedPullRequest(
+      link,
+      authority,
+      chunked(large, 64 * 1024),
+      null,
+    );
+    expect((await passed.text()).length).toBe(large.length);
+    expect(linked).toHaveLength(1);
   });
 });

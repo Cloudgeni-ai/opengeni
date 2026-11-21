@@ -37,7 +37,7 @@ export async function admitMcpConnectionRateLimit(
     .digest("hex");
   const capacity = input.capacity;
   const rate = input.refillPerSecond;
-  return await withAccountRls(db, input.accountId, async (scoped) => {
+  const retryAfter = await withAccountRls(db, input.accountId, async (scoped) => {
     const refilled = (table: string) =>
       sql.raw(`least(${capacity}::double precision, ${table}.tokens
         + greatest(0, extract(epoch from clock_timestamp() - ${table}.updated_at))
@@ -59,16 +59,19 @@ export async function admitMcpConnectionRateLimit(
           where current.account_id = ${input.accountId}::uuid and current.scope_hash = ${scopeHash}),
           1)::integer as retry_after`,
     );
-    if (Math.random() < 0.01) {
-      await scoped
-        .execute(
-          sql`delete from mcp_connection_rate_limits
-            where account_id = ${input.accountId}::uuid
-              and updated_at < clock_timestamp() - ${IDLE_ROW_MS} * interval '1 millisecond'`,
-        )
-        .catch(() => undefined);
-    }
     if (rows[0]?.admitted) return 0;
     return Math.max(1, Number(rows[0]?.retry_after ?? 1));
   });
+  // Now and then, after the call's own statement committed, so a failed
+  // cleanup never undoes the token it took.
+  if (Math.random() < 0.01) {
+    await withAccountRls(db, input.accountId, async (scoped) =>
+      scoped.execute(
+        sql`delete from mcp_connection_rate_limits
+          where account_id = ${input.accountId}::uuid
+            and updated_at < clock_timestamp() - ${IDLE_ROW_MS} * interval '1 millisecond'`,
+      ),
+    ).catch(() => undefined);
+  }
+  return retryAfter;
 }

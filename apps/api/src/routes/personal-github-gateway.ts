@@ -430,7 +430,7 @@ const CREATED_PULL_REQUEST_MAX_BYTES = 4 * 1024 * 1024;
  * `createPullRequest.pullRequest.url`) to the chat. Linking never fails the
  * command: a body too large, unreadable or without a URL links nothing.
  */
-async function linkingCreatedPullRequest(
+export async function linkingCreatedPullRequest(
   link: NonNullable<PersonalGitHubGatewayServices["linkPullRequest"]>,
   authority: PersonalGitHubGatewayAuthority,
   upstream: Response,
@@ -444,13 +444,46 @@ async function linkingCreatedPullRequest(
       headers: downstreamHeaders(upstream),
     });
   }
-  const bytes = new Uint8Array(await upstream.arrayBuffer());
-  const created =
-    bytes.byteLength <= CREATED_PULL_REQUEST_MAX_BYTES
-      ? createdPullRequest(parseJsonBody(bytes), requestBody)
-      : null;
-  if (created) await link(authority, created).catch(() => undefined);
-  return new Response(bytes as unknown as BodyInit, {
+  // Read up to the limit; a longer body (only possible without a
+  // content-length) passes through whole, read and unread parts alike.
+  const reader = upstream.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let done = false;
+  while (size <= CREATED_PULL_REQUEST_MAX_BYTES) {
+    const next = await reader.read();
+    if (next.done) {
+      done = true;
+      break;
+    }
+    chunks.push(next.value);
+    size += next.value.byteLength;
+  }
+  if (done) {
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const created = createdPullRequest(parseJsonBody(bytes), requestBody);
+    if (created) await link(authority, created).catch(() => undefined);
+  }
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      if (done) controller.close();
+    },
+    async pull(controller) {
+      const next = await reader.read();
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: downstreamHeaders(upstream),

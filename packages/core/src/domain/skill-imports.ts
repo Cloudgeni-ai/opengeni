@@ -184,6 +184,12 @@ function buildResolvedImport(
 
 /** At most this many Skill folders are read from one repository. */
 export const SKILL_REPOSITORY_MAX_SKILLS = 50;
+/**
+ * Files read from GitHub per sync. Each is one request against the server's
+ * public GitHub request limit (about 60 an hour), which every workspace on
+ * the server shares; folders past it are reported as skipped.
+ */
+export const SKILL_REPOSITORY_MAX_FILE_READS = 40;
 /** The bytes read from one repository across all its Skills. */
 const SKILL_REPOSITORY_MAX_TOTAL_BYTES = 4 * PORTABLE_SKILL_MAX_TOTAL_BYTES;
 
@@ -248,6 +254,7 @@ export async function readSkillRepository(
   const skills: Array<{ path: string; files: SkillLibraryFile[] }> = [];
   const skipped: Array<{ path: string; reason: string }> = [];
   let totalBytes = 0;
+  let fileReads = 0;
   for (const root of selected) {
     const prefix = root === "." ? "" : `${root}/`;
     const inside = tree.filter(
@@ -273,12 +280,21 @@ export async function readSkillRepository(
       });
       continue;
     }
+    if (fileReads + blobs.length > SKILL_REPOSITORY_MAX_FILE_READS) {
+      skipped.push({
+        path: root,
+        reason:
+          "Too many files to read from GitHub in one sync. Sync this folder on its own, or upload it from a local checkout.",
+      });
+      continue;
+    }
+    fileReads += blobs.length;
+    totalBytes += declared;
     try {
       const files = await mapConcurrent(blobs, maxConcurrentBlobReads, async (entry) => {
         const bytes = await client.readBlob(parsed.owner, parsed.repository, entry.sha);
         if (bytes.byteLength > PORTABLE_SKILL_MAX_FILE_BYTES)
           throw new SkippedSkill("It is too large.");
-        totalBytes += bytes.byteLength;
         let content: string;
         try {
           content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);

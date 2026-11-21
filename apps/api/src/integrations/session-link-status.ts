@@ -302,7 +302,8 @@ export async function sessionLinkGitHubWakeTarget(
   deps: Pick<ApiRouteDeps, "db" | "settings" | "githubPersonalFetch">,
   workspaceId: string,
   link: Pick<SessionLink, "url" | "ref" | "kind">,
-  person?: { accountId: string; subjectId: string } | null,
+  /** Who the chat acts for, looked up only when the App can't read the repository. */
+  person?: () => Promise<{ accountId: string; subjectId: string } | null>,
 ): Promise<{
   fullName: string;
   state: SessionLinkLiveStatus["state"] | null;
@@ -328,10 +329,11 @@ export async function sessionLinkGitHubWakeTarget(
     }
     return { fullName: repository.fullName, state, via: "app" };
   }
-  if (!person) return null;
+  const who = person ? await person().catch(() => null) : null;
+  if (!who) return null;
   const read = await personalGitHubReader(
     { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
-    { ...person, workspaceId, repository: `${ref.owner}/${ref.repo}` },
+    { ...who, workspaceId, repository: `${ref.owner}/${ref.repo}` },
   ).catch(() => null);
   if (!read) return null;
   const found = (await read(`/repos/${ref.owner}/${ref.repo}`).catch(() => null)) as {

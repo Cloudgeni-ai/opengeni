@@ -81,8 +81,8 @@ seconds):
 
 GitHub status is read through the workspace's GitHub App installation for the
 repository's owner, and only for repositories the workspace chose for that
-installation; that choice is checked on every read. Where the App can't read
-the repository (or the workspace has no GitHub App), it is read as the viewer
+installation; that choice is checked on every read. Where the app can't read
+the repository (or the workspace has no GitHub app), it is read as the viewer
 through their own GitHub connection (Your GitHub,
 [personal-github.md](personal-github.md)), only for repositories they allowed
 Opengeni to use, and cached for that viewer alone: someone else opening the
@@ -125,15 +125,19 @@ open after that answer for the woken one, then settles as usual. Recurring event
 leave the thread alone.
 
 `wakeWhen` needs automations with event triggers in the chat (otherwise the
-tool refuses it) and either the workspace's GitHub App able to read the
+tool refuses it) and either the workspace's GitHub app able to read the
 repository, with a GitHub event source the chat's owner can use (a workspace
 has at most one, so the wake uses it), or the chat's person's own GitHub
-connection able to read it. In that second case the wake uses their
+connection able to read it. In that second case (also when the app reads the
+repository but the workspace has no GitHub event source) the wake uses their
 "GitHub (your connection)" event source (kind `github_personal`, private to
 them, added on first use; migrations `1525` to `1528`): it reads the pull
 request, and the repository's releases, with their connection every two
 minutes while the automation waits, and fires once for a merge or release
-after the wake was set up (so up to two minutes after it happens). Otherwise,
+from shortly before the wake was set up on (so up to two minutes after it
+happens). It reads the 25 newest pull requests and 10 newest repositories its
+automations name; a repository that fails to read is retried without holding
+up the others. Otherwise,
 or for a link that is not a GitHub pull request, the link is added and the
 result says why no wake was set (`wakeNotSet`).
 
@@ -149,7 +153,7 @@ its own GitHub tools and permissions. Embedders control both with the
 
 ## Self-hosted limits
 
-- Live GitHub status and merge wakes use the GitHub App
+- Live GitHub status and merge wakes use the GitHub app
   ([github-app.md](github-app.md)) installed on the repository's owner, with
   its webhooks reaching the deployment. Without it they use the viewer's (for
   a wake, the chat's person's) own GitHub connection, which needs Your GitHub
