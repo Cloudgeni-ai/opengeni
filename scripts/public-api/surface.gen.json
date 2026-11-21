@@ -35450,6 +35450,7 @@
         "$.adoptSessionSettings": "const?=[\"true\"]",
         "$.agentConfig": "ref(ScheduledTaskAgentConfigInput)?",
         "$.agentConfigPatch": "object?",
+        "$.agentConfigPatch.agentId": "string? null",
         "$.agentConfigPatch.model": "string?",
         "$.agentConfigPatch.prompt": "string?",
         "$.agentConfigPatch.reasoningEffort": "ref(ReasoningEffort)?",

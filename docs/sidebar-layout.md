@@ -163,7 +163,8 @@ Both are in the workspace-admin tool family and need `workspace:read`.
 
 - **Web and the desktop app**: under the primary navigation, above the
   chats. Each row has a menu (Move up, Move down, Hide or Remove, Customize
-  sidebar), and a quiet Customize row under the section shows while the
+  sidebar; your own groups also have Rename, inline as on the Sidebar page),
+  and a quiet Customize row under the section shows while the
   pointer is over it (always on touch screens). Both, the account menu's
   Customize sidebar and settings search ("sidebar") open the Sidebar page
   (`/workspaces/<id>/sidebar`): Yours, and Workspace default for admins. Its

@@ -1588,8 +1588,8 @@ test("Open full form keeps the note and chat choice, out of the address", async 
   });
   const note = dialog.querySelector<HTMLTextAreaElement>("textarea")!;
   await act(async () => {
-    const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
-    setValue.call(note, "Label it and reply");
+    const setNative = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+    setNative.call(note, "Label it and reply");
     note.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await chooseFrom(dialog, "New chat each run", "An existing chat");

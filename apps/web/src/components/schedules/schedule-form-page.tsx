@@ -824,21 +824,21 @@ function AgentScheduleForm({
   const needsSessions = inheritsChatSettings && access.canTargetSessions;
   const sourceSessionId = mode.kind === "create" ? mode.sourceSessionId : undefined;
   const targetSessionId = materializedSessionId ?? draft.targetSessionId;
-  const agentId = draft.agentId;
+  const chatAgentId = draft.agentId;
   useEffect(() => {
     if (!needsSessions) return;
     let live = true;
     setSessionsLoading(true);
     setSessionsError(null);
     void Promise.allSettled([
-      materializedSessionId || agentId
+      materializedSessionId || chatAgentId
         ? Promise.resolve([] as Session[])
         : client.listSessions(workspaceId, { limit: 100 }),
       targetSessionId
         ? client.getSession(workspaceId, targetSessionId, { fresh: true })
         : Promise.resolve(null),
-      !materializedSessionId && agentId
-        ? listAgentChats(client, workspaceId, agentId)
+      !materializedSessionId && chatAgentId
+        ? listAgentChats(client, workspaceId, chatAgentId)
         : Promise.resolve([] as AgentChat[]),
     ]).then(([listResult, exactResult, agentResult]) => {
       if (!live) return;
@@ -871,7 +871,7 @@ function AgentScheduleForm({
       live = false;
     };
   }, [
-    agentId,
+    chatAgentId,
     client,
     materializedSessionId,
     needsSessions,
@@ -1535,28 +1535,28 @@ function AgentScheduleForm({
                 value={eachRun}
                 onValueChange={(runMode) => update({ runMode: runMode as EachRun })}
                 options={[
-                {
-                  value: "existing_session",
-                  label: "Use an existing chat",
-                  description: "Continue a conversation with its current settings.",
-                  disabled: !access.canTargetSessions,
-                  disabledReason: "You need permission to open chats in this workspace.",
-                },
-                {
-                  value: "reusable_session",
-                  label: savedReusableSessionId
-                    ? "Use this automation's chat"
-                    : "Create a chat for this automation",
-                  description: "Keep the results together in one conversation.",
-                },
-                {
-                  value: "new_session_per_run",
-                  label: "Create a chat each run",
-                  description: "Start each run with a fresh conversation.",
-                },
-              ]}
-              className="max-w-full"
-            />
+                  {
+                    value: "existing_session",
+                    label: "Use an existing chat",
+                    description: "Continue a conversation with its current settings.",
+                    disabled: !access.canTargetSessions,
+                    disabledReason: "You need permission to open chats in this workspace.",
+                  },
+                  {
+                    value: "reusable_session",
+                    label: savedReusableSessionId
+                      ? "Use this automation's chat"
+                      : "Create a chat for this automation",
+                    description: "Keep the results together in one conversation.",
+                  },
+                  {
+                    value: "new_session_per_run",
+                    label: "Create a chat each run",
+                    description: "Start each run with a fresh conversation.",
+                  },
+                ]}
+                className="max-w-full"
+              />
             </div>
             {materializedSessionId ? (
               <p className="m-0 text-xs leading-4.5 text-fg-muted">
