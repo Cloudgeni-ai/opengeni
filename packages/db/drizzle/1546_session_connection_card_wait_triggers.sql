@@ -1,9 +1,9 @@
 -- deployment-mode: rolling
--- Second half of 1515 (see its header): the session_events triggers that keep
+-- Second half of 1545 (see its header): the session_events triggers that keep
 -- sessions.awaiting_connection_* current, in their own transaction so this
 -- migration locks only session_events.
 --
--- * session_events_connection_wait_v1 runs 1515's tracking function.
+-- * session_events_connection_wait_v1 runs 1545's tracking function.
 -- * The inbox trigger also takes `turn.started`, which closes the chat's open
 --   connection-card notices (status withdrawn). Its function is 1289's plus
 --   that branch; same signature, so grants are kept. CREATE OR REPLACE

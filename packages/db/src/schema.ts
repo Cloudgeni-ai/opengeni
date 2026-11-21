@@ -5548,7 +5548,7 @@ export const sessions = pgTable(
     inputWaitUntil: timestamp("input_wait_until", { withTimezone: true }),
     inputWaitReason: text("input_wait_reason"),
     inputWaitSetAt: timestamp("input_wait_set_at", { withTimezone: true }),
-    // Open connection-card notices the agent waits on (migration 1515): their
+    // Open connection-card notices the agent waits on (migration 1545): their
     // keys and when the oldest was posted. Both null when none is open.
     // Maintained only by the session_events trigger.
     awaitingConnectionSince: timestamp("awaiting_connection_since", { withTimezone: true }),
