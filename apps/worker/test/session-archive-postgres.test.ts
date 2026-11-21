@@ -14,6 +14,8 @@ import {
   createDb,
   createSession,
   getSession,
+  listSessionArchiveCandidates,
+  peekSessionWork,
   persistModelContextSnapshot,
   readSessionArchiveTranscriptEvents,
   submitHumanPromptInTransaction,
@@ -186,7 +188,7 @@ async function restorableRows(scope: { workspaceId: string; sessionId: string })
 }
 
 /** Archive activities whose object storage is an in-memory map. */
-function inMemoryArchive(objects: Map<string, Uint8Array>) {
+function inMemoryArchive(objects: Map<string, Uint8Array>, idleDays = 30) {
   return createSessionArchiveActivities(
     async () =>
       ({
@@ -194,7 +196,7 @@ function inMemoryArchive(objects: Map<string, Uint8Array>) {
         bus: { publish: async () => undefined },
         objectStorage: { deleteObject: async (key: string) => void objects.delete(key) } as never,
         observability: { info: () => undefined, warn: () => undefined } as never,
-        settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+        settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: idleDays }),
       }) as unknown as ActivityServices,
     {
       upload: async (_storage, key, spool) => {
@@ -682,38 +684,42 @@ describe("idle-session archive worker", () => {
     expect(session?.retention?.archive?.state).toBe("archived");
   }, 120_000);
 
-  test("an archived chat held back only by an undelivered update is stopped, then stored", async () => {
-    const scope = await idleSession();
-    // A failed chat with a notice it never got to read: it will never run
-    // again, so the notice is cancelled with its work.
-    await shared.admin`insert into session_system_updates (
+  test.each(["agent_message", "background_command_result"])(
+    "a manually archived chat with a pending %s is stopped, then stored",
+    async (kind) => {
+      const scope = await idleSession();
+      // A failed chat with a notice it never got to read: it will never run
+      // again, so the notice is cancelled with its work.
+      await shared.admin`insert into session_system_updates (
         account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
       ) values (${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
-        'agent_message', ${crypto.randomUUID()}, ${`archive-${crypto.randomUUID()}`},
-        'late notice', ${shared.admin.json({ type: "agent_message", text: "late" })})`;
-    await shared.admin`update sessions set status = 'failed',
+        ${kind}, ${crypto.randomUUID()}, ${`archive-${crypto.randomUUID()}`},
+        'late notice', ${shared.admin.json({ type: kind })})`;
+      await shared.admin`update sessions set status = 'failed',
         archived_at = now() - interval '1 minute', archive_requested_by = 'subject-archiver'
       where workspace_id = ${scope.workspaceId} and id = ${scope.sessionId}`;
-    const activities = createSessionArchiveActivities(
-      async () =>
-        ({
-          db: client.db,
-          bus: { publish: async () => undefined },
-          objectStorage: { deleteObject: async () => undefined } as never,
-          observability: { info: () => undefined, warn: () => undefined } as never,
-          settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
-        }) as unknown as ActivityServices,
-      { upload: async () => undefined },
-    );
-    expect((await activities.archiveIdleSessions()).failed).toBe(0);
-    const [update] = await shared.admin`select state from session_system_updates
+      const activities = createSessionArchiveActivities(
+        async () =>
+          ({
+            db: client.db,
+            bus: { publish: async () => undefined },
+            objectStorage: { deleteObject: async () => undefined } as never,
+            observability: { info: () => undefined, warn: () => undefined } as never,
+            settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+          }) as unknown as ActivityServices,
+        { upload: async () => undefined },
+      );
+      expect((await activities.archiveIdleSessions()).failed).toBe(0);
+      const [update] = await shared.admin`select state from session_system_updates
       where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
-    expect(update!.state).toBe("cancelled");
-    await deliverWakes(scope);
-    expect((await activities.archiveIdleSessions()).failed).toBe(0);
-    const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
-    expect(session?.retention?.archive?.state).toBe("archived");
-  }, 120_000);
+      expect(update!.state).toBe("cancelled");
+      await deliverWakes(scope);
+      expect((await activities.archiveIdleSessions()).failed).toBe(0);
+      const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+      expect(session?.retention?.archive?.state).toBe("archived");
+    },
+    120_000,
+  );
 
   test("an archived sub-chat still at work under a stored chat is stopped, then stored", async () => {
     const activities = createSessionArchiveActivities(
@@ -773,6 +779,67 @@ describe("idle-session archive worker", () => {
 });
 
 describe("restoring an archived chat from long-term storage", () => {
+  test("idle archive preserves a pending command result but leaves runnable input live", async () => {
+    const activities = inMemoryArchive(new Map(), 14);
+    const commandOnly = await idleSession();
+    const messagePending = await idleSession();
+    const updateId = crypto.randomUUID();
+    const commandId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const commandPayload = {
+      type: "background_command_result",
+      commandId,
+      state: "exited",
+      exitCode: 0,
+      reason: "exited",
+      outputLocator: { eventType: "sandbox.command.output.delta", commandId },
+    };
+    // Seed inbox rows without changing the idle status or arming a wake. This
+    // isolates the pending-update guard from the queued-turn/wake guards.
+    for (const [id, scope, sourceId, payload] of [
+      [updateId, commandOnly, commandId, commandPayload],
+      [
+        crypto.randomUUID(),
+        messagePending,
+        commandOnly.sessionId,
+        { type: "agent_message", operationId, text: "Check in" },
+      ],
+    ] as const) {
+      await shared.admin`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, classification, source_id, dedupe_key,
+          summary, payload, state)
+        values (${id}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${payload.type},
+          'info', ${sourceId}, ${crypto.randomUUID()}, 'pending input',
+          ${shared.admin.json(payload)}, 'pending')`;
+    }
+
+    const candidates = await listSessionArchiveCandidates(client.db, {
+      idleSeconds: 14 * 24 * 60 * 60,
+      limit: 100,
+    });
+    expect(candidates.map(({ sessionId }) => sessionId)).toContain(commandOnly.sessionId);
+    expect(candidates.map(({ sessionId }) => sessionId)).not.toContain(messagePending.sessionId);
+
+    expect(
+      await peekSessionWork(client.db, messagePending.workspaceId, messagePending.sessionId),
+    ).toMatchObject({ kind: "runnable" });
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    expect((await contentState(commandOnly.sessionId)).content_archive_state).toBe("archived");
+    expect((await contentState(messagePending.sessionId)).content_archive_state).toBeNull();
+    expect((await restorableRows(commandOnly)).session_system_updates).toEqual([]);
+
+    expect((await unarchiveSession(client.db, commandOnly))?.outcome).toBe("restoring");
+    expect(await activities.restoreArchivedSessions(commandOnly)).toEqual({ restored: 1 });
+    expect((await restorableRows(commandOnly)).session_system_updates).toMatchObject([
+      { id: updateId, state: "pending", payload: commandPayload },
+    ]);
+    expect(
+      await peekSessionWork(client.db, commandOnly.workspaceId, commandOnly.sessionId),
+    ).toEqual({
+      kind: "idle",
+    });
+  }, 180_000);
+
   test("a stored chat and its sub-chat come back with every row they had, and stay live", async () => {
     const objects = new Map<string, Uint8Array>();
     const activities = inMemoryArchive(objects);

@@ -210,9 +210,12 @@ archived by a person qualifies when all of these hold for the idle period:
   sessions;
 - it is not marked keep-live, is not an imported archive, and has no session
   wait;
-- it has no pending human input request, active goal, pending machine input or
-  inbound outbox delivery, running background command, scheduled task that
-  reuses it, or site-authentication maintenance binding;
+- it has no pending human input request, active goal, pending machine input
+  that can start a turn, inbound outbox delivery, running background command,
+  scheduled task that reuses it, or site-authentication maintenance binding.
+  A finished background command's pending result does not block: without a
+  session wait it can only ride along on another turn. The idle archiver
+  stores the result unchanged, so it is still pending if the chat is restored;
 - no direct child is still active or recently active.
 
 ### What happens
