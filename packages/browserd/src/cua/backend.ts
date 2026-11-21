@@ -698,6 +698,35 @@ export class CuaComputerBackend implements ComputerBackend {
     return { after: again, failures: inputFailures(again, steps) };
   }
 
+  /** Midway through a batch: what the writes of `checked` did not do, read
+   * from the window now. Reading the window retires the element tokens of
+   * the reading before it, so each later step (from `rest` on) that names
+   * its element by token gets the same element's token in the new reading;
+   * one the new reading lacks keeps its old token, and CUA stops the batch
+   * there as stale. A window that cannot be read is not judged. */
+  private async checkWrites(
+    targetId: string,
+    checked: readonly Operation[],
+    steps: Operation[],
+    rest: number,
+  ): Promise<string[]> {
+    const before = new Map(this.tokens.get(targetId) ?? []);
+    const reading = await this.observeTarget(targetId).catch(() => null);
+    if (reading?.target.id !== targetId) return [];
+    const { failures } = await this.confirmInput(reading, checked);
+    const after = this.tokens.get(targetId);
+    const refOf = new Map([...before].map(([ref, token]) => [token, ref]));
+    for (let index = rest; index < steps.length; index++) {
+      const step = steps[index]!;
+      const token = step.args.element_token;
+      if (typeof token !== "string") continue;
+      const ref = refOf.get(token);
+      const fresh = ref === undefined ? undefined : after?.get(ref);
+      if (fresh) steps[index] = { ...step, args: { ...step.args, element_token: fresh } };
+    }
+    return failures;
+  }
+
   /** The window an action left in front: the one CUA reports it opened, or
    * its own. A failed read cannot turn a delivered action into a pre-dispatch
    * rejection, so it observes nothing and the receipt still completes. */
@@ -889,7 +918,10 @@ export class CuaComputerBackend implements ComputerBackend {
 
   /** A batch runs as one CUA run_steps call (or a few, when its actions take
    * more steps than one call runs): CUA paces the steps for a batch and the
-   * window is observed once, after the last one. A batch CUA stopped part way
+   * window is observed once, after the last one, and midway only before a
+   * press or key that follows a field's fill (see checkedParts), so a field
+   * that did not take its value stops the batch before anything submits it.
+   * A batch CUA stopped part way
    * says how many actions completed, so the caller can report each. One
    * action that takes several steps (filling a date field) runs the same way,
    * and reports as that action alone. */
@@ -913,65 +945,98 @@ export class CuaComputerBackend implements ComputerBackend {
     // Raw input (a key press, or a press CUA could only send) with nothing
     // confirming the app took it, as for one action (see dispatch).
     let unconfirmedInput = false;
+    // A write the window was read for before a later step of the batch could
+    // submit or clear it: the actions that ran, and what the reading showed
+    // the writes did not do.
+    let unchecked: { actionsRan: number; failures: string[] } | null = null;
+    const parts = checkedParts(steps);
+    // The first step whose write is checked once the batch has run.
+    let lastPart = 0;
     try {
-      for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
-        const chunk = steps.slice(start, start + MAX_RUN_STEPS);
-        let outcome: RunStepsOutcome;
-        try {
-          outcome = await runSteps(this.runtime, {
-            ...this.args(acted),
-            // Each step was checked against the batch's observation. A token CUA
-            // finds stale names an element of a window that changed since: the
-            // batch stops there instead of acting on a lookalike CUA finds again.
-            refind_stale: false,
-            steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
-          });
-        } catch (error) {
-          // A later call refused before it ran: the earlier calls still did.
-          if (start === 0 || !(error instanceof ComputerBackendError) || error.dispatched)
-            throw error;
-          outcome = {
-            kind: "stopped",
-            completed: 0,
-            definite: false,
-            code: null,
-            cuaCode: null,
-            message: error.message,
-            standIns: [],
-          };
-        }
-        // CUA used the one element of a role pressed alike for a step that
-        // named its element by role and name (see namedOperation).
-        for (const used of outcome.standIns) {
-          const actionIndex = actionOf[start + used.step]!;
-          const action = actions[actionIndex];
-          if (action?.type !== "semantic" || action.locator.kind !== "role") continue;
-          standIns.push({
-            actionIndex,
-            requestedRole: action.locator.role,
-            role: observedRole(used.role),
-            name: used.name,
-          });
-        }
-        if (outcome.kind === "completed") {
-          report += openedWindowsReport(outcome.windowChanges);
-          for (const index of outcome.unconfirmed) {
-            const action = actions[actionOf[start + index]!];
-            if (
-              action?.type === "keyboard" ||
-              (action?.type === "semantic" &&
-                action.action === "invoke" &&
-                steps[start + index]?.name === "click")
-            )
-              unconfirmedInput = true;
+      for (const [part, partEnd] of parts.entries()) {
+        const partStart = part === 0 ? 0 : parts[part - 1]!;
+        for (let start = partStart; start < partEnd && !stopped; start += MAX_RUN_STEPS) {
+          const chunk = steps.slice(start, Math.min(start + MAX_RUN_STEPS, partEnd));
+          let outcome: RunStepsOutcome;
+          try {
+            outcome = await runSteps(this.runtime, {
+              ...this.args(acted),
+              // Each step was checked against the batch's observation. A token CUA
+              // finds stale names an element of a window that changed since: the
+              // batch stops there instead of acting on a lookalike CUA finds again.
+              refind_stale: false,
+              steps: chunk.map((step) => ({
+                tool: step.name,
+                args: step.args,
+                ...step.stepOptions,
+              })),
+            });
+          } catch (error) {
+            // A later call refused before it ran: the earlier calls still did.
+            if (start === 0 || !(error instanceof ComputerBackendError) || error.dispatched)
+              throw error;
+            outcome = {
+              kind: "stopped",
+              completed: 0,
+              definite: false,
+              code: null,
+              cuaCode: null,
+              message: error.message,
+              standIns: [],
+            };
           }
-        } else stopped = { step: start + outcome.completed, outcome };
+          // CUA used the one element of a role pressed alike for a step that
+          // named its element by role and name (see namedOperation).
+          for (const used of outcome.standIns) {
+            const actionIndex = actionOf[start + used.step]!;
+            const action = actions[actionIndex];
+            if (action?.type !== "semantic" || action.locator.kind !== "role") continue;
+            standIns.push({
+              actionIndex,
+              requestedRole: action.locator.role,
+              role: observedRole(used.role),
+              name: used.name,
+            });
+          }
+          if (outcome.kind === "completed") {
+            report += openedWindowsReport(outcome.windowChanges);
+            for (const index of outcome.unconfirmed) {
+              const action = actions[actionOf[start + index]!];
+              if (
+                action?.type === "keyboard" ||
+                (action?.type === "semantic" &&
+                  action.action === "invoke" &&
+                  steps[start + index]?.name === "click")
+              )
+                unconfirmedInput = true;
+            }
+          } else stopped = { step: start + outcome.completed, outcome };
+        }
+        if (stopped || partEnd === steps.length) break;
+        // A press or key comes next, which can submit the form these steps
+        // filled or clear its fields: the window is read first, so a field
+        // that did not take its value stops the batch before that happens.
+        const failures = await this.checkWrites(
+          command.targetId,
+          steps.slice(partStart, partEnd),
+          steps,
+          partEnd,
+        );
+        lastPart = partEnd;
+        if (failures.length) {
+          unchecked = { actionsRan: actionOf[partEnd - 1]! + 1, failures };
+          break;
+        }
       }
     } finally {
       await fronted.giveBack();
     }
     // The actions that ran in full acted on their stand-ins.
-    const ran = stopped ? actionOf[stopped.step]! : actions.length;
+    const ran = stopped
+      ? actionOf[stopped.step]!
+      : unchecked
+        ? unchecked.actionsRan
+        : actions.length;
     const reported = new Set<number>();
     if (standIn)
       for (const used of standIns.sort((a, b) => a.actionIndex - b.actionIndex))
@@ -979,11 +1044,33 @@ export class CuaComputerBackend implements ComputerBackend {
           reported.add(used.actionIndex);
           standIn(used);
         }
+    if (unchecked) {
+      if (unconfirmedInput) unconfirmed?.();
+      const count = command.action.type === "batch" ? command.action.actions.length : 1;
+      const failure = new ComputerBackendError(
+        "driver_failed",
+        `${
+          unchecked.actionsRan === 1
+            ? "Action 1 of the batch"
+            : `Actions 1 to ${unchecked.actionsRan} of the batch`
+        } ran, but ${unchecked.failures.join("; ")}. The batch stopped there`,
+        false,
+        true,
+      );
+      // The last action checked is the one whose outcome is unknown; the
+      // actions after it did not run.
+      if (!single && count > 1)
+        failure.details = {
+          batchActionsCompleted: unchecked.actionsRan - 1,
+          batchStoppedActionState: "outcome_unknown",
+        };
+      throw failure;
+    }
     if (!stopped) {
       if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
-      const { after: confirmed, failures } = await this.confirmInput(after, steps);
+      const { after: confirmed, failures } = await this.confirmInput(after, steps.slice(lastPart));
       if (failures.length) {
         const count = command.action.type === "batch" ? command.action.actions.length : 1;
         const failure = new ComputerBackendError(
@@ -3386,8 +3473,14 @@ function inputFailures(
   for (const [index, step] of steps.entries()) {
     if (step.expectToggle) {
       const expected = step.expectToggle;
-      // A later step can press it again or change it with another control.
-      if (steps.slice(index + 1).some((later) => later.fillsField !== true)) continue;
+      // A later press or key can press it again or change it with another
+      // control; a field filled after it does not.
+      if (
+        steps
+          .slice(index + 1)
+          .some((later) => later.name !== "set_value" && later.fillsField !== true)
+      )
+        continue;
       const node = observation.roots.find((candidate) => candidate.ref === expected.ref);
       const state = node ? checkedState(node) : undefined;
       if (state !== undefined && state !== expected.wanted)
@@ -3465,6 +3558,27 @@ function inputFailures(
     }
   }
   return failures;
+}
+
+/** Where a batch reads the window midway: the end (exclusive) of each part
+ * of `steps`, the last part ending with the batch. A part ends after a step
+ * whose write is checked (a text, number or date field, a checkbox or switch)
+ * once a step follows that can submit the form or clear the field: anything
+ * but another field's fill. Its writes are then checked before that step
+ * runs, as inputFailures would not judge them after it. */
+function checkedParts(steps: readonly Operation[]): number[] {
+  const ends: number[] = [];
+  let checks = false;
+  for (const [index, step] of steps.entries()) {
+    if (step.expectText || step.expectDate || step.expectToggle) checks = true;
+    const next = steps[index + 1];
+    if (checks && next && next.name !== "set_value" && next.fillsField !== true) {
+      ends.push(index + 1);
+      checks = false;
+    }
+  }
+  ends.push(steps.length);
+  return ends;
 }
 
 function unsupported(message: string): ComputerBackendError {
