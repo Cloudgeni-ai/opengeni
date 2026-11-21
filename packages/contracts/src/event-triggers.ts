@@ -17,6 +17,9 @@ import { defineSchema } from "./define-schema";
 /**
  * `workspace` is "This workspace": things that happen in Opengeni itself, such
  * as a meeting's transcript becoming ready, as one person may see them.
+ * `github_personal` is "GitHub (your connection)": merges and releases of the
+ * pull requests and repositories its automations name, read with one person's
+ * own GitHub connection where the workspace has no GitHub app.
  */
 export const EVENT_SOURCE_KINDS = [
   "webhook",
@@ -25,6 +28,7 @@ export const EVENT_SOURCE_KINDS = [
   "gmail",
   "mcp",
   "workspace",
+  "github_personal",
 ] as const;
 export const EventSourceKind = /* @__PURE__ */ defineSchema(() => z.enum(EVENT_SOURCE_KINDS));
 export type EventSourceKind = z.infer<typeof EventSourceKind>;
@@ -680,6 +684,13 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
       z
         .object({
           kind: z.enum(["github", "slack"]),
+          name: EventSourceName.optional(),
+        })
+        .strict(),
+      z
+        .object({
+          /** The caller's own "GitHub (your connection)" source; one per person. */
+          kind: z.literal("github_personal"),
           name: EventSourceName.optional(),
         })
         .strict(),

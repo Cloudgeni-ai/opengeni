@@ -104,6 +104,49 @@ export async function claimEventSourceFeed(
   );
 }
 
+/**
+ * The event types and conditions of the runnable triggers listening to a
+ * source (see automationsListenTo), for a feed that reads only what its
+ * triggers name: "GitHub (your connection)" polls just the pull requests and
+ * repositories they ask about.
+ */
+export async function listListeningEventTriggers(
+  db: Database,
+  workspaceId: string,
+  sourceId: string,
+): Promise<Array<{ eventTypes: string[]; conditions: unknown[]; createdAt: Date }>> {
+  return await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const rows = await rawRows<{
+      event_types: string[];
+      conditions: unknown[];
+      created_at: Date | string;
+    }>(
+      scoped,
+      sql`select trigger.event_types, trigger.conditions, trigger.created_at
+        from event_triggers trigger
+        join scheduled_tasks task
+          on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
+        join scheduled_task_event_settings settings
+          on settings.task_id = trigger.task_id and settings.workspace_id = trigger.workspace_id
+        join event_sources source
+          on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
+        where trigger.workspace_id = ${workspaceId} and trigger.source_id = ${sourceId}::uuid
+          and trigger.status in ('active', 'blocked')
+          and task.status = 'active' and task.deleted_at is null and settings.completed_at is null
+          and source.status = 'active'
+          and (source.visibility = 'workspace' or source.owner_subject_id is null
+            or source.owner_subject_id = task.owner_subject_id)
+        order by trigger.created_at
+        limit 500`,
+    );
+    return rows.map((row) => ({
+      eventTypes: Array.isArray(row.event_types) ? row.event_types : [],
+      conditions: Array.isArray(row.conditions) ? row.conditions : [],
+      createdAt: new Date(row.created_at),
+    }));
+  });
+}
+
 export type EventSourceFeedStepResult = {
   /** Undefined keeps the stored value. */
   cursor?: string | null;

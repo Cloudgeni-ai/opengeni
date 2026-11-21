@@ -294,6 +294,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       }
       await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     }
+    // The agent page's triggers: automations whose runs are chats with it.
+    const agentId = c.req.query("agentId");
+    if (agentId !== undefined && !z.string().uuid().safeParse(agentId).success) {
+      throw new HTTPException(400, { message: "invalid agentId" });
+    }
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const tasks = await listScheduledTasks(
       db,
@@ -302,6 +307,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       offset,
       sessionId,
       viewer.subjectId,
+      agentId !== undefined ? { agentId } : {},
     );
     return c.json(
       (await withEventsAndBlockers(await withPolicyDrift(authorization, tasks))).map((task) =>

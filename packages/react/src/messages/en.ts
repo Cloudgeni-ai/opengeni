@@ -600,6 +600,9 @@ export const englishMessages = {
   "automations.source.addWorkspace": "Add this workspace",
   "automations.source.github.description":
     "Pull requests, issues, pushes, reviews and checks in the repositories you connected.",
+  "automations.source.githubPersonal.description":
+    "Merges and releases a chat waits for, read with your own GitHub connection. Only you can see them.",
+  "automations.source.githubPersonal.name": "GitHub (your connection)",
   "automations.source.gmail.description":
     "New messages in your connected mailbox. Only you can see them.",
   "automations.source.kind.appWebhook": "{app} webhook",

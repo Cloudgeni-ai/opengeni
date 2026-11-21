@@ -11,6 +11,7 @@ import {
   type SessionRemovedRepository,
 } from "@opengeni/contracts";
 import {
+  addSessionLink,
   personalGitHubRepositoryAuthority,
   personalGitHubRepositoryDenialMessage,
   type ApiRouteDeps,
@@ -110,6 +111,14 @@ export type PersonalGitHubGatewayServices = {
   fetch: typeof fetch;
   /** Repository default branches, looked up with the person's token. */
   defaultBranches?: DefaultBranchCache;
+  /**
+   * A pull request GitHub confirms this pass created: shown in the chat's
+   * Linked panel, as the GitHub tools do. Best effort; never affects `gh`.
+   */
+  linkPullRequest?: (
+    authority: PersonalGitHubGatewayAuthority,
+    pullRequest: { url: string; title: string | null },
+  ) => Promise<void>;
 };
 
 /** Default branch by connection and repository, kept for a minute. */
@@ -408,6 +417,117 @@ function upstreamHeaders(request: Request, authorization: string, streamed: bool
   }
   if (!headers.has("user-agent")) headers.set("user-agent", "Opengeni-GitHub-Gateway/1");
   return headers;
+}
+
+/** `POST /repos/{owner}/{repo}/pulls`: GitHub's REST pull request create. */
+const REST_PULL_REQUEST_CREATE = /^\/repos\/[^/]+\/[^/]+\/pulls\/?$/u;
+/** A created pull request's response is read whole only up to this size. */
+const CREATED_PULL_REQUEST_MAX_BYTES = 4 * 1024 * 1024;
+/** How long GitHub's answer waits for the link before going on without it. */
+const LINK_WAIT_MS = 2_000;
+
+/**
+ * Pass GitHub's answer to a pull request create through unchanged, and link
+ * the pull request it names (REST `html_url`, or GraphQL
+ * `createPullRequest.pullRequest.url`) to the chat. Linking never fails the
+ * command: a body too large, unreadable or without a URL links nothing.
+ */
+export async function linkingCreatedPullRequest(
+  link: NonNullable<PersonalGitHubGatewayServices["linkPullRequest"]>,
+  authority: PersonalGitHubGatewayAuthority,
+  upstream: Response,
+  requestBody: unknown,
+): Promise<Response> {
+  const declared = Number(upstream.headers.get("content-length") ?? "0");
+  if (!upstream.body || declared > CREATED_PULL_REQUEST_MAX_BYTES) {
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: downstreamHeaders(upstream),
+    });
+  }
+  // Read up to the limit; a longer body (only possible without a
+  // content-length) passes through whole, read and unread parts alike.
+  const reader = upstream.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let done = false;
+  while (size <= CREATED_PULL_REQUEST_MAX_BYTES) {
+    const next = await reader.read();
+    if (next.done) {
+      done = true;
+      break;
+    }
+    chunks.push(next.value);
+    size += next.value.byteLength;
+  }
+  if (done) {
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const created = createdPullRequest(parseJsonBody(bytes), requestBody);
+    // A slow link never holds up GitHub's answer for long.
+    if (created) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        link(authority, created).catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, LINK_WAIT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+  }
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      if (done) controller.close();
+    },
+    async pull(controller) {
+      const next = await reader.read();
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: downstreamHeaders(upstream),
+  });
+}
+
+/** The pull request a create response names, with its title when known. */
+export function createdPullRequest(
+  response: unknown,
+  requestBody: unknown,
+): { url: string; title: string | null } | null {
+  const record = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const pullRequestUrl = (value: unknown): string | null =>
+    typeof value === "string" && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/u.test(value)
+      ? value
+      : null;
+  const body = record(response);
+  const rest = pullRequestUrl(body?.html_url);
+  if (rest) return { url: rest, title: typeof body?.title === "string" ? body.title : null };
+  const graphql = record(record(record(body?.data)?.createPullRequest)?.pullRequest);
+  const url = pullRequestUrl(graphql?.url) ?? pullRequestUrl(graphql?.permalink);
+  if (!url) return null;
+  const input = record(record(record(requestBody)?.variables)?.input);
+  const title =
+    typeof graphql?.title === "string"
+      ? graphql.title
+      : typeof input?.title === "string"
+        ? input.title
+        : null;
+  return { url, title };
 }
 
 function downstreamHeaders(upstream: Response): Headers {
@@ -788,12 +908,14 @@ export async function handlePersonalGitHubGatewayRequest(
   let checks: GatewayRepositoryCheck[] = [];
   let reviewExtra: Record<string, unknown> = {};
   let restRepository: GitHubGatewayRepositoryRef | null = null;
+  let graphqlMutations: readonly string[] = [];
   if (target === "api" && pathname === "/graphql" && method !== "POST") {
     return gatewayError(405, "GitHub GraphQL takes POST requests.");
   }
   if (target === "api" && pathname === "/graphql") {
     const graphql = classifyGitHubGraphqlRequest(parsedBody);
     action = graphql.action;
+    graphqlMutations = graphql.mutations;
     for (const repository of graphql.repositories) {
       // `viewer { repository(name:) }`: the person's own repository.
       const owner = repository.owner ?? authority.metadata.githubLogin;
@@ -940,6 +1062,22 @@ export async function handlePersonalGitHubGatewayRequest(
   if (upstream.status >= 500) await complete("uncertain");
   else if (upstream.status >= 400) await complete("not_executed");
   else await complete("completed");
+  if (
+    services.linkPullRequest &&
+    target === "api" &&
+    method === "POST" &&
+    upstream.status >= 200 &&
+    upstream.status < 300 &&
+    (REST_PULL_REQUEST_CREATE.test(pathname) ||
+      (pathname === "/graphql" && graphqlMutations.includes("createPullRequest")))
+  ) {
+    return await linkingCreatedPullRequest(
+      services.linkPullRequest,
+      authority,
+      upstream,
+      parsedBody,
+    );
+  }
   return new Response(method === "HEAD" ? null : upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
@@ -1137,5 +1275,15 @@ export function personalGitHubGatewayServices(deps: ApiRouteDeps): PersonalGitHu
     git: gatewayGitServices(deps, { openClaims, resolveAuthority }, fetchImpl),
     fetch: fetchImpl,
     defaultBranches: new Map(),
+    // A pull request `gh` opens shows in the chat's Linked panel.
+    linkPullRequest: async (authority, pullRequest) => {
+      await addSessionLink(deps, {
+        workspaceId: authority.claims.workspaceId,
+        sessionId: authority.claims.sessionId,
+        url: pullRequest.url,
+        title: pullRequest.title,
+        addedBy: "automatic",
+      });
+    },
   };
 }

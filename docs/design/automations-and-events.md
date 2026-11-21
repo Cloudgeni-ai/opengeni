@@ -286,6 +286,42 @@ has.
   Other failures back off and block after an hour. Adding another app of this
   kind is one adapter.
 
+### GitHub (your connection)
+
+Where the workspace has no GitHub app (or it can't read a repository), a
+person's own GitHub connection (Your GitHub) can still tell a chat that a
+pull request merged or a release was published: a source of kind
+`github_personal` (migrations `1533` to `1536`), named "GitHub (your
+connection)". A chat's merge wake (`session_links_add` with `wakeWhen`,
+[session-status-and-links.md](../session-status-and-links.md)) adds it on
+first use; `POST /event-sources {kind: "github_personal"}` does too.
+
+- **One source per person, private to them.** Creating it again returns the
+  existing one; it needs their active Your GitHub connection, and a
+  workspace-level caller gets 422. It can't be shared with the workspace.
+- **A feed that reads only what its triggers name.** GitHub sends nothing
+  for a personal connection, so the feed (`github-personal-source.ts`) reads
+  GitHub's REST API as the owner every two minutes while an automation
+  listens: for a `pull_request.closed` trigger whose conditions name
+  `data.repository.full_name` and `data.pull_request.number` (equals), that
+  pull request; for a `release.published` trigger naming the repository, its
+  latest releases. Only repositories the person allowed Opengeni to use are
+  read, and only with GET, as for the person's other Your GitHub work. Triggers
+  without those conditions never fire; at most the 25 newest pull requests
+  and 10 newest repositories are read, and one repository failing doesn't
+  hold up the others.
+- **Same events as the app's.** A merge or release that happened after the
+  trigger was created (less two minutes, as GitHub's times have whole
+  seconds) is shaped like the app webhook's event (`shape` in
+  `github-events.ts`), so the same conditions match, and is recorded once
+  per merge or release (its delivery's dedupe key); the feed keeps no
+  cursor. Types: `pull_request.closed` and `release.published`.
+- **Failures.** A disconnected Your GitHub (or GitHub refusing its sign-in)
+  blocks the source's triggers with a reconnect reason; other GitHub errors
+  (such as its rate limit) are retried, and when every read fails they back
+  off and block after an hour, like other feeds. Its deliveries can't be
+  replayed.
+
 ### This workspace
 
 Things that happen in Opengeni itself are events too: meeting recordings

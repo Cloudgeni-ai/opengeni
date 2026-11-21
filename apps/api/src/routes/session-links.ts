@@ -13,6 +13,7 @@ import { getSessionLinks } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  personalGitHubSessionLinkReader,
   withSessionLinkStatuses,
   workspaceSessionLinkStatusReader,
   type SessionLinkStatusReader,
@@ -43,8 +44,9 @@ function viewerToolGrant(
 }
 
 /**
- * The links with live status: GitHub through the workspace's App, Linear and
- * Slack as the viewer when there is one (a person), else titles only. The
+ * The links with live status: GitHub through the workspace's App (else, for
+ * a person, their own GitHub connection), Linear and Slack as the viewer when
+ * there is one (a person), else titles only. The
  * viewer's gateway is released however the read ends.
  */
 export async function sessionLinksWithStatus(
@@ -63,7 +65,18 @@ export async function sessionLinksWithStatus(
   try {
     return await withSessionLinkStatuses(workspaceId, links, options.reader, {
       fresh: options.fresh,
-      viewer: viewer && grant ? { subjectId: grant.subjectId, read: viewer.read } : null,
+      viewer:
+        viewer && grant
+          ? {
+              subjectId: grant.subjectId,
+              read: viewer.read,
+              readGitHub: personalGitHubSessionLinkReader(deps, {
+                accountId: grant.accountId,
+                workspaceId,
+                subjectId: grant.subjectId,
+              }),
+            }
+          : null,
     });
   } finally {
     await viewer?.close().catch(() => undefined);

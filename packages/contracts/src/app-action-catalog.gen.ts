@@ -6782,6 +6782,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks",
     "request": [],
     "query": [
+      "agentId",
       "limit",
       "offset",
       "sessionId"

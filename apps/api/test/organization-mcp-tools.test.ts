@@ -9,7 +9,10 @@ import {
 import { outsideAgentReach, OUTSIDE_AGENT_GRANT_METADATA_KEY } from "@opengeni/core";
 
 import { claimsStoredApproval } from "../src/mcp/stored-approval-claim";
-import { createConnectionRateLimiter } from "../src/mcp/connection-rate-limit";
+import {
+  createConnectionRateLimiter,
+  createSharedConnectionRateLimiter,
+} from "../src/mcp/connection-rate-limit";
 import {
   buildOrganizationMcpServer,
   type OrganizationActionContext,
@@ -20,6 +23,7 @@ import {
   skillFrontmatterName,
   skillKey,
   toolApprovalUrl,
+  toolsSearchApproval,
   waitState,
 } from "../src/organization-mcp-tools";
 
@@ -424,6 +428,61 @@ describe("organization MCP named tools", () => {
     );
   });
 
+  test("skills_sync from a repository saves each Skill folder and reports the commit", async () => {
+    const saves: Array<{ stableKey: string; reason: string }> = [];
+    const { call } = await connect(
+      {
+        [`GET /v1/workspaces/${workspaceId}/skills/content`]: () =>
+          Response.json({ skills: [], nextCursor: null }),
+        [`POST /v1/workspaces/${workspaceId}/skills/content/save`]: (_request, body) => {
+          saves.push(body as { stableKey: string; reason: string });
+          return Response.json({
+            outcome: "published",
+            skillId: (body as { skillId: string }).skillId,
+          });
+        },
+      },
+      {
+        readSkillRepository: async (url) => {
+          expect(url).toBe("https://github.com/acme/skills/tree/main/skills");
+          return {
+            owner: "acme",
+            repository: "skills",
+            ref: "main",
+            commit: "c".repeat(40),
+            skills: [
+              {
+                path: "skills/release",
+                files: [
+                  { path: "SKILL.md", content: "---\nname: Release\ndescription: d\n---\nB" },
+                ],
+              },
+            ],
+            skipped: [{ path: "skills/big", reason: "It is too large." }],
+            truncated: false,
+          };
+        },
+      },
+    );
+    const result = await call("skills_sync", {
+      direction: "repository",
+      repository: "https://github.com/acme/skills/tree/main/skills",
+    });
+    expect(result.value.commit).toBe("c".repeat(40));
+    expect(result.value.results).toEqual([
+      expect.objectContaining({ name: "release", status: "created", path: "skills/release" }),
+      { path: "skills/big", status: "invalid", error: "It is too large." },
+    ]);
+    expect(saves).toHaveLength(1);
+    expect(saves[0]).toMatchObject({
+      stableKey: "release",
+      reason: `Synced from acme/skills@${"c".repeat(12)}`,
+    });
+    // Without a repository the direction explains what's missing.
+    const missing = await call("skills_sync", { direction: "repository" });
+    expect(missing.isError).toBe(true);
+  });
+
   test("session_send keeps its key when the chat moved on, and returns the turn to wait for", async () => {
     let lastSequence = 10;
     const keys: string[] = [];
@@ -544,5 +603,60 @@ describe("organization MCP named tool helpers", () => {
     limiter.admit("c");
     // "a" was evicted: it starts full again.
     expect(limiter.admit("a")).toBe(0);
+  });
+
+  test("tools_search approvals follow tool settings", () => {
+    expect(toolsSearchApproval({ approval: "none" })).toEqual({
+      approval: "none",
+      approvalSource: "tool",
+    });
+    expect(toolsSearchApproval({ approval: "human" })).toEqual({
+      approval: "human",
+      approvalSource: "tool",
+    });
+    // A connection-backed tool the settings allow, ask for or block.
+    expect(
+      toolsSearchApproval({
+        approval: "policy",
+        permission: { decision: "allow", fromSetting: false },
+      }),
+    ).toEqual({ approval: "none", approvalSource: "tool" });
+    expect(
+      toolsSearchApproval({
+        approval: "human",
+        permission: { decision: "ask", fromSetting: true },
+      }),
+    ).toEqual({ approval: "human", approvalSource: "policy" });
+    expect(
+      toolsSearchApproval({
+        approval: "policy",
+        permission: { decision: "block", fromSetting: true },
+      }),
+    ).toEqual({ approval: "blocked", approvalSource: "policy" });
+  });
+
+  test("the shared limiter counts in the shared store and falls back to this process", async () => {
+    const seen: unknown[] = [];
+    let down = false;
+    const fallbacks: unknown[] = [];
+    const limiter = createSharedConnectionRateLimiter({
+      capacity: 1,
+      refillPerSecond: 1 / 3_600,
+      admitShared: async (input) => {
+        if (down) throw new Error("database unreachable");
+        seen.push(input);
+        return 7;
+      },
+      onFallback: (error) => fallbacks.push(error),
+    });
+    expect(await limiter.admit({ accountId: "acc", key: "connection:a" })).toBe(7);
+    expect(seen).toEqual([
+      { accountId: "acc", key: "connection:a", capacity: 1, refillPerSecond: 1 / 3_600 },
+    ]);
+    down = true;
+    expect(await limiter.admit({ accountId: "acc", key: "connection:a" })).toBe(0);
+    expect(await limiter.admit({ accountId: "acc", key: "connection:a" })).toBeGreaterThan(0);
+    // Told once, not on every call that falls back.
+    expect(fallbacks).toHaveLength(1);
   });
 });

@@ -221,6 +221,8 @@ export type ToolGatewayCatalogEntry = {
   icons?: Array<Record<string, unknown>> | undefined;
   source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
   approval: "none" | "human" | "policy";
+  /** The effective permission from tool settings, for a connection-backed tool. */
+  permission?: { decision: "allow" | "ask" | "block"; fromSetting: boolean };
 };
 
 export type ToolGatewayCatalog = {
