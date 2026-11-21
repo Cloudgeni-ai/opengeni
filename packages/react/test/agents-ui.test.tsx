@@ -1164,6 +1164,7 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
         tools: [{ kind: "mcp", id: "gmail" }],
       },
     ],
+    skills: ["release-notes"],
     memoryEntries: [
       {
         id: "m1",
@@ -1186,14 +1187,17 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   ]);
   await act(async () => button(container, "Set up").click());
   expect(path).toBe(`/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1`);
-  // Can use lists each connection and Opengeni's own GitHub tools, whose row
-  // holds the ready-made agent's github.com rule.
-  expect(container.querySelector("[data-agent-can-use='gmail.com']")).not.toBeNull();
+  // Can use lists only connections with a rule: Opengeni's own GitHub tools,
+  // whose row holds the ready-made agent's github.com rule, and not Gmail.
+  expect(container.querySelector("[data-agent-can-use='gmail.com']")).toBeNull();
   const github = container.querySelector<HTMLElement>("[data-agent-can-use='github.com']")!;
   expect(github.textContent).toContain("GitHub");
-  expect(github.textContent).toContain("1 tool set on their own");
+  expect(github.querySelector("[data-slot='logo-tile']")).not.toBeNull();
+  expect(github.textContent).toContain("merge_pull_request");
   await act(async () =>
-    [...github.querySelectorAll("button")].find((b) => b.textContent?.includes("1 tool"))!.click(),
+    [...github.querySelectorAll("button")]
+      .find((b) => b.textContent?.includes("Choose per tool"))!
+      .click(),
   );
   await flush();
   expect(github.textContent).toContain("pull_request_merge");
@@ -1220,11 +1224,20 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   );
   await flush();
   expect(client.calls).toContainEqual(["pauseScheduledTask", WORKSPACE_ID, trigger.id]);
-  expect(container.textContent).toContain("release-notes");
+  // Skills show by name, linked to the Skill's page.
+  const skill = [...container.querySelectorAll("a")].find(
+    (link) => link.textContent === "Release notes",
+  )!;
+  expect(skill.getAttribute("href")).toBe(
+    `/workspaces/${WORKSPACE_ID}/plugins?section=skills&open=skill%3Askill-release-notes`,
+  );
 });
 
 test("a listed GitHub connection's row also offers Opengeni's own GitHub tools", async () => {
-  const agent = makeAgent({ name: "Fixer" });
+  const agent = makeAgent({
+    name: "Fixer",
+    toolPermissions: [{ connector: "github.com", tool: "*", permission: "ask" }],
+  });
   const client = fakeAgentsClient([agent], {
     capabilities: [
       {
