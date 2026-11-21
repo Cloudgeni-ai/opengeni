@@ -23,7 +23,7 @@ import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
-import { AUTOMATION_HEARS_SOURCE } from "./event-trigger-listening";
+import { triggerHearsSource } from "./event-trigger-listening";
 import * as schema from "./schema";
 
 // Migration 0929. Event sources deliver into a workspace; each raw delivery is
@@ -926,8 +926,11 @@ async function deliveryEvents(
 /**
  * Evaluate the source's active triggers on runnable automations and queue
  * each matching event once per automation. A trigger only sees a private
- * source when its automation belongs to the source's owner, and an event only
- * fires the triggers of the stream it arrived on (an MCP subscription).
+ * source when its automation belongs to the source's owner (or, for a
+ * personal app sync, the source is an opted-in person's own Gmail or GitHub
+ * like the owner's one its trigger names; see triggerHearsSource), and an
+ * event only fires the triggers of the stream it arrived on (an MCP
+ * subscription).
  */
 async function queueMatchingEvents(
   tx: Database,
@@ -954,10 +957,10 @@ async function queueMatchingEvents(
         on settings.task_id = trigger.task_id and settings.workspace_id = trigger.workspace_id
       join event_sources source
         on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
-      where trigger.workspace_id = ${input.workspaceId} and trigger.source_id = ${input.sourceId}
+      where trigger.workspace_id = ${input.workspaceId}
         and trigger.status = 'active' and task.status = 'active' and task.deleted_at is null
         and settings.completed_at is null
-        and ${AUTOMATION_HEARS_SOURCE}
+        and ${triggerHearsSource(sql`${input.sourceId}::uuid`)}
       order by trigger.task_id, trigger.position`,
   );
   const queued = new Map<string, Map<string, { triggerIds: string[]; occurredAt: Date }>>();
