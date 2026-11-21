@@ -79,6 +79,9 @@ type Frame = {
   height: number;
   windowWidth: number;
   windowHeight: number;
+  /** False for the capture an action takes to send its input: no image of
+   * it is returned, so no caller holds coordinates on it. */
+  shown: boolean;
 };
 type Operation = {
   name:
@@ -641,6 +644,19 @@ export class CuaComputerBackend implements ComputerBackend {
   /** The window's most recent frame: the pixels pointer input uses now. */
   private latestFrame(targetId: string): Frame | undefined {
     return [...this.frames.values()].reverse().find((entry) => entry.targetId === targetId);
+  }
+
+  /** The window's most recent frame a caller has an image of, which an
+   * observation names: the next pointer coordinates are in its pixels. The
+   * capture an action takes is never named, though pointer input scales
+   * into it, since nobody has seen it: a click sent on it with the pixels of
+   * the screenshot last shown would land elsewhere when the two sizes differ. */
+  private shownFrameId(targetId: string): string | null {
+    return (
+      [...this.frames.entries()]
+        .reverse()
+        .find(([, frame]) => frame.targetId === targetId && frame.shown)?.[0] ?? null
+    );
   }
 
   /**
@@ -1665,10 +1681,7 @@ export class CuaComputerBackend implements ComputerBackend {
 
   private async observeTarget(targetId: string): Promise<ComputerBackendObservation> {
     const target = await this.target(targetId);
-    if (
-      this.initialCapabilities.windowCapture &&
-      ![...this.frames.values()].some((frame) => frame.targetId === targetId)
-    )
+    if (this.initialCapabilities.windowCapture && this.shownFrameId(targetId) === null)
       await this.captureTarget(targetId).catch((error: unknown) => {
         // CUA captures nothing for a sheet's own window; its tree read below
         // says whether this is one.
@@ -1681,10 +1694,7 @@ export class CuaComputerBackend implements ComputerBackend {
       const observation: ComputerBackendObservation = {
         observationId: this.session + ":viewer",
         target: target.native,
-        frameId:
-          [...this.frames.entries()]
-            .reverse()
-            .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+        frameId: this.shownFrameId(targetId),
         roots: [],
         nodeCount: 0,
         readByNativeTools: true,
@@ -1827,10 +1837,7 @@ export class CuaComputerBackend implements ComputerBackend {
         // a reading after an action or a switch would show it stale.
         focused: false,
       },
-      frameId:
-        [...this.frames.entries()]
-          .reverse()
-          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      frameId: this.shownFrameId(targetId),
       roots,
       nodeCount: roots.length,
       ...(incomplete ? { incomplete } : {}),
@@ -1870,10 +1877,7 @@ export class CuaComputerBackend implements ComputerBackend {
         bounds: state.window_bounds ?? target.native.bounds,
         focused: false,
       },
-      frameId:
-        [...this.frames.entries()]
-          .reverse()
-          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      frameId: this.shownFrameId(targetId),
       roots: [],
       nodeCount: 0,
       incomplete: {
@@ -2131,6 +2135,7 @@ export class CuaComputerBackend implements ComputerBackend {
       height: state.screenshot_height,
       windowWidth: state.window_bounds?.width ?? bounds.width,
       windowHeight: state.window_bounds?.height ?? bounds.height,
+      shown: !actionCapture,
     });
     while (this.frames.size > 32) this.frames.delete(this.frames.keys().next().value!);
     return {
