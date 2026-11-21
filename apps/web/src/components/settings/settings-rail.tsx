@@ -574,14 +574,14 @@ export function useSettingsRail(input: {
   const sidebarLayout = useSidebarLayout(workspace?.id ?? "", !!workspace);
   const personalLayout = sidebarLayout.layout?.personal.available ? sidebarLayout.layout : null;
   const updateLayout = sidebarLayout.update;
-  const shownSettings = personalLayout
-    ? readResolvedSidebarOptions(personalLayout.options).settingsShown
+  const moreSettings = personalLayout
+    ? readResolvedSidebarOptions(personalLayout.options).settingsMore
     : null;
   const railSections = personalLayout
-    ? foldSettingsRail(sections, shownSettings, (settingsShown) => {
+    ? foldSettingsRail(sections, moreSettings, (settingsMore) => {
         updateLayout({
           scope: "personal",
-          changes: [{ op: "options", settingsShown }],
+          changes: [{ op: "options", settingsMore }],
         }).catch((error: unknown) =>
           toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
         );

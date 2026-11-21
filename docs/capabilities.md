@@ -828,8 +828,7 @@ The **Capabilities** page is the one setup page, with three tabs:
 **Connections**, **Skills** and **Ready-made**
 (`apps/web/src/components/capabilities/setup-tabs.tsx`). Each tab is its own
 address: `/plugins?section=skills|ready-made` (no `section` is Connections).
-Ready-made also takes `?kind=agent|app|skill` to show one kind, which the
-Agents page links to. Older `?section=plugins` and `?section=gallery` links
+Ready-made also takes `?kind=agent|app|skill` to show one kind. Older `?section=plugins` and `?section=gallery` links
 open Ready-made, and `/capabilities` links keep working. Knowledge keeps its
 own page (`/state`). The simplified interface's Capabilities page shows only
 connections.
@@ -852,13 +851,12 @@ template's package (one idempotency key per ready-made app, so adding it
 again opens the same app), and `installLibrarySkill`. An added item opens
 instead.
 
-The **Capabilities** view has exactly three top-level sections, in this order:
-**Integrations**, **Connectors**, and **Bundles**. The first two are
-connections - something that holds an identity in another product. The third is
-not: a Bundle is a named collection of tools and instructions.
+The **Connections** tab has two top-level sections: **Integrations** and
+**Connectors**, both connections - something that holds an identity in another
+product. Bundles (named collections of tools and instructions) show on
+**Ready-made**.
 
-The heading outline says the same thing: exactly three `<h2>`s, one per
-section. The Featured strip, the discovery controls, **Enabled**, **Custom
+The heading outline says the same thing: one `<h2>` per section. The Featured strip, the discovery controls, **Enabled**, **Custom
 APIs**, and **Browse** all render *inside* the Connectors `<section>` element,
 and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
 surfaces of their own.

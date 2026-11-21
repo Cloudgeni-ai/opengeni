@@ -170,6 +170,7 @@ export async function readSidebarApps(
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
+  // Edits count from the last 90 days, which keeps the versions read small.
   // A person's opens are their own rows: row-level security shows them only
   // under that person's identity, so this read runs as them.
   const recent =
@@ -188,6 +189,7 @@ export async function readSidebarApps(
                     select v.artifact_id, v.created_at from workspace_artifact_versions v
                     where v.workspace_id = ${scope.workspaceId}::uuid
                       and v.created_by_subject_id = ${viewerSubject}
+                      and v.created_at > now() - interval '90 days'
                   ) touched group by touched.site_id
                 ) t
                 join workspace_artifacts a on a.workspace_id = ${scope.workspaceId}::uuid and a.id = t.site_id

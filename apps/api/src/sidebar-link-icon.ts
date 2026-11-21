@@ -20,6 +20,8 @@ const MISSING_TTL_MS = 60 * 60 * 1000;
 export type SidebarLinkIcon = { bytes: Uint8Array; contentType: string };
 
 const cache = new Map<string, { icon: SidebarLinkIcon | null; expires: number }>();
+// Reads in flight, so many people opening one site's link fetch it once.
+const pending = new Map<string, Promise<SidebarLinkIcon | null>>();
 
 /** The image type of `bytes` by its first bytes; SVG and anything else is refused. */
 export function sniffSidebarLinkIcon(bytes: Uint8Array): string | null {
@@ -61,7 +63,8 @@ async function fetchIcon(
       const location = response.headers.get("location");
       if (!location) return null;
       const next = new URL(location, url);
-      if (next.protocol !== "https:") return null;
+      // Only the default https port, so the route can't probe other ports.
+      if (next.protocol !== "https:" || next.port !== "") return null;
       url = next.toString();
       continue;
     }
@@ -87,14 +90,20 @@ export async function readSidebarLinkIcon(
   options: PinnedFetchOptions = {},
   now = Date.now(),
 ): Promise<SidebarLinkIcon | null> {
-  const origin = new URL(url).origin;
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || parsed.port !== "") return null;
+  const origin = parsed.origin;
   const kept = cache.get(origin);
   if (kept && kept.expires > now) return kept.icon;
+  const inFlight = pending.get(origin);
+  if (inFlight) return await inFlight;
+  const read = fetchIcon(origin, settings, options).catch(() => null);
+  pending.set(origin, read);
   let icon: SidebarLinkIcon | null;
   try {
-    icon = await fetchIcon(origin, settings, options);
-  } catch {
-    icon = null;
+    icon = await read;
+  } finally {
+    pending.delete(origin);
   }
   cache.delete(origin);
   cache.set(origin, { icon, expires: now + (icon ? FOUND_TTL_MS : MISSING_TTL_MS) });
@@ -106,4 +115,5 @@ export async function readSidebarLinkIcon(
 /** For tests: forget every kept icon. */
 export function resetSidebarLinkIcons(): void {
   cache.clear();
+  pending.clear();
 }

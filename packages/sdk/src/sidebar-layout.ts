@@ -34,16 +34,16 @@ export type SidebarLayoutOptions = {
   sessionsShowApps?: boolean;
   /** Built-in rail entries left out (default none). */
   hiddenNavEntries?: SidebarNavEntry[];
-  /** Settings rail entry ids kept at the top; the rest go under More (default all). */
-  settingsShown?: string[];
+  /** Settings rail entry ids moved under More; the rest stay at the top (default none). */
+  settingsMore?: string[];
 };
 
 /** The navigation options in effect for this person. */
 export type ResolvedSidebarLayoutOptions = {
   sessionsShowApps: boolean;
   hiddenNavEntries: string[];
-  /** Null: every settings entry shows at the top. */
-  settingsShown: string[] | null;
+  /** Null: no settings entry is under More. */
+  settingsMore: string[] | null;
 };
 
 /** A link to an app, optionally one of its pages. */
@@ -207,7 +207,7 @@ export type SidebarLayoutChange =
       op: "options";
       sessionsShowApps?: boolean | null;
       hiddenNavEntries?: SidebarNavEntry[] | null;
-      settingsShown?: string[] | null;
+      settingsMore?: string[] | null;
     };
 
 export type UpdateSidebarLayoutRequest = {

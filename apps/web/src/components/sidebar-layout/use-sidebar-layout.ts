@@ -33,6 +33,12 @@ function normalize(layout: SidebarLayoutResponse): SidebarLayoutResponse {
       const [item] = readResolvedSidebarItems([entry?.item]);
       return item ? [{ parentId: entry.parentId ?? null, item }] : [];
     }) as SidebarLayoutResponse["hidden"],
+    // An answer without it (an older server, a stub) means no sidebar of one's own.
+    personal: (layout.personal as SidebarLayoutResponse["personal"] | undefined) ?? {
+      available: false,
+      revision: 0,
+      customized: false,
+    },
     workspace: {
       ...layout.workspace,
       ...(layout.workspace?.items

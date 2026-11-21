@@ -192,7 +192,7 @@ export function PrimaryNavExtras() {
   const hiddenEntries = useHiddenNavEntries(rail.workspaceId);
   return (
     <>
-      {hiddenEntries.inbox ? null : <InboxLink />}
+      <InboxLink hiddenUnlessNeeded={hiddenEntries.inbox} />
 
       {rail.isMobile ? null : rail.collapsed ? (
         <WorkspaceShortcutLinks

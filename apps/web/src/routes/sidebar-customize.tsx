@@ -624,24 +624,39 @@ function NavigationSection({
           />
         }
       />
-      {SIDEBAR_NAV_ENTRIES.map((entry) => (
-        <SettingRow
-          key={entry}
-          label={NAV_ENTRY_LABELS[entry]}
-          control={
-            <Switch
-              aria-label={NAV_ENTRY_LABELS[entry]}
-              checked={!hidden.has(entry)}
-              onCheckedChange={(checked) => {
-                const next = SIDEBAR_NAV_ENTRIES.filter((each) =>
-                  each === entry ? !checked : hidden.has(each),
-                );
-                onChange([{ op: "options", hiddenNavEntries: next }]);
-              }}
-            />
-          }
-        />
-      ))}
+      <SettingRow
+        label="Rail entries"
+        control={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="outline" size="sm">
+                {hidden.size === 0
+                  ? "All shown"
+                  : `${SIDEBAR_NAV_ENTRIES.length - hidden.size} of ${SIDEBAR_NAV_ENTRIES.length} shown`}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {SIDEBAR_NAV_ENTRIES.map((entry) => (
+                <DropdownMenuItem
+                  key={entry}
+                  role="menuitemcheckbox"
+                  aria-checked={!hidden.has(entry)}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    const next = SIDEBAR_NAV_ENTRIES.filter((each) =>
+                      each === entry ? !hidden.has(entry) : hidden.has(each),
+                    );
+                    onChange([{ op: "options", hiddenNavEntries: next }]);
+                  }}
+                >
+                  <DropdownMenuCheck checked={!hidden.has(entry)} />
+                  {NAV_ENTRY_LABELS[entry]}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
+      />
     </Section>
   );
 }

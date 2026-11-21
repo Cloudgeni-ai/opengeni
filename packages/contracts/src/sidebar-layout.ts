@@ -124,7 +124,7 @@ export const SidebarNavEntry = /* @__PURE__ */ defineSchema(() => z.enum(SIDEBAR
 export type SidebarNavEntry = (typeof SIDEBAR_NAV_ENTRIES)[number];
 
 /** Settings pages a person keeps at the top of the settings rail, at most. */
-export const SIDEBAR_SETTINGS_SHOWN_MAX = 100;
+export const SIDEBAR_SETTINGS_MORE_MAX = 100;
 
 /** A settings rail entry's id, such as `workspace:general` or `organization:members`. */
 const SettingsEntryId = /* @__PURE__ */ defineSchema(() =>
@@ -147,8 +147,8 @@ export const SidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
       sessionsShowApps: z.boolean().optional(),
       /** Built-in rail entries left out (default none). */
       hiddenNavEntries: z.array(SidebarNavEntry).max(SIDEBAR_NAV_ENTRIES.length).optional(),
-      /** Settings entries shown at the top of the settings rail; the rest go under More (default all). */
-      settingsShown: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_SHOWN_MAX).optional(),
+      /** Settings entries moved under More in the settings rail; the rest stay at the top (default none). */
+      settingsMore: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_MORE_MAX).optional(),
     })
     .strict(),
 );
@@ -159,8 +159,8 @@ export const ResolvedSidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
   z.object({
     sessionsShowApps: z.boolean(),
     hiddenNavEntries: z.array(z.string()),
-    /** Null: every settings entry shows at the top. */
-    settingsShown: z.array(z.string()).nullable(),
+    /** Null: no settings entry is under More. */
+    settingsMore: z.array(z.string()).nullable(),
   }),
 );
 export type ResolvedSidebarLayoutOptions = z.infer<typeof ResolvedSidebarLayoutOptions>;
@@ -168,7 +168,7 @@ export type ResolvedSidebarLayoutOptions = z.infer<typeof ResolvedSidebarLayoutO
 export const DEFAULT_SIDEBAR_LAYOUT_OPTIONS: ResolvedSidebarLayoutOptions = {
   sessionsShowApps: true,
   hiddenNavEntries: [],
-  settingsShown: null,
+  settingsMore: null,
 };
 
 /** Stored options, read leniently: wrong values drop, entries a newer version added stay. */
@@ -186,13 +186,13 @@ export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
         ].slice(0, max)
       : undefined;
   const hidden = strings(value.hiddenNavEntries, 32);
-  const shown = strings(value.settingsShown, SIDEBAR_SETTINGS_SHOWN_MAX);
+  const more = strings(value.settingsMore, SIDEBAR_SETTINGS_MORE_MAX);
   return {
     ...(typeof value.sessionsShowApps === "boolean"
       ? { sessionsShowApps: value.sessionsShowApps }
       : {}),
     ...(hidden ? { hiddenNavEntries: hidden as SidebarNavEntry[] } : {}),
-    ...(shown ? { settingsShown: shown } : {}),
+    ...(more ? { settingsMore: more } : {}),
   };
 }
 
@@ -207,7 +207,7 @@ export function mergeSidebarOptions(
       workspace?.sessionsShowApps ??
       DEFAULT_SIDEBAR_LAYOUT_OPTIONS.sessionsShowApps,
     hiddenNavEntries: [...(personal?.hiddenNavEntries ?? workspace?.hiddenNavEntries ?? [])],
-    settingsShown: personal?.settingsShown ?? workspace?.settingsShown ?? null,
+    settingsMore: personal?.settingsMore ?? workspace?.settingsMore ?? null,
   };
 }
 
@@ -784,11 +784,7 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
           .max(SIDEBAR_NAV_ENTRIES.length)
           .nullable()
           .optional(),
-        settingsShown: z
-          .array(SettingsEntryId)
-          .max(SIDEBAR_SETTINGS_SHOWN_MAX)
-          .nullable()
-          .optional(),
+        settingsMore: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_MORE_MAX).nullable().optional(),
       })
       .strict(),
   ]),
@@ -874,6 +870,7 @@ function assignIds(
       id,
       type: "group",
       label: item.label,
+      ...(item.icon ? { icon: item.icon } : {}),
       ...(item.collapsed !== undefined ? { collapsed: item.collapsed } : {}),
       items: children,
     };
@@ -1052,7 +1049,7 @@ function applyOptions(
   change: Extract<SidebarLayoutChange, { op: "options" }>,
 ): SidebarLayoutOptions | undefined {
   const next: Record<string, unknown> = { ...options };
-  for (const key of ["sessionsShowApps", "hiddenNavEntries", "settingsShown"] as const) {
+  for (const key of ["sessionsShowApps", "hiddenNavEntries", "settingsMore"] as const) {
     const value = change[key];
     if (value === null) delete next[key];
     else if (value !== undefined) next[key] = Array.isArray(value) ? [...new Set(value)] : value;

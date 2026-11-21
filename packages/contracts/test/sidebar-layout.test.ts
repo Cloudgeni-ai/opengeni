@@ -706,7 +706,7 @@ describe("options", () => {
     expect(DEFAULT_SIDEBAR_LAYOUT_OPTIONS).toEqual({
       sessionsShowApps: true,
       hiddenNavEntries: [],
-      settingsShown: null,
+      settingsMore: null,
     });
   });
 
@@ -720,19 +720,19 @@ describe("options", () => {
     const member = applyPersonalSidebarChanges(
       workspace,
       EMPTY_SIDEBAR_PERSONAL_CHANGES,
-      parseChanges([{ op: "options", hiddenNavEntries: [], settingsShown: ["workspace:general"] }]),
+      parseChanges([{ op: "options", hiddenNavEntries: [], settingsMore: ["workspace:general"] }]),
       ids(),
     );
     expect(sidebarPersonalChangesCustomized(member)).toBe(true);
     expect(mergeSidebarOptions(workspace.options, member.options)).toEqual({
       sessionsShowApps: false,
       hiddenNavEntries: [],
-      settingsShown: ["workspace:general"],
+      settingsMore: ["workspace:general"],
     });
     const cleared = applyPersonalSidebarChanges(
       workspace,
       member,
-      parseChanges([{ op: "options", hiddenNavEntries: null, settingsShown: null }]),
+      parseChanges([{ op: "options", hiddenNavEntries: null, settingsMore: null }]),
       ids(),
     );
     expect(cleared.options).toBeUndefined();

@@ -79,6 +79,8 @@ type RowActions = {
   /** The item whose name is being edited in place. */
   renaming: string | null;
   setRenaming: (id: string | null) => void;
+  /** The rows just before and after an item at its level, for Move up and Move down. */
+  neighbors?: (id: string) => { previous?: string; next?: string };
 };
 
 /** Whether this person edits the item itself (their own), rather than hiding it. */
@@ -91,6 +93,7 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
   const rail = useRail();
   const own = editable(item, actions);
   const hasIcon = item.type === "app" || item.type === "link" || item.type === "group";
+  const near = actions.neighbors?.(item.id);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -136,6 +139,22 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
               ))}
             </DropdownMenuSubContent>
           </DropdownMenuSub>
+        ) : null}
+        {actions.canChange && near?.previous ? (
+          <DropdownMenuItem
+            onSelect={() =>
+              actions.change([{ op: "move", itemId: item.id, beforeId: near.previous! }])
+            }
+          >
+            Move up
+          </DropdownMenuItem>
+        ) : null}
+        {actions.canChange && near?.next ? (
+          <DropdownMenuItem
+            onSelect={() => actions.change([{ op: "move", itemId: item.id, afterId: near.next! }])}
+          >
+            Move down
+          </DropdownMenuItem>
         ) : null}
         {actions.canChange ? (
           <>
@@ -321,7 +340,13 @@ function dropChange(
     }
     if (dragged.id === target.id) return null;
     if (at === "into") {
-      if (dragged.parentId === target.id || dragged.origin !== "personal") return null;
+      // Groups don't nest.
+      if (
+        dragged.parentId === target.id ||
+        dragged.origin !== "personal" ||
+        dragged.type === "group"
+      )
+        return null;
       return { op: "move", itemId: dragged.id, groupId: target.id };
     }
     if (dragged.parentId === parentId) return { op: "move", itemId: dragged.id, ...place };
@@ -754,7 +779,18 @@ export function SidebarLayoutSection() {
       </nav>
     );
   }
-  const actions: RowActions = { change, canChange, renaming, setRenaming };
+  const neighbors = (id: string) => {
+    const levels = [
+      shownItems,
+      ...shownItems.flatMap((each) => (each.type === "group" ? [each.items] : [])),
+    ];
+    for (const level of levels) {
+      const index = level.findIndex((each) => each.id === id);
+      if (index >= 0) return { previous: level[index - 1]?.id, next: level[index + 1]?.id };
+    }
+    return {};
+  };
+  const actions: RowActions = { change, canChange, renaming, setRenaming, neighbors };
   return (
     <nav
       aria-label="Workspace links"
@@ -784,7 +820,8 @@ export function SidebarLayoutSection() {
                 pathHasAppPage(router, path),
               )?.split(/[?#]/)[0] === pathname),
         );
-        const open = holdsActive || (openGroups[item.id] ?? !item.collapsed);
+        // A group holding the open page starts open; the person's own toggle still wins.
+        const open = openGroups[item.id] ?? (holdsActive || !item.collapsed);
         return (
           <div key={item.id} className="grid gap-0.5">
             {renaming === item.id ? (

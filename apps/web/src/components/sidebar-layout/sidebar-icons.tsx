@@ -204,12 +204,18 @@ export function useLinkIcon(workspaceId: string, url: string, enabled: boolean):
     if (entry === undefined) {
       entry = Promise.resolve()
         .then(() => getIcon.call(client, workspaceId, url))
-        .then((blob) => (blob ? URL.createObjectURL(blob) : null))
-        .catch(() => null)
-        .then((found) => {
-          linkIcons.set(key, found);
-          return found;
-        });
+        .then(
+          (blob) => {
+            // Kept only for an answer (an icon, or none): a failed read is tried again later.
+            const found = blob ? URL.createObjectURL(blob) : null;
+            linkIcons.set(key, found);
+            return found;
+          },
+          () => {
+            linkIcons.delete(key);
+            return null;
+          },
+        );
       linkIcons.set(key, entry);
     }
     void Promise.resolve(entry).then((found) => {

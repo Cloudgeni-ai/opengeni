@@ -36,8 +36,8 @@ describe("foldSettingsRail", () => {
     expect(folded.some((section) => section.collapsible)).toBe(false);
   });
 
-  test("entries outside the list go under one collapsed More at the end", () => {
-    const folded = foldSettingsRail(SECTIONS, ["workspace:general"], () => {});
+  test("listed entries go under one collapsed More at the end; new ones stay at the top", () => {
+    const folded = foldSettingsRail(SECTIONS, ["workspace:keys", "account:security"], () => {});
     expect(ids(folded)).toEqual([
       ["workspace", ["workspace:general"]],
       ["organization", []],
@@ -47,17 +47,22 @@ describe("foldSettingsRail", () => {
   });
 
   test("a section emptied by More stays for search only", () => {
-    const folded = foldSettingsRail(SECTIONS, ["account:security"], () => {});
+    const folded = foldSettingsRail(SECTIONS, ["workspace:general", "workspace:keys"], () => {});
     const workspace = folded.find((section) => section.id === "workspace");
     expect(workspace?.searchOnlySection).toBe(true);
     expect(workspace?.searchOnly?.length).toBe(1);
   });
 
-  test("row menus move entries and save the new list", () => {
+  test("row buttons move entries and save the new list, keeping ids this rail doesn't list", () => {
     const saved: string[][] = [];
-    const folded = foldSettingsRail(SECTIONS, ["workspace:general"], (shown) => saved.push(shown));
+    const folded = foldSettingsRail(SECTIONS, ["elsewhere:page", "workspace:keys"], (moved) =>
+      saved.push(moved),
+    );
     folded[0]?.groups[0]?.items[0]?.place?.run();
-    folded.at(-1)?.groups[0]?.items[1]?.place?.run();
-    expect(saved).toEqual([[], ["workspace:general", "account:security"]]);
+    folded.at(-1)?.groups[0]?.items[0]?.place?.run();
+    expect(saved).toEqual([
+      ["elsewhere:page", "workspace:keys", "workspace:general"],
+      ["elsewhere:page"],
+    ]);
   });
 });

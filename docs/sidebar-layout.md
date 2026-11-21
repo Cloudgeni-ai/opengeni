@@ -17,9 +17,9 @@ in Artifacts. The sidebar shows those pins through a **Pinned apps** list.
 | `app`       | An App, optionally one of its pages (`path: "/releases"`). Its own title unless `label` is set. |
 | `agent`     | An agent's page (`agentId`), with the agent's avatar. Its name unless `label` is set. Opens in place. |
 | `link`      | An `https://` link with a `label`. An outside link opens in a new tab and is marked external; a link to a page of this Opengeni opens in place. |
-| `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (Apps this person opened or edited last), `limit` 1 to 20 (default 5). |
+| `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (apps this person opened or edited last), `limit` 1 to 20 (default 5). |
 
-Apps, links and groups take an optional `icon`: a lucide icon name from
+App links, outside links and groups take an optional `icon`: a lucide icon name from
 `SIDEBAR_ITEM_ICONS` in `@opengeni/contracts/sidebar-layout` (for example
 `rocket`, `book-open`, `chart-line`). Without one, an app shows the app icon,
 a group its chevron, and an outside link the site's own icon (see API). An
@@ -40,7 +40,7 @@ default sets them for everyone and a person's own value wins:
 | ------------------ | ------------------------------------------------------------------------------------------ |
 | `sessionsShowApps` | `false`: project apps don't show as rows of their own in the Sessions list; their chats show as ordinary chats. Default `true`. |
 | `hiddenNavEntries` | Built-in rail entries left out: any of `inbox`, `capabilities`, `knowledge`, `automations`, `agents`, `meetings`, `artifacts`. An entry still shows while it is the current page or has something waiting (a Knowledge review, an Inbox item, a recording). Default none. |
-| `settingsShown`    | Settings rail entry ids (`workspace:general`, `organization:members`, ...) kept at the top; the rest go under one collapsed **More**, which opens while it holds the current page. Settings search still finds everything. Default unset: every entry at the top. |
+| `settingsMore`     | Settings rail entry ids (`workspace:general`, `organization:members`, ...) moved under one collapsed **More**, which opens while it holds the current page; every other entry, including new ones, stays at the top. Settings search still finds everything. Default unset: every entry at the top. |
 
 Item ids are 1 to 64 letters, digits, `-` or `_`; the server makes one when a
 new item has none. A person's own items always get ids starting with `my-`: a
@@ -248,7 +248,7 @@ Artifacts view:
 - The last 3 Apps you left stay open while you go elsewhere, so coming back
   doesn't reload them or lose their state. More than that, the one shown
   longest ago closes. Switching workspaces closes them. Each return to an
-  App counts as opening it, for Recent apps; saving a new version of an App
+  app counts as opening it, for Recent apps; saving a new version of an app
   counts too.
 - Coming back to an App seen earlier in the tab draws its last copy at once
   (and refreshes it behind), and a first open is a blank canvas in the

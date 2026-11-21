@@ -114,7 +114,7 @@ function createFixture() {
         item: { id: "my-links", type: "group", label: "My links", items: [] },
       },
     ],
-    options: { settingsShown: ["workspace:general", "workspace:members", "workspace:agents"] },
+    options: { settingsMore: ["workspace:keys", "workspace:security"] },
   };
   let revisions = { personal: 1, workspace: 1 };
   let next = 0;
@@ -317,9 +317,9 @@ function SettingsSearchPreview() {
   );
   // The person's own choice of top-level entries; the rest fold under More.
   const { layout, update } = useSidebarLayout(WORKSPACE_ID);
-  const shown = readResolvedSidebarOptions(layout?.options).settingsShown;
-  const rail = foldSettingsRail(sections, shown, (settingsShown) => {
-    void update({ scope: "personal", changes: [{ op: "options", settingsShown }] });
+  const more = readResolvedSidebarOptions(layout?.options).settingsMore;
+  const rail = foldSettingsRail(sections, more, (settingsMore) => {
+    void update({ scope: "personal", changes: [{ op: "options", settingsMore }] });
   });
   return (
     <div

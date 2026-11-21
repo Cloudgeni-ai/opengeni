@@ -1,35 +1,42 @@
-// The settings rail's More (docs/sidebar-layout.md, `settingsShown`): a
-// person keeps the settings they use at the top, and the rest fold under one
-// More at the end. Unset (the default) keeps every entry at the top. Search
-// still finds everything.
+// The settings rail's More (docs/sidebar-layout.md, `settingsMore`): a
+// person moves the settings they rarely use under one More at the end; every
+// other entry, including ones a later release adds, stays at the top. Unset
+// (the default) keeps every entry at the top. Search still finds everything.
 import type { SettingsRailItem, SettingsRailSection } from "./settings-sidebar";
 
 export const SETTINGS_MORE_SECTION_ID = "more";
 
 /**
- * The rail with the entries outside `shown` moved under More, each with a
- * menu that moves it (Move to More, Show at top). `save` stores the new list.
+ * The rail with the entries in `moved` under More, each with one button that
+ * moves it (Move to More, Show at top). `save` stores the new list.
  */
 export function foldSettingsRail(
   sections: readonly SettingsRailSection[],
-  shown: readonly string[] | null,
-  save: (shown: string[]) => void,
+  moved: readonly string[] | null,
+  save: (moved: string[]) => void,
 ): SettingsRailSection[] {
-  const all = sections.flatMap((section) =>
-    section.groups.flatMap((group) => group.items.map((item) => item.id)),
-  );
-  const top = new Set(shown ?? all);
-  const toMore = (id: string) => save(all.filter((each) => top.has(each) && each !== id));
-  const toTop = (id: string) => save(all.filter((each) => top.has(each) || each === id));
+  const under = new Set(moved ?? []);
+  // Saved entries this rail doesn't list right now (another role, flag or
+  // release) keep their place.
+  const toMore = (id: string) => save([...under, id]);
+  const toTop = (id: string) => save([...under].filter((each) => each !== id));
   const more: SettingsRailItem[] = [];
   const folded = sections.flatMap((section): SettingsRailSection[] => {
     const groups = section.groups
       .map((group) => ({
         ...group,
         items: group.items.flatMap((item) => {
-          if (top.has(item.id))
-            return [{ ...item, place: { label: "Move to More", run: () => toMore(item.id) } }];
-          more.push({ ...item, place: { label: "Show at top", run: () => toTop(item.id) } });
+          if (!under.has(item.id))
+            return [
+              {
+                ...item,
+                place: { label: "Move to More", toMore: true, run: () => toMore(item.id) },
+              },
+            ];
+          more.push({
+            ...item,
+            place: { label: "Show at top", toMore: false, run: () => toTop(item.id) },
+          });
           return [];
         }),
       }))

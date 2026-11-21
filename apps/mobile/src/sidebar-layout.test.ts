@@ -217,7 +217,7 @@ test("hidden entries come from the layout's options; none before it loads", () =
   expect(
     sidebarHiddenEntries({
       ...layout([]),
-      options: { sessionsShowApps: true, hiddenNavEntries: ["automations"], settingsShown: null },
+      options: { sessionsShowApps: true, hiddenNavEntries: ["automations"], settingsMore: null },
     } as SidebarLayoutResponse),
   ).toEqual(["automations"]);
 });

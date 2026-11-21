@@ -94,6 +94,7 @@ export function ReadyMadeSection({
   const canAddApps = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
+  const [partlyLoaded, setPartlyLoaded] = useState(false);
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[] | null>(null);
   const [appTemplates, setAppTemplates] = useState<AppTemplate[] | null>(null);
   const [librarySkills, setLibrarySkills] = useState<CapabilityCatalogItem[] | null>(null);
@@ -109,31 +110,37 @@ export function ReadyMadeSection({
   useEffect(() => {
     let live = true;
     setLoadError(null);
-    void Promise.all([
+    setPartlyLoaded(false);
+    // Each kind loads on its own, so one failure (or a missing permission)
+    // leaves the other kinds usable.
+    void Promise.allSettled([
       client.listAgentTemplates(workspaceId),
-      // Only marks what is already added.
-      client.listAgents(workspaceId).catch(() => null),
+      client.listAgents(workspaceId),
       client.listAppTemplates(workspaceId),
       client.listLibrarySkills(workspaceId),
-    ]).then(
-      ([templates, agents, apps, skills]) => {
-        if (!live) return;
-        setAgentTemplates(templates);
-        setAgentsKnown(agents !== null);
-        setLibrarySkills(skills);
-        setAddedAgents(
-          new Map(
-            (agents ?? []).flatMap((agent) =>
-              agent.templateKey ? [[agent.templateKey, agent.id]] : [],
-            ),
+    ]).then(([templates, agents, apps, skills]) => {
+      if (!live) return;
+      const kinds = [templates, apps, skills];
+      const failed = kinds.filter((result) => result.status === "rejected");
+      if (failed.length === kinds.length) {
+        const reason = (failed[0] as PromiseRejectedResult).reason;
+        setLoadError(reason instanceof Error ? reason : new Error(String(reason)));
+        return;
+      }
+      setPartlyLoaded(failed.length > 0);
+      setAgentTemplates(templates.status === "fulfilled" ? templates.value : []);
+      // Only marks what is already added.
+      setAgentsKnown(agents.status === "fulfilled");
+      setAddedAgents(
+        new Map(
+          (agents.status === "fulfilled" ? agents.value : []).flatMap((agent) =>
+            agent.templateKey ? [[agent.templateKey, agent.id]] : [],
           ),
-        );
-        setAppTemplates(apps);
-      },
-      (error: unknown) => {
-        if (live) setLoadError(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
+        ),
+      );
+      setAppTemplates(apps.status === "fulfilled" ? apps.value : []);
+      setLibrarySkills(skills.status === "fulfilled" ? skills.value : []);
+    });
     return () => {
       live = false;
     };
@@ -236,11 +243,18 @@ export function ReadyMadeSection({
       } else if (entry.kind === "app") {
         const template = appTemplates?.find((each) => each.key === key);
         if (!template) return;
-        const installed = await client.installAppPackage(workspaceId, {
+        // One key per ready-made app: adding it again returns the same app,
+        // unless that app was archived, then it's added fresh.
+        let installed = await client.installAppPackage(workspaceId, {
           package: template.package,
-          // One key per ready-made app: adding it again returns the same app.
           idempotencyKey: `ready-made:${template.key}`,
         });
+        if (installed.replayed && installed.app.status !== "active") {
+          installed = await client.installAppPackage(workspaceId, {
+            package: template.package,
+            idempotencyKey: `ready-made:${template.key}:${crypto.randomUUID()}`,
+          });
+        }
         setAddedApps((current) => new Map(current).set(key, installed.app.id));
         if (installed.notInstalled.length > 0) {
           toast.warning(`${entry.name} was added without some parts`, {
@@ -311,6 +325,18 @@ export function ReadyMadeSection({
   }
   return (
     <div className="grid gap-8">
+      {partlyLoaded ? (
+        <p role="status" className="text-sm text-fg-muted">
+          Some of it couldn't load.{" "}
+          <button
+            type="button"
+            className="font-medium text-fg underline-offset-2 hover:underline"
+            onClick={() => setLoadRevision((value) => value + 1)}
+          >
+            Retry
+          </button>
+        </p>
+      ) : null}
       {groups.map((group) => (
         <section key={group.key} aria-label={group.team}>
           <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>{group.team}</h2>

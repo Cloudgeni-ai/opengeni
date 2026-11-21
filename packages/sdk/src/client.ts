@@ -11799,10 +11799,16 @@ export class OpenGeniClient {
   }
 
   /** Reviewed library skills to add with `installLibrarySkill`; `enabled` once added. */
-  async listLibrarySkills(workspaceId: string): Promise<CapabilityCatalogItem[]> {
+  async listLibrarySkills(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<CapabilityCatalogItem[]> {
     const response = await this.requestJson<ListLibrarySkillsResponse>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/skills/library`,
+      undefined,
+      undefined,
+      options,
     );
     return response.skills;
   }

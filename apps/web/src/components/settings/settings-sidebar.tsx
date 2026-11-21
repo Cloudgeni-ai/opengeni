@@ -2,8 +2,8 @@ import { Link, useNavigate, type NavigateOptions } from "@tanstack/react-router"
 import {
   ArrowLeftIcon,
   ChevronDownIcon,
+  ChevronUpIcon,
   MenuIcon,
-  MoreHorizontalIcon,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -20,12 +20,6 @@ import {
 } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@opengeni/react/ui/dropdown-menu";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
 import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
@@ -104,11 +98,8 @@ export interface SettingsRailItem {
   link: ReactElement;
   /** A purple dot for "needs you". */
   attention?: boolean;
-  /**
-   * Where the person keeps it (docs/sidebar-layout.md, `settingsShown`): its
-   * menu moves it under More or back to the top.
-   */
-  place?: { label: string; run: () => void } | undefined;
+  /** One button that moves the entry under More or back to the top (docs/sidebar-layout.md, `settingsMore`). */
+  place?: { label: string; toMore: boolean; run: () => void } | undefined;
 }
 
 export interface SettingsRailGroup {
@@ -245,20 +236,19 @@ function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active
   return (
     <div className="group/row relative">
       {row}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            aria-label={`More for ${item.label}`}
-            className="absolute top-1/2 right-1 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100"
-          >
-            <MoreHorizontalIcon className="size-3.5" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="right" className="min-w-40">
-          <DropdownMenuItem onSelect={place.run}>{place.label}</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <button
+        type="button"
+        aria-label={`${place.label}: ${item.label}`}
+        title={place.label}
+        onClick={place.run}
+        className="absolute top-1/2 right-1 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100"
+      >
+        {place.toMore ? (
+          <ChevronDownIcon className="size-3.5" />
+        ) : (
+          <ChevronUpIcon className="size-3.5" />
+        )}
+      </button>
     </div>
   );
 }
