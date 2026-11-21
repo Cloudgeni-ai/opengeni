@@ -539,6 +539,25 @@ export const FinalizeRecordingRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type FinalizeRecordingRequest = z.infer<typeof FinalizeRecordingRequest>;
 
+/** Timings are monotonic client measurements, not inputs to the recording pipeline. */
+export const RecordingClientTimings = /* @__PURE__ */ defineSchema(() => {
+  const duration = z
+    .number()
+    .min(0)
+    .max(7 * 24 * 60 * 60 * 1_000);
+  return z
+    .object({
+      purpose: RecordingCapturePurpose,
+      stopToLastPutMs: duration.optional(),
+      finalizeMs: duration.optional(),
+      transcriptWaitMs: duration.optional(),
+      stopToTranscriptMs: duration.optional(),
+      stopToComposerMs: duration.optional(),
+    })
+    .strict();
+});
+export type RecordingClientTimings = z.infer<typeof RecordingClientTimings>;
+
 export const UpdateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

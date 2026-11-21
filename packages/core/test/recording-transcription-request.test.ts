@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { createObservability } from "@opengeni/observability";
+import {
+  createObservability,
+  recordingTimingContext,
+  withRecordingTiming,
+} from "@opengeni/observability";
 import {
   RecordingTranscriptionError,
   type RecordingTranscriptionProvider,
@@ -78,14 +82,32 @@ describe("sending a transcription request as the provider documents", () => {
       call === 1 ? hang(signal) : Promise.resolve(heard),
     );
     const failures: RecordingTranscriptionRequestFailure[] = [];
+    const observability = createObservability(
+      {
+        serviceName: "opengeni",
+        environment: "test",
+        deploymentRevision: "test",
+        observabilityMetricsEnabled: true,
+        observabilityStructuredLogs: false,
+      },
+      { component: "worker" },
+    );
     const startedAt = performance.now();
-    const result = await sendRecordingTranscriptionRequest({
-      provider,
-      request,
-      credentials: null,
-      audioMilliseconds: 80,
-      onFailure: (failure) => failures.push(failure),
-    });
+    const result = await withRecordingTiming(
+      {
+        observability,
+        context: recordingTimingContext("rec-1", "dictation"),
+        providerRegion: () => "westeurope",
+      },
+      () =>
+        sendRecordingTranscriptionRequest({
+          provider,
+          request,
+          credentials: null,
+          audioMilliseconds: 80,
+          onFailure: (failure) => failures.push(failure),
+        }),
+    );
     const elapsed = performance.now() - startedAt;
     expect(result).toBe(heard);
     // 80 ms of audio, then the documented 20 ms wait: not the minutes a hung
@@ -96,6 +118,23 @@ describe("sending a transcription request as the provider documents", () => {
     expect(calls[1]!.startedAt - calls[0]!.startedAt).toBeGreaterThanOrEqual(95);
     // The hung request was stopped before the answer was returned.
     expect(calls[0]!.signal.aborted).toBe(true);
+    const metricLines = (await observability.prometheusMetrics())
+      .split("\n")
+      .filter((line) => line.startsWith("opengeni_recording_stage_duration_seconds_count{"));
+    for (const [stage, outcome] of [
+      ["provider_request", "cancelled"],
+      ["provider_request", "complete"],
+      ["provider_retry_wait", "complete"],
+    ]) {
+      expect(
+        metricLines.some(
+          (line) =>
+            line.includes(`stage="${stage}"`) &&
+            line.includes(`outcome="${outcome}"`) &&
+            line.endsWith(" 1"),
+        ),
+      ).toBe(true);
+    }
     expect(failures).toEqual([
       expect.objectContaining({
         providerId: "fast",

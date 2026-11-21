@@ -141,6 +141,36 @@ The resumable capability is hidden rather than degraded to memory-only behavior
 when object storage or ffmpeg is unavailable. The one-shot endpoint may remain
 available independently when a provider is ready.
 
+### Finding a slow recording
+
+`opengeni_recording_stage_duration_seconds` is a histogram across the API and
+worker, labeled by `stage`, `purpose`, and `outcome`. To diagnose one recording,
+filter `recording.*` spans and recording logs by `recordingKey` (the `rec_` prefix
+and first 32 hex digits of SHA-256 of the lowercase recording ID). The
+`recording processed` log includes that key and the audio duration. The key,
+provider details, attempt, chunk size, and audio duration are diagnostic span
+attributes, not metric labels. The provider region is the configured route's
+claim, or `unknown` when it cannot be determined.
+
+- `chunk_put` measures each confirmed presigned upload from the device, not
+  the API's later object check. `stop_to_last_put` is zero if all uploads
+  already finished when the person stopped. `client_finalize` is the HTTP
+  round trip; `finalize` is the API's finalization work.
+- `queue_wait` measures the first claim's wait after a version is created.
+  `audio_prepare` includes retrieving chunks; `audio_normalize` measures the
+  media processing itself. `provider_request` measures each provider attempt;
+  `provider_retry_wait` records the wait for retries that actually ran.
+- `transcript_long_poll_wait` is the intentional pending window. For API
+  latency use `transcript_list_work`, which excludes deliberate sleeps; the
+  generic HTTP timer still includes the full lifetime of the request.
+- `client_transcript_wait` runs from starting the transcript lookup to having
+  the text. For a fresh resumable dictation, `stop_to_transcript` and
+  `stop_to_composer` use the client's monotonic clock; the latter is emitted
+  only for automatic insertion. The worker's `capture_end_to_transcript` is
+  a separate estimate from the stored capture timestamp, also for meetings.
+  Client spans are placed relative to when reports arrive, not aligned to a
+  device wall clock. Stages can overlap and should not be summed.
+
 ## Browser lifecycle requirements
 
 1. Create the local manifest before microphone capture and negotiate MIME type in

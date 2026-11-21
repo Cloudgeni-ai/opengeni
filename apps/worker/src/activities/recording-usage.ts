@@ -1,6 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
-import type { Attributes, Observability } from "@opengeni/observability";
+import {
+  recordingTimingContext,
+  type Attributes,
+  type Observability,
+} from "@opengeni/observability";
 
 /**
  * What a recording's processing costs this deployment, stage by stage:
@@ -470,6 +474,9 @@ export function reportRecordingProcessing(
     // operational error and keep only its class, so the code is its `reason`.
     observability.info("recording processed", {
       ...context,
+      ...(typeof context.recordingId === "string"
+        ? recordingTimingContext(context.recordingId, report.purpose)
+        : {}),
       ...(typeof context.versionId === "string" ? { correlationId: context.versionId } : {}),
       recordingPurpose: report.purpose,
       provider: report.provider,
