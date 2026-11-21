@@ -17,6 +17,7 @@ import {
   MeetingDetection,
   MeetingDetectionStore,
   MeetingPrompter,
+  type MeetingDetectionOptions,
   ownAppRoot,
   parseWatchLine,
   PROMPT_AFTER_MS,
@@ -24,6 +25,7 @@ import {
   promptText,
   recordedMilliseconds,
   recordingMeeting,
+  REQUEST_WAIT_MS,
   STOP_UNANSWERED_MS,
   type MeetingPage,
   type MeetingPrompt,
@@ -398,6 +400,8 @@ function detection(
     describePage?: (page: MeetingPage) => string | null;
     recordingChanged?: () => void;
     stopConfirmMs?: number;
+    /** Posts notifications; by default the test keeps them. */
+    notify?: MeetingDetectionOptions["notify"];
   } = {},
 ) {
   let now = 0;
@@ -448,11 +452,13 @@ function detection(
     reveal: () => {
       revealed += 1;
     },
-    notify: (notice) => {
-      const posted = { ...notice, closed: false };
-      notices.push(posted);
-      return { close: () => (posted.closed = true) };
-    },
+    notify:
+      options.notify ??
+      ((notice) => {
+        const posted = { ...notice, closed: false };
+        notices.push(posted);
+        return { close: () => (posted.closed = true) };
+      }),
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
     ...(options.revealPage ? { revealPage: options.revealPage } : {}),
     ...(options.describePage ? { describePage: options.describePage } : {}),
@@ -474,6 +480,7 @@ function detection(
     subject,
     cards,
     notices,
+    helper,
     log,
     microphone,
     revealed: () => revealed,
@@ -966,9 +973,19 @@ describe("when the meeting seems over", () => {
     subject.stop();
   });
 
-  test("a call back on the microphone takes the question back; when it ends again it asks again", () => {
+  test("a call back on the microphone takes the question back, not a blip; when it ends again it asks again", () => {
     const { subject, stop, notices, page, microphone, askedAt, cards } = ended();
+    // A blip: the question stays, and so does its notification.
+    microphone([zoom], askedAt + 30_000);
+    microphone([], askedAt + 31_000);
+    microphone([], askedAt + 31_000 + ENDED_AFTER_MS);
+    expect(stop.closed).toBe(false);
+    expect(notices[0]!.closed).toBe(false);
+    expect(cards.at(-1)).toBe(stop);
+    // A rejoin: back for a few seconds.
     microphone([zoom], askedAt + 60_000);
+    expect(stop.closed).toBe(false);
+    microphone([zoom], askedAt + 60_000 + PROMPT_AFTER_MS);
     expect(stop.closed).toBe(true);
     expect(notices[0]!.closed).toBe(true);
     microphone([zoom], askedAt + 2 * STOP_UNANSWERED_MS);
@@ -979,6 +996,62 @@ describe("when the meeting seems over", () => {
     expect(cards.at(-1)).not.toBe(stop);
     expect(notices.filter((notice) => !notice.closed)).toHaveLength(1);
     subject.stop();
+  });
+
+  test("while the microphone can't be watched, an unanswered question doesn't stop the recording", () => {
+    const { subject, stop, page, microphone, askedAt, helper } = ended();
+    // The helper stops: the call may still be going on.
+    helper.emit("exit", 1, null);
+    microphone([], askedAt + 2 * STOP_UNANSWERED_MS);
+    expect(page.sent).toEqual([]);
+    expect(stop.closed).toBe(false);
+    subject.stop();
+  });
+
+  test("a stop that didn't take, then a stop by hand much later, doesn't say it stopped by itself", () => {
+    const { subject, page, microphone, askedAt, cards, notices } = ended();
+    microphone([], askedAt + STOP_UNANSWERED_MS);
+    expect(page.sent).toEqual([{ kind: "stop", app: "Zoom" }]);
+    microphone([], askedAt + STOP_UNANSWERED_MS + REQUEST_WAIT_MS);
+    subject.setRecording(page, false);
+    expect(cards.map((card) => card.prompt.kind)).not.toContain("stopped");
+    expect(notices.map((notice) => notice.title)).not.toContain("Recording stopped");
+    subject.stop();
+  });
+
+  test("a notification that fails to post leaves the card", () => {
+    const run = detection({
+      notify: () => {
+        throw new Error("no notification service");
+      },
+    });
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    run.call();
+    run.subject.setRecording(page, true);
+    run.microphone([], 10_000);
+    run.microphone([], 10_000 + ENDED_AFTER_MS);
+    expect(run.cards.at(-1)!.prompt.kind).toBe("stop");
+    expect(run.log).toContain("Meeting detection: couldn't post a notification.");
+    run.subject.stop();
+  });
+
+  test("OK on the stopped card takes its notification away; a new recording takes the card away", () => {
+    const first = ended();
+    first.microphone([], first.askedAt + STOP_UNANSWERED_MS);
+    first.subject.setRecording(first.page, false);
+    first.cards.at(-1)!.done("dismissed");
+    expect(first.notices.at(-1)).toMatchObject({ title: "Recording stopped", closed: true });
+    first.subject.stop();
+
+    const second = ended();
+    second.microphone([], second.askedAt + STOP_UNANSWERED_MS);
+    second.subject.setRecording(second.page, false);
+    const stopped = second.cards.at(-1)!;
+    second.subject.setRecording(second.page, true);
+    expect(stopped.closed).toBe(true);
+    expect(second.notices.at(-1)!.closed).toBe(true);
+    second.subject.stop();
   });
 
   test("a recording started without asking still stops when its call ends, with no question", () => {

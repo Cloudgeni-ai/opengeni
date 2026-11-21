@@ -23,6 +23,7 @@ export {
   type MeetingPromptText,
   type MeetingPromptView,
   type ShownPrompt,
+  type UnansweredStop,
 } from "./index";
 export { ENGLISH_MEETING_WORDS, fillMeetingWords, type MeetingWords } from "./words";
 export { MeetingPromptCard, MEETING_CARD_TIMEOUT_MS, type MeetingPromptCardOptions } from "./card";

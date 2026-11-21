@@ -37,7 +37,7 @@ export interface MeetingWords {
   calendarEnded?: string;
   /** Said when nobody answered whether the meeting was over, so its recording stopped. */
   autoStopped?: string;
-  /** Why it stopped. */
+  /** Why it stopped. `{minutes}`: how long nobody answered. */
   autoStoppedReason?: string;
   /**
    * Said when a call started recording without asking. Added later, so an
@@ -80,7 +80,7 @@ export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
   keepRecording: "Keep recording",
   calendarEnded: "The meeting on your calendar has ended. Still recording.",
   autoStopped: "Recording stopped",
-  autoStoppedReason: "The meeting seemed over, with no answer for 10 minutes.",
+  autoStoppedReason: "The meeting seemed over, with no answer for {minutes} minutes.",
   recordingStarted: "Recording this call",
   callRecording: "A call in {app} started, so it's being recorded.",
   ok: "OK",

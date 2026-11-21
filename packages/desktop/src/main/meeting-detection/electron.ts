@@ -73,6 +73,11 @@ export interface CreateMeetingDetectionOptions {
   iconPath?: string;
   /** The card's words, in the app's language; read each time a card shows. English by default. */
   words?: () => MeetingWords;
+  /**
+   * System notifications beside the card when the meeting seems over, and
+   * when its recording stopped by itself. On by default.
+   */
+  notify?: boolean;
   /** The person chose to record or stop: bring the app's window up, opening it if it is closed. */
   reveal(): void;
   /**
@@ -119,7 +124,7 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
       platform: process.platform,
     },
     store: new MeetingDetectionStore(options.dataDir),
-    notify: postMeetingNotice,
+    ...(options.notify === false ? {} : { notify: postMeetingNotice }),
     ...(options.words ? { words: options.words } : {}),
     view: new MeetingPromptCard({
       platform: process.platform,

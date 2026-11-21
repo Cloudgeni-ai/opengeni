@@ -333,6 +333,13 @@ export const STOP_UNANSWERED_MS = 10 * 60_000;
  */
 export const CALENDAR_OVERRUN_MS = 5 * 60_000;
 
+/** Stopping a recording nobody answered about: whether it may now, and how. */
+export interface UnansweredStop {
+  /** False while the microphone can't be watched, so a call may still be on. */
+  allowed(): boolean;
+  stop(app: CallApp): void;
+}
+
 export type MeetingPrompt =
   | { kind: "record"; app: CallApp }
   /**
@@ -430,10 +437,10 @@ export class MeetingPrompter {
     private readonly auto: AutoRecording | null = null,
     /**
      * Nobody answered the question to stop for {@link STOP_UNANSWERED_MS}
-     * while no call held the microphone: stop the recording. Without it the
-     * question stays until answered.
+     * while no call held the microphone: stop the recording, if allowed.
+     * Without it the question stays until answered.
      */
-    private readonly unanswered: ((app: CallApp) => void) | null = null,
+    private readonly unanswered: UnansweredStop | null = null,
   ) {}
 
   setEnabled(enabled: boolean, now: number): void {
@@ -481,12 +488,6 @@ export class MeetingPrompter {
       if (declined) declined.lastSeen = now;
     }
     if (this.recording) for (const id of active.keys()) this.recorded.add(id);
-    // A call back on the microphone while asking whether the meeting is over
-    // (a rejoin): it isn't over. Once that call ends, it asks again.
-    const shown = this.shown?.prompt;
-    if (this.recording && active.size > 0 && shown?.kind === "stop" && !shown.calendar) {
-      this.close();
-    }
     this.evaluate(now);
   }
 
@@ -519,21 +520,35 @@ export class MeetingPrompter {
         if (this.automatic && this.auto) {
           this.close();
           this.auto.stop(call.app);
-        } else {
+        } else if (!(this.shown?.prompt.kind === "stop" && !this.shown.prompt.calendar)) {
+          // Already asking (a blip while it asked): the question stays as it is.
           this.present({ kind: "stop", app: call.app }, now);
         }
       }
     }
     const shown = this.shown?.prompt;
+    // A call back on the microphone for a few seconds while asking whether the
+    // meeting is over (a rejoin; not a blip): it isn't over. Once that call
+    // ends, it asks again.
+    if (
+      this.recording &&
+      shown?.kind === "stop" &&
+      !shown.calendar &&
+      [...this.calls.values()].some((call) => call.active && now - call.since >= PROMPT_AFTER_MS)
+    ) {
+      this.close();
+    }
     if (
       shown?.kind === "stop" &&
+      this.shown?.prompt === shown &&
       this.unanswered &&
       this.stopAskedAt !== null &&
       now - this.stopAskedAt >= STOP_UNANSWERED_MS &&
-      this.activeCalls().length === 0
+      this.activeCalls().length === 0 &&
+      this.unanswered.allowed()
     ) {
       this.close();
-      this.unanswered(shown.app);
+      this.unanswered.stop(shown.app);
     }
     if (!this.enabled || this.recording) return;
     for (const call of this.calls.values()) {
@@ -690,7 +705,9 @@ export function promptText(
   if (prompt.kind === "stopped") {
     return {
       question: words.autoStopped ?? ENGLISH_MEETING_WORDS.autoStopped,
-      reason: words.autoStoppedReason ?? ENGLISH_MEETING_WORDS.autoStoppedReason,
+      reason: fillMeetingWords(words.autoStoppedReason ?? ENGLISH_MEETING_WORDS.autoStoppedReason, {
+        minutes: String(Math.round(STOP_UNANSWERED_MS / 60_000)),
+      }),
       // Nothing to do but read it.
       action: "",
       dismiss: words.ok ?? ENGLISH_MEETING_WORDS.ok,
@@ -982,12 +999,16 @@ export class MeetingDetection {
   private readonly stopping = new Set<MeetingPage>();
   /** The calendar meeting the recording going on is of, once known. */
   private recordedMeeting: CalendarMeeting | null = null;
-  /** This recording was already asked whether its meeting is over. */
+  /** The person already answered whether this recording's meeting is over, or the calendar asked. */
   private askedToStop = false;
-  /** Nobody answered whether the meeting was over: the recording is being stopped for them. */
-  private stoppingUnanswered: CallApp | null = null;
+  /** Nobody answered whether the meeting was over: the recording is being stopped for them, since `at`. */
+  private stoppingUnanswered: { app: CallApp; at: number } | null = null;
+  /** A meeting joined from its reminder, whose recording is on its way. */
+  private joined: { meeting: CalendarMeeting; at: number } | null = null;
   /** The notification that the recording stopped by itself, until the next recording. */
   private stoppedNotice: ShownPrompt | null = null;
+  /** The card saying the recording stopped by itself, while it shows. */
+  private stoppedCard: ShownPrompt | null = null;
 
   constructor(private readonly options: MeetingDetectionOptions) {
     this.prompter = new MeetingPrompter(
@@ -1006,12 +1027,16 @@ export class MeetingDetection {
           this.deliver(promptRequest({ kind: "stop", app }), { quiet: true });
         },
       },
-      (app) => {
-        this.options.log(
-          `Meeting detection: nobody answered whether the meeting is over; stopping its recording (${app.id}).`,
-        );
-        this.stoppingUnanswered = app;
-        this.deliver(promptRequest({ kind: "stop", app }), { quiet: true });
+      {
+        // Not while the helper is down or failing: the call may still be on.
+        allowed: () => this.child !== null && this.problem === null,
+        stop: (app) => {
+          this.options.log(
+            `Meeting detection: nobody answered whether the meeting is over; stopping its recording (${app.id}).`,
+          );
+          this.stoppingUnanswered = { app, at: this.now() };
+          this.deliver(promptRequest({ kind: "stop", app }), { quiet: true });
+        },
       },
     );
     const calendar = options.calendar;
@@ -1026,9 +1051,15 @@ export class MeetingDetection {
           // A meeting whose call the person turned down isn't offered while it goes on.
           callState: (appId) => this.prompter.callState(appId, this.now()),
           // A call that just started, or one that ended, is asked about first.
-          busy: () => this.onCard?.prompt.kind === "record" || this.onCard?.prompt.kind === "stop",
+          // The calendar's question gives way: the reminder offers to switch.
+          busy: () => {
+            const prompt = this.onCard?.prompt;
+            return prompt?.kind === "record" || (prompt?.kind === "stop" && !prompt.calendar);
+          },
           present: (reminder, done) => this.showCard(joinPrompt(reminder), done),
           join: (reminder) => {
+            // Its recording is of this meeting, whichever other is going on.
+            this.joined = { meeting: reminder.meeting, at: this.now() };
             // Recording starts in the background, and the meeting opens last,
             // in front, so the window doesn't cover it.
             this.deliver(promptRequest(joinPrompt(reminder)), { quiet: true });
@@ -1174,18 +1205,26 @@ export class MeetingDetection {
     else this.recordingSince ??= now;
     if (started || !any) {
       // A new recording: its own meeting, and asked again when that is over.
-      this.recordedMeeting = null;
+      const joined = this.joined;
+      this.joined = null;
+      this.recordedMeeting =
+        started && joined && now - joined.at < REQUEST_WAIT_MS ? joined.meeting : null;
       this.askedToStop = false;
     }
     if (started) {
       this.stoppedNotice?.close();
       this.stoppedNotice = null;
+      this.stoppedCard?.close();
+      this.stoppedCard = null;
     }
     const unanswered = this.stoppingUnanswered;
     if (started || !any) this.stoppingUnanswered = null;
     this.prompter.setRecording(any, now);
-    // Stopped because nobody answered: say so, on the card and in a notification.
-    if (!any && unanswered) this.presentStopped(unanswered);
+    // Stopped because nobody answered: say so, on the card and in a
+    // notification. A stop that didn't take then is no longer that one.
+    if (!any && unanswered && now - unanswered.at < REQUEST_WAIT_MS) {
+      this.presentStopped(unanswered.app);
+    }
     for (const listener of this.recordingListeners) listener();
     if (changed) this.options.recordingChanged?.();
   }
@@ -1279,7 +1318,8 @@ export class MeetingDetection {
     // until the question is answered or taken back.
     let notice: ShownPrompt | null = null;
     if (prompt.kind === "stop") {
-      this.askedToStop = true;
+      // The calendar asks once a recording.
+      if (prompt.calendar) this.askedToStop = true;
       notice = this.notify(prompt, () => this.showRecorder());
     }
     const withdraw = () => {
@@ -1290,6 +1330,16 @@ export class MeetingDetection {
       withdraw();
       this.prompter.dismissed(prompt);
       this.options.log(`Meeting detection: ${OUTCOMES[outcome]} (${app}).`);
+      // Answered: not asked again for this recording, by the calendar either.
+      if (prompt.kind === "stop" && outcome !== "expired") this.askedToStop = true;
+      if (prompt.kind === "stopped") {
+        this.stoppedCard = null;
+        // Read: its notification goes too.
+        if (outcome !== "expired") {
+          this.stoppedNotice?.close();
+          this.stoppedNotice = null;
+        }
+      }
       if (outcome === "dismissed" && prompt.kind === "record") {
         // Not now: not during this call, and not for the calendar meeting it is.
         const now = this.now();
@@ -1314,7 +1364,7 @@ export class MeetingDetection {
     const prompt: MeetingPrompt = { kind: "stopped", app };
     this.stoppedNotice?.close();
     this.stoppedNotice = this.notify(prompt, () => this.reveal());
-    this.present(prompt);
+    this.stoppedCard = this.present(prompt);
   }
 
   /** Post a system notification saying what the card says; null when there is none. */
@@ -1361,8 +1411,10 @@ export class MeetingDetection {
    */
   private checkCalendarEnd(now: number): void {
     const since = this.recordingSince;
+    // Only the active account's calendar is read, so only its recording is asked about.
     if (!this.reminders || since === null || this.askedToStop) return;
-    this.recordedMeeting ??= this.reminders.meetingDuring(since);
+    if (!this.remindersWanted() || !this.targetRecords()) return;
+    this.recordedMeeting ??= this.reminders.meetingRecorded(since);
     const meeting = this.recordedMeeting;
     if (!meeting || now < meeting.endsAt + CALENDAR_OVERRUN_MS) return;
     if (this.onCard?.prompt.kind === "join") return;
