@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, withWorkspaceRls, type Database } from "./database";
 
 /**
- * App webhooks and app notifications (migration 1524, docs/app-webhooks.md).
+ * App webhooks and app notifications (migration 1532, docs/app-webhooks.md).
  * Every read and write runs under the workspace's row-level security. A
  * delivery names its workspace in its address, so the public intake reads
  * its webhook in that workspace's context without an account.
@@ -287,7 +287,7 @@ export async function insertAppNotification(
 ): Promise<{ id: string } | { limited: "sender" | "workspace" } | { unavailable: true }> {
   return await withRlsContext(db, scope, async (tx) => {
     // Delivery runs once this role may execute it (granted a release after
-    // migration 1524); until then a send is refused rather than stored.
+    // migration 1532); until then a send is refused rather than stored.
     const [privilege] = await rawRows<{ allowed: boolean }>(
       tx,
       sql`select has_function_privilege(

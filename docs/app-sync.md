@@ -259,7 +259,7 @@ cross-workspace listing is visible only to a connection with no workspace or
 account context set. Each queue row carries the run's chain depth, so a run
 started by an automation keeps counting toward the chain limit.
 
-Migration `1522_app_sync_paging_and_leases.sql` (rolling):
+Migration `1530_app_sync_paging_and_leases.sql` (rolling):
 `app_sync_queue.lease_token`, `app_sync_subscriptions.account_server_id` and
 the FORCE RLS table `app_sync_keys` (the keys each sync wrote, for
 `removeMissing`; ids, keys and a table sync's value fingerprints, no record
