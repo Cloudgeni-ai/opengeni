@@ -510,27 +510,23 @@ function ArtifactDetailPage({
   });
   // A host that opens pages beside the chat has no history to go back through.
   const opensBeside = usePage().opensBeside;
-  const back: DetailBackLink =
-    fromSite && !opensBeside
-      ? {
-          // Named after the app once it has loaded (below).
-          label: "",
-          href: `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(artifactId)}`,
-          onClick: (event?: MouseEvent) => {
-            if (
-              event &&
-              (event.button !== 0 ||
-                event.metaKey ||
-                event.ctrlKey ||
-                event.shiftKey ||
-                event.altKey)
-            )
-              return;
-            event?.preventDefault();
-            window.history.back();
-          },
-        }
-      : artifactsBack;
+  const backToSite = fromSite && !opensBeside;
+  const back: DetailBackLink = backToSite
+    ? {
+        // Named after the app once it has loaded (below).
+        label: "Back",
+        href: `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(artifactId)}`,
+        onClick: (event?: MouseEvent) => {
+          if (
+            event &&
+            (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+          )
+            return;
+          event?.preventDefault();
+          window.history.back();
+        },
+      }
+    : artifactsBack;
   const copyLink = useCopyArtifactLink(workspaceId);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
   // The tab is in the address, so Settings (from the workbench or the old
@@ -677,7 +673,7 @@ function ArtifactDetailPage({
   const shownTab: SiteTab = tab === "data" && !manageData ? "versions" : tab;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
-      <DetailPage back={back.label ? back : { ...back, label: artifact.title }}>
+      <DetailPage back={backToSite ? { ...back, label: artifact.title } : back}>
         <LineTabs
           value={shownTab}
           onValueChange={(value) => setTab(value as SiteTab)}

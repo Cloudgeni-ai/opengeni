@@ -823,6 +823,10 @@ test("the chat starts closed on an app no one has chatted with, open on one they
   const chatted = await render();
   expect(panel(chatted.container).hidden).toBe(false);
   expect(localStorage.getItem(openKey)).toBeNull();
+  // The default is kept, so the next visit starts open instead of opening late.
+  expect(JSON.parse(localStorage.getItem("og.site-view.chat-default:v1:me")!)).toEqual({
+    [siteId]: true,
+  });
 });
 
 test("arriving from a chat, or choosing one, shows a hidden chat", async () => {

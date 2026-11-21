@@ -487,14 +487,20 @@ export function SiteViewRoute({
       >
         {publishing || fullScreen ? null : (
           <SiteHeader inWindowBar={titleInWindowBar} column={siteColumn}>
-            {layout.position === "left" ? showChatButton : null}
-            {backControl}
-            {titleInWindowBar ? null : titleNode}
+            {/* In the macOS app the bar's own "Artifacts › title" is the way
+                back, and these controls sit on the bar's right. */}
+            {titleInWindowBar ? null : (
+              <>
+                {layout.position === "left" ? showChatButton : null}
+                {backControl}
+                {titleNode}
+              </>
+            )}
             {versionMenu}
             <span className="min-w-2 flex-1" />
             <SiteLiveStateLabel state={liveState} />
             {siteControls}
-            {layout.position === "left" ? null : showChatButton}
+            {layout.position === "left" && !titleInWindowBar ? null : showChatButton}
           </SiteHeader>
         )}
         {publishingSite ? (

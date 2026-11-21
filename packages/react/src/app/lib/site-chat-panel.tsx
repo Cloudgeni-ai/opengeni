@@ -136,6 +136,11 @@ export function siteChatOpenStorageId(subjectId: string): string {
   return ["og.site-view.chat-open", `v${VERSION}`, encodeURIComponent(subjectId)].join(":");
 }
 
+/** The view's last default per Site, so a later visit starts with it instead of opening late. */
+export function siteChatDefaultStorageId(subjectId: string): string {
+  return ["og.site-view.chat-default", `v${VERSION}`, encodeURIComponent(subjectId)].join(":");
+}
+
 function readOpenMap(storageId: string, storage: PanelStorage | null): Record<string, boolean> {
   if (!storage) return {};
   try {
@@ -181,16 +186,18 @@ export function writeSiteChatOpen(
  * Whether the Site's chat is open, remembered per person and Site. Until the
  * person chooses, the view decides (`setFallback`): closed for a Site no one
  * has chatted with, open for one that has conversations or was reached from a
- * chat.
+ * chat. That default is remembered too, so the next visit starts with it
+ * rather than opening the chat once the conversations have loaded.
  */
 export function useSiteChatOpen(subjectId: string, siteId: string) {
   const storageId = siteChatOpenStorageId(subjectId);
+  const defaultId = siteChatDefaultStorageId(subjectId);
   const key = `${storageId}|${siteId}`;
   const [state, setState] = useState(() => ({
     key,
     siteId,
     stored: readSiteChatOpen(storageId, siteId),
-    fallback: false,
+    fallback: readSiteChatOpen(defaultId, siteId) ?? false,
   }));
   // Another person signing in keeps the Site's default; another Site starts over.
   const current =
@@ -200,7 +207,10 @@ export function useSiteChatOpen(subjectId: string, siteId: string) {
           key,
           siteId,
           stored: readSiteChatOpen(storageId, siteId),
-          fallback: state.siteId === siteId && state.fallback,
+          fallback:
+            state.siteId === siteId
+              ? state.fallback
+              : (readSiteChatOpen(defaultId, siteId) ?? false),
         };
   if (current !== state) setState(current);
   const setOpen = useCallback(
@@ -211,11 +221,13 @@ export function useSiteChatOpen(subjectId: string, siteId: string) {
     [key, siteId, storageId],
   );
   const setFallback = useCallback(
-    (open: boolean) =>
+    (open: boolean) => {
+      if (readSiteChatOpen(defaultId, siteId) !== open) writeSiteChatOpen(defaultId, siteId, open);
       setState((previous) =>
         previous.fallback === open ? previous : { ...previous, fallback: open },
-      ),
-    [],
+      );
+    },
+    [defaultId, siteId],
   );
   return {
     open: current.stored ?? current.fallback,
