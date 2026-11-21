@@ -10,7 +10,7 @@ import {
 } from "../src";
 
 // A connection card the agent waits on needs the person, as an approval does
-// (migration 1545): its `connection-card:` notice marks the idle chat as
+// (migration 1546): its `connection-card:` notice marks the idle chat as
 // needing them until the card is withdrawn or the agent starts working again.
 
 let shared: SharedTestDatabase;
