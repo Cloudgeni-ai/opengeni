@@ -12,7 +12,8 @@ import type { ChatClient } from "@opengeni/sdk";
    hidden live provider read. No embedder events-at-mount contract is required
    and the choice latches before real content paints.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+import { dropdownMenuStub } from "./dropdown-menu-stub";
 import { act, type ReactElement, type ReactNode, useMemo } from "react";
 import type { GetWorkspaceCaptureResponse, WorkspaceCaptureManifest } from "@opengeni/sdk";
 import { registerDom, renderComponent, flush } from "./render-hook";
@@ -43,6 +44,8 @@ import {
 } from "../src/components/sandbox-workspace";
 
 registerDom({ clock: "virtual" });
+// Radix menus never mount content under the virtual clock; read the menu in place.
+mock.module("../src/ui/dropdown-menu", dropdownMenuStub);
 
 const EMPTY_MACHINES = { activeSandboxId: null, activeEpoch: 0, machines: [] };
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
@@ -764,12 +767,25 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     expect(rendered.container.textContent).toContain(
       "Open the live workspace to view current changes.",
     );
-    await clickButton("Uncommitted");
+    // The comparison lives in the Changes view menu.
+    const chooseComparison = async (label: string) => {
+      const option = Array.from(
+        rendered.container.querySelectorAll<HTMLElement>("[data-changes-comparison-option]"),
+      ).find(
+        (candidate) => !candidate.closest("[hidden]") && candidate.textContent?.trim() === label,
+      );
+      expect(option).toBeDefined();
+      await act(async () => {
+        option!.click();
+      });
+      await flush(60);
+    };
+    await chooseComparison("Uncommitted");
     expect(rendered.container.textContent).toContain("Saved changes preview is unavailable");
-    await clickButton("Staged");
+    await chooseComparison("Staged");
     expect(rendered.container.textContent).not.toContain("Saved changes preview is unavailable");
     expect(rendered.container.textContent).toContain("Wake the sandbox to inspect staged changes.");
-    await clickButton("Branch");
+    await chooseComparison("Branch");
     expect(rendered.container.textContent).toContain("Saved changes preview is unavailable");
     expect(notifications).toEqual([]);
     expect(spy.attachCalls).toBe(0);

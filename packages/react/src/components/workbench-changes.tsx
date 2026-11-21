@@ -3,12 +3,16 @@ import {
   ArrowUpRightIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  Columns2Icon,
+  EllipsisIcon,
   FileWarningIcon,
   GitPullRequestArrowIcon,
   HistoryIcon,
+  Rows2Icon,
 } from "lucide-react";
 import {
   Component,
+  memo,
   type ReactNode,
   useCallback,
   useEffect,
@@ -27,6 +31,15 @@ import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
 import { useWindowedSections } from "../hooks/use-windowed-sections";
 import { PierreDiff } from "./pierre-diff";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 
 /* ----------------------------------------------------------------------------
    Changes tab — a PR-review surface.
@@ -48,25 +61,13 @@ import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 /** Group the rail (and reorder the pane) once the change set is larger than this. */
 const GROUP_THRESHOLD = 20;
 /** Mount this many sections beyond the visible window on each side. */
-const OVERSCAN = 2;
+const OVERSCAN = 1;
 const HEADER_PX = 30;
 const LINE_PX = 18;
 const GUARD_BODY_PX = 52;
 const EMPTY_BODY_PX = 36;
 const COMPACT_SURFACE_PX = 560;
 const useChangesLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
-
-const STATUS_TINT: Record<GitFileDiff["status"], string> = {
-  added: "text-og-status-idle",
-  modified: "text-og-status-running",
-  deleted: "text-og-status-failed",
-  renamed: "text-og-accent",
-  copied: "text-og-accent",
-  untracked: "text-og-fg-subtle",
-  ignored: "text-og-fg-subtle",
-  conflicted: "text-og-status-failed",
-  typechange: "text-og-status-running",
-};
 
 const STATUS_LETTER: Record<GitFileDiff["status"], string> = {
   added: "A",
@@ -103,7 +104,20 @@ export type WorkbenchChangesProps = {
   pullRequest?: WorkbenchPullRequest | null | undefined;
   /** Ask for a pull request for these changes: shows "Open PR" when there is none. */
   onOpenPullRequest?: (() => void) | undefined;
+  /** What the diff compares (e.g. branch, uncommitted, staged): offered in the
+   *  view menu at the start of the summary row, with the diff layout. */
+  comparison?: WorkbenchChangesComparison | undefined;
+  /** Leave out the summary row (view menu and pull-request action), for a host
+   *  that draws its own header above the changes. */
+  hideSummary?: boolean | undefined;
   className?: string | undefined;
+};
+
+/** The diff's comparison choices, shown in the Changes view menu. */
+export type WorkbenchChangesComparison = {
+  value: string;
+  options: readonly { value: string; label: string }[];
+  onChange: (value: string) => void;
 };
 
 /** A pull request the host knows for the changes on screen. */
@@ -334,7 +348,7 @@ function estimateSectionHeight(file: GitFileDiff, collapsed = false): number {
   return HEADER_PX + Math.max(lines, 1) * LINE_PX + 8;
 }
 
-export function WorkbenchChanges({
+export const WorkbenchChanges = memo(function WorkbenchChanges({
   diff,
   source,
   capturedAt,
@@ -343,6 +357,8 @@ export function WorkbenchChanges({
   onOpenFile,
   pullRequest,
   onOpenPullRequest,
+  comparison,
+  hideSummary = false,
   className,
 }: WorkbenchChangesProps) {
   const t = useOpenGeniText();
@@ -423,40 +439,78 @@ export function WorkbenchChanges({
     overscan: OVERSCAN,
   });
 
-  const jumpTo = useCallback(
-    (index: number) => {
-      setActivePath(orderedFiles[index]?.path ?? null);
-      windowed.scrollToIndex(index);
-    },
-    [orderedFiles, windowed],
-  );
+  // Rail jumps read the latest layout through refs, so the callback (and every
+  // rail row holding it) stays stable while sections measure in.
+  const layoutRef = useRef({ orderedFiles, offsets: windowed.offsets });
+  layoutRef.current = { orderedFiles, offsets: windowed.offsets };
+  // The section a rail click jumped to. While set, the pane stays pinned to it
+  // as sections above it replace their estimated heights with measured ones,
+  // and the rail keeps it selected even when the pane cannot scroll that far.
+  // It is kept by path, so a list that changes under it never re-points it.
+  const anchorRef = useRef<string | null>(null);
+  const scrollToIndex = windowed.scrollToIndex;
+  const scrollToIndexRef = useRef(scrollToIndex);
+  scrollToIndexRef.current = scrollToIndex;
+  const jumpTo = useCallback((index: number) => {
+    const path = layoutRef.current.orderedFiles[index]?.path ?? null;
+    anchorRef.current = path;
+    setActivePath(path);
+    scrollToIndexRef.current(index);
+  }, []);
+
+  useChangesLayoutEffect(() => {
+    const anchor = anchorRef.current;
+    if (anchor === null) return;
+    const index = orderedFiles.findIndex((file) => file.path === anchor);
+    if (index < 0) {
+      anchorRef.current = null;
+      return;
+    }
+    scrollToIndex(index);
+  }, [windowed.offsets, orderedFiles, scrollToIndex]);
 
   // Track which section is at the top of the pane so the rail highlights it.
   const onPaneScroll = useCallback(() => {
+    if (anchorRef.current !== null) return;
     const el = windowed.scrollRef.current;
     if (!el) {
       return;
     }
     const top = el.scrollTop;
-    const offsets = windowed.offsets;
+    const { offsets, orderedFiles: files } = layoutRef.current;
     let idx = 0;
-    for (let i = 0; i < orderedFiles.length; i++) {
+    for (let i = 0; i < files.length; i++) {
       if ((offsets[i] ?? 0) <= top + 4) idx = i;
       else break;
     }
-    const nextPath = orderedFiles[idx]?.path ?? null;
+    const nextPath = files[idx]?.path ?? null;
     setActivePath((previous) => (previous === nextPath ? previous : nextPath));
-  }, [windowed, orderedFiles]);
+  }, [windowed.scrollRef]);
 
   useEffect(() => {
     const el = windowed.scrollRef.current;
     if (!el) return;
+    // Any reader-driven scroll releases the jump anchor.
+    const release = () => {
+      anchorRef.current = null;
+    };
     el.addEventListener("scroll", onPaneScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onPaneScroll);
+    el.addEventListener("wheel", release, { passive: true });
+    el.addEventListener("touchstart", release, { passive: true });
+    el.addEventListener("keydown", release);
+    el.addEventListener("pointerdown", release);
+    return () => {
+      el.removeEventListener("scroll", onPaneScroll);
+      el.removeEventListener("wheel", release);
+      el.removeEventListener("touchstart", release);
+      el.removeEventListener("keydown", release);
+      el.removeEventListener("pointerdown", release);
+    };
   }, [windowed.scrollRef, onPaneScroll]);
 
   const sourceBadge = describeSource(t, source, capturedAt, captureRevision ?? null);
   const activeFile = orderedFiles[activeIndex] ?? orderedFiles[0];
+  const onToggle = toggleCollapsed;
 
   return (
     <div
@@ -464,43 +518,29 @@ export function WorkbenchChanges({
       className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
       data-workbench-changes-layout={compact ? "compact" : "rail"}
     >
-      {/* Summary + source badge + layout toggle. */}
-      <div
-        className={cn(
-          "flex shrink-0 items-center justify-between gap-2 border-b border-og-border px-3 py-1.5",
-          compact && source === "capture" && "flex-col items-stretch gap-1.5 py-2",
-        )}
-      >
-        <span
-          role="status"
-          aria-atomic="true"
-          aria-live="polite"
-          data-contrast-audited
-          className="min-w-0 text-og-xs text-og-fg-muted"
-        >
-          {t("workbenchChanges.filesChanged", { count: diff.length })}
-          <span data-contrast-audited className="ml-2 text-og-status-idle">
-            +{additions}
-          </span>
-          <span data-contrast-audited className="ml-1 text-og-status-failed">
-            −{deletions}
-          </span>
-        </span>
-        <div
-          className={cn(
-            "flex shrink-0 items-center gap-2",
-            compact && source === "capture" && "self-start",
-          )}
-        >
-          {compact ? null : <LayoutToggle layout={layout} onChange={setLayout} />}
-          <SourceBadge source={source} capturedAt={capturedAt} label={sourceBadge} />
-          <PullRequestAction pullRequest={pullRequest} onOpenPullRequest={onOpenPullRequest} />
+      <span role="status" aria-atomic="true" aria-live="polite" className="sr-only">
+        {t("workbenchChanges.filesChanged", { count: diff.length })} +{additions} −{deletions}
+      </span>
+      {/* One quiet row: the view menu, then the one pull-request action. */}
+      {hideSummary ? null : (
+        <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-og-border px-2 py-1">
+          <WorkbenchChangesViewMenu
+            comparison={comparison}
+            layout={layout}
+            onLayoutChange={compact ? undefined : setLayout}
+          />
+          {source === "capture" && capturedAt ? (
+            <SourceBadge capturedAt={capturedAt} label={sourceBadge} />
+          ) : null}
+          <div className="ml-auto flex shrink-0 items-center">
+            <PullRequestAction pullRequest={pullRequest} onOpenPullRequest={onOpenPullRequest} />
+          </div>
         </div>
-      </div>
+      )}
 
       {compact ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="shrink-0 border-b border-og-border bg-og-surface-1 p-2">
+          <div className="shrink-0 border-b border-og-border p-2">
             <label className="sr-only" htmlFor={pickerId}>
               {t("workbenchChanges.changedFile")}
             </label>
@@ -543,33 +583,35 @@ export function WorkbenchChanges({
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* File rail — virtualized (virtua): a dense change set is fine. */}
-          <ChangesRailVList
-            rowCount={rows.length}
-            coarsePointer={coarsePointer}
-            files={orderedFiles}
-            className="w-[clamp(12rem,28%,15rem)] shrink-0 border-r border-og-border bg-og-surface-1/35"
-          >
-            {rows.map((row) =>
-              row.kind === "group" ? (
-                <div
-                  key={`g:${row.label}`}
-                  data-rail-group
-                  className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle"
-                >
-                  <span className="min-w-0 truncate">{row.label}</span>
-                  <span className="shrink-0">{row.count}</span>
-                </div>
-              ) : (
-                <RailFileRow
-                  key={row.file.path}
-                  file={row.file}
-                  grouped={grouped}
-                  active={row.index === activeIndex}
-                  onClick={() => jumpTo(row.index)}
-                />
-              ),
-            )}
-          </ChangesRailVList>
+          {compact ? null : (
+            <ChangesRailVList
+              rowCount={rows.length}
+              coarsePointer={coarsePointer}
+              files={orderedFiles}
+              className="w-[clamp(12rem,28%,15rem)] shrink-0 border-r border-og-border"
+            >
+              {rows.map((row) =>
+                row.kind === "group" ? (
+                  <div
+                    key={`g:${row.label}`}
+                    data-rail-group
+                    className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-og-xs font-medium text-og-fg-subtle"
+                  >
+                    <span className="min-w-0 truncate">{row.label}</span>
+                  </div>
+                ) : (
+                  <RailFileRow
+                    key={row.file.path}
+                    file={row.file}
+                    index={row.index}
+                    grouped={grouped}
+                    active={row.index === activeIndex}
+                    onSelect={jumpTo}
+                  />
+                ),
+              )}
+            </ChangesRailVList>
+          )}
 
           {/* Diff pane — windowed file sections. Only the sections inside the
             visible window ± overscan are in the DOM; the container reserves the
@@ -597,7 +639,7 @@ export function WorkbenchChanges({
                       layout={layout}
                       themeType={resolvedTheme}
                       collapsed={collapsedPaths.has(file.path)}
-                      onToggle={() => toggleCollapsed(file.path)}
+                      onToggle={onToggle}
                       {...(onOpenFile ? { onOpenFile } : {})}
                     />
                   </MeasuredSection>
@@ -609,37 +651,19 @@ export function WorkbenchChanges({
       )}
     </div>
   );
-}
+});
 
-/**
- * The data-source badge. "live" stays understated (the header chip already
- * carries machine liveness) — but a capture-served diff is honestly labelled
- * historical: a muted clock + the "as of turn N · <time>" so the reviewer always
- * knows they are looking at a turn-end snapshot, not the live tree.
- */
-function SourceBadge({
-  source,
-  capturedAt,
-  label,
-}: {
-  source: "live" | "capture" | null;
-  capturedAt: string | null;
-  label: string;
-}) {
+/** A capture-served diff is honestly labelled historical: a muted clock and
+ *  "as of turn N · <time>". A live diff carries no badge (the machine chip in
+ *  the dock already says the workspace is live). */
+function SourceBadge({ capturedAt, label }: { capturedAt: string; label: string }) {
   const t = useOpenGeniText();
-  if (source === "capture" && capturedAt) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 rounded-og-xs border border-og-border px-1.5 py-px text-og-xs text-og-fg-muted"
-        title={new Date(capturedAt).toLocaleString(t.locale)}
-      >
-        <HistoryIcon className="size-3 shrink-0 text-og-status-running" aria-hidden />
-        {label}
-      </span>
-    );
-  }
   return (
-    <span className="rounded-og-xs bg-og-surface-2 px-1.5 py-px text-og-xs text-og-fg-subtle">
+    <span
+      className="inline-flex items-center gap-1 px-1 text-og-xs text-og-fg-muted"
+      title={new Date(capturedAt).toLocaleString(t.locale)}
+    >
+      <HistoryIcon className="size-3 shrink-0 text-og-status-running" aria-hidden />
       {label}
     </span>
   );
@@ -659,16 +683,25 @@ function describeSource(
     : `as of ${time}`;
 }
 
-function RailFileRow({
+function splitPath(path: string): { name: string; dir: string } {
+  const slash = path.lastIndexOf("/");
+  return slash >= 0
+    ? { name: path.slice(slash + 1), dir: path.slice(0, slash) }
+    : { name: path, dir: "" };
+}
+
+const RailFileRow = memo(function RailFileRow({
   file,
+  index,
   grouped,
   active,
-  onClick,
+  onSelect,
 }: {
   file: SandboxGitFileDiff;
+  index: number;
   grouped: boolean;
   active: boolean;
-  onClick: () => void;
+  onSelect: (index: number) => void;
 }) {
   // A real repository group strips the exact repo root. Legacy top-directory
   // grouping strips only that first segment.
@@ -680,43 +713,33 @@ function RailFileRow({
         : file.path
       : file.path.slice(file.path.indexOf("/") + 1) || file.path
     : file.path;
+  const { name, dir } = splitPath(shown);
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={() => onSelect(index)}
       title={file.path}
       data-rail-file
       data-rail-file-path={file.path}
+      aria-current={active ? "true" : undefined}
       className={cn(
-        "relative flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm transition-colors hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
+        "flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
         grouped && "pl-3",
-        active &&
-          "bg-og-accent-soft text-og-fg before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-r-full before:bg-og-accent",
+        active && "bg-og-surface-2 text-og-fg",
       )}
     >
-      <span
-        data-contrast-audited
-        className={cn("w-3 shrink-0 text-center font-og-mono text-og-xs", STATUS_TINT[file.status])}
-      >
-        {STATUS_LETTER[file.status]}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{shown}</span>
-      <span className="ml-auto flex shrink-0 items-center gap-1 pl-1 font-og-mono text-og-xs">
-        <span data-contrast-audited className="text-og-status-idle">
-          +{file.additions}
-        </span>
-        <span data-contrast-audited className="text-og-status-failed">
-          −{file.deletions}
-        </span>
+      <span className="min-w-0 flex-1 truncate">
+        <span className={cn(file.status === "deleted" && "line-through")}>{name}</span>
+        {dir ? <span className="ml-1.5 text-og-xs text-og-fg-subtle">{dir}</span> : null}
       </span>
     </button>
   );
-}
+});
 
 /** A windowed section wrapper. Absolutely positioned at `top`; a ResizeObserver
  *  reports its real height back so the layout refines as Pierre's async Shiki
  *  render grows (else short estimates would overlap sections). */
-function MeasuredSection({
+const MeasuredSection = memo(function MeasuredSection({
   index,
   top,
   onMeasure,
@@ -747,9 +770,9 @@ function MeasuredSection({
       {children}
     </div>
   );
-}
+});
 
-function DiffSection({
+const DiffSection = memo(function DiffSection({
   file,
   layout,
   themeType,
@@ -761,19 +784,20 @@ function DiffSection({
   layout: "unified" | "split";
   themeType: "dark" | "light";
   collapsed?: boolean | undefined;
-  onToggle?: (() => void) | undefined;
+  onToggle?: ((path: string) => void) | undefined;
   onOpenFile?: ((path: string) => void) | undefined;
 }) {
   // One header per file, drawn here so every file (diffable or guarded) folds
   // the same way; Pierre's own file header is turned off to avoid a second one.
   const guarded = isGuarded(file);
   const empty = hasNoHunks(file);
+  const diff = useMemo(() => [file], [file]);
   return (
     <section
       data-diff-file={file.path}
       data-diff-collapsed={collapsed ? "" : undefined}
       {...(guarded || empty || collapsed ? {} : { "data-pierre-section": "" })}
-      className={cn("border-b border-og-border", !collapsed && (guarded ? "pb-1" : "pb-2"))}
+      className={cn(!collapsed && "pb-2")}
     >
       <DiffFileHeader file={file} collapsed={collapsed} onToggle={onToggle} />
       {collapsed ? null : guarded ? (
@@ -782,7 +806,7 @@ function DiffSection({
         <NoHunksBody />
       ) : (
         <PierreDiff
-          diff={[file]}
+          diff={diff}
           layout={layout}
           themeType={themeType}
           disableFileHeader
@@ -791,7 +815,7 @@ function DiffSection({
       )}
     </section>
   );
-}
+});
 
 function DiffFileHeader({
   file,
@@ -800,40 +824,37 @@ function DiffFileHeader({
 }: {
   file: GitFileDiff;
   collapsed: boolean;
-  onToggle?: (() => void) | undefined;
+  onToggle?: ((path: string) => void) | undefined;
 }) {
   const renamed = file.oldPath && file.oldPath !== file.path;
   const label = renamed ? `${file.oldPath} → ${file.path}` : file.path;
+  const { name, dir } = splitPath(file.path);
   const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
   const body = (
     <>
       {onToggle ? <Chevron className="size-3.5 shrink-0 text-og-fg-subtle" aria-hidden /> : null}
-      <span
-        aria-hidden
-        className={cn("w-3 shrink-0 font-og-mono text-og-xs", STATUS_TINT[file.status])}
-      >
-        {STATUS_LETTER[file.status]}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-left font-og-mono text-og-xs" title={label}>
-        {label}
-      </span>
-      <span className="flex shrink-0 items-center gap-2 font-og-mono text-og-xs">
-        <span className="text-og-status-idle">+{file.additions}</span>
-        <span className="text-og-status-failed">−{file.deletions}</span>
+      <span className="min-w-0 flex-1 truncate text-left" title={label}>
+        <span className={cn("font-medium text-og-fg", file.status === "deleted" && "line-through")}>
+          {name}
+        </span>
+        {dir ? <span className="ml-1.5 text-og-xs text-og-fg-subtle">{dir}</span> : null}
+        {renamed ? (
+          <span className="ml-1.5 text-og-xs text-og-fg-subtle">← {file.oldPath}</span>
+        ) : null}
       </span>
     </>
   );
   const className =
-    "sticky top-0 z-10 flex w-full items-center gap-2 bg-og-surface-1 px-3 py-1.5 text-og-sm text-og-fg";
+    "sticky top-0 z-10 flex w-full items-center gap-2 border-b border-og-border bg-og-bg px-3 py-1.5 text-og-sm text-og-fg";
   if (!onToggle) return <header className={className}>{body}</header>;
   return (
     <button
       type="button"
       aria-expanded={!collapsed}
-      onClick={onToggle}
+      onClick={() => onToggle(file.path)}
       className={cn(
         className,
-        "hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
+        "hover:bg-og-surface-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
       )}
     >
       {body}
@@ -852,7 +873,7 @@ function PullRequestAction({
 }) {
   const t = useOpenGeniText();
   const className =
-    "inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-0.5 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11";
+    "inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 py-0.5 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11";
   if (pullRequest?.url) {
     return (
       <a
@@ -874,7 +895,7 @@ function PullRequestAction({
       type="button"
       onClick={onOpenPullRequest}
       data-workbench-pr-action="open"
-      className={className}
+      className={cn(className, "border border-og-border")}
     >
       <GitPullRequestArrowIcon className="size-3.5" aria-hidden />
       {t("workbenchChanges.openPullRequest")}
@@ -922,30 +943,66 @@ function GuardBody({
   );
 }
 
-function LayoutToggle({
-  layout,
-  onChange,
+/** The view menu: what the diff compares (when the host offers a choice) and
+ *  unified or split. Its button names the comparison, or is a quiet "⋯". */
+export function WorkbenchChangesViewMenu({
+  comparison,
+  layout = "unified",
+  onLayoutChange,
 }: {
-  layout: "unified" | "split";
-  onChange: (next: "unified" | "split") => void;
+  comparison?: WorkbenchChangesComparison | undefined;
+  layout?: "unified" | "split" | undefined;
+  onLayoutChange?: ((next: "unified" | "split") => void) | undefined;
 }) {
+  const t = useOpenGeniText();
+  if (!comparison && !onLayoutChange) return null;
+  const current = comparison?.options.find((option) => option.value === comparison.value);
+  const next = layout === "unified" ? "split" : "unified";
+  const layoutLabel =
+    next === "split" ? t("workbenchChanges.showSplitDiff") : t("workbenchChanges.showUnifiedDiff");
+  const LayoutIcon = next === "split" ? Columns2Icon : Rows2Icon;
   return (
-    <div className="inline-flex items-center rounded-og-sm border border-og-border p-0.5">
-      {(["unified", "split"] as const).map((value) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
         <button
-          key={value}
           type="button"
-          onClick={() => onChange(value)}
-          className={cn(
-            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs capitalize focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
-            layout === value
-              ? "bg-og-accent-soft text-og-fg"
-              : "text-og-fg-subtle hover:text-og-fg",
-          )}
+          data-changes-view-menu
+          aria-label={current ? undefined : t("workbenchChanges.view")}
+          title={t("workbenchChanges.view")}
+          className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:bg-og-surface-2 pointer-coarse:min-h-11"
         >
-          {value}
+          {current ? (
+            <>
+              {current.label}
+              <ChevronDownIcon className="size-3 text-og-fg-subtle" aria-hidden />
+            </>
+          ) : (
+            <EllipsisIcon className="size-4" aria-hidden />
+          )}
         </button>
-      ))}
-    </div>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-[11rem]">
+        {comparison ? (
+          <DropdownMenuRadioGroup value={comparison.value} onValueChange={comparison.onChange}>
+            {comparison.options.map((option) => (
+              <DropdownMenuRadioItem
+                key={option.value}
+                value={option.value}
+                data-changes-comparison-option={option.value}
+              >
+                {option.label}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        ) : null}
+        {comparison && onLayoutChange ? <DropdownMenuSeparator /> : null}
+        {onLayoutChange ? (
+          <DropdownMenuItem data-diff-layout={layout} onSelect={() => onLayoutChange(next)}>
+            <LayoutIcon className="size-3.5 text-og-fg-subtle" aria-hidden />
+            {layoutLabel}
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

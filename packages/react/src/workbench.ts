@@ -5,12 +5,17 @@
 // It names every peer, so the host installs all of them; a host that wants
 // only some calls the single `enable*` functions instead.
 import { enableDesktopViewer } from "./desktop";
-import { enablePierreDiffs } from "./diffs";
+import { type EnablePierreDiffsOptions, enablePierreDiffs } from "./diffs";
 import { enableCodeEditor } from "./editor";
 import { enableSandboxTerminal } from "./terminal";
 
-export function enableWorkbench(): void {
-  enablePierreDiffs();
+export type EnableWorkbenchOptions = {
+  /** Highlight diffs in a Web Worker (see `enablePierreDiffs`). */
+  diffsWorker?: EnablePierreDiffsOptions["worker"];
+};
+
+export function enableWorkbench(options?: EnableWorkbenchOptions): void {
+  enablePierreDiffs(options?.diffsWorker ? { worker: options.diffsWorker } : undefined);
   enableSandboxTerminal({ webgl: () => import("@xterm/addon-webgl") });
   enableDesktopViewer();
   enableCodeEditor({

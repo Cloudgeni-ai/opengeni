@@ -16,6 +16,9 @@ import {
   ChevronsLeftRightIcon,
   Maximize2Icon,
   Minimize2Icon,
+  CheckIcon,
+  ChevronDownIcon,
+  EllipsisIcon,
   PanelRightCloseIcon,
   XIcon,
 } from "lucide-react";
@@ -33,6 +36,13 @@ import { cn } from "../lib/cn";
 import { inertProps } from "../lib/inert";
 import { useWindowLayerOpen } from "../lib/window-layer";
 import { useOpenGeniText } from "../messages/runtime";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 
 export type WorkspaceTab = {
   id: string;
@@ -45,6 +55,11 @@ export type WorkspaceTab = {
   content: ReactNode;
   /** A small badge after the label (e.g. dirty count, live pill). */
   badge?: ReactNode | undefined;
+  /**
+   * Listed in the strip's menu instead of as a tab. While it is active, the
+   * menu button shows its name. Omitted: the tab is always on the strip.
+   */
+  optional?: boolean | undefined;
 };
 
 export type WorkspaceDockProps = {
@@ -66,6 +81,12 @@ export type WorkspaceDockProps = {
   /** Optional host navigation shown at the start of the phone overlay header.
    *  It is intentionally absent from desktop dock chrome. */
   mobileLeadingControl?: ReactNode | undefined;
+  /**
+   * Essentials only: the header shows the tabs and one menu, and the dock's
+   * own controls (maximize, hide) and the header accessory move into that
+   * menu. The phone overlay keeps its close button.
+   */
+  essentials?: boolean | undefined;
   /** Persisted layout id (localStorage key) for react-resizable-panels. */
   autoSaveId?: string | undefined;
   /** Default dock width as a percent of the session area. */
@@ -185,6 +206,7 @@ export function WorkspaceDock({
   showCollapseControl = true,
   headerAccessory,
   mobileLeadingControl,
+  essentials = false,
   autoSaveId = "og.session.dock",
   defaultSize = 34,
   minSize = 22,
@@ -268,6 +290,8 @@ export function WorkspaceDock({
     },
     [onActiveTabChange],
   );
+  // Optional tabs live in the strip's menu; the menu button names the active one.
+  const shownTabs = useMemo(() => tabs.filter((tab) => !tab.optional), [tabs]);
   const setCollapsed = useCallback(
     (next: boolean) => {
       setInternalCollapsed((previous) => (previous === next ? previous : next));
@@ -467,11 +491,13 @@ export function WorkspaceDock({
         >
           <DockChrome
             tabs={tabs}
+            shownTabs={shownTabs}
             current={current}
             onTab={setTab}
             onExpandClaim={claimExpand}
             leading={mobileLeadingControl}
             accessory={headerAccessory}
+            accessoryInMenu={essentials}
             controls={
               <ChromeButton
                 onClick={collapse}
@@ -503,55 +529,80 @@ export function WorkspaceDock({
   // A panel with its own expand (a Site's full window) is the one expand
   // there; a maximized dock still offers Restore.
   const showMaximize = maximized || !expandClaims[current];
+  const showCollapse = !(hostControlled && !showCollapseControl);
+  const menuActions: DockMenuAction[] = [
+    ...(showMaximize
+      ? [
+          {
+            id: "maximize",
+            label: maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock"),
+            icon: maximized ? <Minimize2Icon /> : <Maximize2Icon />,
+            onSelect: () => setMaximized((m) => !m),
+          },
+        ]
+      : []),
+    ...(showCollapse
+      ? [
+          {
+            id: "hide",
+            label: msg("workspaceDock.hideWorkspace"),
+            icon: <PanelRightCloseIcon />,
+            onSelect: collapse,
+          },
+        ]
+      : []),
+  ];
   const dockChrome = (
     <DockChrome
       tabs={tabs}
+      shownTabs={shownTabs}
       current={current}
       onTab={setTab}
       onExpandClaim={claimExpand}
-      // On the desktop dock the status and window controls sit under the
-      // panel tabs, so every panel starts at the top with its own header.
-      chromePlacement="rail"
       accessory={headerAccessory}
+      accessoryInMenu={essentials}
+      menuActions={essentials ? menuActions : undefined}
       controls={
-        <>
-          {showMaximize ? (
-            <ChromeButton
-              onClick={(event) => {
-                // Restoring a panel that owns its expand removes this button;
-                // keep keyboard focus in the dock instead of dropping it.
-                if (maximized && expandClaims[current]) {
-                  const next =
-                    (event.currentTarget.nextElementSibling as HTMLElement | null) ??
-                    rootRef.current?.querySelector<HTMLElement>(
-                      '[role="tab"][aria-selected="true"]',
-                    );
-                  requestAnimationFrame(() => next?.focus());
+        essentials ? null : (
+          <>
+            {showMaximize ? (
+              <ChromeButton
+                onClick={(event) => {
+                  // Restoring a panel that owns its expand removes this button;
+                  // keep keyboard focus in the dock instead of dropping it.
+                  if (maximized && expandClaims[current]) {
+                    const next =
+                      (event.currentTarget.nextElementSibling as HTMLElement | null) ??
+                      rootRef.current?.querySelector<HTMLElement>(
+                        '[role="tab"][aria-selected="true"]',
+                      );
+                    requestAnimationFrame(() => next?.focus());
+                  }
+                  setMaximized((m) => !m);
+                }}
+                title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
+                label={
+                  maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")
                 }
-                setMaximized((m) => !m);
-              }}
-              title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
-              label={
-                maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")
-              }
-            >
-              {maximized ? (
-                <Minimize2Icon className="size-3.5" />
-              ) : (
-                <Maximize2Icon className="size-3.5" />
-              )}
-            </ChromeButton>
-          ) : null}
-          {hostControlled && !showCollapseControl ? null : (
-            <ChromeButton
-              onClick={collapse}
-              title={msg("workspaceDock.hideWorkspace")}
-              label={msg("workspaceDock.hideWorkspace")}
-            >
-              <PanelRightCloseIcon className="size-3.5" />
-            </ChromeButton>
-          )}
-        </>
+              >
+                {maximized ? (
+                  <Minimize2Icon className="size-3.5" />
+                ) : (
+                  <Maximize2Icon className="size-3.5" />
+                )}
+              </ChromeButton>
+            ) : null}
+            {hostControlled && !showCollapseControl ? null : (
+              <ChromeButton
+                onClick={collapse}
+                title={msg("workspaceDock.hideWorkspace")}
+                label={msg("workspaceDock.hideWorkspace")}
+              >
+                <PanelRightCloseIcon className="size-3.5" />
+              </ChromeButton>
+            )}
+          </>
+        )
       }
     />
   );
@@ -661,63 +712,60 @@ function ChromeButton({
   );
 }
 
+/** A dock control listed in the essentials menu. */
+type DockMenuAction = {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  onSelect: () => void;
+};
+
+function tabName(tab: WorkspaceTab): string {
+  return tab.ariaLabel ?? (typeof tab.label === "string" ? tab.label : tab.id);
+}
+
 function DockChrome({
   tabs,
+  shownTabs,
   current,
   onTab,
   onExpandClaim,
   leading,
-  chromePlacement = "header",
   accessory,
+  accessoryInMenu = false,
+  menuActions,
   controls,
 }: {
+  /** Every tab; hidden optional tabs stay mounted once visited. */
   tabs: WorkspaceTab[];
+  /** The tabs on the strip, in order; the rest are in the menu. */
+  shownTabs: WorkspaceTab[];
   current: string;
   onTab: (id: string) => void;
   /** A panel's content shows (or stops showing) its own expand. */
   onExpandClaim: (tabId: string, claimed: boolean) => void;
   /** Host navigation at the start of mobile overlay chrome. */
   leading?: ReactNode | undefined;
-  /**
-   * `header`: a row above the panels (the phone overlay, with its title and
-   * close). `rail`: under the panel tabs, so no row is spent on it.
-   */
-  chromePlacement?: "header" | "rail" | undefined;
   /** A status accessory (machine chip) between the tab strip and the controls. */
   accessory?: ReactNode | undefined;
+  /** Show the accessory at the top of the menu instead of in the header. */
+  accessoryInMenu?: boolean | undefined;
+  /** Dock controls listed at the end of the menu (essentials). */
+  menuActions?: DockMenuAction[] | undefined;
   /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
   controls: ReactNode;
 }) {
   const msg = useOpenGeniText();
-  const chromeRef = useRef<HTMLDivElement | null>(null);
-  const [compact, setCompact] = useState(false);
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
   const tabsetId = useId();
-  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const tabRefs = useRef(new Map<string, HTMLButtonElement | null>());
   const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set());
   const activeId = active?.id ?? "";
-
-  // Dock width, not viewport width, chooses rail density. A narrow split keeps
-  // the icon-first activity rail usable without stealing the panel's content
-  // width; overlays and maximized views retain readable labels.
-  useDockLayoutEffect(() => {
-    const node = chromeRef.current;
-    if (!node) return;
-    const update = () => {
-      const desktop =
-        typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 1024px)").matches;
-      const next = desktop && node.getBoundingClientRect().width < 440;
-      setCompact((previous) => (previous === next ? previous : next));
-    };
-    update();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", update);
-      return () => window.removeEventListener("resize", update);
-    }
-    const observer = new ResizeObserver(update);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
+  const menuTabs = tabs.filter((tab) => !shownTabs.includes(tab));
+  const activeInMenu = active !== undefined && menuTabs.includes(active) ? active : null;
+  const menuAccessory = accessoryInMenu && accessory ? accessory : null;
+  const actions = menuActions ?? [];
+  const hasMenu = menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null;
 
   useEffect(() => {
     if (!activeId) return;
@@ -730,157 +778,203 @@ function DockChrome({
   }, [activeId]);
 
   const activateTab = (index: number) => {
-    const tab = tabs[index];
+    const tab = shownTabs[index];
     if (!tab) {
       return;
     }
     onTab(tab.id);
-    tabRefs.current[index]?.focus();
+    tabRefs.current.get(tab.id)?.focus();
   };
 
   const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (tabs.length === 0) return;
+    if (shownTabs.length === 0) return;
     let nextIndex: number | null = null;
-    if (event.key === "ArrowDown") nextIndex = (index + 1) % tabs.length;
-    else if (event.key === "ArrowUp") nextIndex = (index - 1 + tabs.length) % tabs.length;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % shownTabs.length;
+    else if (event.key === "ArrowLeft")
+      nextIndex = (index - 1 + shownTabs.length) % shownTabs.length;
     else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = tabs.length - 1;
+    else if (event.key === "End") nextIndex = shownTabs.length - 1;
     if (nextIndex === null) return;
     event.preventDefault();
     activateTab(nextIndex);
   };
 
   return (
-    <div
-      ref={chromeRef}
-      data-dock-chrome
-      data-compact={compact ? "true" : undefined}
-      className="flex h-full min-h-0 min-w-0 flex-col"
-    >
-      {chromePlacement === "header" ? (
-        <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-og-border px-2 max-[1023px]:min-h-12">
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            {leading ?? (
-              <span className="hidden truncate text-og-sm font-semibold text-og-fg max-[1023px]:inline">
-                {msg("workspaceDock.workspace")}
-              </span>
-            )}
-          </div>
-          <div className="min-w-0 shrink text-og-fg-muted">{accessory}</div>
-          <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
-        </div>
-      ) : null}
-      <div className="flex min-h-0 min-w-0 flex-1">
-        <div
-          className={cn(
-            "flex shrink-0 flex-col border-r border-og-border bg-og-surface-1/45",
-            compact ? "w-12" : "w-32 max-[1023px]:w-36",
-          )}
-        >
+    <div data-dock-chrome className="flex h-full min-h-0 min-w-0 flex-col">
+      <div className="flex min-h-10 shrink-0 items-center gap-1 border-b border-og-border px-1.5 max-[1023px]:min-h-12">
+        {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
+        {shownTabs.length > 0 ? (
           <div
-            className="flex min-h-0 flex-1 flex-col gap-1 overflow-x-hidden overflow-y-auto p-1.5"
+            className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]"
             role="tablist"
             aria-label={msg("workspaceDock.workspacePanels")}
-            aria-orientation="vertical"
+            aria-orientation="horizontal"
           >
-            {tabs.map((tab, index) => {
-              const tabName = tab.ariaLabel ?? (typeof tab.label === "string" ? tab.label : tab.id);
+            {shownTabs.map((tab, index) => {
+              const selected = tab.id === current;
+              const tabIndex = tabs.indexOf(tab);
               return (
                 <button
                   key={tab.id}
                   ref={(node) => {
-                    tabRefs.current[index] = node;
+                    tabRefs.current.set(tab.id, node);
                   }}
-                  id={`${tabsetId}-tab-${index}`}
+                  id={`${tabsetId}-tab-${tabIndex}`}
                   type="button"
                   role="tab"
-                  aria-label={compact && tab.icon ? tabName : undefined}
-                  title={compact && tab.icon ? tabName : undefined}
-                  aria-selected={tab.id === current}
-                  aria-controls={`${tabsetId}-panel-${index}`}
-                  tabIndex={tab.id === current ? 0 : -1}
+                  aria-label={tabName(tab)}
+                  aria-selected={selected}
+                  aria-controls={`${tabsetId}-panel-${tabIndex}`}
+                  tabIndex={selected || (activeInMenu && index === 0) ? 0 : -1}
                   onClick={() => onTab(tab.id)}
                   onKeyDown={(event) => onTabKeyDown(event, index)}
+                  data-dock-tab={tab.id}
                   className={cn(
-                    "group relative flex min-h-9 w-full items-center gap-2 rounded-og-md px-2 text-left text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-                    compact && "justify-center px-1",
-                    tab.id === current
-                      ? "bg-og-accent-soft text-og-fg shadow-[inset_2px_0_0_var(--og-color-accent)]"
-                      : "text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg",
+                    "flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+                    selected ? "bg-og-surface-2 text-og-fg" : "text-og-fg-muted hover:text-og-fg",
                   )}
                 >
                   {tab.icon ? (
                     <span
-                      className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4"
+                      className="flex size-3.5 shrink-0 items-center justify-center [&>svg]:size-3.5"
                       aria-hidden
                     >
                       {tab.icon}
                     </span>
                   ) : null}
-                  {!compact || !tab.icon ? (
-                    <span data-contrast-audited className="min-w-0 flex-1 truncate">
-                      {tab.label}
-                    </span>
-                  ) : null}
-                  {tab.badge ? (
-                    <span
-                      className={cn("shrink-0", compact && "absolute -right-0.5 -top-0.5 scale-90")}
-                    >
-                      {tab.badge}
-                    </span>
-                  ) : null}
+                  <span data-contrast-audited className="max-w-[12rem] truncate whitespace-nowrap">
+                    {tab.label}
+                  </span>
+                  {tab.badge ? <span className="shrink-0">{tab.badge}</span> : null}
                 </button>
               );
             })}
           </div>
-          {chromePlacement === "rail" ? (
-            <div
-              data-dock-rail-footer
-              className={cn(
-                "flex shrink-0 border-t border-og-border p-1.5 text-og-fg-subtle",
-                compact
-                  ? // Only the status dot fits; its label stays for assistive tech.
-                    "flex-col items-center gap-0.5 [&_[role=status]]:px-0 [&_[role=status]>span:last-child]:sr-only"
-                  : "flex-wrap items-center justify-between gap-0.5",
-              )}
-            >
-              {accessory ? <div className="min-w-0 text-og-fg-muted">{accessory}</div> : null}
-              <div className={cn("flex shrink-0 items-center gap-0.5", compact && "flex-col")}>
-                {controls}
-              </div>
-            </div>
-          ) : null}
-        </div>
-        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-          {tabs.length > 0 ? (
-            tabs.map((tab, index) => {
-              const selected = tab.id === activeId;
-              const shouldMount = selected || visitedTabs.has(tab.id);
-              return (
-                <div
+        ) : null}
+        {hasMenu ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                id={activeInMenu ? `${tabsetId}-tab-${tabs.indexOf(activeInMenu)}` : undefined}
+                title={msg("workspaceDock.more")}
+                aria-label={
+                  activeInMenu
+                    ? `${tabName(activeInMenu)}, ${msg("workspaceDock.more")}`
+                    : msg("workspaceDock.more")
+                }
+                data-dock-menu
+                data-dock-menu-active={activeInMenu?.id}
+                className={cn(
+                  "inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:bg-og-surface-2 max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+                  activeInMenu
+                    ? "bg-og-surface-2 px-2 text-og-fg"
+                    : "min-w-7 justify-center text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:min-w-11 pointer-coarse:min-w-11",
+                )}
+              >
+                {activeInMenu ? (
+                  <>
+                    {activeInMenu.icon ? (
+                      <span
+                        className="flex size-3.5 shrink-0 items-center justify-center [&>svg]:size-3.5"
+                        aria-hidden
+                      >
+                        {activeInMenu.icon}
+                      </span>
+                    ) : null}
+                    <span className="max-w-[12rem] truncate whitespace-nowrap">
+                      {activeInMenu.label}
+                    </span>
+                    <ChevronDownIcon className="size-3 text-og-fg-subtle" aria-hidden />
+                  </>
+                ) : (
+                  <EllipsisIcon className="size-4" aria-hidden />
+                )}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-[12rem]">
+              {menuAccessory ? (
+                <>
+                  <div className="px-2 py-1.5 text-og-fg-muted" data-dock-menu-accessory>
+                    {menuAccessory}
+                  </div>
+                  {menuTabs.length > 0 || actions.length > 0 ? <DropdownMenuSeparator /> : null}
+                </>
+              ) : null}
+              {menuTabs.map((tab) => (
+                <DropdownMenuItem
                   key={tab.id}
-                  id={`${tabsetId}-panel-${index}`}
-                  aria-labelledby={`${tabsetId}-tab-${index}`}
-                  className="h-full min-h-0 min-w-0 overflow-hidden"
-                  hidden={!selected}
-                  role="tabpanel"
+                  data-dock-menu-tab={tab.id}
+                  onSelect={() => onTab(tab.id)}
                 >
-                  {shouldMount ? (
-                    <PanelExpandScope tabId={tab.id} onClaim={onExpandClaim}>
-                      {tab.content}
-                    </PanelExpandScope>
+                  <span
+                    className="flex size-4 shrink-0 items-center justify-center text-og-fg-subtle [&>svg]:size-4"
+                    aria-hidden
+                  >
+                    {tab.icon}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{tab.label}</span>
+                  {tab.id === activeId ? (
+                    <CheckIcon className="size-3.5 shrink-0" aria-hidden />
                   ) : null}
-                </div>
-              );
-            })
-          ) : (
-            <div
-              className="h-full min-h-0 min-w-0"
-              aria-label={msg("workspaceDock.workspace")}
-              role="tabpanel"
-            />
-          )}
-        </div>
+                </DropdownMenuItem>
+              ))}
+              {actions.length > 0 && menuTabs.length > 0 ? <DropdownMenuSeparator /> : null}
+              {actions.map((action) => (
+                <DropdownMenuItem
+                  key={action.id}
+                  data-dock-menu-action={action.id}
+                  onSelect={action.onSelect}
+                >
+                  <span
+                    className="flex size-4 shrink-0 items-center justify-center text-og-fg-subtle [&>svg]:size-3.5"
+                    aria-hidden
+                  >
+                    {action.icon}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{action.label}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+        <div className="min-w-0 flex-1" />
+        {accessory && !menuAccessory ? (
+          <div className="min-w-0 shrink text-og-fg-muted">{accessory}</div>
+        ) : null}
+        {controls ? (
+          <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
+        ) : null}
+      </div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        {tabs.length > 0 ? (
+          tabs.map((tab, index) => {
+            const selected = tab.id === activeId;
+            const shouldMount = selected || visitedTabs.has(tab.id);
+            return (
+              <div
+                key={tab.id}
+                id={`${tabsetId}-panel-${index}`}
+                aria-labelledby={`${tabsetId}-tab-${index}`}
+                className="h-full min-h-0 min-w-0 overflow-hidden"
+                hidden={!selected}
+                role="tabpanel"
+              >
+                {shouldMount ? (
+                  <PanelExpandScope tabId={tab.id} onClaim={onExpandClaim}>
+                    {tab.content}
+                  </PanelExpandScope>
+                ) : null}
+              </div>
+            );
+          })
+        ) : (
+          <div
+            className="h-full min-h-0 min-w-0"
+            aria-label={msg("workspaceDock.workspace")}
+            role="tabpanel"
+          />
+        )}
       </div>
     </div>
   );

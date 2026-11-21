@@ -4,7 +4,7 @@
  * land here, with a one-time note saying so.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BotIcon, PlusIcon, UploadIcon } from "lucide-react";
+import { BotIcon, ChevronDownIcon, FilePlusIcon, PlusIcon, UploadIcon } from "lucide-react";
 import {
   agentInitialsAvatar,
   type Agent,
@@ -17,13 +17,20 @@ import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
 import { DetailPage, DetailPageHeader } from "../../../ui/detail-page";
 import { DetailSection } from "../../../ui/detail-sheet";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../../../ui/dropdown-menu";
 import { EmptyState } from "../../../ui/empty-state";
 import { ErrorMessage } from "../../../ui/error-message";
 import { ListRow, ListRowSkeleton, RowList } from "../../../ui/list-row";
 import { LogoTile } from "../../../ui/logo-tile";
 import { MetaChip } from "../../../ui/meta-chip";
 import { Notice } from "../../../ui/notice";
-import { RowButton } from "../../../ui/page-actions";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
@@ -128,21 +135,18 @@ export function AgentsPage({
           if (file) void importFile(file);
         }}
       />
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="pointer-coarse:h-11"
-        title="Import an .agent.json or .bot.json file"
-        onClick={() => fileInput.current?.click()}
-      >
-        <UploadIcon />
-        Import
-      </Button>
-      <Button type="button" size="sm" className="pointer-coarse:h-11" onClick={create}>
-        <PlusIcon />
-        New agent
-      </Button>
+      <AddAgentMenu
+        workspaceId={workspaceId}
+        added={
+          new Set((agents ?? []).flatMap((agent) => (agent.templateKey ? [agent.templateKey] : [])))
+        }
+        onAdded={(agent) => {
+          state.replace((current) => [agent, ...current]);
+          open(agent);
+        }}
+        onBlank={create}
+        onImport={() => fileInput.current?.click()}
+      />
     </>
   );
 
@@ -261,37 +265,28 @@ export function AgentsPage({
           )}
         </DetailSection>
       )}
-      {state.supported ? (
-        <AgentGallery
-          workspaceId={workspaceId}
-          added={
-            new Set(
-              (agents ?? []).flatMap((agent) => (agent.templateKey ? [agent.templateKey] : [])),
-            )
-          }
-          onAdded={(agent) => {
-            state.replace((current) => [agent, ...current]);
-            open(agent);
-          }}
-        />
-      ) : null}
       {after}
     </DetailPage>
   );
 }
 
 /**
- * "Add an agent": ready-made agents, each added as an ordinary agent the
- * person then sets up on its page. One already added here is not offered.
+ * The one way to add an agent: ready-made agents first (each added as an
+ * ordinary agent the person then sets up on its page; one already added here
+ * is not offered), then a blank agent or one imported from a file.
  */
-function AgentGallery({
+function AddAgentMenu({
   workspaceId,
   added,
   onAdded,
+  onBlank,
+  onImport,
 }: {
   workspaceId: string;
   added: ReadonlySet<string>;
   onAdded: (agent: Agent) => void;
+  onBlank: () => void;
+  onImport: () => void;
 }) {
   const { client } = useAppContext();
   const [templates, setTemplates] = useState<AgentTemplate[] | null>(null);
@@ -320,7 +315,6 @@ function AgentGallery({
   const offered = (templates ?? []).filter(
     (template) => !added.has(template.key) && !addedHere.has(template.key),
   );
-  if (offered.length === 0) return null;
   const add = async (template: AgentTemplate) => {
     setAdding(template.key);
     try {
@@ -334,31 +328,64 @@ function AgentGallery({
     }
   };
   return (
-    <DetailSection title="Add an agent">
-      <RowList label="Ready-made agents" variant="catalog">
-        {offered.map((template) => (
-          <ListRow
-            key={template.key}
-            data-agent-template={template.key}
-            leading={
-              <SessionAvatar
-                avatar={template.avatar ?? agentInitialsAvatar(template.name, template.key)}
-                name={template.name}
-                workspaceId={workspaceId}
-                seed={template.key}
-                size="md"
-              />
-            }
-            title={template.name}
-            description={template.description}
-            control={
-              <RowButton disabled={adding !== null} onClick={() => void add(template)}>
-                {adding === template.key ? "Adding…" : "Add"}
-              </RowButton>
-            }
-          />
-        ))}
-      </RowList>
-    </DetailSection>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          size="sm"
+          className="pointer-coarse:h-11"
+          disabled={adding !== null}
+          data-add-agent=""
+        >
+          <PlusIcon />
+          Add agent
+          <ChevronDownIcon className="opacity-70" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-80">
+        {offered.length > 0 ? (
+          <>
+            <DropdownMenuLabel>Ready-made</DropdownMenuLabel>
+            {offered.map((template) => (
+              <DropdownMenuItem
+                key={template.key}
+                data-agent-template={template.key}
+                disabled={adding !== null}
+                onSelect={() => void add(template)}
+                className="items-start"
+              >
+                <SessionAvatar
+                  avatar={template.avatar ?? agentInitialsAvatar(template.name, template.key)}
+                  name={template.name}
+                  workspaceId={workspaceId}
+                  seed={template.key}
+                  size="sm"
+                />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate">{template.name}</span>
+                  {template.description ? (
+                    <span className="line-clamp-2 text-xs text-fg-muted">
+                      {template.description}
+                    </span>
+                  ) : null}
+                </span>
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
+        <DropdownMenuItem onSelect={onBlank}>
+          <FilePlusIcon />
+          Blank agent
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={onImport}
+          title="Import an .agent.json or .bot.json file"
+        >
+          <UploadIcon />
+          Import from file
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

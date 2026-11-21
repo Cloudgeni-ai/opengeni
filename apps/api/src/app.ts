@@ -439,6 +439,7 @@ import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSessionShareLinkRoutes } from "./routes/session-share-links";
 import { registerSessionLinkRoutes } from "./routes/session-links";
+import { registerSessionLinkPullRequestRoutes } from "./routes/session-link-pull-request";
 import {
   archivedSessionImportErrorResponse,
   isSessionHistoryImportRequest,
@@ -2938,6 +2939,7 @@ export function createAppComposition(
   registerSessionShareLinkRoutes(app, routeDeps);
   // The Linked panel, after the session module for the same reason.
   registerSessionLinkRoutes(app, routeDeps);
+  registerSessionLinkPullRequestRoutes(app, routeDeps);
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);

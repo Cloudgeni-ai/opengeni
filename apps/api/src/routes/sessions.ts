@@ -6269,6 +6269,8 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (/^\/links\/[^/]+$/.test(suffix) && verb === "DELETE") return "session.control";
+  // A linked pull request's details (files, commits, discussion, checks): a read.
+  if (/^\/links\/[^/]+\/pull-request$/.test(suffix) && verb === "GET") return "session.read";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   // Stands in for the person's own next message, so it needs the same access.
