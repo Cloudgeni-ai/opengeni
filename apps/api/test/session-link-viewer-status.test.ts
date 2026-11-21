@@ -257,6 +257,11 @@ describe("Linked status read as the viewer", () => {
     const reader = viewerSessionLinkReader(deps, grant("user:ada"), [linear], io, 20);
     expect(await reader.read(linear)).toEqual({ kind: "none" });
     await reader.close();
+    // A gateway that never finishes opening is bounded the same way.
+    const stuck = { ...fake.io, open: () => new Promise<never>(() => undefined) };
+    const slow = viewerSessionLinkReader(deps, grant("user:ada"), [linear], stuck, 20);
+    expect(await slow.read(linear)).toEqual({ kind: "none" });
+    await slow.close();
   });
 
   test("keys, services and other links read nothing", async () => {

@@ -33,6 +33,8 @@ const STATUS_TTL_MS = 30_000;
  * so they're kept longer; an explicit refresh still re-reads them.
  */
 const VIEWER_STATUS_TTL_MS = 120_000;
+/** A viewer read that found nothing (failed, timed out) is tried again soon. */
+const VIEWER_MISS_TTL_MS = 10_000;
 /** Even an explicit refresh re-reads one link at most this often. */
 const FRESH_MIN_INTERVAL_MS = 5_000;
 const TOKEN_REUSE_MARGIN_MS = 60_000;
@@ -372,7 +374,9 @@ export async function withSessionLinkStatuses(
       const maxAge = options.fresh
         ? FRESH_MIN_INTERVAL_MS
         : viewer
-          ? VIEWER_STATUS_TTL_MS
+          ? cached?.status || cached?.connect
+            ? VIEWER_STATUS_TTL_MS
+            : VIEWER_MISS_TTL_MS
           : STATUS_TTL_MS;
       if (cached && Date.now() - cached.at < maxAge) {
         results[index] = withRead(link, cached);

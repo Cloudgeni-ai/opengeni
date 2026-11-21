@@ -83,7 +83,6 @@ export type ViewerLinkReaderIo = {
     deps: ApiRouteDeps,
     grant: AccessGrant,
     identities: readonly ToolGatewayIdentity[],
-    signal?: AbortSignal,
   ) => Promise<ViewerToolSession>;
 };
 
@@ -317,12 +316,11 @@ export function viewerReadsOwnConnections(grant: AccessGrant): boolean {
 
 const defaultIo: ViewerLinkReaderIo = {
   inventory: readSiteToolAccountInventory,
-  async open(deps, grant, identities, signal) {
+  async open(deps, grant, identities) {
     const prepared: PreparedWorkspaceToolGateway = await prepareWorkspaceToolGatewayForGrant(
       deps,
       grant,
       identities,
-      signal ? { signal } : {},
     );
     const entries = prepared.toolGatewayCatalog.entries;
     return {
@@ -376,9 +374,12 @@ export function viewerSessionLinkReader(
       const all = await Promise.all(needed.map(accountsOf));
       const identities = all.flatMap((each) => each?.accounts ?? []);
       if (identities.length === 0) return null;
-      return await io
-        .open(deps, grant, identities, AbortSignal.timeout(VIEWER_READ_TIMEOUT_MS))
-        .catch(() => null);
+      // Setup alone is bounded here; each call is bounded per link below.
+      const opening = io.open(deps, grant, identities).catch(() => null);
+      const opened = await within(opening, timeoutMs);
+      // Opened too late: release it once it's ready.
+      if (!opened) void opening.then((late) => late?.close().catch(() => undefined));
+      return opened;
     })();
     return await session;
   };

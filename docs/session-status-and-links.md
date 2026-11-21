@@ -86,7 +86,8 @@ workspace shares; never through another person's own connection. The read
 goes through the same tool gateway as the viewer's own calls, so the
 connection's tool permissions apply (a tool set to Ask first or Block isn't
 read). Status is cached per viewer for two minutes (an explicit refresh
-re-reads it), and each read stops after 6 seconds. A viewer without a
+re-reads it); each read stops after 6 seconds, and one that found nothing is
+tried again after 10 seconds. A viewer without a
 connection sees the title and a quiet **Connect Linear** or **Connect Slack**
 link (`connect` on the link, `{ name, capabilityId }`), only where the
 workspace offers that connector. Only signed-in people read live status this
