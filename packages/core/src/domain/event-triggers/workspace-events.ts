@@ -84,8 +84,8 @@ const THRESHOLD_FIELD: Field = [
 ];
 
 const APP_FIELDS: Field[] = [
-  ["data.appId", "The App, for the App tools"],
-  ["data.appTitle", "The App's title"],
+  ["data.appId", "The app, for the app tools"],
+  ["data.appTitle", "The app's title"],
   [
     "data.writtenByYou",
     "true when the change was made for you: by you, your agent or your own automation",
@@ -164,22 +164,22 @@ const ACTIVITY_TYPES: Record<ActivityEventType, CatalogEntry & { fields: Field[]
     fields: USAGE_FIELDS,
   },
   "app.record.added": {
-    description: "A record was added to an App's collection",
+    description: "A record was added to an app's collection",
     summary: "Record added",
     fields: APP_RECORD_FIELDS,
   },
   "app.record.changed": {
-    description: "A record in an App's collection was changed",
+    description: "A record in an app's collection was changed",
     summary: "Record changed",
     fields: APP_RECORD_FIELDS,
   },
   "app.record.removed": {
-    description: "A record was removed from an App's collection",
+    description: "A record was removed from an app's collection",
     summary: "Record removed",
     fields: APP_RECORD_FIELDS,
   },
   "app.sql.changed": {
-    description: "Rows were written to an App's SQL database",
+    description: "Rows were written to an app's SQL database",
     summary: "App database changed",
     fields: [
       ...APP_FIELDS,

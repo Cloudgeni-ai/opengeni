@@ -465,17 +465,17 @@ async function syncAccess(
 ): Promise<SiteDataAccess> {
   const access = await resolveSiteDataAccess(deps, grant, action.siteId);
   if (access.site.status !== "active")
-    throw forbidden("The App is archived, so its syncs don't run. Restore the App to sync again.");
+    throw forbidden("The app is archived, so its syncs don't run. Restore the app to sync again.");
   const collection = await access.store.getCollection(
     { accountId: task.accountId, workspaceId: task.workspaceId, siteId: action.siteId },
     action.collection,
   );
   if (!collection)
-    throw invalid(`The App has no collection named "${action.collection}" any more.`);
+    throw invalid(`The app has no collection named "${action.collection}" any more.`);
   if (action.mode === "shared") {
     if (access.caller.role !== "manager")
       throw forbidden(
-        "The sync's owner can no longer manage this App's data. Someone who manages the App should save the sync again.",
+        "The sync's owner can no longer manage this app's data. Someone who manages the app should save the sync again.",
       );
     if (collection.accessMode === "per_viewer")
       throw invalid(
@@ -526,7 +526,7 @@ async function runForPerson(
     if (!grant)
       throw forbidden(
         action.mode === "shared"
-          ? "The sync's owner is no longer in this workspace. Someone who manages the App should save the sync again."
+          ? "The sync's owner is no longer in this workspace. Someone who manages the app should save the sync again."
           : "This person is no longer in the workspace.",
       );
     const access = await syncAccess(deps, grant, task, action, context);
@@ -790,10 +790,10 @@ async function requireCollectionFor(
     { accountId: grant.accountId, workspaceId: grant.workspaceId, siteId },
     collection,
   );
-  if (!found) throw invalid(`The App has no collection named "${collection}". Define it first.`);
+  if (!found) throw invalid(`The app has no collection named "${collection}". Define it first.`);
   if (mode === "personal" && found.accessMode !== "per_viewer")
     throw invalid(
-      `A personal sync fills each person's own records, so "${collection}" must be a per_viewer collection (privateRecords keeps them from the App's managers too).`,
+      `A personal sync fills each person's own records, so "${collection}" must be a per_viewer collection (privateRecords keeps them from the app's managers too).`,
     );
   if (mode === "shared" && found.accessMode === "per_viewer")
     throw invalid(
@@ -1241,7 +1241,7 @@ export async function setAppSyncOptIn(
   surface: SiteDataSurface = {},
 ): Promise<{ syncId: string; optedIn: boolean }> {
   if (surface.frameSiteId !== undefined && surface.frameSiteId !== null)
-    throw forbidden("Opt in to a sync from Opengeni, not from inside the App.");
+    throw forbidden("Opt in to a sync from Opengeni, not from inside the app.");
   const access = await resolveSiteDataAccess(deps, grant, siteId);
   if (!access.subjectId) throw forbidden("Only a person can opt in to a personal sync.");
   const { task, action } = await requireSyncTask(deps, grant, siteId, syncId);

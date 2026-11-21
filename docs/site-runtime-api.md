@@ -277,7 +277,7 @@ Operations:
   - Guests read and open the Site's `shared` files (list and short-lived
     download URLs, within the same per-visitor and per-address request
     limits). They never upload or delete files, and never see `private` files.
-  - `GET /data/syncs` (`site.data.syncs()`) returns each App data sync's last
+  - `GET /data/syncs` (`site.data.syncs()`) returns each app data sync's last
     run and, for personal syncs, the viewer's own last run and opt-in
     ([app-sync.md](app-sync.md)).
 - `sessions.*` are Site agent conversations:
@@ -424,17 +424,17 @@ Operations:
 
 ## Connect card
 
-When a workspace member opens an App (a Site), Opengeni shows a small card
-for each connected tool the App declares that they still have to connect or
+When a workspace member opens an app (a Site), Opengeni shows a small card
+for each connected tool the app declares that they still have to connect or
 reconnect: "Connect Gmail", one button each, and a close button. Nothing shows
 when everything is ready, for guests and invited viewers outside the
-workspace, or after the viewer closed it (until a new need appears or the App
+workspace, or after the viewer closed it (until a new need appears or the app
 asks for it again). App authors build nothing: the list comes from the current
 version's `requestedTools`.
 
 - **Source.** `POST /v1/workspaces/:workspaceId/tools/site-setup`
   (`{ siteArtifactId, siteVersionId }`, `workspace:read`) in the console, and
-  `POST /v1/site-runtime/tools/setup` (`{}`) for a published App. Both answer
+  `POST /v1/site-runtime/tools/setup` (`{}`) for a published app. Both answer
   `ToolGatewaySiteSetupResponse` `{ version: 1, items }`; each item has a
   stable `key` (`<action>:<digest>`, the digest of the connector's catalog
   capability and the account's connection, so connectors that share a name
@@ -451,21 +451,21 @@ version's `requestedTools`.
   picks the account; blocked, unavailable and permission-denied tools are not
   something one click fixes, so they don't show. Tools whose connector has no
   catalog entry are left out.
-- **Console.** The card sits over the App's bottom right corner. Its button
+- **Console.** The card sits over the app's bottom right corner. Its button
   opens Opengeni's own connect or reconnect dialog (the same
   `McpConnectionCard` flow as chat), and the card refreshes when it finishes
   and when the window regains focus.
-- **Published App.** The gateway shell shows the same card to members. A
+- **Published app.** The gateway shell shows the same card to members. A
   published page has no Opengeni frame to sign in through, so the button opens
-  `openUrl`, the App in the Opengeni console with `?connect=<key>`, in a new
-  tab, which opens that dialog at once; returning to the App refreshes the
+  `openUrl`, the app in the Opengeni console with `?connect=<key>`, in a new
+  tab, which opens that dialog at once; returning to the app refreshes the
   card and its tool readiness. `openUrl` uses `OPENGENI_WEB_BASE_URL`,
   falling back to `OPENGENI_PUBLIC_BASE_URL` as other console links do; set
   `OPENGENI_WEB_BASE_URL` when the console is served from another origin
   than the API, or the link opens the API's address. The console opens the
   dialog once its connect dialogs are ready and drops a key the card no
   longer lists.
-- **From the App.** `site.connections` in `@opengeni/sdk/site`:
+- **From the app.** `site.connections` in `@opengeni/sdk/site`:
   `status()` resolves `{ supported, ready, needed }` (each need with `key`,
   `action`, `connector`, `account`, `label` and `tools`; no ids or
   addresses), `connect(key?)` starts one need's action and resolves
@@ -474,25 +474,25 @@ version's `requestedTools`.
   connected may have changed. Hosts advertise this with `connections: 1` in
   the bridge ready message; local previews, older hosts and outside viewers
   answer `supported: false`, `ready: true`.
-- **Self-hosted.** Published App hosts (the Site gateway on Cloudflare) are not
+- **Self-hosted.** Published app hosts (the Site gateway on Cloudflare) are not
   available self-hosted, so there the card shows only in the console, where it
   works the same. `site.connections` in the console behaves as above.
 
 ## Opengeni look for apps
 
 Apps opened in Opengeni follow its light or dark theme: the frame's
-`color-scheme` is Opengeni's, so `prefers-color-scheme` inside the App
+`color-scheme` is Opengeni's, so `prefers-color-scheme` inside the app
 matches it and changes without a reload. (Safari doesn't pass a frame's
-`color-scheme` to `prefers-color-scheme`, so there an App follows the
+`color-scheme` to `prefers-color-scheme`, so there an app follows the
 system's theme; that differs only when Opengeni's appearance is set to the
-other one.) An App that wants Opengeni's own look opts in with one tag:
+other one.) An app that wants Opengeni's own look opts in with one tag:
 
 ```html
 <link rel="stylesheet" href="/__opengeni/ui.css">
 ```
 
 A bundler (`bun build ./index.html`, Vite) tries to resolve that link and
-fails, so in a built App use a style that only imports it, which bundlers
+fails, so in a built app use a style that only imports it, which bundlers
 leave alone:
 
 ```html

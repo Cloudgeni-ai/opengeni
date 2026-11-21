@@ -159,22 +159,22 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
       {
         type: "app.record.added",
         label: "Record added",
-        description: "A record was added to an App's collection.",
+        description: "A record was added to an app's collection.",
       },
       {
         type: "app.record.changed",
         label: "Record changed",
-        description: "A record in an App's collection was changed.",
+        description: "A record in an app's collection was changed.",
       },
       {
         type: "app.record.removed",
         label: "Record removed",
-        description: "A record was removed from an App's collection.",
+        description: "A record was removed from an app's collection.",
       },
       {
         type: "app.sql.changed",
         label: "App database changed",
-        description: "Rows were written to an App's SQL database.",
+        description: "Rows were written to an app's SQL database.",
       },
     ],
   },

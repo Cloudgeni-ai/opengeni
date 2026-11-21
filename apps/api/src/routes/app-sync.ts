@@ -67,7 +67,7 @@ export function registerAppSyncRoutes(app: Hono, deps: ApiRouteDeps): void {
   const managed = (context: Context) => {
     if (surface(context).frameSiteId !== undefined)
       throw siteDataHttpError(
-        new SiteDataError("forbidden", "Syncs are managed from Opengeni, not from inside the App"),
+        new SiteDataError("forbidden", "Syncs are managed from Opengeni, not from inside the app"),
       );
   };
   const json = async (context: Context) => await context.req.json().catch(() => null);

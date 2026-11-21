@@ -1,6 +1,6 @@
 # App data sync
 
-A data sync keeps one collection of an App's (published Site's)
+A data sync keeps one collection of an app's (published Site's)
 [Site Data](site-data.md) filled from a connected tool, with no model run. On
 every run it calls one tool with fixed arguments, reads the records out of the
 result, keeps the chosen fields and upserts each record by its key. Prefer it
@@ -39,7 +39,7 @@ in the automation's run history with its status, error and a `syncSummary`
 - **Shared** (`mode: "shared"`, default) runs as its owner, the person who last
   saved it, on their connection, and writes shared records of a `shared`,
   `shared_read` or `append_only` collection with the principal
-  `schedule:<taskId>`. The owner must still manage the App; otherwise the run
+  `schedule:<taskId>`. The owner must still manage the app; otherwise the run
   fails and asks a manager to save the sync again. When another manager saves
   it, they become the owner and the sync moves to their own account of the
   same connector.
@@ -48,7 +48,7 @@ in the automation's run history with its status, error and a `syncSummary`
   account of the same connector, never a workspace-shared account (a person
   with only the shared one gets a readable error asking them to connect their
   own), and writes only their own records (`user:<subjectId>`) of a
-  `per_viewer` collection. `privateRecords: true` is not required, so an App
+  `per_viewer` collection. `privateRecords: true` is not required, so an app
   can let its managers see everyone's synced records; set it to hide them from
   managers too. One person's failure doesn't stop the others; the run fails
   with "N of M people failed" and each person's last run is kept on their
@@ -80,9 +80,9 @@ in batches of 100 `put` operations.
   and "ask first" fails the run with a readable error, since nobody can approve
   an unattended run. A tool that needs a connection the person lacks fails
   with "Connect … first".
-- Writes use the person's live access to the App: a lost audience stops the
-  sync, and an archived App fails its runs with a readable error until it is
-  restored. They count in the App's manager write window, are metered
+- Writes use the person's live access to the app: a lost audience stops the
+  sync, and an archived app fails its runs with a readable error until it is
+  restored. They count in the app's manager write window, are metered
   like other Site Data writes (`site_data.write`, `site_data.write_bytes`) and
   record the run's automation chain depth and ids on the caller, so the event
   chain limit applies to changes a sync makes.
@@ -101,14 +101,14 @@ HTTP (`apps/api/src/routes/app-sync.ts`), under
 
 | Route | Purpose | Who |
 | --- | --- | --- |
-| `GET /data/syncs` | each sync's name, collection, mode, `active`, `lastRun` and, for personal syncs, `optedIn` (the viewer's own last run) | anyone who can see the App, including the App's page |
+| `GET /data/syncs` | each sync's name, collection, mode, `active`, `lastRun` and, for personal syncs, `optedIn` (the viewer's own last run) | anyone who can see the app, including the app's page |
 | `GET /syncs` | full definitions, owners, subscriber counts, last runs | managers (`artifacts:read`) |
 | `POST /syncs`, `PATCH /syncs/:syncId`, `DELETE /syncs/:syncId` | create, change, delete | managers with `artifacts:publish` and `scheduled_tasks:manage` |
 | `POST /syncs/:syncId/run` | run now and return the result | managers with `artifacts:publish` and `scheduled_tasks:run` |
-| `PUT\|DELETE /syncs/:syncId/subscription` | opt in to or out of a personal sync | anyone who can see the App |
+| `PUT\|DELETE /syncs/:syncId/subscription` | opt in to or out of a personal sync | anyone who can see the app |
 
-Published Apps also serve `GET /data/syncs` through the Site runtime. The
-management and subscription routes refuse requests from inside an App frame.
+Published apps also serve `GET /data/syncs` through the Site runtime. The
+management and subscription routes refuse requests from inside an app frame.
 Errors use the Site Data error envelope.
 
 - **App page:** `await site.data.syncs()` (`OpenGeniAppSyncStatus[]`).
@@ -116,9 +116,9 @@ Errors use the Site Data error envelope.
   `runAppSync`, `setAppSyncOptIn`, `getAppSyncStatus`.
 - **Agent tools** (family `artifacts`, session-bound): `app_sync_save`
   (create, or change with `syncId`), `app_sync_list`, `app_sync_delete`,
-  `app_sync_run`, `app_sync_opt_in`. An App's own visitor agent can't manage
+  `app_sync_run`, `app_sync_opt_in`. An app's own visitor agent can't manage
   syncs.
-- The bundled App-building Skill tells agents to prefer a sync over a model-run
+- The bundled app-building Skill tells agents to prefer a sync over a model-run
   automation for plain data refresh.
 
 ## Export and install
@@ -161,7 +161,7 @@ and a running worker with Temporal schedules, as other automations do.
   the HTTP API manage syncs.
 - Site SQL tables as a target; only Site Data collections.
 - Removing records the tool no longer returns.
-- Opting in from inside the App's page (people opt in in Opengeni or through
+- Opting in from inside the app's page (people opt in in Opengeni or through
   their agent).
 - Personal event sources as triggers.
 - More than 1,000 records per run or 200 people per personal sync.
@@ -170,7 +170,7 @@ and a running worker with Temporal schedules, as other automations do.
 ## Tests
 
 - `apps/api/test/app-sync-postgres.test.ts`: shared upsert by key with kept
-  fields and no session, failures in run history and the App's status,
+  fields and no session, failures in run history and the app's status,
   approval errors, personal sync isolation and opt-out, the queue executor,
   export and paused install.
 - `apps/api/test/app-sync-records.test.ts`: reading records and fields.

@@ -26,7 +26,7 @@ type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
 };
 
-const AppIdInput = z4.string().uuid().describe("The App (published Site) id.");
+const AppIdInput = z4.string().uuid().describe("The app (published Site) id.");
 const SyncIdInput = z4.string().uuid().describe("The sync's id, from app_sync_list.");
 const Path = z4.string().min(1).max(256);
 
@@ -37,10 +37,10 @@ const SAVE_FIELDS = {
     .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
     .optional()
     .describe(
-      "The App data collection to fill. Define it first with app_data_define_collection: shared or shared_read for a shared sync, per_viewer (ideally privateRecords) for a personal one.",
+      "The app data collection to fill. Define it first with app_data_define_collection: shared or shared_read for a shared sync, per_viewer (ideally privateRecords) for a personal one.",
     ),
   mode: AppSyncMode.optional().describe(
-    "shared (default): runs on your connection and fills data everyone in the App shares. personal: each person opts in with app_sync_opt_in and it fills only their own records, from their own account.",
+    "shared (default): runs on your connection and fills data everyone in the app shares. personal: each person opts in with app_sync_opt_in and it fills only their own records, from their own account.",
   ),
   tool: z4
     .object({
@@ -126,7 +126,7 @@ export function registerAppSyncTools(
     "app_sync_save",
     {
       description:
-        "Create or change an App data sync: on a schedule or event, call one connected tool with fixed arguments, keep chosen fields of each returned record and upsert them by key into a collection of the App's data. No model runs, so prefer it over an agent automation for plain data refresh. Without syncId it creates a sync (name, collection, tool, key and schedule are required); with syncId only the given fields change. Whoever saves a sync owns it: a shared sync runs on their connection. Tools that ask for approval first can't run unattended; a run of one fails with a readable error. Try it with app_sync_run.",
+        "Create or change an app data sync: on a schedule or event, call one connected tool with fixed arguments, keep chosen fields of each returned record and upsert them by key into a collection of the app's data. No model runs, so prefer it over an agent automation for plain data refresh. Without syncId it creates a sync (name, collection, tool, key and schedule are required); with syncId only the given fields change. Whoever saves a sync owns it: a shared sync runs on their connection. Tools that ask for approval first can't run unattended; a run of one fails with a readable error. Try it with app_sync_run.",
       inputSchema: {
         siteId: AppIdInput,
         syncId: SyncIdInput.optional().describe("Change this sync instead of creating one."),
@@ -150,7 +150,7 @@ export function registerAppSyncTools(
     "app_sync_list",
     {
       description:
-        "List an App's data syncs: tool, collection, schedule, owner, opted-in people and each one's last run (time, status, error, counts). Needs a manager of the App.",
+        "List an app's data syncs: tool, collection, schedule, owner, opted-in people and each one's last run (time, status, error, counts). Needs a manager of the app.",
       inputSchema: { siteId: AppIdInput },
     },
     call(async ({ siteId }: { siteId: string }) => ({
@@ -161,7 +161,7 @@ export function registerAppSyncTools(
   server.registerTool(
     "app_sync_delete",
     {
-      description: "Delete an App data sync. Records it already wrote stay.",
+      description: "Delete an app data sync. Records it already wrote stay.",
       inputSchema: { siteId: AppIdInput, syncId: SyncIdInput },
     },
     call(async ({ siteId, syncId }: { siteId: string; syncId: string }) =>
@@ -173,7 +173,7 @@ export function registerAppSyncTools(
     "app_sync_run",
     {
       description:
-        "Run an App data sync now (even while paused) and return its result: records read and written, or the error. Use it to check a new sync.",
+        "Run an app data sync now (even while paused) and return its result: records read and written, or the error. Use it to check a new sync.",
       inputSchema: { siteId: AppIdInput, syncId: SyncIdInput },
     },
     call(async ({ siteId, syncId }: { siteId: string; syncId: string }) =>
@@ -185,7 +185,7 @@ export function registerAppSyncTools(
     "app_sync_opt_in",
     {
       description:
-        "Opt the person you act for in to a personal App data sync, or out with optedIn: false. Each run then fills only their own records, from their own account. Only do this when they ask.",
+        "Opt the person you act for in to a personal app data sync, or out with optedIn: false. Each run then fills only their own records, from their own account. Only do this when they ask.",
       inputSchema: {
         siteId: AppIdInput,
         syncId: SyncIdInput,

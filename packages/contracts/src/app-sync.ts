@@ -35,7 +35,7 @@ const AppSyncCollection = /* @__PURE__ */ defineSchema(() =>
   z
     .string()
     .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u)
-    .describe("The App data collection the sync fills."),
+    .describe("The app data collection the sync fills."),
 );
 const AppSyncPath = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(256));
 

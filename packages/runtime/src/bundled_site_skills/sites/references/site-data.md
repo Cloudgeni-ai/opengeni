@@ -126,7 +126,7 @@ each and 1 GB per app, by default), `rate_limited` (retry later), and
 `site_data_unsupported` (a host or local preview without app data). Local
 sandbox previews have no app data; test the published app.
 
-**Data sync: refresh data without a model run.** When the App only needs data
+**Data sync: refresh data without a model run.** When the app only needs data
 copied in from a connected tool (orders, tickets, calendar events, rows of a
 sheet), save a sync instead of a scheduled agent task: `app_sync_save` calls
 one tool with fixed arguments on a schedule or event, keeps the fields you

@@ -165,7 +165,7 @@ const OrganizationEventTypes = /* @__PURE__ */ defineSchema(() =>
     })
     .refine((types) => types.every((type) => !type.startsWith("app.")), {
       message:
-        "Organization webhooks accept session events only; subscribe to App events on a workspace webhook.",
+        "Organization webhooks accept session events only; subscribe to app events on a workspace webhook.",
     })
     .transform((types) => [...new Set(types)]),
 );

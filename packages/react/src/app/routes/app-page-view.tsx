@@ -71,8 +71,8 @@ export function AppPage({
         showToolbar={false}
         versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
         watch={live.watch}
-        archivedMessage="This App is archived."
-        loadingLabel="Opening App…"
+        archivedMessage="This app is archived."
+        loadingLabel="Opening app…"
         instant
       />
     </>

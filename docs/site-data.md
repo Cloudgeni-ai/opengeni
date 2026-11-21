@@ -123,7 +123,7 @@ atomic with Postgres, so no hint is published).
 
 ### App change events for automations and webhooks
 
-Automations and workspace webhooks hear about App data changes through the
+Automations and workspace webhooks hear about app data changes through the
 same vocabulary as Opengeni's other events (migration `1519`,
 `packages/db/src/app-activity-events.ts`):
 
@@ -134,12 +134,12 @@ same vocabulary as Opengeni's other events (migration `1519`,
   nothing, so a sync that refreshes the same data stays quiet. Imports,
   collection resets and collection deletes send none.
 - `app.sql.changed`: a Site SQL write (a saved write query or
-  `app_sql_execute`) that wrote rows. The App's database commits in its
+  `app_sql_execute`) that wrote rows. The app's database commits in its
   Durable Object, outside Postgres, so the API records this fact right after
   the call returns, best effort: a crash in between loses the event, never
   the write.
 
-Facts go to `workspace_activity_events` (the 1105 facts table) with the App's
+Facts go to `workspace_activity_events` (the 1105 facts table) with the app's
 id, in the write's own transaction, and only while someone listens: an active
 "This workspace" event source or an enabled workspace webhook subscribed to an
 app type. Otherwise the write pays one indexed lookup. A fact carries the
@@ -154,18 +154,18 @@ applies. A fact that cannot be written is logged and never fails the write.
 Who sees a fact is decided by row security, as the "This workspace" source
 reads as its owner:
 
-- The person must be able to open the App: it is shared with the workspace,
-  or it is their own Only me App.
+- The person must be able to open the app: it is shared with the workspace,
+  or it is their own Only me app.
 - In a collection where viewers read only their own records (`per_viewer`,
-  `append_only`), the record's owner sees it, and so do the App's managers
-  (members who may publish Apps, and workspace administrators) unless the
+  `append_only`), the record's owner sees it, and so do the app's managers
+  (members who may publish apps, and workspace administrators) unless the
   records are private (`privateRecords`), when only the owner does.
 
-Workspace webhooks receive every App fact of the workspace, but without the
+Workspace webhooks receive every app fact of the workspace, but without the
 record's data, key and owner when only some people may read it
 (`recordWithheld: true`): a
 record in a collection where people read only their own, or any record of an
-App that isn't shared with the workspace (an Only me App).
+app that isn't shared with the workspace (an Only me app).
 Organization webhooks don't offer app types. Events for automations are
 rendered like other "This workspace" events: summary `Record added in
 <App> / <collection>`, the App's console address, `data.appId`,
@@ -196,7 +196,7 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   `privateRecords`. Everyone else who can view the Site is a **viewer**.
 - Agents outside Opengeni (connected agents and personal API keys on the
   [organization MCP server](mcp-surfaces.md#named-tools-for-connected-agents))
-  are **viewers** unless the person set the connection's App data to Manager
+  are **viewers** unless the person set the connection's app data to Manager
   (`outside_agent_viewer`), and reach only members-only or unpublished Sites
   (`outside_agent_members_only`): text from outside visitors must not reach an
   agent that picks up work. Describe answers them with `access: "viewer"`.
@@ -415,7 +415,7 @@ use the schedule's. Site-origin agents use the same native role as console agent
 
 
 
-**Syncs.** An App data sync keeps a collection filled from a connected tool on
+**Syncs.** An app data sync keeps a collection filled from a connected tool on
 a schedule without a model run; the page reads each sync's last run with
 `site.data.syncs()` (`GET /data/syncs`). See [app-sync.md](app-sync.md).
 

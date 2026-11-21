@@ -67,7 +67,7 @@ export async function validateScheduledTaskEvents(
   }
   if (input.action.kind !== "agent_turn" && input.action.kind !== "app_sync") {
     throw new HTTPException(422, {
-      message: "Only agent automations and App data syncs can have event triggers",
+      message: "Only agent automations and app data syncs can have event triggers",
     });
   }
   if (events.once && input.schedule.type !== "manual" && input.schedule.type !== "once") {
