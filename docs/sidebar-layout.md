@@ -212,7 +212,7 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   lists, Show. The page's More (next to Add) switches the options above
   (Group chats under their app, and Menu entries for each rail entry) and
   holds Reset to workspace default; for you and, for admins, as the default.
-  A settings entry's menu has **Move to More** or **Show at top**. Groups
+  A settings entry's button does **Move to More** or **Show at top**. Groups
   remember open or closed per browser. The icon-only rail
   leaves the section out. Changes made elsewhere (an agent's tool call,
   another tab or device) show when the window regains focus, on return to
