@@ -9,6 +9,8 @@ import type {
   AppPackageExportResponse,
   AppPackageInstallRequest,
   AppPackageInstallResponse,
+  AppPackageUpgradeRequest,
+  AppPackageUpgradeResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -10412,6 +10414,26 @@ export class OpenGeniClient {
     return await this.requestJson<AppPackageInstallResponse>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-packages/install`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Upgrades an app from a newer package (docs/app-packages.md#upgrade):
+   * `dryRun` returns the plan; otherwise the package's version becomes the
+   * app's new version and only its new data definitions run.
+   */
+  async upgradeAppPackage(
+    workspaceId: string,
+    appId: string,
+    request: AppPackageUpgradeRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageUpgradeResponse> {
+    return await this.requestJson<AppPackageUpgradeResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(appId)}/package/upgrade`,
       request,
       undefined,
       options,

@@ -1341,6 +1341,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sql_reset",
   "app_export",
   "app_install",
+  "app_upgrade",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",

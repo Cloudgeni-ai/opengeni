@@ -4843,6 +4843,7 @@ export type FirstPartyMcpToolName =
   | "site_sql_reset"
   | "app_export"
   | "app_install"
+  | "app_upgrade"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"

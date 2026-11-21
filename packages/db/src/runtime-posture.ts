@@ -2049,6 +2049,7 @@ export const FORCE_RLS_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
+  "app_package_exports",
   "app_sync_queue",
   "app_sync_subscriptions",
   "attached_browser_devices",
@@ -2654,6 +2655,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
+  // 1523_app_package_exports: stored app package files and their sweep.
+  "app_package_exports",
   // 1520_app_data_sync: App data sync executor queue and personal opt-ins.
   "app_sync_queue",
   "app_sync_subscriptions",

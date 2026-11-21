@@ -5,6 +5,9 @@ export type {
   AppPackageInstallRequest,
   AppPackageInstallResponse,
   AppPackageProblem,
+  AppPackageUpgradePlan,
+  AppPackageUpgradeRequest,
+  AppPackageUpgradeResponse,
 } from "@opengeni/contracts";
 export type {
   ModelDecisionRequest,

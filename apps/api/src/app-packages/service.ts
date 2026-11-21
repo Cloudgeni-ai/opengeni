@@ -1,4 +1,5 @@
 import {
+  APP_PACKAGE_DEMO_FILES_MAX,
   APP_PACKAGE_DEMO_MAX_BYTES,
   APP_PACKAGE_DEMO_RECORDS_PER_COLLECTION,
   APP_PACKAGE_DEMO_ROWS_PER_TABLE,
@@ -14,12 +15,14 @@ import {
   stableJson,
   type AccessGrant,
   type AppPackage,
+  type AppPackageDemoFile,
   type AppPackageDemoRecord,
   type AppPackageExportRequest,
   type AppPackageExportResponse,
   type AppPackageInstallResponse,
   type AppPackageProblem,
   type SiteDataAccessMode,
+  type SiteSqlValue,
   type SiteDataWriteOperation,
   type ToolGatewayIdentity,
   type WorkspaceArtifactVisibility,
@@ -45,6 +48,9 @@ import {
   defineSiteDataCollection,
   describeSiteData,
   exportSiteData,
+  listSiteDataFiles,
+  readSiteDataFileBytes,
+  uploadSiteDataFile,
   writeSiteData,
 } from "../site-data/operations";
 import { siteSqlGatewayConfig, siteSqlOffered } from "../site-sql/gateway";
@@ -60,6 +66,7 @@ import {
 } from "../site-sql/service";
 import { connectorToolIdentities, readSiteToolAccountInventory } from "../site-tool-routing";
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
+import { siteSqlInsertStatements } from "../site-sql/format";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
 import { exportAppSidebar, installAppSidebar } from "./sidebar";
@@ -116,7 +123,7 @@ export function appPackageHttpError(error: unknown): ApiHttpError | null {
   return null;
 }
 
-function reason(error: unknown, context: string): string {
+export function reason(error: unknown, context: string): string {
   if (
     error instanceof SiteDataError ||
     error instanceof SiteSqlError ||
@@ -128,7 +135,7 @@ function reason(error: unknown, context: string): string {
   return "Something went wrong on our side";
 }
 
-function jsonBytes(value: unknown): number {
+export function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
@@ -376,7 +383,7 @@ async function exportDemoData(
           notExported.push({
             part: "demo_data",
             name,
-            reason: "It has binary or very long values, which packages don't carry",
+            reason: "It has text values over 64 KB, which packages don't carry",
           });
           continue;
         }
@@ -394,8 +401,105 @@ async function exportDemoData(
   } else if (wantsTables && typeof demo === "object") {
     notExported.push({ part: "demo_data", reason: "This app has no database" });
   }
-  if (Object.keys(records).length === 0 && Object.keys(sqlRows).length === 0) return undefined;
-  return { records, sqlRows };
+
+  // Shared Site files, after records and rows, within what is left of the budget.
+  const files: AppPackageDemoFile[] = [];
+  if (demo === true || (typeof demo === "object" && demo.files === true)) {
+    const result = await exportDemoFiles(deps, grant, appId, budget, notExported);
+    files.push(...result.files);
+    budget = result.budget;
+  }
+  if (Object.keys(records).length === 0 && Object.keys(sqlRows).length === 0 && files.length === 0)
+    return undefined;
+  return { records, sqlRows, ...(files.length > 0 ? { files } : {}) };
+}
+
+/**
+ * The app's shared files as demo data, oldest first, while they fit the
+ * budget. Private files belong to the people who uploaded them and are never
+ * exported.
+ */
+async function exportDemoFiles(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  appId: string,
+  budget: number,
+  notExported: AppPackageProblem[],
+): Promise<{ files: AppPackageDemoFile[]; budget: number }> {
+  const files: AppPackageDemoFile[] = [];
+  const listed: Array<{
+    id: string;
+    name: string;
+    contentType: string;
+    sizeBytes: number;
+  }> = [];
+  let privateFiles = 0;
+  try {
+    let cursor: string | null = null;
+    do {
+      const page = await listSiteDataFiles(deps, grant, appId, {
+        limit: 100,
+        cursor,
+      });
+      for (const file of page.files)
+        if (file.scope === "shared") listed.push(file);
+        else privateFiles += 1;
+      cursor = page.nextCursor;
+    } while (cursor && listed.length <= APP_PACKAGE_DEMO_FILES_MAX * 2);
+  } catch (error) {
+    notExported.push({
+      part: "demo_data",
+      name: "files",
+      reason: reason(error, "listing files"),
+    });
+    return { files, budget };
+  }
+  if (privateFiles > 0)
+    notExported.push({
+      part: "demo_data",
+      name: "files",
+      reason: `${privateFiles} private files belong to the people who uploaded them, so they aren't demo data`,
+    });
+  listed.reverse();
+  let skipped = 0;
+  for (const entry of listed) {
+    const size = Math.ceil(entry.sizeBytes / 3) * 4 + entry.name.length + 200;
+    if (files.length >= APP_PACKAGE_DEMO_FILES_MAX || size > budget) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      const read = await readSiteDataFileBytes(deps, grant, appId, entry.id);
+      if (!read) {
+        notExported.push({
+          part: "demo_data",
+          name: entry.name,
+          reason: "Its stored file is gone",
+        });
+        continue;
+      }
+      files.push({
+        id: entry.id,
+        name: read.file.name,
+        contentType: read.file.contentType,
+        base64: Buffer.from(read.bytes).toString("base64"),
+      });
+      budget -= size;
+    } catch (error) {
+      notExported.push({
+        part: "demo_data",
+        name: entry.name,
+        reason: reason(error, "reading a file"),
+      });
+    }
+  }
+  if (skipped > 0)
+    notExported.push({
+      part: "demo_data",
+      name: "files",
+      reason: `${skipped} shared files didn't fit in the package`,
+    });
+  return { files, budget };
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +571,7 @@ export async function installAppPackage(
     sidebar: 0,
     demoRecords: 0,
     demoRows: 0,
+    demoFiles: 0,
   };
 
   // 1. The app itself, from the package's version.
@@ -651,17 +756,31 @@ export async function installAppPackage(
   if (pkg.sidebar?.length)
     installed.sidebar = await installAppSidebar(deps, grant, app, pkg.sidebar, notInstalled);
 
-  // 6. Demo data, only into collections and tables that are still empty.
+  // 6. Demo data, only into collections, tables and file lists that are
+  // still empty. Files go first: demo values that are a packaged file's id
+  // then name its installed copy.
   if (wantsDemo && pkg.demoData) {
+    let ids = new Map<string, string>();
+    if (pkg.demoData.files?.length) {
+      const loaded = await installDemoFiles(deps, grant, app.id, pkg.demoData.files, notInstalled);
+      ids = loaded.ids;
+      installed.demoFiles = loaded.written;
+    }
     installed.demoRecords = await installDemoRecords(
       deps,
       grant,
       app.id,
-      pkg.demoData.records,
+      ids.size > 0 ? replaceFileIds(pkg.demoData.records, ids) : pkg.demoData.records,
       notInstalled,
     );
     if (sqlReady)
-      installed.demoRows = await installDemoRows(deps, grant, app.id, sqlRows, notInstalled);
+      installed.demoRows = await installDemoRows(
+        deps,
+        grant,
+        app.id,
+        ids.size > 0 ? replaceFileIds(sqlRows, ids) : sqlRows,
+        notInstalled,
+      );
     else if (Object.keys(sqlRows).length > 0 && !notInstalled.some((p) => p.part === "sql"))
       notInstalled.push({ part: "demo_data", reason: "The app database isn't available" });
   }
@@ -672,6 +791,63 @@ export async function installAppPackage(
     installed,
     notInstalled,
   };
+}
+
+/** `value` with every string that is exactly a packaged file's id replaced by its copy's id. */
+export function replaceFileIds<T>(value: T, ids: ReadonlyMap<string, string>): T {
+  if (typeof value === "string") return (ids.get(value) ?? value) as T;
+  if (Array.isArray(value)) return value.map((entry) => replaceFileIds(entry, ids)) as T;
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, replaceFileIds(entry, ids)]),
+    ) as T;
+  return value;
+}
+
+/**
+ * Upload the package's shared files into an app that has no files yet (a
+ * replayed install finds them there and loads nothing). Returns the new id
+ * of each packaged file id.
+ */
+async function installDemoFiles(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  appId: string,
+  files: AppPackageDemoFile[],
+  notInstalled: AppPackageProblem[],
+): Promise<{ written: number; ids: Map<string, string> }> {
+  const ids = new Map<string, string>();
+  try {
+    const existing = await listSiteDataFiles(deps, grant, appId, { limit: 1 });
+    if (existing.files.length > 0) return { written: 0, ids };
+  } catch (error) {
+    notInstalled.push({
+      part: "demo_data",
+      name: "files",
+      reason: reason(error, "listing files"),
+    });
+    return { written: 0, ids };
+  }
+  let written = 0;
+  for (const file of files) {
+    try {
+      const uploaded = await uploadSiteDataFile(deps, grant, appId, {
+        name: file.name,
+        contentType: file.contentType,
+        body: new Uint8Array(Buffer.from(file.base64, "base64")),
+        scope: "shared",
+      });
+      if (file.id) ids.set(file.id, uploaded.id);
+      written += 1;
+    } catch (error) {
+      notInstalled.push({
+        part: "demo_data",
+        name: file.name,
+        reason: reason(error, "loading a file"),
+      });
+    }
+  }
+  return { written, ids };
 }
 
 async function installDemoRecords(
@@ -750,12 +926,17 @@ async function installDemoRows(
       continue;
     }
     if (count > 0 || rows.length === 0) continue;
+    // Blob values load through SQL INSERTs (X'…' literals); JSON imports take scalars only.
+    if (rows.some((row) => Object.values(row).some(isBlobValue))) {
+      written += await installBlobRows(deps, grant, appId, table, rows, notInstalled);
+      continue;
+    }
     for (let start = 0; start < rows.length; start += 1_000) {
       try {
         const result = await importSiteSql(deps, grant, appId, {
           format: "json",
           table,
-          rows: rows.slice(start, start + 1_000),
+          rows: rows.slice(start, start + 1_000) as Record<string, SiteSqlValue>[],
           onConflict: "ignore",
         });
         written += result.imported;
@@ -768,6 +949,64 @@ async function installDemoRows(
         break;
       }
     }
+  }
+  return written;
+}
+
+function isBlobValue(value: unknown): value is { $base64: string } {
+  return value !== null && typeof value === "object" && "$base64" in value;
+}
+
+/** Most bytes of INSERT statements per SQL import call (the import takes 2 MB). */
+const BLOB_IMPORT_BYTES = 1_500_000;
+
+/**
+ * Rows with blob values, loaded as SQL INSERT statements into an empty table
+ * (the same literals Site SQL dumps write), in calls under the import limit.
+ */
+async function installBlobRows(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  appId: string,
+  table: string,
+  rows: AppPackageSqlRow[],
+  notInstalled: AppPackageProblem[],
+): Promise<number> {
+  const columns: string[] = [];
+  for (const row of rows)
+    for (const column of Object.keys(row)) if (!columns.includes(column)) columns.push(column);
+  const statements = siteSqlInsertStatements({
+    name: table,
+    columns,
+    rows: rows.map((row) => columns.map((column) => row[column] ?? null)),
+  });
+  let written = 0;
+  let chunk: string[] = [];
+  let bytes = 0;
+  const flush = async () => {
+    if (chunk.length === 0) return;
+    const result = await importSiteSql(deps, grant, appId, {
+      format: "sql",
+      sql: chunk.join("\n"),
+    });
+    written += result.rowsWritten;
+    chunk = [];
+    bytes = 0;
+  };
+  try {
+    for (const statement of statements) {
+      const size = Buffer.byteLength(statement, "utf8") + 1;
+      if (bytes + size > BLOB_IMPORT_BYTES) await flush();
+      chunk.push(statement);
+      bytes += size;
+    }
+    await flush();
+  } catch (error) {
+    notInstalled.push({
+      part: "demo_data",
+      name: table,
+      reason: `${rows.length - written} rows weren't loaded: ${reason(error, "loading rows")}`,
+    });
   }
   return written;
 }

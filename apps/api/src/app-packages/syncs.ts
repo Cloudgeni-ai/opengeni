@@ -11,10 +11,25 @@ import type { ApiRouteDeps } from "@opengeni/core";
  *   each paused until the installer confirms the account it uses (install).
  *   It is called again with the same `installKey` when an install request is
  *   replayed, so it should not create a sync twice for one key.
+ * - `planUpgrade` compares a package's syncs with an app's, by name
+ *   (upgrade dry run and plan), and `applyUpgrade` adds the new ones paused
+ *   and changes the changed ones in place, keeping each one's owner and
+ *   status. Both treat definitions as plain JSON. A deployment without them
+ *   reports every package sync as not upgraded.
  *
  * The default does nothing: packages export no syncs, and an install reports
  * any syncs a package carries as not installed.
  */
+export type AppSyncUpgradePlan = {
+  added: string[];
+  changed: string[];
+  unchanged: string[];
+  /** The app's syncs the package doesn't have: they stay. */
+  kept: string[];
+  /** Syncs that won't upgrade as planned, and why. */
+  problems: Array<{ name: string; reason: string }>;
+};
+
 export type AppSyncHooks = {
   list(input: { deps: ApiRouteDeps; grant: AccessGrant; appId: string }): Promise<AppPackageSync[]>;
   createPaused(input: {
@@ -27,6 +42,23 @@ export type AppSyncHooks = {
     /** Names (or ids) of the syncs created, paused. */
     created: string[];
     notCreated: Array<{ name: string; reason: string }>;
+  }>;
+  planUpgrade?(input: {
+    deps: ApiRouteDeps;
+    grant: AccessGrant;
+    appId: string;
+    syncs: AppPackageSync[];
+  }): Promise<AppSyncUpgradePlan>;
+  applyUpgrade?(input: {
+    deps: ApiRouteDeps;
+    grant: AccessGrant;
+    appId: string;
+    syncs: AppPackageSync[];
+    upgradeKey: string;
+  }): Promise<{
+    /** Names of the syncs added (paused) or changed. */
+    upgraded: string[];
+    notUpgraded: Array<{ name: string; reason: string }>;
   }>;
 };
 
