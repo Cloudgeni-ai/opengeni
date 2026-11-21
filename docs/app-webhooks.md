@@ -77,10 +77,14 @@ Data write. The app's normal change events fire: live updates for open
 pages, and `app.record.*` facts for "This workspace" automations and
 workspace webhooks ([site-data.md](site-data.md#app-change-events-for-automations-and-webhooks)),
 with chain depth 1, so automations they start keep the chain limit and the
-storm guard. The app is read as the webhook's creator sees it: an Only me
-app keeps accepting only while it is still theirs. Otherwise a webhook
-belongs to the app, not to the person who created it: it keeps accepting
-after they leave, and the app's managers pause, rotate or delete it.
+storm guard.
+
+A webhook writes on the authority of the person who last saved it, like a
+shared data sync. Every delivery checks that they are still a live
+workspace member who manages the app (and can still open it, for an Only me
+app); otherwise it is refused with 403 and the reason is kept on the
+webhook's last delivery, so managers see it. A person (or their agent) must
+save a webhook; a manager who saves or rotates it takes it over.
 
 ### Management
 
@@ -97,7 +101,13 @@ Managers of the app (`artifacts:publish`), never from inside the app's frame:
 
 `site.notify({ title, body?, to?, path?, key? })` in `@opengeni/sdk/site`
 (operation `site.notify`, `POST …/published-artifacts/current/notify`; SDK
-`notifyFromApp` from a server). Answers `{ key, delivered, skipped }`.
+`notifyFromApp` from a server). Answers `{ key, delivered, skipped, overLimit }`.
+
+**Not enabled yet.** Every send currently answers 403 with `details.reason`
+`notify_not_available` and stores nothing (see Rollout below). Delivery
+starts once a follow-up migration grants the runtime role EXECUTE on
+`opengeni_private.deliver_app_notification_v1(uuid)`. Until then the
+bundled app-building Skill and the public docs don't mention it.
 
 - **Who sends.** Signed-in workspace members only, with live membership:
   guests and invited viewers who aren't members get 403 with `details.reason`
@@ -106,8 +116,8 @@ Managers of the app (`artifacts:publish`), never from inside the app's frame:
   if they can open the app (a shared app, or their own) and allow other
   members to notify them (the same setting as agent notifications). Yourself
   always. `"workspace"`: the app's managers only; reaches every other member
-  who can open the app and allows it, at most 200; the rest count as
-  `skipped`.
+  who can open the app and allows it, at most 200. Members who don't allow
+  it count as `skipped`; members past the 200 count as `overLimit`.
 - **Limits.** 30 sends per sender and app in 10 minutes, of which at most 3
   to `"workspace"`; then 429 `rate_limited`.
 - **`key`.** The same key updates the person's existing notification in
@@ -120,21 +130,25 @@ Managers of the app (`artifacts:publish`), never from inside the app's frame:
   sender when it isn't the recipient, a link that opens the app at `path` in
   the console) and native push for new or reopened items under each device's
   `agent` rule. Rows older than a day are removed.
-- **Rollout.** The runtime role's EXECUTE on that routine is withheld for one
-  release (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`, as for migration 1503),
-  because the previous release refuses an unknown trigger definer or a
-  runtime grant on an unknown definer. Until a later migration grants it,
-  `site.notify` answers 403 with `details.reason` `notify_not_available` and
-  stores nothing.
+- **Rollout.** The runtime role's EXECUTE on that routine is withheld
+  (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`, as for migration 1503), because the
+  release before 1524 refuses an unknown trigger definer or a runtime grant
+  on an unknown definer. The follow-up grant migration can land once a
+  release with 1524 is the pinned previous release; it also removes the
+  `notify_not_available` refusal in `insertAppNotification` and adds
+  `site.notify` to the Skill and docs-site.
 
 ## Self-hosting
 
-- Webhooks need an API address senders can reach:
-  `OPENGENI_WEBHOOK_BASE_URL` or the public base URL (otherwise the request's
-  own origin is used), and `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`.
-- `site.notify` from published app hosts needs the Sites gateway; in the
-  console it works on every deployment. Native push needs push configured;
-  without it notifications still reach the inbox.
+- Webhooks need an API address senders can reach, and
+  `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`. A webhook's `url` uses
+  `OPENGENI_WEBHOOK_BASE_URL`, else `OPENGENI_PUBLIC_BASE_URL`, else the
+  request's own origin (HTTP routes) or `OPENGENI_MCP_URL`'s origin (agent
+  tools). With none of them set, the agent tools return the delivery `path`
+  instead, to post on the API's public address.
+- `site.notify` isn't enabled yet (see above). Once it is, published app
+  hosts need the Sites gateway, and native push needs push configured
+  (without it notifications still reach the inbox).
 - Not supported: per-viewer (personal) webhook targets, Site SQL targets,
   outbound retries (senders retry on non-2xx), and notifications to people
   outside the workspace.

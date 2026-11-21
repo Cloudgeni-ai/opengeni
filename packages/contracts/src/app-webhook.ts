@@ -168,8 +168,10 @@ export const AppNotifyResponse = /* @__PURE__ */ defineSchema(() =>
     key: z.string(),
     /** People it reached. */
     delivered: z.number().int().nonnegative(),
-    /** For `"workspace"`: members left out because they don't allow it (or past the limit). */
+    /** For `"workspace"`: members left out because they don't allow notifications from others. */
     skipped: z.number().int().nonnegative(),
+    /** For `"workspace"`: members left out past the recipient limit (APP_NOTIFY_MAX_RECIPIENTS). */
+    overLimit: z.number().int().nonnegative(),
   }),
 );
 export type AppNotifyResponse = z.infer<typeof AppNotifyResponse>;

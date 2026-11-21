@@ -13064,6 +13064,7 @@
         "$": "object",
         "$.delivered": "integer!",
         "$.key": "string!",
+        "$.overLimit": "integer!",
         "$.skipped": "integer!"
       }
     },

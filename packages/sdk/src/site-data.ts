@@ -279,6 +279,8 @@ export type OpenGeniSiteNotifyResult = {
   delivered: number;
   /** For `"workspace"`: members left out because they don't allow it. */
   skipped: number;
+  /** For `"workspace"`: members left out past the recipient limit. */
+  overLimit?: number;
 };
 
 /** Path prefix the host rewrites to its pinned Site; Site code never names a Site id. */

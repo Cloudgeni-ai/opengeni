@@ -41,11 +41,9 @@ Pages read data when they load; there are no live updates.
 
 Agents use `app_data_describe`, `app_data_query`, `app_data_write`, `app_data_import`, `app_data_export`, `app_data_reset` and `app_files_*`. A scheduled task runs them with the schedule's access, which makes an app a dashboard that refreshes itself. A conversation started from an app page acts like the page for its whole life: it reaches only that app's data, with viewer rights, even when its owner later continues it from the console.
 
-## Webhooks and notifications
+## Webhooks
 
 Another service can send data into an app: ask the agent to add a webhook to a collection, and give the service the address and secret it shows (once). Each delivery adds or updates records, and automations and workspace webhooks hear about them like any other change. Self-hosted deployments need an API address the service can reach.
-
-An app page can also notify people with `site.notify({ title, body, path })`: by default the person using it, or another member who allows notifications. The notification opens the app at `path`. Only workspace members can send them.
 
 ## Data syncs
 

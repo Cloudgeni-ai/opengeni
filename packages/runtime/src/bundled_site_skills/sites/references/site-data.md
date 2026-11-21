@@ -177,14 +177,9 @@ each delivery inserts) and `fields`. It returns the `url` and a `secret`
 shown once: give both to the user for the sending service (`Authorization:
 Bearer <secret>`, or the `X-Opengeni-Signature` HMAC). `rotateSecret: true`
 replaces it; `status: "paused"` stops deliveries. Pages see the records
-through `onChange` like any other write.
-
-**Notifications.** `await site.notify({ title, body, path, key })` sends the
-viewer an inbox notification that opens the app at `path`; `to` names another
-member (by email) or `"workspace"` (managers only, everyone who can open the
-app). Members only; it is rate limited, and the same `key` updates the
-notification instead of adding one. Use it for things a person must act on,
-not every change.
+through `onChange` like any other write. It writes on the saving person's
+authority: deliveries are refused once they can no longer manage the app,
+until a manager saves it again.
 
 Agents and scheduled tasks use the tools: `opengeni__app_data_describe`,
 `app_data_query`, `app_data_write` (batches of up to 100), `app_data_import`

@@ -2912,10 +2912,11 @@ settle checks; `app_sync_keys` records the keys a sync wrote for
 App webhooks let other services post JSON into one shared collection of an
 app (`app_webhooks`, public `POST /v1/webhooks/apps/:workspaceId/:webhookId`,
 bearer secret or HMAC signature), written through the Site Data write path as
-`webhook:<id>` so the normal change events fire. `site.notify` sends inbox
-notifications from an app page: the API inserts an `app_notifications` row and
-its trigger calls an owner definer that writes chat-less inbox items and
-native push (runtime EXECUTE granted a release after migration 1524). See
+`webhook:<id>` while the person who saved it still manages the app, so the
+normal change events fire. `site.notify` (inbox notifications from an app
+page) is routed but not enabled yet: its trigger calls an owner definer that
+writes chat-less inbox items and native push once a follow-up migration grants
+the runtime EXECUTE on it. See
 [`app-webhooks.md`](app-webhooks.md).
 
 Site SQL is the optional per-Site database next to it: one SQLite-backed

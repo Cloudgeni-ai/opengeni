@@ -162,6 +162,14 @@ async function fixture() {
   const owner = await person(managerPermissions);
   const alice = await person(viewerPermissions);
   const bob = await person(viewerPermissions);
+  const teammate = await person(managerPermissions);
+  const removeMember = async (who: Who) => {
+    const removed = await app.request(
+      `/v1/workspaces/${workspace.id}/members/${encodeURIComponent(who.subjectId)}`,
+      { method: "DELETE", headers: service },
+    );
+    expect(removed.status, await removed.clone().text()).toBeLessThan(300);
+  };
   await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'app-webhooks-test')`;
   const base = `/v1/workspaces/${workspace.id}/published-artifacts`;
@@ -208,6 +216,8 @@ async function fixture() {
     owner,
     alice,
     bob,
+    teammate,
+    removeMember,
     siteId: String(published.json.artifact.id),
     versionId: String(published.json.version.id),
     request,
@@ -300,6 +310,9 @@ test("a webhook delivery writes app data with a bearer or a signature and fires 
     ).status,
   ).toBe(401);
   expect((await f.deliver(url, body, {})).status).toBe(401);
+  // Failed authentication writes nothing, not even the last delivery status.
+  const afterBadAuth = await f.request(f.owner, "GET", `/${f.siteId}/webhooks`);
+  expect(afterBadAuth.json.webhooks[0]).toMatchObject({ lastStatus: "succeeded", lastError: null });
   expect(
     (
       await f.deliver(url, "<xml/>", {
@@ -366,6 +379,17 @@ test("keyless deliveries insert once per delivery id; per-viewer targets and arc
   expect((await f.deliver(url, JSON.stringify({ kind: "paid" }), auth)).status).toBe(200);
   expect(await records(f, "events")).toHaveLength(1);
 
+  // A signed delivery replayed in the signature window, even with a changed
+  // id header, inserts nothing new.
+  const signedBody = JSON.stringify({ kind: "refunded" });
+  const signature = signTimestampedHmac({ secret: String(created.json.secret), body: signedBody });
+  for (const id of ["a", "b"])
+    expect(
+      (await f.deliver(url, signedBody, { "x-opengeni-signature": signature, "webhook-id": id }))
+        .status,
+    ).toBe(200);
+  expect(await records(f, "events")).toHaveLength(2);
+
   const archived = await f.request(f.owner, "PATCH", `/${f.siteId}/status`, {
     status: "archived",
     expectedCurrentVersionId: f.versionId,
@@ -375,6 +399,46 @@ test("keyless deliveries insert once per delivery id; per-viewer targets and arc
   expect(archived.status, JSON.stringify(archived.json)).toBe(200);
   expect(
     (await f.deliver(url, JSON.stringify({ kind: "x" }), { authorization: auth.authorization }))
+      .status,
+  ).toBe(403);
+});
+
+test("a webhook stops when the person who saved it can no longer manage the app", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/events`, {
+    accessMode: "shared_read",
+  });
+  const created = await f.request(f.teammate, "POST", `/${f.siteId}/webhooks`, {
+    name: "Events",
+    collection: "events",
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  expect(created.json.webhook.createdBySubjectId).toBe(f.teammate.subjectId);
+  const id = String(created.json.webhook.id);
+  const url = String(created.json.webhook.url);
+  const auth = { authorization: `Bearer ${created.json.secret}` };
+  expect((await f.deliver(url, JSON.stringify({ n: 1 }), auth)).status).toBe(200);
+
+  await f.removeMember(f.teammate);
+  const refused = await f.deliver(url, JSON.stringify({ n: 2 }), auth);
+  expect(refused.status, JSON.stringify(refused.json)).toBe(403);
+  const listed = await f.request(f.owner, "GET", `/${f.siteId}/webhooks`);
+  expect(listed.json.webhooks[0]).toMatchObject({ lastStatus: "failed" });
+  expect(String(listed.json.webhooks[0].lastError)).toContain("can no longer manage");
+  expect(await records(f, "events")).toHaveLength(1);
+
+  // A manager saving it again takes it over; the secret is unchanged.
+  const saved = await f.request(f.owner, "PATCH", `/${f.siteId}/webhooks/${id}`, {
+    name: "Events",
+  });
+  expect(saved.status, JSON.stringify(saved.json)).toBe(200);
+  expect(saved.json.webhook.createdBySubjectId).toBe(f.owner.subjectId);
+  expect((await f.deliver(url, JSON.stringify({ n: 3 }), auth)).status).toBe(200);
+  expect(await records(f, "events")).toHaveLength(2);
+
+  // Viewers can't save one.
+  expect(
+    (await f.request(f.alice, "POST", `/${f.siteId}/webhooks`, { name: "x", collection: "events" }))
       .status,
   ).toBe(403);
 });
@@ -445,7 +509,7 @@ async function notifyCases() {
   expect((await notify(f.alice, { title: "All", to: "workspace" })).status).toBe(403);
   const all = await notify(f.owner, { title: "All", to: "workspace" });
   expect(all.status, JSON.stringify(all.json)).toBe(200);
-  expect(all.json).toMatchObject({ delivered: 1, skipped: 1 });
+  expect(all.json).toMatchObject({ delivered: 1, skipped: 2, overLimit: 0 });
 
   // Bounded sends per sender and app.
   let limited = 0;

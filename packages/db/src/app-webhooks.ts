@@ -167,7 +167,12 @@ export async function updateAppWebhook(
   db: Database,
   scope: Scope,
   webhookId: string,
-  input: AppWebhookSettings & { secretHash?: string; secretEncrypted?: string },
+  input: AppWebhookSettings & {
+    secretHash?: string;
+    secretEncrypted?: string;
+    /** The person saving it takes the webhook over. */
+    createdBySubjectId?: string;
+  },
 ): Promise<AppWebhookRow | null> {
   return await withRlsContext(db, scope, async (tx) => {
     const [row] = await rawRows<Record_>(
@@ -178,6 +183,7 @@ export async function updateAppWebhook(
           status = ${input.status},
           secret_hash = coalesce(${input.secretHash ?? null}, secret_hash),
           secret_encrypted = coalesce(${input.secretEncrypted ?? null}, secret_encrypted),
+          created_by_subject_id = coalesce(${input.createdBySubjectId ?? null}, created_by_subject_id),
           updated_at = now()
         where workspace_id = ${scope.workspaceId} and id = ${webhookId}
         returning *`,

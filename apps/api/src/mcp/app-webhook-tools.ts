@@ -3,7 +3,9 @@ import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SiteDataError } from "@opengeni/db";
 import * as z4 from "zod/v4";
+import type { AppWebhook } from "@opengeni/contracts";
 import {
+  APP_WEBHOOK_PATH_PREFIX,
   createAppWebhook,
   deleteAppWebhook,
   listAppWebhooks,
@@ -34,6 +36,17 @@ export function registerAppWebhookTools(
   json: JsonResult,
   siteAgent?: () => Promise<SiteAgentDataResolution>,
 ): void {
+  // Tool calls carry no request address: the API's own public MCP address
+  // gives its origin. Without any public address, say where senders post.
+  const apiAddress = deps.settings.opengeniMcpUrl ?? null;
+  const addressed = (webhook: AppWebhook) =>
+    webhook.url
+      ? webhook
+      : {
+          ...webhook,
+          path: `${APP_WEBHOOK_PATH_PREFIX}${grant.workspaceId}/${webhook.id}`,
+          note: "This deployment has no public address set (OPENGENI_WEBHOOK_BASE_URL or OPENGENI_PUBLIC_BASE_URL): senders post to this path on the API's public address.",
+        };
   const call =
     <A>(fn: (args: A) => Promise<unknown>) =>
     async (args: A) => {
@@ -109,12 +122,17 @@ export function registerAppWebhookTools(
         const body = Object.fromEntries(
           Object.entries(fields).filter(([, value]) => value !== undefined),
         );
-        return webhookId
-          ? await updateAppWebhook(deps, grant, siteId, webhookId, {
-              ...body,
-              ...(rotateSecret === true ? { rotateSecret: true } : {}),
-            })
-          : await createAppWebhook(deps, grant, siteId, body);
+        const saved = webhookId
+          ? await updateAppWebhook(
+              deps,
+              grant,
+              siteId,
+              webhookId,
+              { ...body, ...(rotateSecret === true ? { rotateSecret: true } : {}) },
+              apiAddress,
+            )
+          : await createAppWebhook(deps, grant, siteId, body, apiAddress);
+        return { ...saved, webhook: addressed(saved.webhook) };
       },
     ),
   );
@@ -127,7 +145,7 @@ export function registerAppWebhookTools(
       inputSchema: { siteId: AppIdInput },
     },
     call(async ({ siteId }: { siteId: string }) => ({
-      webhooks: await listAppWebhooks(deps, grant, siteId),
+      webhooks: (await listAppWebhooks(deps, grant, siteId, apiAddress)).map(addressed),
     })),
   );
 

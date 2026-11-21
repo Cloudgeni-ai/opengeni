@@ -134,6 +134,7 @@ export async function notifyFromApp(
   let audience: "people" | "workspace" = "people";
   let recipients: string[];
   let skipped = 0;
+  let overLimit = 0;
   const to = request.to?.trim();
   if (to === "workspace") {
     if (siteDataRole(grant, site, sender.subjectId) !== "manager")
@@ -147,12 +148,14 @@ export async function notifyFromApp(
       (member) => member.subjectId !== sender.subjectId && canOpen(site, member.subjectId),
     );
     for (const member of members) {
-      const allowed =
-        recipients.length < APP_NOTIFY_MAX_RECIPIENTS &&
-        (await getMemberNotificationsAllowed(deps.db, {
-          workspaceId: scope.workspaceId,
-          subjectId: member.subjectId,
-        }));
+      if (recipients.length >= APP_NOTIFY_MAX_RECIPIENTS) {
+        overLimit += 1;
+        continue;
+      }
+      const allowed = await getMemberNotificationsAllowed(deps.db, {
+        workspaceId: scope.workspaceId,
+        subjectId: member.subjectId,
+      });
       if (allowed) recipients.push(member.subjectId);
       else skipped += 1;
     }
@@ -184,7 +187,7 @@ export async function notifyFromApp(
   }
 
   const key = request.key ?? randomUUID();
-  if (recipients.length === 0) return { key, delivered: 0, skipped };
+  if (recipients.length === 0) return { key, delivered: 0, skipped, overLimit };
   const inserted = await insertAppNotification(
     deps.db,
     scope,
@@ -219,5 +222,5 @@ export async function notifyFromApp(
         : `An app can send at most ${APP_NOTIFY_SENDS_PER_WINDOW} notifications in ${APP_NOTIFY_WINDOW_SECONDS / 60} minutes per sender.`,
       { retryable: true },
     );
-  return { key, delivered: recipients.length, skipped };
+  return { key, delivered: recipients.length, skipped, overLimit };
 }

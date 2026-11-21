@@ -20,11 +20,13 @@ import {
   deleteAppWebhook as removeAppWebhook,
   encryptEnvironmentValue,
   getAppWebhook,
-  getSiteDataSite,
+  getWorkspaceGrant,
   listAppWebhooks as readAppWebhooks,
   recordAppWebhookDelivery,
   SiteDataError,
+  subjectHasLiveWorkspaceAuthorityInScope,
   updateAppWebhook as writeAppWebhook,
+  withWorkspaceSubjectRls,
   type AppWebhookRow,
   type AppWebhookSettings,
   type SiteDataCaller,
@@ -167,8 +169,18 @@ async function requireSharedCollection(access: SiteDataAccess, name: string): Pr
     );
 }
 
-function creatorOf(access: SiteDataAccess, grant: AccessGrant): string {
-  return (access.subjectId ?? `service:${grant.subjectId}`).slice(0, 1024);
+/**
+ * A webhook writes on the authority of the person who last saved it, so a
+ * person (or their agent) saves it, and deliveries stop when that person can
+ * no longer manage the app.
+ */
+function creatorOf(access: SiteDataAccess): string {
+  if (!access.subjectId)
+    throw forbidden(
+      "A webhook writes on a person's authority, so a person (or their agent) must save it.",
+      { reason: "person_required" },
+    );
+  return access.subjectId;
 }
 
 export async function listAppWebhooks(
@@ -211,7 +223,7 @@ export async function createAppWebhook(
       status: request.status ?? "active",
       secretHash: secret.secretHash,
       secretEncrypted: secret.secretEncrypted,
-      createdBySubjectId: creatorOf(access, grant),
+      createdBySubjectId: creatorOf(access),
     },
   );
   if (row === "limit")
@@ -247,6 +259,7 @@ export async function updateAppWebhook(
   const request = parse(AppWebhookUpdateRequest, body);
   const access = await managerAccess(deps, grant, siteId);
   const current = await requireWebhook(deps, grant, access, webhookId);
+  const creator = creatorOf(access);
   const next: AppWebhookSettings = {
     name: request.name ?? current.name,
     collection: request.collection ?? current.collection,
@@ -264,6 +277,7 @@ export async function updateAppWebhook(
     current.id,
     {
       ...next,
+      createdBySubjectId: creator,
       ...(secret ? { secretHash: secret.secretHash, secretEncrypted: secret.secretEncrypted } : {}),
     },
   );
@@ -423,16 +437,46 @@ export function appWebhookOperations(
   return { operations, skipped };
 }
 
-/** The access a delivery writes with: the webhook's own trusted principal, never a person. */
+const CREATOR_CANNOT_MANAGE =
+  "The person who saved this webhook can no longer manage the app. Someone who manages it should save the webhook again.";
+
+/** The creator's live grant, as when they use Opengeni themselves; null once they're gone. */
+async function creatorGrant(deps: SiteDataDeps, row: AppWebhookRow): Promise<AccessGrant | null> {
+  const scope = { accountId: row.accountId, workspaceId: row.workspaceId };
+  const subjectId = row.createdBySubjectId;
+  return await withWorkspaceSubjectRls(deps.db, row.workspaceId, subjectId, async (tx) => {
+    if (!(await subjectHasLiveWorkspaceAuthorityInScope(tx, { ...scope, subjectId }))) return null;
+    return await getWorkspaceGrant(tx, subjectId, row.workspaceId, {
+      principalKind: "human_session",
+    });
+  });
+}
+
+/**
+ * The access a delivery writes with: the webhook's own trusted principal,
+ * while the person who saved it is still a live member who manages the app
+ * (the rule shared syncs follow). An archived app refuses deliveries.
+ */
 async function deliveryAccess(deps: SiteDataDeps, row: AppWebhookRow): Promise<SiteDataAccess> {
   const scope = { accountId: row.accountId, workspaceId: row.workspaceId };
-  // The app as its webhook's creator sees it: an Only me app stays reachable
-  // only while it is still theirs.
-  const creator = row.createdBySubjectId.startsWith("service:") ? null : row.createdBySubjectId;
-  const site = await getSiteDataSite(deps.db, scope, { subjectId: creator }, row.siteId);
-  if (!site) throw new SiteDataError("not_found", "App not found");
+  const refused = () => forbidden(CREATOR_CANNOT_MANAGE, { reason: "creator_cannot_manage" });
+  const grant = await creatorGrant(deps, row);
+  if (!grant) throw refused();
+  let creator: SiteDataAccess;
+  try {
+    creator = await resolveSiteDataAccess(deps, grant, row.siteId);
+  } catch (error) {
+    if (
+      error instanceof SiteDataError &&
+      (error.code === "forbidden" || error.code === "not_found")
+    )
+      throw refused();
+    throw error;
+  }
+  const site = creator.site;
   if (site.status !== "active")
     throw forbidden("The app is archived, so its webhooks refuse deliveries.");
+  if (creator.caller.role !== "manager") throw refused();
   const principal = `webhook:${row.id}`;
   const caller: SiteDataCaller = {
     ...scope,
