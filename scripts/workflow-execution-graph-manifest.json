@@ -113,6 +113,10 @@
       "sha256": "087cb13feba7bd66312488b80bc0bd49970d3838541fd415b8f1f1d5bc0398c6"
     },
     {
+      "path": ".github/workflows/publish-cli.yml",
+      "sha256": "d335ec053fa96a4f6cb421b1d8b5ab144c5329281ae63bad8b2d026b25b0b2c1"
+    },
+    {
       "path": ".github/workflows/publish-desktop-image.yml",
       "sha256": "5e1712fb3dc3e9db15f0dfebfbc75baf8aba5154b3f3503f1ac7c52918f774fa"
     },
@@ -1718,6 +1722,48 @@
       "job": "publish",
       "step": "Publish canary versions",
       "sha256": "9152611098866280b2e6eea496cf456998ba2813cd45610f7f80d90e093686e8"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Confirm npm serves the CLI as latest",
+      "sha256": "da550d3dc38af09e408b9ecd073d54b181c8f93f02e4f7d5a944415ece3ba718"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Install dependencies",
+      "sha256": "cc965da9232cf030bda3caef238c96bb7d8724be56167989ea31fac29e12a9b6"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Publish the CLI",
+      "sha256": "9032e98ba04ebe5d2c9bb46e23234fc17308715597f64cabffb15b70de58e70e"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Require successful protected source CI",
+      "sha256": "9bfdec38a5dcf4415e7d5cde38d4906b9885ca88852cafb0a4fb9c019e592ea6"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Stage, pack and smoke-test the bin-only CLI",
+      "sha256": "a905cc510835eacf91e7bf5e5900e7e5509af19f04ca0defaa8448355653178c"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Test the CLI",
+      "sha256": "cd48bfba2b403ea619e7eef71be16a6c40c965c813c450db8d29a030bb27b739"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Verify exact main source",
+      "sha256": "764748ff8de5a4c69424f5f67f115b9df0a1512e9bd2a325490aeb5a149f31f5"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",
