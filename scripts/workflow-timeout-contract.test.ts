@@ -120,13 +120,6 @@ const EXPECTED_CAPS = [
     "run",
   ],
   [
-    "publish-cli.yml",
-    "publish",
-    "Restore complete checkout history without listing refs",
-    7,
-    "run",
-  ],
-  [
     "publish-packages.yml",
     "publish",
     "Restore complete checkout history without listing refs",
@@ -304,7 +297,7 @@ describe("workflow timeout contract", () => {
     expect(validJobCap("ci.yml", "automation-admission", { ...job, steps: [] })).toBe(false);
     expect(validJobCap("other.yml", "plan", job)).toBe(false);
   });
-  test("all jobs and the exact 53 run plus 5 action steps use static native caps", async () => {
+  test("all jobs and the exact 52 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -344,7 +337,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(53);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(52);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(5);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);

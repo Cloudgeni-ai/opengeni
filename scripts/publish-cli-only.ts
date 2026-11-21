@@ -121,11 +121,38 @@ function publishedVersion(version: string): boolean {
   return result.status === 0 && result.stdout.trim() === version;
 }
 
+/** The current `latest`, or null while the package doesn't exist. */
+function currentLatest(): string | null {
+  const result = spawnSync(
+    "npm",
+    ["view", CLI_PACKAGE_NAME, "dist-tags.latest", "--prefer-online"],
+    { encoding: "utf8" },
+  );
+  if (result.status === 0) return result.stdout.trim() || null;
+  if (`${result.stdout}${result.stderr}`.includes("E404")) return null;
+  throw new Error(`npm view ${CLI_PACKAGE_NAME} failed: ${result.stderr}`);
+}
+
+/** Whether stable `version` is newer than stable `latest`. */
+export function isNewer(version: string, latest: string | null): boolean {
+  if (latest === null) return true;
+  const a = version.split(".").map(Number);
+  const b = latest.split("-")[0]!.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!;
+  return false;
+}
+
 function publish(outDir: string): void {
   const { version } = stagedManifest(outDir);
   if (publishedVersion(version)) {
     console.log(`${CLI_PACKAGE_NAME}@${version} is already published; nothing to do`);
     return;
+  }
+  const latest = currentLatest();
+  if (!isNewer(version, latest)) {
+    throw new Error(
+      `${CLI_PACKAGE_NAME}@${version} is not newer than latest ${latest}; refusing to move latest back`,
+    );
   }
   const tarball = readFileSync(join(outDir, "tarball"), "utf8").trim();
   run("npm", ["publish", tarball, "--access", "public", "--provenance", "--tag", "latest"], outDir);
@@ -135,16 +162,13 @@ function publish(outDir: string): void {
 async function verify(outDir: string): Promise<void> {
   const { version } = stagedManifest(outDir);
   for (let attempt = 0; attempt < 60; attempt++) {
-    const result = spawnSync(
-      "npm",
-      ["view", CLI_PACKAGE_NAME, "dist-tags.latest", "--prefer-online"],
-      {
-        encoding: "utf8",
-      },
-    );
-    if (result.status === 0 && result.stdout.trim() === version) {
+    const latest = currentLatest();
+    if (latest === version) {
       console.log(`npm serves ${CLI_PACKAGE_NAME}@${version} as latest`);
       return;
+    }
+    if (latest !== null && isNewer(latest, version)) {
+      throw new Error(`latest is ${latest}, newer than ${CLI_PACKAGE_NAME}@${version}`);
     }
     await Bun.sleep(10_000);
   }

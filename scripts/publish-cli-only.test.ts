@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { binOnlyManifest } from "./publish-cli-only";
+import { binOnlyManifest, isNewer } from "./publish-cli-only";
 
 const root = join(import.meta.dir, "..");
 const cli = JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8"));
@@ -27,6 +27,14 @@ describe("CLI-only publication", () => {
   test("refuses any other package", () => {
     expect(() => binOnlyManifest({ ...cli, name: "@opengeni/sdk" })).toThrow();
     expect(() => binOnlyManifest({ ...cli, version: "6.35.1-canary.1" })).toThrow();
+  });
+
+  test("never moves latest backwards", () => {
+    expect(isNewer("6.35.0", null)).toBe(true);
+    expect(isNewer("6.35.0", "6.8.0")).toBe(true);
+    expect(isNewer("6.35.0", "6.35.0")).toBe(false);
+    expect(isNewer("6.9.0", "6.35.0")).toBe(false);
+    expect(isNewer("7.0.0", "6.35.1")).toBe(true);
   });
 
   test("the workflow publishes only through this script, from main, behind package-release", () => {
