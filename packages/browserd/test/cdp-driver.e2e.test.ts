@@ -2668,3 +2668,87 @@ chromiumE2e(
   },
   60_000,
 );
+
+chromiumE2e(
+  "a link whose website never answers ends the click within the commit deadline and keeps the tab usable",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-silent-link-");
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+      navigationCommitTimeoutMs: 2_000,
+    });
+    // Same site as the page, as a link to another part of one website is.
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      idleTimeout: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/silent") {
+          await Bun.sleep(120_000);
+          return new Response("too late");
+        }
+        if (path === "/slow") {
+          await Bun.sleep(500);
+          return new Response("<!doctype html><title>Slow</title><h1>Slow page</h1>", {
+            headers: { "content-type": "text/html" },
+          });
+        }
+        return new Response(
+          '<!doctype html><title>Start</title><h1>Start page</h1><a href="/silent">Silent link</a> <a href="/slow">Slow link</a>',
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const initial = await driver.start(`${origin}/`);
+      const started = Date.now();
+      // Chromium holds every read of the page while the link's request waits
+      // for an answer; the click must not wait for its own read deadline.
+      const click = driver.dispatch(
+        command(initial, {
+          type: "click",
+          locator: { kind: "role", role: "link", name: "Silent link", exact: true },
+        }),
+      );
+      await expect(click).rejects.toMatchObject({
+        code: "outcome_unknown",
+        failureReason: "destination_not_answered",
+      });
+      await expect(click).rejects.toThrow(
+        `timeout: the page it opened (${origin}) did not load: its website did not answer within 2 seconds, so the browser stopped loading it and the tab still shows the previous page`,
+      );
+      expect(Date.now() - started).toBeLessThan(15_000);
+      // The tab answers at once and still shows the page the click ran on.
+      const reading = Date.now();
+      const after = await driver.observe(initial.target.id);
+      expect(Date.now() - reading).toBeLessThan(5_000);
+      expect(after.target.url).toBe(`${origin}/`);
+      expect(names(after)).toContain("Start page");
+      // A website that answers within the deadline loads as before.
+      const slow = await driver.dispatch(
+        command(after, {
+          type: "click",
+          locator: { kind: "role", role: "link", name: "Slow link", exact: true },
+        }),
+      );
+      expect(slow.target.url).toBe(`${origin}/slow`);
+      expect(names(slow)).toContain("Slow page");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
