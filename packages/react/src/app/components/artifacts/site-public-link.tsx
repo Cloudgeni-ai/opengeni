@@ -99,9 +99,26 @@ export function useSitePublicationLink({
       status,
     }: Pick<SitePublication, "siteId" | "hostname" | "url" | "status">) => {
       request.current?.abort();
-      setAnswer({
-        key,
-        load: { state: "ready", link: { siteId: publishedSiteId, hostname, url, status } },
+      // A publication change keeps what the link read knew beyond it (the
+      // app's model).
+      setAnswer((previous) => {
+        const agentModel =
+          previous?.key === key && previous.load.state === "ready"
+            ? previous.load.link.agentModel
+            : undefined;
+        return {
+          key,
+          load: {
+            state: "ready",
+            link: {
+              siteId: publishedSiteId,
+              hostname,
+              url,
+              status,
+              ...(agentModel !== undefined ? { agentModel } : {}),
+            },
+          },
+        };
       });
     },
     [key],
