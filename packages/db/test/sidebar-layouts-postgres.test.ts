@@ -8,6 +8,7 @@ import {
   readSidebarLinkedApps,
   readSidebarApps,
   readSidebarLayouts,
+  recordSiteOpened,
   writeSidebarLayout,
   type DbClient,
 } from "../src";
@@ -150,6 +151,41 @@ test("only apps the viewer can open are returned; archived and other people's pr
     recentLimit: 0,
   });
   expect(bob.apps.has(theirs.toLowerCase())).toBe(true);
+});
+
+test("recent apps are the ones this person opened or edited last, under their own identity", async () => {
+  if (!shared || !client) return;
+  const scope = await workspace("Sidebar recent apps");
+  // Version 1 of each is published by user:owner (an edit of theirs).
+  const first = await app(scope, "First", null);
+  const second = await app(scope, "Second", null);
+  const bobs = await app(scope, "Bob's", "user:bob");
+  const open = (subjectId: string, siteId: string) =>
+    recordSiteOpened(client!.db, {
+      workspaceId: scope.workspaceId,
+      subjectId,
+      viewer: { subjectId },
+      siteId,
+    });
+  await open("user:ada", first);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await open("user:ada", second);
+  await open("user:bob", bobs);
+  const recent = async (subjectId: string) =>
+    (
+      await readSidebarApps(client!.db, scope, {
+        viewer: { subjectId },
+        appIds: [],
+        pinnedLimit: 0,
+        recentLimit: 5,
+      })
+    ).recent.map((entry) => entry.title);
+  // Newest first; someone else's opens and Only me apps never show.
+  expect(await recent("user:ada")).toEqual(["Second", "First"]);
+  expect(await recent("user:bob")).toEqual(["Bob's"]);
+  // Editing counts too: user:owner published both and opened neither.
+  expect((await recent("user:owner")).sort()).toEqual(["First", "Second"]);
+  expect(await recent("user:nobody")).toEqual([]);
 });
 
 test("a sidebar keeps links to archived apps; a person's own drop other people's private apps", async () => {

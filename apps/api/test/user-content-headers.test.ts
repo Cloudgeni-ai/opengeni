@@ -66,6 +66,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "server-drawn PNG avatar for Slack; image avatars are re-encoded, never passed through",
   },
+  "sidebar-layout.ts": {
+    count: 1,
+    userContent: true,
+    why: "an outside sidebar link's site icon (raster images only, sniffed)",
+  },
   "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
   "site-runtime.ts": {
     count: 2,

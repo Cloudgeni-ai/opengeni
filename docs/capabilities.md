@@ -824,13 +824,39 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 
 ## Web Flow
 
-The **Capabilities** view has exactly three top-level sections, in this order:
-**Integrations**, **Connectors**, and **Bundles**. The first two are
-connections - something that holds an identity in another product. The third is
-not: a Bundle is a named collection of tools and instructions.
+The **Capabilities** page is the one setup page, with three tabs:
+**Connections**, **Skills** and **Ready-made**
+(`apps/web/src/components/capabilities/setup-tabs.tsx`). Each tab is its own
+address: `/plugins?section=skills|ready-made` (no `section` is Connections).
+Ready-made also takes `?kind=agent|app|skill` to show one kind. Older `?section=plugins` and `?section=gallery` links
+open Ready-made, and `/capabilities` links keep working. Knowledge keeps its
+own page (`/state`). The simplified interface's Capabilities page shows only
+connections.
 
-The heading outline says the same thing: exactly three `<h2>`s, one per
-section. The Featured strip, the discovery controls, **Enabled**, **Custom
+Every tab lists what you have first, then suggestions, in the same row
+(`CapabilityCatalogRow`): logo or initial, name, one line and one action.
+Rows you have show a status line in place of the description, with whose it
+is where that is known ("Installed · Workspace", "Installed · Yours"), and no
+glyph unless they need attention (`ConnectionInstalled`).
+
+**Ready-made** lists ready-made agents (`packages/core/src/agent-templates`),
+apps (`packages/core/src/app-templates`, [app packages](app-packages.md#ready-made-apps))
+and reviewed library skills (`GET /v1/workspaces/:workspaceId/skills/library`,
+SDK `listLibrarySkills`, every installable library skill with `enabled` once
+added; the capability catalog lists only added ones), grouped by each item's own `team` (agent and app
+templates' `team`, a library skill's `metadata.team`), alphabetically, with
+items without one under **More**. One click adds an item through the same
+paths as elsewhere: `createAgentFromTemplate`, `installAppPackage` with the
+template's package (one idempotency key per ready-made app, so adding it
+again opens the same app), and `installLibrarySkill`. An added item opens
+instead.
+
+The **Connections** tab has two top-level sections: **Integrations** and
+**Connectors**, both connections - something that holds an identity in another
+product. Bundles (named collections of tools and instructions) show on
+**Ready-made**.
+
+The heading outline says the same thing: one `<h2>` per section. The Featured strip, the discovery controls, **Enabled**, **Custom
 APIs**, and **Browse** all render *inside* the Connectors `<section>` element,
 and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
 surfaces of their own.

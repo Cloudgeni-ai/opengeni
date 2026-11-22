@@ -2,6 +2,7 @@
   "key": "dependency-updater",
   "name": "Dependency updater",
   "description": "Batches routine dependency upgrades into one pull request a week and asks PR reviewer to review it.",
+  "team": "Engineering",
   "avatar": {
     "kind": "icon",
     "icon": "wrench",
