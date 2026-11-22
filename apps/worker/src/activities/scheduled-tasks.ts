@@ -150,8 +150,14 @@ import {
   agentMemoryAccess,
   agentMemoryGuidance,
   agentRunAdmissionDenial,
+  attachSessionRepositoryResource,
   fundedBillingOrigin,
 } from "@opengeni/core";
+import {
+  scheduledEventRepositoryResources,
+  sessionResourcesMatchEventRun,
+  githubEventRepositories,
+} from "../scheduled-event-repositories";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -1909,6 +1915,38 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 );
               }
             }
+            // A GitHub event's run checks out the repositories its events are
+            // about, offered by the workspace's GitHub App allowlist now. The
+            // chat was admitted with exactly the task's resources; these join
+            // it before its first turn starts, as an attach does.
+            if (task.runMode === "new_session_per_run" && run.triggerType === "event") {
+              const eventRepositories = await scheduledEventRepositoryResources(dispatchDb, {
+                workspaceId: task.workspaceId,
+                runId: run.id,
+              });
+              for (const resource of eventRepositories) {
+                try {
+                  const attached = await attachSessionRepositoryResource(
+                    { db: dispatchDb, bus },
+                    { workspaceId: task.workspaceId, sessionId: session.id, resource },
+                    { deferPublication: deferPublications },
+                  );
+                  session = attached.session;
+                  if (attached.events.length > 0) {
+                    if (deferPublications) {
+                      deferredEvents.push({ sessionId: session.id, events: attached.events });
+                    }
+                  }
+                } catch (error) {
+                  // Refused since the allowlist read: the run goes ahead without it.
+                  const status =
+                    error instanceof Error
+                      ? (error as Error & { status?: unknown }).status
+                      : undefined;
+                  if (status !== 409 && status !== 422) throw error;
+                }
+              }
+            }
             session = await seedScheduledGeneratedSessionRoute({
               db: dispatchDb,
               bus,
@@ -2974,6 +3012,17 @@ async function recoverBoundScheduledTaskDispatch(input: {
       );
     }
   }
+  // A GitHub event run's chat may also hold the repositories its events are about.
+  const recoversEventRun =
+    task.runMode === "new_session_per_run" && input.run.triggerType === "event";
+  const recoveredEventRepositoryIds = new Set<number>(
+    recoversEventRun
+      ? githubEventRepositories(
+          (await getEventOccurrenceForScheduledTaskRun(input.db, task.workspaceId, input.run.id))
+            ?.events ?? [],
+        ).map((repository) => repository.id)
+      : [],
+  );
   let session: Awaited<ReturnType<typeof createSession>>;
   if (input.run.sessionId) {
     session = await requireSession(input.db, task.workspaceId, input.run.sessionId);
@@ -3256,7 +3305,11 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.sandboxOs !== input.acceptedExecution.resolvedSandboxOs ||
       session.activeSandboxId !==
         (acceptedScheduledMachineTarget(input.acceptedExecution)?.targetSandboxId ?? null) ||
-      stableJson(session.resources) !== stableJson(task.agentConfig.resources) ||
+      !sessionResourcesMatchEventRun({
+        sessionResources: session.resources,
+        taskResources: task.agentConfig.resources,
+        eventRepositoryIds: recoveredEventRepositoryIds,
+      }) ||
       stableJson(session.tools) !== stableJson(input.acceptedExecution.resolvedTools) ||
       stableJson(session.firstPartyMcpTools) !==
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpTools) ||
@@ -3277,6 +3330,27 @@ async function recoverBoundScheduledTaskDispatch(input: {
   }
   let workflowId = workflowIdForSession(session.id);
   if (generatedSession) {
+    // The repositories its events are about, if the dead dispatch had not
+    // attached them yet (an attach the chat already has is a no-op).
+    if (recoversEventRun) {
+      for (const resource of await scheduledEventRepositoryResources(input.db, {
+        workspaceId: task.workspaceId,
+        runId: input.run.id,
+      })) {
+        try {
+          session = (
+            await attachSessionRepositoryResource(
+              { db: input.db, bus: input.bus },
+              { workspaceId: task.workspaceId, sessionId: session.id, resource },
+            )
+          ).session;
+        } catch (error) {
+          const status =
+            error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
+          if (status !== 409 && status !== 422) throw error;
+        }
+      }
+    }
     const goalSpec = task.agentConfig.goal ?? null;
     const started = await initializeSessionStartAtomically(input.db, {
       accountId: task.accountId,

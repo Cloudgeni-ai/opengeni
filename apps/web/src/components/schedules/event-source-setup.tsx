@@ -1,12 +1,15 @@
 /**
  * How a webhook source is connected, shared by the add flow and the source's
- * page: its URL to copy, the steps in Linear, Sentry or another app with the secret to
- * paste back, and how your own app signs its requests.
+ * page: its URL to copy and how your own app signs its requests. An app's
+ * pasted secret uses the shared `PastedWebhookSteps` (also in Add trigger).
  */
 import { t } from "@opengeni/react/app/lib/console-text";
-import { pastedWebhookSetup } from "@opengeni/react/automations";
+import {
+  PastedWebhookSteps as SharedPastedWebhookSteps,
+  pastedWebhookSetup,
+} from "@opengeni/react/automations";
 import { CopyField } from "@opengeni/react/ui/copy-field";
-import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { Field } from "@opengeni/react/ui/field";
 import { InlineHelp } from "@opengeni/react/ui/inline-help";
 import type { EventSource } from "@opengeni/sdk";
 
@@ -49,19 +52,14 @@ export function PastedWebhookSteps({
 }) {
   const setup = pastedWebhookSetup(t, source);
   if (!setup) return null;
-  const label = setup.secretName.charAt(0).toUpperCase() + setup.secretName.slice(1);
   return (
-    <FieldStack>
-      <WebhookUrlField url={source.webhookUrl} hint={setup.urlStep} />
-      <Field label={label} error={error} hint={setup.secretStep}>
-        <TextInput
-          type="password"
-          mono
-          value={secret}
-          onChange={(event) => onSecretChange(event.target.value)}
-          suppressAutofill
-        />
-      </Field>
-    </FieldStack>
+    <SharedPastedWebhookSteps
+      className="gap-6"
+      url={source.webhookUrl}
+      setup={setup}
+      value={secret}
+      onChange={onSecretChange}
+      error={error}
+    />
   );
 }

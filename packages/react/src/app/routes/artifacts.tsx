@@ -25,6 +25,7 @@ import { toast } from "../lib/toast";
 
 import { ArtifactLibrary } from "../components/artifacts/artifact-library";
 import { InstallAppButton } from "../components/artifacts/app-package";
+import { ReadyMadeApps } from "../components/artifacts/ready-made-apps";
 import { useCopyArtifactLink } from "../components/artifacts/copy-artifact-link";
 import {
   ARTIFACT_DETAIL_FRAME,
@@ -237,6 +238,13 @@ function ArtifactListRoute({
       New artifact
     </Button>
   ) : null;
+  // Ready-made apps under the Apps tab, and under the first empty page,
+  // for people who can add apps; not while searching or showing archived.
+  const readyMadeApps =
+    canPin &&
+    filters.q.trim() === "" &&
+    filters.status === "active" &&
+    (filters.kind === "site" || (filters.kind === "all" && empty));
   return (
     <ContentPage width="standard" className="pt-6" {...position}>
       <LineTabs
@@ -304,6 +312,7 @@ function ArtifactListRoute({
                 : undefined
             }
           />
+          {readyMadeApps ? <ReadyMadeApps workspaceId={workspaceId} /> : null}
         </LineTabsContent>
       </LineTabs>
     </ContentPage>

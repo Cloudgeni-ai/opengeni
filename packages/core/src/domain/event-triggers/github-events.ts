@@ -78,6 +78,8 @@ function repository(payload: Json): Json | null {
   const repo = object(payload.repository);
   if (!repo) return null;
   return compact({
+    // The id lets a run attach the repository through the App allowlist.
+    id: int(repo.id),
     full_name: text(repo.full_name),
     name: text(repo.name),
     owner: login(repo.owner),

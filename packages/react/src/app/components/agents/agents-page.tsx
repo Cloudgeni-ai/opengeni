@@ -13,6 +13,7 @@ import {
   type AgentTemplate,
 } from "@opengeni/contracts";
 
+import { CapabilityCatalogRow } from "../../../capability-catalog-row";
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
 import { DetailPage, DetailPageHeader } from "../../../ui/detail-page";
@@ -36,9 +37,11 @@ import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
 import { duplicateAgentNames, parseAgentFile, useAgents } from "../../lib/agents";
 import { useNavigate } from "../../lib/navigation";
+import { hasWorkspacePermission } from "../../lib/permissions";
 import { toast } from "../../lib/toast";
 import { SessionAvatar } from "../session/session-avatar";
 import { useDismissedNotice } from "./agent-notices";
+import "../../../../styles/connect.css";
 
 const FILTER_OPTIONS = [
   { value: "all", label: "All" },
@@ -73,7 +76,7 @@ export function AgentsPage({
   /** More sections under the workspace's own agents (the app's "Managed in Console" list). */
   after?: ReactNode | undefined;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<AgentListFilter>("all");
   const state = useAgents(workspaceId, { filter });
@@ -89,6 +92,11 @@ export function AgentsPage({
     });
   const create = () =>
     void navigate({ to: "/workspaces/$workspaceId/agents/new", params: { workspaceId } });
+  const readyMade = useReadyMadeAgents(workspaceId, agents, (agent) => {
+    state.replace((current) => [agent, ...current]);
+    open(agent);
+  });
+  const canAdd = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
 
   const importFile = async (file: File) => {
     const parsed = parseAgentFile(await file.text());
@@ -137,13 +145,7 @@ export function AgentsPage({
       />
       <AddAgentMenu
         workspaceId={workspaceId}
-        added={
-          new Set((agents ?? []).flatMap((agent) => (agent.templateKey ? [agent.templateKey] : [])))
-        }
-        onAdded={(agent) => {
-          state.replace((current) => [agent, ...current]);
-          open(agent);
-        }}
+        readyMade={readyMade}
         onBlank={create}
         onImport={() => fileInput.current?.click()}
       />
@@ -263,29 +265,30 @@ export function AgentsPage({
           )}
         </DetailSection>
       )}
+      {state.supported && canAdd && agents !== undefined && readyMade.offered.length > 0 ? (
+        <ReadyMadeAgents workspaceId={workspaceId} readyMade={readyMade} />
+      ) : null}
       {after}
     </DetailPage>
   );
 }
 
+type ReadyMadeAgentsState = {
+  /** Ready-made agents not added here yet, in gallery order. */
+  offered: AgentTemplate[];
+  adding: string | null;
+  add: (template: AgentTemplate) => Promise<void>;
+};
+
 /**
- * The one way to add an agent: ready-made agents first (each added as an
- * ordinary agent the person then sets up on its page; one already added here
- * is not offered), then a blank agent or one imported from a file.
+ * Ready-made agents nobody here has added yet (whatever the list's filter),
+ * and the one way to add one: the add-from-template route, then its page.
  */
-function AddAgentMenu({
-  workspaceId,
-  added,
-  onAdded,
-  onBlank,
-  onImport,
-}: {
-  workspaceId: string;
-  added: ReadonlySet<string>;
-  onAdded: (agent: Agent) => void;
-  onBlank: () => void;
-  onImport: () => void;
-}) {
+function useReadyMadeAgents(
+  workspaceId: string,
+  agents: readonly AgentSummary[] | undefined,
+  onAdded: (agent: Agent) => void,
+): ReadyMadeAgentsState {
   const { client } = useAppContext();
   const [templates, setTemplates] = useState<AgentTemplate[] | null>(null);
   // Ready-made agents anyone here already added, whatever the list's filter.
@@ -297,10 +300,10 @@ function AddAgentMenu({
       client.listAgentTemplates(workspaceId),
       client.listAgents(workspaceId).catch(() => []),
     ]).then(
-      ([list, agents]) => {
+      ([list, all]) => {
         if (!live) return;
         setAddedHere(
-          new Set(agents.flatMap((agent) => (agent.templateKey ? [agent.templateKey] : []))),
+          new Set(all.flatMap((agent) => (agent.templateKey ? [agent.templateKey] : []))),
         );
         setTemplates(list);
       },
@@ -310,13 +313,17 @@ function AddAgentMenu({
       live = false;
     };
   }, [client, workspaceId]);
+  const listed = new Set(
+    (agents ?? []).flatMap((agent) => (agent.templateKey ? [agent.templateKey] : [])),
+  );
   const offered = (templates ?? []).filter(
-    (template) => !added.has(template.key) && !addedHere.has(template.key),
+    (template) => !listed.has(template.key) && !addedHere.has(template.key),
   );
   const add = async (template: AgentTemplate) => {
     setAdding(template.key);
     try {
       const agent = await client.createAgentFromTemplate(workspaceId, template.key);
+      setAddedHere((current) => new Set(current).add(template.key));
       toast.success(`Added ${agent.name}`);
       onAdded(agent);
     } catch (error) {
@@ -325,6 +332,68 @@ function AddAgentMenu({
       setAdding(null);
     }
   };
+  return { offered, adding, add };
+}
+
+function readyMadeAvatar(workspaceId: string, template: AgentTemplate, size: "sm" | "md") {
+  return (
+    <SessionAvatar
+      avatar={template.avatar ?? agentInitialsAvatar(template.name, template.key)}
+      name={template.name}
+      workspaceId={workspaceId}
+      seed={template.key}
+      size={size}
+    />
+  );
+}
+
+/** Under the workspace's agents: ready-made ones not added yet, each one click to add. */
+function ReadyMadeAgents({
+  workspaceId,
+  readyMade,
+}: {
+  workspaceId: string;
+  readyMade: ReadyMadeAgentsState;
+}) {
+  return (
+    <DetailSection title="Ready-made">
+      <div className="og-connection-catalog" data-columns="2">
+        {readyMade.offered.map((template) => (
+          <CapabilityCatalogRow
+            key={template.key}
+            data-ready-made-agent={template.key}
+            name={template.name}
+            description={template.description}
+            title={template.description}
+            icon={readyMadeAvatar(workspaceId, template, "md")}
+            status={readyMade.adding === template.key ? "loading" : "available"}
+            statusLabel={`Add ${template.name}`}
+            disabled={readyMade.adding !== null}
+            onOpen={() => void readyMade.add(template)}
+          />
+        ))}
+      </div>
+    </DetailSection>
+  );
+}
+
+/**
+ * The one way to add an agent: ready-made agents first (each added as an
+ * ordinary agent the person then sets up on its page; one already added here
+ * is not offered), then a blank agent or one imported from a file.
+ */
+function AddAgentMenu({
+  workspaceId,
+  readyMade,
+  onBlank,
+  onImport,
+}: {
+  workspaceId: string;
+  readyMade: ReadyMadeAgentsState;
+  onBlank: () => void;
+  onImport: () => void;
+}) {
+  const { offered, adding, add } = readyMade;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -352,13 +421,7 @@ function AddAgentMenu({
                 onSelect={() => void add(template)}
                 className="items-start"
               >
-                <SessionAvatar
-                  avatar={template.avatar ?? agentInitialsAvatar(template.name, template.key)}
-                  name={template.name}
-                  workspaceId={workspaceId}
-                  seed={template.key}
-                  size="sm"
-                />
+                {readyMadeAvatar(workspaceId, template, "sm")}
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate">{template.name}</span>
                   {template.description ? (

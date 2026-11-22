@@ -50,6 +50,8 @@ const kit = await import("./agents-test-kit");
 const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText } =
   await import("../src/app/components/agents/agents-page");
 const { AgentPage } = await import("../src/app/components/agents/agent-page");
+const { ReadyMadeApps } = await import("../src/app/components/artifacts/ready-made-apps");
+const { installReadyMadeApp } = await import("../src/app/lib/ready-made-apps");
 const {
   NewAgentPage,
   EditAgentPage,
@@ -1285,6 +1287,7 @@ async function openAgentTrigger(
     chatsPageSize?: number;
     suggestion?: string;
     githubStatus?: string;
+    githubRepos?: { id: number; fullName: string }[];
     /** Chats in the workspace, given the agent's id. */
     sessions?: (agentId: string) => { id: string; title: string; agentId?: string | null }[];
   } = {},
@@ -1307,6 +1310,7 @@ async function openAgentTrigger(
       context={appContext(client, {
         clientConfig: { eventTriggers: { enabled: options.eventTriggers ?? true } },
         ...(options.githubStatus ? { githubStatus: { status: options.githubStatus } } : {}),
+        ...(options.githubRepos ? { githubRepos: options.githubRepos } : {}),
       })}
       onLocation={(location) => {
         path = location.href;
@@ -1613,6 +1617,33 @@ async function chooseFrom(dialog: HTMLElement, current: string, option: string) 
   return offered;
 }
 
+test("a GitHub trigger covers every repository, or only the chosen ones; runs open their event's", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    githubRepos: [
+      { id: 1, fullName: "acme/api" },
+      { id: 2, fullName: "acme/web" },
+      { id: 3, fullName: "acme/docs" },
+    ],
+  });
+  const field = dialog.querySelector<HTMLElement>("[data-agent-trigger-repositories]")!;
+  expect(field.textContent).toContain("All repositories");
+  await chooseFrom(dialog, "All repositories", "acme/api");
+  const offered = await chooseFrom(dialog, "Add a repository", "acme/web");
+  expect(offered).toEqual(["acme/web", "acme/docs"]);
+  await act(async () => button(dialog, "Remove acme/web").click());
+  await chooseFrom(dialog, "Add a repository", "acme/docs");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  // No repository is cloned for every run; the condition chooses them.
+  expect(request.agentConfig.resources).toEqual([]);
+  expect(request.events.triggers[0].conditions).toEqual([
+    { field: "data.repository.full_name", op: "in", value: ["acme/api", "acme/docs"] },
+  ]);
+});
+
 test("a trigger's runs start a new chat by default, or continue one of this agent's chats", async () => {
   const { agent, client, dialog } = await openAgentTrigger({
     eventSources: [GITHUB_SOURCE],
@@ -1857,4 +1888,119 @@ test("Add agent offers ready-made agents first and adds one", async () => {
   expect(client.calls).toContainEqual(["createAgentFromTemplate", WORKSPACE_ID, "triage"]);
   const created = [...client.agents.values()][0]!;
   expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/${created.id}`);
+});
+
+function canCreate(client: object) {
+  return appContext(client, {
+    accessContext: {
+      subjectId: "user-me",
+      subjectLabel: "Maja",
+      workspaceGrants: [
+        {
+          workspaceId: WORKSPACE_ID,
+          subjectId: "user-me",
+          principalKind: "human_session",
+          permissions: ["sessions:read", "sessions:create", "artifacts:read", "artifacts:publish"],
+        },
+      ],
+      accountGrants: [],
+    },
+  });
+}
+
+const REVIEWER_TEMPLATE = {
+  ...TRIAGE_TEMPLATE,
+  key: "pr-reviewer",
+  name: "PR reviewer",
+  description: "Reviews pull requests.",
+  suggestedTriggers: [],
+};
+
+test("Ready-made lists the agents not added yet under the workspace's, and adds one in one click", async () => {
+  const added = makeAgent({ name: "Triage", templateKey: "triage" });
+  const client = fakeAgentsClient([added], { templates: [TRIAGE_TEMPLATE, REVIEWER_TEMPLATE] });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)} onLocation={(location) => (path = location.href)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const rows = [...container.querySelectorAll<HTMLButtonElement>("[data-ready-made-agent]")];
+  expect(rows.map((row) => row.dataset.readyMadeAgent)).toEqual(["pr-reviewer"]);
+  await act(async () => rows[0]!.click());
+  await flush();
+  expect(client.calls).toContainEqual(["createAgentFromTemplate", WORKSPACE_ID, "pr-reviewer"]);
+  const created = [...client.agents.values()].find((agent) => agent.templateKey === "pr-reviewer")!;
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/${created.id}`);
+  expect(container.querySelector("[data-ready-made-agent]")).toBeNull();
+});
+
+test("Ready-made agents aren't offered to someone who can't add agents", async () => {
+  const client = fakeAgentsClient([], { templates: [TRIAGE_TEMPLATE] });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  expect(container.querySelector("[data-ready-made-agent]")).toBeNull();
+});
+
+const APP_TEMPLATE = {
+  key: "issue-tracker",
+  name: "Issue tracker",
+  description: "Track bugs and tasks.",
+  team: "Engineering",
+  package: { tools: [] },
+};
+
+function appInstaller(responses: { id: string; status: string; replayed: boolean }[]) {
+  const requests: { idempotencyKey: string }[] = [];
+  return {
+    requests,
+    async installAppPackage(_workspaceId: string, request: { idempotencyKey: string }) {
+      requests.push(request);
+      const next = responses.shift()!;
+      return {
+        app: { id: next.id, status: next.status },
+        replayed: next.replayed,
+        notInstalled: [],
+      } as never;
+    },
+  };
+}
+
+test("a ready-made app is added once; an archived copy is added fresh after it", async () => {
+  const installer = appInstaller([
+    { id: "app-1", status: "archived", replayed: true },
+    { id: "app-2", status: "active", replayed: false },
+  ]);
+  const installed = await installReadyMadeApp(installer, WORKSPACE_ID, APP_TEMPLATE as never);
+  expect(installed.app.id).toBe("app-2");
+  expect(installer.requests.map((request) => request.idempotencyKey)).toEqual([
+    "ready-made:issue-tracker",
+    "ready-made:issue-tracker:after:app-1",
+  ]);
+});
+
+test("Ready-made apps add in one click and open the app, which asks for its tools", async () => {
+  const installer = appInstaller([{ id: "app-9", status: "active", replayed: false }]);
+  const client = Object.assign(fakeAgentsClient([]), installer, {
+    async listAppTemplates() {
+      return [APP_TEMPLATE];
+    },
+  });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)} onLocation={(location) => (path = location.href)}>
+      <ReadyMadeApps workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLButtonElement>("[data-ready-made-app='issue-tracker']")!;
+  expect(row.textContent).toContain("Issue tracker");
+  await act(async () => row.click());
+  await flush();
+  expect(installer.requests.map((request) => request.idempotencyKey)).toEqual([
+    "ready-made:issue-tracker",
+  ]);
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/artifacts/app-9`);
 });

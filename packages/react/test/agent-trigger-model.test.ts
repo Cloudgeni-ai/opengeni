@@ -17,7 +17,12 @@ import {
   agentTriggerSourceStep,
   agentTriggerSaveError,
   agentTriggerWithSources,
+  agentTriggerRepositoryEvents,
 } from "../src/app/components/agents/agent-trigger-model";
+import {
+  eventConditionFromDraft,
+  newEventTriggerDraft,
+} from "../src/components/automations/event-trigger-model";
 import {
   eventSourceChoices,
   type EventSourceChoice,
@@ -331,4 +336,24 @@ test("a refused shared trigger says who can add one", () => {
   });
   expect(agentTriggerSaveError(forbidden, "workspace")).toBe(AGENT_TRIGGER_SHARED_DENIED);
   expect(agentTriggerSaveError(forbidden, "private")).not.toBe(AGENT_TRIGGER_SHARED_DENIED);
+});
+
+test("chosen repositories narrow only GitHub triggers; none chosen covers every repository", () => {
+  const github = { ...newEventTriggerDraft("github-source"), eventTypes: ["pull_request.opened"] };
+  const slack = { ...newEventTriggerDraft("slack-source"), eventTypes: ["message"] };
+  const events = { triggers: [github, slack], once: false, maxRunsPerHour: 20 };
+  const isGitHub = (trigger: { sourceId: string }) => trigger.sourceId === "github-source";
+
+  expect(agentTriggerRepositoryEvents(events, isGitHub, [])).toBe(events);
+
+  const one = agentTriggerRepositoryEvents(events, isGitHub, ["acme/api"]);
+  expect(one.triggers[0]!.conditions.map(eventConditionFromDraft)).toEqual([
+    { field: "data.repository.full_name", op: "equals", value: "acme/api" },
+  ]);
+  expect(one.triggers[1]!.conditions).toEqual([]);
+
+  const several = agentTriggerRepositoryEvents(one, isGitHub, ["acme/api", "acme/web", "acme/api"]);
+  expect(several.triggers[0]!.conditions.map(eventConditionFromDraft)).toEqual([
+    { field: "data.repository.full_name", op: "in", value: ["acme/api", "acme/web"] },
+  ]);
 });

@@ -180,6 +180,10 @@ export type {
   PastedWebhookSetup,
 } from "./components/automations/event-source-model";
 export {
+  PastedWebhookSteps,
+  type PastedWebhookStepsProps,
+} from "./components/automations/pasted-webhook-steps";
+export {
   EventSourceTile,
   eventSourceLogoResolver,
 } from "./components/automations/event-source-tile";
@@ -236,8 +240,10 @@ export const EVENT_DELIVERY_STATUS: Record<
 };
 
 /** @deprecated English only. Use `eventCommonFields(t)`. */
-export const EVENT_COMMON_FIELDS: ReadonlyArray<{ field: string; description: string }> =
-  commonFields(english);
+export const EVENT_COMMON_FIELDS: ReadonlyArray<{
+  field: string;
+  description: string;
+}> = commonFields(english);
 
 /** @deprecated English only. Use `eventRowColumns(t)`. */
 export const INBOUND_EVENT_COLUMNS: RowListColumn[] = rowColumns(english);

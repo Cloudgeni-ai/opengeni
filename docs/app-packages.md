@@ -248,8 +248,16 @@ recorded export objects.
 `listAppTemplates`) lists ready-made apps: content files in
 `packages/core/src/app-templates/*.app.json` (schema `AppTemplate`: `key`,
 `name`, `description`, `team` and a `package`). A file that isn't a valid
-package, or whose package has problems, is skipped. Capabilities **Ready-made**
-adds one by installing its `package` through the ordinary install above.
+package, or whose package has problems, is skipped. Four ship, in this
+order: Issue tracker, Incident log, Feedback board and Decision log. Each
+keeps its records in Site Data, so it works right after it is added (Feedback
+board's votes are a `per_viewer` collection). Capabilities **Ready-made** and
+the Artifacts page (its **Apps** tab, and its empty state) offer them; both add
+one by installing its `package` through the ordinary install above, keyed
+`ready-made:<key>` so adding it again opens the same app (an archived one is
+added fresh), then open the app, which asks to connect any tool it uses.
+Ready-made apps built on a connected tool (a Linear or GitHub board) come
+later, with app server code.
 
 ## Self-hosting
 

@@ -42,7 +42,10 @@ import {
 import type { EventSourceLogoSubject } from "../../../components/automations/event-source-tile";
 import {
   emptyEventTriggersDraft,
+  newEventConditionDraft,
   newEventTriggerDraft,
+  type EventTriggerDraft,
+  type EventTriggersDraft,
 } from "../../../components/automations/event-trigger-model";
 import type { OpenGeniText } from "../../../messages/runtime";
 import { apiErrorFacts, userErrorText } from "../../../ui/api-error";
@@ -57,6 +60,47 @@ export const AGENT_TRIGGER_SCHEDULE_MESSAGE = "Do your scheduled work.";
 /** A refused shared trigger, in words. */
 export const AGENT_TRIGGER_SHARED_DENIED =
   "You can't add automations shared with this workspace. Ask an admin for access.";
+
+/** The event field a GitHub trigger's repositories are chosen by. */
+export const AGENT_TRIGGER_REPOSITORY_FIELD = "data.repository.full_name";
+
+/** At most this many chosen repositories, the size of a condition's list. */
+export const AGENT_TRIGGER_REPOSITORIES_MAX = 50;
+
+/**
+ * GitHub triggers narrowed to the chosen repositories (`owner/name`). None
+ * chosen covers every repository the GitHub connection reaches. Each run
+ * checks out the repository its event is about, so the task keeps none.
+ */
+export function agentTriggerRepositoryEvents(
+  events: EventTriggersDraft,
+  isGitHub: (trigger: EventTriggerDraft) => boolean,
+  repositories: readonly string[],
+): EventTriggersDraft {
+  const chosen = [...new Set(repositories)].slice(0, AGENT_TRIGGER_REPOSITORIES_MAX);
+  if (chosen.length === 0) return events;
+  return {
+    ...events,
+    triggers: events.triggers.map((trigger) => {
+      if (!isGitHub(trigger)) return trigger;
+      const condition = {
+        ...newEventConditionDraft(AGENT_TRIGGER_REPOSITORY_FIELD),
+        ...(chosen.length === 1
+          ? { op: "equals" as const, value: chosen[0]! }
+          : { op: "in" as const, value: chosen.join(", ") }),
+      };
+      return {
+        ...trigger,
+        conditions: [
+          ...trigger.conditions.filter(
+            (existing) => existing.field.trim() !== AGENT_TRIGGER_REPOSITORY_FIELD,
+          ),
+          condition,
+        ],
+      };
+    }),
+  };
+}
 
 const NAME_MAX_LENGTH = 200;
 
