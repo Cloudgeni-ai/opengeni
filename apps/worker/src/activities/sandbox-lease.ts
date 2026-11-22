@@ -69,6 +69,8 @@ import {
   listLiveModalSandboxLeaseAttributions,
   listPendingModalProviderCreates,
   claimModalProviderCreateRecovery,
+  modalProviderCreateOutlivedProvider,
+  settleExpiredModalProviderCreate,
   recordRecoveredModalProviderCreate,
   markWarmBillingStopCutoff,
   listMeterableWarmLeases,
@@ -241,6 +243,7 @@ import {
   recordCreditGrantGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
+  recordModalProviderCreateRecovery,
   recordSandboxDrainCaptureFailure,
   recordSandboxDrainCaptureFallback,
   recordSandboxWorkspaceSnapshotSize,
@@ -4413,9 +4416,27 @@ export async function reconcileModalProviderCreates(
       const identity = { ...candidate, accountId };
       const attempt = await claimModalProviderCreateRecovery(db, identity);
       if (!attempt) return;
+      // Past the provider's maximum sandbox lifetime nothing from this create
+      // can be running, so there is nothing left to discover.
+      if (modalProviderCreateOutlivedProvider(attempt)) {
+        const settled = await settleExpiredModalProviderCreate(db, { ...identity, attempt });
+        if (settled) {
+          recordModalProviderCreateRecovery(observability, "settled_expired");
+          observability.warn(
+            "sandbox reaper: settled a Modal create whose outcome stayed unknown past the provider's maximum sandbox lifetime",
+            { ...candidate, operationId: attempt.operationId, startedAt: attempt.startedAt },
+          );
+        }
+        return;
+      }
       const instanceId = await discover(settings, attempt);
-      if (!instanceId) return; // Absence never settles an unknown dispatch.
+      if (!instanceId) {
+        // Absence never settles an unknown dispatch; only the lifetime above does.
+        recordModalProviderCreateRecovery(observability, "unresolved");
+        return;
+      }
       if (await recordRecoveredModalProviderCreate(db, { ...identity, attempt, instanceId })) {
+        recordModalProviderCreateRecovery(observability, "recovered");
         observability.info("sandbox reaper: recovered Modal create receipt", {
           ...candidate,
           operationId: attempt.operationId,
@@ -4423,6 +4444,7 @@ export async function reconcileModalProviderCreates(
         });
       }
     } catch (error) {
+      recordModalProviderCreateRecovery(observability, "unresolved");
       observability.warn("sandbox reaper: Modal create remains fenced pending discovery", {
         ...candidate,
         error: errorMessage(error),

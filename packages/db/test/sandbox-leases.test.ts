@@ -19,6 +19,7 @@ import {
   beginModalProviderCreate,
   listPendingModalProviderCreates,
   claimModalProviderCreateRecovery,
+  settleExpiredModalProviderCreate,
   recordRecoveredModalProviderCreate,
   claimTemporalScheduleCleanups,
   claimWorkspaceArchiveCapture,
@@ -1322,6 +1323,117 @@ describe("Modal create outcome fencing", () => {
     // Synthetic provider terminal proof is the caller's precondition here.
     await failWarmingToCold(db, { ...identity, expectedEpoch });
     expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("cold");
+  }, 60_000);
+
+  test("an unknown create settles only after the provider's maximum sandbox lifetime, then the lease restarts cold", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
+      ...identity,
+      kind: "turn",
+      holderId: "lost-reply-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const expectedEpoch = acquired.lease.leaseEpoch;
+    const create = (operationId: string, epoch: number) => ({
+      ...identity,
+      expectedEpoch: epoch,
+      operationId,
+      providerBindingKey: "fixture-provider",
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-fixture",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "c".repeat(64),
+    });
+    await beginModalProviderCreate(db, create(crypto.randomUUID(), expectedEpoch));
+    await admin`update sandbox_leases set expires_at=now()-interval '1 second'
+      where workspace_id=${ids.workspaceId} and sandbox_group_id=${ids.groupId}`;
+    await admin`update sandbox_lease_holders set last_heartbeat_at=now()-interval '1 hour' where workspace_id=${ids.workspaceId}`;
+    const young = (await claimModalProviderCreateRecovery(db, identity))!;
+    expect(young.instanceId).toBeNull();
+    // Within the provider's lifetime nothing may clear it, directly or not.
+    expect(await settleExpiredModalProviderCreate(db, { ...identity, attempt: young })).toBe(false);
+    const backdate = async (age: string) =>
+      await admin.begin(async (tx) => {
+        // Fixture only: move the recorded start back without the guard.
+        await tx`set local session_replication_role = replica`;
+        await tx`update sandbox_leases set provider_create_attempt = jsonb_set(provider_create_attempt,
+          '{startedAt}', to_jsonb(to_char((now() - ${age}::interval) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))),
+          provider_create_recovery_after = null
+          where workspace_id=${ids.workspaceId} and sandbox_group_id=${ids.groupId}`;
+      });
+    await backdate("24 hours");
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set provider_create_attempt = null
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await backdate("26 hours");
+    // Even an expired attempt cannot be cleared together with other changes.
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set provider_create_attempt = null,
+        liveness = 'cold', lease_epoch = lease_epoch + 1
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      Promise.resolve(admin`delete from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    const old = (await claimModalProviderCreateRecovery(db, identity))!;
+    expect(
+      await settleExpiredModalProviderCreate(db, {
+        ...identity,
+        attempt: { ...old, operationId: crypto.randomUUID() },
+      }),
+    ).toBe(false);
+    const before = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    const settled = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        settleExpiredModalProviderCreate(db, { ...identity, attempt: old }),
+      ),
+    );
+    expect(settled.filter(Boolean)).toHaveLength(1);
+    const cleared = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    expect(cleared.providerCreateAttempt).toBeNull();
+    expect(cleared.liveness).toBe("warming");
+    expect(cleared.leaseEpoch).toBe(expectedEpoch);
+    expect(cleared.currentCheckpointArtifactId).toBe(before.currentCheckpointArtifactId);
+    expect(await listPendingModalProviderCreates(db)).not.toContainEqual({
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    });
+    // The ordinary expired-warming reset now moves it to cold on a new epoch.
+    await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 0,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 0,
+    });
+    const reset = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    expect(reset.liveness).toBe("cold");
+    expect(reset.leaseEpoch).toBe(expectedEpoch + 1);
+    // And the next turn may create a fresh box.
+    const next = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
+      ...identity,
+      kind: "turn",
+      holderId: "next-turn",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(next.lease.liveness).toBe("warming");
+    await beginModalProviderCreate(db, create(crypto.randomUUID(), next.lease.leaseEpoch));
+    expect(
+      (await readLease(db, ids.workspaceId, ids.groupId))!.providerCreateAttempt?.leaseEpoch,
+    ).toBe(next.lease.leaseEpoch);
   }, 60_000);
 });
 

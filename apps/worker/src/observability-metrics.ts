@@ -2088,6 +2088,22 @@ export function recordRetainedProcessInventoryGauges(
 }
 
 export const EXPIRED_DRAINING_BACKENDS = [...SandboxBackend.options, "unknown"] as const;
+
+/** One reaper check of a Modal create whose reply was lost: still unresolved,
+ * recovered from an exact provider receipt, or settled once the provider's
+ * maximum sandbox lifetime passed. */
+export function recordModalProviderCreateRecovery(
+  observability: Observability,
+  outcome: "unresolved" | "recovered" | "settled_expired",
+): void {
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_modal_create_recovery_checks_total",
+      help: "Reaper checks of Modal creates whose outcome is unknown, by outcome.",
+      labels: { outcome },
+    }),
+  );
+}
 const EXPIRED_DRAINING_BACKEND_SET = new Set<string>(EXPIRED_DRAINING_BACKENDS);
 export const EXPIRED_DRAINING_AGE_BUCKETS = ["lt_5m", "5m_1h", "1h_1d", "gte_1d"] as const;
 

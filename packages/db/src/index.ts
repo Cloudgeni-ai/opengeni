@@ -57644,6 +57644,55 @@ export async function claimModalProviderCreateRecovery(
   });
 }
 
+/** Modal ends every sandbox within 24 hours, its maximum lifetime (and the
+ * most `modalTimeoutSeconds` allows). An unresolved create that started longer
+ * ago than that plus an hour for dispatch and scheduling can own no running
+ * box. The database guard enforces the same horizon (migration 1549). */
+export const MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS = 25 * 60 * 60 * 1000;
+
+export function modalProviderCreateOutlivedProvider(
+  attempt: Pick<SandboxProviderCreateAttempt, "startedAt">,
+  nowMs: number = Date.now(),
+): boolean {
+  const startedAtMs = Date.parse(attempt.startedAt);
+  return (
+    Number.isFinite(startedAtMs) && nowMs - startedAtMs > MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS
+  );
+}
+
+/** Clear an unresolved create that no receipt attributed within the provider's
+ * maximum sandbox lifetime. Only the exact attempt on its own expired warming
+ * epoch is cleared; the ordinary expired-warming reset then moves the lease to
+ * cold with a new epoch, keeping its archive, so the next turn creates afresh. */
+export async function settleExpiredModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    attempt: SandboxProviderCreateAttempt;
+  },
+): Promise<boolean> {
+  if (input.attempt.instanceId !== null || !modalProviderCreateOutlivedProvider(input.attempt))
+    return false;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ id: string }>(sql`
+      update sandbox_leases set provider_create_attempt = null,
+        provider_create_recovery_after = null,
+        updated_at = now()
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and lease_epoch = ${input.attempt.leaseEpoch}
+        and provider_create_attempt = ${JSON.stringify(input.attempt)}::jsonb
+        and expires_at < now()
+        and (provider_create_attempt->>'startedAt')::timestamptz
+          <= now() - (${String(MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS)} || ' milliseconds')::interval
+      returning id
+    `);
+    return rows.length > 0;
+  });
+}
+
 /** Attribute a positively identified late receipt, preserving expiry and every
  * checkpoint. Ordinary holder/epoch-fenced draining owns all physical cleanup. */
 export async function recordRecoveredModalProviderCreate(
@@ -61931,7 +61980,9 @@ export async function reapStaleLeaseHolders(
         let warmingReset = 0;
         for (const row of expiredWarming) {
           // A lost reply can still name a live provider. Keep the same epoch
-          // available for late attribution; time is not termination proof.
+          // available for late attribution; expiry alone is not termination
+          // proof. Only the provider's maximum sandbox lifetime is, and
+          // settleExpiredModalProviderCreate clears the attempt once it passes.
           if (row.provider_create_attempt?.instanceId === null) continue;
           const resetResumeState = warmingResetResumeState(row, new Date().toISOString());
           const reset = await tx.execute<{ id: string }>(sql`

@@ -623,6 +623,67 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("cold");
   }, 60_000);
 
+  test("a create whose outcome stayed unknown past the provider's maximum lifetime settles without discovery and restarts cold", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
+      ...identity,
+      kind: "turn",
+      holderId: "lost-reply",
+      backend: "modal",
+      leaseTtlMs: 45000,
+    });
+    const operationId = crypto.randomUUID();
+    await beginModalProviderCreate(db, {
+      ...identity,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      operationId,
+      providerBindingKey: MODAL_PROVIDER_BINDING.key,
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-fixture",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "d".repeat(64),
+    });
+    await admin.begin(async (tx) => {
+      // Fixture only: record the create as started 26 hours ago.
+      await tx`set local session_replication_role = replica`;
+      await tx`update sandbox_leases set expires_at=now()-interval '1 hour',updated_at=now()-interval '1 hour',
+        provider_create_attempt = jsonb_set(provider_create_attempt, '{startedAt}',
+          to_jsonb(to_char((now() - interval '26 hours') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))
+        where workspace_id=${ids.workspaceId} and sandbox_group_id=${ids.groupId}`;
+    });
+    await admin`update sandbox_lease_holders set last_heartbeat_at=now()-interval '1 hour' where workspace_id=${ids.workspaceId}`;
+    let discovered = 0;
+    const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: false });
+    const observability = createObservability(settings, { component: "worker-test" });
+    const activities = createSandboxLeaseActivities(reaperServices(settings, observability), {
+      findModalProviderCreateReceipt: async () => {
+        discovered++;
+        return null;
+      },
+      terminateBox: async () => true,
+    });
+    await activities.reapSandboxLeases();
+    await activities.reapSandboxLeases();
+    expect(discovered).toBe(0);
+    const lease = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    expect(lease.providerCreateAttempt).toBeNull();
+    expect(lease.liveness).toBe("cold");
+    expect(lease.leaseEpoch).toBe(acquired.lease.leaseEpoch + 1);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_modal_create_recovery_checks_total\{[^}]*outcome="settled_expired"[^}]*\} 1/,
+    );
+  }, 60_000);
+
   test("ownership-off keeps read-only inventory fresh without provider mutation", async () => {
     if (!available) return;
     const settings = testSettings({
