@@ -1049,9 +1049,42 @@ test.each([
     (async () => new Response(detail, { status: 403 })) as typeof fetch,
   );
   const error = await model.getResponse(request()).catch((e) => e);
-  expect(error).toMatchObject({ status: 403, code: "anthropic_permission_denied" });
+  expect(error).toMatchObject({
+    status: 403,
+    code: "anthropic_permission_denied",
+    subscriptionHttpPermissionRefusal: false,
+  });
   expect(error.message).toContain("permissions");
   expect(error.message).not.toContain("synthetic-private-value");
+});
+
+test("subscription stream and non-generic HTTP failures don't prove an account refusal", async () => {
+  const subscription = {
+    ...provider,
+    anthropic: {
+      auth: "oauth" as const,
+      identity: { accountUuid: "10000000-0000-4000-8000-000000000001", deviceId: "d".repeat(64) },
+      cacheTtl: "5m" as const,
+      maxOutputTokens: 32_000,
+      streamIdleTimeoutMs: 600_000,
+    },
+  };
+  const model = new AnthropicMessagesModel(subscription, "claude-test", (async () =>
+    stream([{ type: "error", error: { type: "permission_error" } }])) as typeof fetch);
+  await expect(collect(model)).rejects.toMatchObject({
+    status: 403,
+    code: "anthropic_permission_denied",
+    subscriptionHttpPermissionRefusal: false,
+  });
+  const denied = new AnthropicMessagesModel(
+    subscription,
+    "claude-test",
+    (async () => new Response("Non-Anthropic 403", { status: 403 })) as typeof fetch,
+  );
+  await expect(denied.getResponse(request())).rejects.toMatchObject({
+    code: "anthropic_permission_denied",
+    subscriptionHttpPermissionRefusal: false,
+  });
 });
 
 test("SSE permission errors preserve the model suspension", async () => {
