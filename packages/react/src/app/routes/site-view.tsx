@@ -528,6 +528,7 @@ export function SiteViewRoute({
                 workspaceId={workspaceId}
                 siteId={siteId}
                 versionId={artifact.currentVersion?.id ?? null}
+                onOpenChat={showChat}
               />
             ) : null}
             {siteControls}

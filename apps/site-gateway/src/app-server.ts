@@ -1,6 +1,7 @@
 import {
   APP_SERVER_CONTEXT_HEADER,
   APP_SERVER_GATEWAY_BODY_MAX_BYTES,
+  APP_SERVER_GATEWAY_RESULT_MAX_BYTES,
   APP_SERVER_HOST_BODY_MAX_BYTES,
   APP_SERVER_INTERNAL_PREFIX,
   APP_SERVER_RUN_TOKEN_HEADER,
@@ -27,6 +28,9 @@ import { precheckSiteDbSignature, verifySiteDbSignature } from "./site-db";
  * - `LOADER.get("<siteId>:<versionId>:<digest>")` loads the code once per
  *   isolate and caches it; each app version is its own isolate, so one
  *   app's code never shares memory with another's.
+ * - The limits inside the isolate (calls, logs, response size) are
+ *   advisory: the app's own code runs there. The API counts each call back
+ *   on the live run, and the gateway and the API read the result bounded.
  * - The isolate has no network (`globalOutbound: null`). Its only binding is
  *   `HOST`, a loopback to this Worker's `AppServerHost` entrypoint whose
  *   props (the app and version) the gateway fixes when it loads the code.
@@ -41,6 +45,12 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const COMPATIBILITY_DATE = "2026-07-01";
 /** The wrapper module the loaded isolate starts in; the app's own modules live under `app/`. */
 const WRAPPER_MODULE = "__opengeni_app_server.js";
+/**
+ * Set up before any of the app's modules load (the wrapper imports it
+ * first, and ES modules evaluate in import order), so a library that keeps
+ * a reference to `fetch` or `console` at load time gets the routed ones.
+ */
+const SETUP_MODULE = "__opengeni_app_server_setup.js";
 
 /** The slice of the Worker Loader binding the gateway uses. */
 export type WorkerLoaderLike = {
@@ -80,24 +90,18 @@ export function parseAppServerPath(pathname: string): string | null {
 }
 
 /**
- * The wrapper the isolate starts in. It hands the app's code a fresh `env`
- * per request (viewer, app, tools, data, fetch), routes `console` and the
- * global `fetch` to the request being served (AsyncLocalStorage, so
- * concurrent requests never see each other's logs or token), caps calls
- * back to Opengeni, and answers the gateway with one JSON envelope.
+ * The first module the isolate evaluates: it routes `console` and the global
+ * `fetch` to the request being served (AsyncLocalStorage, so concurrent
+ * requests never see each other's logs or token).
  */
-export function appServerWrapperSource(main: string): string {
-  if (!isAppServerModulePath(main)) throw new Error("Invalid main module");
-  return `import { AsyncLocalStorage } from "node:async_hooks";
-import * as appModule from ${JSON.stringify(`./app/${main}`)};
-const CONTEXT_HEADER = ${JSON.stringify(APP_SERVER_CONTEXT_HEADER)};
-const TOKEN_HEADER = ${JSON.stringify(APP_SERVER_RUN_TOKEN_HEADER)};
-const runs = new AsyncLocalStorage();
-const text = (value) => {
+export const APP_SERVER_SETUP_SOURCE = `import { AsyncLocalStorage } from "node:async_hooks";
+export const runs = new AsyncLocalStorage();
+export const text = (value) => {
   if (typeof value === "string") return value;
   if (value instanceof Error) return value.stack || String(value);
   try { return JSON.stringify(value); } catch { return String(value); }
 };
+export const parseJson = JSON.parse;
 for (const level of ["log", "info", "warn", "error", "debug"]) {
   console[level] = (...args) => { const run = runs.getStore(); if (run) run.log(level, args.map(text).join(" ")); };
 }
@@ -106,6 +110,20 @@ globalThis.fetch = (input, init) => {
   if (!run) return Promise.reject(new Error("fetch works only while the app's server code handles a request"));
   return run.fetch(input, init);
 };
+`;
+
+/**
+ * The wrapper the isolate starts in. It hands the app's code a fresh `env`
+ * per request (viewer, app, tools, data, fetch), keeps the request's logs,
+ * stops waiting at the run's deadline (answering with the logs so far), and
+ * answers the gateway with one JSON envelope.
+ */
+export function appServerWrapperSource(main: string): string {
+  if (!isAppServerModulePath(main)) throw new Error("Invalid main module");
+  return `import { runs, text, parseJson } from ${JSON.stringify(`./${SETUP_MODULE}`)};
+import * as appModule from ${JSON.stringify(`./app/${main}`)};
+const CONTEXT_HEADER = ${JSON.stringify(APP_SERVER_CONTEXT_HEADER)};
+const TOKEN_HEADER = ${JSON.stringify(APP_SERVER_RUN_TOKEN_HEADER)};
 const toBase64 = (bytes) => {
   let binary = "";
   for (let index = 0; index < bytes.length; index += 0x8000)
@@ -115,7 +133,6 @@ const toBase64 = (bytes) => {
 const fromBase64 = (value) => Uint8Array.from(atob(value || ""), (char) => char.charCodeAt(0));
 function newRun(context, host) {
   let logs = "";
-  let calls = 0;
   const run = {
     log(level, line) {
       if (logs.length >= context.logLimit) return;
@@ -124,9 +141,6 @@ function newRun(context, host) {
     },
     logs: () => logs,
     async call(op, input) {
-      calls += 1;
-      if (calls > context.hostCallLimit)
-        throw new Error("This run made more than " + context.hostCallLimit + " calls to tools, data and fetch");
       const response = await host.fetch("https://host.internal/", {
         method: "POST",
         headers: { "content-type": "application/json", [TOKEN_HEADER]: context.token },
@@ -137,7 +151,7 @@ function newRun(context, host) {
       if (response.ok && value && "result" in value) return value.result;
       const error = value && value.error ? value.error : {};
       const failure = new Error(error.message || "Opengeni refused the call (HTTP " + response.status + ")");
-      failure.code = error.code || "failed";
+      failure.code = (error.details && error.details.reason) || error.code || "failed";
       failure.status = response.status;
       throw failure;
     },
@@ -194,16 +208,28 @@ async function handle(request, context, run, limits) {
 }
 export default {
   async fetch(request, env) {
-    const { context, limits } = JSON.parse(request.headers.get(CONTEXT_HEADER));
+    const { context, limits } = parseJson(request.headers.get(CONTEXT_HEADER));
     const run = newRun(context, env.HOST);
-    const envelope = await runs.run(run, async () => {
-      try {
-        return await handle(request, context, run, limits);
-      } catch (error) {
-        run.log("error", text(error));
-        return { status: 500, headers: [], bodyBase64: "", logs: run.logs(), error: (error && error.message) || String(error) };
-      }
+    const failed = (message) => ({ status: 500, headers: [], bodyBase64: "", logs: run.logs(), error: message });
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(
+        () => resolve(failed("The server code did not answer within " + Math.round(limits.timeoutMs / 1000) + " seconds")),
+        Math.max(1000, limits.timeoutMs - 1500),
+      );
     });
+    const envelope = await Promise.race([
+      runs.run(run, async () => {
+        try {
+          return await handle(request, context, run, limits);
+        } catch (error) {
+          run.log("error", text(error));
+          return failed((error && error.message) || String(error));
+        }
+      }),
+      deadline,
+    ]);
+    clearTimeout(timer);
     return new Response(JSON.stringify(envelope), { headers: { "content-type": "application/json" } });
   },
 };
@@ -215,10 +241,14 @@ export function appServerWorkerCode(
   run: Pick<AppServerGatewayRunRequest, "main" | "modules" | "limits">,
   host: unknown,
 ): WorkerLoaderCode {
-  const modules: Record<string, string> = { [WRAPPER_MODULE]: appServerWrapperSource(run.main) };
+  const modules: Record<string, string> = {
+    [WRAPPER_MODULE]: appServerWrapperSource(run.main),
+    [SETUP_MODULE]: APP_SERVER_SETUP_SOURCE,
+  };
+  const utf8 = new TextDecoder("utf-8", { fatal: true });
   for (const [path, source] of Object.entries(run.modules)) {
     if (!isAppServerModulePath(path)) throw new Error(`Invalid module path ${path}`);
-    modules[`app/${path}`] = source;
+    modules[`app/${path}`] = utf8.decode(decodeBase64(source));
   }
   if (!modules[`app/${run.main}`]) throw new Error("The main module is missing");
   return {
@@ -269,7 +299,7 @@ function timeoutResult(timeoutMs: number): AppServerGatewayRunResult {
     headers: [],
     bodyBase64: "",
     logs: "",
-    error: `The server code did not answer within ${Math.round(timeoutMs / 1000)} seconds`,
+    error: `The server code did not answer within ${Math.round(timeoutMs / 1000)} seconds (its logs are lost when it overruns this way)`,
   };
 }
 
@@ -343,10 +373,21 @@ export async function handleAppServerInternal(
     });
     try {
       const response = await Promise.race([worker.getEntrypoint().fetch(inner), timedOut]);
-      result =
-        response === null
-          ? timeoutResult(runRequest.limits.timeoutMs)
-          : ((await response.json()) as AppServerGatewayRunResult);
+      if (response === null) result = timeoutResult(runRequest.limits.timeoutMs);
+      else {
+        // Bounded: the isolate's own limits are advisory, since the app's code runs there.
+        const answer = await readBodyCapped(response, APP_SERVER_GATEWAY_RESULT_MAX_BYTES);
+        result =
+          answer === "too_large"
+            ? {
+                status: 500,
+                headers: [],
+                bodyBase64: "",
+                logs: "",
+                error: "The server code answered more than it may",
+              }
+            : (JSON.parse(new TextDecoder().decode(answer)) as AppServerGatewayRunResult);
+      }
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

@@ -50,6 +50,21 @@ describe("app server bundle", () => {
       AppServerBundle.safeParse({ main: "a.js", files: [{ path: "a.js", content: "" }] }).success,
     ).toBe(true);
     expect(appServerManifestOf({ files: [] })).toBeNull();
+    // Secrets go only to listed hosts, so a bundle with secrets lists some.
+    expect(
+      AppServerBundle.safeParse({
+        main: "a.js",
+        files: [{ path: "a.js", content: "" }],
+        secrets: [SECRET],
+      }).success,
+    ).toBe(false);
+    expect(
+      AppServerBundle.safeParse({
+        main: "a.js",
+        files: [{ path: "a.js", content: "" }],
+        tools: ["linear/list_issues", "not a tool"],
+      }).success,
+    ).toBe(false);
   });
 
   test("freezes a manifest whose digest follows the code, hosts and secrets", () => {
@@ -68,6 +83,9 @@ describe("app server bundle", () => {
     expect(appServerManifestOf({ ...base, secrets: [] })!.manifest.digest).not.toBe(
       one.manifest.digest,
     );
+    const withTools = appServerManifestOf({ ...base, tools: ["linear/list_issues"] })!;
+    expect(withTools.manifest.tools).toEqual(["linear/list_issues"]);
+    expect(withTools.manifest.digest).not.toBe(one.manifest.digest);
     expect(() =>
       appServerManifestOf({
         main: "index.js",
@@ -78,9 +96,7 @@ describe("app server bundle", () => {
 
   test("page requests need a path starting with /", () => {
     expect(AppServerFetchRequest.safeParse({ path: "/issues?x=1" }).success).toBe(true);
-    expect(AppServerFetchRequest.safeParse({ path: "https://evil.example/" }).success).toBe(
-      false,
-    );
+    expect(AppServerFetchRequest.safeParse({ path: "https://evil.example/" }).success).toBe(false);
   });
 });
 
@@ -122,7 +138,7 @@ describe("app server run token", () => {
 describe("app server tool routing", () => {
   const inventory: SiteToolAccountInventory = {
     canonical: new Map([["linear", { name: "Linear" } as never]]),
-    plain: new Set(["opengeni", "weather"]),
+    plain: new Set(["opengeni", "weather", "hosted", "catalog"]),
     accounts: [
       { serverId: "linear__mine", canonicalServerId: "linear", shared: false } as never,
       { serverId: "linear__team", canonicalServerId: "linear", shared: true } as never,
@@ -130,12 +146,28 @@ describe("app server tool routing", () => {
     servers: new Map([
       ["weather", { url: "https://weather.example/mcp" }],
       ["opengeni", {}],
+      [
+        "hosted",
+        {
+          url: "https://hosted.example/mcp",
+          connectionRef: {
+            authoritySource: "host",
+            connectionId: "c1",
+            providerDomain: "hosted.example",
+            subjectScope: "subject",
+          },
+        },
+      ],
+      ["catalog", { url: "https://catalog.example/mcp" }],
     ]),
+    capabilityServers: new Set(["catalog"]),
   };
   const declared = [
     { serverId: "linear", toolName: "list_issues" },
     { serverId: "weather", toolName: "forecast" },
     { serverId: "opengeni", toolName: "session_create" },
+    { serverId: "hosted", toolName: "read" },
+    { serverId: "catalog", toolName: "read" },
   ];
   const route = (serverId: string, toolName: string, from = inventory) =>
     routeAppServerTool(from, declared, { serverId, toolName });
@@ -170,6 +202,15 @@ describe("app server tool routing", () => {
     expect(route("weather", "forecast")).toEqual({ serverId: "weather", toolName: "forecast" });
     expect(() => route("unknown", "list_issues")).toThrow(AppServerError);
   });
+
+  test("never a host-authority connection or a server enabled from the catalog", () => {
+    // Either may carry a person's own credentials (the deployer's included).
+    expect(() => route("hosted", "read")).toThrow(/act as a person/);
+    expect(() => route("catalog", "read")).toThrow(/act as a person/);
+    // Without the capability list the server is refused, not assumed workspace-wide.
+    const { capabilityServers: _omitted, ...unknownOrigin } = inventory;
+    expect(() => route("weather", "forecast", unknownOrigin)).toThrow(/act as a person/);
+  });
 });
 
 describe("app server outbound fetch", () => {
@@ -178,6 +219,7 @@ describe("app server outbound fetch", () => {
     files: [{ path: "index.js", sha256: "0".repeat(64), sizeBytes: 1 }],
     egress: ["api.example.com"],
     secrets: [SECRET],
+    tools: [],
     digest: "0".repeat(64),
   };
   const sent: Array<{ url: string; init: RequestInit }> = [];
@@ -214,9 +256,9 @@ describe("app server outbound fetch", () => {
     await expect(
       fetchWith({ url: "https://api.example.com/", headers: [["authorization", OTHER_SECRET]] }),
     ).rejects.toThrow(/only use the vault secrets its version lists/);
-    await expect(
-      fetchWith({ url: `https://api.example.com/?key=${SECRET}` }),
-    ).rejects.toThrow(/headers, not the URL/);
+    await expect(fetchWith({ url: `https://api.example.com/?key=${SECRET}` })).rejects.toThrow(
+      /headers, not the URL/,
+    );
     await expect(
       fetchWith({
         url: "https://api.example.com/",

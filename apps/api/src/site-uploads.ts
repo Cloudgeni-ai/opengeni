@@ -97,7 +97,7 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
     // {files: [{path, base64}]} (see @opengeni/contracts/app-assets).
     assets: { putUrl: assets.url, requiredHeaders: assets.requiredHeaders },
     // App server code (docs/app-server-code.md): JSON {main, files: [{path,
-    // content}], egress?, secrets?}; omit to keep the current version's code.
+    // content}], tools?, egress?, secrets?}; omit to keep the current version's code.
     server: { putUrl: server.url, requiredHeaders: server.requiredHeaders },
     expiresAt: new Date(
       Math.min(

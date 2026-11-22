@@ -45,6 +45,10 @@ export const APP_SERVER_HOST_CALLS_PER_RUN = 50;
 export const APP_SERVER_LOG_MAX_CHARS = 8_000;
 /** Runs one app may start per minute (all viewers together). */
 export const APP_SERVER_RUNS_PER_MINUTE = 300;
+/** Runs one viewer may start per app per minute (guests also count against the guest write limit). */
+export const APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE = 60;
+/** Most tools one version's server code may declare. */
+export const APP_SERVER_MAX_TOOLS = 50;
 /** Largest outbound response body one fetch may read. */
 export const APP_SERVER_FETCH_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 /** Outbound fetch timeout. */
@@ -68,8 +72,17 @@ export function appServerHostSuffix(siteId: string, versionId: string): string {
 }
 /** Header the gateway hands the run's context to its wrapper in (stripped before the app's code sees the request). */
 export const APP_SERVER_CONTEXT_HEADER = "x-opengeni-app-server-context";
-/** Largest API -> gateway run request (code, request body and context). */
+/** Largest API -> gateway run request (code and request body, both base64, and context). */
 export const APP_SERVER_GATEWAY_BODY_MAX_BYTES = 4 * 1024 * 1024;
+/**
+ * Largest gateway -> API run result: a base64 response body, logs and
+ * headers. The gateway and the API both read the result bounded by this;
+ * the limits inside the isolate are advisory, since the app's own code runs there.
+ */
+export const APP_SERVER_GATEWAY_RESULT_MAX_BYTES =
+  Math.ceil((APP_SERVER_RESPONSE_BODY_MAX_BYTES * 4) / 3) +
+  6 * APP_SERVER_LOG_MAX_CHARS +
+  256 * 1024;
 /** Largest call back to Opengeni from one isolate (an outbound request with its body). */
 export const APP_SERVER_HOST_BODY_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -115,6 +128,15 @@ const SecretReference = z
   .string()
   .regex(APP_SERVER_SECRET_REFERENCE, "must be a vault reference to a shared vault item");
 
+/** A tool server code calls: `"serverId/toolName"`. */
+export const APP_SERVER_TOOL_REFERENCE = /^[A-Za-z0-9_.:-]{1,200}\/[A-Za-z0-9_.:-]{1,200}$/u;
+const ToolReference = z
+  .string()
+  .regex(
+    APP_SERVER_TOOL_REFERENCE,
+    'must be "serverId/toolName", for example "linear/list_issues"',
+  );
+
 /**
  * The uploaded server code: JavaScript modules (ES modules, `export default`).
  * `{"files": []}` removes the app's server code; a publish without a server
@@ -131,6 +153,11 @@ export const AppServerBundle = z
     egress: z.array(EgressHost).max(APP_SERVER_MAX_EGRESS_HOSTS).optional(),
     /** Vault references outbound request headers may carry; the API fills them in. */
     secrets: z.array(SecretReference).max(APP_SERVER_MAX_SECRETS).optional(),
+    /**
+     * Tools the code calls (`"serverId/toolName"`), on the workspace's shared
+     * accounts. Separate from the page's `requestedTools`, which run as the viewer.
+     */
+    tools: z.array(ToolReference).max(APP_SERVER_MAX_TOOLS).optional(),
   })
   .strict()
   .superRefine((bundle, context) => {
@@ -145,6 +172,12 @@ export const AppServerBundle = z
         });
       paths.add(file.path);
     }
+    if ((bundle.secrets?.length ?? 0) > 0 && (bundle.egress?.length ?? 0) === 0)
+      context.addIssue({
+        code: "custom",
+        path: ["egress"],
+        message: "list the hosts the secrets are sent to",
+      });
     if (!bundle.main || !paths.has(bundle.main))
       context.addIssue({
         code: "custom",
@@ -167,7 +200,9 @@ export const AppServerManifest = z.object({
   files: z.array(AppServerFile).min(1).max(APP_SERVER_MAX_FILES),
   egress: z.array(EgressHost).max(APP_SERVER_MAX_EGRESS_HOSTS),
   secrets: z.array(SecretReference).max(APP_SERVER_MAX_SECRETS),
-  /** SHA-256 over main, files, egress and secrets: the code's identity in the gateway's cache. */
+  /** Tools the code calls, on shared accounts (`"serverId/toolName"`). */
+  tools: z.array(ToolReference).max(APP_SERVER_MAX_TOOLS).default([]),
+  /** SHA-256 over main, files, egress, secrets and tools: the code's identity in the gateway's cache. */
   digest: z.string().regex(/^[0-9a-f]{64}$/u),
 });
 export type AppServerManifest = z.infer<typeof AppServerManifest>;
@@ -238,7 +273,7 @@ export type AppServerGatewayRunRequest = {
   versionId: string;
   digest: string;
   main: string;
-  /** The code, path -> source (the gateway caches the loaded isolate by app, version and digest). */
+  /** The code, path -> UTF-8 source in base64 (the gateway caches the loaded isolate by app, version and digest). */
   modules: Record<string, string>;
   context: AppServerRunContext;
   request: { method: string; path: string; headers: Array<[string, string]>; bodyBase64: string };
@@ -297,11 +332,13 @@ export type AppServerRun = {
   trigger: AppServerTrigger;
   /** The request's method and path. */
   target: string;
-  status: "ok" | "error";
+  /** `running` until the run ends (or is abandoned). */
+  status: "running" | "ok" | "error";
   httpStatus: number | null;
   durationMs: number;
   error: string | null;
   logs: string;
+  /** Who the run served: `user:<subject>` or `guest:<visitor>`. */
   viewerSubjectId: string | null;
   createdAt: string;
 };
@@ -315,7 +352,12 @@ export type AppServerStatus = {
   errorsToday: number;
   runsToday: number;
   lastError: { message: string; at: string } | null;
+  /** The newest finished run failed (the line shows until a run succeeds). */
+  lastRunFailed: boolean;
+  /** Why the code can't run now (for example its publisher can no longer manage the app), else null. */
+  paused: string | null;
   /** What the code may reach, for managers. */
   egress: string[];
   secrets: string[];
+  tools: string[];
 };

@@ -132,6 +132,8 @@ export type SiteToolAccountInventory = {
   accounts: ReadonlyArray<Omit<SiteToolAccount, "identity"> & { serverId: string }>;
   /** Each server's own approval recommendation and approval identity input. */
   servers?: ReadonlyMap<string, SiteToolServerApproval>;
+  /** Servers enabled from the capability catalog (for the workspace or for this person). */
+  capabilityServers?: ReadonlySet<string>;
 };
 
 /** What decides whether a server's tools ask first (see `prepareWorkspaceToolGateway`). */
@@ -233,7 +235,13 @@ export async function readSiteToolAccountInventory(
       },
     ];
   });
-  return { canonical, plain, accounts, servers };
+  return {
+    canonical,
+    plain,
+    accounts,
+    servers,
+    capabilityServers: new Set(capabilityServers.map((server) => server.id)),
+  };
 }
 
 /** An account of the viewer's that would serve a connector but must sign in again. */

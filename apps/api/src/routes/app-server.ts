@@ -118,7 +118,7 @@ export function registerAppServerRoutes(app: Hono, deps: ApiRouteDeps): void {
       await runAppServerRoute(() =>
         appServerRuns(deps, grant, siteId(context), {
           limit: Number.isFinite(limit) ? limit : 20,
-          ...(status === "ok" || status === "error" ? { status } : {}),
+          ...(status === "running" || status === "ok" || status === "error" ? { status } : {}),
           ...(before ? { before } : {}),
         }),
       ),

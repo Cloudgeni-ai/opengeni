@@ -1338,7 +1338,18 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
       case "server.fetch":
-        // The app's server code, told who is asking; it runs as the app.
+        // The app's server code, told who is asking; it runs as the app. A
+        // guest's runs also count against the guest write limit, per visitor
+        // and per client address, like their data writes.
+        if (viewer.kind === "guest")
+          await enforceSiteRuntimeViewerRate(
+            deps,
+            host,
+            viewer,
+            request.fields,
+            "guest_writes",
+            limits.guestWritesPerMinute,
+          );
         return context.json(
           await runAppServerRoute(() =>
             runAppServerAs(

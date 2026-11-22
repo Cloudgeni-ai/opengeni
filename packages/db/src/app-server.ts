@@ -22,7 +22,7 @@ type RunRecord = {
   version_id: string;
   trigger: AppServerTrigger;
   target: string;
-  status: "ok" | "error";
+  status: "running" | "ok" | "error";
   http_status: number | null;
   duration_ms: number;
   error: string | null;
@@ -52,49 +52,137 @@ function toRun(record: RunRecord): AppServerRun {
 
 const clip = (text: string, max: number) => (text.length <= max ? text : text.slice(0, max));
 
-export type AppServerRunInsert = {
+export type AppServerRunStart = {
   id: string;
   siteId: string;
   versionId: string;
   trigger: AppServerTrigger;
   target: string;
+  /** Who the run serves: `user:<subject>` or `guest:<visitor>`. */
+  viewerSubjectId: string | null;
+};
+
+export type AppServerRunFinish = {
+  id: string;
+  siteId: string;
   status: "ok" | "error";
   httpStatus: number | null;
   durationMs: number;
   error: string | null;
   logs: string;
-  viewerSubjectId: string | null;
 };
 
-/** Record one run. Rows past the retention window for this app are pruned on the way. */
-export async function recordAppServerRun(
+/**
+ * Start one run under the app's rate limits: at most `perApp` runs of the
+ * app, and `perViewer` runs for one viewer, started in the last minute. The
+ * run is inserted as `running`, so concurrent bursts count too; an advisory
+ * lock per app makes the check and the insert one step.
+ */
+export async function startAppServerRun(
   db: Database,
   scope: Scope,
-  run: AppServerRunInsert,
+  run: AppServerRunStart,
+  limits: { perApp: number; perViewer: number },
+): Promise<"started" | "app_limit" | "viewer_limit"> {
+  return await withRlsContext(db, scope, async (tx) => {
+    await rawRows(
+      tx,
+      sql`select pg_advisory_xact_lock(hashtextextended(${`app_server_runs:${run.siteId}`}, 0))`,
+    );
+    const [counts] = await rawRows<{ app: number | string; viewer: number | string }>(
+      tx,
+      sql`select count(*) as app,
+          count(*) filter (where viewer_subject_id is not distinct from ${run.viewerSubjectId}) as viewer
+        from app_server_runs
+        where workspace_id = ${scope.workspaceId} and site_id = ${run.siteId}
+          and created_at > now() - interval '1 minute'`,
+    );
+    if (Number(counts?.app ?? 0) >= limits.perApp) return "app_limit";
+    if (Number(counts?.viewer ?? 0) >= limits.perViewer) return "viewer_limit";
+    await rawRows(
+      tx,
+      sql`insert into app_server_runs (id, account_id, workspace_id, site_id, version_id, trigger,
+          target, status, duration_ms, viewer_subject_id)
+        values (${run.id}, ${scope.accountId}, ${scope.workspaceId}, ${run.siteId}, ${run.versionId},
+          ${run.trigger}, ${clip(run.target, 600)}, 'running', 0, ${run.viewerSubjectId})`,
+    );
+    return "started";
+  });
+}
+
+/** End a run. Rows past the retention window in this workspace are pruned on the way. */
+export async function finishAppServerRun(
+  db: Database,
+  scope: Scope,
+  run: AppServerRunFinish,
   keptDays: number,
 ): Promise<void> {
   await withRlsContext(db, scope, async (tx) => {
     await rawRows(
       tx,
-      sql`insert into app_server_runs (id, account_id, workspace_id, site_id, version_id, trigger,
-          target, status, http_status, duration_ms, error, logs, viewer_subject_id)
-        values (${run.id}, ${scope.accountId}, ${scope.workspaceId}, ${run.siteId}, ${run.versionId},
-          ${run.trigger}, ${clip(run.target, 600)}, ${run.status},
-          ${run.httpStatus !== null && run.httpStatus >= 100 && run.httpStatus <= 599 ? run.httpStatus : null},
-          ${Math.max(0, Math.round(run.durationMs))},
-          ${run.error === null ? null : clip(run.error, 2000)}, ${clip(run.logs, 8000)},
-          ${run.viewerSubjectId})
-        on conflict (id) do nothing`,
+      sql`update app_server_runs set status = ${run.status},
+          http_status = ${run.httpStatus !== null && run.httpStatus >= 100 && run.httpStatus <= 599 ? run.httpStatus : null},
+          duration_ms = ${Math.max(0, Math.round(run.durationMs))},
+          error = ${run.error === null ? null : clip(run.error, 2000)},
+          logs = ${clip(run.logs, 8000)}
+        where id = ${run.id} and workspace_id = ${scope.workspaceId} and site_id = ${run.siteId}
+          and status = 'running'`,
     );
-    // Bounded: a few old rows per run at most, using the (workspace, site, created_at) index.
+    // Bounded: a few old rows per run at most, using the (workspace, created_at) index.
     await rawRows(
       tx,
       sql`delete from app_server_runs where id in (
           select id from app_server_runs
-          where workspace_id = ${scope.workspaceId} and site_id = ${run.siteId}
+          where workspace_id = ${scope.workspaceId}
             and created_at < now() - make_interval(days => ${keptDays})
           order by created_at limit 50)`,
     );
+  });
+}
+
+/**
+ * Count one call back to Opengeni against a live run: the run must be the
+ * app's and version's, still `running` and inside its deadline, and under
+ * `limit` calls. The API enforces this whatever the code does in its isolate.
+ */
+export async function claimAppServerHostCall(
+  db: Database,
+  scope: Scope,
+  call: { runId: string; siteId: string; versionId: string; limit: number; maxAgeMs: number },
+): Promise<"ok" | "ended" | "limit"> {
+  if (!UUID.test(call.runId)) return "ended";
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{ host_calls: number | string }>(
+      tx,
+      sql`update app_server_runs set host_calls = host_calls + 1
+        where id = ${call.runId} and workspace_id = ${scope.workspaceId}
+          and site_id = ${call.siteId} and version_id = ${call.versionId}
+          and status = 'running'
+          and created_at > now() - make_interval(secs => ${call.maxAgeMs / 1000})
+        returning host_calls`,
+    );
+    if (!row) return "ended";
+    return Number(row.host_calls) > call.limit ? "limit" : "ok";
+  });
+}
+
+/** One run of an app, or null. */
+export async function getAppServerRun(
+  db: Database,
+  scope: Scope,
+  siteId: string,
+  runId: string,
+): Promise<AppServerRun | null> {
+  if (!UUID.test(siteId) || !UUID.test(runId)) return null;
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<RunRecord>(
+      tx,
+      sql`select id, site_id, version_id, trigger, target, status, http_status, duration_ms,
+          error, logs, viewer_subject_id, created_at
+        from app_server_runs
+        where id = ${runId} and workspace_id = ${scope.workspaceId} and site_id = ${siteId}`,
+    );
+    return row ? toRun(row) : null;
   });
 }
 
@@ -103,7 +191,7 @@ export async function listAppServerRuns(
   db: Database,
   scope: Scope,
   siteId: string,
-  options: { limit: number; status?: "ok" | "error"; before?: string },
+  options: { limit: number; status?: "running" | "ok" | "error"; before?: string },
 ): Promise<AppServerRun[]> {
   if (!UUID.test(siteId)) return [];
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
@@ -125,14 +213,19 @@ export async function listAppServerRuns(
   );
 }
 
-/** Runs and errors of one app since `since`, and its newest error. */
+/** Runs and errors of one app since `since`, its newest error, and whether its newest finished run failed. */
 export async function summarizeAppServerRuns(
   db: Database,
   scope: Scope,
   siteId: string,
   since: Date,
-): Promise<{ runs: number; errors: number; lastError: { message: string; at: string } | null }> {
-  if (!UUID.test(siteId)) return { runs: 0, errors: 0, lastError: null };
+): Promise<{
+  runs: number;
+  errors: number;
+  lastError: { message: string; at: string } | null;
+  lastRunFailed: boolean;
+}> {
+  if (!UUID.test(siteId)) return { runs: 0, errors: 0, lastError: null, lastRunFailed: false };
   return await withRlsContext(db, scope, async (tx) => {
     const [counts] = await rawRows<{ runs: number | string; errors: number | string }>(
       tx,
@@ -148,30 +241,20 @@ export async function summarizeAppServerRuns(
           and status = 'error' and created_at >= ${since.toISOString()}
         order by created_at desc limit 1`,
     );
+    const [newest] = await rawRows<{ status: string }>(
+      tx,
+      sql`select status from app_server_runs
+        where workspace_id = ${scope.workspaceId} and site_id = ${siteId} and status <> 'running'
+        order by created_at desc, id desc limit 1`,
+    );
     return {
       runs: Number(counts?.runs ?? 0),
       errors: Number(counts?.errors ?? 0),
       lastError: last
         ? { message: last.error ?? "Failed", at: new Date(last.created_at).toISOString() }
         : null,
+      lastRunFailed: newest?.status === "error",
     };
-  });
-}
-
-/** How many runs one app started in the last minute (its rate window). */
-export async function countRecentAppServerRuns(
-  db: Database,
-  scope: Scope,
-  siteId: string,
-): Promise<number> {
-  return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ count: number | string }>(
-      tx,
-      sql`select count(*) as count from app_server_runs
-        where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
-          and created_at > now() - interval '1 minute'`,
-    );
-    return Number(row?.count ?? 0);
   });
 }
 
@@ -274,7 +357,7 @@ export async function getAppServerDeployment(
       siteId,
       status: row.status,
       versionId: row.versionId,
-      manifest: row.manifest ?? null,
+      manifest: row.manifest ? { ...row.manifest, tools: row.manifest.tools ?? [] } : null,
       requestedTools: row.requestedTools ?? [],
       deployerSubjectId: event?.actorSubjectId ?? row.createdBySubjectId,
     };

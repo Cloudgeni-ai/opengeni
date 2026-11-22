@@ -60,9 +60,10 @@ new_sqlite_classes = ["SiteLive"]
 # runs each app version's code in its own isolate with no network, reached
 # only through the API's signed internal route `/_og/internal/app-server`.
 # Without the binding the route answers 404 and the API reports server code
-# as not set up. Needs Workers Paid; enable it per environment:
-# [[worker_loaders]]
-# binding = "LOADER"
+# as not set up. Needs Workers Paid: on the Free plan, remove these two lines.
+# Opengeni's own deploys bind it where server code is turned on.
+[[worker_loaders]]
+binding = "LOADER"
 
 [env.staging]
 name = "opengeni-site-gateway-staging"

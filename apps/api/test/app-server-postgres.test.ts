@@ -151,6 +151,7 @@ async function fixture() {
       { serverId: "linear__owner", canonicalServerId: "linear", shared: false } as never,
       { serverId: "linear__team", canonicalServerId: "linear", shared: true } as never,
     ],
+    capabilityServers: new Set(),
   };
   const holder: { app?: ReturnType<typeof createApp> } = {};
   const host = async (
@@ -359,6 +360,7 @@ async function fixture() {
 
 const SERVER_CODE = {
   main: "index.js",
+  tools: ["linear/list_issues"],
   files: [
     {
       path: "index.js",
@@ -380,7 +382,9 @@ test("a member without their own connection gets shared-account data from the ap
   f.setIsolate(async (run, host) => {
     const called = await host("tools.call", { tool: "linear/list_issues", arguments: {} });
     expect(called.status, JSON.stringify(called.json)).toBe(200);
-    expect(run.modules["index.js"]).toBe(SERVER_CODE.files[0]!.content);
+    expect(Buffer.from(run.modules["index.js"]!, "base64").toString("utf8")).toBe(
+      SERVER_CODE.files[0]!.content,
+    );
     return {
       bodyBase64: Buffer.from(JSON.stringify(called.json.result)).toString("base64"),
       logs: "listed\n",
@@ -413,7 +417,14 @@ test("a member without their own connection gets shared-account data from the ap
   // A publish without a server upload keeps the code.
   expect((await f.publish()).status).toBe(200);
   const status = await f.request(f.owner, "GET", `/${f.siteId}/server/status`);
-  expect(status.json).toMatchObject({ hasCode: true, available: true, runsToday: 1 });
+  expect(status.json).toMatchObject({
+    hasCode: true,
+    available: true,
+    runsToday: 1,
+    lastRunFailed: false,
+    paused: null,
+    tools: ["linear/list_issues"],
+  });
 });
 
 test("without a shared account the tool call fails instead of using anyone's own connection", async () => {
@@ -423,6 +434,7 @@ test("without a shared account the tool call fails instead of using anyone's own
     canonical: new Map([["linear", { name: "Linear" } as never]]),
     plain: new Set(),
     accounts: [{ serverId: "linear__owner", canonicalServerId: "linear", shared: false } as never],
+    capabilityServers: new Set(),
   });
   let refused: HostReply | undefined;
   f.setIsolate(async (_run, host) => {
@@ -436,49 +448,89 @@ test("without a shared account the tool call fails instead of using anyone's own
   expect(refused?.json.error.details.reason).toBe("shared_account_required");
   expect(f.toolCalls).toEqual([]);
   const status = await f.request(f.owner, "GET", `/${f.siteId}/server/status`);
-  expect(status.json).toMatchObject({ errorsToday: 1, lastError: { message: "no data" } });
+  expect(status.json).toMatchObject({
+    errorsToday: 1,
+    lastRunFailed: true,
+    lastError: { message: "no data" },
+  });
 });
 
-test("a run's token works only for its own app and its current version", async () => {
+test("a run's token works only for its own app, its current version and while it runs", async () => {
   const f = await fixture();
   expect((await f.publish(SERVER_CODE)).status).toBe(200);
   const other = await fixture();
   expect((await other.publish(SERVER_CODE)).status).toBe(200);
+  const defined = await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+  });
+  expect(defined.status, JSON.stringify(defined.json)).toBe(201);
+  const call = { tool: "linear/list_issues", arguments: {} };
+  const seen: Record<string, HostReply> = {};
   let captured: AppServerGatewayRunRequest | undefined;
   f.setIsolate(async (run) => {
     captured = run;
+    // Another app's path with this run's token.
+    seen.crossApp = await f.host(run, "tools.call", call, {
+      siteId: other.siteId,
+      versionId: other.versionId(),
+    });
+    // A forged token.
+    seen.forged = await f.host(run, "tools.call", call, { token: "x.y" });
+    // Vault references never ride in tool arguments.
+    seen.secretArgs = await f.host(run, "tools.call", {
+      tool: "linear/list_issues",
+      arguments: { q: VAULT_REFERENCE },
+    });
+    // Per-viewer data isn't the app's.
+    seen.perViewer = await f.host(run, "data.query", { collection: "mine" });
     return {};
   });
   expect((await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/" })).status).toBe(
     200,
   );
-  const run = captured!;
-  const call = { tool: "linear/list_issues", arguments: {} };
-  // Another app's path with this run's token.
-  const crossApp = await f.host(run, "tools.call", call, {
-    siteId: other.siteId,
-    versionId: other.versionId(),
+  expect(seen.crossApp!.status).toBe(403);
+  expect(seen.forged!.status).toBe(403);
+  expect(seen.secretArgs!.json.error.details?.reason).toBe("secret_in_arguments");
+  expect(seen.perViewer!.json.error.details?.reason).toBe("collection_per_viewer");
+  // Once the run has ended, its token is spent.
+  const ended = await f.host(captured!, "tools.call", call);
+  expect(ended.status).toBe(403);
+  expect(ended.json.error.details?.reason).toBe("run_ended");
+  expect(f.toolCalls).toEqual([]);
+});
+
+test("the API counts a run's calls back and stops them at the limit or a new version", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  const statuses: number[] = [];
+  let reason: unknown;
+  f.setIsolate(async (_run, host) => {
+    // Whatever the code does in its isolate, the API counts each call.
+    for (let index = 0; index < 52; index += 1) {
+      const reply = await host("data.query", { collection: "none" });
+      statuses.push(reply.status);
+      if (reply.status === 429) {
+        reason = reply.json.error.details?.reason;
+        break;
+      }
+    }
+    return {};
   });
-  expect(crossApp.status).toBe(403);
-  // A forged token.
-  expect((await f.host(run, "tools.call", call, { token: "x.y" })).status).toBe(403);
-  // Vault references never ride in tool arguments.
-  const secretArgs = await f.host(run, "tools.call", {
-    tool: "linear/list_issues",
-    arguments: { q: VAULT_REFERENCE },
+  expect((await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/" })).status).toBe(
+    200,
+  );
+  expect(statuses.length).toBe(51);
+  expect(reason).toBe("host_call_limit");
+
+  let stale: HostReply | undefined;
+  f.setIsolate(async (_run, host) => {
+    // A new version is published while this run is live: its calls stop.
+    expect((await f.publish()).status).toBe(200);
+    stale = await host("tools.call", { tool: "linear/list_issues", arguments: {} });
+    return {};
   });
-  expect(secretArgs.json.error.details?.reason).toBe("secret_in_arguments");
-  // Per-viewer data isn't the app's.
-  const defined = await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
-    accessMode: "per_viewer",
-  });
-  expect(defined.status, JSON.stringify(defined.json)).toBe(201);
-  const perViewer = await f.host(run, "data.query", { collection: "mine" });
-  expect(perViewer.json.error.details?.reason).toBe("collection_per_viewer");
-  // After a new version, the old run's calls stop.
-  expect((await f.publish()).status).toBe(200);
-  const stale = await f.host(run, "tools.call", call);
-  expect(stale.status).toBe(409);
+  await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/" });
+  expect(stale?.status).toBe(409);
   expect(f.toolCalls).toEqual([]);
 });
 
@@ -486,15 +538,12 @@ test("the code pauses once the publisher can no longer manage the app", async ()
   const f = await fixture();
   expect((await f.publish(SERVER_CODE)).status).toBe(200);
   await f.removeMember(f.owner);
-  let refused: HostReply | undefined;
-  f.setIsolate(async (_run, host) => {
-    refused = await host("tools.call", { tool: "linear/list_issues", arguments: {} });
-    return {};
-  });
-  expect((await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/" })).status).toBe(
-    200,
-  );
-  expect(refused?.json.error.details?.reason).toBe("deployer_cannot_manage");
+  const before = f.runs.length;
+  // The run stops before the code starts, and the failure is recorded.
+  const refused = await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/" });
+  expect(refused.status).toBe(403);
+  expect(refused.json.error.details?.reason).toBe("deployer_cannot_manage");
+  expect(f.runs.length).toBe(before);
   expect(f.toolCalls).toEqual([]);
 });
 

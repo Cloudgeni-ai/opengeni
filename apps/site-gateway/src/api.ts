@@ -76,7 +76,7 @@ export function classifyApiRequest(method: string, pathname: string): ApiRoute |
 
 /** Read at most `limit` bytes, or "too_large". */
 export async function readBodyCapped(
-  request: Request,
+  request: Request | Response,
   limit: number,
 ): Promise<Uint8Array<ArrayBuffer> | "too_large"> {
   const declared = Number(request.headers.get("content-length") ?? "");

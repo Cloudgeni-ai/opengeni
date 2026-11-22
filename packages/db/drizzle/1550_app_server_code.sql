@@ -11,7 +11,10 @@
 --   does not fire for ADD COLUMN.
 -- * app_server_runs: one row per run of an app's server code (trigger,
 --   status, duration, error and bounded console output) for the app's
---   managers. The API prunes rows older than 14 days per app.
+--   managers. A run is inserted as 'running' when it starts (the rate limits
+--   count started runs) and its calls back to Opengeni are counted on it
+--   (host_calls), so the API enforces the per-run limits whatever the code
+--   does in its isolate. The API prunes rows older than 14 days.
 --
 -- Rolling: a nullable column and a new table the previous release never
 -- reads or writes.
@@ -34,17 +37,20 @@ CREATE TABLE app_server_runs (
   duration_ms integer NOT NULL,
   error text,
   logs text NOT NULL DEFAULT '',
+  host_calls integer NOT NULL DEFAULT 0,
+  -- Who the run served: user:<subject> or guest:<visitor>.
   viewer_subject_id text,
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT app_server_runs_pkey PRIMARY KEY (id),
   CONSTRAINT app_server_runs_trigger_check CHECK (trigger IN ('request', 'manual')),
   CONSTRAINT app_server_runs_target_check CHECK (char_length(target) BETWEEN 1 AND 600),
-  CONSTRAINT app_server_runs_status_check CHECK (status IN ('ok', 'error')),
+  CONSTRAINT app_server_runs_status_check CHECK (status IN ('running', 'ok', 'error')),
   CONSTRAINT app_server_runs_http_status_check
     CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599),
   CONSTRAINT app_server_runs_duration_check CHECK (duration_ms >= 0),
   CONSTRAINT app_server_runs_error_check CHECK (error IS NULL OR char_length(error) <= 2000),
   CONSTRAINT app_server_runs_logs_check CHECK (char_length(logs) <= 8000),
+  CONSTRAINT app_server_runs_host_calls_check CHECK (host_calls >= 0),
   CONSTRAINT app_server_runs_viewer_check
     CHECK (viewer_subject_id IS NULL OR char_length(viewer_subject_id) BETWEEN 1 AND 1024),
   CONSTRAINT app_server_runs_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
@@ -54,6 +60,8 @@ CREATE TABLE app_server_runs (
 );
 CREATE INDEX app_server_runs_site_created_idx
   ON app_server_runs (workspace_id, site_id, created_at DESC);
+CREATE INDEX app_server_runs_workspace_created_idx
+  ON app_server_runs (workspace_id, created_at);
 COMMENT ON TABLE app_server_runs IS 'Runs of an app''s server code: trigger, status, duration, error and bounded console output.';
 
 ALTER TABLE app_server_runs ENABLE ROW LEVEL SECURITY;

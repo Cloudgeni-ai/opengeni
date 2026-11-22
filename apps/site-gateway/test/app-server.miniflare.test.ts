@@ -49,7 +49,12 @@ function runRequest(
     versionId,
     digest: digest(JSON.stringify(modules)),
     main,
-    modules,
+    modules: Object.fromEntries(
+      Object.entries(modules).map(([path, source]) => [
+        path,
+        Buffer.from(source, "utf8").toString("base64"),
+      ]),
+    ),
     context: {
       runId: crypto.randomUUID(),
       appId: siteId,
@@ -161,7 +166,16 @@ beforeAll(async () => {
           result: { status: 201, headers: [["x-up", "1"]], bodyBase64: btoa("upstream") },
         });
       if (parsed?.op === "tools.call") return Response.json({ result: { echoed: parsed.input } });
-      return Response.json({ error: { code: "forbidden", message: "nope" } }, { status: 403 });
+      return Response.json(
+        {
+          error: {
+            code: "forbidden",
+            message: "nope",
+            details: { reason: "collection_per_viewer" },
+          },
+        },
+        { status: 403 },
+      );
     },
   });
   mf = await startWorker(true);
@@ -221,19 +235,50 @@ describe("app server code in the gateway", () => {
     });
   });
 
-  test("caps calls back to Opengeni per run and reports refusals as errors", async () => {
+  test("reports a refused call with its reason as the error's code", async () => {
     const result = await run(
       runRequest(SITE_A, VERSION_A, {
         "index.js":
-          "export default { async fetch(request, env) { const out = []; for (let i = 0; i < 4; i++) { try { await env.data.query('things'); out.push('ok'); } catch (e) { out.push(e.code + ':' + e.message); } } return Response.json(out); } };",
+          "export default { async fetch(request, env) { try { await env.data.query('things'); return new Response('ran'); } catch (e) { return new Response(e.code + ':' + e.message); } } };",
       }),
     );
-    expect(JSON.parse(text(result))).toEqual([
-      "forbidden:nope",
-      "forbidden:nope",
-      "forbidden:nope",
-      expect.stringContaining("more than 3 calls"),
-    ]);
+    expect(text(result)).toBe("collection_per_viewer:nope");
+  });
+
+  test("a library that keeps fetch from load time still goes through Opengeni", async () => {
+    const result = await run(
+      runRequest(SITE_A, "88888888-8888-4888-8888-888888888888", {
+        "index.js":
+          "import { get } from './lib/client.js'; export default { async fetch() { const up = await get(); return new Response(String(up.status)); } };",
+        "lib/client.js":
+          "const keptFetch = globalThis.fetch; export const get = () => keptFetch('https://api.example.com/x');",
+      }),
+    );
+    expect(result.error).toBeNull();
+    expect(text(result)).toBe("201");
+  });
+
+  test("a run that overruns its time keeps the logs it wrote", async () => {
+    const result = await run(
+      runRequest(SITE_B, "99999999-9999-4999-8999-999999999999", {
+        "index.js":
+          "export default { async fetch() { console.log('started'); await new Promise(() => {}); } };",
+      }),
+    );
+    expect(result.status).toBe(500);
+    expect(result.error).toContain("did not answer");
+    expect(result.logs).toContain("started");
+  });
+
+  test("reads the isolate's answer bounded, whatever the code does inside it", async () => {
+    const result = await run(
+      runRequest(SITE_B, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+        "index.js":
+          "JSON.stringify = () => 'x'.repeat(7 * 1024 * 1024); export default { async fetch() { return new Response('small'); } };",
+      }),
+    );
+    expect(result.status).toBe(500);
+    expect(result.error).toContain("more than it may");
   });
 
   test("keeps each app's isolate to itself", async () => {

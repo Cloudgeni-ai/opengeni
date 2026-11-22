@@ -4,6 +4,7 @@ import {
   APP_SERVER_CPU_MS,
   APP_SERVER_FETCH_RESPONSE_MAX_BYTES,
   APP_SERVER_FETCH_TIMEOUT_MS,
+  APP_SERVER_GATEWAY_RESULT_MAX_BYTES,
   APP_SERVER_HOST_CALLS_PER_RUN,
   APP_SERVER_LOG_MAX_CHARS,
   APP_SERVER_MAX_TOTAL_BYTES,
@@ -12,6 +13,7 @@ import {
   APP_SERVER_RUN_TIMEOUT_MS,
   APP_SERVER_RUNS_KEPT_DAYS,
   APP_SERVER_RUNS_PER_MINUTE,
+  APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE,
   AppServerBundle,
   AppServerFetchRequest,
   AppServerHostRequest,
@@ -42,16 +44,19 @@ import {
   type ObjectStorageDependency,
 } from "@opengeni/core";
 import {
-  countRecentAppServerRuns,
+  claimAppServerHostCall,
+  finishAppServerRun,
   getAppServerDeployment,
+  getAppServerRun,
   getVerifiedSubjectEmail,
   getWorkspaceGrant,
   listAppServerRuns,
-  recordAppServerRun,
   SiteDataError,
+  startAppServerRun,
   subjectHasLiveWorkspaceAuthorityInScope,
   summarizeAppServerRuns,
   withWorkspaceSubjectRls,
+  workspaceMemberDisplayName,
   WorkspaceArtifactOperationError,
   type AppServerDeployment,
   type SiteDataCaller,
@@ -86,16 +91,21 @@ import { mintAppServerRunToken, verifyAppServerRunToken } from "./token";
  * isolate that the Sites gateway loads, as the app and never as the viewer:
  *
  * - Authority: the person who made the version current (its latest publish
- *   or rollback), while they are still a live member who manages the app,
+ *   or rollback), while they are still a live member who manages the app
+ *   (and, when the code lists vault secrets, may use workspace secrets),
  *   like a webhook's or a shared sync's owner. The code reaches only
- *   - tools the version declares, on the workspace's shared connections (or
- *     connectors without accounts), never anyone's personal connection;
+ *   - tools its server manifest declares, on the workspace's shared
+ *     connections (or servers configured for the whole workspace without
+ *     accounts), never anyone's personal connection;
  *   - the app's shared data, as its own principal `server:<appId>`;
  *   - HTTPS to the hosts the version lists, with vault secrets the version
  *     lists filled into headers under the workspace's own vault reach.
  * - The viewer's identity is passed to the code as data; their credentials
  *   never are, and no call made by the code uses them.
  * - Every run is recorded for the app's managers (status, logs, errors).
+ *   A run is a row from its start: the rate limits count started runs, and
+ *   each call back to Opengeni is counted on the live run, so the per-run
+ *   limits hold whatever the code does inside its isolate.
  */
 
 export type AppServerDeps = ApiRouteDeps & {
@@ -161,7 +171,7 @@ function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-/** The digest that names one version's code: main, files, egress and secrets. */
+/** The digest that names one version's code: main, files, egress, secrets and tools. */
 export function appServerDigest(manifest: Omit<AppServerManifest, "digest">): string {
   return sha256(
     JSON.stringify([
@@ -169,6 +179,7 @@ export function appServerDigest(manifest: Omit<AppServerManifest, "digest">): st
       manifest.files.map((file) => [file.path, file.sha256]),
       manifest.egress,
       manifest.secrets,
+      manifest.tools ?? [],
     ]),
   );
 }
@@ -195,6 +206,7 @@ export function appServerManifestOf(bundle: AppServerBundle): {
     files: files.map(({ path, sha256: hash, sizeBytes }) => ({ path, sha256: hash, sizeBytes })),
     egress: [...new Set(bundle.egress ?? [])].sort(),
     secrets: [...new Set(bundle.secrets ?? [])].sort(),
+    tools: [...new Set(bundle.tools ?? [])].sort(),
   };
   return {
     manifest: AppServerManifest.parse({ ...base, digest: appServerDigest(base) }),
@@ -251,7 +263,7 @@ export async function freezeAppServerBundle(
     );
   } catch (error) {
     refuseUpload(
-      `Server code must be JSON {main, files: [{path, content}], egress?, secrets?} (${issuesOf(error)}). Correct it and prepare a new upload.`,
+      `Server code must be JSON {main, files: [{path, content}], tools?, egress?, secrets?} (${issuesOf(error)}). Correct it and prepare a new upload.`,
     );
   }
   let parsed: ReturnType<typeof appServerManifestOf>;
@@ -297,12 +309,22 @@ export async function freezeAppServerBundle(
   return winner.frozen;
 }
 
+/** Whether a grant may bind workspace vault secrets (an integration admin with secrets:use). */
+function mayUseWorkspaceSecrets(grant: AccessGrant): boolean {
+  return (
+    hasIntegrationAdminPermission(grant) &&
+    hasPermission(grant.permissions, "secrets:use", grant.permissionMode)
+  );
+}
+
 /**
  * Checks before a version with new server code is published: the deployment
  * runs server code, and a version that lists vault secrets is published by
- * someone who may bind workspace secrets to a connection (an integration
- * admin with secrets:use), and each secret resolves now under the
- * workspace's own reach, so a missing item fails here, not on first use.
+ * someone who may bind workspace secrets (an integration admin with
+ * secrets:use). Each secret must resolve now, under the workspace's own
+ * reach, for at least one listed host, so a missing item fails here, not on
+ * first use. And no listed secret's value may appear in the code itself
+ * (a reference written unescaped in a sandbox is filled in before upload).
  */
 export async function requireAppServerPublishable(
   deps: ApiRouteDeps,
@@ -314,27 +336,51 @@ export async function requireAppServerPublishable(
       "App server code is not enabled on this deployment, so this version can't carry server code. Publish without the server upload.",
     );
   if (manifest.secrets.length === 0) return;
-  if (
-    !hasIntegrationAdminPermission(grant) ||
-    !hasPermission(grant.permissions, "secrets:use", grant.permissionMode)
-  )
+  if (!mayUseWorkspaceSecrets(grant))
     throw new WorkspaceArtifactOperationError(
       "Only a workspace admin can publish server code that uses vault secrets. Ask an admin to publish it, or remove the secrets.",
     );
-  try {
-    await resolveSecretHeaders(
-      deps,
-      { accountId: grant.accountId, workspaceId: grant.workspaceId },
-      Object.fromEntries(manifest.secrets.map((secret, index) => [`x-check-${index}`, secret])),
-      `https://${manifest.egress[0] ?? "example.com"}/`,
-    );
-  } catch (error) {
+  if (manifest.egress.length === 0)
     throw new WorkspaceArtifactOperationError(
-      error instanceof ServiceConnectionCredentialError
-        ? `A secret the server code lists can't be used: ${error.message}`
-        : "The server code's secrets couldn't be checked. Try again shortly.",
+      "Server code that lists vault secrets must list the hosts it sends them to in egress.",
     );
+  const values: string[] = [];
+  for (const secret of manifest.secrets) {
+    let lastError: unknown = null;
+    let resolved: string | null = null;
+    for (const host of manifest.egress) {
+      try {
+        resolved =
+          (
+            await resolveSecretHeaders(
+              deps,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId },
+              { "x-check": secret },
+              `https://${host}/`,
+            )
+          )["x-check"] ?? null;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (resolved === null)
+      throw new WorkspaceArtifactOperationError(
+        lastError instanceof ServiceConnectionCredentialError
+          ? `A secret the server code lists can't be used with its hosts: ${lastError.message}`
+          : "The server code's secrets couldn't be checked. Try again shortly.",
+      );
+    values.push(resolved);
   }
+  if (!deps.objectStorage) return;
+  const modules = await loadModules(deps.objectStorage, grant.workspaceId, manifest);
+  const leaked = values.some(
+    (value) => value.length >= 8 && Object.values(modules).some((source) => source.includes(value)),
+  );
+  if (leaked)
+    throw new WorkspaceArtifactOperationError(
+      "The server code contains the value of a vault secret it lists. Put the reference in a header instead (write it escaped in the sandbox, with a backslash before the two braces, so it isn't filled in), upload again and publish.",
+    );
 }
 
 async function resolveSecretHeaders(
@@ -342,6 +388,7 @@ async function resolveSecretHeaders(
   scope: { accountId: string; workspaceId: string },
   headers: Record<string, string>,
   destinationUrl: string,
+  app?: { siteId: string; versionId: string },
 ): Promise<Record<string, string>> {
   return await resolveServiceConnectionHeaders(
     {
@@ -360,7 +407,8 @@ async function resolveSecretHeaders(
       },
       headers,
       serverId: "app_server",
-      toolName: "app_server_fetch",
+      // The vault's use record names the app and version that sent the secret.
+      toolName: app ? `app_server:${app.siteId}:${app.versionId}` : "app_server_publish_check",
       destinationUrl,
     },
   );
@@ -370,6 +418,8 @@ async function resolveSecretHeaders(
 
 const DEPLOYER_CANNOT_MANAGE =
   "The person who published this version can no longer manage the app, so its server code is paused. Someone who manages the app should publish it again.";
+const DEPLOYER_CANNOT_USE_SECRETS =
+  "This version's server code uses vault secrets, and the person who made it current isn't a workspace admin who may use them, so it is paused. A workspace admin should publish it again.";
 
 /** The deployer's own live workspace grant; null once they are gone. */
 async function deployerGrant(
@@ -414,6 +464,10 @@ async function serverAuthority(
   if (deployer.caller.role !== "manager")
     throw forbidden(DEPLOYER_CANNOT_MANAGE, { reason: "deployer_cannot_manage" });
   if (deployer.site.status !== "active") throw forbidden("This app is archived");
+  // A rollback or a duplicate makes its actor the deployer without a new
+  // publish check, so secrets are checked against the deployer on every run.
+  if ((deployment.manifest?.secrets.length ?? 0) > 0 && !mayUseWorkspaceSecrets(grant))
+    throw forbidden(DEPLOYER_CANNOT_USE_SECRETS, { reason: "deployer_cannot_use_secrets" });
   const scope = { accountId: deployment.accountId, workspaceId: deployment.workspaceId };
   const principal = `server:${deployment.siteId}`;
   const caller: SiteDataCaller = {
@@ -441,6 +495,41 @@ async function serverAuthority(
       },
     },
   };
+}
+
+/**
+ * A live run's authority and tool inventory, kept for the run's lifetime on
+ * the API process that started it, so its calls back to Opengeni don't each
+ * rebuild them. Another process rebuilds them once. Each call still checks
+ * the version is current and counts against the live run.
+ */
+type RunState = {
+  key: string;
+  authority: Promise<ServerAuthority>;
+  inventory?: Promise<SiteToolAccountInventory> | undefined;
+  expiresAt: number;
+};
+const runStates = new Map<string, RunState>();
+const RUN_STATE_MAX = 2_000;
+
+function runStateFor(
+  deps: AppServerDeps,
+  deployment: AppServerDeployment,
+  runId: string,
+): RunState {
+  const now = Date.now();
+  const key = `${deployment.workspaceId}:${deployment.siteId}:${deployment.versionId}:${deployment.deployerSubjectId}`;
+  const existing = runStates.get(runId);
+  if (existing && existing.key === key && existing.expiresAt > now) return existing;
+  if (runStates.size >= RUN_STATE_MAX)
+    for (const [id, state] of runStates) if (state.expiresAt <= now) runStates.delete(id);
+  if (runStates.size >= RUN_STATE_MAX) runStates.clear();
+  const authority = serverAuthority(deps, deployment);
+  // A refusal is not kept: the next call checks again.
+  authority.catch(() => runStates.delete(runId));
+  const state: RunState = { key, authority, expiresAt: now + APP_SERVER_RUN_TIMEOUT_MS + 10_000 };
+  runStates.set(runId, state);
+  return state;
 }
 
 // --- running ---------------------------------------------------------------------
@@ -536,7 +625,8 @@ export async function runAppServer(
     });
   if (deployment.status !== "active") throw forbidden("This app is archived");
   const gateway = siteSqlGatewayConfig(deps.settings);
-  if (!appServerAvailable(deps.settings) || !gateway || !deps.objectStorage)
+  const storage = deps.objectStorage;
+  if (!appServerAvailable(deps.settings) || !gateway || !storage)
     throw new AppServerError("unavailable", "App server code is not available on this deployment", {
       reason: "app_server_unavailable",
     });
@@ -546,78 +636,10 @@ export async function runAppServer(
       : Buffer.from(request.body ?? "", "utf8");
   if (body.byteLength > APP_SERVER_REQUEST_BODY_MAX_BYTES)
     throw invalid(`The request body is over ${APP_SERVER_REQUEST_BODY_MAX_BYTES / 1024 / 1024} MB`);
-  if (
-    (await countRecentAppServerRuns(deps.db, input.scope, input.siteId)) >=
-    APP_SERVER_RUNS_PER_MINUTE
-  )
-    throw new AppServerError(
-      "rate_limited",
-      `This app's server code runs at most ${APP_SERVER_RUNS_PER_MINUTE} times a minute. Try again shortly.`,
-    );
   const manifest = deployment.manifest;
-  const modules = await loadModules(deps.objectStorage, input.scope.workspaceId, manifest);
   const runId = crypto.randomUUID();
   const startedAt = Date.now();
-  const token = mintAppServerRunToken(deps.settings.sitesGatewaySecret!, {
-    runId,
-    accountId: input.scope.accountId,
-    workspaceId: input.scope.workspaceId,
-    siteId: input.siteId,
-    versionId: deployment.versionId,
-    expiresAt: startedAt + APP_SERVER_RUN_TIMEOUT_MS + 5_000,
-  });
-  const headers = Object.entries(request.headers ?? {})
-    .filter(([name]) => !/^(?:host|cookie|authorization|content-length|x-opengeni-)/iu.test(name))
-    .map(([name, value]) => [name.toLowerCase(), value] as [string, string]);
-  const payload: AppServerGatewayRunRequest = {
-    requestId: crypto.randomUUID(),
-    versionId: deployment.versionId,
-    digest: manifest.digest,
-    main: manifest.main,
-    modules,
-    context: {
-      runId,
-      appId: input.siteId,
-      versionId: deployment.versionId,
-      trigger: input.trigger,
-      viewer: input.viewer,
-      token,
-      hostCallLimit: APP_SERVER_HOST_CALLS_PER_RUN,
-      logLimit: APP_SERVER_LOG_MAX_CHARS,
-    },
-    request: { method: request.method, path: request.path, headers, bodyBase64: base64(body) },
-    limits: {
-      timeoutMs: APP_SERVER_RUN_TIMEOUT_MS,
-      cpuMs: APP_SERVER_CPU_MS,
-      responseBytes: APP_SERVER_RESPONSE_BODY_MAX_BYTES,
-    },
-  };
-  const json = JSON.stringify(payload);
-  const signed = signGatewayInternalRequest(gateway, appServerInternalPath(input.siteId), json);
-  let result: AppServerGatewayRunResult | null = null;
-  let failure = "The app's server code could not be reached";
-  try {
-    const response = await (deps.appServerGatewayFetch ?? fetch)(signed.url, {
-      method: "POST",
-      headers: signed.headers,
-      body: json,
-      redirect: "manual",
-      signal: AbortSignal.timeout(APP_SERVER_RUN_TIMEOUT_MS + 5_000),
-    });
-    if (response.ok) result = (await response.json()) as AppServerGatewayRunResult;
-    else {
-      await response.body?.cancel();
-      failure =
-        response.status === 404
-          ? "App server code is not set up on this deployment's app gateway"
-          : `The app gateway answered HTTP ${response.status}`;
-    }
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "TimeoutError")
-      failure = "The app's server code did not answer in time";
-  }
-  const error = runError(result, failure);
-  await recordAppServerRun(
+  const started = await startAppServerRun(
     deps.db,
     input.scope,
     {
@@ -626,20 +648,129 @@ export async function runAppServer(
       versionId: deployment.versionId,
       trigger: input.trigger,
       target: `${request.method} ${request.path}`,
-      status: error ? "error" : "ok",
-      httpStatus: result?.status ?? null,
-      durationMs: Date.now() - startedAt,
-      error,
-      logs: result?.logs ?? "",
       viewerSubjectId: input.viewer?.id ?? null,
     },
-    APP_SERVER_RUNS_KEPT_DAYS,
-  ).catch((recordError: unknown) =>
+    { perApp: APP_SERVER_RUNS_PER_MINUTE, perViewer: APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE },
+  );
+  if (started !== "started")
+    throw new AppServerError(
+      "rate_limited",
+      started === "app_limit"
+        ? `This app's server code runs at most ${APP_SERVER_RUNS_PER_MINUTE} times a minute. Try again shortly.`
+        : `One person can run this app's server code at most ${APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE} times a minute. Try again shortly.`,
+      { reason: started },
+    );
+  let result: AppServerGatewayRunResult | null = null;
+  let failure = "The app's server code could not be reached";
+  let refusal: unknown = null;
+  try {
+    // A paused deployer stops the code before it runs, not only its calls back.
+    await runStateFor(deps, deployment, runId).authority;
+    const modules = await loadModules(storage, input.scope.workspaceId, manifest);
+    const token = mintAppServerRunToken(deps.settings.sitesGatewaySecret!, {
+      runId,
+      accountId: input.scope.accountId,
+      workspaceId: input.scope.workspaceId,
+      siteId: input.siteId,
+      versionId: deployment.versionId,
+      expiresAt: startedAt + APP_SERVER_RUN_TIMEOUT_MS + 5_000,
+    });
+    const headers = Object.entries(request.headers ?? {})
+      .filter(([name]) => !/^(?:host|cookie|authorization|content-length|x-opengeni-)/iu.test(name))
+      .map(([name, value]) => [name.toLowerCase(), value] as [string, string]);
+    const payload: AppServerGatewayRunRequest = {
+      requestId: crypto.randomUUID(),
+      versionId: deployment.versionId,
+      digest: manifest.digest,
+      main: manifest.main,
+      modules: Object.fromEntries(
+        Object.entries(modules).map(([path, source]) => [
+          path,
+          Buffer.from(source, "utf8").toString("base64"),
+        ]),
+      ),
+      context: {
+        runId,
+        appId: input.siteId,
+        versionId: deployment.versionId,
+        trigger: input.trigger,
+        viewer: input.viewer,
+        token,
+        hostCallLimit: APP_SERVER_HOST_CALLS_PER_RUN,
+        logLimit: APP_SERVER_LOG_MAX_CHARS,
+      },
+      request: { method: request.method, path: request.path, headers, bodyBase64: base64(body) },
+      limits: {
+        timeoutMs: APP_SERVER_RUN_TIMEOUT_MS,
+        cpuMs: APP_SERVER_CPU_MS,
+        responseBytes: APP_SERVER_RESPONSE_BODY_MAX_BYTES,
+      },
+    };
+    const json = JSON.stringify(payload);
+    const signed = signGatewayInternalRequest(gateway, appServerInternalPath(input.siteId), json);
+    try {
+      const response = await (deps.appServerGatewayFetch ?? fetch)(signed.url, {
+        method: "POST",
+        headers: signed.headers,
+        body: json,
+        redirect: "manual",
+        signal: AbortSignal.timeout(APP_SERVER_RUN_TIMEOUT_MS + 5_000),
+      });
+      if (response.ok) {
+        // Bounded: the isolate's own limits are advisory, since the app's code runs there.
+        const bytes = await readResponseBodyBounded(
+          response,
+          APP_SERVER_GATEWAY_RESULT_MAX_BYTES,
+          "App server run result",
+        );
+        result = parseGatewayResult(bytes);
+        if (!result) failure = "The app's server code answered too much or something unreadable";
+      } else {
+        await response.body?.cancel();
+        failure =
+          response.status === 404
+            ? "App server code is not set up on this deployment's app gateway"
+            : `The app gateway answered HTTP ${response.status}`;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "TimeoutError")
+        failure = "The app's server code did not answer in time";
+      else if (error instanceof ResponseBodyLimitError)
+        failure = "The app's server code answered more than it may";
+    }
+  } catch (error) {
+    refusal = error;
+    failure = error instanceof Error ? error.message : "The app's server code could not run";
+  }
+  const error = runError(result, failure);
+  try {
+    await finishAppServerRun(
+      deps.db,
+      input.scope,
+      {
+        id: runId,
+        siteId: input.siteId,
+        status: error ? "error" : "ok",
+        httpStatus: result?.status ?? null,
+        durationMs: Date.now() - startedAt,
+        error,
+        logs: result?.logs ?? "",
+      },
+      APP_SERVER_RUNS_KEPT_DAYS,
+    );
+  } catch (recordError) {
     console.warn("[app-server] could not record a run", {
       siteId: input.siteId,
       error: recordError instanceof Error ? recordError.message : String(recordError),
-    }),
-  );
+    });
+  } finally {
+    runStates.delete(runId);
+  }
+  if (refusal) {
+    if (refusal instanceof AppServerError)
+      throw new AppServerError(refusal.code, refusal.message, { ...refusal.details, runId });
+    throw refusal;
+  }
   if (!result) throw new AppServerError("unavailable", failure, { runId, retryable: true });
   const responseHeaders: Record<string, string> = {};
   for (const [name, value] of result.headers) {
@@ -665,17 +796,54 @@ export async function runAppServer(
   };
 }
 
+/** The gateway's run result, shape-checked; null when it isn't one. */
+function parseGatewayResult(bytes: Uint8Array): AppServerGatewayRunResult | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const result = value as Partial<AppServerGatewayRunResult>;
+  if (
+    !Number.isInteger(result.status) ||
+    (result.status as number) < 100 ||
+    (result.status as number) > 599 ||
+    !Array.isArray(result.headers) ||
+    !result.headers.every(
+      (header) =>
+        Array.isArray(header) &&
+        header.length === 2 &&
+        typeof header[0] === "string" &&
+        typeof header[1] === "string",
+    ) ||
+    typeof result.bodyBase64 !== "string" ||
+    Buffer.byteLength(result.bodyBase64, "base64") > APP_SERVER_RESPONSE_BODY_MAX_BYTES + 3
+  )
+    return null;
+  return {
+    status: result.status!,
+    headers: result.headers,
+    bodyBase64: result.bodyBase64,
+    logs: typeof result.logs === "string" ? result.logs.slice(0, APP_SERVER_LOG_MAX_CHARS) : "",
+    error: typeof result.error === "string" ? result.error.slice(0, 2000) : null,
+  };
+}
+
 /** The viewer the code sees for a workspace grant (a member in the console, or their agent). */
 export async function appServerViewerForGrant(
   deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
 ): Promise<AppServerViewer> {
-  return {
-    id: `user:${grant.subjectId}`,
-    email: await getVerifiedSubjectEmail(deps.db, grant.subjectId).catch(() => null),
-    name: null,
-    kind: "member",
-  };
+  const [email, name] = await Promise.all([
+    getVerifiedSubjectEmail(deps.db, grant.subjectId).catch(() => null),
+    workspaceMemberDisplayName(deps.db, {
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    }).catch(() => null),
+  ]);
+  return { id: `user:${grant.subjectId}`, email, name, kind: "member" };
 }
 
 /**
@@ -739,15 +907,26 @@ const sameTool = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) =>
 
 function toolNotDeclared(tool: ToolGatewayIdentity): AppServerError {
   return forbidden(
-    `The app doesn't declare ${tool.serverId}/${tool.toolName}. Add it to the version's requestedTools and publish again.`,
+    `The server code doesn't declare ${tool.serverId}/${tool.toolName}. Add it to the server bundle's tools and publish again.`,
     { reason: "tool_not_declared" },
   );
 }
 
+/** The tools a version's server code declares, as identities. */
+export function appServerDeclaredTools(manifest: AppServerManifest): ToolGatewayIdentity[] {
+  return (manifest.tools ?? []).flatMap((reference) => {
+    const at = reference.indexOf("/");
+    return at > 0 ? [{ serverId: reference.slice(0, at), toolName: reference.slice(at + 1) }] : [];
+  });
+}
+
 /**
- * The identity a tool call from server code runs: only tools the version
- * declares, and only on a workspace-shared account of their connector (or a
- * remote connector without accounts), never a person's own connection.
+ * The identity a tool call from server code runs: only tools the server
+ * manifest declares, and only on a workspace-shared account of their
+ * connector, or on a server configured for the whole workspace with no
+ * connection at all. Never a person's own connection: not a personal
+ * account route, not a host-authority connection, not a server someone
+ * enabled from the catalog (it may carry their credentials).
  */
 export function routeAppServerTool(
   inventory: SiteToolAccountInventory,
@@ -779,10 +958,17 @@ export function routeAppServerTool(
   if (!declares(tool)) throw toolNotDeclared(tool);
   if (inventory.canonical.has(tool.serverId)) return viaConnector(tool.serverId);
   if (inventory.plain.has(tool.serverId)) {
-    if (FIRST_PARTY_SERVERS.has(tool.serverId) || !inventory.servers?.get(tool.serverId)?.url)
-      throw forbidden(`Server code can't call ${tool.serverId} tools: they act as a person.`, {
-        reason: "tool_acts_as_person",
-      });
+    const server = inventory.servers?.get(tool.serverId);
+    if (
+      FIRST_PARTY_SERVERS.has(tool.serverId) ||
+      !server?.url ||
+      server.connectionRef !== undefined ||
+      inventory.capabilityServers?.has(tool.serverId) !== false
+    )
+      throw forbidden(
+        `Server code can't call ${tool.serverId} tools: they may act as a person. It calls connectors on shared accounts, and servers the workspace configures without accounts.`,
+        { reason: "tool_acts_as_person" },
+      );
     return tool;
   }
   // Another member's account route: through the connector the version declares for the same tool.
@@ -859,6 +1045,7 @@ export async function appServerOutboundFetch(
   scope: { accountId: string; workspaceId: string },
   manifest: AppServerManifest,
   input: unknown,
+  app?: { siteId: string; versionId: string },
 ): Promise<{ status: number; headers: Array<[string, string]>; bodyBase64: string }> {
   const request = parseWith(AppServerOutboundRequest, input);
   let url: URL;
@@ -898,7 +1085,7 @@ export async function appServerOutboundFetch(
   let resolved: Record<string, string>;
   try {
     resolved = Object.values(headers).some((value) => value.includes(SECRET_MARK))
-      ? await resolveSecretHeaders(deps, scope, headers, url.toString())
+      ? await resolveSecretHeaders(deps, scope, headers, url.toString(), app)
       : headers;
   } catch (error) {
     if (error instanceof ServiceConnectionCredentialError)
@@ -959,8 +1146,9 @@ export async function appServerOutboundFetch(
 /**
  * One call back to Opengeni from a run, forwarded and signed by the gateway
  * for the isolate's own app and version. The run's token must name the same
- * app and version, the version must still be the app's current one, and the
- * deployer must still manage the app.
+ * app and version, the run must still be live and under its call limit
+ * (counted here, whatever the code does in its isolate), the version must
+ * still be the app's current one, and the deployer must still manage the app.
  */
 export async function handleAppServerHostCall(
   deps: AppServerDeps,
@@ -973,6 +1161,24 @@ export async function handleAppServerHostCall(
   if (!claims || claims.siteId !== input.siteId || claims.versionId !== input.versionId)
     throw forbidden("This run's token is not valid for this app", { reason: "invalid_run_token" });
   const call = parseWith(AppServerHostRequest, input.body);
+  const scope = { accountId: claims.accountId, workspaceId: claims.workspaceId };
+  const claimed = await claimAppServerHostCall(deps.db, scope, {
+    runId: claims.runId,
+    siteId: claims.siteId,
+    versionId: claims.versionId,
+    limit: APP_SERVER_HOST_CALLS_PER_RUN,
+    maxAgeMs: APP_SERVER_RUN_TIMEOUT_MS + 5_000,
+  });
+  if (claimed === "ended")
+    throw forbidden("This run has ended, so it can't call Opengeni any more", {
+      reason: "run_ended",
+    });
+  if (claimed === "limit")
+    throw new AppServerError(
+      "rate_limited",
+      `This run made more than ${APP_SERVER_HOST_CALLS_PER_RUN} calls to tools, data and fetch`,
+      { reason: "host_call_limit" },
+    );
   const deployment = await getAppServerDeployment(
     deps.db,
     claims.workspaceId,
@@ -983,12 +1189,15 @@ export async function handleAppServerHostCall(
     throw new AppServerError("conflict", "This version is no longer the app's current version", {
       reason: "version_replaced",
     });
-  const scope = { accountId: deployment.accountId, workspaceId: deployment.workspaceId };
+  const app = { siteId: deployment.siteId, versionId: deployment.versionId };
   // Even an outbound fetch stops once the deployer can no longer manage the app.
-  const authority = await serverAuthority(deps, deployment);
+  const state = runStateFor(deps, deployment, claims.runId);
+  const authority = await state.authority;
   switch (call.op) {
     case "fetch":
-      return { result: await appServerOutboundFetch(deps, scope, deployment.manifest, call.input) };
+      return {
+        result: await appServerOutboundFetch(deps, scope, deployment.manifest, call.input, app),
+      };
     case "tools.call": {
       const tool = toolIdentityOf(call.input.tool);
       const args = call.input.arguments ?? {};
@@ -1000,17 +1209,23 @@ export async function handleAppServerHostCall(
         });
       let inventory: SiteToolAccountInventory;
       try {
-        inventory = await (deps.appServerToolInventory ?? readSiteToolAccountInventory)(
+        state.inventory ??= (deps.appServerToolInventory ?? readSiteToolAccountInventory)(
           deps,
           authority.grant,
         );
+        inventory = await state.inventory;
       } catch {
+        state.inventory = undefined;
         throw new AppServerError(
           "unavailable",
           "The workspace's connections can't be read right now. Try again shortly.",
         );
       }
-      const identity = routeAppServerTool(inventory, deployment.requestedTools, tool);
+      const identity = routeAppServerTool(
+        inventory,
+        appServerDeclaredTools(deployment.manifest),
+        tool,
+      );
       try {
         const result = await (deps.appServerToolCaller ?? callAppSyncToolThroughGateway)({
           deps,
@@ -1105,15 +1320,38 @@ export async function appServerStatus(
 ): Promise<AppServerStatus> {
   const { access, scope } = await managerScope(deps, grant, siteId);
   const deployment = await getAppServerDeployment(deps.db, grant.workspaceId, access.site.id);
+  if (!deployment?.manifest)
+    return {
+      hasCode: false,
+      available: appServerAvailable(deps.settings),
+      errorsToday: 0,
+      runsToday: 0,
+      lastError: null,
+      lastRunFailed: false,
+      paused: null,
+      egress: [],
+      secrets: [],
+      tools: [],
+    };
   const summary = await summarizeAppServerRuns(deps.db, scope, access.site.id, startOfUtcDay());
+  let paused: string | null = null;
+  try {
+    await serverAuthority(deps, deployment);
+  } catch (error) {
+    if (!(error instanceof AppServerError) || error.code !== "forbidden") throw error;
+    paused = error.message;
+  }
   return {
-    hasCode: !!deployment?.manifest,
+    hasCode: true,
     available: appServerAvailable(deps.settings),
     errorsToday: summary.errors,
     runsToday: summary.runs,
     lastError: summary.lastError,
-    egress: deployment?.manifest?.egress ?? [],
-    secrets: deployment?.manifest?.secrets ?? [],
+    lastRunFailed: summary.lastRunFailed,
+    paused,
+    egress: deployment.manifest.egress,
+    secrets: deployment.manifest.secrets,
+    tools: deployment.manifest.tools ?? [],
   };
 }
 
@@ -1121,7 +1359,7 @@ export async function appServerRuns(
   deps: AppServerDeps,
   grant: AccessGrant,
   siteId: string,
-  options: { limit?: number; status?: "ok" | "error"; before?: string },
+  options: { limit?: number; status?: "running" | "ok" | "error"; before?: string },
 ): Promise<{ runs: AppServerRun[] }> {
   const { access, scope } = await managerScope(deps, grant, siteId);
   return {
@@ -1131,6 +1369,17 @@ export async function appServerRuns(
       ...(options.before ? { before: options.before } : {}),
     }),
   };
+}
+
+/** One run of the app, for its managers. */
+export async function appServerRun(
+  deps: AppServerDeps,
+  grant: AccessGrant,
+  siteId: string,
+  runId: string,
+): Promise<AppServerRun | null> {
+  const { access, scope } = await managerScope(deps, grant, siteId);
+  return await getAppServerRun(deps.db, scope, access.site.id, runId);
 }
 
 /** A manager (or their agent) tries the app's server code: a recorded `manual` run as themselves. */

@@ -5,6 +5,7 @@ import { SiteDataError } from "@opengeni/db";
 import * as z4 from "zod/v4";
 import {
   AppServerError,
+  appServerRun,
   appServerRuns,
   appServerStatus,
   testAppServer,
@@ -19,6 +20,9 @@ type JsonResult = (value: unknown) => {
 };
 
 const AppIdInput = z4.string().uuid().describe("The app (published Site) id.");
+
+/** The most response body `app_server_run` hands the agent; the page gets all of it. */
+const RUN_BODY_PREVIEW_CHARS = 16_000;
 
 /**
  * App server code tools (docs/app-server-code.md): read an app's server code
@@ -65,7 +69,10 @@ export function registerAppServerTools(
         "An app's server code status (has code, available here, today's runs and errors, allowed hosts and secrets) and its recent runs with logs and errors, newest first. Needs a manager of the app.",
       inputSchema: {
         siteId: AppIdInput,
-        status: z4.enum(["ok", "error"]).optional().describe("Only runs with this outcome."),
+        status: z4
+          .enum(["running", "ok", "error"])
+          .optional()
+          .describe("Only runs with this outcome."),
         limit: z4.number().int().min(1).max(100).optional(),
         before: z4
           .string()
@@ -77,7 +84,7 @@ export function registerAppServerTools(
     call(
       async (args: {
         siteId: string;
-        status?: "ok" | "error" | undefined;
+        status?: "running" | "ok" | "error" | undefined;
         limit?: number | undefined;
         before?: string | undefined;
       }) => ({
@@ -95,7 +102,7 @@ export function registerAppServerTools(
     "app_server_run",
     {
       description:
-        "Try an app's published server code: sends one request (as site.server.fetch would) and returns the response, logs and error. Runs as the app with the workspace's shared accounts, recorded as a manual run. Needs a manager of the app.",
+        "Try an app's published server code: sends one request (as site.server.fetch would) and returns the response (body cut to 16,000 characters), logs and error. Runs as the app with the workspace's shared accounts, recorded as a manual run. Needs a manager of the app.",
       inputSchema: {
         siteId: AppIdInput,
         path: z4
@@ -122,10 +129,14 @@ export function registerAppServerTools(
           ...(args.headers ? { headers: args.headers } : {}),
           ...(args.body === undefined ? {} : { body: args.body }),
         });
-        const { runs } = await appServerRuns(deps, grant, args.siteId, { limit: 10 });
-        const run = runs.find((candidate) => candidate.id === response.runId) ?? null;
+        const run = await appServerRun(deps, grant, args.siteId, response.runId);
+        const cut = response.body.length > RUN_BODY_PREVIEW_CHARS;
         return {
-          response,
+          response: {
+            ...response,
+            body: cut ? response.body.slice(0, RUN_BODY_PREVIEW_CHARS) : response.body,
+            ...(cut ? { bodyTruncated: true, bodyLength: response.body.length } : {}),
+          },
           logs: run?.logs ?? "",
           error: run?.error ?? null,
           durationMs: run?.durationMs ?? null,

@@ -33,8 +33,13 @@ export class OpenGeniSiteServerError extends Error {
 
 export type OpenGeniSiteServerInit = {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-  headers?: Record<string, string>;
-  /** A string, or any value to send as JSON. */
+  /** A plain object, a `Headers`, or `[name, value]` pairs. */
+  headers?: Record<string, string> | Headers | Array<[string, string]>;
+  /**
+   * A string; bytes (`ArrayBuffer`, a typed array, a `Blob`) sent as they
+   * are; `FormData` or `URLSearchParams` encoded as a browser would; or any
+   * other value, sent as JSON.
+   */
   body?: unknown;
 };
 
@@ -61,6 +66,42 @@ const KNOWN_CODES = new Set<string>([
 
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  return btoa(binary);
+}
+
+/** The request's body as text or base64, and the content type it implies. */
+async function encodeBody(
+  body: unknown,
+): Promise<{ body?: string; bodyBase64?: string; contentType?: string }> {
+  if (body === undefined || body === null) return {};
+  if (typeof body === "string") return { body };
+  if (body instanceof URLSearchParams)
+    return {
+      body: body.toString(),
+      contentType: "application/x-www-form-urlencoded;charset=UTF-8",
+    };
+  if (
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body) ||
+    (typeof Blob !== "undefined" && body instanceof Blob) ||
+    (typeof FormData !== "undefined" && body instanceof FormData)
+  ) {
+    // The browser's own encoding (a Blob's type, FormData's boundary).
+    const encoded = new Request("https://encode.invalid/", {
+      method: "POST",
+      body: body as BodyInit,
+    });
+    const bytes = new Uint8Array(await encoded.arrayBuffer());
+    const contentType = encoded.headers.get("content-type") ?? undefined;
+    return { bodyBase64: encodeBase64(bytes), ...(contentType ? { contentType } : {}) };
+  }
+  return { body: JSON.stringify(body), contentType: "application/json" };
+}
+
 function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -83,20 +124,23 @@ export function createOpenGeniSiteServer(
           "This app host does not run app server code",
           0,
         );
-      const headers = { ...(init.headers ?? {}) };
-      let body: string | null = null;
-      if (init.body !== undefined && init.body !== null) {
-        if (typeof init.body === "string") body = init.body;
-        else {
-          body = JSON.stringify(init.body);
-          if (!Object.keys(headers).some((name) => name.toLowerCase() === "content-type"))
-            headers["content-type"] = "application/json";
-        }
-      }
+      const headers: Record<string, string> = {};
+      new Headers(init.headers ?? {}).forEach((value, name) => {
+        headers[name] = value;
+      });
+      const encoded = await encodeBody(init.body);
+      if (encoded.contentType && headers["content-type"] === undefined)
+        headers["content-type"] = encoded.contentType;
       const response = await fetchSite(`${SITE_DATA_PATH_PREFIX}/server`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ path, method: init.method ?? "GET", headers, body }),
+        body: JSON.stringify({
+          path,
+          method: init.method ?? "GET",
+          headers,
+          ...(encoded.body !== undefined ? { body: encoded.body } : {}),
+          ...(encoded.bodyBase64 !== undefined ? { bodyBase64: encoded.bodyBase64 } : {}),
+        }),
       });
       const text = await response.text();
       let value: unknown = null;

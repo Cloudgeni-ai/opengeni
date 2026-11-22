@@ -4594,7 +4594,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_prepare_upload",
     {
       description:
-        'Get signed upload URLs for an app\'s HTML, optional source JSON, for a multi-file build optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML, and optional server code JSON {main, files: [{path, content}], egress?, secrets?} (see the sites Skill; omit it to keep the current code, {"files": []} removes it). Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.',
+        'Get signed upload URLs for an app\'s HTML, optional source JSON, for a multi-file build optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML, and optional server code JSON {main, files: [{path, content}], tools?, egress?, secrets?} (see the sites Skill; omit it to keep the current code, {"files": []} removes it). Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.',
       inputSchema: {},
     },
     async () => {
@@ -4639,10 +4639,11 @@ function registerWorkspaceArtifactTools(
         getAppServerManifest(deps.db, grant.workspaceId, artifactId, ref.version.id),
       ]);
       // The version's server code: download each file to edit it, then upload
-      // the whole bundle again ({main, files, egress, secrets}).
+      // the whole bundle again ({main, files, tools, egress, secrets}).
       const server = serverManifest
         ? {
             main: serverManifest.main,
+            tools: serverManifest.tools ?? [],
             egress: serverManifest.egress,
             secrets: serverManifest.secrets,
             files: await Promise.all(

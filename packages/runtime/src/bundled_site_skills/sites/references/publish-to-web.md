@@ -15,6 +15,11 @@ query. Then tell the user in plain words who sees what. An app that uses
 personal-account tools shows clear connect states from
 `site.tools.$readiness`, so it works for teammates who have not connected yet.
 
+Server code (`references/server-code.md`) reaches the workspace's shared
+accounts, the app's shared data and vault-backed hosts for everyone who can
+open the app, guests included. Check that it refuses what each `env.viewer.kind`
+shouldn't reach, and tell the user what guests would reach before publishing.
+
 ## Viewers, the embedded agent and limits
 
 - Viewer: `const viewer = await site.viewer` gives `{ kind, id, name, email,
