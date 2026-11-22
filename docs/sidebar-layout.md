@@ -275,8 +275,9 @@ API replica keeps them in storage without showing them.
 
 Icons and options follow the same rule: older clients ignore them. Writers
 keep what they don't know: item fields (icons), options, option values a
-newer version widened (`sessionsShowApps: "auto"`), layout fields, fields on
-a person's added entries and a newer layout `version` stay in storage
+newer version widened (`sessionsShowApps: "auto"`), rail entries a newer
+version hid, layout fields, fields on a person's added entries and a newer
+layout `version` stay in storage
 through an older replica's write, and answers carry only what the replica
 reads. Reset is the one change that clears them. So a newer version adds
 fields and values; it never changes what an existing one means. API

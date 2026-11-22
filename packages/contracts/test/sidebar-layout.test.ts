@@ -892,6 +892,34 @@ describe("rolling deploy: this version writing what a newer one stored", () => {
     expect(set.options?.sessionsShowApps).toBe(false);
   });
 
+  test("rail entries a newer version hid stay hidden when this one saves the list", () => {
+    const stored = readStoredSidebarPersonalChanges({
+      version: 1,
+      hidden: [],
+      added: [],
+      order: {},
+      options: { hiddenNavEntries: ["inbox", "voice-notes"] },
+    });
+    // The answer names only entries this version knows; the Customize page
+    // sends that list back with its change.
+    expect(knownSidebarOptions(stored.options)?.hiddenNavEntries).toEqual(["inbox"]);
+    const written = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      stored,
+      parseChanges([{ op: "options", hiddenNavEntries: ["knowledge"] }]),
+      ids(),
+    );
+    expect(written.options?.hiddenNavEntries as string[]).toEqual(["knowledge", "voice-notes"]);
+    // Showing every entry again clears the list outright.
+    const cleared = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      written,
+      parseChanges([{ op: "options", hiddenNavEntries: null }]),
+      ids(),
+    );
+    expect(cleared.options?.hiddenNavEntries).toBeUndefined();
+  });
+
   test("every option the schema has is read for answers and applied by changes", () => {
     const every = {
       sessionsShowApps: false,

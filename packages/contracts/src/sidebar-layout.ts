@@ -1104,9 +1104,21 @@ function applyOptions(
   for (const key of sidebarOptionKeys()) {
     const value = (change as Record<string, unknown>)[key];
     if (value === null) delete next[key];
-    else if (value !== undefined) next[key] = Array.isArray(value) ? [...new Set(value)] : value;
+    else if (value !== undefined)
+      next[key] = Array.isArray(value)
+        ? [...new Set([...value, ...unknownEntries(key, next[key])])]
+        : value;
   }
   return Object.keys(next).length ? (next as SidebarLayoutOptions) : undefined;
+}
+
+/**
+ * Hidden rail entries a newer version added: answers leave them out, so a
+ * client's list never names them; keep them when it replaces the list.
+ */
+function unknownEntries(key: string, stored: unknown): unknown[] {
+  if (key !== "hiddenNavEntries" || !Array.isArray(stored)) return [];
+  return stored.filter((entry) => !(SIDEBAR_NAV_ENTRIES as readonly unknown[]).includes(entry));
 }
 
 function withOptions<T extends { options?: SidebarLayoutOptions }>(
