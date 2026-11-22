@@ -68,18 +68,21 @@ export function AppServerStatusLine({
       if (timer !== undefined) window.clearInterval(timer);
       timer = undefined;
     };
+    // A failing status call never breaks the app view; it just shows nothing.
     const load = () =>
-      client.getAppServerStatus(workspaceId, siteId, { signal: abort.signal }).then(
-        (next) => {
-          if (abort.signal.aborted) return;
-          setStatus(next);
-          // Only apps with server code are watched; a new version starts over.
-          if (!next.hasCode) stop();
-          else if (timer === undefined) timer = window.setInterval(() => void load(), 60_000);
-        },
-        // Not a manager of this app (or it's gone): nothing to show or watch.
-        () => stop(),
-      );
+      Promise.resolve()
+        .then(() => client.getAppServerStatus(workspaceId, siteId, { signal: abort.signal }))
+        .then(
+          (next) => {
+            if (abort.signal.aborted) return;
+            setStatus(next);
+            // Only apps with server code are watched; a new version starts over.
+            if (!next.hasCode) stop();
+            else if (timer === undefined) timer = window.setInterval(() => void load(), 60_000);
+          },
+          // Not a manager of this app (or it's gone): nothing to show or watch.
+          () => stop(),
+        );
     void load();
     return () => {
       abort.abort();
