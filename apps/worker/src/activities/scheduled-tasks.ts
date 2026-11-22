@@ -150,11 +150,10 @@ import {
   agentMemoryAccess,
   agentMemoryGuidance,
   agentRunAdmissionDenial,
-  attachSessionRepositoryResource,
   fundedBillingOrigin,
 } from "@opengeni/core";
 import {
-  scheduledEventRepositoryResources,
+  attachScheduledEventRepositories,
   attachesEventRepositories,
   sessionResourcesMatchEventRun,
   githubEventRepositories,
@@ -1922,31 +1921,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             // resources; these join it before its first turn starts, as an
             // attach does.
             if (attachesEventRepositories(task, run)) {
-              const eventRepositories = await scheduledEventRepositoryResources(dispatchDb, {
-                workspaceId: task.workspaceId,
-                runId: run.id,
-              });
-              for (const resource of eventRepositories) {
-                try {
-                  const attached = await attachSessionRepositoryResource(
-                    { db: dispatchDb, bus },
-                    { workspaceId: task.workspaceId, sessionId: session.id, resource },
-                    { deferPublication: deferPublications },
-                  );
-                  session = attached.session;
-                  if (attached.events.length > 0) {
-                    if (deferPublications) {
-                      deferredEvents.push({ sessionId: session.id, events: attached.events });
-                    }
-                  }
-                } catch (error) {
-                  // Refused since the allowlist read: the run goes ahead without it.
-                  const status =
-                    error instanceof Error
-                      ? (error as Error & { status?: unknown }).status
-                      : undefined;
-                  if (status !== 409 && status !== 422) throw error;
-                }
+              const attached = await attachScheduledEventRepositories(
+                { db: dispatchDb, bus, settings },
+                {
+                  workspaceId: task.workspaceId,
+                  runId: run.id,
+                  sessionId: session.id,
+                  deferPublication: deferPublications,
+                },
+              );
+              if (attached.session) session = attached.session;
+              if (deferPublications && attached.events.length > 0) {
+                deferredEvents.push({ sessionId: session.id, events: attached.events });
               }
             }
             session = await seedScheduledGeneratedSessionRoute({
@@ -3334,23 +3320,16 @@ async function recoverBoundScheduledTaskDispatch(input: {
     // The repositories its events are about, if the dead dispatch had not
     // attached them yet (an attach the chat already has is a no-op).
     if (recoversEventRun) {
-      for (const resource of await scheduledEventRepositoryResources(input.db, {
-        workspaceId: task.workspaceId,
-        runId: input.run.id,
-      })) {
-        try {
-          session = (
-            await attachSessionRepositoryResource(
-              { db: input.db, bus: input.bus },
-              { workspaceId: task.workspaceId, sessionId: session.id, resource },
-            )
-          ).session;
-        } catch (error) {
-          const status =
-            error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
-          if (status !== 409 && status !== 422) throw error;
-        }
-      }
+      const attached = await attachScheduledEventRepositories(
+        { db: input.db, bus: input.bus, settings: input.settings },
+        {
+          workspaceId: task.workspaceId,
+          runId: input.run.id,
+          sessionId: session.id,
+          deferPublication: false,
+        },
+      );
+      if (attached.session) session = attached.session;
     }
     const goalSpec = task.agentConfig.goal ?? null;
     const started = await initializeSessionStartAtomically(input.db, {

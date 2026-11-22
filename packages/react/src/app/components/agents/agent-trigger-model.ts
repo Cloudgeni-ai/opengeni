@@ -69,8 +69,9 @@ export const AGENT_TRIGGER_REPOSITORIES_MAX = 50;
 
 /**
  * GitHub triggers narrowed to the chosen repositories (`owner/name`). None
- * chosen covers every repository the GitHub connection reaches. Each run
- * checks out the repository its event is about, so the task keeps none.
+ * chosen covers every repository the GitHub connection reaches. A new chat
+ * per run checks out the repository its event is about, so the task keeps
+ * none; a continued chat keeps the chosen ones as the task's (the dialog).
  */
 export function agentTriggerRepositoryEvents(
   events: EventTriggersDraft,

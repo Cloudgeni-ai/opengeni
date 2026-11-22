@@ -11,6 +11,7 @@ import {
   assertSessionIsNotImported,
   requireSession,
   type Database,
+  type RepositoryAttachRequester,
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -45,8 +46,16 @@ export type SessionRepositoryAttachResult = {
 export async function attachSessionRepositoryResource(
   deps: { db: Database; bus: EventBus },
   input: { workspaceId: string; sessionId: string; resource: RepositoryResourceRef },
-  /** A caller in a transaction publishes the returned events after it commits. */
-  options: { deferPublication?: boolean } = {},
+  options: {
+    /** A caller in a transaction publishes the returned events after it commits. */
+    deferPublication?: boolean;
+    /**
+     * Who asks (default a person). Anyone else, such as the scheduler, can't
+     * undo a person's removal: a removed repository throws
+     * `SessionRepositoryRemovedError`.
+     */
+    requester?: RepositoryAttachRequester;
+  } = {},
 ): Promise<SessionRepositoryAttachResult> {
   const { workspaceId, sessionId, resource } = input;
   const current = await requireSession(deps.db, workspaceId, sessionId);
@@ -78,7 +87,7 @@ export async function attachSessionRepositoryResource(
       const admission = admitRequestedRepositories({
         removedRepositories: session.removedRepositories ?? [],
         requested: [resource],
-        requester: "person",
+        requester: options.requester ?? "person",
       });
       attached = true;
       reattached = admission.changed;

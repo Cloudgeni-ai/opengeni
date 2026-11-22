@@ -17,7 +17,10 @@ export interface PastedWebhookStepsProps {
   setup: PastedWebhookSetup;
   /** The source's logo, beside its URL. */
   tile?: ReactNode;
-  /** Controlled value; leave it out to read the field through `inputRef`. */
+  /**
+   * Controlled value; leave it out to read the field through `inputRef`.
+   * Pick one per mount: React warns when a field switches between them.
+   */
   value?: string | undefined;
   onChange: (value: string) => void;
   inputRef?: RefObject<HTMLInputElement | null> | undefined;

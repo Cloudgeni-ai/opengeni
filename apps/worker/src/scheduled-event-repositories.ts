@@ -7,24 +7,38 @@
  *
  * A repository is attached only when the workspace's GitHub App allowlist
  * offers it now, through one of the workspace's own installations: the same
- * check as the repository picker and every other attach. One GitHub refuses
- * is left out; the run goes ahead without it.
+ * check as the repository picker and every other attach. Event data is not
+ * trusted for what it names (a test event's data is anyone's): the allowlist
+ * decides on the event's repository id, and GitHub, asked through that
+ * installation, must resolve the event's `owner/name` to that same id; the
+ * name and default branch attached are GitHub's. One that fails any check is
+ * left out, and the run goes ahead without it.
  *
- * Only an agent's triggers (Add trigger on an agent's page) work this way.
- * Other automations keep exactly the repositories they were saved with.
+ * Only an agent's triggers (Add trigger on an agent's page) with no
+ * repository of their own work this way. Other automations keep exactly the
+ * repositories they were saved with.
  */
+import type { Settings } from "@opengeni/config";
 import {
   defaultRepositoryMountPath,
   stableJson,
   type InboundEvent,
   type RepositoryResourceRef,
+  type Session,
 } from "@opengeni/contracts";
+import { attachSessionRepositoryResource } from "@opengeni/core";
 import {
+  SessionRepositoryRemovedError,
   getEventOccurrenceForScheduledTaskRun,
   listAllowedGitHubRepositoryIdsForWorkspace,
   listGitHubInstallationIdsForWorkspace,
   type Database,
 } from "@opengeni/db";
+import type { EventBus } from "@opengeni/events";
+import {
+  createGitHubAppInstallationRepositoryLookup,
+  type GitHubAppInstallationRepositoryLookup,
+} from "@opengeni/github";
 
 /** At most this many repositories per run, for an occurrence that coalesced several events. */
 export const SCHEDULED_EVENT_REPOSITORY_LIMIT = 5;
@@ -36,16 +50,24 @@ export type GitHubEventRepository = { id: number; fullName: string; defaultBranc
 
 /**
  * Whether a run's chat takes the repositories its events are about: a new
- * chat per run, started by an event, for an agent's trigger.
+ * chat per run, started by an event, for an agent's trigger that keeps no
+ * repository of its own.
  */
 export function attachesEventRepositories(
-  task: { runMode: string; agentConfig: { agentId?: string | null | undefined } },
+  task: {
+    runMode: string;
+    agentConfig: {
+      agentId?: string | null | undefined;
+      resources?: readonly { kind: string }[] | null | undefined;
+    };
+  },
   run: { triggerType: string },
 ): boolean {
   return (
     task.runMode === "new_session_per_run" &&
     run.triggerType === "event" &&
-    Boolean(task.agentConfig.agentId)
+    Boolean(task.agentConfig.agentId) &&
+    !(task.agentConfig.resources ?? []).some((resource) => resource.kind === "repository")
   );
 }
 
@@ -96,39 +118,150 @@ export function githubEventRepositoryResource(
   };
 }
 
-/** The repositories an event run checks out: its events' own, where the allowlist offers them. */
+/** GitHub's repository lookup, or null when the GitHub App isn't set up here. */
+export function eventRepositoryLookup(
+  settings: Settings,
+): GitHubAppInstallationRepositoryLookup | null {
+  try {
+    return createGitHubAppInstallationRepositoryLookup(settings);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The repositories an event run checks out: its events' own that the
+ * allowlist offers and GitHub confirms, at most
+ * `SCHEDULED_EVENT_REPOSITORY_LIMIT`.
+ */
 export async function scheduledEventRepositoryResources(
   db: Database,
   input: { workspaceId: string; runId: string },
+  lookup: GitHubAppInstallationRepositoryLookup | null,
 ): Promise<RepositoryResourceRef[]> {
+  if (!lookup) return [];
   const occurrence = await getEventOccurrenceForScheduledTaskRun(
     db,
     input.workspaceId,
     input.runId,
   );
   if (!occurrence) return [];
-  const repositories = githubEventRepositories(occurrence.events).slice(
-    0,
-    SCHEDULED_EVENT_REPOSITORY_LIMIT,
-  );
+  const repositories = githubEventRepositories(occurrence.events);
   if (repositories.length === 0) return [];
-  const installations = await listGitHubInstallationIdsForWorkspace(db, input.workspaceId);
-  const resources: RepositoryResourceRef[] = [];
-  for (const repository of repositories) {
-    for (const installationId of installations) {
-      const allowed = await listAllowedGitHubRepositoryIdsForWorkspace(
-        db,
-        input.workspaceId,
-        installationId,
-        [repository.id],
-      );
-      if (allowed.includes(repository.id)) {
-        resources.push(githubEventRepositoryResource(repository, installationId));
-        break;
-      }
+  // The installation offering each allowlisted id: one read per installation.
+  const installationFor = new Map<number, number>();
+  for (const installationId of await listGitHubInstallationIdsForWorkspace(db, input.workspaceId)) {
+    const pending = repositories
+      .map((repository) => repository.id)
+      .filter((id) => !installationFor.has(id));
+    if (pending.length === 0) break;
+    for (const id of await listAllowedGitHubRepositoryIdsForWorkspace(
+      db,
+      input.workspaceId,
+      installationId,
+      pending,
+    )) {
+      installationFor.set(id, installationId);
     }
   }
+  return await confirmedEventRepositoryResources(
+    repositories,
+    installationFor,
+    lookup,
+    input.runId,
+  );
+}
+
+/**
+ * The event repositories GitHub confirms, as resources: each allowlisted id
+ * (`installationFor`) whose event `owner/name` GitHub resolves, through that
+ * installation, to the same id, with GitHub's own name and default branch.
+ */
+export async function confirmedEventRepositoryResources(
+  repositories: readonly GitHubEventRepository[],
+  installationFor: ReadonlyMap<number, number>,
+  lookup: GitHubAppInstallationRepositoryLookup,
+  runId: string,
+): Promise<RepositoryResourceRef[]> {
+  const resources: RepositoryResourceRef[] = [];
+  for (const repository of repositories) {
+    if (resources.length >= SCHEDULED_EVENT_REPOSITORY_LIMIT) break;
+    const installationId = installationFor.get(repository.id);
+    if (installationId === undefined) continue;
+    const [owner = "", name = ""] = repository.fullName.split("/");
+    let found;
+    try {
+      found = await lookup({ installationId, owner, name });
+    } catch (error) {
+      console.warn("scheduled event repository lookup failed", {
+        runId,
+        repositoryId: repository.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    // The name must be the allowlisted repository's, as GitHub says now.
+    if (!found || found.id !== repository.id) continue;
+    const [confirmed] = githubEventRepositories([
+      {
+        sourceKind: "github",
+        data: {
+          repository: {
+            id: found.id,
+            full_name: found.fullName,
+            default_branch: found.defaultBranch,
+          },
+        },
+      },
+    ]);
+    if (confirmed) resources.push(githubEventRepositoryResource(confirmed, installationId));
+  }
   return resources;
+}
+
+/**
+ * Attach an event run's repositories to its chat before its first turn, on
+ * the scheduler's behalf: a repository someone removed from the chat stays
+ * removed, and one refused since the allowlist read is left out.
+ */
+export async function attachScheduledEventRepositories(
+  deps: { db: Database; bus: EventBus; settings: Settings },
+  input: { workspaceId: string; runId: string; sessionId: string; deferPublication: boolean },
+  lookup: GitHubAppInstallationRepositoryLookup | null = eventRepositoryLookup(deps.settings),
+): Promise<{
+  session: Session | null;
+  events: Awaited<ReturnType<typeof attachSessionRepositoryResource>>["events"];
+}> {
+  let session: Session | null = null;
+  const events: Awaited<ReturnType<typeof attachSessionRepositoryResource>>["events"] = [];
+  const resources = await scheduledEventRepositoryResources(
+    deps.db,
+    { workspaceId: input.workspaceId, runId: input.runId },
+    lookup,
+  );
+  for (const resource of resources) {
+    try {
+      const attached = await attachSessionRepositoryResource(
+        { db: deps.db, bus: deps.bus },
+        { workspaceId: input.workspaceId, sessionId: input.sessionId, resource },
+        { deferPublication: input.deferPublication, requester: "agent" },
+      );
+      session = attached.session;
+      events.push(...attached.events);
+    } catch (error) {
+      const status =
+        error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
+      if (!(error instanceof SessionRepositoryRemovedError) && status !== 409 && status !== 422) {
+        throw error;
+      }
+      console.warn("scheduled event repository not attached", {
+        runId: input.runId,
+        repository: resource.uri,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { session, events };
 }
 
 /**

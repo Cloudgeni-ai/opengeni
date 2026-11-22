@@ -83,6 +83,7 @@ import {
 } from "./agent-trigger-model";
 import { AgentTriggerPicker } from "./agent-trigger-picker";
 import { AgentTriggerRepositories } from "./agent-trigger-repositories";
+import { gitHubRepositoryResource } from "../../lib/session-tools";
 import { AgentTriggerChatField } from "./agent-trigger-chat-field";
 
 export interface AgentTriggerDialogProps {
@@ -374,6 +375,14 @@ function AgentTriggerDialogBody({
           agent,
           suggestion,
           draft: saved,
+          // A new chat per run opens the repository its event is about; a
+          // continued chat keeps the chosen ones open instead.
+          resources:
+            listensOnGitHub && chat.mode !== "new_session_per_run"
+              ? repositories
+                  .filter((repo) => chosenRepositories.includes(repo.fullName))
+                  .map((repo) => gitHubRepositoryResource(repo, ""))
+              : [],
           sources: formSources ?? [],
           now,
           chat,
@@ -555,6 +564,7 @@ function AgentTriggerDialogBody({
             repositories={repositories}
             value={chosenRepositories}
             onChange={setChosenRepositories}
+            newChatPerRun={chat.mode === "new_session_per_run"}
           />
         ) : null}
         {picked && ready ? (

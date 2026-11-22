@@ -1287,7 +1287,7 @@ async function openAgentTrigger(
     chatsPageSize?: number;
     suggestion?: string;
     githubStatus?: string;
-    githubRepos?: { id: number; fullName: string }[];
+    githubRepos?: { id: number; fullName: string; [key: string]: unknown }[];
     /** Chats in the workspace, given the agent's id. */
     sessions?: (agentId: string) => { id: string; title: string; agentId?: string | null }[];
   } = {},
@@ -1641,6 +1641,37 @@ test("a GitHub trigger covers every repository, or only the chosen ones; runs op
   expect(request.agentConfig.resources).toEqual([]);
   expect(request.events.triggers[0].conditions).toEqual([
     { field: "data.repository.full_name", op: "in", value: ["acme/api", "acme/docs"] },
+  ]);
+});
+
+test("a GitHub trigger that continues one chat keeps its chosen repositories open there", async () => {
+  const repo = (id: number, fullName: string) => ({
+    id,
+    installationId: 9,
+    fullName,
+    cloneUrl: `https://github.com/${fullName}.git`,
+    defaultBranch: "main",
+  });
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    githubRepos: [repo(1, "acme/api"), repo(2, "acme/web")],
+  });
+  await chooseFrom(dialog, "New chat each run", "One chat for this trigger");
+  await chooseFrom(dialog, "All repositories", "acme/web");
+  expect(dialog.textContent).toContain("Fires for these, and the chat opens them.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.runMode).toBe("reusable_session");
+  expect(
+    request.agentConfig.resources.map((resource: { uri: string; githubRepositoryId: number }) => [
+      resource.uri,
+      resource.githubRepositoryId,
+    ]),
+  ).toEqual([["https://github.com/acme/web.git", 2]]);
+  expect(request.events.triggers[0].conditions).toEqual([
+    { field: "data.repository.full_name", op: "equals", value: "acme/web" },
   ]);
 });
 

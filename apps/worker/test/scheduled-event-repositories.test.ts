@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   SCHEDULED_EVENT_REPOSITORY_LIMIT,
   attachesEventRepositories,
+  confirmedEventRepositoryResources,
   githubEventRepositories,
   githubEventRepositoryResource,
   sessionResourcesMatchEventRun,
@@ -85,4 +86,63 @@ test("only an agent's event runs in a new chat take their events' repositories",
       { triggerType: "event" },
     ),
   ).toBe(false);
+  // A task with a repository of its own keeps exactly that one.
+  expect(
+    attachesEventRepositories(
+      {
+        ...agentTask,
+        agentConfig: { ...agentTask.agentConfig, resources: [{ kind: "repository" }] },
+      },
+      { triggerType: "event" },
+    ),
+  ).toBe(false);
+});
+
+test("an event's repository is attached only as GitHub names the allowlisted id", async () => {
+  const github = new Map([
+    ["acme/api", { id: 42, fullName: "acme/api", defaultBranch: "main" }],
+    ["acme/old-name", { id: 7, fullName: "acme/new-name", defaultBranch: "trunk" }],
+    ["other/public", { id: 99, fullName: "other/public", defaultBranch: "main" }],
+  ]);
+  const asked: string[] = [];
+  const lookup = async (input: { installationId: number; owner: string; name: string }) => {
+    asked.push(`${input.installationId}:${input.owner}/${input.name}`);
+    if (input.name === "boom") throw new Error("GitHub timed out");
+    const found = github.get(`${input.owner}/${input.name}`);
+    return found ? ({ ...found, installationId: input.installationId } as never) : null;
+  };
+  const resources = await confirmedEventRepositoryResources(
+    [
+      { id: 42, fullName: "acme/api", defaultBranch: "evil" },
+      // An allowlisted id with another repository's name: refused.
+      { id: 43, fullName: "other/public", defaultBranch: "main" },
+      // Renamed since: GitHub's current name and branch are attached.
+      { id: 7, fullName: "acme/old-name", defaultBranch: "main" },
+      // Not allowlisted: GitHub isn't even asked.
+      { id: 99, fullName: "other/public", defaultBranch: "main" },
+      { id: 44, fullName: "acme/boom", defaultBranch: "main" },
+      { id: 45, fullName: "acme/gone", defaultBranch: "main" },
+    ],
+    new Map([
+      [42, 3],
+      [43, 3],
+      [7, 4],
+      [44, 3],
+      [45, 3],
+    ]),
+    lookup,
+    "run-1",
+  );
+  expect(
+    resources.map((resource) => [
+      resource.uri,
+      resource.ref,
+      resource.githubRepositoryId,
+      resource.githubInstallationId,
+    ]),
+  ).toEqual([
+    ["https://github.com/acme/api.git", "main", 42, 3],
+    ["https://github.com/acme/new-name.git", "trunk", 7, 4],
+  ]);
+  expect(asked.filter((each) => each.endsWith("other/public"))).toEqual(["3:other/public"]);
 });

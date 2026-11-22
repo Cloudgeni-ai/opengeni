@@ -14,11 +14,14 @@ export function AgentTriggerRepositories({
   repositories,
   value,
   onChange,
+  newChatPerRun,
 }: {
   repositories: readonly Pick<GitHubRepository, "id" | "fullName">[];
   /** Chosen `owner/name`s; empty for all repositories. */
   value: readonly string[];
   onChange: (value: string[]) => void;
+  /** A new chat per run opens its event's repository; a continued chat opens the chosen ones. */
+  newChatPerRun: boolean;
 }) {
   const options: SelectOption[] = repositories
     .filter((repo) => !value.includes(repo.fullName))
@@ -34,7 +37,11 @@ export function AgentTriggerRepositories({
       hint={
         full
           ? `Up to ${AGENT_TRIGGER_REPOSITORIES_MAX} repositories. For more, choose all.`
-          : "Each run opens the one its event is about."
+          : newChatPerRun
+            ? "Each run opens the one its event is about."
+            : value.length === 0
+              ? "Fires for every repository. Choose some for the chat to open them."
+              : "Fires for these, and the chat opens them."
       }
     >
       <div data-agent-trigger-repositories="" className="flex min-w-0 flex-col gap-2">
