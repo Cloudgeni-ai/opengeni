@@ -41,7 +41,7 @@ export async function recordAppPackageExport(
 }
 
 /**
- * The package an app was installed or last upgraded from (migration 1545),
+ * The package an app was installed or last upgraded from (migration 1546),
  * or null for an app made here. Read without access checks: callers have
  * already opened the app as the person.
  */
