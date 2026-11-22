@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { requireToolDataReader, siteToolDataTarget, toolDataReaderOf } from "../site-tool-data";
 import { SITE_DB_OPERATION_METRIC, SITE_TIMING_BUCKETS } from "../site-live/metrics";
 import {
   compileSiteSql,
@@ -372,6 +373,16 @@ function unavailable(): SiteSqlError {
  * inspect, dropping the data) only needs the gateway, so data can always
  * leave even after the flag is turned off.
  */
+/** Stored shared-account tool data is read only by members who may use it (site-tool-data.ts). */
+async function requireSqlReader(deps: SiteSqlDeps, resolved: Resolved): Promise<void> {
+  await requireToolDataReader(deps, {
+    scope: { accountId: resolved.scope.accountId, workspaceId: resolved.scope.workspaceId },
+    siteId: resolved.scope.siteId,
+    target: siteToolDataTarget("sql"),
+    reader: resolved.guest ? { subjectId: null } : toolDataReaderOf(resolved.access),
+  });
+}
+
 function requireGateway(
   resolved: Resolved,
   need: "offered" | "configured" = "offered",
@@ -1105,6 +1116,7 @@ export async function runSiteSqlQuery(
 ): Promise<SiteSqlRunResponse> {
   return guarded(async () => {
     const resolved = await resolve(deps, authority, siteId, { ...surface, management: false });
+    await requireSqlReader(deps, resolved);
     const gateway = requireGateway(resolved);
     const database = await requireDatabase(deps, resolved, { enabled: true });
     const query = SITE_SQL_NAME.test(name)
@@ -1195,6 +1207,7 @@ export async function runSiteSqlStatement(
       siteId,
       asSiteMember ? { frameSiteId: siteId, management: false } : { management: true },
     );
+    await requireSqlReader(deps, resolved);
     if (asSiteMember && (resolved.guest || resolved.access.subjectId === null))
       throw new SiteSqlError("forbidden", "Only workspace members can query this app's database");
     const gateway = requireGateway(resolved);
@@ -1533,6 +1546,7 @@ export async function exportSiteSql(
 ): Promise<SiteSqlExport> {
   return guarded(async () => {
     const resolved = await resolve(deps, authority, siteId, { management: true });
+    await requireSqlReader(deps, resolved);
     const gateway = requireGateway(resolved, "configured");
     await requireDatabase(deps, resolved, { enabled: false });
     if (request.format === "csv" && !request.table)

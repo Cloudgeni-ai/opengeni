@@ -151,7 +151,13 @@ async function fixture() {
       "account:admin",
     ],
   });
-  const settings = testSettings({ productAccessMode: "configured", sandboxBackend: "none" });
+  const settings = testSettings({
+    productAccessMode: "configured",
+    sandboxBackend: "none",
+    // The fake orders tool, configured for the workspace: readers of what a
+    // shared sync stored must be able to use it (site-tool-data.ts).
+    mcpServers: [{ id: "orders-server", name: "Orders", url: "https://orders.example/mcp" }],
+  });
   const deps = {
     db: db.db,
     bus: new MemoryEventBus(),

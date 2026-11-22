@@ -112,6 +112,9 @@ const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: n
   "site-data/operations.ts": { calls: 1, withUserContentOptions: 1 },
   // App package downloads for agents (app_export).
   "mcp/app-package-tools.ts": { calls: 1, withUserContentOptions: 1 },
+  // Server code modules the agent's sandbox downloads with an app's source
+  // (artifacts_get_source); JavaScript read by the sandbox, not a browser.
+  "mcp/server.ts": { calls: 1, withUserContentOptions: 0 },
 };
 
 async function sourceFiles(directory: URL, prefix = ""): Promise<string[]> {

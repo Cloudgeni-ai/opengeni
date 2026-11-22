@@ -100,6 +100,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |
 | Provider-aware image generation | `docs/image-generation.md` | Runtime, worker, artifact, SDK, and React summaries should link instead of restating provider and recovery semantics. |
 | App webhooks (other services writing app data) and notifications from apps (`site.notify`) | `docs/app-webhooks.md` | `docs/site-data.md`, `docs/site-runtime-api.md` and the bundled app-building Skill link instead of restating limits or checks. |
+| App server code (code that runs as the app: shared connections, vault secrets, server-side writes) | `docs/app-server-code.md` | The bundled app-building Skill, `docs/site-runtime-api.md` and the gateway README link instead of restating limits or authority. |
 | Workspace and session artifact library | `docs/artifact-library.md` | Unified discovery and retained-file presentation; existing Site and editable-artifact authorities remain separate content models. |
 | Public documentation site (docs.opengeni.ai) | `docs-site/` (`docs.json` + MDX; Mintlify deploys it from `main` with subdirectory `/docs-site`) | Site pages link to the canonical homes in this table instead of restating commands, env vars, or SDK signatures. |
 

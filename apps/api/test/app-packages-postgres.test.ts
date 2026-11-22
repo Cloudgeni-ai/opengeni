@@ -29,6 +29,7 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
+  markSiteToolData,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -468,6 +469,34 @@ test("an exported app installs into another workspace and works there, with empt
   // The original keeps its own data.
   const original = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/data`);
   expect(original.json.collections.find((c: any) => c.name === "tasks").recordCount).toBe(2);
+}, 120_000);
+
+test("tool data from a connected account is never packaged as demo data", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f);
+  // A shared sync stored a connected account's data in both: it stays in this workspace.
+  await markSiteToolData(f.deps.db, { accountId: f.accountId, workspaceId: f.source.id }, appId, [
+    { target: "collection:tasks", connector: "example-crm", route: "example-crm", shared: true },
+    { target: "sql", connector: "example-crm", route: "example-crm", shared: true },
+  ]);
+  const exported = await f.exportApp(appId, { demoData: true });
+  expect(exported.status, exported.text).toBe(200);
+  expect(exported.json.package.demoData?.records.tasks).toBeUndefined();
+  expect(exported.json.package.demoData?.sqlRows.items).toBeUndefined();
+  expect(exported.json.notExported).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        part: "demo_data",
+        name: "tasks",
+        reason: expect.stringContaining("connected account"),
+      }),
+      expect.objectContaining({
+        part: "demo_data",
+        name: "items",
+        reason: expect.stringContaining("connected account"),
+      }),
+    ]),
+  );
 }, 120_000);
 
 test("demo data is included only when the author asks, and installs unless declined", async () => {

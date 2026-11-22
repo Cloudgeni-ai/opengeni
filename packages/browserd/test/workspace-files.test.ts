@@ -5,6 +5,32 @@ import { describe, expect, test } from "bun:test";
 import { BrowserWorkspaceFileStager } from "../src";
 
 describe("browser workspace-file staging", () => {
+  test("stages a file under its own name in any script, as the page shows it", async () => {
+    const bytes = Buffer.from("drawing", "utf8");
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response(bytes, { headers: { "content-length": String(bytes.length) } }),
+    });
+    const root = await mkdtemp("/tmp/ogb-workspace-files-");
+    const operationId = randomUUID();
+    const fileId = randomUUID();
+    try {
+      const stager = await BrowserWorkspaceFileStager.open({ rootDirectory: root });
+      const request = authorityRequest({ operationId, fileId, url: server.url.toString(), bytes });
+      const name = "Rørføring etg. 2 – rev A (SIM).pdf";
+      await stager.stage({
+        ...request,
+        files: request.files.map((file) => ({ ...file, safeFilename: name })),
+      });
+      const [path] = await stager.resolve(operationId, [fileId]);
+      expect(path).toEndWith(`/${name}`);
+      expect(await readFile(path!)).toEqual(bytes);
+    } finally {
+      server.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("materializes exact private bytes once and replays without retaining authority", async () => {
     const bytes = Buffer.from("workspace upload payload", "utf8");
     let downloads = 0;

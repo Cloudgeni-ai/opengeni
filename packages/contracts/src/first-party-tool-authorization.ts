@@ -353,6 +353,8 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   app_webhook_save: { sessionRequired: true, allOf: ["artifacts:publish"] },
   app_webhook_list: { sessionRequired: true, allOf: ["artifacts:publish"] },
   app_webhook_delete: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  app_server_runs: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  app_server_run: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_files_list: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_files_upload: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_files_delete: { sessionRequired: true, allOf: ["artifacts:publish"] },

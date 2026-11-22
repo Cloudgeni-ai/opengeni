@@ -74,7 +74,9 @@ in the automation's run history with its status, error and a `syncSummary`
   `schedule:<taskId>`. The owner must still manage the app; otherwise the run
   fails and asks a manager to save the sync again. When another manager saves
   it, they become the owner and the sync moves to their own account of the
-  same connector.
+  same connector. What it stores is shown only to workspace members who may
+  use that connector themselves, whatever the collection's guest access or
+  the app's sharing setting says ([Stored tool data](app-server-code.md#stored-tool-data)).
 - **Personal** (`mode: "personal"`) runs once for each person who opted in
   (`app_sync_subscriptions`, at most 200 per run), as that person, on their own
   account of the same connector, never a workspace-shared account (a person

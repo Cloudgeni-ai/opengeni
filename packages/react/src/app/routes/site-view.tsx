@@ -43,6 +43,7 @@ import {
 import { SiteView } from "../../artifacts";
 import { useArtifactLabels } from "../../components/artifacts/artifact-chrome";
 import type { SiteLiveState } from "../../components/artifacts/artifact-sandbox";
+import { AppServerStatusLine } from "../components/artifacts/app-server-status";
 import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { useArtifactsBackLink } from "../components/artifacts/artifact-page-chrome";
 import type {
@@ -523,6 +524,14 @@ export function SiteViewRoute({
             {versionMenu}
             <span className="min-w-2 flex-1" />
             <SiteLiveStateLabel state={liveState} />
+            {canPublish && artifact && !archived ? (
+              <AppServerStatusLine
+                workspaceId={workspaceId}
+                siteId={siteId}
+                versionId={artifact.currentVersion?.id ?? null}
+                onOpenChat={showChat}
+              />
+            ) : null}
             {siteControls}
             {layout.position === "left" && !titleInWindowBar ? null : showChatButton}
           </SiteHeader>

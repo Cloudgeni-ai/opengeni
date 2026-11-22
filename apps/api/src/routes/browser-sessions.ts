@@ -81,6 +81,8 @@ import {
   type BrowserWorkingCopyAdoption as BrowserWorkingCopyAdoptionValue,
   type BrowserWorkingCopyRefusal as BrowserWorkingCopyRefusalValue,
   type FileAsset,
+  type BrowserWorkspaceFileAuthority,
+  isPortableUploadFilename,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
   type InteractionCredentialAuthorityRef,
@@ -1843,7 +1845,7 @@ export function registerBrowserSessionRoutes(
                     fileIds: workspaceFileIds,
                   });
                   const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
-                  const authorities = await Promise.all(
+                  const uploads = await Promise.all(
                     ordered.map(async (file) => {
                       const signed = await deps.objectStorage!.createGetUrl({
                         key: file.objectKey,
@@ -1851,21 +1853,28 @@ export function registerBrowserSessionRoutes(
                         audience: signedUrlAudienceForPlacement(record.session.placement),
                       });
                       return {
-                        fileId: file.id,
-                        safeFilename: browserUploadFilename(file.safeFilename),
-                        sizeBytes: file.sizeBytes,
-                        sha256: browserUploadSha256(file.sha256),
-                        download: {
-                          url: signed.url,
-                          expiresAt: signed.expiresAt.toISOString(),
+                        filename: file.filename,
+                        safeFilename: file.safeFilename,
+                        authority: {
+                          fileId: file.id,
+                          sizeBytes: file.sizeBytes,
+                          sha256: browserUploadSha256(file.sha256),
+                          download: {
+                            url: signed.url,
+                            expiresAt: signed.expiresAt.toISOString(),
+                          },
                         },
                       };
                     }),
                   );
-                  await sessionClient.stageWorkspaceFiles({
-                    operationId: request.operationId,
-                    files: authorities,
-                  });
+                  await stageBrowserUploadFiles(
+                    (authorities) =>
+                      sessionClient.stageWorkspaceFiles({
+                        operationId: request.operationId,
+                        files: authorities,
+                      }),
+                    uploads,
+                  );
                 }
               }
               await passkeyTakeover;
@@ -7126,7 +7135,65 @@ export function requireAuthorizedBrowserUploadFiles(
   });
 }
 
-function browserUploadFilename(value: string): string {
+/** Stages upload files under the names they were given, in any script, so
+ * the page sees `Rørføring – rev A (2).pdf` rather than an ASCII stand-in. A
+ * controller from before such names refuses the whole request as invalid; it
+ * gets the ASCII names it has always accepted instead. */
+export async function stageBrowserUploadFiles(
+  stage: (files: BrowserWorkspaceFileAuthority[]) => Promise<unknown>,
+  uploads: readonly {
+    filename: string;
+    safeFilename: string;
+    authority: Omit<BrowserWorkspaceFileAuthority, "safeFilename">;
+  }[],
+): Promise<void> {
+  const named = uploads.map((upload) => ({
+    ...upload.authority,
+    safeFilename: browserUploadFilename(upload.filename, upload.safeFilename),
+  }));
+  try {
+    await stage(named);
+  } catch (error) {
+    const ascii = uploads.map((upload) => ({
+      ...upload.authority,
+      safeFilename: asciiUploadFilename(upload.safeFilename),
+    }));
+    const refusedAsInvalid =
+      error instanceof BrowserControlRequestError &&
+      error.status === 400 &&
+      error.error.code === "invalid_action";
+    if (
+      !refusedAsInvalid ||
+      ascii.every((file, index) => file.safeFilename === named[index]!.safeFilename)
+    ) {
+      throw error;
+    }
+    await stage(ascii);
+  }
+}
+
+/** The file's own name as one portable path segment: path separators,
+ * control characters and characters Windows forbids become `_`, and a
+ * trailing dot or space, which Windows drops, is removed. Letters of every
+ * script stay. A name that cannot be kept falls back to its ASCII form. */
+export function browserUploadFilename(filename: string, safeFilename: string): string {
+  let name = filename
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f/\\<>:"|?*]+/gu, "_")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/[. ]+$/u, "");
+  const encoder = new TextEncoder();
+  const characters = [...name].slice(0, 240);
+  while (encoder.encode(characters.join("")).byteLength > 240) characters.pop();
+  name = characters
+    .join("")
+    .trimEnd()
+    .replace(/[. ]+$/u, "");
+  return isPortableUploadFilename(name) ? name : asciiUploadFilename(safeFilename);
+}
+
+function asciiUploadFilename(value: string): string {
   const normalized = value
     .trim()
     .replace(/[/\\]/gu, "_")

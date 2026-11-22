@@ -68,6 +68,7 @@ import {
 } from "../site-sql/service";
 import { connectorToolIdentities, readSiteToolAccountInventory } from "../site-tool-routing";
 import { readSiteAssetBundle, storeSiteAssetFiles } from "../site-assets";
+import { siteToolDataSources, siteToolDataTarget } from "../site-tool-data";
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { siteSqlInsertStatements } from "../site-sql/format";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
@@ -318,6 +319,17 @@ async function exportDemoData(
   if (demo === undefined || demo === false) return undefined;
   const { notExported } = context;
   let budget = Math.max(0, context.budget);
+  // Tool data from a connected account stays in its workspace (site-tool-data.ts).
+  const toolData = new Set(
+    (
+      await siteToolDataSources(
+        deps,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        appId,
+      )
+    ).map((source) => source.target),
+  );
+  const HOLDS_TOOL_DATA = "It holds data from a connected account, so it stays in this workspace";
   const records: Record<string, AppPackageDemoRecord[]> = {};
   const names = context.collections.map((collection) => collection.name);
   for (const name of selected(demo, "collections", names)) {
@@ -334,6 +346,10 @@ async function exportDemoData(
         name,
         reason: "Its records belong to the people who wrote them, so they aren't demo data",
       });
+      continue;
+    }
+    if (toolData.has(siteToolDataTarget("collection", name))) {
+      notExported.push({ part: "demo_data", name, reason: HOLDS_TOOL_DATA });
       continue;
     }
     try {
@@ -383,6 +399,10 @@ async function exportDemoData(
     for (const name of tables.length > 0 ? selected(demo, "tables", tables) : []) {
       if (!tables.includes(name)) {
         notExported.push({ part: "demo_data", name, reason: "No table with this name" });
+        continue;
+      }
+      if (toolData.has(siteToolDataTarget("sql"))) {
+        notExported.push({ part: "demo_data", name, reason: HOLDS_TOOL_DATA });
         continue;
       }
       try {

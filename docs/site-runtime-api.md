@@ -286,6 +286,11 @@ Operations:
   enabled yet: it answers 403 with `details.reason` `notify_not_available`
   until a follow-up migration grants delivery. Its checks and limits are in
   [app-webhooks.md](app-webhooks.md#notifications-from-apps).
+- `site.server.fetch(path, init)` (`server.fetch`,
+  `POST /published-artifacts/current/server`) runs the app's server code for
+  the viewer and returns a `Response`; the code runs as the app on shared
+  accounts and sees only who the viewer is
+  ([app-server-code.md](app-server-code.md)).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable
