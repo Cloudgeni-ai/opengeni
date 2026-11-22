@@ -6354,9 +6354,11 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
       ...(details ? { details } : {}),
       guidance: error.outcomeUnknown
         ? "The request may have completed. Do not repeat actions automatically; inspect the existing session before continuing."
-        : error.retryable
-          ? "Check the existing session before retrying. Keep its identity and do not recreate it to bypass the failure."
-          : "Resolve the reported issue before calling again; this failure is not marked retryable.",
+        : failure?.code === "agent_offline"
+          ? `The machine this ${failure.surface} runs on is offline. Wait for it to reconnect, or, if the work does not need this machine, open a new ${failure.surface} on another online machine from sandboxes_list.`
+          : error.retryable
+            ? "Check the existing session before retrying. Keep its identity and do not recreate it to bypass the failure."
+            : "Resolve the reported issue before calling again; this failure is not marked retryable.",
     };
     return {
       isError: true,

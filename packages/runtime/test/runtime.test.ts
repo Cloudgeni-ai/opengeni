@@ -2489,6 +2489,31 @@ describe("runtime event normalization", () => {
       expect(result.content[0].text).not.toContain("Please try again");
     });
 
+    test("an offline connected machine points to another online machine", () => {
+      const offline = mcpToolErrorOutput(
+        new OpenGeniApiError(
+          409,
+          JSON.stringify({
+            error: {
+              code: "upstream_unavailable",
+              message: "Connected Machine has no live runner connection",
+              retryable: false,
+              outcomeUnknown: false,
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: "browser",
+                controlFailureCode: "agent_offline",
+              },
+            },
+          }),
+        ),
+      );
+      // An offline machine names the way out: another online machine.
+      expect(offline.structuredContent?.error.guidance).toBe(
+        "The machine this browser runs on is offline. Wait for it to reconnect, or, if the work does not need this machine, open a new browser on another online machine from sandboxes_list.",
+      );
+    });
+
     test("an uncertain API failure without control details still forbids automatic retries", () => {
       const failure = new OpenGeniApiError(504, "Synthetic request timed out.", {
         outcomeUnknown: true,
