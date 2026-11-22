@@ -9399,9 +9399,19 @@
       background-color: var(--color-accent);
     }
   }
+:where(.og-root).aria-pressed\:bg-og-surface-2,:where(.og-root) .aria-pressed\:bg-og-surface-2 {
+    &[aria-pressed="true"] {
+      background-color: var(--og-color-surface-2);
+    }
+  }
 :where(.og-root).aria-pressed\:text-foreground,:where(.og-root) .aria-pressed\:text-foreground {
     &[aria-pressed="true"] {
       color: var(--color-foreground);
+    }
+  }
+:where(.og-root).aria-pressed\:text-og-fg,:where(.og-root) .aria-pressed\:text-og-fg {
+    &[aria-pressed="true"] {
+      color: var(--og-color-fg);
     }
   }
 :where(.og-root).aria-pressed\:opacity-100,:where(.og-root) .aria-pressed\:opacity-100 {

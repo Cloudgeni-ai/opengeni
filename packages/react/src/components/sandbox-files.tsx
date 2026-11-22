@@ -1,5 +1,5 @@
 import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { cn } from "../lib/cn";
 import { prefersReducedMotion } from "../lib/motion";
@@ -10,7 +10,13 @@ import {
   type UseSandboxFilesResult,
 } from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
-import { filePathVisibility, type FileNodeVisibilityPredicate } from "../file-node-visibility";
+import {
+  filePathVisibility,
+  isHiddenByDefault,
+  pathMayBeHiddenByDefault,
+  treeRootIsRepository,
+  type FileNodeVisibilityPredicate,
+} from "../file-node-visibility";
 import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
 import { PierreFile } from "./pierre-file";
@@ -41,6 +47,12 @@ export type SandboxFilesProps = {
   onSelectedPathChange?: ((path: string | null) => void) | undefined;
   /** Presentation-only node filter shared with the tree and selected-file view. */
   isNodeVisible?: FileNodeVisibilityPredicate | undefined;
+  /**
+   * Leave tool and cache folders (`node_modules`, `.cache`, the sandbox
+   * home's dot folders) out of the tree behind a Show hidden toggle. On by
+   * default; `false` shows everything and drops the toggle.
+   */
+  hideToolFolders?: boolean | undefined;
   /** A deliberate file-open path routed here by the parent workspace. */
   requestedPath?: string | undefined;
   /** 1-based line to reveal after `requestedPath` opens. */
@@ -83,6 +95,7 @@ export function SandboxFiles({
   initialSelectedPath,
   onSelectedPathChange,
   isNodeVisible,
+  hideToolFolders = true,
   requestedPath,
   requestedLine,
   requestedPathRequestId,
@@ -111,6 +124,40 @@ export function SandboxFiles({
   const pendingRequestRef = useRef<string | number | null>(null);
   const handledRequestRef = useRef<string | number | null>(null);
   const requestKey = requestedPath ? (requestedPathRequestId ?? requestedPath) : null;
+  // Tool and cache folders (and the sandbox home's dot folders) stay out of
+  // the tree until the person shows hidden files; see `isHiddenByDefault`.
+  const [showHiddenChoice, setShowHiddenChoice] = useShowHiddenFiles();
+  // A file opened inside a hidden folder shows hidden files in this view only;
+  // the remembered choice changes only through the toggle.
+  const [revealHidden, setRevealHidden] = useState(false);
+  const showHidden = !hideToolFolders || showHiddenChoice || revealHidden;
+  const setShowHidden = useCallback(
+    (show: boolean) => {
+      setRevealHidden(false);
+      setShowHiddenChoice(show);
+    },
+    [setShowHiddenChoice],
+  );
+  const rootIsRepository = useMemo(() => treeRootIsRepository(files.tree), [files.tree]);
+  const treeNodeVisible = useCallback<FileNodeVisibilityPredicate>(
+    (node, context) =>
+      (isNodeVisible ? isNodeVisible(node, context) : true) &&
+      (showHidden || !isHiddenByDefault(node, context, rootIsRepository)),
+    [isNodeVisible, rootIsRepository, showHidden],
+  );
+  const visibleByDefault = useCallback<FileNodeVisibilityPredicate>(
+    (node, context) => !isHiddenByDefault(node, context, rootIsRepository),
+    [rootIsRepository],
+  );
+  // Everything at the top is hidden: say so, with the way to show it.
+  const onlyHiddenEntries = useMemo(() => {
+    if (showHidden) return false;
+    const top = { depth: 0, parent: null };
+    return (
+      !files.tree.some((node) => treeNodeVisible(node, top)) &&
+      files.tree.some((node) => (isNodeVisible ? isNodeVisible(node, top) : true))
+    );
+  }, [files.tree, isNodeVisible, showHidden, treeNodeVisible]);
 
   useEffect(() => {
     if (!requestedPath || requestKey === null) {
@@ -127,7 +174,9 @@ export function SandboxFiles({
       setTreeRevealRequest(null);
       return;
     }
-    if (isNodeVisible && files.loading && files.tree.length === 0) return;
+    // Wait for the tree when a filter (the host's, or the default hiding)
+    // needs it to judge the path.
+    if ((isNodeVisible || hideToolFolders) && files.loading && files.tree.length === 0) return;
     if (isNodeVisible && !files.loading && files.tree.length === 0) {
       handledRequestRef.current = requestKey;
       pendingRequestRef.current = null;
@@ -140,6 +189,17 @@ export function SandboxFiles({
       setTreeRevealRequest(null);
       return;
     }
+    // A file opened on purpose (from Changes, a link) inside a hidden or
+    // cache folder shows hidden files, so the tree can show where it is.
+    if (!showHidden) {
+      const visibility = filePathVisibility(files.tree, requestedPath, visibleByDefault);
+      if (
+        visibility === "hidden" ||
+        (visibility === "unknown" && pathMayBeHiddenByDefault(requestedPath))
+      ) {
+        setRevealHidden(true);
+      }
+    }
     handledRequestRef.current = requestKey;
     pendingRequestRef.current = null;
     setSelected(requestedPath);
@@ -151,12 +211,15 @@ export function SandboxFiles({
   }, [
     files.loading,
     files.tree,
+    hideToolFolders,
+    visibleByDefault,
     isNodeVisible,
     onSelectedPathChange,
     requestKey,
     requestedLine,
     requestedPath,
     requestedPathReady,
+    showHidden,
   ]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
@@ -361,7 +424,9 @@ export function SandboxFiles({
         >
           <FileBrowser
             result={files}
-            isNodeVisible={isNodeVisible}
+            isNodeVisible={treeNodeVisible}
+            showHidden={showHidden}
+            {...(hideToolFolders ? { onShowHiddenChange: setShowHidden } : {})}
             selectedPath={selected ?? undefined}
             {...(treeRevealRequest
               ? {
@@ -371,7 +436,22 @@ export function SandboxFiles({
               : {})}
             onSelectFile={selectFile}
             editable={editable}
-            emptyState={t("sandboxFiles.thisDirectoryIsEmpty")}
+            emptyState={
+              onlyHiddenEntries ? (
+                <span>
+                  {t("sandboxFiles.onlyHiddenFilesHere")}{" "}
+                  <button
+                    type="button"
+                    className="font-medium text-og-fg underline underline-offset-2 hover:text-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+                    onClick={() => setShowHidden(true)}
+                  >
+                    {t("fileBrowser.showHiddenFiles")}
+                  </button>
+                </span>
+              ) : (
+                t("sandboxFiles.thisDirectoryIsEmpty")
+              )
+            }
             className="min-w-0 flex-1"
           />
         </Panel>
@@ -938,4 +1018,32 @@ function Notice({
       </div>
     </div>
   );
+}
+
+const SHOW_HIDDEN_FILES_KEY = "og.files.show-hidden:v1";
+
+/**
+ * Whether the Files tree shows hidden and cache folders, remembered in this
+ * browser. Storage that is blocked only means the choice lasts for the page.
+ */
+function useShowHiddenFiles(): [boolean, (show: boolean) => void] {
+  const [show, setShow] = useState(() => {
+    try {
+      return (
+        typeof window !== "undefined" && window.localStorage.getItem(SHOW_HIDDEN_FILES_KEY) === "1"
+      );
+    } catch {
+      return false;
+    }
+  });
+  const update = useCallback((next: boolean) => {
+    setShow(next);
+    try {
+      if (next) window.localStorage.setItem(SHOW_HIDDEN_FILES_KEY, "1");
+      else window.localStorage.removeItem(SHOW_HIDDEN_FILES_KEY);
+    } catch {
+      // The choice lasts until the page reloads.
+    }
+  }, []);
+  return [show, update];
 }

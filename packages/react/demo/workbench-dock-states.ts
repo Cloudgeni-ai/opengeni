@@ -593,6 +593,32 @@ const recoveryPng =
   "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAgklEQVR4nO3YQQ0AMAhDUZRM3YQhZyIQMw0censJBghQ2l91J1rndbRKAyZghRwxFSKjHplPzEowc9woOy3QSGQipVCPSsAqwBYyBy2Cu+j0Gq/H+X0YXWrABKyQI6ZCZNQj84lZCWaOG2WnBRqJTKQU6lEJWAXYQuagRXAXnZ7tGXyehjFL36VnmwAAAABJRU5ErkJggg==";
 const recoveryTree = dir("workspace", "", [fsfile("recovery.png", "recovery.png", 187)]);
 
+/** A sandbox home as the agent leaves it: tool and cache folders beside the repositories. */
+const treeSandboxHome: FsTreeNode = dir("", "", [
+  dir(".bun", ".bun", []),
+  dir(".cache", ".cache", []),
+  dir(".config", ".config", []),
+  dir(".npm", ".npm", []),
+  dir(".opengeni", ".opengeni", []),
+  dir("node_modules", "node_modules", []),
+  dir("repos", "repos", [
+    dir("github.com", "repos/github.com", [
+      dir("acme", "repos/github.com/acme", [
+        dir("api", "repos/github.com/acme/api", [
+          dir(".github", "repos/github.com/acme/api/.github", []),
+          dir("node_modules", "repos/github.com/acme/api/node_modules", []),
+          dir("src", "repos/github.com/acme/api/src", [
+            fsfile("server.ts", "repos/github.com/acme/api/src/server.ts", 3120),
+          ]),
+          fsfile(".gitignore", "repos/github.com/acme/api/.gitignore", 120),
+          fsfile("package.json", "repos/github.com/acme/api/package.json", 842),
+        ]),
+      ]),
+    ]),
+  ]),
+  fsfile("notes.md", "notes.md", 640),
+]);
+
 function status(files: GitStatusResponse["files"], isRepo = true): GitStatusResponse {
   return {
     isRepo,
@@ -692,6 +718,16 @@ export const DOCK_STATES: Record<string, DockState> = {
     gitDiff: diffReview,
     tree: treeReview,
     announceFileCount: 3,
+  },
+  // Warm box, nothing changed yet: the sandbox home with its tool folders.
+  "sandbox-home": {
+    label: "Warm · sandbox home",
+    capabilities: caps("warm"),
+    capture: captureNone,
+    machines: fleet(machine({ state: "online" })),
+    gitStatus: statusClean,
+    gitDiff: [],
+    tree: treeSandboxHome,
   },
   // Warm box, a real-sized branch review (nine files, long hunks).
   "branch-review": {
