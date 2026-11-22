@@ -1,5 +1,31 @@
 # @opengeni/browserd
 
+## 0.4.55
+
+### Patch Changes
+
+- 4b65617: Text typed into a UTM virtual machine window now arrives as the letters sent, not as a row of "a". UTM passes each key event's key code to the guest's keyboard and drops the Unicode text a synthetic event carries, so text sent the usual way (Unicode on key code 0, the A key) reached the guest as "aaaa". The pinned CUA driver now treats UTM like Screen Sharing, the iOS Simulator and iPhone Mirroring and types into it as physical keys.
+- 4b5ccce: A tab a page opens itself (a link to a new tab, `window.open`) now gets the managed browser's passkey authenticator and passkey autofill withdrawal, like every other tab. Such a tab waits for its debugger and answers page commands only once it runs, but the controller waited for those answers before letting it run: they timed out after five seconds and the tab was left with no authenticator. A passkey request there then showed the browser's own passkey dialog, which holds the tab's input and cannot be reached through page actions. The controller now sends the page commands before the tab runs and checks their answers afterwards, and removes the authenticator again from a tab that could not take the withdrawal.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/interaction@6.36.0
+
 ## 0.4.54
 
 ### Patch Changes

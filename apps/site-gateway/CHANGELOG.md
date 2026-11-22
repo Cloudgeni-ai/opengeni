@@ -1,5 +1,33 @@
 # @opengeni/site-gateway
 
+## 0.3.6
+
+### Patch Changes
+
+- 23e52db: Published apps' frame chrome and the gateway's own pages follow the viewer's light or dark system setting.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/sdk@6.36.0
+
 ## 0.3.5
 
 ### Patch Changes

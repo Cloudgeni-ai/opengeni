@@ -1,5 +1,58 @@
 # @opengeni/db
 
+## 6.36.0
+
+### Minor Changes
+
+- 27832fd: Upgrade an existing app from a newer package of it: a dry run returns the plan (new version, tools, collections, migrations, queries and syncs), and applying it publishes the package's version as a new version of the same app and runs only what is new. Nothing is deleted; destructive changes need `allowDestructive: true` and conflicts stop the upgrade. Adds `POST /v1/workspaces/:workspaceId/published-artifacts/:appId/package/upgrade`, `upgradeAppPackage` in the SDK, the `app_upgrade` agent tool and Upgrade from package in the app's menu. Package demo data now carries the app's shared files (`demoData.files`) and SQL blob values (`{ "$base64": "…" }`), and package files `app_export` stores are deleted after 24 hours. Older packages stay readable. See docs/app-packages.md.
+
+### Patch Changes
+
+- 23e52db: App packages carry a multi-file app's asset files, and install and upgrade restore them. Packages carry a `packageId`: installed copies record it, and upgrading from a different app's package needs `allowDestructive`. Install responses and upgrade plans include it.
+- 26b0190: Let idle chats archive when their only pending updates are background command results that cannot start a turn without an explicit wait. Preserve those results for the next turn if the chat is restored.
+- b419673: Settle a Modal sandbox create whose reply was lost once it is older than Modal's 24-hour maximum sandbox lifetime plus an hour. The lease then restarts cold from its archive, so the chat gets a fresh sandbox instead of waiting forever.
+- 23e52db: A personal app sync whose trigger is on its owner's own Gmail or GitHub (your connection) source now also runs when an opted-in person's own source of that kind fires, only for that person.
+- f2c07c2: A workspace that its organization shares an Opengeni Slack bot with can now add Slack as an automation event source, and the bot's channel events reach that workspace's automations as well as the home workspace's. Delivery follows the live sharing setting: turning sharing off or leaving the workspace out stops new events there. Migration 1538 adds the one lookup each Slack callback makes for this; the shared workspaces' deliveries never delay Slack's acknowledgement. A workspace's Slack source whose bot is no longer shared with it reads as blocked with "The Slack bot isn't shared with this workspace anymore" until the bot is shared again.
+- 53320fa: A Slack callback for a bot shared across an organization can find the shared workspaces' Slack sources in one indexed lookup (`list_shared_slack_event_sources_v2`, migrations 1551 and 1552) instead of one probe per workspace. The definer is withheld from the runtime for one release, so until a later migration grants it the existing per-workspace lookup stays in use; delivery and sharing rules are unchanged.
+- b1abd39: The sidebar is edited in place: drag rows to reorder (or drop an app from the Sessions list), **+** on a group adds an app, and row menus rename, set an icon, set how many apps a list shows, and remove. A project app's menu has **Add to sidebar**. Apps, links and groups take an optional `icon` from a curated set of lucide names (`SIDEBAR_ITEM_ICONS`); outside links without one show the site's icon through `GET /v1/workspaces/:workspaceId/sidebar-layout/link-icon` (`client.getSidebarLinkIcon`). The phone app shows item icons and site icons, and leaves out hidden built-in entries (Automations in the side menu; Artifacts, Meetings or Inbox in the tab bar). Layouts gain `options` (the `options` change): `sessionsShowApps`, `hiddenNavEntries` and `settingsMore`, set as the workspace default or per person; unset keeps today's behaviour. While a deploy rolls out, a write from an older API replica can drop saved `options`; set them again afterwards. Recent apps now count opens and the last 90 days of edits (read through a new index on app versions by author), and no longer come back empty: the read ran without the person's identity, so row-level security hid every open.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/subscriptions@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes

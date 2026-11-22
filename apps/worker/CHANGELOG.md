@@ -1,5 +1,80 @@
 # @opengeni/worker-bundle
 
+## 6.36.0
+
+### Patch Changes
+
+- 55539f1: Show where recordings spend time between Stop and the transcript. The SDK measures storage uploads and finalize, React measures transcript delivery and composer insertion, and the API and worker emit recording stage timings with a shared recording key. Transcript long polling reports its intentional wait separately from active API work.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- 0b36a4b: The workspace filesystem layout and the agent's sandbox manifest now come from one builder and one placement rule. `buildManifest` takes the turn's placement (`activeSandboxBackend`, `sandboxWorkspaceRoot`) and owns the Connected Machine root and resource rules; the layout is that manifest without files. The SDK renders nothing from the manifest into the system prompt (`manifestInstructions: false` replaces the `instructionManifest` projection and `filesystemInstructions`), so a resumed sandbox that still holds an earlier turn's file mount at a custom path no longer adds a remote mount policy section to the cached system prompt. Rendered text for every other case is unchanged.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [26b0190]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [b419673]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [23e52db]
+- Updated dependencies [86bef5d]
+- Updated dependencies [53320fa]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [53320fa]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [0b36a4b]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/core@6.36.0
+  - @opengeni/sdk@6.36.0
+  - @opengeni/db@6.36.0
+  - @opengeni/runtime@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/decisions@6.36.0
+  - @opengeni/documents@6.36.0
+  - @opengeni/events@6.36.0
+  - @opengeni/github@6.36.0
+  - @opengeni/interaction@6.36.0
+  - @opengeni/storage@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/vaults-bitwarden@6.36.0
+  - @opengeni/vaults-keeper@6.36.0
+  - @opengeni/vaults-onepassword@6.36.0
+  - @opengeni/vaults-protonpass@6.36.0
+  - @opengeni/jev@6.36.0
+  - @opengeni/agent-proto@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/subscriptions@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

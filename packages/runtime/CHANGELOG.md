@@ -1,5 +1,73 @@
 # @opengeni/runtime
 
+## 6.36.0
+
+### Minor Changes
+
+- 27832fd: Upgrade an existing app from a newer package of it: a dry run returns the plan (new version, tools, collections, migrations, queries and syncs), and applying it publishes the package's version as a new version of the same app and runs only what is new. Nothing is deleted; destructive changes need `allowDestructive: true` and conflicts stop the upgrade. Adds `POST /v1/workspaces/:workspaceId/published-artifacts/:appId/package/upgrade`, `upgradeAppPackage` in the SDK, the `app_upgrade` agent tool and Upgrade from package in the app's menu. Package demo data now carries the app's shared files (`demoData.files`) and SQL blob values (`{ "$base64": "…" }`), and package files `app_export` stores are deleted after 24 hours. Older packages stay readable. See docs/app-packages.md.
+- bede91b: The function `apply_patch` tool takes an optional `then` shell command. It runs once, only after every patch operation applied, through the same `exec_command` path (sandbox, lean defaults, turn cancellation, finish floor, secret references and leak guard, truncation and approval policy), inside the exclusive edit call, and its result follows the patch result in the same tool output. A failed patch leaves it unrun and says so. The tool description notes that one patch can change several files, and one system-prompt sentence suggests batching decided edits and passing the follow-up check as `then`.
+
+  The function `apply_patch` is applied one file section at a time: an Add File section without lines creates an empty file instead of failing the whole patch, an Invalid Context failure is followed by the closest matching region of the file with line numbers, a section whose hunks were written out of file order is retried in file order when each hunk matches exactly one place, and each section reports its own result.
+
+  All of this is on by default; `OPENGENI_EXPERIMENT_APPLY_PATCH_THEN=false` restores the previous plain tool.
+
+- b1abd39: Ready-made content names the team it is for: `AgentTemplate` has an optional `team`, and new `AppTemplate` content (an app package with a name, a line and a team) is listed by `GET /v1/workspaces/:workspaceId/app-templates` (SDK `listAppTemplates`); add one with `installAppPackage` and its `package`. `GET /v1/workspaces/:workspaceId/skills/library` (SDK `listLibrarySkills`) lists every reviewed library skill to add, `enabled` once added.
+
+  `ConnectionInstalled` lists what you have in the same rows as the catalog: logo, name and one status line ("Installed · Workspace"), two columns where there is room. `CapabilityCatalogRow` takes an optional `statusLine` that replaces the description and drops the glyph unless the row needs attention. `ConnectionInstalledItem.showStatus` is deprecated: the status line always shows. The `.og-connection-installed-status` and `.capability-search-section` classes are removed. Embedding products that style these rows see a visible change; the row buttons no longer carry an `aria-label`, so their visible text is their name. Catalog rows carry `data-row-status` for styling; `data-status` is on the row only when it shows no indicator.
+
+### Patch Changes
+
+- 59235cb: The Branch view in Changes and the branch comparison stored with workspace captures now show only the changes made on the current branch, measured from where it left the default branch, like a pull request. Before, a checkout that had fallen behind the default branch also listed every later change on the default branch, reversed. Git diff requests take a new optional `mergeBase` flag for this.
+- f2c07c2: The ready-made Triage agent suggests a Slack trigger (a new message in a channel), and Triage and Bug fixer start with what they can reach and hand off by name instead of asking for setup first. `scheduled_tasks_create` takes `agentConfig.agentName` (an agent's name or id), and the apps Skill tells agents to start work on new app records with an automation on app change events, not page code. Adding a GitHub event source without a GitHub connection offers Connect GitHub. The coding-agent setup guide shows how to add the Opengeni MCP server by hand when the `opengeni` npm package isn't available.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- 0b36a4b: The workspace filesystem layout and the agent's sandbox manifest now come from one builder and one placement rule. `buildManifest` takes the turn's placement (`activeSandboxBackend`, `sandboxWorkspaceRoot`) and owns the Connected Machine root and resource rules; the layout is that manifest without files. The SDK renders nothing from the manifest into the system prompt (`manifestInstructions: false` replaces the `instructionManifest` projection and `filesystemInstructions`), so a resumed sandbox that still holds an earlier turn's file mount at a custom path no longer adds a remote mount policy section to the cached system prompt. Rendered text for every other case is unchanged.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/sdk@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/decisions@6.36.0
+  - @opengeni/interaction@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/jev@6.36.0
+  - @opengeni/agent-proto@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes
