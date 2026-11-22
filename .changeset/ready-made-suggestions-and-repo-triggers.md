@@ -2,6 +2,7 @@
 "@opengeni/core": patch
 "@opengeni/react": patch
 "@opengeni/runtime": patch
+"@opengeni/sdk": patch
 ---
 
 The Agents page lists the ready-made agents not added yet under the workspace's own, each added in one click. The Artifacts page's Apps tab, and its empty state, offer ready-made apps the same way, opening the app once it's added (Capabilities' **Ready-made** tab now opens it too). Three new ready-made apps keep their own data: **Issue tracker**, **Incident log** and **Feedback board** (with votes), next to **Decision log**.
@@ -10,4 +11,4 @@ An agent's GitHub trigger now covers every repository the GitHub connection reac
 
 The pasted webhook secret steps are one component shared by Add a source, a source's page and Add trigger, and the Skills section on an agent's page has more room above **Add a Skill**.
 
-New apps take the Opengeni look by default (`/__opengeni/ui.css`), single-file apps included, unless the person's design, the workspace's design system or the product the app is about comes first; the ready-made apps use it too.
+New apps take the Opengeni look by default (`/__opengeni/ui.css`), single-file apps included, unless the person's design, the workspace's design system or the product the app is about comes first; the ready-made apps use it too. `ui.css` now sizes text in `rem`, so the reader's browser text size applies, and uses 16px inputs on touch screens so phones don't zoom when a field is tapped.

@@ -81,20 +81,25 @@ tool calls.
 Every new app, single-file apps included, takes the first look that applies:
 
 1. The person's requested design, or the existing app's.
-2. A design system the workspace keeps in Knowledge or Skills, if you find one.
+2. A design system the workspace keeps in Knowledge or Skills, when one is in
+   context or a Skill applies; don't search for one.
 3. For an app about one product (a GitHub tracker, a PostHog dashboard), the
-   Opengeni look with that product's accent and logo, or the product's own look.
+   Opengeni look with that product's accent and logo; the product's own look
+   only when asked.
 4. Otherwise the Opengeni look: `<link rel="stylesheet" href="/__opengeni/ui.css">`
    in `<head>`, `og-app` on `<body>`, its classes (`og-page`, `og-title`,
    `og-heading`, `og-card`, `og-button` with `og-button-primary`, `og-input`,
    `og-badge`, `og-table`, `og-muted`) and `--og-*` tokens for anything else.
-   It follows `prefers-color-scheme` and loads in the console and on the web,
-   so add no font, reset or hard-coded white page.
+   It follows `prefers-color-scheme` and loads in the console and on the web
+   (a downloaded copy is unstyled), so add no font, reset or hard-coded white
+   page.
 
 Keep text readable: prose on a page meant for reading at 1–1.125rem, line
 height about 1.6 and about 70ch wide; `rem`/`em` for your own sizes; reflow on
-a phone instead of shrinking text; browser zoom and text scaling left working.
-Leave embedded components such as `SessionConversation` on their own styles.
+a phone instead of shrinking text; browser zoom and text scaling left working;
+small text only for secondary metadata. Don't restyle an existing app wholesale
+or force sizes with `!important`, and leave embedded components such as
+`SessionConversation` on their own styles.
 
 A single-file app that follows this needs no more checking than its
 one optional phone-width look. For a full app, before publishing, inspect actual

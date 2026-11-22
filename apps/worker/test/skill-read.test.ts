@@ -223,6 +223,8 @@ describe("skill_read gateway definition", () => {
                 "1–1.125rem",
                 "reflow on a phone instead of shrinking text",
                 "SessionConversation",
+                "`!important`",
+                "don't search for one",
                 "text enlarged to 200%",
               ])
                 expect(guidance).toContain(rule);
