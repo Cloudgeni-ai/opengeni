@@ -32,6 +32,7 @@ function arnParts(id: string) {
 
 let discovered: readonly BedrockDiscoveredModel[] = [];
 const applicationProfileBases = new Map<string, string>();
+const configuredApplicationProfileBases = new Map<string, string>();
 
 /** Replace the discovered model list (runtime discovery, see docs/amazon-bedrock.md). */
 export function setBedrockDiscoveredModels(models: readonly BedrockDiscoveredModel[]): void {
@@ -46,9 +47,17 @@ export function bedrockDiscoveredModels(): readonly BedrockDiscoveredModel[] {
   return discovered;
 }
 
-/** The system profile or model id an application profile copies, when discovery resolved it. */
+/**
+ * Record application profile bases named in OPENGENI_BEDROCK_MODELS
+ * (`<arn>=<profile id>`), for when discovery is off or cannot read them.
+ */
+export function setBedrockConfiguredApplicationProfiles(bases: ReadonlyMap<string, string>): void {
+  for (const [arn, base] of bases) configuredApplicationProfileBases.set(arn, base);
+}
+
+/** The system profile or model id an application profile copies, when known. */
 export function bedrockApplicationProfileBase(id: string): string | undefined {
-  return applicationProfileBases.get(id);
+  return applicationProfileBases.get(id) ?? configuredApplicationProfileBases.get(id);
 }
 
 export function bedrockRouteScope(id: string): BedrockRouteScope {
@@ -74,13 +83,13 @@ export function bedrockProfileGeo(id: string): string | undefined {
  * for anything that is not Claude.
  */
 export function bedrockClaudeBaseModelId(id: string): string | undefined {
-  const base = applicationProfileBases.get(id);
+  const base = bedrockApplicationProfileBase(id);
   if (base !== undefined) return bedrockClaudeBaseModelId(base);
   const arn = arnParts(id);
   if (arn?.type === "application-inference-profile") return undefined;
   const tail = (arn ? arn.resource : id).replace(BEDROCK_GEO_PREFIX, "");
   if (!tail.startsWith("anthropic.claude-")) return undefined;
-  return tail.slice("anthropic.".length).replace(/-v\d+(?::\d+)?$/u, "");
+  return tail.slice("anthropic.".length).replace(/-v\d+(?::\d+)*(?::\d+k)?$/u, "");
 }
 
 /**
@@ -100,7 +109,7 @@ export function bedrockProductModelId(upstreamModelId: string): string {
 export function bedrockPriceMultiplier(upstreamModelId: string): number | undefined {
   const scope = bedrockRouteScope(upstreamModelId);
   if (scope === "application") {
-    const base = applicationProfileBases.get(upstreamModelId);
+    const base = bedrockApplicationProfileBase(upstreamModelId);
     return base === undefined ? undefined : bedrockPriceMultiplier(base);
   }
   return scope === "global" ? 1 : 1.1;

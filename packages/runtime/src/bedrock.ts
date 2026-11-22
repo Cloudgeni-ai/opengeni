@@ -71,26 +71,28 @@ const callers = new AsyncLocalStorage<{ subjectId: string }>();
 
 /**
  * Run `fn` with Bedrock requests attributed to this person (when the
- * deployment configured an attribution role). Without a subject the
- * deployment's own identity is used.
+ * deployment configured an attribution role). Without a subject, requests in
+ * `fn` use the deployment's own identity, even inside another person's scope.
  */
 export function withBedrockCaller<T>(subjectId: string | null | undefined, fn: () => T): T {
-  return subjectId ? callers.run({ subjectId }, fn) : fn();
+  return subjectId ? callers.run({ subjectId }, fn) : callers.exit(fn);
 }
 
 /**
- * The STS session name for a person: `og-` and their stable user id, or a
- * digest of it when the id does not fit STS's 64-character name charset.
- * Never an email address.
+ * The STS session name for a person: `og-` and their stable user id (other
+ * characters than STS allows become `-`), or a digest of it when it is too
+ * long or looks like an email address. Never an email address.
  */
 export function bedrockSessionName(subjectId: string): string {
-  return /^[\w+=,.@-]{1,61}$/u.test(subjectId) && !subjectId.includes("@")
-    ? `og-${subjectId}`
+  const readable = subjectId.replace(/[^\w+=,.-]/gu, "-");
+  return readable.length <= 61 && !subjectId.includes("@")
+    ? `og-${readable}`
     : `og-${createHash("sha256").update(subjectId).digest("hex").slice(0, 40)}`;
 }
 
 const SESSION_LIMIT = 2_000;
 const REFRESH_MARGIN_MS = 5 * 60_000;
+const STS_TIMEOUT_MS = 10_000;
 const attributedSessions = new Map<
   string,
   { credentials?: AwsCredentials; pending?: Promise<AwsCredentials> }
@@ -98,6 +100,11 @@ const attributedSessions = new Map<
 
 function xmlField(xml: string, name: string): string | undefined {
   return new RegExp(`<${name}>([^<]*)</${name}>`, "u").exec(xml)?.[1];
+}
+
+/** Keep AWS account ids out of messages people see in a chat. */
+function redactAccountIds(text: string): string {
+  return text.replace(/(?<![\d])\d{12}(?![\d])/gu, "<account>");
 }
 
 async function assumeRole(
@@ -128,15 +135,29 @@ async function assumeRole(
     body,
   });
   const { host: _host, ...headers } = signed.headers;
-  const response = await fetchImpl(url, { method: "POST", headers, body });
-  const xml = await response.text();
+  let response: Response;
+  let xml: string;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(STS_TIMEOUT_MS),
+    });
+    xml = await response.text();
+  } catch (error) {
+    throw new Error(
+      `Amazon Bedrock attribution could not reach STS in ${region} to assume ${redactAccountIds(roleArn)} (${error instanceof Error ? error.name : "network error"}).`,
+      { cause: error },
+    );
+  }
   const accessKeyId = xmlField(xml, "AccessKeyId");
   const secretAccessKey = xmlField(xml, "SecretAccessKey");
   const sessionToken = xmlField(xml, "SessionToken");
   const expiration = xmlField(xml, "Expiration");
   if (!response.ok || !accessKeyId || !secretAccessKey || !sessionToken)
     throw new Error(
-      `Amazon Bedrock attribution could not assume ${roleArn} (${xmlField(xml, "Code") ?? `HTTP ${response.status}`}). Check the role's trust policy (docs/amazon-bedrock.md).`,
+      `Amazon Bedrock attribution could not assume ${redactAccountIds(roleArn)} (${xmlField(xml, "Code") ?? `HTTP ${response.status}`}). Check the role's trust policy (docs/amazon-bedrock.md).`,
     );
   return {
     accessKeyId,
@@ -258,7 +279,7 @@ function anthropicShaped(response: Response, text?: string): Response {
         type: "error",
         error: {
           type: AWS_ERROR_TYPES[awsType] ?? "api_error",
-          message: awsType ? `${awsType}: ${message}` : message,
+          message: redactAccountIds(awsType ? `${awsType}: ${message}` : message),
         },
       });
     }
@@ -269,41 +290,46 @@ function anthropicShaped(response: Response, text?: string): Response {
   return new Response(body, { status: response.status, headers });
 }
 
-/** Bedrock routes that refused an Anthropic beta header or a forced tool choice. */
-const withoutBetas = new Set<string>();
-const withoutForcedTools = new Set<string>();
+/**
+ * Anthropic beta flags Bedrock refused, per route and model, with when they
+ * were refused. A refusal is retried after an hour, in case Bedrock added it.
+ */
+const refusedBetas = new Map<string, Map<string, number>>();
+const BETA_RETRY_MS = 60 * 60_000;
 
 /** Test seam: forget remembered Bedrock request fallbacks. */
 export function resetBedrockFallbacksForTests() {
-  withoutBetas.clear();
-  withoutForcedTools.clear();
+  refusedBetas.clear();
 }
 
 type Json = Record<string, any>;
 
-function dropBetas(headers: Headers, body: Json): void {
-  headers.delete("anthropic-beta");
-  // Prefix-bound thinking controls exist only under their beta.
-  if (body.thinking && typeof body.thinking === "object") delete body.thinking.block_binding;
-}
+const betaFlags = (headers: Headers): string[] =>
+  (headers.get("anthropic-beta") ?? "")
+    .split(",")
+    .map((flag) => flag.trim())
+    .filter(Boolean);
 
-function dropForcedTool(body: Json): void {
-  const choice = body.tool_choice;
-  if (choice?.type === "any" || choice?.type === "tool") {
-    body.tool_choice = {
-      type: "auto",
-      ...(choice.disable_parallel_tool_use === undefined
-        ? {}
-        : { disable_parallel_tool_use: choice.disable_parallel_tool_use }),
-    };
-  }
+/** Remove these beta flags from a request, and the body fields that need them. */
+function dropBetas(headers: Headers, body: Json, drop: ReadonlySet<string>): void {
+  const kept = betaFlags(headers).filter((flag) => !drop.has(flag));
+  if (kept.length) headers.set("anthropic-beta", kept.join(","));
+  else headers.delete("anthropic-beta");
+  // Prefix-bound thinking controls exist only under their beta.
+  if (
+    !kept.some((flag) => flag.startsWith("thinking-")) &&
+    body.thinking &&
+    typeof body.thinking === "object"
+  )
+    delete body.thinking.block_binding;
 }
 
 /**
  * The fetch an AnthropicMessagesModel uses on a Bedrock route: drops the
- * Anthropic credentials, signs with SigV4 and, if Bedrock refuses a beta
- * header or a forced tool choice, sends the request once more without it and
- * leaves it out on this route from then on.
+ * Anthropic credentials, signs with SigV4 and, if Bedrock refuses an
+ * Anthropic beta flag, sends the request once more without it and leaves it
+ * out for that model for an hour. Flags the error names are dropped; if it
+ * names none, all are.
  */
 export function bedrockFetch(
   provider: ResolvedModelProvider,
@@ -311,7 +337,6 @@ export function bedrockFetch(
 ): typeof globalThis.fetch {
   const bedrock = provider.bedrock;
   if (!bedrock) throw new Error(`${provider.id} is not an Amazon Bedrock provider`);
-  const routeKey = `${provider.id}\0${provider.baseUrl ?? ""}`;
   const send = async (
     url: URL,
     init: RequestInit | undefined,
@@ -333,7 +358,9 @@ export function bedrockFetch(
       ...(body === undefined ? {} : { body }),
     });
   const wrapped = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (input instanceof Request)
+      throw new TypeError("Amazon Bedrock requests take a URL and init, not a Request");
+    const url = new URL(String(input));
     const headers = new Headers(init?.headers);
     headers.delete("x-api-key");
     headers.delete("authorization");
@@ -345,30 +372,34 @@ export function bedrockFetch(
         parsed = undefined;
       }
     }
-    if (parsed && withoutBetas.has(routeKey)) dropBetas(headers, parsed);
-    if (parsed && withoutForcedTools.has(routeKey)) dropForcedTool(parsed);
+    const routeKey = `${provider.id}\0${provider.baseUrl ?? ""}\0${String(parsed?.model ?? url.pathname)}`;
+    const refused = refusedBetas.get(routeKey);
+    if (parsed && refused) {
+      const now = Date.now();
+      for (const [flag, at] of refused) if (now - at > BETA_RETRY_MS) refused.delete(flag);
+      if (refused.size) dropBetas(headers, parsed, new Set(refused.keys()));
+    }
     let body = parsed ? JSON.stringify(parsed) : (init?.body as string | undefined);
     let response = await send(url, init, headers, body);
     if (response.ok) return anthropicShaped(response);
     const text = await response.text();
-    if (response.status === 400 && parsed) {
-      const betaRefused = headers.has("anthropic-beta") && /beta/iu.test(text);
-      const forcedChoice =
-        parsed.tool_choice?.type === "any" || parsed.tool_choice?.type === "tool";
-      const toolChoiceRefused = !betaRefused && forcedChoice && /tool_choice/iu.test(text);
-      if (betaRefused || toolChoiceRefused) {
-        if (betaRefused) {
-          withoutBetas.add(routeKey);
-          dropBetas(headers, parsed);
-        } else {
-          withoutForcedTools.add(routeKey);
-          dropForcedTool(parsed);
-        }
-        body = JSON.stringify(parsed);
-        response = await send(url, init, headers, body);
-        if (response.ok) return anthropicShaped(response);
-        return anthropicShaped(response, await response.text());
-      }
+    const sent = betaFlags(headers);
+    if (
+      response.status === 400 &&
+      parsed &&
+      sent.length &&
+      /\bbeta\b|anthropic-beta/iu.test(text)
+    ) {
+      const named = sent.filter((flag) => text.includes(flag));
+      const drop = new Set(named.length ? named : sent);
+      const remembered = refusedBetas.get(routeKey) ?? new Map<string, number>();
+      for (const flag of drop) remembered.set(flag, Date.now());
+      refusedBetas.set(routeKey, remembered);
+      dropBetas(headers, parsed, drop);
+      body = JSON.stringify(parsed);
+      response = await send(url, init, headers, body);
+      if (response.ok) return anthropicShaped(response);
+      return anthropicShaped(response, await response.text());
     }
     return anthropicShaped(response, text);
   };
@@ -379,6 +410,8 @@ const GEOS: [RegExp, string][] = [
   [/^eu-/u, "eu"],
   [/^us-gov-/u, "us-gov"],
   [/^us-/u, "us"],
+  [/^ap-northeast-[13]$/u, "jp"],
+  [/^ap-southeast-[24]$/u, "au"],
   [/^ap-/u, "apac"],
   [/^ca-/u, "ca"],
 ];
@@ -387,7 +420,7 @@ const GEOS: [RegExp, string][] = [
  * The system profile or model id an application profile copies, read from
  * the regions of the foundation models it lists: one region is in-Region,
  * several in one geography are that geography's profile, and a model ARN
- * without a region (or regions in several geographies) is global.
+ * without a region is global. Anything else is unknown.
  */
 export function bedrockApplicationProfileBaseId(
   modelArns: readonly string[],
@@ -404,7 +437,7 @@ export function bedrockApplicationProfileBaseId(
   const geos = new Set(
     [...regions].map((value) => GEOS.find(([pattern]) => pattern.test(value))?.[1] ?? value),
   );
-  return geos.size === 1 ? `${[...geos][0]}.${modelId}` : `global.${modelId}`;
+  return geos.size === 1 ? `${[...geos][0]}.${modelId}` : undefined;
 }
 
 async function controlPlaneGet(
@@ -460,6 +493,9 @@ async function* pages(
     nextToken = typeof result.nextToken === "string" ? result.nextToken : undefined;
     if (!nextToken) return;
   }
+  throw new Error(
+    `Amazon Bedrock ${path} returned more than 50 pages; the model list is incomplete`,
+  );
 }
 
 /**
@@ -529,14 +565,19 @@ let discoveryTimer: ReturnType<typeof setInterval> | undefined;
 /**
  * Fill the Bedrock model list from discovery now and every 15 minutes. The
  * first attempt is bounded by `startupTimeoutMs`; a failed attempt keeps the
- * previous list and is reported through `onError`.
+ * previous list and is reported through `onError`. Returns a function that
+ * stops the refresh.
  */
 export async function startBedrockModelDiscovery(
   settings: Pick<Settings, "bedrockRegion" | "bedrockModelDiscovery">,
   options: { onError?: (error: unknown) => void; startupTimeoutMs?: number } = {},
-): Promise<void> {
+): Promise<() => void> {
+  const stop = () => {
+    clearInterval(discoveryTimer);
+    discoveryTimer = undefined;
+  };
   if (!settings.bedrockRegion || settings.bedrockModelDiscovery === false || discoveryTimer)
-    return;
+    return stop;
   const refresh = () =>
     discoverBedrockModels(settings).then(setBedrockDiscoveredModels, (error: unknown) =>
       options.onError?.(error),
@@ -552,4 +593,5 @@ export async function startBedrockModelDiscovery(
     }),
   ]);
   clearTimeout(timeout);
+  return stop;
 }

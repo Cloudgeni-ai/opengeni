@@ -368,7 +368,18 @@ export const BEDROCK_PASSTHROUGH_ENV: readonly string[] = [
 
 /** A Bedrock-only deployment needs no OpenAI key; one that sets it still passes it. */
 function openAiKeyRequired(env: Record<string, string | undefined>): boolean {
-  return !env.OPENGENI_BEDROCK_REGION || Boolean(env.OPENGENI_OPENAI_API_KEY);
+  if (env.OPENGENI_OPENAI_API_KEY || !env.OPENGENI_BEDROCK_REGION) return true;
+  // A Bedrock-only deployment: its default and every allowed model are on Bedrock.
+  const models = [
+    env.OPENGENI_OPENAI_MODEL ?? "",
+    ...(env.OPENGENI_OPENAI_ALLOWED_MODELS ?? "").split(","),
+  ]
+    .map((model) => model.trim())
+    .filter(Boolean);
+  return !(
+    (env.OPENGENI_OPENAI_MODEL ?? "").startsWith("bedrock/") &&
+    models.every((model) => model.startsWith("bedrock/"))
+  );
 }
 
 /** Public workspace MCP OAuth rollout settings. The enable switch is

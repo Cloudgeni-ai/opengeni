@@ -17,8 +17,8 @@ the same way.
 | Variable | Meaning |
 | --- | --- |
 | `OPENGENI_BEDROCK_REGION` | Turns Bedrock on, for example `eu-west-1`. Requests, discovery and STS use this region. |
-| `OPENGENI_BEDROCK_ENDPOINT_URL` | Optional `bedrock-runtime` endpoint, such as a VPC interface endpoint URL. |
-| `OPENGENI_BEDROCK_MODELS` | Optional comma-separated inference profile ids (`eu.anthropic.claude-opus-5-5`, `global.anthropic.claude-sonnet-5-5`), model ids or inference-profile ARNs, including application inference profiles. |
+| `OPENGENI_BEDROCK_ENDPOINT_URL` | Optional `https://` `bedrock-runtime` endpoint, such as a VPC interface endpoint URL. |
+| `OPENGENI_BEDROCK_MODELS` | Optional comma-separated inference profile ids (`eu.anthropic.claude-opus-5-5`, `global.anthropic.claude-sonnet-5-5`), model ids or inference-profile ARNs, including application inference profiles. `<application profile ARN>=<profile id>` names the model an application profile copies, for when discovery is off. |
 | `OPENGENI_BEDROCK_MODEL_DISCOVERY` | `false` turns model discovery off. On by default. |
 | `OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN` | Optional per-user cost attribution (see below). |
 
@@ -88,10 +88,11 @@ so the foundation-model resources use a wildcard region:
 ```
 
 Without the `ListModels` statement, discovery fails (logged as a warning) and
-only `OPENGENI_BEDROCK_MODELS` and a `bedrock/` default are offered; an
-application profile then has no known base model, so it runs without Claude's
-native profile and has no price. Anthropic models also need model access in
-the Bedrock console for the account.
+only `OPENGENI_BEDROCK_MODELS` and a `bedrock/` default are offered. An
+application profile is offered only once its base model is known, from
+discovery or from `<ARN>=<profile id>` in `OPENGENI_BEDROCK_MODELS`, so it is
+always priced. Anthropic models also need model access for the account (the
+Anthropic use-case form and model agreement in the Bedrock console).
 
 ## Private networking
 
@@ -114,12 +115,13 @@ ARN, including the session name
 With `OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN` set, the worker assumes that role
 from the pod role for each person and signs their requests with it, so each
 request shows as
-`arn:aws:sts::<account id>:assumed-role/<role name>/og-<user id>`. The session
-name is `og-` and the person's stable Opengeni user id, never their email; an id
-that does not fit STS's 64-character name rules is replaced by a digest of it.
-Sessions last an hour (the role-chaining limit) and are renewed before they
-expire. Work started by no person, such as scheduled runs without an initiating
-human, uses the pod role. Converse `requestMetadata` is not used: it reaches
+`arn:aws:sts::<account id>:assumed-role/<role name>/og-user-<user id>`. The
+session name is `og-` and the person's stable Opengeni user id, never their
+email; an id too long for STS's 64-character limit is replaced by a digest of
+it. Sessions last an hour (the role-chaining limit) and are renewed before they
+expire. Agent turns and chat titles a person started are attributed to them;
+other model calls, and work started by no person (such as scheduled runs
+without an initiating human), use the pod role. Converse `requestMetadata` is not used: it reaches
 invocation logs, not CUR.
 
 The attribution role carries the same `InvokeClaude` statement as above. Its
@@ -140,8 +142,8 @@ trust policy lets the pod role assume it:
 ```
 
 The pod role also needs `sts:AssumeRole` on the attribution role. If assuming it
-fails, that person's request fails with the role ARN and STS error code; it
-does not fall back to the pod role.
+fails or STS does not answer within 10 seconds, that person's request fails
+with the role name and STS error; it does not fall back to the pod role.
 
 ## Prices, usage and residency
 
@@ -164,5 +166,6 @@ unknown unless it copies a global profile.
   deployment route that uses the pod's AWS identity.
 - Batch inference, provisioned throughput and Bedrock Guardrails.
 - Anthropic beta features Bedrock does not accept. If Bedrock refuses a beta
-  header or a forced tool choice, the request is sent once more without it and
-  the route leaves it out from then on.
+  flag, the request is sent once more without the flags its error names (all
+  of them if it names none), and that model leaves them out for an hour.
+- AWS China regions (`cn-*`).

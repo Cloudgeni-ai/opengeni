@@ -36,6 +36,7 @@ import {
   bedrockProductModelId,
   bedrockProfileGeo,
   bedrockRouteScope,
+  setBedrockConfiguredApplicationProfiles,
 } from "./bedrock";
 import {
   parseSideFeatureResidencyJson,
@@ -1407,11 +1408,20 @@ const SettingsSchema = z.object({
   // credentials come from the AWS SDK default chain, never from settings.
   bedrockRegion: z
     .string()
-    .regex(/^[a-z]{2}(-[a-z]+)+-\d+$/u, "must be an AWS region such as eu-west-1")
+    .regex(
+      /^(?!cn-)[a-z]{2}(-[a-z]+)+-\d+$/u,
+      "must be an AWS region such as eu-west-1 (China regions are not supported)",
+    )
     .optional(),
   // Bedrock runtime endpoint override, such as a VPC interface endpoint URL.
-  bedrockEndpointUrl: z.string().url().optional(),
-  // Comma-separated inference profile ids, model ids or inference-profile ARNs.
+  bedrockEndpointUrl: z
+    .string()
+    .url()
+    .refine((value) => value.startsWith("https://"), "must be an https:// URL")
+    .optional(),
+  // Comma-separated inference profile ids, model ids or inference-profile ARNs;
+  // `<application profile ARN>=<profile id>` names the model an application
+  // profile copies when discovery cannot read it.
   bedrockModels: z.string().optional(),
   // List the Claude models the account can use (ListInferenceProfiles/
   // ListFoundationModels). On unless set to false.
@@ -4330,7 +4340,6 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   "workspace-anthropic",
   "workspace-claude-subscription",
   CLAUDE_SUBSCRIPTION_PROVIDER_ID,
-  BEDROCK_PROVIDER_ID,
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
@@ -8269,7 +8278,10 @@ function opperRegistryProvider(
 }
 
 function configuredRegistryProviders(settings: Settings): InternalRegistryProvider[] {
-  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  // Bedrock signing is only for the provider OPENGENI_BEDROCK_* configures.
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).map(
+    ({ bedrock: _bedrock, ...provider }) => provider as InternalRegistryProvider,
+  );
   const injected: InternalRegistryProvider[] = providers.filter(
     (provider) =>
       settings.claudeSubscriptionEnabled ||
@@ -8395,11 +8407,16 @@ function bedrockRegistryProvider(settings: Settings): InternalRegistryProvider |
     settings.bedrockEndpointUrl ?? `https://bedrock-runtime.${region}.amazonaws.com`
   ).replace(/\/+$/u, "");
   const names = new Map<string, string | undefined>();
-  for (const id of splitCsv(settings.bedrockModels ?? ""))
-    names.set(
-      id.startsWith(BEDROCK_MODEL_ID_PREFIX) ? id.slice(BEDROCK_MODEL_ID_PREFIX.length) : id,
-      undefined,
-    );
+  const configuredBases = new Map<string, string>();
+  for (const entry of splitCsv(settings.bedrockModels ?? "")) {
+    const [rawId, base] = entry.split("=", 2).map((part) => part.trim());
+    const id = rawId!.startsWith(BEDROCK_MODEL_ID_PREFIX)
+      ? rawId!.slice(BEDROCK_MODEL_ID_PREFIX.length)
+      : rawId!;
+    if (base) configuredBases.set(id, base);
+    names.set(id, undefined);
+  }
+  setBedrockConfiguredApplicationProfiles(configuredBases);
   for (const model of bedrockDiscoveredModels())
     if (!names.get(model.upstreamModelId)) names.set(model.upstreamModelId, model.name);
   // A default or allowed `bedrock/<profile id>` model works without listing it.
@@ -8407,15 +8424,14 @@ function bedrockRegistryProvider(settings: Settings): InternalRegistryProvider |
     const upstream = id.startsWith(BEDROCK_MODEL_ID_PREFIX)
       ? id.slice(BEDROCK_MODEL_ID_PREFIX.length)
       : "";
-    if (upstream && !upstream.includes("/") && !names.has(upstream))
-      names.set(upstream, undefined);
+    if (upstream && !upstream.includes("/") && !names.has(upstream)) names.set(upstream, undefined);
   }
   const models: RegistryProvider["models"] = [];
   for (const [upstreamModelId, name] of names) {
     const base = bedrockClaudeBaseModelId(upstreamModelId);
     // Only Claude runs on this route (Messages API). An application profile
-    // whose base model discovery could not read is offered without a profile.
-    if (base === undefined && bedrockRouteScope(upstreamModelId) !== "application") continue;
+    // is offered once its base model is known, so it is priced and placed.
+    if (base === undefined) continue;
     const scope = bedrockRouteScope(upstreamModelId);
     // `claude-opus-4-6` → "Claude Opus 4.6"; a trailing date is left out.
     const baseLabel = base
@@ -14768,6 +14784,16 @@ export function validateModelCatalogSettings(
     if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider id ${provider.id} is reserved for a reviewed Opengeni provider`,
+      );
+    }
+    if (provider.id === BEDROCK_PROVIDER_ID && settings.bedrockRegion) {
+      throw new Error(
+        `OPENGENI_MODEL_PROVIDERS_JSON provider id ${provider.id} is used by Amazon Bedrock while OPENGENI_BEDROCK_REGION is set`,
+      );
+    }
+    if (provider.bedrock) {
+      throw new Error(
+        `OPENGENI_MODEL_PROVIDERS_JSON provider ${provider.id}: Amazon Bedrock is configured with OPENGENI_BEDROCK_* (docs/amazon-bedrock.md)`,
       );
     }
     if (provider.id === builtinId) {

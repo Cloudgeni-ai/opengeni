@@ -108,7 +108,9 @@ describe("Amazon Bedrock Messages transport", () => {
       /^AWS4-HMAC-SHA256 Credential=AKIDPOD\/\d{8}\/eu-west-1\/bedrock\/aws4_request, SignedHeaders=[^,]*anthropic-version[^,]*, Signature=[0-9a-f]{64}$/u,
     );
     expect(call!.headers.get("x-amz-security-token")).toBe("pod-token");
-    expect(call!.headers.get("x-amz-content-sha256") ?? call!.headers.get("x-amz-date")).toBeTruthy();
+    expect(
+      call!.headers.get("x-amz-content-sha256") ?? call!.headers.get("x-amz-date"),
+    ).toBeTruthy();
     expect(call!.headers.has("x-api-key")).toBe(false);
     const body = JSON.parse(call!.body!);
     expect(body.model).toBe("eu.anthropic.claude-opus-5-5");
@@ -138,9 +140,9 @@ describe("Amazon Bedrock Messages transport", () => {
     );
     const events: any[] = [];
     for await (const event of model.getStreamedResponse(request())) events.push(event);
-    expect(events.some((event) => event.type === "output_text_delta" && event.delta === "Hello")).toBe(
-      true,
-    );
+    expect(
+      events.some((event) => event.type === "output_text_delta" && event.delta === "Hello"),
+    ).toBe(true);
     const done = events.find((event) => event.type === "response_done");
     expect(done.response.usage.outputTokens).toBe(4);
   });
@@ -148,11 +150,16 @@ describe("Amazon Bedrock Messages transport", () => {
   test("AWS errors keep their status, type and request id", async () => {
     const { fetch } = recorder(() =>
       json({ message: "Too many requests, please wait before trying again." }, 429, {
-        "x-amzn-errortype": "ThrottlingException:http://internal.amazon.com/coral/com.amazon.bedrock/",
+        "x-amzn-errortype":
+          "ThrottlingException:http://internal.amazon.com/coral/com.amazon.bedrock/",
         "x-amzn-requestid": "aws-throttle",
       }),
     );
-    const model = new AnthropicMessagesModel(bedrockProvider(), "eu.anthropic.claude-opus-5-5", fetch);
+    const model = new AnthropicMessagesModel(
+      bedrockProvider(),
+      "eu.anthropic.claude-opus-5-5",
+      fetch,
+    );
     const error: any = await model.getResponse(request()).catch((caught) => caught);
     expect(error.status).toBe(429);
     expect(error.request_id).toBe("aws-throttle");
@@ -162,11 +169,16 @@ describe("Amazon Bedrock Messages transport", () => {
 
   test("a refused beta is retried once without it and left out on that route afterwards", async () => {
     const { calls, fetch } = recorder(
-      () => json({ message: "invalid beta flag" }, 400, { "x-amzn-errortype": "ValidationException" }),
+      () =>
+        json({ message: "invalid beta flag" }, 400, { "x-amzn-errortype": "ValidationException" }),
       () => json(message),
       () => json(message),
     );
-    const model = new AnthropicMessagesModel(bedrockProvider(), "eu.anthropic.claude-opus-5-5", fetch);
+    const model = new AnthropicMessagesModel(
+      bedrockProvider(),
+      "eu.anthropic.claude-opus-5-5",
+      fetch,
+    );
     const thinking = request({ modelSettings: { reasoning: { effort: "medium" } } });
     await model.getResponse(thinking);
     expect(calls[0]!.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
@@ -179,38 +191,104 @@ describe("Amazon Bedrock Messages transport", () => {
     expect(calls[2]!.headers.has("anthropic-beta")).toBe(false);
   });
 
-  test("a refused forced tool choice falls back to auto", async () => {
+  test("only the beta flag Bedrock names is dropped, and only for that model", async () => {
     const { calls, fetch } = recorder(
       () =>
-        json({ message: "tool_choice type 'any' is not supported for this model" }, 400, {
+        json({ message: "Unsupported beta: context-1m-2025-08-07" }, 400, {
           "x-amzn-errortype": "ValidationException",
         }),
       () => json(message),
+      () => json(message),
     );
-    const model = new AnthropicMessagesModel(bedrockProvider(), "eu.anthropic.claude-opus-5-5", fetch);
-    await model.getResponse(
-      request({
-        modelSettings: { toolChoice: "required" },
-        tools: [
-          {
-            type: "function",
-            name: "lookup",
-            description: "Look up",
-            parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
-            strict: true,
-          },
-        ],
+    const provider = bedrockProvider();
+    const opus = new AnthropicMessagesModel(provider, "eu.anthropic.claude-opus-5-5", fetch);
+    await opus.getResponse(request());
+    const sent = calls[0]!.headers.get("anthropic-beta")!.split(",");
+    expect(sent).toContain("context-1m-2025-08-07");
+    const retried = calls[1]!.headers.get("anthropic-beta")?.split(",") ?? [];
+    expect(retried).toEqual(sent.filter((flag) => flag !== "context-1m-2025-08-07"));
+    const sonnet = new AnthropicMessagesModel(
+      provider,
+      "global.anthropic.claude-sonnet-5-5",
+      fetch,
+    );
+    await sonnet.getResponse(request());
+    // Another model keeps the flag.
+    expect(calls[2]!.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+    expect(calls).toHaveLength(3);
+  });
+
+  test("a refused forced tool choice is reported, not silently relaxed", async () => {
+    const { calls, fetch } = recorder(() =>
+      json({ message: "tool_choice type 'any' is not supported for this model" }, 400, {
+        "x-amzn-errortype": "ValidationException",
       }),
     );
+    const model = new AnthropicMessagesModel(
+      bedrockProvider(),
+      "eu.anthropic.claude-opus-5-5",
+      fetch,
+    );
+    const error: any = await model
+      .getResponse(
+        request({
+          modelSettings: { toolChoice: "required" },
+          tools: [
+            {
+              type: "function",
+              name: "lookup",
+              description: "Look up",
+              parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+                additionalProperties: false,
+              },
+              strict: true,
+            },
+          ],
+        }),
+      )
+      .catch((caught) => caught);
+    expect(error.status).toBe(400);
     expect(JSON.parse(calls[0]!.body!).tool_choice.type).toBe("any");
-    expect(JSON.parse(calls[1]!.body!).tool_choice.type).toBe("auto");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("AWS account ids are kept out of error messages", async () => {
+    const { fetch } = recorder(() =>
+      json(
+        {
+          message:
+            "The provided model identifier arn:aws:bedrock:eu-west-1:123456789012:application-inference-profile/x is invalid.",
+        },
+        400,
+        { "x-amzn-errortype": "ValidationException" },
+      ),
+    );
+    const model = new AnthropicMessagesModel(
+      bedrockProvider(),
+      "eu.anthropic.claude-opus-5-5",
+      fetch,
+    );
+    const error: any = await model.getResponse(request()).catch((caught) => caught);
+    expect(error.detail).toContain(
+      "arn:aws:bedrock:eu-west-1:<account>:application-inference-profile/x",
+    );
+    expect(error.detail).not.toContain("123456789012");
   });
 
   test("other refusals are not retried", async () => {
     const { calls, fetch } = recorder(() =>
-      json({ message: "Operation not allowed" }, 400, { "x-amzn-errortype": "ValidationException" }),
+      json({ message: "Operation not allowed" }, 400, {
+        "x-amzn-errortype": "ValidationException",
+      }),
     );
-    const model = new AnthropicMessagesModel(bedrockProvider(), "eu.anthropic.claude-opus-5-5", fetch);
+    const model = new AnthropicMessagesModel(
+      bedrockProvider(),
+      "eu.anthropic.claude-opus-5-5",
+      fetch,
+    );
     const error: any = await model.getResponse(request()).catch((caught) => caught);
     expect(error.status).toBe(400);
     expect(error.detail).toBe("invalid_request_error: ValidationException: Operation not allowed");
@@ -219,11 +297,13 @@ describe("Amazon Bedrock Messages transport", () => {
 });
 
 describe("per-user cost attribution", () => {
-  const sts = (key: string, expiresInMs = 3_600_000) => () =>
-    new Response(
-      `<AssumeRoleResponse><AssumeRoleResult><Credentials><AccessKeyId>${key}</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t-${key}</SessionToken><Expiration>${new Date(Date.now() + expiresInMs).toISOString()}</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>`,
-      { headers: { "content-type": "text/xml" } },
-    );
+  const sts =
+    (key: string, expiresInMs = 3_600_000) =>
+    () =>
+      new Response(
+        `<AssumeRoleResponse><AssumeRoleResult><Credentials><AccessKeyId>${key}</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t-${key}</SessionToken><Expiration>${new Date(Date.now() + expiresInMs).toISOString()}</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>`,
+        { headers: { "content-type": "text/xml" } },
+      );
 
   test("each person's requests sign with their own role session, cached until near expiry", async () => {
     const { calls, fetch } = recorder(
@@ -290,8 +370,56 @@ describe("per-user cost attribution", () => {
     const error: any = await withBedrockCaller("user_carol", () =>
       model.getResponse(request()),
     ).catch((caught) => caught);
-    expect(error.message).toContain(ROLE);
+    expect(error.message).toContain("role/opengeni-bedrock-users");
+    expect(error.message).not.toContain("123456789012");
     expect(error.message).toContain("AccessDenied");
+  });
+
+  test("an unreachable STS fails the request with a clear error", async () => {
+    const fetch = (async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    }) as unknown as typeof globalThis.fetch;
+    const model = new AnthropicMessagesModel(
+      bedrockProvider(true),
+      "eu.anthropic.claude-opus-5-5",
+      fetch,
+    );
+    const error: any = await withBedrockCaller("user_dan", () =>
+      model.getResponse(request()),
+    ).catch((caught) => caught);
+    expect(error.message).toContain("could not reach STS");
+    expect(error.message).toContain("TimeoutError");
+  });
+
+  test("concurrent people keep their own sessions, and no-subject work inside one uses the deployment", async () => {
+    const calls: Call[] = [];
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, headers: new Headers(init?.headers), body: init?.body as string });
+      if (url.includes("sts.")) {
+        const name = new URLSearchParams(init!.body as string).get("RoleSessionName")!;
+        await new Promise((resolve) => setTimeout(resolve, name.endsWith("a") ? 20 : 1));
+        return sts(`AKID${name.slice(-1).toUpperCase()}`)();
+      }
+      return json(message);
+    }) as typeof globalThis.fetch;
+    const model = new AnthropicMessagesModel(
+      bedrockProvider(true),
+      "eu.anthropic.claude-opus-5-5",
+      fetch,
+    );
+    await Promise.all([
+      withBedrockCaller("user-a", () => model.getResponse(request())),
+      withBedrockCaller("user-b", () => model.getResponse(request())),
+    ]);
+    await withBedrockCaller("user-a", () =>
+      withBedrockCaller(null, () => model.getResponse(request())),
+    );
+    const signedWith = calls
+      .filter((call) => call.url.includes("bedrock-runtime"))
+      .map((call) => /Credential=(\w+)\//u.exec(call.headers.get("authorization")!)![1]);
+    expect(signedWith.slice(0, 2).sort()).toEqual(["AKIDA", "AKIDB"]);
+    expect(signedWith[2]).toBe("AKIDPOD");
   });
 
   test("session names use the stable user id and never an email address", () => {
@@ -299,7 +427,10 @@ describe("per-user cost attribution", () => {
     expect(bedrockSessionName("3f1c2e4a-1234-4abc-9def-0123456789ab")).toBe(
       "og-3f1c2e4a-1234-4abc-9def-0123456789ab",
     );
-    for (const id of ["harry@example.com", "id with spaces", "x".repeat(80)]) {
+    expect(bedrockSessionName("user:3f1c2e4a-1234-4abc-9def-0123456789ab")).toBe(
+      "og-user-3f1c2e4a-1234-4abc-9def-0123456789ab",
+    );
+    for (const id of ["harry@example.com", "x".repeat(80)]) {
       const name = bedrockSessionName(id);
       expect(name).toMatch(/^og-[0-9a-f]{40}$/u);
       expect(name.length).toBeLessThanOrEqual(64);
@@ -327,7 +458,10 @@ describe("model discovery", () => {
             status: "ACTIVE",
             models: [
               { modelArn: "arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-5-5" },
-              { modelArn: "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-opus-5-5" },
+              {
+                modelArn:
+                  "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-opus-5-5",
+              },
             ],
           },
         ],
@@ -341,7 +475,10 @@ describe("model discovery", () => {
       if (url.pathname === "/foundation-models")
         return json({
           modelSummaries: [
-            { modelId: "anthropic.claude-haiku-4-5-20251001-v1:0", modelLifecycle: { status: "ACTIVE" } },
+            {
+              modelId: "anthropic.claude-haiku-4-5-20251001-v1:0",
+              modelLifecycle: { status: "ACTIVE" },
+            },
           ],
         });
       return json(pages[url.searchParams.get("type")!]);
@@ -379,8 +516,15 @@ describe("model discovery", () => {
     expect(bedrockApplicationProfileBaseId([arn("us-east-1"), arn("us-west-2")], "us-east-1")).toBe(
       "us.anthropic.claude-opus-5-5",
     );
-    expect(bedrockApplicationProfileBaseId([arn("us-east-1"), arn("eu-west-1")], "us-east-1")).toBe(
-      "global.anthropic.claude-opus-5-5",
-    );
+    expect(
+      bedrockApplicationProfileBaseId(
+        [arn("ap-northeast-1"), arn("ap-northeast-3")],
+        "ap-northeast-1",
+      ),
+    ).toBe("jp.anthropic.claude-opus-5-5");
+    // Regions in several geographies, without a global model ARN, are unknown.
+    expect(
+      bedrockApplicationProfileBaseId([arn("us-east-1"), arn("eu-west-1")], "us-east-1"),
+    ).toBeUndefined();
   });
 });

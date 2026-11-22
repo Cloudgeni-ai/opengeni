@@ -1902,6 +1902,13 @@ describe("deployment contract", () => {
       "OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN=arn:aws:iam::123456789012:role/opengeni-users",
     );
     expect(bedrock.missingEnvVars).not.toContain("OPENGENI_OPENAI_API_KEY");
+    // An OpenAI model still allowed next to Bedrock still needs the key.
+    const mixed = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_BEDROCK_REGION: "eu-west-1",
+      OPENGENI_OPENAI_MODEL: "bedrock/eu.anthropic.claude-opus-5-5",
+      OPENGENI_OPENAI_ALLOWED_MODELS: "bedrock/eu.anthropic.claude-opus-5-5,gpt-5.5",
+    });
+    expect(mixed.missingEnvVars).toContain("OPENGENI_OPENAI_API_KEY");
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.missingEnvVars).toContain("OPENGENI_OPENAI_API_KEY");
     for (const key of BEDROCK_PASSTHROUGH_ENV) expect(absent.runtimeEnv).not.toContain(`${key}=`);

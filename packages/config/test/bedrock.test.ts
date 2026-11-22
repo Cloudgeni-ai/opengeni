@@ -10,6 +10,7 @@ import {
   configuredProviders,
   getSettings,
   setBedrockDiscoveredModels,
+  validateModelCatalogSettings,
 } from "../src/index";
 import { testSettings } from "@opengeni/testing/settings";
 
@@ -28,9 +29,16 @@ describe("Bedrock model ids", () => {
       "claude-opus-5-5",
     ],
     ["arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-5-5", "claude-opus-5-5"],
+    ["anthropic.claude-sonnet-4-6-v1:0:200k", "claude-sonnet-4-6"],
   ])("%s serves %s", (id, base) => {
     expect(bedrockClaudeBaseModelId(id)).toBe(base);
     expect(claudeNativeModelProfile(id)).toBe(claudeNativeModelProfile(base));
+    if (claudeNativeModelProfile(base)) expect(claudeNativeModelProfile(id)).toBeDefined();
+  });
+
+  test("Opus and Sonnet 5.5 profiles resolve to their native Claude profile", () => {
+    for (const id of ["eu.anthropic.claude-opus-5-5", "global.anthropic.claude-sonnet-5-5"])
+      expect(claudeNativeModelProfile(id)).toBeDefined();
   });
 
   test("non-Claude ids and unresolved application profiles have no Claude base", () => {
@@ -173,6 +181,68 @@ describe("Bedrock provider", () => {
     });
   });
 
+  test("an application profile is offered once its base is known, from discovery or configuration", () => {
+    expect(bedrockModels(settings({ bedrockModels: APP })).length).toBe(0);
+    const configured = bedrockModels(
+      settings({ bedrockModels: `${APP}=global.anthropic.claude-opus-5-5` }),
+    );
+    expect(configured).toHaveLength(1);
+    expect(configured[0]).toMatchObject({
+      id: "bedrock/application-inference-profile/a1b2c3",
+      upstreamModelId: APP,
+      residency: { geography: "global" },
+    });
+    expect(configured[0]!.pricing?.default.inputMicrosPerMillionTokens).toBe(4_000_000);
+  });
+
+  test("a Bedrock-only deployment validates without an OpenAI key", () => {
+    const value = testSettings({
+      bedrockRegion: "eu-west-1",
+      openaiApiKey: undefined,
+      openaiModel: "bedrock/eu.anthropic.claude-opus-5-5",
+      openaiAllowedModels:
+        "bedrock/eu.anthropic.claude-opus-5-5,bedrock/global.anthropic.claude-sonnet-5-5",
+    });
+    expect(validateModelCatalogSettings(value, {}).map((model) => model.id)).toContain(
+      "bedrock/eu.anthropic.claude-opus-5-5",
+    );
+  });
+
+  test("the provider registry JSON cannot claim Bedrock signing", () => {
+    const json = (provider: Record<string, unknown>) =>
+      JSON.stringify([
+        {
+          api: "anthropic-messages",
+          baseUrl: "https://example.com/v1",
+          apiKey: "k",
+          models: [{ id: "claude-opus-5-5" }],
+          ...provider,
+        },
+      ]);
+    expect(() =>
+      validateModelCatalogSettings(
+        testSettings({
+          modelProvidersJson: json({ id: "other", bedrock: { region: "eu-west-1" } }),
+        }),
+        {},
+      ),
+    ).toThrow("OPENGENI_BEDROCK_");
+    expect(
+      configuredProviders(
+        testSettings({
+          modelProvidersJson: json({ id: "other", bedrock: { region: "eu-west-1" } }),
+        }),
+      ).find((provider) => provider.id === "other")?.bedrock,
+    ).toBeUndefined();
+    // The id is free while Bedrock is off.
+    expect(() =>
+      validateModelCatalogSettings(
+        testSettings({ modelProvidersJson: json({ id: "bedrock" }) }),
+        {},
+      ),
+    ).not.toThrow();
+  });
+
   test("settings reject a malformed region or attribution role", () => {
     const env = (values: Record<string, string>) => {
       const saved = { ...process.env };
@@ -184,6 +254,13 @@ describe("Bedrock provider", () => {
       }
     };
     expect(() => env({ OPENGENI_BEDROCK_REGION: "europe" })).toThrow("AWS region");
+    expect(() => env({ OPENGENI_BEDROCK_REGION: "cn-north-1" })).toThrow("China");
+    expect(() =>
+      env({
+        OPENGENI_BEDROCK_REGION: "eu-west-1",
+        OPENGENI_BEDROCK_ENDPOINT_URL: "http://bedrock.internal",
+      }),
+    ).toThrow("https://");
     expect(() =>
       env({ OPENGENI_BEDROCK_REGION: "eu-west-1", OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN: "x" }),
     ).toThrow("IAM role ARN");
