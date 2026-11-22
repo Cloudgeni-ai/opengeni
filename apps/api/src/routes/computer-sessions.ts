@@ -5,6 +5,10 @@ import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
+  agentCallerSessionId,
+  connectedInteractionRouteSession,
+} from "../connected-interaction-route";
+import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
   sandboxFleetLimits,
@@ -1804,7 +1808,7 @@ export function registerComputerSessionRoutes(
           callerId !== record.sourceSessionId
             ? await requireSourceSession(deps, workspaceId, callerId)
             : null;
-        const routed = connectedDesktopRouteSession(machineId, sourceSession, caller);
+        const routed = connectedInteractionRouteSession(machineId, sourceSession, caller);
         if (!routed) {
           throw sourcePlacementElsewhereApiError(
             "computer_session",
@@ -2119,26 +2123,6 @@ export function registerComputerSessionRoutes(
       computerSessionId: requireUuidParam(context, "computerSessionId"),
     };
   }
-}
-
-/** The chat whose route reaches a Desktop on Connected Machine `machineId`:
- * the chat that opened it while that chat works there, or else the agent
- * chat now using it from that machine. Null when neither works there. */
-export function connectedDesktopRouteSession<S extends { activeSandboxId?: string | null }>(
-  machineId: string,
-  source: S | null,
-  caller: S | null,
-): S | null {
-  if (source?.activeSandboxId === machineId) return source;
-  if (caller?.activeSandboxId === machineId) return caller;
-  return null;
-}
-
-/** The agent chat a grant acts for, or null for a person or service. */
-function agentCallerSessionId(grant: AccessGrant): string | null {
-  if (grant.principalKind !== "agent_attempt") return null;
-  const sessionId = grant.metadata?.["sessionId"];
-  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
 }
 
 function sourcePlacementElsewhereApiError(
