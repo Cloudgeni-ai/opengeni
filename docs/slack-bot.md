@@ -679,8 +679,10 @@ grants administration of an otherwise inaccessible home workspace.
 An organization administrator chooses **Available in Opengeni**: the installation
 workspace, selected workspaces, or all workspaces in the organization. Sharing
 grants only bot-tool access, never personal credentials, channel membership,
-inbound routing, or session visibility. Existing installations retain their saved
-sharing setting. The installation workspace retains its own local connection.
+inbound conversation routing, or session visibility; the one inbound effect is
+that automations there can listen to the bot's channel events (below). Existing
+installations retain their saved sharing setting. The installation workspace
+retains its own local connection.
 
 `GET /v1/workspaces/:workspaceId/connections/slack-bot/available` returns
 credential-free bot metadata for an authorized target workspace. The installation's
@@ -696,6 +698,50 @@ posting access. Connection-scoped knowledge settings are under **More settings**
 reaction, notice and publication settings live under **Workspace automation** on
 the inventory, outside any selected bot. Publication names the configured Slack
 workspace and channel; reaction selection groups locally installed bots.
+
+### Slack events for automations
+
+With event triggers on (`OPENGENI_EVENT_TRIGGERS_ENABLED`), **Add a source →
+Slack** adds a workspace's Slack event source. It works in the bot's home
+workspace and in any workspace the organization currently shares the bot with;
+a workspace with neither gets "Connect Slack to this workspace first". Where
+several bots are available, each Add takes the next Slack team without a
+source, a bot installed there first; one source per Slack team. Members of a
+shared workspace see that team's channel events there, as its bot tools could
+already read those channels.
+
+Slack sends every callback to the home installation. After verifying it, the
+events receiver records it into the home workspace's Slack source, as before,
+and into the Slack source of every other workspace the live share covers: the
+bot must still be the active, verified install, sharing must be on, and the
+saved workspace selection (or all workspaces) must include that workspace. The
+home workspace's delivery is recorded before Slack is acknowledged; the shared
+workspaces' are not waited for. One SQL call per callback finds their sources
+with each source's status, and their deliveries are then written a few at a
+time. The call is `opengeni_private.list_shared_slack_event_sources_v2`
+(migration `1552_shared_slack_event_sources_v2.sql`): a SECURITY DEFINER read,
+callable only from the home workspace's own RLS context, that returns nothing
+unless the bot is the active verified install with sharing on, and otherwise
+reads every covered workspace's source for that Slack team in one probe of the
+partial index `event_sources_slack_team_idx` (migration 1551), so its cost does
+not grow with the number of workspaces in the organization. It returns only
+workspace, source id, status and status reason; `event_sources` stays FORCE RLS
+and the runtime role gains no read (the definer opens the owner inventory
+window for its own statement, and its owner-only policy covers Slack rows
+only). Until a later migration grants the runtime EXECUTE on it (a release
+that doesn't know a definer refuses a runtime grant on it), the runtime keeps
+calling 1538's `list_shared_slack_event_sources_v1`, a SECURITY INVOKER read
+under each covered workspace's own RLS context. Turning sharing off or removing a
+workspace from it stops delivery from the next callback; its source stays,
+reads as blocked with "The Slack bot isn't shared with this workspace anymore"
+(code `connector_removed`, nothing stored), and reads as active and receives
+again if the bot is shared with it again. A failure for one workspace is
+logged and never stops the others or the conversation handling. Direct
+messages are never recorded anywhere. Self-hosted deployments behave the same.
+
+Each Slack source hears only the channels the bot is in. The events, their types
+and own-event marking are described in
+[Automations and events](design/automations-and-events.md).
 
 ## Scheduled and interactive bot posting
 

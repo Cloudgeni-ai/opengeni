@@ -2,6 +2,7 @@ import {
   WorkspaceArtifactHtml,
   WorkspaceArtifactRequestedTools,
   WorkspaceArtifactSourceBundle,
+  type SiteAssetManifest,
   type ToolGatewayIdentity,
   type WorkspaceArtifactSourceBundle as WorkspaceArtifactSourceBundleValue,
   type WorkspaceArtifactVersion,
@@ -20,6 +21,8 @@ export type PreparedWorkspaceArtifactContent = {
   sourceSha256: null;
   sourceSizeBytes: number | null;
   requestedTools?: ToolGatewayIdentity[];
+  /** Asset files of a multi-file build (uploads only); null for a single-file app. */
+  assetManifest?: SiteAssetManifest | null;
   persistContent: () => Promise<void>;
   discardContent: () => Promise<void>;
 };

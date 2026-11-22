@@ -1,5 +1,99 @@
 # @opengeni/api-router
 
+## 6.36.0
+
+### Minor Changes
+
+- 27832fd: Upgrade an existing app from a newer package of it: a dry run returns the plan (new version, tools, collections, migrations, queries and syncs), and applying it publishes the package's version as a new version of the same app and runs only what is new. Nothing is deleted; destructive changes need `allowDestructive: true` and conflicts stop the upgrade. Adds `POST /v1/workspaces/:workspaceId/published-artifacts/:appId/package/upgrade`, `upgradeAppPackage` in the SDK, the `app_upgrade` agent tool and Upgrade from package in the app's menu. Package demo data now carries the app's shared files (`demoData.files`) and SQL blob values (`{ "$base64": "…" }`), and package files `app_export` stores are deleted after 24 hours. Older packages stay readable. See docs/app-packages.md.
+- 92fb3ca: The chat's side panel shows only the essentials. Tabs run across the top; in the app the strip shows the PR when one is linked, Changes when there are changes and Artifacts when the chat has some; a "+" menu holds everything else (Files, Terminal, Browser, Desktop, Linked, expand and hide), and a tab opened from it stays on the strip for that chat until closed. Switching tabs keeps each panel's scroll and selection and no longer re-renders every panel. A linked GitHub pull request gets a PR tab: title, one status line, one action (Merge, which asks the agent, or View on GitHub) and a menu for Description, Discussion, Commits and Checks, read from the new `GET .../sessions/:id/links/:linkId/pull-request` route (`client.getSessionPullRequest`). Linked shows only when something else is linked. A chat with nothing to show starts with the panel closed; new content puts a small dot on the panel toggle, and an opened empty panel offers Files, Terminal and Browser (`WorkspaceDock` `landing`/`onStripEmptied`/`headerAccessoryPinned`, `openTabRequest.expand`).
+
+  Changes has one quiet header per file, a folder tree with +/− change bars in the app (`WorkbenchChanges` `navigation="tree"`), and one view menu (comparison and unified/split), and switching files no longer stalls: diff highlighting can run in web workers (`enablePierreDiffs({ worker })` or `enableWorkbench({ diffsWorker })`), and file rows and sections no longer re-render on every scroll or stream update. `WorkspaceTab.optional`, the `essentials` and `tabScope` dock props, `WorkbenchChanges` `comparison`/`hideSummary`/`navigation` and `SandboxWorkspace` `tabVisibility` are new and additive; embedders keep today's tabs by default.
+
+  Opening an app or artifact shows one way back (the window-bar breadcrumb) and restores the list's scroll position on return. The Agents page has one **Add agent** menu at the top with the ready-made agents, a blank agent and import.
+
+### Patch Changes
+
+- 581d1cc: A browser on a Connected Machine can be used by another agent chat working on that machine (a child given its parent's browser, say) after the chat that opened it has moved to another machine, as a Desktop already can. Before, opening, resuming, controlling or saving it was refused with "this task now runs on another machine", even though the calling chat was on the browser's machine, because only the opening chat's route counted. The request now goes through the calling chat's own route when it works on that machine, authorized for that chat. Requests from a chat on another machine are refused as before.
+- 1608c81: When computers are already connected, the Connected Machine card result now tells the agent which of the person's computers are connected and their state, instead of a generic "machines are connected" line. It no longer promises that the person can connect another computer from the card, since that depends on the app and the device they're on, and it tells the agent that a computer the person means but isn't listed is not connected. The Chrome extension it names is the deployment's own, linked only when the link is for that extension.
+- 7b6eb1d: Log the content-free cause of a browser or computer create that the controller refused, so operators can see the driver error class and code frame without the machine's own logs.
+- c5f3f57: A browser or desktop placed on a session's own managed box stays reachable while that session routes to a Connected Machine. Sessions whose home is a machine used to follow the selected machine for every direct operation, so reopening such a browser failed with "home placement is unavailable" even though its box still existed. Requests for a controller placed on the managed box now go to that box, the same way they already do when no machine is selected.
+- 55539f1: Show where recordings spend time between Stop and the transcript. The SDK measures storage uploads and finalize, React measures transcript delivery and composer insertion, and the API and worker emit recording stage timings with a shared recording key. Transcript long polling reports its intentional wait separately from active API work.
+- f2c07c2: A workspace that its organization shares an Opengeni Slack bot with can now add Slack as an automation event source, and the bot's channel events reach that workspace's automations as well as the home workspace's. Delivery follows the live sharing setting: turning sharing off or leaving the workspace out stops new events there. Migration 1538 adds the one lookup each Slack callback makes for this; the shared workspaces' deliveries never delay Slack's acknowledgement. A workspace's Slack source whose bot is no longer shared with it reads as blocked with "The Slack bot isn't shared with this workspace anymore" until the bot is shared again.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- 684587a: Every app opened in the workspace now offers its Opengeni chat beside it: the chat opens by default wherever the window has room for both (until you close it, which is remembered per app), and a closed chat comes back from a labelled Chat button in the app's header or the macOS window bar. A new chat there starts on the app's configured model when the workspace allows it (`SitePublicationLink.agentModel`, `useNewConversation({ defaultModel })`). The app header's publication control reads **Share**, and a published app shows a loading screen until it has loaded. "Let people chat" now says the app's own chat uses the agent, and the apps guidance has the agent add a chat that suits the app when chat is turned on.
+
+  The workbench tab strip shows Changes, Files, Terminal, Browser and Desktop directly while they fit and moves only the ones that don't into "+"; Settings and Debug stay in "+". This changes `WorkspaceTab.optional`: an optional tab now fills spare room on the strip. Add `inMenu: true` to keep a tab in "+" as before. The strip has one maximize/restore button (Esc also restores), and the session header's Pin moved into its … menu.
+
+  The Files tab leaves tool and cache folders (`.bun`, `.cache`, `.npm`, `node_modules` and the like, and the sandbox home's dot folders) out of the tree by default; one Show hidden files toggle in its toolbar brings them back, and opening a file inside one shows them in that view. `hideToolFolders={false}` on `SandboxWorkspace` or `SandboxFiles` turns this off.
+
+- Updated dependencies [f2c07c2]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [9cfc4b7]
+- Updated dependencies [837e58f]
+- Updated dependencies [26b0190]
+- Updated dependencies [e765d11]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [b419673]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [23e52db]
+- Updated dependencies [53320fa]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [53320fa]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [0b36a4b]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/core@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/runtime@6.36.0
+  - @opengeni/db@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/artifact-tool@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/decisions@6.36.0
+  - @opengeni/documents@6.36.0
+  - @opengeni/events@6.36.0
+  - @opengeni/github@6.36.0
+  - @opengeni/interaction@6.36.0
+  - @opengeni/storage@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/vaults-bitwarden@6.36.0
+  - @opengeni/vaults-keeper@6.36.0
+  - @opengeni/vaults-onepassword@6.36.0
+  - @opengeni/vaults-protonpass@6.36.0
+  - @opengeni/agent-proto@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes

@@ -154,6 +154,22 @@ const ICONS: Record<string, string> = {
   gauge: "GaugeIcon",
   "circle-x": "XCircleIcon",
   "circle-check": "CheckCircle2Icon",
+  // The sidebar item icons (SIDEBAR_ITEM_ICONS) not already above.
+  bookmark: "BookmarkIcon",
+  calendar: "CalendarIcon",
+  "chart-column": "ChartColumnIcon",
+  clock: "ClockIcon",
+  flag: "FlagIcon",
+  heart: "HeartIcon",
+  house: "HouseIcon",
+  "layout-dashboard": "LayoutDashboardIcon",
+  lightbulb: "LightbulbIcon",
+  "list-checks": "ListChecksIcon",
+  map: "MapIcon",
+  "notebook-pen": "NotebookPenIcon",
+  package: "PackageIcon",
+  star: "StarIcon",
+  store: "StoreIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};

@@ -150,6 +150,7 @@ import {
   withBillingOriginOverride,
   getOrganizationMcpConnectionSettings,
   updateOrganizationMcpConnectionSettings,
+  admitMcpConnectionRateLimit,
   type OrganizationMcpConnectionSettings,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
@@ -219,6 +220,7 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
+import { createGitHubSkillSourceClient, readSkillRepository } from "@opengeni/core";
 import {
   eventTriggersEnabled,
   PersonalWorkspacesOffError,
@@ -330,7 +332,7 @@ import {
 } from "./mcp-oauth";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
 import { claimsStoredApproval } from "./mcp/stored-approval-claim";
-import { createConnectionRateLimiter } from "./mcp/connection-rate-limit";
+import { createSharedConnectionRateLimiter } from "./mcp/connection-rate-limit";
 import type { ActionAuditProvenance } from "./http/disconnect-audit-actor";
 import {
   CodemodeAuthorityError,
@@ -367,6 +369,7 @@ import {
 } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
+import { registerAppAssetRoutes } from "./routes/app-assets";
 import { registerSessionAvatarImageRoutes } from "./routes/session-avatar-image";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
@@ -436,6 +439,7 @@ import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSessionShareLinkRoutes } from "./routes/session-share-links";
 import { registerSessionLinkRoutes } from "./routes/session-links";
+import { registerSessionLinkPullRequestRoutes } from "./routes/session-link-pull-request";
 import {
   archivedSessionImportErrorResponse,
   isSessionHistoryImportRequest,
@@ -457,12 +461,14 @@ import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
 import { registerAppSyncRoutes } from "./routes/app-sync";
+import { registerAppWebhookRoutes } from "./routes/app-webhooks";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerSiteSqlRoutes } from "./routes/site-sql";
 import { registerAppPackageRoutes } from "./routes/app-packages";
+import { registerAppTemplateRoutes } from "./routes/app-templates";
 import { setAppSyncHooks } from "./app-packages/syncs";
 import { APP_PACKAGE_SYNC_HOOKS } from "./app-sync/package-hooks";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
@@ -1993,15 +1999,23 @@ export function createAppComposition(
     );
   });
 
-  // Per connection: calls in general, and new delegated chats.
-  const organizationMcpCallLimiter = createConnectionRateLimiter({
-    capacity: 120,
-    refillPerSecond: 2,
-  });
-  const organizationMcpDelegateLimiter = createConnectionRateLimiter({
-    capacity: 20,
-    refillPerSecond: 1 / 30,
-  });
+  // Per connection: calls in general, and new delegated chats. Counted in
+  // Postgres so every API process shares one budget per connection.
+  const sharedMcpLimiter = (budget: string, capacity: number, refillPerSecond: number) =>
+    createSharedConnectionRateLimiter({
+      capacity,
+      refillPerSecond,
+      admitShared: (input) => admitMcpConnectionRateLimit(routeDeps.db, { ...input, budget }),
+      onFallback: (error) =>
+        observability.warn("MCP rate limit fell back to this process", {
+          budget,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    });
+  const organizationMcpCallLimiter = sharedMcpLimiter("call", 120, 2);
+  const organizationMcpDelegateLimiter = sharedMcpLimiter("delegate", 20, 1 / 30);
+  // skills_sync from a repository reads public GitHub, like a Skill import.
+  const skillRepositoryReader = createGitHubSkillSourceClient(routeDeps.settings);
   // The organization MCP server: every public action, as a person who signed
   // in (capped by their connection's access setting) or as an organization
   // API key. Each action runs the real route in this process.
@@ -2106,6 +2120,8 @@ export function createAppComposition(
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // The organization whose account context holds the shared bucket.
+    const rateAccountId = caller.kind === "person" ? caller.accountId : organizationKeyAccountId!;
     // This reaches every workspace of the organization: EU-only content stays
     // in EU-only workspaces when another Opengeni workspace calls.
     await requireCallingWorkspaceContentExchange(routeDeps.db, c.req.raw, {
@@ -2146,6 +2162,8 @@ export function createAppComposition(
         ? {
             outsideAgent: {
               appData: connectionSettings?.settings.appDataAccess ?? "viewer",
+              // Its writes are recorded as this connected agent, not as the person.
+              ...(connectionSettings ? { connectionId: connectionSettings.id } : {}),
             },
           }
         : {}),
@@ -2165,11 +2183,13 @@ export function createAppComposition(
             },
           }
         : {}),
-      admit: (toolName) =>
-        Math.max(
-          organizationMcpCallLimiter.admit(rateKey),
-          toolName === "delegate" ? organizationMcpDelegateLimiter.admit(rateKey) : 0,
-        ),
+      readSkillRepository: async (url) => await readSkillRepository(url, skillRepositoryReader),
+      admit: async (toolName) => {
+        const bucket = { accountId: rateAccountId, key: rateKey };
+        const call = await organizationMcpCallLimiter.admit(bucket);
+        if (call > 0 || toolName !== "delegate") return call;
+        return await organizationMcpDelegateLimiter.admit(bucket);
+      },
       dispatch: async (request) => {
         stampRequestBillingOrigin(
           request,
@@ -2880,12 +2900,14 @@ export function createAppComposition(
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
   registerAppSyncRoutes(app, routeDeps);
+  registerAppWebhookRoutes(app, routeDeps);
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
   registerSiteSqlRoutes(app, routeDeps);
   setAppSyncHooks(APP_PACKAGE_SYNC_HOOKS);
   registerAppPackageRoutes(app, routeDeps);
+  registerAppTemplateRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
@@ -2902,6 +2924,7 @@ export function createAppComposition(
   registerApiIntegrationRoutes(app, routeDeps);
   registerIntegrationFacetRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
+  registerAppAssetRoutes(app, routeDeps);
   registerSessionAvatarImageRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
@@ -2922,6 +2945,7 @@ export function createAppComposition(
   registerSessionShareLinkRoutes(app, routeDeps);
   // The Linked panel, after the session module for the same reason.
   registerSessionLinkRoutes(app, routeDeps);
+  registerSessionLinkPullRequestRoutes(app, routeDeps);
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
@@ -3831,6 +3855,10 @@ const routeLabelPatterns: Array<{
   { pattern: /^\/v1\/webhooks\/events\/[^/]+$/, label: "/v1/webhooks/events/:routeId" },
   { pattern: /^\/v1\/webhooks\/github$/, label: "/v1/webhooks/github" },
   {
+    pattern: /^\/v1\/webhooks\/apps\/[^/]+\/[^/]+$/,
+    label: "/v1/webhooks/apps/:workspaceId/:webhookId",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
     label: "/v1/workspaces/:workspaceId/mcp",
   },
@@ -4526,6 +4554,7 @@ const routeLabelPatterns: Array<{
     label: "/v1/git/personal/:routeId/git-receive-pack",
   },
   { pattern: /^\/v1\/catalog-assets\/.+$/, label: "/v1/catalog-assets/*" },
+  { pattern: /^\/v1\/app-assets\/.+$/, label: "/v1/app-assets/*" },
   {
     pattern: /^\/v1\/public\/session-avatars\/[^/]+$/,
     label: "/v1/public/session-avatars/:file",

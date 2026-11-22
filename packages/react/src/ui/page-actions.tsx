@@ -20,11 +20,17 @@ export function MoreMenu({
   label,
   quiet = false,
   disabled,
+  onCloseAutoFocus,
   children,
 }: {
   label: string;
   quiet?: boolean | undefined;
   disabled?: boolean | undefined;
+  /**
+   * As the menu closes it returns focus to its button; call `preventDefault`
+   * when the chosen item focuses something else (an inline rename field).
+   */
+  onCloseAutoFocus?: ((event: Event) => void) | undefined;
   children: ReactNode;
 }) {
   return (
@@ -44,7 +50,7 @@ export function MoreMenu({
           <MoreHorizontalIcon />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-48">
+      <DropdownMenuContent align="end" className="min-w-48" onCloseAutoFocus={onCloseAutoFocus}>
         {children}
       </DropdownMenuContent>
     </DropdownMenu>

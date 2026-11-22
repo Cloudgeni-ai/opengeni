@@ -13,7 +13,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   agentPromptResourcesFor,
   buildOpenGeniAgent,
-  manifestWithoutFileResourceEntries,
+  buildManifest,
   workspaceFilesystemLayout,
 } from "../src/index";
 
@@ -46,7 +46,8 @@ type PreparedSandboxAgent = {
 };
 
 // The SDK's own preparation step (patched): it renders the remote mount policy
-// and filesystem layout sections from the agent's instruction manifest.
+// and filesystem layout sections from the manifest unless the agent turns
+// them off (`manifestInstructions: false`), as Opengeni's agent does.
 const { prepareSandboxAgent } = (await import(
   new URL(
     "../node_modules/@openai/agents-core/dist/sandbox/runtime/agentPreparation.mjs",
@@ -64,9 +65,10 @@ async function sentInstructions(
   resources: ResourceRef[],
   sessionManifest?: Manifest,
   placement: { activeSandboxBackend?: "selfhosted"; sandboxWorkspaceRoot?: string } = {},
+  kind: "configured agent" | "plain chat" = "configured agent",
 ): Promise<{ text: string; runtimeManifest: Manifest }> {
   const agent = buildOpenGeniAgent(settings, resources, {
-    agentConfig,
+    ...(kind === "configured agent" ? { agentConfig } : {}),
     ...placement,
   }) as unknown as {
     defaultManifest: Manifest;
@@ -120,26 +122,42 @@ describe("file attachments and the cached instruction prefix", () => {
     }
   });
 
-  test("moving the session to another machine keeps the instructions; only the layout changes", async () => {
-    const managed = await sentInstructions([REPOSITORY]);
-    const linux = await sentInstructions([REPOSITORY], undefined, {
-      activeSandboxBackend: "selfhosted",
-      sandboxWorkspaceRoot: "/home/user",
+  for (const kind of ["configured agent", "plain chat"] as const) {
+    test(`${kind}: moving the session between machines keeps the instructions byte-identical`, async () => {
+      const managed = await sentInstructions([REPOSITORY], undefined, {}, kind);
+      const linux = await sentInstructions(
+        [REPOSITORY],
+        undefined,
+        { activeSandboxBackend: "selfhosted", sandboxWorkspaceRoot: "/home/user" },
+        kind,
+      );
+      const mac = await sentInstructions(
+        [REPOSITORY],
+        undefined,
+        { activeSandboxBackend: "selfhosted", sandboxWorkspaceRoot: "/Users/user" },
+        kind,
+      );
+      // Managed sandbox, one machine and another: one system prompt.
+      expect(linux.text).toBe(managed.text);
+      expect(mac.text).toBe(managed.text);
+      for (const sent of [managed, linux, mac]) {
+        expect(sent.text).not.toContain("The filesystem layout is");
+        expect(sent.text).not.toContain("/home/user");
+        expect(sent.text).not.toContain("/Users/user");
+        expect(sent.text).toContain("<opengeni_workspace_filesystem>");
+      }
+      // The box still applies each machine's own root.
+      expect(managed.runtimeManifest.root).toBe("/workspace");
+      expect(linux.runtimeManifest.root).toBe("/home/user");
+      expect(mac.runtimeManifest.root).toBe("/Users/user");
     });
-    const mac = await sentInstructions([REPOSITORY], undefined, {
-      activeSandboxBackend: "selfhosted",
-      sandboxWorkspaceRoot: "/Users/user",
-    });
-    // Machines differ only by their root, which is no longer in the prompt.
-    expect(mac.text).toBe(linux.text);
-    expect(linux.text).not.toContain("/home/user");
-    for (const sent of [managed, linux]) {
-      expect(sent.text).not.toContain("The filesystem layout is");
-      expect(sent.text).toContain("<opengeni_workspace_filesystem>");
-    }
-    expect(linux.runtimeManifest.root).toBe("/home/user");
+  }
 
-    expect(workspaceFilesystemLayout(settings, [REPOSITORY])).toStartWith("/workspace");
+  test("the layout describes the workspace the turn's box applies", () => {
+    // Managed sandbox: /workspace with its repositories.
+    const managed = workspaceFilesystemLayout(settings, [REPOSITORY]);
+    expect(managed).toStartWith("/workspace\n");
+    expect(managed).toContain("repos/");
     // The system prompt describes the deployment's managed sandboxes, so the
     // layout of a Connected Machine says what working there means.
     const onMachine = workspaceFilesystemLayout(settings, [REPOSITORY], {
@@ -147,6 +165,8 @@ describe("file attachments and the cached instruction prefix", () => {
       sandboxWorkspaceRoot: "/home/user",
     });
     expect(onMachine).toStartWith("/home/user\n\n# Connected Machine\n\n");
+    // Opengeni puts nothing on the person's own machine: the layout is its root.
+    expect(onMachine!.split("\n\n")[0]).toBe("/home/user");
     expect(onMachine).toContain("Guidance about managed sandboxes does not apply on this machine");
     expect(onMachine).not.toContain("sandbox:/home/u/proj");
     expect(
@@ -163,12 +183,27 @@ describe("file attachments and the cached instruction prefix", () => {
         sandboxWorkspaceRoot: "/home/user",
       }),
     ).toBe("/home/user");
-    expect(
+    // A Connected Machine that reported no root has no workspace to describe;
+    // the agent build refuses it the same way.
+    expect(() =>
       workspaceFilesystemLayout(settings, [REPOSITORY], { activeSandboxBackend: "selfhosted" }),
-    ).toBeNull();
+    ).toThrow("reported workspace root");
+    expect(() =>
+      buildOpenGeniAgent(settings, [REPOSITORY], {
+        agentConfig,
+        activeSandboxBackend: "selfhosted",
+      }),
+    ).toThrow("reported workspace root");
+    // No sandbox: no layout.
     expect(workspaceFilesystemLayout({ ...settings, sandboxBackend: "none" }, [REPOSITORY])).toBe(
       null,
     );
+    expect(
+      workspaceFilesystemLayout({ ...settings, sandboxBackend: "none" }, [REPOSITORY], {
+        activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/home/user",
+      }),
+    ).toBeNull();
   });
 
   test("files from earlier turns in a resumed sandbox's manifest stay out too", async () => {
@@ -176,35 +211,28 @@ describe("file attachments and the cached instruction prefix", () => {
     const agent = buildOpenGeniAgent(settings, [REPOSITORY], { agentConfig }) as unknown as {
       defaultManifest: Manifest;
     };
+    // A file mounted from object storage at its own path on an earlier turn.
+    const earlierMount = buildManifest(settings, [
+      { kind: "file", fileId: EARLIER_FILE_ID, mountPath: "inputs/report" },
+    ]).entries["inputs/report"];
+    expect((earlierMount as { type: string }).type).toMatch(/_mount$/);
     const resumed = new Manifest({
       ...agent.defaultManifest,
       entries: {
         ...agent.defaultManifest.entries,
         [`.opengeni/files/${EARLIER_FILE_ID}`]: dir(),
+        "inputs/report": earlierMount,
       },
     });
-    expect((await sentInstructions([REPOSITORY], resumed)).text).toBe(withoutFile.text);
+    const sent = await sentInstructions([REPOSITORY], resumed);
+    expect(sent.text).toBe(withoutFile.text);
+    expect(sent.text).not.toContain("# Sandbox remote mount policy");
+    expect(sent.text).not.toContain("inputs/report");
   });
 
   test("prompt resources ignore per-turn files", () => {
     expect(agentPromptResourcesFor(settings, [REPOSITORY, FILE], {})).toEqual(
       agentPromptResourcesFor(settings, [REPOSITORY], {}),
     );
-  });
-
-  test("the instruction manifest drops only file resource entries", () => {
-    const custom: ResourceRef = { kind: "file", fileId: FILE_ID, mountPath: "inputs/report" };
-    const manifest = new Manifest({
-      entries: {
-        "inputs/report": dir(),
-        [`.opengeni/files/${EARLIER_FILE_ID}`]: dir(),
-        "repos/github.com/acme/app": dir(),
-      },
-    });
-    expect(
-      Object.keys(manifestWithoutFileResourceEntries(manifest, [custom, REPOSITORY]).entries),
-    ).toEqual(["repos/github.com/acme/app"]);
-    const unchanged = new Manifest({ entries: { "repos/github.com/acme/app": dir() } });
-    expect(manifestWithoutFileResourceEntries(unchanged, [REPOSITORY])).toBe(unchanged);
   });
 });

@@ -11,8 +11,11 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+/** Follows the viewer's system light or dark setting, in the shell's tones. */
 const PAGE_STYLE =
-  "html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;background:Canvas;color:CanvasText}main{max-width:32rem;padding:2rem}h1{font-size:1.25rem;margin:0 0 .5rem}p{margin:.5rem 0;opacity:.85}a{color:LinkText}label{display:block;margin:.75rem 0 .25rem;font-weight:600}select,textarea,input{width:100%;box-sizing:border-box;font:inherit;padding:.5rem}textarea{min-height:8rem}button{margin-top:1rem;font:inherit;padding:.5rem 1rem}";
+  ":root{color-scheme:light dark;--bg:#fff;--text:#111;--muted:#555;--line:#d6d6d6;--link:#1f5fbf;--strong:#111;--strong-text:#fff}" +
+  "@media (prefers-color-scheme:dark){:root{--bg:#161616;--text:#ececec;--muted:#a8a8a8;--line:#3a3a3a;--link:#8ab4f8;--strong:#ececec;--strong-text:#111}}" +
+  "body{margin:0;min-height:100vh;display:grid;place-items:center;font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--text)}main{max-width:32rem;padding:2rem}h1{font-size:1.25rem;font-weight:600;margin:0 0 .5rem}p{margin:.5rem 0;color:var(--muted)}a{color:var(--link)}label{display:block;margin:.75rem 0 .25rem;font-weight:600}select,textarea,input{width:100%;box-sizing:border-box;font:inherit;padding:.5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text)}textarea{min-height:8rem}button{margin-top:1rem;font:inherit;font-weight:500;padding:.5rem 1rem;border:1px solid var(--strong);border-radius:6px;background:var(--strong);color:var(--strong-text);cursor:pointer}";
 
 export type PageInit = SecurityOptions & {
   status: number;

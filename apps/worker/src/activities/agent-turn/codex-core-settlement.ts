@@ -226,6 +226,7 @@ export async function recordCoreCodexRefusal(input: {
               modelId: input.modelId,
               until: new Date(now.getTime() + SUBSCRIPTION_CORE_CODEX_ENTITLEMENT_COOLDOWN_MS),
               refreshGeneration: generation,
+              cause: "entitlement",
             })
           : false;
         break;

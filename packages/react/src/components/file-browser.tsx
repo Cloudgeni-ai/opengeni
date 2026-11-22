@@ -1,5 +1,7 @@
 import {
   ChevronRightIcon,
+  EyeIcon,
+  EyeOffIcon,
   FileIcon,
   FilePlusIcon,
   FolderIcon,
@@ -49,6 +51,12 @@ export type FileBrowserProps = {
   selectedPath?: string | undefined;
   /** Presentation-only node filter. Hidden parents never expose their children. */
   isNodeVisible?: FileNodeVisibilityPredicate | undefined;
+  /**
+   * With `onShowHiddenChange`, the toolbar has one Show hidden files toggle
+   * (its host decides what hidden means, through `isNodeVisible`).
+   */
+  showHidden?: boolean | undefined;
+  onShowHiddenChange?: ((show: boolean) => void) | undefined;
   /** Deliberately reveal this selected path by lazily opening every loaded
    * ancestor and scrolling its row into view. The path is opaque and is never
    * normalized or re-rooted here. */
@@ -190,6 +198,8 @@ export function FileBrowser({
   onSelectFile,
   selectedPath,
   isNodeVisible,
+  showHidden = false,
+  onShowHiddenChange,
   revealPath,
   revealPathRequestId,
   renderNode,
@@ -713,7 +723,7 @@ export function FileBrowser({
   const showEmpty = !result.loading && visibleTree.length === 0 && !draftCreate;
   // Retry lives next to the state it explains (the degraded/empty notice), so do
   // not render a second toolbar retry for the same failure.
-  const showToolbar = supportsMutation || result.loading;
+  const showToolbar = supportsMutation || result.loading || onShowHiddenChange !== undefined;
   // Virtua caches the previous visible range when a lazy-expanded subtree is
   // inserted in the middle of a short list. The spacer grows but later root
   // siblings can remain unmounted until a scroll/resize (for example,
@@ -979,6 +989,15 @@ export function FileBrowser({
             </>
           ) : null}
           <span className="ml-auto" />
+          {onShowHiddenChange ? (
+            <ToolbarButton
+              label={t("fileBrowser.showHiddenFiles")}
+              pressed={showHidden}
+              onClick={() => onShowHiddenChange(!showHidden)}
+            >
+              {showHidden ? <EyeIcon className="size-3.5" /> : <EyeOffIcon className="size-3.5" />}
+            </ToolbarButton>
+          ) : null}
           <ToolbarButton
             label={t("fileBrowser.refresh")}
             onClick={() => void result.refresh()}
@@ -1284,11 +1303,14 @@ function ToolbarButton({
   label,
   onClick,
   disabled,
+  pressed,
   children,
 }: {
   label: string;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
+  /** A toggle's state; omitted for a plain button. */
+  pressed?: boolean | undefined;
   children: ReactNode;
 }) {
   return (
@@ -1296,11 +1318,13 @@ function ToolbarButton({
       type="button"
       title={label}
       aria-label={label}
+      aria-pressed={pressed}
       onClick={onClick}
       disabled={disabled}
       className={cn(
         "inline-flex size-7 items-center justify-center rounded-og-sm p-1 text-og-fg-muted max-[1023px]:size-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
         "hover:bg-og-surface-2 hover:text-og-fg",
+        "aria-pressed:bg-og-surface-2 aria-pressed:text-og-fg",
         "disabled:cursor-not-allowed disabled:opacity-40",
       )}
     >

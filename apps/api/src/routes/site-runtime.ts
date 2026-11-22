@@ -1,4 +1,4 @@
-import { appSyncStatusForSite } from "../app-sync/service";
+import { appSyncOptInReview, appSyncStatusForSite, setAppSyncOptIn } from "../app-sync/service";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ReasoningEffort,
@@ -35,6 +35,9 @@ import {
   type Permission,
   type SiteAuthExchangeResponse,
   type SiteRuntimeConfig,
+  injectSiteAssetBase,
+  parseSiteAssetAddress,
+  siteAssetGatewayBase,
 } from "@opengeni/contracts";
 import {
   cancelPublishedSiteSession,
@@ -118,6 +121,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { markLocalInternalDispatch } from "../http/local-browser-boundary";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { siteAssetFile, siteAssetResponse } from "../site-assets";
 import {
   getSiteDataFileUrl,
   getSiteDataRecord,
@@ -201,6 +205,7 @@ import {
   type SiteRuntimeViewer,
 } from "../site-publishing/viewer";
 import { runSiteSqlQuery } from "../site-sql/service";
+import { notifyFromApp } from "../app-notify/service";
 import { siteDataHttpError } from "./site-data";
 import { runSiteSqlRoute } from "./site-sql";
 
@@ -297,6 +302,14 @@ function unsupported() {
     "This operation is not available to published apps",
   );
 }
+
+const SiteSyncOptInToolRequest = z
+  .object({
+    syncId: z.string().uuid(),
+    optedIn: z.boolean().optional(),
+    account: z.string().min(1).max(256).optional(),
+  })
+  .strict();
 
 function parseJson<S extends z.ZodType>(bytes: Uint8Array, schema: S): z.infer<S> {
   let value: unknown = null;
@@ -443,6 +456,7 @@ const SITE_SESSION_FIELDS = [
   "inputWait",
   "activelyWorking",
   "requiresActionSince",
+  "awaitingConnectionSince",
   "createdAt",
   "updatedAt",
 ] as const;
@@ -617,6 +631,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "GET" && suffix === "/host") return await hostLookup(request);
     const version = /^\/versions\/([^/]+)\/html$/u.exec(suffix);
     if (method === "GET" && version) return await versionHtml(request, version[1]!);
+    if ((method === "GET" || method === "HEAD") && suffix.startsWith("/assets/"))
+      return await versionAsset(request, suffix.slice("/assets/".length), method);
     if (method === "POST" && suffix === "/auth/exchange") return await exchange(request);
     if (method === "POST" && suffix === "/auth/logout") return await logout(request);
     if (method === "POST" && suffix === "/auth/view-as") return await viewAs(request);
@@ -625,7 +641,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "POST" && suffix === "/platform/timings") return await platformTimings(request);
     if (method === "POST" && suffix === "/live/admit") return await liveAdmit(request);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
-    const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
+    const tool = /^\/tools\/([a-z][a-z-]*)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
     const sitePath = suffix === "/v1/config/client" ? suffix : `/v1/workspaces/site-host${suffix}`;
     const matched = matchSiteOperation(method, sitePath);
@@ -710,7 +726,17 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const object = version ? await deps.objectStorage.getObjectBytes(version.contentKey) : null;
     if (!version || !object)
       throw sitePublishingError(404, "not_found", "site_version_not_found", "Version not found");
-    return new Response(object.bytes as Uint8Array<ArrayBuffer>, {
+    // A multi-file build loads its files from this host (`/_og/a/...`); a
+    // single-file app is served byte for byte.
+    const body = version.assetManifest
+      ? new TextEncoder().encode(
+          injectSiteAssetBase(
+            new TextDecoder().decode(object.bytes),
+            siteAssetGatewayBase(version.id, version.assetManifest.token),
+          ),
+        )
+      : (object.bytes as Uint8Array<ArrayBuffer>);
+    return new Response(body, {
       headers: {
         ...USER_CONTENT_SECURITY_HEADERS,
         "Content-Type": "text/html; charset=utf-8",
@@ -720,6 +746,42 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Referrer-Policy": "no-referrer",
         ...(version.contentSha256 ? { ETag: `"${version.contentSha256}"` } : {}),
       },
+    });
+  };
+
+  /**
+   * One asset file of a multi-file version of this Site. Frames are
+   * opaque-origin and send no cookies, so there is no viewer: the version's
+   * unguessable token (only its access-checked HTML names it) is the
+   * capability. Only this Site's own versions are served, any of them, so a
+   * page open since an earlier version keeps loading its chunks; the
+   * gateway's host check already refuses unpublished and taken-down Sites.
+   */
+  const versionAsset = async (
+    request: RuntimeRequest,
+    address: string,
+    method: string,
+  ): Promise<Response> => {
+    const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
+    if (!deps.objectStorage)
+      throw sitePublishingError(
+        503,
+        "upstream_unavailable",
+        "site_storage_unavailable",
+        "Storage is not configured",
+      );
+    const parsed = parseSiteAssetAddress(address);
+    const version = parsed
+      ? await getPublishedSiteVersion(deps.db, host.scope, host.site.id, parsed.versionId)
+      : null;
+    const file = parsed
+      ? siteAssetFile(version?.assetManifest ?? null, parsed.token, parsed.path)
+      : null;
+    if (!file)
+      throw sitePublishingError(404, "not_found", "site_asset_not_found", "File not found");
+    return await siteAssetResponse(deps.objectStorage, host.scope.workspaceId, file, {
+      method,
+      ifNoneMatch: request.context.req.header("if-none-match") ?? null,
     });
   };
 
@@ -1009,6 +1071,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     } else if (method === "setup") {
       // The host's connect card; the page sends no body worth reading.
       result = await describeWorkspaceSiteToolSetup(deps, authorization, site, options);
+    } else if (method === "sync-review" || method === "sync-opt-in") {
+      // Only the host's own page reaches tool methods: it shows the platform's
+      // confirmation and posts the opt-in after the viewer confirms.
+      const input = parseJson(request.body, SiteSyncOptInToolRequest);
+      result = await runSiteData(() =>
+        method === "sync-review"
+          ? appSyncOptInReview(deps, authorization.grant, site.siteArtifactId, input.syncId)
+          : setAppSyncOptIn(
+              deps,
+              authorization.grant,
+              site.siteArtifactId,
+              input.syncId,
+              input.optedIn !== false,
+              {},
+              input.account ? { account: input.account } : {},
+            ),
+      );
     } else if (method === "invoke") {
       result = await withSiteSecretContext(
         { siteId: site.siteArtifactId, siteVersion: site.siteVersionId },
@@ -1225,6 +1304,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return await siteData(request, host, viewer, limits.guestWritesPerMinute);
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
+      case "site.notify":
+        // Members only: notifyFromApp refuses guests and invited viewers.
+        return context.json(
+          await runSiteData(() =>
+            notifyFromApp(
+              deps,
+              publishedViewer(host, viewer),
+              host.site.id,
+              parseJson(request.body, z.unknown()),
+              { frameSiteId: host.site.id },
+            ),
+          ),
+        );
       default:
         if (id.startsWith("sessions.")) {
           const assistant = await agentViewing(host, viewer, limits);

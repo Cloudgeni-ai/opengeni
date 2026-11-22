@@ -19,19 +19,24 @@ import {
   LayersIcon,
   LockKeyholeIcon,
   MonitorIcon,
+  PanelLeftIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
   UsersIcon,
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
+import { toast } from "sonner";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import {
   ORGANIZATION_SETTINGS_GROUPS,
   ORGANIZATION_SETTINGS_ITEMS,
   organizationSettingsLabel,
 } from "./organization-settings-pages";
+import { foldSettingsRail } from "./settings-more";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
+import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import {
   interfaceListsDestination,
   interfaceListsOrganizationSection,
@@ -446,6 +451,17 @@ export function useSettingsRail(input: {
             })),
         },
       ],
+      // The Sidebar page (docs/sidebar-layout.md) opens from the rail and the
+      // account menu; search finds it here too.
+      searchOnly: [
+        {
+          id: "workspace:/workspaces/$workspaceId/sidebar",
+          label: "Sidebar",
+          icon: PanelLeftIcon,
+          link: <Link to="/workspaces/$workspaceId/sidebar" params={{ workspaceId }} />,
+          keywords: ["customize sidebar", "navigation", "links", "groups", "rail", "menu"],
+        },
+      ],
     });
   }
 
@@ -552,9 +568,28 @@ export function useSettingsRail(input: {
       }
     : { label: `Back to ${productName}`, link: <Link to="/" /> };
 
+  // The person's own choice of which entries stay at the top; the rest fold
+  // under More (docs/sidebar-layout.md). Unset keeps everything at the top;
+  // the last known choice draws at once on a reload (see useSidebarLayout).
+  const sidebarLayout = useSidebarLayout(workspace?.id ?? "", !!workspace);
+  const ownSidebar = sidebarLayout.layout
+    ? sidebarLayout.layout.personal.available
+    : !!workspace && !!sidebarLayout.options?.settingsMore;
+  const updateLayout = sidebarLayout.update;
+  const railSections = ownSidebar
+    ? foldSettingsRail(sections, sidebarLayout.options?.settingsMore ?? null, (settingsMore) => {
+        updateLayout({
+          scope: "personal",
+          changes: [{ op: "options", settingsMore }],
+        }).catch((error: unknown) =>
+          toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
+        );
+      })
+    : sections;
+
   return {
     picker,
-    sections,
+    sections: railSections,
     back,
     home: settingsHomeLink(sessionsWorkspaceId ?? undefined),
     organizationName,

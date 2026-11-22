@@ -37,8 +37,29 @@ export type ComposerAgentSelection =
       avatar?: SessionAvatarValue | undefined;
     };
 
-/** How many agents the menu lists; Browse agents opens the rest. */
+/** How many agents the menu lists when Browse agents opens the rest. */
 const LISTED = 8;
+
+/**
+ * The chip's selection for an agent id among the listed agents: null for
+ * Opengeni itself, loading while the list loads, an error when it isn't listed.
+ */
+export function composerAgentSelectionFor(
+  agentId: string | null | undefined,
+  agents: AgentSummary[] | undefined,
+  unavailable: { message: string; name?: string | undefined },
+): ComposerAgentSelection | null {
+  if (!agentId) return null;
+  const agent = agents?.find((entry) => entry.id === agentId);
+  if (agent) return { kind: "ready", id: agent.id, name: agent.name, avatar: agentAvatar(agent) };
+  if (agents === undefined) return { kind: "loading", id: agentId };
+  return {
+    kind: "error",
+    id: agentId,
+    message: unavailable.message,
+    ...(unavailable.name ? { name: unavailable.name } : {}),
+  };
+}
 
 export function ComposerAgentChip({
   workspaceId,
@@ -57,13 +78,14 @@ export function ComposerAgentChip({
   selection: ComposerAgentSelection | null;
   disabled: boolean;
   onSelect: (agentId: string | null) => void;
-  onBrowse: () => void;
+  /** Without it, the menu lists every agent (for forms that mustn't navigate away). */
+  onBrowse?: (() => void) | undefined;
   /** Only me chats aren't available here, so Only me agents can't be chosen. */
   onlyMeUnavailable?: boolean | undefined;
   className?: string | undefined;
 }) {
   const selectedId = selection?.id ?? null;
-  const listed = (agents ?? []).slice(0, LISTED);
+  const listed = onBrowse ? (agents ?? []).slice(0, LISTED) : (agents ?? []);
   // The chosen agent stays in the list even when it isn't among the first few.
   const chosen =
     selectedId && !listed.some((agent) => agent.id === selectedId)
@@ -117,7 +139,12 @@ export function ComposerAgentChip({
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-72">
+      <DropdownMenuContent
+        align="start"
+        side="bottom"
+        sideOffset={8}
+        className={cn("w-72", !onBrowse && "max-h-80 overflow-y-auto")}
+      >
         <DropdownMenuLabel>Chat with</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => onSelect(null)}>
           <BrandMark className="w-4" />
@@ -158,11 +185,15 @@ export function ComposerAgentChip({
             </DropdownMenuItem>
           ))
         )}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onBrowse}>
-          <LayoutGridIcon />
-          Browse agents
-        </DropdownMenuItem>
+        {onBrowse ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onBrowse}>
+              <LayoutGridIcon />
+              Browse agents
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

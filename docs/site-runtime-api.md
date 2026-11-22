@@ -249,7 +249,8 @@ signature.
 | Method and suffix | Result |
 | --- | --- |
 | `GET /host` | `SiteHostMapRecord` for the signed host (the gateway's fallback on a KV miss), or 404 `site_not_found`. An optional `host` query must equal the signed host |
-| `GET /versions/:versionId/html` | The immutable HTML of the Site's current version, or of a version a publish or rollback replaced in the last 10 minutes (pages already open), with a sandbox CSP and an ETag. 404 `site_version_not_found` for any other version, of this Site or another |
+| `GET /versions/:versionId/html` | The immutable HTML of the Site's current version, or of a version a publish or rollback replaced in the last 10 minutes (pages already open), with a sandbox CSP and an ETag. 404 `site_version_not_found` for any other version, of this Site or another. A multi-file version's HTML starts with a `<base href="/_og/a/<versionId>/<token>/">` for its files |
+| `GET /assets/:versionId/:token/*path` | One file of a multi-file version of this Site, any of its versions ([Multi-file apps](published-sites.md#multi-file-apps)); no viewer needed, the token is checked against the version's manifest. Immutable caching with the content hash as ETag. 404 `site_asset_not_found` otherwise |
 | `POST /auth/exchange` | `SiteAuthExchangeResponse`. 400 `site_auth_code_invalid` (wrong verifier, host or redirect URI, expired, or already used) |
 | `POST /auth/logout` | 200 `{ revoked }`, even when the Site no longer exists |
 | `POST /site/reports` | 201. Rate limited per reporter, per client address and per Site |
@@ -280,6 +281,11 @@ Operations:
   - `GET /data/syncs` (`site.data.syncs()`) returns each app data sync's last
     run and, for personal syncs, the viewer's own last run and opt-in
     ([app-sync.md](app-sync.md)).
+- `site.notify` (`POST /published-artifacts/current/notify`,
+  `site.notify({ title, body?, to?, path?, key? })`) is routed but not
+  enabled yet: it answers 403 with `details.reason` `notify_not_available`
+  until a follow-up migration grants delivery. Its checks and limits are in
+  [app-webhooks.md](app-webhooks.md#notifications-from-apps).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable
@@ -451,6 +457,14 @@ version's `requestedTools`.
   picks the account; blocked, unavailable and permission-denied tools are not
   something one click fixes, so they don't show. Tools whose connector has no
   catalog entry are left out.
+- **API-key tools.** A connector that takes an API key keeps each person's
+  own `connect` item. When the app's shared syncs wait on it, a separate
+  `connect` item with `shared: true` carries `sharedKey`: `add` for a workspace admin who
+  may use secrets ("Add a shared key for Stripe", which connects it once for
+  the workspace with a key from a vault), or `ask_admin` for anyone else
+  ("Ask an admin to connect Stripe", shown as text, with no `openUrl`). Once a
+  shared service connection covers the tool it is ready and has no item. See
+  [connection presentation](connection-presentation.md#app-connect-card).
 - **Console.** The card sits over the app's bottom right corner. Its button
   opens Opengeni's own connect or reconnect dialog (the same
   `McpConnectionCard` flow as chat), and the card refreshes when it finishes
@@ -467,7 +481,8 @@ version's `requestedTools`.
   longer lists.
 - **From the app.** `site.connections` in `@opengeni/sdk/site`:
   `status()` resolves `{ supported, ready, needed }` (each need with `key`,
-  `action`, `connector`, `account`, `label` and `tools`; no ids or
+  `action`, `connector`, `account`, `sharedKey` (when set), `label` and
+  `tools`; no ids or
   addresses), `connect(key?)` starts one need's action and resolves
   `{ connected }`, `showCard()` shows the platform card again even after it
   was closed, and `onChange(listener)` fires when what the viewer has

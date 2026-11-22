@@ -2,6 +2,7 @@ import {
   isVerifiedDelegatedHumanAuthorization,
   knowledgeContextForGateway,
   outsideAgentReach,
+  serviceConnectionCredentialReferences,
 } from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -958,7 +959,21 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ? callerSettings
       : gatewaySettings;
   const deps = { ...routeDeps, catalogSourceSettings, settings: firstPartySettings };
-  const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
+  // A shared service connection's vault references resolve with the
+  // connection's own reach, whoever calls (a person, an app, a sync).
+  const nativeResolveConnection = buildConnectionTokenResolver(
+    routeDeps.db,
+    gatewaySettings,
+    undefined,
+    {
+      resolveCredentialReferences: serviceConnectionCredentialReferences({
+        db: routeDeps.db,
+        settings: routeDeps.settings,
+        providers: (workspaceId) =>
+          vaultProviderRegistryFor(routeDeps, { workspaceId, subjectId: null }),
+      }),
+    },
+  );
   // A person's own account may live in the workspace it was added in and be
   // turned on here ("Use it here"). Its credential is read where it lives,
   // exactly as an accepted turn reads it. Only the caller's own routed
@@ -1183,7 +1198,20 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           // The filter then hides a tool that still needs approval only when
           // its provider recommends Ask and it has no approval preflight. Its
           // execution still resolves the exact arguments.
-          return { ...definition, approval: permission.approvalRequired ? "human" : "policy" };
+          // A tool whose every action is blocked is refused on call; say so
+          // in the catalog instead of listing it as allowed.
+          const decision =
+            permission.permission === "block" &&
+            permission.actionPermissions.every((action) => action.permission === "block")
+              ? "block"
+              : permission.approvalRequired
+                ? "ask"
+                : "allow";
+          return {
+            ...definition,
+            approval: permission.approvalRequired ? "human" : "policy",
+            permission: { decision, fromSetting: permission.source !== "recommended" },
+          };
         },
         resolveApproval: async ({ call, entry }) => {
           const defaultDecision =

@@ -24,7 +24,8 @@ const MIN_HEIGHT = 96;
 const MAX_HEIGHT = 320;
 /**
  * How long a question to record, or the note that a call is being recorded,
- * stays up; hovering holds it. A question to stop stays.
+ * stays up; hovering holds it. A question to stop stays until it is
+ * answered, or the recording stops.
  */
 export const MEETING_CARD_TIMEOUT_MS = 45_000;
 /** How often the card looks whether the pointer is on it, which holds it. */

@@ -31,6 +31,7 @@ import {
   type EventOccurrenceToStart,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
+import { startBedrockModelDiscovery } from "@opengeni/runtime/bedrock";
 import {
   createObservability,
   errorCauseAttributes,
@@ -48,6 +49,7 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+  settleSlackEventRecordings,
 } from "@opengeni/core";
 import {
   Connection,
@@ -80,6 +82,7 @@ import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
 import { startAppSyncPump } from "./app-sync/service";
+import { startAppPackageExportSweepPump } from "./app-packages/exports";
 import {
   startEventIntakePrunePump,
   startEventTriggerDispatchPump,
@@ -547,6 +550,13 @@ export async function startApi(options: StartApiOptions = {}) {
   const settings = options.settings ?? getSettings();
   const observability =
     options.observability ?? createObservability(settings, { component: "api" });
+  // Amazon Bedrock: list the Claude models the account offers before serving.
+  await startBedrockModelDiscovery(settings, {
+    onError: (error) =>
+      observability.warn("Amazon Bedrock model discovery failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+  });
   // Step I: standalone → dbSchema unset → searchPath undefined → today's plain
   // handle (public). Embedded → scoped to the dedicated schema + the host's RLS
   // strategy.
@@ -838,6 +848,12 @@ export async function startApi(options: StartApiOptions = {}) {
   // App data syncs: runs the worker queued, executed here where connected
   // tools and Site Data are (docs/app-sync.md).
   const stopAppSyncPump = startAppSyncPump(routeDeps);
+  // Package files app_export stored for download, deleted once they expire.
+  const stopAppPackageExportSweepPump = startAppPackageExportSweepPump({
+    db: dbClient.db,
+    objectStorage: routeDeps.objectStorage,
+    observability,
+  });
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
   const stopBrowserHoldRenewalPump = startBrowserHoldRenewalPump(renewBrowserHolds, observability);
   const stopEventSubscriptionPump = startEventSubscriptionPump({
@@ -939,6 +955,7 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopAppSyncPump();
+      await stopAppPackageExportSweepPump();
       await stopEventIntakePrunePump();
       await stopBrowserHoldRenewalPump();
       await stopEventSubscriptionPump();
@@ -946,6 +963,9 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopNativePushDispatchPump();
       await billingAutoTopUpsStopped;
       await httpDrained;
+      // Slack callbacks answered during the drain may still be recording into
+      // the workspaces their bot is shared with.
+      await settleSlackEventRecordings(httpDrainDeadline);
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await routeDeps.decisions?.flushUsage().catch(() => {

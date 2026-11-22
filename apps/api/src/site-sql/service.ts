@@ -4,6 +4,7 @@ import {
   compileSiteSql,
   isSiteSqlPrincipalParam,
   isSiteSqlTableName,
+  quoteSiteSqlIdentifier,
   SITE_SQL_HARD_LIMITS,
   SITE_SQL_IDENTIFIER,
   SITE_SQL_NAME,
@@ -12,6 +13,7 @@ import {
   type SiteDbMeter,
   type SiteDbMigrateResponse,
   type SiteDbRunResponse,
+  type SiteSqlRow,
   type SiteDbSchemaEntry,
   type SiteSqlDescribeResponse,
   type SiteSqlErrorCode,
@@ -1249,6 +1251,243 @@ export async function runSiteSqlStatement(
     await meter(deps, resolved, usage, { countTowardCaps: asSiteMember });
     if (statement.kind === "write") await recordSqlChange(deps, resolved, null, response);
     return runResponse(response);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Data sync writes (docs/app-sync.md)
+// ---------------------------------------------------------------------------
+
+/** Most rows of one sync upsert call. */
+const SYNC_UPSERT_ROWS = 100;
+/** Keys per sync delete statement (the Durable Object binds at most 100 values). */
+const SYNC_DELETE_KEYS = 50;
+/** Bound parameters one conditional sync delete may use (the limit is 100). */
+const SYNC_DELETE_PARAMS = 90;
+
+function syncResolved(deps: SiteSqlDeps, access: SiteDataAccess, siteId: string): Resolved {
+  return {
+    access,
+    scope: { accountId: access.caller.accountId, workspaceId: access.caller.workspaceId, siteId },
+    gateway: measuredGateway(deps),
+    offered: siteSqlOffered(deps.settings),
+    guest: false,
+  };
+}
+
+/**
+ * Whether a data sync can fill a table of this Site: Site SQL is offered on
+ * this deployment and turned on for the Site. Throws a readable error
+ * otherwise.
+ */
+export async function requireSiteSqlForSync(
+  deps: SiteSqlDeps,
+  access: SiteDataAccess,
+  siteId: string,
+): Promise<void> {
+  await guarded(async () => {
+    const resolved = syncResolved(deps, access, siteId);
+    if (!resolved.gateway || !resolved.offered)
+      throw new SiteSqlError(
+        "unavailable",
+        "This deployment has no app SQL, so a sync can't fill a table. Sync into a collection instead.",
+      );
+    await requireDatabase(deps, resolved, { enabled: true });
+  });
+}
+
+/**
+ * A data sync's rows: upserted by `keyColumn` (the table's primary key or a
+ * unique column) with the access the sync resolved (the App's manager write
+ * window and change events with the run's chain depth). Metered like other
+ * management writes.
+ */
+export async function upsertSiteSqlRowsForSync(
+  deps: SiteSqlDeps,
+  access: SiteDataAccess,
+  siteId: string,
+  request: { table: string; keyColumn: string; columns: string[]; rows: SiteSqlValue[][] },
+): Promise<{ rowsWritten: number }> {
+  return guarded(async () => {
+    if (request.rows.length === 0) return { rowsWritten: 0 };
+    const resolved = syncResolved(deps, access, siteId);
+    const gateway = requireGateway(resolved);
+    await requireDatabase(deps, resolved, { enabled: true });
+    await requireSitePlatformOpen(deps, "sql_write");
+    await requirePlatformQuota(deps, resolved, true);
+    const limits = await limitsFor(deps, resolved.scope);
+    await consume(deps, resolved, limits);
+    const usage = newUsage();
+    let rowsWritten = 0;
+    try {
+      for (let start = 0; start < request.rows.length; start += SYNC_UPSERT_ROWS) {
+        const response = await callSiteDb<SiteDbMeter>(
+          gateway,
+          siteId,
+          "insert",
+          {
+            table: request.table,
+            columns: request.columns,
+            rows: request.rows.slice(start, start + SYNC_UPSERT_ROWS),
+            onConflict: "update",
+            conflictColumn: request.keyColumn,
+            maxDatabaseBytes: limits.storageBytesPerSite,
+          },
+          siteSqlTransport.fetch,
+        );
+        addUsage(usage, response);
+        rowsWritten += response.rowsWritten;
+      }
+    } finally {
+      await meter(deps, resolved, usage, { countTowardCaps: false });
+      if (usage.rowsWritten > 0)
+        await recordSqlChange(deps, resolved, null, {
+          columns: [],
+          rows: [],
+          truncated: false,
+          rowsRead: usage.rowsRead,
+          rowsWritten: usage.rowsWritten,
+          databaseBytes: usage.databaseBytes,
+        });
+    }
+    return { rowsWritten };
+  });
+}
+
+/** Delete a data sync's rows by key; returns how many rows were deleted. */
+export async function deleteSiteSqlRowsForSync(
+  deps: SiteSqlDeps,
+  access: SiteDataAccess,
+  siteId: string,
+  request: {
+    table: string;
+    keyColumn: string;
+    keys: readonly string[];
+    /**
+     * Delete only rows this returns true for, given the row's key column and
+     * `columns` as read just before the delete.
+     */
+    match?: { columns: readonly string[]; owned: (row: SiteSqlRow) => boolean };
+  },
+): Promise<number> {
+  return guarded(async () => {
+    if (request.keys.length === 0) return 0;
+    const resolved = syncResolved(deps, access, siteId);
+    const gateway = requireGateway(resolved);
+    await requireDatabase(deps, resolved, { enabled: true });
+    await requireSitePlatformOpen(deps, "sql_write");
+    const limits = await limitsFor(deps, resolved.scope);
+    await consume(deps, resolved, limits);
+    const usage = newUsage();
+    let deleted = 0;
+    try {
+      for (let start = 0; start < request.keys.length; start += SYNC_DELETE_KEYS) {
+        let keys = request.keys.slice(start, start + SYNC_DELETE_KEYS);
+        let matched: SiteSqlRow[] | null = null;
+        if (request.match) {
+          const key = quoteSiteSqlIdentifier(request.keyColumn);
+          const read = await callSiteDb<SiteDbRunResponse>(
+            gateway,
+            siteId,
+            "run",
+            {
+              sql: `SELECT ${[request.keyColumn, ...request.match.columns]
+                .map(quoteSiteSqlIdentifier)
+                .join(", ")} FROM ${quoteSiteSqlIdentifier(request.table)} WHERE ${key} IN (${keys
+                .map((_, index) => `:k${index}`)
+                .join(", ")})`,
+              profile: "agent",
+              params: Object.fromEntries(keys.map((value, index) => [`k${index}`, value])),
+              expect: "read",
+              maxRows: keys.length,
+              maxResponseBytes: limits.maxResponseBytes,
+              maxDatabaseBytes: limits.storageBytesPerSite,
+            },
+            siteSqlTransport.fetch,
+          );
+          addUsage(usage, read);
+          const scalar = (value: unknown) =>
+            value === null || ["string", "number", "boolean"].includes(typeof value);
+          // A row cut off from the answer (too large), or holding a value
+          // that can't be compared again (a blob), is kept.
+          // A row too wide for one conditional delete is kept too.
+          const fits = 1 + request.match.columns.length <= SYNC_DELETE_PARAMS;
+          matched = read.rows.filter(
+            (row) =>
+              fits &&
+              request.match!.owned(row) &&
+              request.match!.columns.every((column) => scalar(row[column])),
+          );
+          const owned = new Set(matched.map((row) => String(row[request.keyColumn])));
+          keys = keys.filter((value) => owned.has(value));
+          if (keys.length === 0) continue;
+        }
+        const keyColumn = quoteSiteSqlIdentifier(request.keyColumn);
+        // Without a match, one delete by key. With one, each row is deleted
+        // only while its columns still hold the values just read, so a row
+        // changed in between is kept; rows are grouped to stay under the
+        // site database's bound-parameter limit.
+        const perRow = 1 + (request.match?.columns.length ?? 0);
+        const groups: Array<{ where: string; params: Record<string, unknown> }> = [];
+        if (!matched)
+          groups.push({
+            where: `${keyColumn} IN (${keys.map((_, index) => `:k${index}`).join(", ")})`,
+            params: Object.fromEntries(keys.map((key, index) => [`k${index}`, key])),
+          });
+        else {
+          const rowsPerDelete = Math.max(1, Math.floor(SYNC_DELETE_PARAMS / perRow));
+          for (let at = 0; at < matched.length; at += rowsPerDelete) {
+            const params: Record<string, unknown> = {};
+            const where = matched
+              .slice(at, at + rowsPerDelete)
+              .map((row, index) => {
+                params[`k${index}`] = row[request.keyColumn];
+                const conditions = request.match!.columns.map((column, position) => {
+                  params[`k${index}c${position}`] = row[column];
+                  return `${quoteSiteSqlIdentifier(column)} IS :k${index}c${position}`;
+                });
+                return `(${[`${keyColumn} = :k${index}`, ...conditions].join(" AND ")})`;
+              })
+              .join(" OR ");
+            groups.push({ where, params });
+          }
+        }
+        for (const group of groups) {
+          const response = await callSiteDb<SiteDbRunResponse>(
+            gateway,
+            siteId,
+            "run",
+            {
+              sql: `DELETE FROM ${quoteSiteSqlIdentifier(request.table)} WHERE ${group.where}`,
+              profile: "agent",
+              params: group.params,
+              expect: "write",
+              maxRows: 1,
+              maxResponseBytes: limits.maxResponseBytes,
+              maxDatabaseBytes: limits.storageBytesPerSite,
+            },
+            siteSqlTransport.fetch,
+          );
+          addUsage(usage, response);
+          if (!matched) deleted += response.rowsWritten;
+        }
+        // Matched rows were just read, so each key is one row (row writes
+        // count indexes too); a row changed in between is still counted.
+        if (matched) deleted += keys.length;
+      }
+    } finally {
+      await meter(deps, resolved, usage, { countTowardCaps: false });
+      if (usage.rowsWritten > 0)
+        await recordSqlChange(deps, resolved, null, {
+          columns: [],
+          rows: [],
+          truncated: false,
+          rowsRead: usage.rowsRead,
+          rowsWritten: usage.rowsWritten,
+          databaseBytes: usage.databaseBytes,
+        });
+    }
+    return deleted;
   });
 }
 

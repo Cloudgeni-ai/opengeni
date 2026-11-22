@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
 import {
+  createdPullRequest,
   gatewayBearer,
+  linkingCreatedPullRequest,
   gatewayRepositoryDecision,
   handlePersonalGitHubGatewayRequest,
   isPersonalGitHubGatewayRequest,
@@ -70,12 +72,14 @@ function harness(
   options: {
     authority?: PersonalGitHubGatewayAuthority;
     decision?: GatewayDecision;
+    readDecision?: Extract<GatewayDecision, { kind: "allow" } | { kind: "refuse" }>;
     respond?: (url: string, init: RequestInit) => Response;
   } = {},
 ) {
   const upstream: Upstream[] = [];
   const decisions: GatewayDecisionInput[] = [];
   const completions: string[] = [];
+  const reads: string[] = [];
   const authorized: Array<{
     url: string;
     tool: string;
@@ -93,6 +97,14 @@ function harness(
       decisions.push(input);
       return options.decision ?? { kind: "allow" };
     },
+    ...(options.readDecision
+      ? {
+          decideRead: async (_identity: unknown, title: string) => {
+            reads.push(title);
+            return options.readDecision!;
+          },
+        }
+      : {}),
     complete: async (_identity, requestId, outcome) => {
       completions.push(`${requestId}:${outcome}`);
     },
@@ -112,7 +124,7 @@ function harness(
       "api",
       services,
     );
-  return { services, send, upstream, decisions, completions, authorized };
+  return { services, send, upstream, decisions, completions, authorized, reads };
 }
 
 describe("personal GitHub gateway", () => {
@@ -170,6 +182,33 @@ describe("personal GitHub gateway", () => {
     expect(upstream[0]!.init.redirect).toBe("manual");
     expect(JSON.stringify(upstream)).not.toContain("session-pass");
     expect(decisions).toEqual([]);
+  });
+
+  test("a read the agent's Can use blocks is refused before GitHub sees it", async () => {
+    const blocked = harness({
+      readDecision: {
+        kind: "refuse",
+        status: 403,
+        waiting: false,
+        message: "Blocked by this agent's Can use: Read. Do not retry it.",
+      },
+    });
+    const response = await blocked.send("/repos/acme/widgets/pulls/1");
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { message: string }).message).toContain(
+      "Blocked by this agent's Can use",
+    );
+    expect(blocked.upstream).toEqual([]);
+    expect(blocked.reads).toEqual(["Read"]);
+    const allowed = harness({ readDecision: { kind: "allow" } });
+    expect((await allowed.send("/repos/acme/widgets/pulls/1")).status).toBe(200);
+    expect(allowed.upstream).toHaveLength(1);
+    // Writes go through the write policy, not the read check.
+    await allowed.send("/repos/acme/widgets/issues", {
+      method: "POST",
+      body: JSON.stringify({ title: "x" }),
+    });
+    expect(allowed.reads).toEqual(["Read"]);
   });
 
   test("passes redirects back to gh instead of following them", async () => {
@@ -962,5 +1001,93 @@ describe("force updates and deletions of refs", () => {
         expect(context.upstream.some((request) => request.init.method === "DELETE")).toBe(false);
       }
     }
+  });
+
+  test("a pull request gh opens is linked to the chat, and the answer passes through", async () => {
+    const linked: unknown[] = [];
+    const created = {
+      html_url: "https://github.com/acme/widgets/pull/7",
+      title: "Fix the widget",
+      number: 7,
+    };
+    const rest = harness({ respond: () => Response.json(created, { status: 201 }) });
+    rest.services.linkPullRequest = async (_authority, pullRequest) => {
+      linked.push(pullRequest);
+    };
+    const response = await rest.send("/repos/acme/widgets/pulls", {
+      method: "POST",
+      body: JSON.stringify({ title: "Fix the widget", head: "f", base: "main" }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual(created);
+    expect(linked).toEqual([{ url: created.html_url, title: "Fix the widget" }]);
+    // A failed link never fails the command, and other writes link nothing.
+    rest.services.linkPullRequest = async () => {
+      throw new Error("down");
+    };
+    expect(
+      (
+        await rest.send("/repos/acme/widgets/pulls", {
+          method: "POST",
+          body: JSON.stringify({ title: "T", head: "f", base: "main" }),
+        })
+      ).status,
+    ).toBe(201);
+    expect(linked).toHaveLength(1);
+  });
+
+  test("reads the created pull request from REST and GraphQL answers", () => {
+    expect(
+      createdPullRequest(
+        { data: { createPullRequest: { pullRequest: { url: "https://github.com/a/b/pull/3" } } } },
+        { variables: { input: { title: "From input" } } },
+      ),
+    ).toEqual({ url: "https://github.com/a/b/pull/3", title: "From input" });
+    expect(createdPullRequest({ html_url: "https://evil.example/a/b/pull/3" }, null)).toBeNull();
+    expect(createdPullRequest(undefined, null)).toBeNull();
+  });
+
+  test("a created pull request's answer passes through whole, however large", async () => {
+    const gatewayAuthority = {} as PersonalGitHubGatewayAuthority;
+    const linked: string[] = [];
+    const link = async (_: unknown, created: { url: string }) => {
+      linked.push(created.url);
+    };
+    const small = JSON.stringify({ html_url: "https://github.com/a/b/pull/9" });
+    const chunked = (text: string, size: number) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const bytes = new TextEncoder().encode(text);
+            for (let at = 0; at < bytes.byteLength; at += size) {
+              controller.enqueue(bytes.slice(at, at + size));
+            }
+            controller.close();
+          },
+        }),
+        { status: 201 },
+      );
+    const answered = await linkingCreatedPullRequest(
+      link,
+      gatewayAuthority,
+      chunked(small, 7),
+      null,
+    );
+    expect(await answered.text()).toBe(small);
+    expect(linked).toEqual(["https://github.com/a/b/pull/9"]);
+    // Past the read limit and without a content-length: nothing is linked,
+    // and every byte still reaches the command.
+    const large = JSON.stringify({
+      html_url: "https://github.com/a/b/pull/10",
+      body: "x".repeat(5 * 1024 * 1024),
+    });
+    const passed = await linkingCreatedPullRequest(
+      link,
+      authority,
+      chunked(large, 64 * 1024),
+      null,
+    );
+    expect((await passed.text()).length).toBe(large.length);
+    expect(linked).toHaveLength(1);
   });
 });

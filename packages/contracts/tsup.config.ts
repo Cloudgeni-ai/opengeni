@@ -5,6 +5,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/browser-response-headers.ts",
+    "src/app-assets.ts",
     "src/html-frame-host.ts",
     "src/sidebar-layout.ts",
     "src/modal-native-proof-v2.ts",
@@ -93,6 +94,7 @@ export default defineConfig({
     "src/presentation-artifact-commands.ts",
     "src/presentation-artifact-query.ts",
     "src/codex-provider-account-authority.ts",
+    "src/subscription-capacity-wait.ts",
     "src/subscription-personal-authority-v2.ts",
     "src/video-generation.ts",
     "src/xai-provider-account-authority.ts",

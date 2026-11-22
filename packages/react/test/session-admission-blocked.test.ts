@@ -137,3 +137,19 @@ describe("admission-blocked sessions", () => {
     expect(items[0]!.resolvedAt).toBeDefined();
   });
 });
+
+describe("connection card waits", () => {
+  test("an idle chat waiting on a connection card reads as needing the person", () => {
+    const since = "2026-11-19T14:00:00.000Z";
+    expect(sessionDisplayStatus({ status: "idle", awaitingConnectionSince: since })).toBe(
+      "requires_action",
+    );
+    expect(sessionDisplayStatus({ status: "running", awaitingConnectionSince: since })).toBe(
+      "running",
+    );
+    expect(sessionDisplayStatus({ status: "idle", awaitingConnectionSince: null })).toBe("idle");
+    expect(
+      sessionDisplayStatus({ status: "idle", awaitingConnectionSince: since, archived: true }),
+    ).toBe("archived");
+  });
+});

@@ -353,6 +353,17 @@ export function NativeRepeatedMachineRequestNote({ chrome }: { chrome: boolean }
   );
 }
 
+/** An earlier card for a connection the agent asked for again further down. */
+export function NativeRepeatedCapabilityRequestNote({ name }: { name: string }) {
+  const t = useOpenGeniText();
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <MutedIcon name="plug" />
+      <Line tone="small">{t("native.timeline.inChatConnect.askedAgain", { name })}</Line>
+    </View>
+  );
+}
+
 /** The chat runs on the machine it needs: one quiet line, Change reopens the choice. */
 function MachineConfirmation({ label, onChange }: { label: string; onChange: () => void }) {
   const t = useOpenGeniText();

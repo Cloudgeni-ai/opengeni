@@ -19,7 +19,7 @@
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger)
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger, ?returnTo=agent)
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
@@ -67,6 +67,7 @@ import {
   createRouter,
   lazyRouteComponent,
   redirect,
+  useLocation,
   useParams,
   useSearch,
 } from "@tanstack/react-router";
@@ -163,6 +164,13 @@ import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-contex
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
+import type { AgentTriggerStart } from "./components/schedules/schedule-form-page";
+import {
+  capabilitiesSectionFromSearch,
+  readyMadeKindFromSearch,
+  type CapabilitiesSection,
+  type ReadyMadeKind,
+} from "@/components/capabilities/capabilities-section";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
@@ -619,10 +627,14 @@ const nativeSignInRoute = createRoute({
 // The Opengeni phone app's in-app viewers for a Site and for a document,
 // spreadsheet or presentation: the Site or editor alone, without the web app's
 // rail or header (the app draws its own). The app signs its web view in with
-// the device session.
+// the device session. `?page=` opens an app at one of its pages (a sidebar
+// link's path).
 const nativeSiteViewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "native-view/workspaces/$workspaceId/sites/$siteId",
+  validateSearch: (search: Record<string, unknown>): { page?: string | undefined } => ({
+    page: siteViewSearch(search).page,
+  }),
   component: NativeSiteView,
 });
 const nativeEditableArtifactViewRoute = createRoute({
@@ -940,20 +952,25 @@ const workspaceInsightsRoute = createRoute({
   }),
   component: Insights,
 });
+/** `?section=` names a Capabilities tab; `?kind=` narrows Ready-made. */
+function capabilitiesSearch(search: Record<string, unknown>): {
+  section?: CapabilitiesSection;
+  kind?: ReadyMadeKind;
+} {
+  const section = capabilitiesSectionFromSearch(search.section);
+  const kind = section === "ready-made" ? readyMadeKindFromSearch(search.kind) : undefined;
+  return { ...(section ? { section } : {}), ...(kind ? { kind } : {}) };
+}
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
   component: CapabilitiesLegacyRedirect,
 });
 const AUTOMATIONS_SEARCH_UUID =
@@ -989,6 +1006,8 @@ type NewAutomationSearch = {
   agent?: string;
   /** Start from this one of the agent's suggested triggers. */
   agentTrigger?: number;
+  /** Cancel and Save go back to the agent's page. Needs `agent`. */
+  returnTo?: "agent";
 };
 function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
   return {
@@ -1015,6 +1034,7 @@ function newAutomationSearch(search: Record<string, unknown>): NewAutomationSear
     Number(search.agentTrigger) < 10
       ? { agentTrigger: Number(search.agentTrigger) }
       : {}),
+    ...(search.returnTo === "agent" ? { returnTo: "agent" as const } : {}),
   };
 }
 const workspaceAutomationsRoute = createRoute({
@@ -1666,9 +1686,14 @@ function CapabilitiesLegacyRedirect() {
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
-  const { section } = workspaceCapabilitiesRoute.useSearch();
+  const { section, kind } = workspaceCapabilitiesRoute.useSearch();
   return (
-    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+    <LazyCapabilitiesRoute
+      key={workspaceId}
+      workspaceId={workspaceId}
+      initialSection={section}
+      readyMadeKind={kind}
+    />
   );
 }
 
@@ -1687,8 +1712,11 @@ function Automations() {
 
 function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source, agent, agentTrigger } =
+  const { template, from, sourceSessionId, source, agent, agentTrigger, returnTo } =
     workspaceAutomationNewRoute.useSearch();
+  const agentTriggerStart = useLocation({
+    select: (location) => agentTriggerStartOf(location.state.agentTriggerStart),
+  });
   return (
     <LazyAutomationFormRoute
       workspaceId={workspaceId}
@@ -1700,9 +1728,27 @@ function AutomationNew() {
         eventSourceId: source,
         agentId: agent,
         agentTrigger,
+        returnTo,
+        ...(agent && agentTriggerStart ? { agentTriggerStart } : {}),
       }}
     />
   );
+}
+
+/** Add trigger's note and chat choice from history state, when well formed. */
+function agentTriggerStartOf(value: unknown): AgentTriggerStart | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { note, chat } = value as { note?: unknown; chat?: unknown };
+  const mode = (chat as { mode?: unknown } | null | undefined)?.mode;
+  const sessionId = (chat as { sessionId?: unknown } | null | undefined)?.sessionId;
+  return {
+    ...(typeof note === "string" && note.trim() ? { note } : {}),
+    ...(mode === "new_session_per_run" || mode === "reusable_session"
+      ? { chat: { mode } }
+      : mode === "existing_session" && typeof sessionId === "string"
+        ? { chat: { mode, sessionId } }
+        : {}),
+  };
 }
 
 function EventSources() {
@@ -1951,6 +1997,7 @@ function SiteViewPage() {
       page={search.page}
       artifactsReturn={siteViewArtifactsReturn(search)}
       connect={search.connect}
+      publishing={search.publishing === true}
     />
   );
 }
@@ -1972,12 +2019,14 @@ function EditableArtifact() {
 
 function NativeSiteView() {
   const { workspaceId, siteId } = nativeSiteViewRoute.useParams();
+  const { page } = nativeSiteViewRoute.useSearch();
   return (
     <div className="h-dvh w-dvw overflow-hidden bg-og-bg">
       <LazySiteViewRoute
         key={`${workspaceId}:${siteId}`}
         workspaceId={workspaceId}
         siteId={siteId}
+        page={page}
         embedded
       />
     </div>

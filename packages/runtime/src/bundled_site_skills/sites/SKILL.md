@@ -5,10 +5,10 @@ description: Build, edit, and publish apps. Use when the user asks for a site, d
 
 # Apps
 
-An app is a saved page or web app in the workspace: one self-contained HTML
-file that the console shows, shares and can put on the web, plus optional
-editable source. Apps have no server of their own; Opengeni AI, tools and
-saved data come from the host.
+An app is a saved page or web app in the workspace: one HTML file (a large
+app adds build files) that the console shows, shares and can put on the web,
+plus optional editable source. Apps have no server of their own; Opengeni AI,
+tools and saved data come from the host.
 
 Do not invent an app framework, deployment service, App Host, custom domain
 setup, provider-specific API wrapper, or platform-only build CLI. Putting a
@@ -70,8 +70,9 @@ tool calls.
   id, the same collection name and `accessMode`: `per_viewer` for each
   person's own entries (add `privateRecords: true` for health or other
   personal data), `append_only` for a form that collects answers. Skip
-  `jsonSchema`; check values in the page.
-6. Reply with the link as soon as it is saved, in the person's words: what
+  `jsonSchema`; check values in the page. Then add a test entry in the saved
+  app in a browser: it must show without a reload; delete it.
+6. Reply with the link once that works, in the person's words: what
    it does and how to use it. The link opens for workspace members only.
    When the person wants others to open it (family, customers, "on their
    phones"), offer to put it on the web and ask before making it public,
@@ -95,13 +96,12 @@ Keep form text readable and let controls grow with their labels.
 These are authoring defaults, not a mandatory theme or runtime CSS override.
 Honor a user's deliberate design, retain an existing app's type system, and
 leave embedded components such as `SessionConversation` on their own styles.
-Do not inject a blanket font-size rule into existing apps or use `!important`
-to force this scale onto a component library. If `frontend-design` is available,
+Do not force this scale onto existing apps or a component library (no blanket
+font-size rule or `!important`). If `frontend-design` is available,
 use it for visual direction alongside these readability defaults.
 
 For a new page, this optional starting point applies only to elements you mark
 with these classes; adapt it to the design rather than importing a global reset.
-The sizes below assume the usual 16px browser default and scale with it.
 
 ```css
 .site-copy { font-size: 1.0625rem; line-height: 1.6; max-width: 70ch; }
@@ -144,15 +144,17 @@ URLs, and signed URLs out of every app's source and HTML.
    locally and PUT it to `source.putUrl`. Paths must be relative and
    traversal-free. Exclude node_modules, caches, build output, and credentials.
    Source is optional: skip this upload for an HTML-only app.
-4. Call `opengeni__artifacts_create` with `uploadId`, title, description,
+4. Multi-file build only: PUT the other `dist/` files to `assets.putUrl`
+   ("Large apps").
+5. Call `opengeni__artifacts_create` with `uploadId`, title, description,
    idempotency key, and exact `requestedTools`. For an edit, call
    `opengeni__artifacts_publish` with the artifact id and
    `expectedCurrentVersionId` from `artifacts_get_source`.
 
-Do not put generated HTML or source into model tool arguments. Upload file
-bytes directly from the sandbox. No special SDK upload helper is required.
-Finish both intended uploads before publishing. For changed content, prepare
-a new upload; published versions do not change if an old PUT URL is reused.
+Upload bytes directly from the sandbox, never through tool arguments; no SDK
+helper is needed. Finish every intended upload before publishing. For changed
+content, prepare a new upload; reusing an old PUT URL changes no published
+version.
 
 If an idempotent create or publish reports an uncertain outcome, inspect the
 artifact list/source and rerun that same persistent script with the exact same
@@ -165,24 +167,25 @@ use this link form, with the exact returned ID and a descriptive title:
 [Open <app title>](artifact:<artifactId>)
 ```
 
-Include that link in the completion reply instead of making the user search for
-the app. Never present a sandbox URL, API content URL, or object-storage URL as
-the finished destination. Mention source files, tests or tool names only to
+Include that link in the completion reply. Never present a sandbox URL, API
+content URL, or object-storage URL as the finished destination.
+Mention source files, tests or tool names only to
 someone who asked about them.
 
 Archive with `opengeni__artifacts_archive` and restore with
-`opengeni__artifacts_restore`. Archiving unpublishes the app but preserves its
-immutable versions and retained source. There is no hard-delete workflow.
+`opengeni__artifacts_restore`. Archiving unpublishes the app and keeps its
+versions and source; there is no hard delete.
 
 ### Keep the page small
 
 Visitors download all of the HTML before anything shows, and the apps gateway
-can't serve a page over 256 MB. Keep it under 5 MB: resize and compress images
-to their shown size (WebP or JPEG), and link video or large images from where
-they are hosted. App files (`references/site-data.md`) also hold media:
+can't serve a page over 256 MB. Keep it under 5 MB; a full app over about 1 MB
+builds as several files instead ("Large apps"). For media, resize and compress
+images to their shown size (WebP or JPEG), and link video or large images from
+where they are hosted. App files (`references/site-data.md`) also hold media:
 shared files open for every visitor of the app, signed-out guests of a public
-app included. A create or publish result with `warnings` means the page is
-too heavy: shrink or move the media and publish again.
+app included. A create or publish result with `warnings` means the page is too
+heavy: shrink or move the media and publish again.
 
 ## Publish to the web
 
@@ -233,9 +236,11 @@ inside an app, that bridge is the design. Do not propose Vercel, another
 server, a tunnel, or a Connected Machine for workspace AI access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. Saved data needs no server either:
-app data gives every published app persistent collections and files,
-and a data sync (`app_sync_save`) refills them with no model run. A separate
-server is only
+app data gives every published app persistent collections and files. A page
+calling a connected tool usually shows data only to viewers with their own
+connection; for a team, a shared sync (`app_sync_save`) fills a collection on a
+schedule, and a webhook (`app_webhook_save`) takes in other services' events.
+A separate server is only
 relevant for a genuinely external need: a third-party API that requires a
 secret the viewer's browser must not hold, relational queries or volumes app
 Data cannot serve, or live server-side compute. If the request seems to need
@@ -264,7 +269,7 @@ Read the references the app needs with `skill_read`, for example
 | --- | --- |
 | Every full app: packages, build, local preview with live tools, pages and addresses (`/admin`, `?t=` links), requested tools, the completion gate | `references/build-and-preview.md` |
 | Inline AI results, an embedded conversation, Opengeni UI components or the typed client | `references/ai-and-chat.md` |
-| Saves records or files (app data) | `references/site-data.md` |
+| Saves or reacts to records or files (app data, syncs, webhooks) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (app SQL) | `references/site-sql.md` |
 | Invited or public, with data, tools or an embedded agent | `references/publish-to-web.md` |
 | Moves to another workspace | `references/app-packages.md` |
@@ -280,16 +285,12 @@ To embed a published app, use a fenced `opengeni-site` block containing JSON:
 {"siteId":"<artifact.id>","versionId":"<published version.id>"}
 ```
 
-Use the actual returned ids. `versionId` is optional; omitting it loads the
-current version when the embed opens. Including it preserves the intended
-version. The viewer can choose another version within the embed without
-publishing or rolling back the app. The embed uses the same app renderer,
-reload/full-screen controls, tool declarations and viewer permissions as the
-app page. Embeds resolve in the chat's workspace. Keep a normal app link when
-it helps the user reopen or share it. Archived or inaccessible apps display
-an unavailable state.
+Use the actual returned ids. `versionId` is optional: omitted, the embed loads
+the current version; included, it keeps that version. The viewer can pick
+another version in the embed without publishing or rolling back. The embed
+works like the app page (tools, viewer permissions), in the chat's workspace. Keep a normal app
+link when it helps the user reopen or share it. Archived or inaccessible apps
+show as unavailable.
 
 Use inline HTML for a visualization that belongs in this response. Use an app
-for a reusable app or durable page, and embed it when useful. Both can be small;
-neither requires a dashboard or full-page layout. React apps still use the
-normal build and publish workflow.
+for a reusable app or durable page, and embed it when useful.

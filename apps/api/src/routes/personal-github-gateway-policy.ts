@@ -1,4 +1,8 @@
-import { UNATTENDED_APPROVAL_REFUSAL_TEXT, agentToolPermissionFor } from "@opengeni/contracts";
+import {
+  GITHUB_REST_READ_TOOL_NAMES,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
+  agentToolPermissionFor,
+} from "@opengeni/contracts";
 import type { AgentToolPermissionRuleInput, ToolReviewContext } from "@opengeni/contracts";
 import {
   beginConnectorActionExecution,
@@ -67,6 +71,15 @@ export type GatewayCompleter = (
   outcome: "completed" | "uncertain" | "not_executed",
 ) => Promise<void>;
 
+/**
+ * Decides one `gh` read (REST or GraphQL) against the chat's agents' Can
+ * use: refused when they block every built-in GitHub read tool, else allowed.
+ */
+export type GatewayReadDecider = (
+  identity: GatewayDecisionIdentity,
+  title: string,
+) => Promise<Extract<GatewayDecision, { kind: "allow" } | { kind: "refuse" }>>;
+
 const DECISION_RANK = { allow: 0, ask: 1, block: 2 } as const;
 
 /** The provider domain a Can use rule may name for `gh` and Git requests. */
@@ -115,6 +128,50 @@ export function withAgentGatewayFloor(
       return floor;
     },
   };
+}
+
+/**
+ * Whether the chat's agents block every built-in GitHub read tool. A `gh`
+ * read can't be matched to one tool, so it follows Can use only when the
+ * agents can't read GitHub through the built-in tools at all (for example
+ * Block on all of GitHub's tools); a rule on one read tool applies to that
+ * tool only. Ask first isn't applied to reads: the gateway has no approval
+ * for reads, and the person's own GitHub settings don't cover reads either.
+ */
+export function agentsBlockEveryGitHubRead(
+  ruleSets: readonly (readonly AgentToolPermissionRuleInput[])[],
+): boolean {
+  return (
+    ruleSets.length > 0 &&
+    GITHUB_REST_READ_TOOL_NAMES.every(
+      (toolName) => agentGatewayFloor(ruleSets, toolName) === "block",
+    )
+  );
+}
+
+async function sessionAgentRuleSets(
+  db: Database,
+  claims: PersonalGitHubGitBrokerClaims,
+): Promise<AgentToolPermissionRuleInput[][]> {
+  return (
+    await getSessionAgentChain(db, {
+      workspaceId: claims.workspaceId,
+      sessionId: claims.sessionId,
+    })
+  ).flatMap((agent) => agentToolPermissionSetsForEnforcement(agent));
+}
+
+/** `gh` reads follow the chat's agents' Can use (see `agentsBlockEveryGitHubRead`). */
+export function databaseGatewayReadDecider(db: Database): GatewayReadDecider {
+  return async (identity, title) =>
+    agentsBlockEveryGitHubRead(await sessionAgentRuleSets(db, identity.claims))
+      ? {
+          kind: "refuse",
+          status: 403,
+          waiting: false,
+          message: `Blocked by this agent's Can use: ${title}. Do not retry it.`,
+        }
+      : { kind: "allow" };
 }
 
 function connectorIdentity(identity: GatewayDecisionIdentity): ConnectorActionAttemptIdentity {
@@ -194,12 +251,7 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
     // too, so `gh pr merge` follows the same Block as the merge tool. Read
     // per request (the worker reads them once per attempt), so an edit can
     // reach `gh` a turn sooner; either way it only makes calls stricter.
-    const agentRuleSets = (
-      await getSessionAgentChain(db, {
-        workspaceId: identity.claims.workspaceId,
-        sessionId: identity.claims.sessionId,
-      })
-    ).flatMap((agent) => agentToolPermissionSetsForEnforcement(agent));
+    const agentRuleSets = await sessionAgentRuleSets(db, identity.claims);
     const floored = withAgentGatewayFloor(agentRuleSets, (lookup) =>
       resolveAttemptConnectorToolDecision(db, ledgerIdentity, {
         connectionId: identity.claims.connectionId,

@@ -444,6 +444,12 @@ export const WorkspaceArtifactContentResponse = /* @__PURE__ */ defineSchema(() 
     html: WorkspaceArtifactHtml,
     source: WorkspaceArtifactSourceBundle,
     requestedTools: WorkspaceArtifactRequestedTools,
+    /**
+     * A multi-file version's asset folder: render `html` with this as its
+     * `<base href>` (`injectSiteAssetBase` in `@opengeni/contracts/app-assets`).
+     * Absent for a single-file app.
+     */
+    assetBaseUrl: primitives.string.url().optional(),
   }),
 );
 export type WorkspaceArtifactContentResponse = z.infer<typeof WorkspaceArtifactContentResponse>;

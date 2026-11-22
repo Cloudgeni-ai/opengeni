@@ -62,6 +62,11 @@ export type UseNewConversationOptions = ClientOverride<ChatClient> & {
   realtimeVoice?: boolean | undefined;
   /** Changes reset this new-chat draft; use for host record/project scope. */
   scopeKey?: string | undefined;
+  /**
+   * The model to preselect instead of the workspace default, such as an app's
+   * configured model. Used only while the catalog offers it as selectable.
+   */
+  defaultModel?: string | null | undefined;
 };
 
 type Choice = Pick<NewConversationCreateOptions, "model" | "reasoningEffort" | "latencyMode">;
@@ -89,6 +94,16 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   const config = useClientConfigFlags(context.client);
   const showModelPicker = options.modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({ ...scope, enabled: showModelPicker });
+  // A host's preferred model wins over the workspace default while the
+  // workspace can run it; otherwise the server-owned default stands.
+  const preferredModel =
+    options.defaultModel &&
+    catalog.models.some(
+      (row) => row.id === options.defaultModel && row.availability?.selectable !== false,
+    )
+      ? options.defaultModel
+      : undefined;
+  const defaultModel = preferredModel ?? catalog.defaultModel;
   const files = useFileAttachments(scope);
   const uploadsEnabled = (options.attachments ?? true) && config.uploads;
   const available =
@@ -155,7 +170,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   const updateChoice = (patch: Choice) => {
     if (!ownsScope()) return;
     const next = { ...choiceRef.current, ...patch };
-    const model = catalog.models.find((row) => row.id === (next.model ?? catalog.defaultModel));
+    const model = catalog.models.find((row) => row.id === (next.model ?? defaultModel));
     if (model) {
       if (next.reasoningEffort)
         next.reasoningEffort = coerceReasoningEffortForModel(model, next.reasoningEffort);
@@ -168,8 +183,11 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     // reason goes. An unconfirmed create keeps its status until it settles.
     if (!pendingRef.current) setError(null);
   };
+  // The server picks its own default when none is sent; a host's preferred
+  // model must be sent to take effect.
+  const preferredChoice = (): Choice => (preferredModel ? { model: preferredModel } : {});
   const effectivePolicy = () => {
-    const model = choiceRef.current.model ?? catalog.defaultModel;
+    const model = choiceRef.current.model ?? defaultModel;
     const definition = catalog.models.find((row) => row.id === model);
     const effort =
       choiceRef.current.reasoningEffort ??
@@ -303,7 +321,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       create,
       options: {
         ...(resources.length ? { resources: structuredClone(resources) } : {}),
-        ...(showModelPicker ? { ...choiceRef.current } : {}),
+        ...(showModelPicker ? { ...preferredChoice(), ...choiceRef.current } : {}),
       },
     });
   };
@@ -325,7 +343,10 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       textRevision: textRevision.current,
       clearDraft: false,
       create,
-      options: { ...(showModelPicker ? { ...choiceRef.current } : {}), startMode: "realtime" },
+      options: {
+        ...(showModelPicker ? { ...preferredChoice(), ...choiceRef.current } : {}),
+        startMode: "realtime",
+      },
       realtimeModel: model,
     });
   };

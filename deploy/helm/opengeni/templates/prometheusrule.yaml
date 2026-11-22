@@ -601,7 +601,7 @@ spec:
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniMcpStrictConnectFailed
           expr: |
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome="failed"}[5m])) > 0
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome=~"failed|refused_by_policy"}[5m])) > 0
           for: 1m
           labels:
             severity: critical
@@ -631,10 +631,10 @@ spec:
             (
               sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])), 1)
+              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!="refused_by_policy"}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])) >= 5
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!="refused_by_policy"}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
@@ -1454,6 +1454,22 @@ spec:
             user_impact: 'Affected users'' next turn may hit a lost sandbox and continue from a checkpoint.'
             next_step: 'Check the lease''s capture and drain progress and provider-missing recovery.'
             description: A warm lease names an exact Modal instance that complete app listings keep not showing (draining leases are excluded; they lose their box mid-drain). The lease may keep metering warm time and its next turn or drain will hit provider loss. Check the lease's capture/drain progress and provider-missing recovery.
+        - alert: OpenGeniModalCreateOutcomeUnknown
+          # The reaper checks each expired warming lease whose create reply was
+          # lost about every 30 s. A receipt normally turns up within minutes;
+          # 15 minutes of checks held for 30 more means one stays unknown.
+          expr: |
+            sum(increase(opengeni_sandbox_modal_create_recovery_checks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="unresolved"}[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A Modal sandbox create has had an unknown outcome for over 45 minutes.'
+            headline: 'Sandbox create stuck with unknown outcome'
+            value: '{{ "{{ printf `%.0f` $value }}" }} unresolved check(s) in 15m'
+            user_impact: 'The affected chat waits for its sandbox and does not continue until the create settles, at most 25 hours after it started.'
+            next_step: 'Find the lease in the reaper''s "Modal create remains fenced pending discovery" warnings and check the Modal app for a sandbox named opengeni-create-<operation id>.'
+            description: A warming Modal lease recorded a create whose reply never arrived, and the reaper cannot find an exact provider receipt for it. The lease stays fenced so no second box is created, and it postpones every Modal orphan termination meanwhile. Once the attempt is older than Modal's 24-hour maximum sandbox lifetime plus an hour, the reaper settles it (outcome settled_expired) and the next turn creates a fresh box from the archive.
         - alert: OpenGeniModalInventoryStale
           expr: |
             min(

@@ -6,6 +6,7 @@ import {
   type AppSyncRunSummary as AppSyncRunSummaryType,
 } from "@opengeni/contracts";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { PERSONAL_SYNC_SUBSCRIBER_SOURCE_KINDS } from "./event-trigger-listening";
 
 /**
  * App data sync persistence (docs/app-sync.md). A sync is an ordinary
@@ -152,6 +153,8 @@ export type ClaimedAppSyncRun = {
   triggerType: string;
   /** Another run of the same sync holds a live lease: this one must not run (overlap `skip`). */
   overlapping: boolean;
+  /** This claim's lease token: renewing and settling need it (see `renewAppSyncLease`). */
+  leaseToken: string;
 };
 
 /**
@@ -180,14 +183,16 @@ export async function claimAppSyncRun(
       account_id: string;
       attempts: number;
       chain_depth: number | string;
+      lease_token: string;
     }>(
       tx,
       sql`update app_sync_queue
-          set lease_until = now() + make_interval(secs => ${leaseSeconds}), attempts = attempts + 1
+          set lease_until = now() + make_interval(secs => ${leaseSeconds}), attempts = attempts + 1,
+              lease_token = gen_random_uuid()
           where run_id = ${input.runId}::uuid
             and workspace_id = ${input.workspaceId}::uuid
             and (lease_until is null or lease_until < now())
-          returning task_id, account_id, attempts, chain_depth`,
+          returning task_id, account_id, attempts, chain_depth, lease_token`,
     );
     if (!claimed) return null;
     const [run] = await rawRows<{
@@ -235,14 +240,33 @@ export async function claimAppSyncRun(
       chainDepth,
       triggerType: run.trigger_type,
       overlapping: other !== undefined,
+      leaseToken: claimed.lease_token,
     };
   });
 }
 
-/** Extend a running sync's lease, so a long run is not claimed again. False when it is gone. */
+/**
+ * A claim's fence: the lease token and attempt count it got. A claim by a
+ * release without tokens leaves the token unchanged but still counts an
+ * attempt, so both are checked.
+ */
+export type AppSyncLease = { leaseToken: string; attempts: number };
+
+function leaseHeld(lease: AppSyncLease | undefined) {
+  return lease
+    ? sql`and lease_token = ${lease.leaseToken}::uuid and attempts = ${lease.attempts}`
+    : sql``;
+}
+
+/**
+ * Extend a running sync's lease, so a long run is not claimed again. False
+ * when the run is gone or, given the claim's lease, another executor has
+ * claimed it since: the caller must then stop calling the tool and writing,
+ * and leave the run to the current holder.
+ */
 export async function renewAppSyncLease(
   db: Database,
-  input: { workspaceId: string; runId: string; leaseSeconds?: number },
+  input: { workspaceId: string; runId: string; leaseSeconds?: number; lease?: AppSyncLease },
 ): Promise<boolean> {
   const leaseSeconds = Math.max(10, Math.trunc(input.leaseSeconds ?? APP_SYNC_LEASE_SECONDS));
   return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
@@ -250,6 +274,7 @@ export async function renewAppSyncLease(
       tx,
       sql`update app_sync_queue set lease_until = now() + make_interval(secs => ${leaseSeconds})
           where workspace_id = ${input.workspaceId}::uuid and run_id = ${input.runId}::uuid
+            ${leaseHeld(input.lease)}
           returning run_id`,
     );
     return rows.length > 0;
@@ -265,9 +290,21 @@ export async function finishAppSyncRun(
     status: "succeeded" | "failed" | "skipped";
     error: string | null;
     summary: AppSyncRunSummaryType | null;
+    /** Settle only while this claim still holds the run; false (and nothing changes) otherwise. */
+    lease?: AppSyncLease;
   },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    if (input.lease) {
+      const held = await rawRows<{ run_id: string }>(
+        tx,
+        sql`select run_id from app_sync_queue
+            where workspace_id = ${input.workspaceId}::uuid and run_id = ${input.runId}::uuid
+              ${leaseHeld(input.lease)}
+            for update`,
+      );
+      if (held.length === 0) return false;
+    }
     const updated = await rawRows<{ id: string }>(
       tx,
       sql`update scheduled_task_runs
@@ -291,11 +328,14 @@ export type AppSyncSubscription = {
   subjectId: string;
   createdAt: string;
   lastRun: AppSyncLastRun | null;
+  /** The account (route server id) the person chose; null when they didn't. */
+  account: string | null;
 };
 
 type SubscriptionRow = {
   task_id: string;
   subject_id: string;
+  account_server_id: string | null;
   created_at: Date | string;
   last_run_at: Date | string | null;
   last_status: string | null;
@@ -307,6 +347,7 @@ function mapSubscription(row: SubscriptionRow): AppSyncSubscription {
   return {
     taskId: row.task_id,
     subjectId: row.subject_id,
+    account: row.account_server_id ?? null,
     createdAt: iso(row.created_at),
     lastRun:
       row.last_run_at && row.last_status
@@ -321,17 +362,47 @@ function mapSubscription(row: SubscriptionRow): AppSyncSubscription {
   };
 }
 
-/** Opt a person in to (or out of) a personal sync. Returns whether they are opted in. */
+/**
+ * Opt a person in to (or out of) a personal sync, on the account they chose
+ * (kept as it is when `account` is omitted). Returns whether they are opted in.
+ */
 export async function setAppSyncSubscription(
   db: Database,
-  input: Scope & { taskId: string; subjectId: string; optedIn: boolean },
+  input: Scope & {
+    taskId: string;
+    subjectId: string;
+    optedIn: boolean;
+    account?: string | null;
+  },
 ): Promise<boolean> {
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
-    if (input.optedIn)
-      await tx.execute(sql`insert into app_sync_subscriptions (account_id, workspace_id, task_id, subject_id)
-        values (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid, ${input.subjectId})
-        on conflict (workspace_id, task_id, subject_id) do nothing`);
-    else
+    if (input.optedIn) {
+      await tx.execute(sql`insert into app_sync_subscriptions (account_id, workspace_id, task_id, subject_id, account_server_id)
+        values (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid, ${input.subjectId}, ${input.account ?? null})
+        on conflict (workspace_id, task_id, subject_id) do update
+          set account_server_id = case when ${input.account === undefined} then app_sync_subscriptions.account_server_id
+            else excluded.account_server_id end`);
+      // The person's own sources of a kind the sync's triggers listen to now
+      // fire it for them (triggerHearsSource): read them now, not at their
+      // next idle check.
+      await tx.execute(sql`update event_source_feeds feed
+        set next_action_at = now(), updated_at = now()
+        from event_sources mine
+        where feed.workspace_id = ${input.workspaceId}::uuid and feed.source_id = mine.id
+          and mine.workspace_id = feed.workspace_id and mine.owner_subject_id = ${input.subjectId}
+          and mine.visibility = 'private' and mine.status = 'active'
+          and feed.next_action_at > now()
+          and mine.kind in (
+            select heard.kind from event_triggers trigger
+            join event_sources heard
+              on heard.workspace_id = trigger.workspace_id and heard.id = trigger.source_id
+            where trigger.workspace_id = ${input.workspaceId}::uuid
+              and trigger.task_id = ${input.taskId}::uuid
+              and heard.kind in (${sql.join(
+                PERSONAL_SYNC_SUBSCRIBER_SOURCE_KINDS.map((kind) => sql`${kind}`),
+                sql`, `,
+              )}))`);
+    } else
       await tx.execute(sql`delete from app_sync_subscriptions
         where workspace_id = ${input.workspaceId}::uuid and task_id = ${input.taskId}::uuid
           and subject_id = ${input.subjectId}`);
@@ -366,7 +437,7 @@ export async function listAppSyncSubscriptions(
   const rows = await withWorkspaceRls(db, workspaceId, (tx) =>
     rawRows<SubscriptionRow>(
       tx,
-      sql`select task_id, subject_id, created_at, last_run_at, last_status, last_error, last_summary
+      sql`select task_id, subject_id, account_server_id, created_at, last_run_at, last_status, last_error, last_summary
           from app_sync_subscriptions
           where workspace_id = ${workspaceId}::uuid and task_id = ${taskId}::uuid
           order by created_at, subject_id
@@ -388,7 +459,7 @@ export async function getAppSyncSubscriptionsForSubject(
   const rows = await withWorkspaceRls(db, workspaceId, (tx) =>
     rawRows<SubscriptionRow>(
       tx,
-      sql`select task_id, subject_id, created_at, last_run_at, last_status, last_error, last_summary
+      sql`select task_id, subject_id, account_server_id, created_at, last_run_at, last_status, last_error, last_summary
           from app_sync_subscriptions
           where workspace_id = ${workspaceId}::uuid and subject_id = ${subjectId}
             and task_id in (${sql.join(
@@ -444,5 +515,178 @@ export async function recordAppSyncSubscriptionRun(
           last_summary = ${input.summary ? JSON.stringify(input.summary) : null}::jsonb
       where workspace_id = ${input.workspaceId}::uuid and task_id = ${input.taskId}::uuid
         and subject_id = ${input.subjectId}`);
+  });
+}
+
+// --- keys a sync wrote (removeMissing) -----------------------------------------
+
+/** The ledger's person for a shared sync's keys. */
+export const APP_SYNC_SHARED_KEYS = "";
+
+/**
+ * Record that this run pass saw (and wrote) these keys, for one person of a
+ * personal sync or `APP_SYNC_SHARED_KEYS`. `hashes` (same order as `keys`)
+ * are a table sync's fingerprints of the values written.
+ */
+export async function recordAppSyncKeys(
+  db: Database,
+  input: Scope & {
+    taskId: string;
+    subjectId: string;
+    pass: string;
+    keys: readonly string[];
+    hashes?: readonly (string | null)[];
+  },
+): Promise<void> {
+  if (input.keys.length === 0) return;
+  await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    for (let start = 0; start < input.keys.length; start += 500) {
+      const chunk = input.keys.slice(start, start + 500);
+      const hashes = chunk.map((_, index) => input.hashes?.[start + index] ?? null);
+      await tx.execute(sql`insert into app_sync_keys (account_id, workspace_id, task_id, subject_id, record_key, seen_pass, written_hash)
+        select ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid, ${input.subjectId}, entry.key, ${input.pass}::uuid, entry.hash
+        from unnest(${sql.raw("ARRAY[")}${sql.join(
+          chunk.map((key) => sql`${key}`),
+          sql`, `,
+        )}${sql.raw("]::text[]")}, ${sql.raw("ARRAY[")}${sql.join(
+          hashes.map((hash) => sql`${hash}`),
+          sql`, `,
+        )}${sql.raw("]::text[]")}) as entry(key, hash)
+        on conflict (workspace_id, task_id, subject_id, record_key) do update
+          set seen_pass = excluded.seen_pass, seen_at = now(), written_hash = excluded.written_hash`);
+    }
+  });
+}
+
+/** A key this sync wrote earlier, with a table sync's fingerprint of what it wrote. */
+export type AppSyncMissingKey = { key: string; hash: string | null };
+
+/** Keys this sync wrote earlier that the pass didn't see, oldest first. */
+export async function listMissingAppSyncKeys(
+  db: Database,
+  input: { workspaceId: string; taskId: string; subjectId: string; pass: string; limit: number },
+): Promise<AppSyncMissingKey[]> {
+  const rows = await withWorkspaceRls(db, input.workspaceId, (tx) =>
+    rawRows<{ record_key: string; written_hash: string | null }>(
+      tx,
+      sql`select record_key, written_hash from app_sync_keys
+          where workspace_id = ${input.workspaceId}::uuid and task_id = ${input.taskId}::uuid
+            and subject_id = ${input.subjectId} and seen_pass <> ${input.pass}::uuid
+          order by seen_at, record_key
+          limit ${Math.max(1, Math.trunc(input.limit))}`,
+    ),
+  );
+  return rows.map((row) => ({ key: row.record_key, hash: row.written_hash }));
+}
+
+/** Forget keys whose records were removed. */
+export async function deleteAppSyncKeys(
+  db: Database,
+  input: { workspaceId: string; taskId: string; subjectId: string; keys: readonly string[] },
+): Promise<void> {
+  if (input.keys.length === 0) return;
+  await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    await tx.execute(sql`delete from app_sync_keys
+      where workspace_id = ${input.workspaceId}::uuid and task_id = ${input.taskId}::uuid
+        and subject_id = ${input.subjectId}
+        and record_key in (${sql.join(
+          input.keys.map((key) => sql`${key}`),
+          sql`, `,
+        )})`);
+  });
+}
+
+/** Forget every key a sync wrote (it now writes somewhere else); returns how many. */
+export async function clearAppSyncKeys(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+  subjectId?: string,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (tx) => {
+    const rows = await rawRows<{ record_key: string }>(
+      tx,
+      sql`delete from app_sync_keys
+          where workspace_id = ${workspaceId}::uuid and task_id = ${taskId}::uuid
+            ${subjectId === undefined ? sql`` : sql`and subject_id = ${subjectId}`}
+          returning record_key`,
+    );
+    return rows.length;
+  });
+}
+
+// --- event runs ------------------------------------------------------------------
+
+/**
+ * For an event run: whose event sources fired it. `workspaceWide` when any
+ * of its triggers is on a workspace source; otherwise `owners` are the
+ * people whose own (private) sources fired it, none when they no longer
+ * exist. Null for any other run.
+ */
+export async function appSyncRunEventSources(
+  db: Database,
+  workspaceId: string,
+  runId: string,
+): Promise<{ workspaceWide: boolean; owners: string[] } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (tx) => {
+    // The sources the run's events came from: every event batched into its
+    // occurrence (the occurrence carries at most 50), since a personal sync's
+    // trigger also hears its subscribers' own sources and the triggers'
+    // sources can name the wrong person. An occurrence without any falls
+    // back to its triggers' sources.
+    const rows = await rawRows<{
+      kind: "occurrence" | "source";
+      visibility: string | null;
+      owner_subject_id: string | null;
+    }>(
+      tx,
+      sql`with occurrence as (
+            select occurrence.id, occurrence.workspace_id, occurrence.task_id, occurrence.events,
+              occurrence.trigger_ids
+            from scheduled_task_runs run
+            join scheduled_task_event_occurrences occurrence
+              on occurrence.workspace_id = run.workspace_id and occurrence.task_id = run.task_id
+              and run.producer_key = 'scheduled-task-event:' || occurrence.id::text
+            where run.workspace_id = ${workspaceId}::uuid and run.id = ${runId}::uuid
+              and run.trigger_type = 'event'
+          ), fired as (
+            select inbound.source_id
+            from occurrence
+            join scheduled_task_event_inbox inbox
+              on inbox.workspace_id = occurrence.workspace_id and inbox.task_id = occurrence.task_id
+              and inbox.occurrence_id = occurrence.id
+            join inbound_events inbound
+              on inbound.workspace_id = inbox.workspace_id and inbound.id = inbox.event_id
+            union
+            select (summary ->> 'sourceId')::uuid
+            from occurrence, jsonb_array_elements(
+              case when jsonb_typeof(occurrence.events) = 'array' then occurrence.events
+                else '[]'::jsonb end) summary
+            where summary ->> 'sourceId' ~ '^[0-9a-f-]{36}$'
+          ), heard as (
+            select source_id from fired
+            union
+            select trigger.source_id from occurrence
+            join event_triggers trigger
+              on trigger.workspace_id = occurrence.workspace_id
+              and trigger.id = any(occurrence.trigger_ids)
+            where not exists (select 1 from fired)
+          )
+          select 'occurrence' as kind, null as visibility, null as owner_subject_id from occurrence
+          union all
+          select 'source', source.visibility, source.owner_subject_id
+          from heard
+          join event_sources source
+            on source.workspace_id = ${workspaceId}::uuid and source.id = heard.source_id`,
+    );
+    if (!rows.some((row) => row.kind === "occurrence")) return null;
+    const owners = new Set<string>();
+    let workspaceWide = false;
+    for (const row of rows) {
+      if (row.kind !== "source") continue;
+      if (row.visibility === "workspace" || row.owner_subject_id === null) workspaceWide = true;
+      else owners.add(row.owner_subject_id);
+    }
+    return { workspaceWide, owners: [...owners] };
   });
 }

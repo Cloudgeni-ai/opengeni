@@ -45,7 +45,11 @@ test("plugin rows and detail pages preserve keyboard focus, scrolling, and insta
         expect(await opener.locator("button").count()).toBe(0);
         expect(await opener.locator('[data-slot="logo-tile"]').count()).toBe(1);
         if (query.includes("installed")) {
-          expect(await opener.getAttribute("aria-label")).toContain("Installed");
+          // The row's visible text names it: the plugin and its status line.
+          expect(await opener.getAttribute("aria-label")).toBeNull();
+          expect(await opener.locator(".og-capability-catalog-status-line").textContent()).toBe(
+            "Installed · Workspace",
+          );
         } else {
           expect(await opener.locator("[data-status]").getAttribute("data-status")).toBe(
             "available",

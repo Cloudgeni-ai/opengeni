@@ -21,6 +21,7 @@ export * from "./claude-cite-tags";
 export * from "./provider-citation-handles";
 export * from "./machine-access";
 export * from "./no-reply";
+export * from "./connection-card-notice";
 import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
 import {
@@ -37,6 +38,7 @@ import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./session-links";
+export * from "./github-built-in-tools";
 import { SessionWaitingOn } from "./session-links";
 export * from "./turn-serving-policy";
 import {
@@ -76,10 +78,13 @@ export * from "./app-shot";
 import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./app-sync";
+export * from "./app-webhook";
 import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
+export * from "./app-assets";
 export * from "./site-sql";
 export * from "./app-package";
+export * from "./app-templates";
 export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
@@ -249,6 +254,7 @@ export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
+export * from "./shared-service-connections";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
@@ -1322,6 +1328,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sync_delete",
   "app_sync_run",
   "app_sync_opt_in",
+  "app_webhook_save",
+  "app_webhook_list",
+  "app_webhook_delete",
   "app_files_list",
   "app_files_upload",
   "app_files_delete",
@@ -1341,6 +1350,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sql_reset",
   "app_export",
   "app_install",
+  "app_upgrade",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -7077,7 +7087,9 @@ export type McpCredentialAuthNeededReason =
   | CredentialAuthNeededReason
   | "personal_authority_unavailable"
   | "unsupported_auth"
-  | "resource_scope_unavailable";
+  | "resource_scope_unavailable"
+  /** A shared key's vault item is missing or out of the connection's reach. */
+  | "designated_credential_unavailable";
 
 export type ConnectionCredentialPlacement = {
   carrier: "header" | "query" | "cookie";
@@ -11694,8 +11706,12 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * waiter when a later check finds its reset later than the parent was told
  * (the time passed without capacity, or a longer limit binds) or unknown; its
  * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
+ *
+ * 5: new Codex wait notices can name an actionable cause or rate limit. If
+ * the cause changes, a new notice adds the child's waiting-event sequence to
+ * its dedupe key. Previously stored summaries keep their original text.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 5;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -13640,6 +13656,14 @@ export const ScheduledTaskMetadataInput =
     "scheduled task metadata",
   );
 
+/**
+ * Task metadata the server writes when an automation's agent changes while it
+ * has its own chat: that chat stays with the agent it began with, so the next
+ * run starts a new chat with the new agent. The value is `{ sessionId,
+ * agentId, changedAt }`: the previous chat, its agent (null: none) and when.
+ */
+export const SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY = "_opengeniAgentChatChange";
+
 /** A Slack public or private channel ID. Direct messages are not destinations. */
 export const ScheduledTaskSlackChannelId = /* @__PURE__ */ defineSchema(() =>
   primitives.string.regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789"),
@@ -13686,7 +13710,8 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
      * The workspace agent each run's chat is with (an agent's "Starts when"):
      * it runs with that agent's Instructions, Memory and Can use. Checked
      * against the task owner's access when the task is saved and at each
-     * run. Only for a task that starts its own chat.
+     * run. An existing chat must be bound to the agent; the automation's own
+     * chat is replaced when the agent changes.
      */
     agentId: primitives.uuid.optional(),
     bundledSkillIds: BundledSkillSelection.optional(),
@@ -14916,7 +14941,18 @@ export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
 
 /** Create a sync. */
 export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
-  AppSyncDefinition.extend({ status: ScheduledTaskStatus.default("active") }),
+  AppSyncDefinition.extend({
+    /** Optional with a Site SQL `target`: it defaults to the table's name. */
+    collection: AppSyncSettings.shape.collection.optional(),
+    status: ScheduledTaskStatus.default("active"),
+    /**
+     * Shared syncs: the owner's account to run on (an `id` from their
+     * accounts of the connector). Omitted, it runs on the route it was saved
+     * with, else the owner's first own account. Not part of a definition, so
+     * packages stay portable.
+     */
+    account: z.string().min(1).max(256).optional(),
+  }),
 );
 export type AppSyncCreateRequest = z.input<typeof AppSyncCreateRequest>;
 
@@ -14935,6 +14971,11 @@ export const AppSyncUpdateRequest = /* @__PURE__ */ defineSchema(() =>
       schedule: ScheduledTaskScheduleSpec,
       events: ScheduledTaskEventsInput,
       status: ScheduledTaskStatus,
+      target: AppSyncSettings.shape.target.unwrap().nullable(),
+      paging: AppSyncSettings.shape.paging.unwrap().nullable(),
+      maxRecords: AppSyncSettings.shape.maxRecords.unwrap().nullable(),
+      removeMissing: AppSyncSettings.shape.removeMissing.unwrap(),
+      account: z.string().min(1).max(256),
     })
     .partial(),
 );
@@ -14954,6 +14995,12 @@ export const AppSync = /* @__PURE__ */ defineSchema(() =>
     recordsPath: z.string().nullable(),
     key: z.string(),
     fields: z.array(z.string()).nullable(),
+    target: AppSyncSettings.shape.target.unwrap().nullable().optional(),
+    paging: AppSyncSettings.shape.paging.unwrap().nullable().optional(),
+    maxRecords: z.number().int().nullable().optional(),
+    removeMissing: z.boolean().optional(),
+    /** Shared syncs: the owner's chosen account, when they chose one. */
+    account: z.string().nullable().optional(),
     schedule: ScheduledTaskScheduleSpec,
     events: ScheduledTaskEvents.nullable(),
     ownerSubjectId: z.string(),
@@ -15037,10 +15084,12 @@ export const UpdateScheduledTaskRequest =
             prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
             model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
             reasoningEffort: ReasoningEffort.optional(),
+            /** The agent each run's chat is with; null runs without one. */
+            agentId: primitives.uuid.nullable().optional(),
           })
           .strict()
           .refine((patch) => Object.keys(patch).length > 0, {
-            message: "agentConfigPatch requires prompt, model or reasoningEffort",
+            message: "agentConfigPatch requires prompt, model, reasoningEffort or agentId",
           })
           .optional(),
         status: ScheduledTaskStatus.optional(),
@@ -15435,6 +15484,14 @@ export const ConnectionKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["oauth2", "api_key", "app_install", "delegated"]),
 );
 export type ConnectionKind = z.infer<typeof ConnectionKind>;
+
+/** Safe connection diagnostics written by MCP setup, also shown in connection settings. */
+export const MCP_DESTINATION_CONNECTION_ERRORS = {
+  blocked:
+    "This deployment does not allow the connector’s address. Use an allowed address, then reconnect.",
+  unresolvable:
+    "This deployment could not find the connector’s address. Check that the address is reachable from this deployment, then reconnect.",
+} as const;
 
 export const ConnectionStatus = /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "needs_reauth", "revoked", "error"]),
@@ -16317,6 +16374,12 @@ export const ListInstalledSkillsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ skills: z.array(InstalledSkillSummary).max(1000) }).strict(),
 );
 export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
+
+/** GET /v1/workspaces/:workspaceId/skills/library: reviewed library skills, `enabled` once added. */
+export const ListLibrarySkillsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ skills: z.array(CapabilityCatalogItem).max(1000) }).strict(),
+);
+export type ListLibrarySkillsResponse = z.infer<typeof ListLibrarySkillsResponse>;
 
 export const SkillUninstallPreview = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -17600,6 +17663,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * Absent when false and on older servers; treat absence as unhandled.
      */
     failureHandled: primitives.optionalBoolean,
+    /**
+     * True when this `requires_action` session waits only on questions it put
+     * to the agent that started it, which still has them, so it does not wait
+     * on a person. Absent when false and on older servers.
+     */
+    questionWithAgent: primitives.optionalBoolean,
     /** Personal power-user label for work the member intends to continue. */
     activelyWorking: primitives.boolean.default(false),
     /** Optimistic revision for unread/actively-working state. */
@@ -17635,6 +17704,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         runningDescendants: primitives.nonnegativeInteger,
         queuedDescendants: primitives.nonnegativeInteger,
         waitingDescendants: z.number().int().nonnegative().optional(),
+        /** Descendants waiting on a person (not those whose questions are with their agent). */
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
         /**
@@ -17668,6 +17738,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * null otherwise and omitted by older servers or detail reads.
      */
     requiresActionSince: z.string().nullable().optional(),
+    /**
+     * When the agent started waiting on a connection card (connect, reconnect
+     * or more access) in this chat that is still open; null when none is.
+     * While the session is idle it needs the person, as an approval does.
+     * Omitted by older servers.
+     */
+    awaitingConnectionSince: z.string().nullable().optional(),
     createdAt: primitives.string,
     updatedAt: primitives.string,
   }),
@@ -17836,6 +17913,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinVersion: true,
     unread: true,
     failureHandled: true,
+    questionWithAgent: true,
     activelyWorking: true,
     attentionVersion: true,
     archived: true,
@@ -17845,6 +17923,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
+    awaitingConnectionSince: true,
     admissionBlock: true,
     createdAt: true,
     updatedAt: true,
@@ -19614,6 +19693,11 @@ export const GitDiffRequest = /* @__PURE__ */ defineSchema(() =>
     includeUntracked: primitives.boolean.default(false),
     fromRef: z.string().optional(),
     toRef: z.string().optional(),
+    // With fromRef: compare against the merge base of fromRef and toRef (HEAD
+    // when toRef is omitted, then including the working tree), i.e. only the
+    // changes made on this branch, like a pull request. Without it a branch that
+    // is behind fromRef also shows every later change on fromRef, reversed.
+    mergeBase: primitives.boolean.default(false),
     pathspec: z.array(primitives.string).default([]),
     contextLines: z.number().int().min(0).max(10).default(3),
     maxBytesPerFile: primitives.positiveInteger.max(2 * 1024 * 1024).default(512 * 1024),
@@ -23730,7 +23814,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("deployment"),
-          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+          mechanism: z.enum(["api_key", "azure_ad_bearer", "aws_iam"]),
         })
         .strict(),
       z

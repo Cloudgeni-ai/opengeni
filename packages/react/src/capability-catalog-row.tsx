@@ -20,6 +20,12 @@ export type CapabilityCatalogRowProps = Omit<
   statusLabel?: string | undefined;
   /** Preserve opaque host status text when adopting this row without typed health. */
   showStatusLabel?: boolean;
+  /**
+   * Something you already have shows one status line ("Installed · Workspace")
+   * in place of its description, and no glyph unless it needs attention: the
+   * row itself opens it.
+   */
+  statusLine?: string | undefined;
   onOpen: () => void;
 };
 
@@ -74,23 +80,38 @@ export function CapabilityCatalogRow({
   status = "available",
   statusLabel,
   showStatusLabel = false,
+  statusLine,
   onOpen,
   className = "",
   ...props
 }: CapabilityCatalogRowProps) {
+  const quiet = statusLine !== undefined && (status === "added" || status === "available");
   return (
     <button
       {...props}
       type="button"
       className={`og-capability-catalog-row ${className}`}
+      data-row-status={status}
+      // A quiet row has no indicator, so the row itself carries the status.
+      {...(quiet ? { "data-status": status } : {})}
       onClick={onOpen}
     >
       {icon ? <span className="og-capability-catalog-icon">{icon}</span> : null}
       <span className="og-capability-catalog-copy">
         <strong>{name}</strong>
-        {description ? <span>{description}</span> : null}
+        {statusLine !== undefined ? (
+          <span className="og-capability-catalog-status-line">{statusLine}</span>
+        ) : description ? (
+          <span>{description}</span>
+        ) : null}
       </span>
-      <CapabilityCatalogIndicator status={status} label={statusLabel} showLabel={showStatusLabel} />
+      {quiet ? null : (
+        <CapabilityCatalogIndicator
+          status={status}
+          label={statusLabel}
+          showLabel={showStatusLabel && statusLine === undefined}
+        />
+      )}
     </button>
   );
 }

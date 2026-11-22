@@ -12,7 +12,12 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
+import type { ResolvedModelProvider } from "@opengeni/config";
+import { AnthropicMessagesModel } from "../../runtime/src/anthropic-messages";
+import { claudeCoreRefusal } from "../../../apps/worker/src/activities/agent-turn/claude-core";
+import { recordCoreSubscriptionRefusal } from "../../../apps/worker/src/activities/agent-turn/subscription-core-settlement";
 import * as realRegistry from "../src/subscription-core-providers";
+import { failoverFixture } from "./helpers/subscription-core-failover-fixture";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -240,6 +245,160 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
       displayName: "Claude",
       wake: { accountId, reason: "core_claude_access_changed" },
     });
+  });
+
+  test("a subscription HTTP 403 keeps the account out of rotation until reconnect", async () => {
+    const provider = db.SUBSCRIPTION_CORE_CLAUDE;
+    const model = {
+      id: "organization-claude-subscription/claude-opus-4-6",
+      upstreamModelId: "claude-opus-4-6",
+      provider: "claude",
+      reasoningLevels: ["high"],
+    };
+    const fixture = failoverFixture(shared!, [provider], [model]);
+    try {
+      const owner = await fixture.organization();
+      const providerAccountId = crypto.randomUUID();
+      const connect = (reconnectTarget?: {
+        connectionId: string;
+        expectedVersion: number;
+        providerAccountId: string;
+      }) =>
+        connectClaude(
+          { ...owner, sharedWorkspaceId: owner.workspaceId },
+          {
+            workspaceId: owner.workspaceId,
+            providerAccountId,
+            credential: oauthCredential(providerAccountId),
+            ...(reconnectTarget ? { reconnectTarget } : {}),
+          },
+        );
+      const first = await connect();
+      if (first.kind !== "connected") throw new Error("Expected a workspace connection");
+      const runtime = db.subscriptionCoreTurns(provider);
+      const place = (work: Awaited<ReturnType<typeof fixture.turn>>) =>
+        runtime.placeSubscriptionCoreTurn(fixture.client.db, work);
+      const work = await fixture.turn(owner);
+      const placed = await place(work);
+      if (placed.kind !== "run") throw new Error("Expected initial placement");
+      expect(placed.connectionId).toBe(first.id);
+      const backup = await fixture.connection(owner, provider);
+      expect(await fixture.binding(work, "claude")).toMatchObject({
+        connection_id: first.id,
+        choice: "automatic",
+      });
+
+      const transport: ResolvedModelProvider = {
+        id: "organization-claude-subscription",
+        label: "Claude subscription",
+        kind: "claude-subscription-organization",
+        api: "anthropic-messages",
+        wireProfile: "openai",
+        builtin: false,
+        baseUrl: "https://example.test/v1",
+        apiKey: "synthetic-bearer",
+        credentialSource: { kind: "connected_subscription", provider: "claude" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+        anthropic: {
+          auth: "oauth",
+          identity: { accountUuid: providerAccountId, deviceId: "d".repeat(64) },
+          cacheTtl: "5m",
+          maxOutputTokens: 32_000,
+          streamIdleTimeoutMs: 1_000,
+        },
+      };
+      const fetcher = Object.assign(
+        async () =>
+          Response.json(
+            { error: { type: "permission_error", message: "private provider detail" } },
+            { status: 403 },
+          ),
+        { preconnect: fetch.preconnect },
+      );
+      const upstream = new AnthropicMessagesModel(transport, model.upstreamModelId, fetcher);
+      const error = await upstream
+        .getResponse({
+          input: "Test",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        })
+        .catch((cause: unknown) => cause);
+      expect(error).toMatchObject({ code: "anthropic_permission_denied", status: 403 });
+      const binding = claudeCoreRefusal(model.id);
+      const outcome = binding.classify(error);
+      expect(outcome).toEqual({ kind: "forbidden" });
+      if (!outcome) throw new Error("Expected an account refusal");
+      // The same worker binding and fenced settlement used by the live turn.
+      expect(
+        await recordCoreSubscriptionRefusal({
+          db: fixture.client.db,
+          provider: binding.provider,
+          core: {
+            identity: work.identity,
+            connectionId: placed.connectionId,
+            personal: placed.personal,
+            placedRefreshGeneration: placed.refreshGeneration,
+          },
+          lease: { holderId: work.holderId, generation: work.executionGeneration },
+          outcome,
+          credential: binding.credential,
+        }),
+      ).toEqual({ receipt: true, health: true });
+
+      const listed = async () =>
+        (
+          await db.getSubscriptionCoreClaudeWorkspaceProjection(fixture.client.db, {
+            accountId: owner.accountId,
+            workspaceId: owner.workspaceId,
+            viewerSubjectId: owner.subjectId,
+          })
+        ).accounts.find((account) => account.id === first.id);
+      const quarantined = await listed();
+      expect(quarantined).toMatchObject({
+        status: "error",
+        allocatorEnabled: true,
+      });
+      expect(quarantined?.lastError).toBe(
+        "The provider denied model access for this account (HTTP 403). Check its permissions, then reconnect it.",
+      );
+      expect(
+        await runtime.countSubscriptionCoreTurnRefusals(fixture.client.db, work.identity),
+      ).toBe(1);
+
+      const retry = await fixture.recover(work);
+      expect(retry.identity.turnId).toBe(work.identity.turnId);
+      expect(
+        await runtime.recoverSubscriptionCoreConnectionHealth(fixture.client.db, retry.identity),
+      ).toBe(0);
+      expect(await place(retry)).toMatchObject({
+        kind: "run",
+        connectionId: backup,
+        switch: "failover_same_provider",
+      });
+      await fixture.finish(retry);
+      const fresh = await fixture.turn(owner);
+      expect(await place(fresh)).toMatchObject({ kind: "run", connectionId: backup });
+      await fixture.finish(fresh);
+      expect(await listed()).toMatchObject({ status: "error" });
+
+      expect(
+        await connect({
+          connectionId: first.id,
+          expectedVersion: quarantined!.version,
+          providerAccountId,
+        }),
+      ).toMatchObject({ kind: "connected", id: first.id, isNew: false });
+      expect(await listed()).toMatchObject({
+        status: "active",
+        lastError: null,
+        allocatorEnabled: true,
+      });
+    } finally {
+      await fixture.client.close();
+    }
   });
 
   test("OAuth and setup-token connections take Claude's formats and provider state", async () => {

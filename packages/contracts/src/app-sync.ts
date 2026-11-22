@@ -2,6 +2,7 @@ import { z } from "zod";
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { ToolGatewayIdentity } from "./tool-catalog";
+import { SITE_SQL_IDENTIFIER, isSiteSqlTableName } from "./site-sql";
 
 /**
  * App data sync: an automation action that calls one connected tool with fixed
@@ -16,6 +17,14 @@ export const APP_SYNC_MAX_RECORDS = 1_000;
 export const APP_SYNC_MAX_FIELDS = 100;
 /** People a personal sync runs for in one run. */
 export const APP_SYNC_MAX_SUBSCRIBERS = 200;
+/** Records one run reads in total across pages (per person for a personal sync). */
+export const APP_SYNC_MAX_RUN_RECORDS = 10_000;
+/** Tool calls (pages) one run makes at most (per person for a personal sync). */
+export const APP_SYNC_MAX_PAGES = 50;
+/** Pages a paged sync reads per run when it doesn't say. */
+export const APP_SYNC_DEFAULT_PAGES = 10;
+/** Columns a Site SQL target fills. */
+export const APP_SYNC_MAX_COLUMNS = 100;
 
 /**
  * `shared` runs on the owner's connection and fills data everyone in the App
@@ -43,9 +52,110 @@ export const AppSyncArguments = /* @__PURE__ */ defineSchema(() =>
   z.record(z.string().max(512), z.unknown()),
 );
 
+const AppSyncArgumentName = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(256)
+    .describe("The tool argument (dot path) the sync sets on each next call."),
+);
+const AppSyncMaxPages = /* @__PURE__ */ defineSchema(() =>
+  z
+    .number()
+    .int()
+    .min(1)
+    .max(APP_SYNC_MAX_PAGES)
+    .optional()
+    .describe(`Most tool calls per run (default ${APP_SYNC_DEFAULT_PAGES}).`),
+);
+
+/**
+ * Paging across tool calls. `cursor`: each result carries the next page's
+ * cursor at `cursorPath`, passed back as `cursorArgument`; the run ends when
+ * there is none. `page`: `pageArgument` counts up from `firstPage`; the run
+ * ends at a page with no new records.
+ */
+export const AppSyncPaging = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("mode", [
+    z
+      .object({
+        mode: z.literal("cursor"),
+        cursorPath: AppSyncPath.describe(
+          "Dot path to the next page's cursor in the tool result (for example `nextCursor`).",
+        ),
+        cursorArgument: AppSyncArgumentName,
+        maxPages: AppSyncMaxPages,
+      })
+      .strict(),
+    z
+      .object({
+        mode: z.literal("page"),
+        pageArgument: AppSyncArgumentName,
+        firstPage: z
+          .number()
+          .int()
+          .min(0)
+          .max(1_000_000)
+          .optional()
+          .describe("The first page number (default 1)."),
+        maxPages: AppSyncMaxPages,
+      })
+      .strict(),
+  ]),
+);
+export type AppSyncPaging = z.infer<typeof AppSyncPaging>;
+
+const SqlIdentifier = /* @__PURE__ */ defineSchema(() => z.string().regex(SITE_SQL_IDENTIFIER));
+
+/**
+ * A Site SQL table a shared sync fills instead of a collection: each record
+ * is upserted by `keyColumn` (which gets the record's key and must be the
+ * table's primary key or unique), and `columns` maps each other column to a
+ * dot path in the record.
+ */
+export const AppSyncTableTarget = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      table: SqlIdentifier.refine(isSiteSqlTableName, "Not a table name an app can use")
+        // Stored as the sync's collection name too, so it fits both.
+        .refine(
+          (name) => /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(name),
+          "Start with a letter; at most 64 characters",
+        )
+        .describe("The app's Site SQL table to fill."),
+      keyColumn: SqlIdentifier.describe(
+        "The column that holds each record's key; it must be the table's primary key or have a unique index.",
+      ),
+      columns: z
+        .record(SqlIdentifier, AppSyncPath)
+        .refine(
+          (value) => Object.keys(value).length <= APP_SYNC_MAX_COLUMNS,
+          `At most ${APP_SYNC_MAX_COLUMNS} columns`,
+        )
+        .describe(
+          "Each column to fill and the dot path of its value in the record. Objects and lists are stored as JSON text.",
+        ),
+    })
+    .strict(),
+);
+export type AppSyncTableTarget = z.infer<typeof AppSyncTableTarget>;
+
+const AppSyncMaxRecords = /* @__PURE__ */ defineSchema(() =>
+  z
+    .number()
+    .int()
+    .min(1)
+    .max(APP_SYNC_MAX_RUN_RECORDS)
+    .describe(
+      `Most records one run reads across pages (default ${APP_SYNC_MAX_RECORDS}, at most ${APP_SYNC_MAX_RUN_RECORDS}).`,
+    ),
+);
+
 /** The fields every stored and requested sync shares. */
 export const AppSyncSettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /** The collection it fills; for a Site SQL table (`target`), the table's name. */
     collection: AppSyncCollection,
     mode: AppSyncMode.default("shared"),
     tool: ToolGatewayIdentity.describe("The connected tool to call."),
@@ -68,6 +178,19 @@ export const AppSyncSettings = /* @__PURE__ */ defineSchema(() =>
       .describe(
         "Dot paths of the fields to keep (stored under the same path). Omit to keep the whole record.",
       ),
+    // Optional with no default, so a definition that doesn't use them stays
+    // the same plain JSON it was (packages compare definitions as JSON).
+    target: AppSyncTableTarget.optional().describe(
+      "Shared syncs: fill this Site SQL table instead of a collection.",
+    ),
+    paging: AppSyncPaging.optional().describe("Read several pages, one tool call each."),
+    maxRecords: AppSyncMaxRecords.optional(),
+    removeMissing: z
+      .boolean()
+      .optional()
+      .describe(
+        "After a complete run (every page read, nothing cut off, no failure), remove the records this sync wrote that the tool no longer returns.",
+      ),
   }),
 );
 
@@ -80,6 +203,7 @@ export const AppSyncAction = /* @__PURE__ */ defineSchema(() =>
     .object({
       kind: z.literal("app_sync"),
       siteId: primitives.uuid,
+      /** For a Site SQL target (`target`), the table's name. */
       collection: AppSyncCollection,
       mode: AppSyncMode,
       /** The person whose connection a shared sync uses; never a request field. */
@@ -102,6 +226,16 @@ export const AppSyncAction = /* @__PURE__ */ defineSchema(() =>
       recordsPath: AppSyncPath.nullable(),
       key: AppSyncPath,
       fields: z.array(AppSyncPath).max(APP_SYNC_MAX_FIELDS).nullable(),
+      target: AppSyncTableTarget.nullable().optional(),
+      paging: AppSyncPaging.nullable().optional(),
+      maxRecords: z.number().int().min(1).max(APP_SYNC_MAX_RUN_RECORDS).nullable().optional(),
+      removeMissing: z.boolean().optional(),
+      /**
+       * The account (its route's server id) the owner chose for a shared
+       * sync. Every run checks it is still theirs. Absent on syncs saved
+       * before the choice existed; they keep using the owner's first account.
+       */
+      ownerAccount: z.string().min(1).max(256).nullable().optional(),
     })
     .strict(),
 );
@@ -116,8 +250,12 @@ export const AppSyncRunSummary = /* @__PURE__ */ defineSchema(() =>
     written: z.number().int().nonnegative().default(0),
     /** Records without a usable key. */
     skipped: z.number().int().nonnegative().default(0),
-    /** The result had more records than one run reads. */
+    /** The run stopped before the tool's last record (a limit, or a cursor that repeated). */
     truncated: z.boolean().default(false),
+    /** Tool calls made (pages read). */
+    pages: z.number().int().nonnegative().default(0),
+    /** Records removed because the tool no longer returned them (`removeMissing`). */
+    removed: z.number().int().nonnegative().default(0),
     /** Personal syncs: how many people the run was for, and how many failed. */
     people: z
       .object({
@@ -150,7 +288,10 @@ export const AppSyncStatus = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
     name: z.string(),
+    /** The collection it fills, or for a Site SQL target the table. */
     collection: z.string(),
+    /** The Site SQL table it fills; null for a collection. */
+    table: z.string().nullable().optional(),
     mode: AppSyncMode,
     active: z.boolean(),
     lastRun: AppSyncLastRun.nullable(),
@@ -165,7 +306,69 @@ export const AppSyncStatusResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type AppSyncStatusResponse = z.infer<typeof AppSyncStatusResponse>;
 
-export const AppSyncSubscriptionResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ syncId: primitives.uuid, optedIn: z.boolean() }),
+/** One of the person's own accounts a sync can run on. */
+export const AppSyncAccountChoice = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Pass as `account`. */
+    id: z.string(),
+    /** "ada@example.com" */
+    label: z.string(),
+    connector: z.string(),
+    /** A workspace-shared account (shared syncs only). */
+    shared: z.boolean(),
+  }),
 );
+export type AppSyncAccountChoice = z.infer<typeof AppSyncAccountChoice>;
+
+export const AppSyncSubscriptionResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    syncId: primitives.uuid,
+    optedIn: z.boolean(),
+    /** The account the person's runs use, when they chose one. */
+    account: z.string().nullable().optional(),
+    /**
+     * Their accounts of the sync's connector, when they have several and
+     * didn't choose one (runs use their first own account until they do).
+     */
+    accounts: z.array(AppSyncAccountChoice).optional(),
+  }),
+);
+
+/** `PUT …/syncs/:syncId/subscription`: opt in, optionally on one of the person's accounts. */
+export const AppSyncOptInRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      account: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe(
+          "The account to run on (an `accounts[].id` from the opt-in review). Omit to keep an earlier choice, or use the first own account.",
+        ),
+    })
+    .strict(),
+);
+export type AppSyncOptInRequest = z.infer<typeof AppSyncOptInRequest>;
+
+/**
+ * What the platform's opt-in confirmation shows: the sync, the tool it calls,
+ * where it writes and the person's own accounts to run it on.
+ */
+export const AppSyncOptInReview = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    syncId: primitives.uuid,
+    name: z.string(),
+    mode: AppSyncMode,
+    collection: z.string(),
+    tool: z.object({ toolName: z.string(), connector: z.string().nullable() }),
+    accounts: z.array(AppSyncAccountChoice),
+    /** The account their runs use now, when opted in with one. */
+    account: z.string().nullable(),
+    optedIn: z.boolean(),
+    /** Why they can't opt in yet (for example nothing connected), or null. */
+    blocked: z.string().nullable(),
+  }),
+);
+export type AppSyncOptInReview = z.infer<typeof AppSyncOptInReview>;
 export type AppSyncSubscriptionResponse = z.infer<typeof AppSyncSubscriptionResponse>;

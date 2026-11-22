@@ -320,9 +320,21 @@ export function agentToolPermissionFor(
   rules: readonly AgentToolPermissionRuleInput[],
   target: AgentToolPermissionTarget,
 ): AgentToolPermission | null {
-  let best: { rank: number; permission: AgentToolPermission } | null = null;
+  return agentToolPermissionRuleFor(rules, target)?.permission ?? null;
+}
+
+/**
+ * The rule {@link agentToolPermissionFor} decides by, with its tool
+ * normalized (`*` when omitted), or null when no rule names the call.
+ */
+export function agentToolPermissionRuleFor(
+  rules: readonly AgentToolPermissionRuleInput[],
+  target: AgentToolPermissionTarget,
+): AgentToolPermissionRule | null {
+  let best: { rank: number; rule: AgentToolPermissionRule } | null = null;
   for (const rule of rules) {
-    const connectorRank = ruleConnectorRank(rule.connector.trim(), target);
+    const connector = rule.connector.trim();
+    const connectorRank = ruleConnectorRank(connector, target);
     if (connectorRank === undefined) continue;
     const tool = (rule.tool ?? "*").trim();
     if (tool !== "*" && tool !== target.toolName) continue;
@@ -331,13 +343,20 @@ export function agentToolPermissionFor(
       best === null ||
       rank > best.rank ||
       (rank === best.rank &&
-        PERMISSION_STRICTNESS[rule.permission] > PERMISSION_STRICTNESS[best.permission])
+        PERMISSION_STRICTNESS[rule.permission] > PERMISSION_STRICTNESS[best.rule.permission])
     ) {
-      best = { rank, permission: rule.permission };
+      best = { rank, rule: { connector, tool, permission: rule.permission } };
     }
   }
-  return best?.permission ?? null;
+  return best?.rule ?? null;
 }
+
+/**
+ * The connector key Can use names Opengeni's built-in GitHub tools by. It is
+ * GitHub's domain, so one rule also covers every GitHub connection, as the
+ * ready-made agents' rules do.
+ */
+export const AGENT_BUILT_IN_GITHUB_CONNECTOR = "github.com";
 
 /** What the reader may do with an agent. */
 export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
@@ -629,6 +648,9 @@ export const AgentTemplateTrigger = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentTemplateTrigger = z.output<typeof AgentTemplateTrigger>;
 
+/** The team a piece of ready-made content is for, as people say it: "Engineering", "Sales". */
+export const ReadyMadeTeam = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(60));
+
 /** A ready-made agent people can add from the "Add an agent" gallery. Content, not code. */
 export const AgentTemplate = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -638,6 +660,8 @@ export const AgentTemplate = /* @__PURE__ */ defineSchema(() =>
       .max(AGENT_TEMPLATE_KEY_MAX_LENGTH),
     name: AgentName,
     description: AgentDescription,
+    /** The team it is for ("Engineering"); Ready-made groups by it. */
+    team: ReadyMadeTeam.nullish(),
     avatar: SessionAvatar.nullable().default(null),
     instructions: AgentInstructions,
     memoryEnabled: z.boolean().default(true),

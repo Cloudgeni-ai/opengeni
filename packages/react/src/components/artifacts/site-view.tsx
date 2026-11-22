@@ -54,6 +54,12 @@ export type SiteViewProps = {
   /** Hide the frame toolbar under a host header that draws reload and full screen. */
   showToolbar?: boolean | undefined;
   /**
+   * Whether the Site on screen is current, for a host header drawn instead of
+   * the frame toolbar: `updating` while a newer version loads, `reconnecting`
+   * while new versions can't be checked, and undefined until it has loaded.
+   */
+  onLiveStateChange?: ((state: SiteLiveState | undefined) => void) | undefined;
+  /**
    * Replaces the toolbar's "Live" indicator, for example with a link to the
    * published Site; `null` shows nothing there. Omit it for the default.
    */
@@ -139,6 +145,7 @@ export function SiteView({
   loadingLabel,
   onTitle,
   showToolbar,
+  onLiveStateChange,
   liveStatus,
   reloadToken,
   versionId,
@@ -248,6 +255,18 @@ export function SiteView({
         : undefined,
     [content, siteId, toolBridge],
   );
+  const archived = snapshot?.detail.artifact.status === "archived";
+  const liveState: SiteLiveState | undefined =
+    !content || archived || error || (versionId === undefined && watch === undefined)
+      ? undefined
+      : refresh === "loading" || (versionId && versionId !== shownVersion && refresh !== "failed")
+        ? "updating"
+        : watch === "reconnecting" || refresh === "failed"
+          ? "reconnecting"
+          : "live";
+  const onLiveStateChangeRef = useRef(onLiveStateChange);
+  onLiveStateChangeRef.current = onLiveStateChange;
+  useEffect(() => onLiveStateChangeRef.current?.(liveState), [liveState]);
   // Without the Site there is no toolbar, but its first control stays, so a
   // Back never disappears while the Site loads or fails.
   const withStart = (state: ReactNode) =>
@@ -280,18 +299,10 @@ export function SiteView({
         <ArtifactLoading label={loadingLabel ?? labels.loadingSite} />
       ),
     );
-  if (snapshot.detail.artifact.status === "archived")
+  if (archived)
     return withStart(
       <div className="p-4 text-sm text-fg-muted">{archivedMessage ?? labels.siteArchived}</div>,
     );
-  const liveState: SiteLiveState | undefined =
-    versionId === undefined && watch === undefined
-      ? undefined
-      : refresh === "loading" || (versionId && versionId !== shownVersion && refresh !== "failed")
-        ? "updating"
-        : watch === "reconnecting" || refresh === "failed"
-          ? "reconnecting"
-          : "live";
   return (
     <ArtifactSandbox
       html={content.html}

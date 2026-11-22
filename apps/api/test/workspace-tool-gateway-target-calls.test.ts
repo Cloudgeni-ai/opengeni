@@ -1325,6 +1325,43 @@ describe("target-only workspace tool calls", () => {
     }
   });
 
+  test("catalog entries carry the effective permission from tool settings", async () => {
+    const f = createFixture();
+    const attestations = createWorkspaceToolGatewayCatalogAttestations();
+    try {
+      const permissionOf = async () =>
+        (await attestedCatalog(f, attestations)).entries.find(
+          (entry) =>
+            entry.identity.serverId === f.identity(f.shared).serverId &&
+            entry.identity.toolName === "query_prometheus",
+        );
+      f.state.connections = [f.shared];
+      const setting = (decision: "allow" | "ask" | "block") => ({
+        id: crypto.randomUUID(),
+        connectionId: f.shared.id,
+        serverId: "grafana",
+        toolName: "query_prometheus",
+        actionName: "*",
+        policy: decision,
+        version: 1,
+      });
+      // No setting: the provider's recommendation, listed as allowed.
+      expect((await permissionOf())?.permission).toEqual({ decision: "allow", fromSetting: false });
+      f.state.policies = [setting("ask")];
+      expect(await permissionOf()).toMatchObject({
+        approval: "human",
+        permission: { decision: "ask", fromSetting: true },
+      });
+      f.state.policies = [setting("block")];
+      expect(await permissionOf()).toMatchObject({
+        approval: "policy",
+        permission: { decision: "block", fromSetting: true },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
   test("approval capabilities bypass target preparation; approval-classified targets still ask", async () => {
     const f = createFixture();
     const attestations = createWorkspaceToolGatewayCatalogAttestations();
@@ -2738,6 +2775,66 @@ describe("Site tool readiness and typed failures", () => {
     expect(
       siteToolSetupKey({ action: "reconnect", capabilityId: "c", connectionId: "x" }),
     ).not.toBe(siteToolSetupKey({ action: "connect", capabilityId: "c", connectionId: "x" }));
+  });
+
+  test("an API-key connector keeps each person's Connect; a shared sync adds a shared key", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.foreign];
+      let sharedSyncTools: { serverId: string; toolName: string }[] = [];
+      const apiKeyConnector = {
+        readReconnect: async () => [],
+        readSharedSyncTools: async () => sharedSyncTools,
+        readAccounts: async (...args: Parameters<typeof readSiteToolAccountInventory>) => {
+          const inventory = await readSiteToolAccountInventory(...args);
+          return {
+            ...inventory,
+            canonical: new Map(
+              [...inventory.canonical].map(([id, connect]) => [
+                id,
+                { ...connect, capabilityId: "capability-grafana", apiKey: true as const },
+              ]),
+            ),
+          };
+        },
+      };
+      const setup = async (permissions: string[]) => {
+        const authorization = targetAuthorization();
+        authorization.grant = {
+          ...authorization.grant,
+          permissions: permissions as AccessGrant["permissions"],
+        };
+        return (
+          await describeWorkspaceSiteToolSetup(
+            f.deps,
+            authorization,
+            site,
+            targetOptions({ readSiteVersion: siteVersion([canonical]), ...apiKeyConnector }),
+          )
+        ).items;
+      };
+      const admin = ["workspace:read", "capabilities:manage", "connections:write", "secrets:use"];
+      // Only each person's own use waits on it: their own Connect, for admins too.
+      const [own, ...rest] = await setup(admin);
+      expect(own).toMatchObject({ action: "connect", shared: false });
+      expect(own).not.toHaveProperty("sharedKey");
+      expect(rest).toEqual([]);
+      // A shared sync calls it: a separate shared-key item next to the Connect.
+      sharedSyncTools = [canonical];
+      const [memberOwn, member] = await setup(["workspace:read", "connections:write"]);
+      expect(memberOwn).toMatchObject({ key: own!.key, action: "connect" });
+      expect(memberOwn).not.toHaveProperty("sharedKey");
+      expect(member).toMatchObject({ action: "connect", sharedKey: "ask_admin", openUrl: null });
+      expect(member!.key).not.toBe(own!.key);
+      const [, adminShared] = await setup(admin);
+      expect(adminShared).toMatchObject({ action: "connect", sharedKey: "add", shared: true });
+      // Once the workspace has a shared connection for it, nothing is left to do.
+      f.state.connections = [f.personal, f.foreign];
+      expect(await setup(["workspace:read"])).toEqual([]);
+      expect(f.grafana.requests).toHaveLength(0);
+    } finally {
+      f.close();
+    }
   });
 
   test("an undeclared target is unavailable; a replaced Site version is refused", async () => {

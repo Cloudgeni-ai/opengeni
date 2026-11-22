@@ -83,7 +83,14 @@ const links: SessionLinkWithStatus[] = [
     "linear",
     "PAY-212",
     "Checkout rounds totals down",
-    null,
+    {
+      state: "open",
+      label: "In Progress",
+      title: "Checkout rounds totals down",
+      checks: null,
+      review: null,
+      assignee: "Kari Nordmann",
+    },
   ),
   link(
     "2",
@@ -129,8 +136,28 @@ const links: SessionLinkWithStatus[] = [
     "slack",
     null,
     "#payments thread",
-    null,
+    {
+      state: "unknown",
+      label: null,
+      title: "#payments thread",
+      checks: null,
+      review: null,
+      replies: 3,
+      lastReplyAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    },
   ),
+  {
+    ...link(
+      "6",
+      "https://linear.app/acme/issue/PAY-219",
+      "issue",
+      "linear",
+      "PAY-219",
+      "Refunds skip the currency check",
+      null,
+    ),
+    connect: { name: "Linear", capabilityId: "linear" },
+  },
 ];
 
 function Preview() {
@@ -174,7 +201,12 @@ function Preview() {
             data-shot="linked"
             className="h-fit w-[360px] rounded-md border border-border bg-surface"
           >
-            <LinkedList links={links} status="ready" onRemove={() => undefined} />
+            <LinkedList
+              links={links}
+              status="ready"
+              onRemove={() => undefined}
+              connectHref={() => "#connect"}
+            />
           </aside>
         </div>
       </AppContext.Provider>

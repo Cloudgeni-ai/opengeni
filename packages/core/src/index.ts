@@ -148,6 +148,7 @@ export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/personal-github-repository-access";
+export * from "./domain/personal-github-reader";
 export * from "./domain/connections-needing-reconnect";
 export * from "./domain/nango-integrations";
 export * from "./domain/nango-connection-sharing";
@@ -168,6 +169,7 @@ export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
 export * from "./domain/agents";
 export * from "./agent-templates";
+export * from "./app-templates";
 export * from "./domain/org-agent-config";
 export * from "./domain/org-agents";
 export * from "./domain/org-agent-runs-on";

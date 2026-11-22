@@ -1753,6 +1753,43 @@ describe("createSessionProxyHandler pass-through", () => {
     init?: RequestInit,
   ) => handler(new Request(url, init));
 
+  test("asserts only the configured browser/computer attachment origin, never a browser header", async () => {
+    const { handler, upstream } = setup({ interactionViewerOrigin: PRODUCT });
+    const asserted = "x-opengeni-interaction-viewer-origin";
+    const headers = { origin: PRODUCT, [asserted]: "https://spoof.example.test" };
+    for (const resource of ["browser-sessions", "computer-sessions"]) {
+      const base = `${ws}/${resource}/${SESSION_ID}`;
+      await send(handler, `${base}/attachments`, { method: "POST", headers });
+      const attachment = upstream.requests.at(-1)!;
+      expect(attachment.url.pathname).toEndWith(`/${resource}/${SESSION_ID}/attachments`);
+      expect(attachment.headers.get(asserted)).toBe(PRODUCT);
+      expect(attachment.headers.get("origin")).toBeNull();
+      expect(attachment.headers.get("x-opengeni-external-actor")).toContain("u_42");
+      for (const origin of [undefined, "null", "https://wrong.example.test"]) {
+        const before = upstream.requests.length;
+        const denied = await send(handler, `${base}/attachments`, {
+          method: "POST",
+          headers: { [asserted]: PRODUCT, ...(origin ? { origin } : {}) },
+        });
+        expect(denied.status).toBe(403);
+        expect(upstream.requests).toHaveLength(before);
+      }
+      await send(handler, `${base}/actions`, { method: "POST", headers });
+      expect(upstream.requests.at(-1)!.url.pathname).toEndWith("/actions");
+      expect(upstream.requests.at(-1)!.headers.get(asserted)).toBeNull();
+    }
+
+    const ordinary = setup();
+    await send(ordinary.handler, `${ws}/browser-sessions/${SESSION_ID}/attachments`, {
+      method: "POST",
+      headers,
+    });
+    expect(ordinary.upstream.requests.at(-1)!.headers.get(asserted)).toBeNull();
+    for (const invalid of ["*", "null", "https://*.example.test", `${PRODUCT}/app`]) {
+      expect(() => setup({ interactionViewerOrigin: invalid })).toThrow("exact http(s) origin");
+    }
+  });
+
   test("bootstraps with the resolved workspace only, never other access or the key", async () => {
     const { handler } = setup();
     const access = (await (await send(handler, `${mount}/access/me`)).json()) as Record<

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
+import { bedrockFetch } from "./bedrock";
 import { isCompactionSummary } from "./context-compaction";
 import {
   ANTHROPIC_IMAGE_MAX_ENCODED_BYTES,
@@ -403,6 +404,8 @@ export class AnthropicProviderRejection extends Error {
     readonly request_id?: string,
     readonly suspendedUntil?: string,
     readonly headers: Record<string, string> = {},
+    /** A subscription HTTP permission error, before any stream, with no recognized narrower scope. */
+    readonly subscriptionHttpPermissionRefusal = false,
   ) {
     super(
       code === "anthropic_model_access_suspended"
@@ -435,6 +438,7 @@ function providerRejection(
   status: number,
   detail: unknown,
   responseHeaders: Headers,
+  subscriptionHttpResponse = false,
 ): AnthropicProviderRejection | undefined {
   if (status !== 403) return undefined;
   const requestId = responseHeaders.get("request-id") ?? undefined;
@@ -457,6 +461,7 @@ function providerRejection(
     requestId,
     undefined,
     headers,
+    subscriptionHttpResponse && error.type === "permission_error",
   );
 }
 
@@ -1471,11 +1476,15 @@ export class AnthropicMessagesModel implements Model {
   private readonly refusedApiKeys = new Set<string>();
   /** The pooled API key each accepted response was sent with. */
   private readonly responseApiKeys = new WeakMap<Response, string>();
+  private readonly fetch: typeof globalThis.fetch;
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
-    private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
-  ) {}
+    fetch: typeof globalThis.fetch = globalThis.fetch,
+  ) {
+    // Amazon Bedrock: the same Messages requests, SigV4-signed with AWS credentials.
+    this.fetch = provider.bedrock ? bedrockFetch(provider, fetch) : fetch;
+  }
 
   /**
    * The provider as this request sends it: with an organization's several
@@ -1657,7 +1666,7 @@ export class AnthropicMessagesModel implements Model {
       betas.add("mid-conversation-system-2026-04-07");
       headers.set("anthropic-beta", [...betas].join(","));
     }
-    if (provider.kind !== "anonymous") {
+    if (provider.kind !== "anonymous" && !provider.bedrock) {
       if (!provider.apiKey) throw new AnthropicProtocolError("Claude credentials are unavailable");
       if (provider.anthropic?.auth === "oauth") {
         headers.delete("x-api-key");
@@ -1811,7 +1820,12 @@ export class AnthropicMessagesModel implements Model {
       } catch {
         /* Diagnostics can be truncated. */
       }
-      const rejection = providerRejection(response.status, providerError, response.headers);
+      const rejection = providerRejection(
+        response.status,
+        providerError,
+        response.headers,
+        this.provider.anthropic?.auth === "oauth",
+      );
       if (rejection) throw rejection;
       // An organization admin can switch Claude's web search off; the request
       // then fails as a whole instead of returning a search error.

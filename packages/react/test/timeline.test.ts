@@ -430,6 +430,27 @@ describe("buildTimeline", () => {
   });
 
   test.each([
+    [
+      "codex_relogin_required",
+      "The Codex account “Primary” needs a new sign-in. An admin must reconnect it.",
+    ],
+    [
+      "codex_plan_no_capacity",
+      "The ChatGPT plans available to this chat don’t provide Codex capacity for this model.",
+    ],
+    [
+      "codex_rate_limited",
+      "Codex is rate-limited. This turn continues automatically when an account has capacity again.",
+    ],
+  ])("a %s wait keeps the recorded reason in the timeline", (waitReason, error) => {
+    reset();
+    const [item] = buildTimeline(englishText, [
+      event("codex.capacity.waiting", { waitReason, error }),
+    ]);
+    expect(item).toMatchObject({ text: error, capacityWait: { detail: error } });
+  });
+
+  test.each([
     [{ waitReason: "no_eligible_capacity" }],
     [{ waitReason: "pinned_account_unavailable" }],
     [{ waitReason: "compaction_provider_locked" }],
@@ -4388,6 +4409,148 @@ describe("buildTimeline", () => {
       ["turn-3", "11111111-1111-4111-8111-111111111111", false],
       ["turn-4", null, true],
       ["turn-5", null, false],
+    ]);
+  });
+
+  test("the same request for more access shows one card, finished once the person allows it", () => {
+    reset();
+    const modify = "https://www.googleapis.com/auth/gmail.modify";
+    const stepUp = (turnId: string, scopes = [modify], connectionId = "conn-1") =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "gmail",
+          toolName: "batch_modify_messages",
+          providerDomain: "gmailmcp.googleapis.com",
+          reason: "insufficient_scope",
+          connectionId,
+          scopes,
+        },
+        { turnId },
+      );
+    const first = stepUp("turn-1");
+    const retried = stepUp("turn-1");
+    const otherAccess = stepUp("turn-1", ["https://www.googleapis.com/auth/gmail.compose"]);
+    const otherAccount = stepUp("turn-1", [modify], "conn-2");
+    const askedAgain = stepUp("turn-2");
+    const cards = (events: SessionEvent[]) =>
+      buildTimeline(englishText, events)
+        .filter((item) => item.kind === "auth-needed")
+        .map((item) => [item.id, item.askedAgainLater ?? false, item.setupFinished ?? false]);
+    // Only the latest copy of the same ask stays a card; other access or
+    // another account is a separate request.
+    expect(cards([first, retried, otherAccess, otherAccount, askedAgain])).toEqual([
+      [otherAccess.id, false, false],
+      [otherAccount.id, false, false],
+      [askedAgain.id, false, false],
+    ]);
+    // The person allowed it from the latest card: that card is finished; the
+    // other requests are not.
+    const finishedFrom = (card: SessionEvent) =>
+      event(
+        "system.update.delivered",
+        {
+          historyItemId: "history-1",
+          count: 1,
+          members: [
+            {
+              id: "update-1",
+              kind: "capability_setup_completed",
+              classification: "success",
+              sourceId: card.id,
+              summary: "The person finished setting up Gmail from your request.",
+            },
+          ],
+        },
+        { turnId: "turn-3" },
+      );
+    const finished = finishedFrom(askedAgain);
+    expect(cards([first, retried, otherAccess, otherAccount, askedAgain, finished])).toEqual([
+      [otherAccess.id, false, false],
+      [otherAccount.id, false, false],
+      [askedAgain.id, false, true],
+    ]);
+    // Asked again after that (the access is still missing): the new card is live.
+    const later = stepUp("turn-4");
+    expect(cards([first, askedAgain, finished, later])).toEqual([[later.id, false, false]]);
+    // Finished from the only card there was: it stays, saying so.
+    expect(cards([first, finishedFrom(first)])).toEqual([[first.id, false, true]]);
+  });
+
+  test("only the newest card for the same connection stays a full card; a turn shows it once", () => {
+    reset();
+    const card = (turnId: string, id: string, name: string, rationale: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id,
+            name,
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale,
+            requiredVariables: [],
+          },
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "mcp:slack", "Slack", "Read the report."),
+      card("turn-1", "mcp:linear", "Linear", "Update the issue."),
+      card("turn-1", "mcp:slack", "Slack", "Search for duplicates."),
+      card("turn-2", "mcp:slack", "Slack", "Annotate the report."),
+      card("turn-3", "mcp:linear", "Linear", "Label the issue."),
+      card("turn-3", "mcp:linear", "Linear", "Set its priority."),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.turnId, item.capability?.rationale, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["turn-1", "Update the issue.", true],
+      ["turn-1", "Search for duplicates.", true],
+      ["turn-2", "Annotate the report.", false],
+      ["turn-3", "Set its priority.", false],
+    ]);
+  });
+
+  test("connection cards with inputs are never folded", () => {
+    reset();
+    const card = (turnId: string, rationale: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "mcp:jira",
+            name: "Jira",
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale,
+            requiredVariables: [],
+            inputs: [{ id: "site", label: "Site" }],
+          },
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "Connect the first site."),
+      card("turn-1", "Connect the second site."),
+      card("turn-2", "Connect the third site."),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.capability?.rationale, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["Connect the first site.", false],
+      ["Connect the second site.", false],
+      ["Connect the third site.", false],
     ]);
   });
 

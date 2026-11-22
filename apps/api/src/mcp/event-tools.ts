@@ -32,6 +32,7 @@ import {
   resolveTurnBillingOrigin,
   scheduledTaskViewerForGrant,
   updateEventSourceForViewer,
+  withSlackSourceSharing,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -210,7 +211,7 @@ export function registerEventTools(
     "event_sources_list",
     {
       description:
-        "List the event sources automations can trigger on: connected apps such as GitHub, Slack and Gmail, webhook endpoints, and MCP connections that offer events. readyToAdd lists sources that need no setup (MCP servers the user is signed in to that offer events, their Gmail, This workspace for meetings): a readyToAdd id works anywhere a source id does, and the user's source is added the first time it is used. Pass sourceId to get the event types that source offers, the fields conditions can match, and an MCP event type's subscription arguments. Use them in the events field of scheduled_tasks_create and scheduled_tasks_update.",
+        "List the event sources automations can trigger on: connected apps such as GitHub, Slack and Gmail, webhook endpoints, and MCP connections that offer events. readyToAdd lists sources that need no setup (MCP servers the user is signed in to that offer events, their Gmail, This workspace for meetings and app data changes): a readyToAdd id works anywhere a source id does, and the user's source is added the first time it is used. Pass sourceId to get the event types that source offers, the fields conditions can match, and an MCP event type's subscription arguments. Use them in the events field of scheduled_tasks_create and scheduled_tasks_update.",
       inputSchema: { sourceId: EventSourceRef.optional() },
     },
     async ({ sourceId }) => {
@@ -242,6 +243,13 @@ export function registerEventTools(
             throw error;
           });
         }
+        source = (
+          await withSlackSourceSharing(
+            deps.db,
+            { accountId: grant.accountId, workspaceId: grant.workspaceId },
+            [source],
+          )
+        )[0]!;
         const eventTypes = await listEventSourceTypes({
           db: deps.db,
           settings: deps.settings,
@@ -277,11 +285,19 @@ export function registerEventTools(
         });
       }
       const [sources, ready] = await Promise.all([
-        listEventSources(deps.db, grant.workspaceId, reader.subjectId).then((all) =>
-          all
-            .filter((source) => eventSourceAccess(reader, source) !== "none")
-            .map((source) => sourceForModel(source)),
-        ),
+        listEventSources(deps.db, grant.workspaceId, reader.subjectId)
+          .then((all) =>
+            withSlackSourceSharing(
+              deps.db,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId },
+              all,
+            ),
+          )
+          .then((all) =>
+            all
+              .filter((source) => eventSourceAccess(reader, source) !== "none")
+              .map((source) => sourceForModel(source)),
+          ),
         canAddSources
           ? listReadyEventSources(network, {
               accountId: grant.accountId,

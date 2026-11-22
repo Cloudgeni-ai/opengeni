@@ -7,6 +7,7 @@ import {
   toolReviewContextFromSchema,
   type ToolReviewContext,
   type ToolReviewReasonCode,
+  ToolReviewAgentRule,
   toolReviewAction,
   toolReviewDetails,
   toolReviewFields,
@@ -392,6 +393,10 @@ export async function getToolActionReview(
     accountOwner !== null &&
     accountOwner !== viewerSubjectId;
   const ownerLabel = ownerOnly ? accountOwnerLabelForTurn(accountOwner!, turn) : null;
+  // Whether or not the action still waits: another person's account details
+  // never reach this viewer.
+  const viewerIsNotAccountOwner =
+    viewerSubjectId !== undefined && accountOwner !== null && accountOwner !== viewerSubjectId;
   // In a chat shared with the workspace, the owner is told the decision is
   // theirs alone; in their own chats that goes without saying.
   const approvedByViewer =
@@ -421,7 +426,7 @@ export async function getToolActionReview(
         }
       : {}),
     ...toolReviewFields(args, context, request.toolName),
-    ...toolReviewReason(status, request.policySource),
+    ...toolReviewReason(status, request.policySource, request.agentRule),
     createdAt: request.createdAt.toISOString(),
     updatedAt: (operation?.updatedAt ?? request.updatedAt).toISOString(),
     availableActions: waiting
@@ -434,6 +439,12 @@ export async function getToolActionReview(
       : approvedByViewer
         ? { approvedBy: "you" }
         : {}),
+    // Only a viewer who could approve is asked for the provider's access. It
+    // stays after the decision, so a surface that renders this review once
+    // (a Slack message, retried under one id) shows the same content again.
+    ...(!viewerIsNotAccountOwner && request.reviewArguments !== null && context?.accessNeeded
+      ? { accessNeeded: context.accessNeeded }
+      : {}),
     detailsAvailable: args !== null,
   });
 }
@@ -445,7 +456,23 @@ export async function getToolActionReview(
 function toolReviewReason(
   status: ToolReviewStatus,
   policySource: string,
-): { reason: string; reasonCode: ToolReviewReasonCode } {
+  agentRule?: ToolReviewAgentRule | null,
+): { reason: string; reasonCode: ToolReviewReasonCode; agentRule?: ToolReviewAgentRule } {
+  // An agent's Can use rule decided: name the agent; the code stays the
+  // default one for hosts that don't read `agentRule`.
+  if (agentRule && policySource === "default") {
+    const parsed = ToolReviewAgentRule.safeParse(agentRule);
+    if (parsed.success) {
+      const blocked = status === "blocked";
+      return {
+        reason: blocked
+          ? `The agent ${parsed.data.agentName} blocks this action.`
+          : `The agent ${parsed.data.agentName} asks first for this action.`,
+        reasonCode: blocked ? "blocked_by_default" : "asks_by_default",
+        agentRule: parsed.data,
+      };
+    }
+  }
   if (status === "blocked")
     return policySource === "explicit"
       ? { reason: "Your permission settings block this action.", reasonCode: "blocked_by_setting" }

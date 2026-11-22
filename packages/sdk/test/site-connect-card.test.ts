@@ -6,6 +6,7 @@ import {
   createSiteToolBridge,
   isOpenGeniSiteBridgeRequestMessage,
   siteConnectCardDismissals,
+  siteConnectCardItemActionable,
   siteConnectCardLabel,
   siteConnectionStatus,
   type SiteToolConnectPrompt,
@@ -48,6 +49,45 @@ const items: ToolGatewaySiteSetupItem[] = [
 ];
 
 function memoryStorage() {
+  return memoryStorageImpl();
+}
+
+test("API-key tools: a shared key for admins, ask an admin for everyone else", () => {
+  const stripe = { ...items[0]!, key: "connect:Stripe:", connector: "Stripe" };
+  expect(siteConnectCardLabel({ ...stripe, sharedKey: "add" })).toBe("Add a shared key for Stripe");
+  expect(siteConnectCardLabel({ ...stripe, sharedKey: "ask_admin" })).toBe(
+    "Ask an admin to connect Stripe",
+  );
+  expect(siteConnectCardItemActionable({ sharedKey: "add" })).toBe(true);
+  expect(siteConnectCardItemActionable({ sharedKey: "ask_admin" })).toBe(false);
+  expect(siteConnectCardItemActionable({})).toBe(true);
+  const status = siteConnectionStatus([{ ...stripe, sharedKey: "ask_admin", openUrl: null }]);
+  expect(status.needed[0]).toMatchObject({
+    sharedKey: "ask_admin",
+    label: "Ask an admin to connect Stripe",
+  });
+  expect(siteConnectionStatus(items).needed[0]).not.toHaveProperty("sharedKey");
+});
+
+test("API-key tools: each person's own Connect stays next to a shared sync's shared key", () => {
+  const own = { ...items[0]!, key: "connect:Stripe:own", connector: "Stripe" };
+  const shared = {
+    ...own,
+    key: "connect:Stripe:shared",
+    shared: true,
+    sharedKey: "ask_admin" as const,
+  };
+  expect(siteConnectCardLabel(own)).toBe("Connect Stripe");
+  expect(siteConnectCardItemActionable(own)).toBe(true);
+  const status = siteConnectionStatus([own, shared]);
+  expect(status.ready).toBe(false);
+  expect(status.needed.map((item) => item.label)).toEqual([
+    "Connect Stripe",
+    "Ask an admin to connect Stripe",
+  ]);
+});
+
+function memoryStorageImpl() {
   const values = new Map<string, string>();
   return {
     values,

@@ -255,7 +255,7 @@ export function useSandboxGit(
           {
             path: root,
             ...(comparison === "branch"
-              ? { fromRef: "origin/HEAD", includeUntracked: true }
+              ? { fromRef: "origin/HEAD", mergeBase: true, includeUntracked: true }
               : comparison === "working"
                 ? { fromRef: "HEAD", includeUntracked: true }
                 : { staged: true, includeUntracked: false }),
@@ -289,7 +289,7 @@ export function useSandboxGit(
                     diff: {
                       path: root,
                       ...(comparison === "branch"
-                        ? { fromRef: "origin/HEAD", includeUntracked: true }
+                        ? { fromRef: "origin/HEAD", mergeBase: true, includeUntracked: true }
                         : comparison === "working"
                           ? { fromRef: "HEAD", includeUntracked: true }
                           : { staged: true, includeUntracked: false }),
@@ -333,7 +333,7 @@ export function useSandboxGit(
       if (refreshGenerationRef.current !== generation) return;
       const repositories = statuses.filter(({ status }) => status.isRepo);
       const roots = repositories.map(({ root }) => root);
-      setRepoRoots(roots);
+      setRepoRoots((previous) => (sameStrings(previous, roots) ? previous : roots));
       setIsRepo(repositories.length > 0);
       setBranch(repositories.length === 1 ? (repositories[0]?.status.head ?? null) : null);
       setAhead(repositories.reduce((sum, { status }) => sum + status.ahead, 0));
@@ -430,7 +430,8 @@ export function useSandboxGit(
       setBranch(repositories.length === 1 ? (repositories[0]?.head ?? null) : null);
       setAhead(repositories.reduce((sum, repo) => sum + repo.ahead, 0));
       setBehind(repositories.reduce((sum, repo) => sum + repo.behind, 0));
-      setRepoRoots(repositories.map((repo) => normalizeRoot(repo.root)));
+      const capturedRoots = repositories.map((repo) => normalizeRoot(repo.root));
+      setRepoRoots((previous) => (sameStrings(previous, capturedRoots) ? previous : capturedRoots));
       setDiff((prev) =>
         mergeDiffs(
           prev,
@@ -570,19 +571,44 @@ export function useSandboxGit(
   );
 
   const identityMatches = enabled && stateIdentity === identityKey;
-  const visibleRepoRoots = identityMatches ? repoRoots : [];
-  return {
-    diff: identityMatches ? diff : [],
-    branch: identityMatches ? branch : null,
-    isRepo: identityMatches && isRepo,
-    ahead: identityMatches ? ahead : 0,
-    behind: identityMatches ? behind : 0,
-    repoCount: visibleRepoRoots.length,
-    repoRoots: visibleRepoRoots,
+  const capturedAt = identityMatches && source === "capture" ? (capture?.capturedAt ?? null) : null;
+  // One stable result while nothing changed: hosts memoize on it, so a fresh
+  // object each render would rebuild every surface that reads it.
+  return useMemo(() => {
+    const visibleRepoRoots = identityMatches ? repoRoots : NO_ROOTS;
+    return {
+      diff: identityMatches ? diff : NO_DIFF,
+      branch: identityMatches ? branch : null,
+      isRepo: identityMatches && isRepo,
+      ahead: identityMatches ? ahead : 0,
+      behind: identityMatches ? behind : 0,
+      repoCount: visibleRepoRoots.length,
+      repoRoots: visibleRepoRoots,
+      refresh,
+      source: identityMatches ? source : null,
+      capturedAt,
+      loading: identityMatches && loading,
+      error: identityMatches ? error : null,
+    };
+  }, [
+    identityMatches,
+    repoRoots,
+    diff,
+    branch,
+    isRepo,
+    ahead,
+    behind,
     refresh,
-    source: identityMatches ? source : null,
-    capturedAt: identityMatches && source === "capture" ? (capture?.capturedAt ?? null) : null,
-    loading: identityMatches && loading,
-    error: identityMatches ? error : null,
-  };
+    source,
+    capturedAt,
+    loading,
+    error,
+  ]);
 }
+
+const NO_DIFF = Object.freeze([]) as unknown as SandboxGitFileDiff[];
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+const NO_ROOTS = Object.freeze([]) as unknown as string[];

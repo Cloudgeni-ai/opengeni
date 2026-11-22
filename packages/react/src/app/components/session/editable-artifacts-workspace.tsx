@@ -9,7 +9,7 @@ import {
   RotateCwIcon,
   SettingsIcon,
 } from "lucide-react";
-import { lazy, useEffect, useRef, useState } from "react";
+import { lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "../../../ui/button";
 import { useWorkspacePanelOwnsExpand } from "../../../components/workspace-dock";
@@ -125,6 +125,11 @@ export function SessionEditableArtifactsWorkspace({
     status,
   ]);
 
+  // Back from an artifact returns to where the list was scrolled.
+  const listScrollTop = useRef(0);
+  const restoreListScroll = useCallback((node: HTMLDivElement | null) => {
+    if (node && listScrollTop.current > 0) node.scrollTop = listScrollTop.current;
+  }, []);
   const artifact =
     artifacts.find((candidate) => matchesArtifact(candidate, selectedArtifactId)) ?? artifacts[0];
   const listShown = browsing && catalogItems.length > 0;
@@ -134,18 +139,24 @@ export function SessionEditableArtifactsWorkspace({
   useWorkspacePanelOwnsExpand(!listShown && artifact?.modality === "site" && !settingsOpen);
   if (listShown) {
     return (
-      <div className="@container h-full min-h-0 overflow-y-auto bg-bg p-3 text-fg">
-        <div className="mb-4 flex min-h-10 items-center justify-between gap-2">
-          <h2 className="text-sm font-medium">Session artifacts</h2>
-          <Button asChild variant="ghost" size="sm">
-            <Link
-              to="/workspaces/$workspaceId/artifacts"
-              params={{ workspaceId }}
-              search={sessionId ? { fromSession: sessionId } : {}}
-            >
-              All artifacts
-            </Link>
-          </Button>
+      <div
+        ref={restoreListScroll}
+        onScroll={(event) => {
+          listScrollTop.current = event.currentTarget.scrollTop;
+        }}
+        className="@container h-full min-h-0 overflow-y-auto bg-bg p-3 text-fg"
+      >
+        {/* The tab already names the list: one quiet way to the whole library. */}
+        <div className="-mt-1 mb-2 flex min-h-7 items-center justify-between gap-2">
+          <h2 className="sr-only">Session artifacts</h2>
+          <Link
+            to="/workspaces/$workspaceId/artifacts"
+            params={{ workspaceId }}
+            search={sessionId ? { fromSession: sessionId } : {}}
+            className="ml-auto rounded-sm px-1 text-xs text-fg-subtle transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-brand/55"
+          >
+            All artifacts
+          </Link>
         </div>
         <ArtifactLibrary
           workspaceId={workspaceId}

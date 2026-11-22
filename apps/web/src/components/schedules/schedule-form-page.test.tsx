@@ -24,6 +24,33 @@ const client = {
   updateScheduledTask,
   getSession: async (_workspace: string, id: string) => chats.find((chat) => chat.id === id)!,
   listSessions: async () => chats,
+  listSessionPage: async () => ({ pinned: [], sessions: chats, nextCursor: null }),
+  getAgent: async (_workspace: string, id: string) => ({
+    id,
+    name: "Triage",
+    visibility: "workspace",
+    templateKey: null,
+  }),
+  listAgents: async () => [
+    { id: AGENT, name: "Triage", description: "", visibility: "workspace", avatar: null },
+    { id: OTHER_AGENT, name: "Reviewer", description: "", visibility: "workspace", avatar: null },
+  ],
+  // The server filters by agent.
+  listAgentChats: async (_workspace: string, agentId: string) => ({
+    chats: chats
+      .filter((chat) => chat.agentId === agentId)
+      .map((chat) => ({
+        sessionId: chat.id,
+        title: chat.title ?? null,
+        visibility: "workspace" as const,
+        createdBySubjectId: null,
+        source: "app" as const,
+        slack: null,
+        createdAt: "2026-11-21T00:00:00.000Z",
+        updatedAt: "2026-11-21T00:00:00.000Z",
+      })),
+    nextCursor: null,
+  }),
   getSessionTenancyCreateCapabilities: async () => ({
     activated: true,
     canCreatePrivate: privateAllowed,
@@ -161,12 +188,16 @@ mock.module("@opengeni/react/ui/select-menu", () => ({
     onValueChange,
   }: {
     value: string;
-    options: { value: string; label: string }[];
+    options: { value: string; label: string; disabled?: boolean; disabledReason?: string }[];
     onValueChange: (value: string) => void;
   }) => (
     <select value={value} onChange={(event) => onValueChange(event.target.value)}>
       {options.map((option) => (
-        <option key={option.value} value={option.value}>
+        <option
+          key={option.value}
+          value={option.value}
+          data-locked={option.disabled ? option.disabledReason : undefined}
+        >
           {option.label}
         </option>
       ))}
@@ -516,4 +547,167 @@ test("a new schedule starts with the organization's default audience; an existin
   const edited = await render();
   expect(audienceOption(edited.container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
   await act(async () => edited.root.unmount());
+});
+
+const AGENT = "aaaaaaaa-0000-4000-8000-000000000001";
+const OTHER_AGENT = "aaaaaaaa-0000-4000-8000-000000000002";
+
+test("an automation's agent changes in the agent picker and is saved with it", async () => {
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT };
+  const { container, root } = await render();
+  const chip = container.querySelector<HTMLButtonElement>("[data-composer-agent]")!;
+  expect(chip.textContent).toContain("Triage");
+  await act(async () => {
+    chip.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+    await flush();
+  });
+  const reviewer = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")].find(
+    (item) => item.textContent?.includes("Reviewer"),
+  )!;
+  await act(async () => {
+    reviewer.click();
+    await flush();
+  });
+  expect(chip.textContent).toContain("Reviewer");
+  const request = (await save(container)) as { agentConfig?: { agentId?: string } };
+  expect(request.agentConfig?.agentId).toBe(OTHER_AGENT);
+  await act(async () => root.unmount());
+});
+
+test("an agent's automation can use its own chat or one of the agent's chats", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render();
+  const option = (label: string) =>
+    [...container.querySelectorAll("option")].find((entry) => entry.textContent === label);
+  // Both chat choices are open to an agent's automation.
+  expect(option("Use an existing chat")!.dataset.locked).toBeUndefined();
+  expect(option("Create a chat for this automation")!.dataset.locked).toBeUndefined();
+  // Only the agent's chats are offered.
+  expect(option("Source chat")!.dataset.locked).toBeUndefined();
+  expect(option("Destination chat")).toBeUndefined();
+  await act(async () => root.unmount());
+});
+
+test("an agent's automation offers the agent's other chats", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = [
+    ...chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat)),
+    { ...chats[0]!, id: "older-agent-chat", title: "Older agent chat", agentId: AGENT },
+  ];
+  const { container, root } = await render();
+  const option = (label: string) =>
+    [...container.querySelectorAll("option")].find((entry) => entry.textContent === label);
+  // The agent's other chats come from the server's agent filter.
+  expect(option("Older agent chat")!.dataset.locked).toBeUndefined();
+  expect(option("Destination chat")).toBeUndefined();
+  await act(async () => root.unmount());
+});
+
+test("another agent for an existing-chat automation asks for one of its chats, in place", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render();
+  const chip = container.querySelector<HTMLButtonElement>("[data-composer-agent]")!;
+  await act(async () => {
+    chip.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+    await flush();
+  });
+  const items = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")];
+  // Every agent is listed here; nothing navigates away from the draft.
+  expect(items.some((item) => item.textContent?.includes("Browse agents"))).toBe(false);
+  await act(async () => {
+    items.find((item) => item.textContent?.includes("Reviewer"))!.click();
+    await flush();
+  });
+  const selected = [...container.querySelectorAll<HTMLOptionElement>("option")].find(
+    (entry) => entry.textContent === "Source chat",
+  );
+  // Triage's chat can't be Reviewer's, so it is no longer chosen.
+  expect(selected?.selected).not.toBe(true);
+  await act(async () => root.unmount());
+});
+
+test("an agent's automation aimed at another chat says it isn't the agent's", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "destination-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render();
+  const option = (label: string) =>
+    [...container.querySelectorAll("option")].find((entry) => entry.textContent === label);
+  expect(option("Destination chat")!.dataset.locked).toBe("Not a chat with this agent.");
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>("[data-submit]")!.click();
+    await flush();
+  });
+  expect(updateScheduledTask).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Not a chat with this agent.");
+  await act(async () => root.unmount());
+});
+
+test("an agent's chats that can't be read show an error, not an empty list", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  const listAgentChats = client.listAgentChats;
+  client.listAgentChats = async () => {
+    throw Object.assign(new Error("Opengeni API 500: down"), { status: 500 });
+  };
+  try {
+    const { container, root } = await render();
+    expect(container.textContent).toContain("Chats couldn't load");
+    await act(async () => root.unmount());
+  } finally {
+    client.listAgentChats = listAgentChats;
+  }
+});
+
+test("Add trigger's note and chat choice start the full form", async () => {
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render({
+    kind: "create",
+    agentId: AGENT,
+    returnTo: "agent",
+    agentTriggerStart: {
+      note: "Label it and reply",
+      chat: { mode: "existing_session", sessionId: "source-chat" },
+    },
+  });
+  // Add trigger's note and chat choice carry into the full form.
+  expect(container.querySelector("textarea")!.value).toBe("Label it and reply");
+  const selected = (label: string) =>
+    [...container.querySelectorAll<HTMLOptionElement>("option")].find(
+      (entry) => entry.textContent === label,
+    )?.selected;
+  expect(selected("Use an existing chat")).toBe(true);
+  expect(selected("Source chat")).toBe(true);
+  await act(async () => root.unmount());
+});
+
+test("an agent's own chat says when a change of agent started a new one", async () => {
+  task = {
+    ...task,
+    runMode: "reusable_session",
+    reusableSessionId: null,
+    metadata: {
+      _opengeniAgentChatChange: { sessionId: "source-chat", agentId: null, changedAt: "now" },
+    },
+  };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT };
+  const { container, root } = await render();
+  expect(container.textContent).toContain("Its agent changed, so it has a new chat.");
+  expect(container.textContent).toContain("Previous chat");
+  await act(async () => root.unmount());
+});
+
+test("a new automation opened from an agent's page goes back there on Cancel and Save", async () => {
+  const { scheduleFormReturnAgent } = await import("./schedule-form-page");
+  expect(
+    scheduleFormReturnAgent({ kind: "create", agentId: "agent-example", returnTo: "agent" }),
+  ).toBe("agent-example");
+  expect(scheduleFormReturnAgent({ kind: "create", agentId: "agent-example" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "create", returnTo: "agent" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "edit", scheduleId: "task-example" })).toBeUndefined();
 });

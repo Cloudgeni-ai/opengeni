@@ -1,6 +1,7 @@
 import {
   WorkspaceArtifactRequestedTools,
   type McpConnectionAccountBinding,
+  type SiteAssetManifest,
   type ToolGatewayIdentity,
   type WorkspaceArtifact,
   type WorkspaceArtifactDetailResponse,
@@ -186,7 +187,8 @@ type ArtifactMutationToolName =
   | "artifacts_rollback"
   | "artifacts_archive"
   | "artifacts_restore"
-  | "app_install";
+  | "app_install"
+  | "app_upgrade";
 
 export class WorkspaceArtifactNotFoundError extends Error {
   readonly name = "WorkspaceArtifactNotFoundError";
@@ -636,6 +638,7 @@ export async function getWorkspaceArtifactContentRef(
   version: WorkspaceArtifactVersion;
   contentKey: string;
   sourceKey: string | null;
+  assetManifest: SiteAssetManifest | null;
 }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const artifact = await artifactRow(scopedDb, workspaceId, artifactId, viewer);
@@ -660,7 +663,35 @@ export async function getWorkspaceArtifactContentRef(
       version: versionFromRow(version),
       contentKey: version.contentKey,
       sourceKey: version.sourceKey,
+      assetManifest: version.assetManifest ?? null,
     };
+  });
+}
+
+/**
+ * The asset manifest of one version, for the console's asset route. That
+ * route has no signed-in caller (app frames send no credentials): the
+ * version's unguessable token in the URL is the capability, checked by the
+ * caller against this manifest. Null for an unknown version or a
+ * single-file app.
+ */
+export async function getSiteVersionAssetManifest(
+  db: Database,
+  workspaceId: string,
+  versionId: string,
+): Promise<SiteAssetManifest | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ assetManifest: schema.workspaceArtifactVersions.assetManifest })
+      .from(schema.workspaceArtifactVersions)
+      .where(
+        and(
+          eq(schema.workspaceArtifactVersions.workspaceId, workspaceId),
+          eq(schema.workspaceArtifactVersions.id, versionId),
+        ),
+      )
+      .limit(1);
+    return row?.assetManifest ?? null;
   });
 }
 
@@ -675,6 +706,8 @@ type PublishMetadata = {
   sourceSha256: string | null;
   sourceSizeBytes: number | null;
   requestedTools?: ToolGatewayIdentity[];
+  /** Asset files of a multi-file build; omitted or null for a single-file app. */
+  assetManifest?: SiteAssetManifest | null;
   /** `requestedTools` as the caller declared them, before the server paired connector identities. */
   declaredRequestedTools?: ToolGatewayIdentity[];
   operationKey: string;
@@ -1218,6 +1251,7 @@ export async function createWorkspaceArtifact(
               sourceSha256: input.sourceSha256,
               sourceSizeBytes: input.sourceSizeBytes,
               requestedTools: input.requestedTools ?? [],
+              assetManifest: input.assetManifest ?? null,
               operationKey: input.operationKey,
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
@@ -1377,6 +1411,8 @@ export async function duplicateWorkspaceArtifact(
             sourceSha256: source.sourceSha256,
             sourceSizeBytes: source.sourceSizeBytes,
             requestedTools,
+            // The copy serves the same immutable files under its own version.
+            assetManifest: source.assetManifest,
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
@@ -1498,6 +1534,7 @@ export async function publishWorkspaceArtifactVersion(
               sourceSha256: input.sourceSha256,
               sourceSizeBytes: input.sourceSizeBytes,
               requestedTools: input.requestedTools ?? current.requestedTools,
+              assetManifest: input.assetManifest ?? null,
               operationKey: input.operationKey,
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,

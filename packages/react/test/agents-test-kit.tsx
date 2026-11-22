@@ -96,11 +96,33 @@ export function fakeAgentsClient(
     /** Workspace Skills by stable key. */
     skills?: string[];
     /** Event sources automations listen to. */
-    eventSources?: { id: string; name: string }[];
+    eventSources?: {
+      id: string;
+      name: string;
+      kind?: string;
+      status?: string;
+      [field: string]: unknown;
+    }[];
+    /** Makes createScheduledTask fail with this error. */
+    createTaskError?: unknown;
+    /** Chats in the workspace, with the agent each was started with. */
+    sessions?: { id: string; title: string; agentId?: string | null }[] | undefined;
+    /** Chats per page of the session list (default 100). */
+    sessionsPageSize?: number | undefined;
+    /** Makes reading the session list fail with this error. */
+    sessionsError?: unknown;
+    /** Agent chats per page (default 100). */
+    chatsPageSize?: number | undefined;
+    /** Makes reading an agent's chats fail with this error. */
+    chatsError?: unknown;
+    /** Makes createEventSource fail with this error. */
+    createSourceError?: unknown;
+    updateSourceError?: unknown;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
   const calls: unknown[][] = [];
+  const createdSources = new Map<string, Record<string, unknown>>();
   const held: Array<() => void> = [];
   const find = (id: string) => {
     const agent = agents.get(id);
@@ -211,6 +233,97 @@ export function fakeAgentsClient(
       calls.push(["listEventSources", workspaceId]);
       return options.eventSources ?? [];
     },
+    catalogAssetUrl(path: string | null) {
+      return path ? `/assets/${path}` : null;
+    },
+    async listReadyEventSources(workspaceId: string) {
+      calls.push(["listReadyEventSources", workspaceId]);
+      return [];
+    },
+    async listSessions(workspaceId: string) {
+      calls.push(["listSessions", workspaceId]);
+      if (options.sessionsError) throw options.sessionsError;
+      return options.sessions ?? [];
+    },
+    async listSessionPage(workspaceId: string, query: { cursor?: string; limit?: number }) {
+      calls.push(["listSessionPage", workspaceId, query.cursor ?? null]);
+      if (options.sessionsError) throw options.sessionsError;
+      const all = options.sessions ?? [];
+      const size = Math.min(options.sessionsPageSize ?? 100, query.limit ?? 100);
+      const start = Number(query.cursor ?? 0);
+      const end = start + size;
+      return {
+        pinned: [],
+        sessions: all.slice(start, end),
+        nextCursor: end < all.length ? String(end) : null,
+      };
+    },
+    async listEventSourceTypes(workspaceId: string, sourceId: string) {
+      calls.push(["listEventSourceTypes", workspaceId, sourceId]);
+      return [];
+    },
+    async createEventSource(workspaceId: string, request: Record<string, unknown>) {
+      calls.push(["createEventSource", workspaceId, request]);
+      if (options.createSourceError) throw options.createSourceError;
+      const id = uuid();
+      const kind = String(request.kind);
+      // An app's webhook (Linear, Sentry) waits for the secret that app shows.
+      const pasted = kind === "webhook" && request.adapter === "custom";
+      const awaiting = pasted && request.signingSecret === undefined;
+      const source = {
+        id,
+        workspaceId,
+        kind,
+        adapter: (request.adapter as string | undefined) ?? null,
+        format: (request.format as unknown) ?? null,
+        name: (request.name as string | undefined) ?? kind,
+        status: awaiting ? "blocked" : "active",
+        statusReasonCode: awaiting ? "awaiting_secret" : null,
+        statusReason: awaiting ? "Paste the signing secret." : null,
+        awaitingSigningSecret: awaiting,
+        mcp: null,
+        webhookUrl: kind === "webhook" ? `https://hooks.example.com/${id}` : null,
+      };
+      createdSources.set(id, source);
+      return {
+        source,
+        ...(kind === "webhook" && !pasted ? { signingSecret: "whsec_test" } : {}),
+      };
+    },
+    async updateEventSource(
+      workspaceId: string,
+      sourceId: string,
+      request: Record<string, unknown>,
+    ) {
+      calls.push(["updateEventSource", workspaceId, sourceId, request]);
+      if (options.updateSourceError) throw options.updateSourceError;
+      const current =
+        createdSources.get(sourceId) ??
+        (options.eventSources ?? []).find((source) => source.id === sourceId);
+      if (!current) throw new Error(`no source ${sourceId}`);
+      const updated =
+        request.signingSecret !== undefined
+          ? {
+              ...current,
+              status: "active",
+              statusReasonCode: null,
+              statusReason: null,
+              awaitingSigningSecret: false,
+            }
+          : current;
+      createdSources.set(sourceId, updated);
+      return updated;
+    },
+    async createScheduledTask(workspaceId: string, request: Record<string, unknown>) {
+      calls.push(["createScheduledTask", workspaceId, request]);
+      if (options.createTaskError) throw options.createTaskError;
+      return {
+        id: uuid(),
+        status: "active",
+        ...request,
+        events: request.events ?? null,
+      };
+    },
     async listCapabilities(workspaceId: string) {
       calls.push(["listCapabilities", workspaceId]);
       return { items: options.capabilities ?? [] };
@@ -244,11 +357,43 @@ export function fakeAgentsClient(
     },
     async listWorkspaceSkills(workspaceId: string, request: unknown) {
       calls.push(["listWorkspaceSkills", workspaceId, request]);
-      return { skills: (options.skills ?? []).map((stableKey) => ({ stableKey })) };
+      return {
+        skills: (options.skills ?? []).map((stableKey) => ({
+          id: `skill-${stableKey}`,
+          stableKey,
+          title: null,
+          description: null,
+        })),
+        nextCursor: null,
+      };
     },
     async listAgentChats(workspaceId: string, id: string, request: Record<string, unknown>) {
       calls.push(["listAgentChats", workspaceId, id, request]);
-      return { chats: options.chats ?? [], nextCursor: null as string | null };
+      if (options.chatsError) throw options.chatsError;
+      if (options.chats || !options.sessions)
+        return { chats: options.chats ?? [], nextCursor: null as string | null };
+      // Chats in the workspace with this agent, filtered as the server does.
+      const all = options.sessions
+        .filter((session) => session.agentId === id)
+        .map(
+          (session): AgentChat => ({
+            sessionId: session.id,
+            title: session.title,
+            visibility: "workspace",
+            createdBySubjectId: null,
+            source: "app",
+            slack: null,
+            createdAt: "2026-11-21T00:00:00.000Z",
+            updatedAt: "2026-11-21T00:00:00.000Z",
+          }),
+        );
+      const size = Math.min(options.chatsPageSize ?? 100, Number(request.limit ?? 100));
+      const start = Number(request.cursor ?? 0);
+      const end = start + size;
+      return {
+        chats: all.slice(start, end),
+        nextCursor: end < all.length ? String(end) : null,
+      };
     },
     async listAgentSlackInstalls(workspaceId: string, id: string) {
       calls.push(["listAgentSlackInstalls", workspaceId, id]);

@@ -1,5 +1,5 @@
 import type { ConnectorActionPolicySnapshotEntry } from "./schema";
-import type { McpConnectionAccountBinding } from "@opengeni/contracts";
+import type { McpConnectionAccountBinding, ToolReviewAgentRule } from "@opengeni/contracts";
 import { stableJson } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 
@@ -70,6 +70,8 @@ export type ResolvedConnectorActionPolicy =
       /** `block` only from a minimum decision (an agent's Can use Block). */
       decision: "allow" | "ask" | "block";
       actionName: string;
+      /** The agent's Can use rule that set the minimum decision, when one did. */
+      agentRule?: ToolReviewAgentRule;
     }
   | {
       managed: true;
@@ -138,11 +140,20 @@ export function withMinimumConnectorDecision(
   resolved: ResolvedConnectorActionPolicy,
   minimum: "ask" | "block" | undefined,
   actionName: string,
+  /** Who set `minimum`: an agent's Can use rule, recorded with the request. */
+  minimumBy?: ToolReviewAgentRule,
 ): ResolvedConnectorActionPolicy {
   if (minimum === undefined) return resolved;
   const current = resolved.managed ? connectorActionPolicyDecision(resolved) : "allow";
   if (DECISION_STRICTNESS[current] >= DECISION_STRICTNESS[minimum]) return resolved;
-  return { managed: true, source: "default", entry: null, decision: minimum, actionName };
+  return {
+    managed: true,
+    source: "default",
+    entry: null,
+    decision: minimum,
+    actionName,
+    ...(minimumBy && minimumBy.permission === minimum ? { agentRule: minimumBy } : {}),
+  };
 }
 
 export function connectorActionPolicyDecision(

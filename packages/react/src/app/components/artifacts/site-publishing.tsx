@@ -26,7 +26,6 @@ import { toast } from "../../lib/toast";
 import { ModelPicker } from "../pickers";
 import { payerShortLabel } from "../models/models-ui";
 import { Button, buttonVariants } from "../../../ui/button";
-import { ChoiceCard, ChoiceCards } from "../../../ui/choice-cards";
 import { useCopyToClipboard } from "../../../ui/copy-field";
 import { showUndoToast } from "../ui/destructive-confirm";
 import { DropdownMenuItem } from "../../../ui/dropdown-menu";
@@ -38,7 +37,6 @@ import { ListRow, RowList } from "../../../ui/list-row";
 import { LogoTile, type LogoTileSize } from "../../../ui/logo-tile";
 import { Notice } from "../../../ui/notice";
 import { RelativeTime } from "../../../ui/relative-time";
-import { Section } from "../../../ui/section";
 import { SelectMenu } from "../../../ui/select-menu";
 import { SettingRow } from "../../../ui/setting-row";
 import { StatusBadge } from "../../../ui/status-badge";
@@ -264,8 +262,10 @@ function PublishFrame({
   layout = "page",
   back,
   ...props
-}: Omit<FormFrameProps, "variant"> & { layout?: "page" | "panel" | undefined }) {
-  return layout === "panel" ? <FormInline {...props} /> : <FormPage back={back} {...props} />;
+}: Omit<FormFrameProps, "variant"> & {
+  layout?: "page" | "panel" | undefined;
+}) {
+  return layout === "panel" ? <FormInline plain {...props} /> : <FormPage back={back} {...props} />;
 }
 
 /**
@@ -361,7 +361,10 @@ function SitePublishForm({
   const [emailError, setEmailError] = useState<string | null>(null);
   const [limitError, setLimitError] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
-  const [refusal, setRefusal] = useState<{ title: string; body: string } | null>(null);
+  const [refusal, setRefusal] = useState<{
+    title: string;
+    body: string;
+  } | null>(null);
   const [busy, setBusy] = useState<"unpublish" | "restore" | null>(null);
   const [takedownOpen, setTakedownOpen] = useState(false);
   const update = (patch: Partial<SitePublishDraft>) =>
@@ -406,6 +409,9 @@ function SitePublishForm({
   // Readiness warnings describe the saved access; hide them while it changes.
   const warnings =
     saved?.status === "active" && saved.access === draft.access ? saved.warnings : [];
+  const openReports = saved?.moderation.openReports ?? 0;
+  const moreSummary =
+    openReports > 0 ? `${openReports} open ${openReports === 1 ? "report" : "reports"}` : undefined;
 
   const submit = async () => {
     setLabelError(null);
@@ -503,11 +509,7 @@ function SitePublishForm({
         layout={layout}
         back={{ label: site.title, onClick: onBack }}
         title={publishing ? "Publish to web" : "Web address"}
-        description={
-          publishing
-            ? `Give “${site.title}” its own address on the web.`
-            : "Its address, who can open it and its agent."
-        }
+        description={publishing ? `Give “${site.title}” its own address on the web.` : undefined}
         submitLabel={publishing ? "Publish" : "Save changes"}
         pendingLabel={publishing ? "Publishing…" : "Saving…"}
         onSubmit={submit}
@@ -572,26 +574,33 @@ function SitePublishForm({
             </div>
           </Field>
 
-          <Field label="Who can open it" group>
-            <ChoiceCards
+          <Field
+            label="Who can open it"
+            // The choice's own description, so the closed menu still says it.
+            hint={ACCESS_CHOICES.find((choice) => choice.value === draft.access)?.description({
+              workspaceName,
+              loginOnly: sites.loginOnly === true,
+            })}
+          >
+            <SelectMenu
               value={draft.access}
-              onValueChange={(value) => update({ access: value as SitePublishDraft["access"] })}
-              variant="radio"
-            >
-              {ACCESS_CHOICES.map((choice) => (
-                <ChoiceCard
-                  key={choice.value}
-                  value={choice.value}
-                  title={choice.title}
-                  description={choice.description({
-                    workspaceName,
-                    loginOnly: sites.loginOnly === true,
-                  })}
-                  disabled={choice.value === "public" && publicDisabled}
-                  disabledReason="Public apps are turned off on this server."
-                />
-              ))}
-            </ChoiceCards>
+              onValueChange={(value) => update({ access: value })}
+              options={ACCESS_CHOICES.map((choice) => ({
+                value: choice.value,
+                label: choice.title,
+                description: choice.description({
+                  workspaceName,
+                  loginOnly: sites.loginOnly === true,
+                }),
+                ...(choice.value === "public" && publicDisabled
+                  ? {
+                      disabled: true,
+                      disabledReason: "Public apps are turned off on this server.",
+                    }
+                  : {}),
+              }))}
+              className="w-full max-w-80"
+            />
           </Field>
 
           {draft.access === "invited" ? (
@@ -621,6 +630,7 @@ function SitePublishForm({
           <div className="flex min-w-0 flex-col gap-4">
             <CheckboxField
               label="Let people chat with the app's agent"
+              description="The app's own chat uses it. Ask the agent to add one if the app has none."
               checked={draft.agentEnabled}
               onCheckedChange={(agentEnabled) => update({ agentEnabled })}
             />
@@ -651,24 +661,29 @@ function SitePublishForm({
             ) : null}
           </div>
 
-          <CheckboxField
-            label="Hide from search engines"
-            description="Asks search engines not to list the app."
-            checked={draft.noindex}
-            disabled={forceNoindex}
-            disabledReason="Always on for this server."
-            onCheckedChange={(noindex) => update({ noindex })}
-          />
-
-          {saved ? (
-            <SiteReports
-              client={client}
-              workspaceId={workspaceId}
-              siteId={site.id}
-              publication={saved}
-              onTakeDown={() => setTakedownOpen(true)}
+          {/* Rarely changed, and the dangerous ones: closed unless a report waits. */}
+          <PublishMore
+            title="Search engines and reports"
+            summary={moreSummary}
+            defaultOpen={openReports > 0}
+          >
+            <CheckboxField
+              label="Hide from search engines"
+              checked={draft.noindex}
+              disabled={forceNoindex}
+              disabledReason="Always on for this server."
+              onCheckedChange={(noindex) => update({ noindex })}
             />
-          ) : null}
+            {saved ? (
+              <SiteReports
+                client={client}
+                workspaceId={workspaceId}
+                siteId={site.id}
+                publication={saved}
+                onTakeDown={() => setTakedownOpen(true)}
+              />
+            ) : null}
+          </PublishMore>
         </FieldStack>
       </PublishFrame>
       {saved ? (
@@ -689,6 +704,25 @@ function SitePublishForm({
   );
 }
 
+/** A collapsed group of rare and dangerous settings, one row style. */
+export function PublishMore({
+  title = "More",
+  summary,
+  defaultOpen,
+  children,
+}: {
+  title?: string | undefined;
+  summary?: ReactNode | undefined;
+  defaultOpen?: boolean | undefined;
+  children: ReactNode;
+}) {
+  return (
+    <Disclosure title={title} summary={summary} defaultOpen={defaultOpen}>
+      <div className="flex min-w-0 flex-col gap-4 pt-2">{children}</div>
+    </Disclosure>
+  );
+}
+
 function AvailabilityHint({
   availability,
   label,
@@ -700,7 +734,7 @@ function AvailabilityHint({
   domain: string | null;
   unchanged: boolean;
 }) {
-  if (unchanged) return "Changing it moves the app. The old address stops working.";
+  if (unchanged) return "Changing it breaks the old address.";
   if (
     availability.state === "checking" ||
     (availability.state !== "idle" && availability.label !== label)
@@ -778,45 +812,20 @@ function PublicationStatus({
       </Notice>
     );
   return (
-    <Notice
-      icon={<GlobeIcon className="size-4" />}
-      title="Published"
-      actionLayout="responsive"
-      action={
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => void copy(publication.url)}
-            className="rounded-[10px] pointer-coarse:h-11"
-          >
-            {copied === "copied" ? (
-              <CheckIcon aria-hidden="true" />
-            ) : (
-              <CopyIcon aria-hidden="true" />
-            )}
-            {copied === "copied" ? "Copied" : "Copy link"}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy !== null}
-            onClick={onUnpublish}
-            className="rounded-[10px] pointer-coarse:h-11"
-          >
-            {busy === "unpublish" ? "Unpublishing…" : "Unpublish"}
-          </Button>
-        </div>
-      }
+    <div
+      data-site-publication-status=""
+      className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 text-sm"
     >
-      <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="inline-flex min-w-0 flex-1 basis-56 flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="inline-flex items-center gap-1.5 text-fg-muted">
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-status-idle" />
+          Published
+        </span>
         <a
           href={publication.url}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex max-w-full items-center gap-1 font-medium og-link"
+          className="inline-flex min-w-0 max-w-full items-center gap-1 font-medium og-link"
         >
           <span className="truncate">{publication.hostname}</span>
           <ExternalLinkIcon aria-hidden="true" className="size-3.5 shrink-0" />
@@ -827,7 +836,29 @@ function PublicationStatus({
           </a>
         ) : null}
       </span>
-    </Notice>
+      <span className="flex items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => void copy(publication.url)}
+          className="rounded-[10px] pointer-coarse:h-11"
+        >
+          {copied === "copied" ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
+          {copied === "copied" ? "Copied" : "Copy link"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy !== null}
+          onClick={onUnpublish}
+          className="rounded-[10px] pointer-coarse:h-11"
+        >
+          {busy === "unpublish" ? "Unpublishing…" : "Unpublish"}
+        </Button>
+      </span>
+    </div>
   );
 }
 
@@ -1134,61 +1165,61 @@ function SiteReports({
     }
   };
   return (
-    <Section
-      title="Reports"
-      description="Visitors can report this app from the link at the bottom of every page."
-      action={
-        publication.status === "suspended" ? null : (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={onTakeDown}
-            className="rounded-[10px] text-danger hover:text-danger pointer-coarse:h-11"
-          >
-            Take down…
-          </Button>
-        )
-      }
-      className="border-t border-border pt-6"
-    >
-      <div className="mt-3">
-        {failed ? (
-          <p className="text-sm text-fg-muted">Couldn't load reports.</p>
-        ) : reports === null ? (
-          <p className="text-sm text-fg-muted">Loading reports…</p>
-        ) : reports.length === 0 ? (
-          <p className="text-sm text-fg-muted">No open reports.</p>
-        ) : (
-          <RowList label="Open reports" flush>
-            {reports.map((report) => (
-              <ListRow
-                key={report.id}
-                leading={reportRowLeading}
-                title={abuseCategoryLabel(report.category)}
-                description={report.message || undefined}
-                meta={[
-                  report.contactEmail ?? "Anonymous",
-                  <RelativeTime key="created" date={report.createdAt} />,
-                ]}
-                menuLabel={`Actions for the ${abuseCategoryLabel(report.category)} report`}
-                menu={
-                  <>
-                    <DropdownMenuItem onSelect={() => void close(report, "actioned")}>
-                      <CheckIcon />
-                      Mark as handled
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => void close(report, "dismissed")}>
-                      Dismiss
-                    </DropdownMenuItem>
-                  </>
-                }
-              />
-            ))}
-          </RowList>
-        )}
-      </div>
-    </Section>
+    <div className="flex min-w-0 flex-col gap-2">
+      <SettingRow
+        label="Reports"
+        description={
+          failed
+            ? "Couldn't load reports."
+            : reports === null
+              ? "Loading reports…"
+              : reports.length === 0
+                ? "No open reports."
+                : `${reports.length} open`
+        }
+        control={
+          publication.status === "suspended" ? undefined : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={onTakeDown}
+              className="rounded-[10px] text-danger hover:text-danger pointer-coarse:h-11"
+            >
+              Take down…
+            </Button>
+          )
+        }
+      />
+      {reports && reports.length > 0 ? (
+        <RowList label="Open reports" flush>
+          {reports.map((report) => (
+            <ListRow
+              key={report.id}
+              leading={reportRowLeading}
+              title={abuseCategoryLabel(report.category)}
+              description={report.message || undefined}
+              meta={[
+                report.contactEmail ?? "Anonymous",
+                <RelativeTime key="created" date={report.createdAt} />,
+              ]}
+              menuLabel={`Actions for the ${abuseCategoryLabel(report.category)} report`}
+              menu={
+                <>
+                  <DropdownMenuItem onSelect={() => void close(report, "actioned")}>
+                    <CheckIcon />
+                    Mark as handled
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => void close(report, "dismissed")}>
+                    Dismiss
+                  </DropdownMenuItem>
+                </>
+              }
+            />
+          ))}
+        </RowList>
+      ) : null}
+    </div>
   );
 }
 

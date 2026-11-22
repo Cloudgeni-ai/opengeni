@@ -13,6 +13,7 @@ import {
   microsoftDynamicsMcpEndpoint,
   microsoftDynamicsProductForMcpUrl,
 } from "@opengeni/contracts/microsoft-dynamics";
+import { connectorProviderDomain } from "@opengeni/contracts/nango";
 
 /** Passive service identity only. Never selects an account or grants tool access. */
 const services: Record<string, { name: string; logo: string; mcpUrl?: string }> = {
@@ -107,6 +108,23 @@ export function bundledServiceLogo(
       item.id.startsWith(registryCapabilityIdPrefix(service.mcpUrl))
     )
       return service.logo;
+  }
+  return null;
+}
+
+/**
+ * The bundled mark of a reviewed service named by a connection's provider
+ * domain ("gmailmcp.googleapis.com", or its integration platform's
+ * "nango:gmail"), as sign-in cards in a chat identify it. Null for others.
+ */
+export function bundledServiceLogoForDomain(domain: string | null | undefined): string | null {
+  if (!domain) return null;
+  const host = connectorProviderDomain(domain)
+    .replace(/^https?:\/\//u, "")
+    .split("/")[0];
+  if (!host) return null;
+  for (const service of Object.values(services)) {
+    if (service.mcpUrl && new URL(service.mcpUrl).hostname === host) return service.logo;
   }
   return null;
 }

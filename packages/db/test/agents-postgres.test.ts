@@ -10,9 +10,12 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import {
+  bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   claimSlackAgentOpenNotice,
   createAgent,
   createDb,
+  createSession,
   deleteAgent,
   deleteAgentSlackInstall,
   deleteSlackAgent,
@@ -21,6 +24,7 @@ import {
   getSlackAgent,
   insertSlackAgent,
   listAgentSlackInstalls,
+  listAgentChats,
   listAgentsMissingFromSlack,
   listSlackAgentIntroChannelIds,
   listSlackAgentsForConnection,
@@ -28,10 +32,12 @@ import {
   readSessionAgentPrompt,
   recordSlackAgentIntroPost,
   sessionAgentRequiresPrivateChat,
+  submitHumanPromptInTransaction,
   touchSlackAgentUserState,
   updateAgent,
   updateSlackAgent,
   withWorkspaceSessionActivityRls,
+  withWorkspaceSubjectSessionActivityRls,
   type CreateAgentInput,
 } from "../src/index";
 import { AGENT_FIRST_MESSAGE_LEAD, agentInstructionsWithFirstMessage } from "@opengeni/contracts";
@@ -522,6 +528,20 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(
       await getSessionAgent(app.db, { workspaceId: org.home, sessionId: older }),
     ).toMatchObject({ agentChat: true, agent: { id: agent.id } });
+    // Listed as one of the agent's chats, except with direct, which keeps only
+    // chats that are with the agent themselves (what an automation can post into).
+    const listed = async (direct: boolean) =>
+      (
+        await listAgentChats(app.db, org.homeScope, {
+          agentId: agent.id,
+          viewerSubjectId: org.owner,
+          filter: "everyone",
+          direct,
+          limit: 10,
+        })
+      ).map((chat) => chat.sessionId);
+    expect(await listed(false)).toContain(older);
+    expect(await listed(true)).not.toContain(older);
     // Metadata a caller set on create never names the agent.
     expect(await getSessionAgent(app.db, { workspaceId: org.home, sessionId: forged })).toEqual({
       agentChat: true,
@@ -870,5 +890,122 @@ describe("agents data layer (restricted runtime role)", () => {
     });
     if (!opened || typeof opened === "string") throw new Error(`open failed: ${opened}`);
     expect(opened).toMatchObject({ open: true, version: agentVersion + 2 });
+  }, 120_000);
+
+  test("an agent's chat a person started hands work to another agent by name", async () => {
+    // A person's chat with one agent creates a worker chat bound to another
+    // agent. The parent turn has an initiating person, so the child goes
+    // through create_agent_child_session, which must accept the binding.
+    const suffix = crypto.randomUUID();
+    const subjectId = `user:${suffix}`;
+    const access = await bootstrapWorkspace(app.db, {
+      accountExternalSource: "test",
+      accountExternalId: suffix,
+      accountName: "Delegation",
+      workspaceExternalSource: "test",
+      workspaceExternalId: suffix,
+      workspaceName: "Delegation",
+      subjectId,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const accountId = grant.accountId;
+    const workspaceId = grant.workspaceId!;
+    const scope = { accountId, workspaceId };
+    const agentNamed = async (name: string) =>
+      (
+        await createAgent(app.db, scope, {
+          visibility: "workspace",
+          ownerSubjectId: null,
+          name,
+          description: "",
+          avatar: null,
+          instructions: `Be the ${name}.`,
+          firstMessage: "",
+          memoryEnabled: true,
+          origin: "app",
+          sourceSessionId: null,
+          createdBySubjectId: subjectId,
+          maxPerWorkspace: 500,
+        })
+      ).agent;
+    const triage = await agentNamed("Triage");
+    const fixer = await agentNamed("Bug fixer");
+    const chat = {
+      accountId,
+      workspaceId,
+      resources: [],
+      metadata: {},
+      subjectId,
+      visibility: "workspace_shared" as const,
+      model: "scripted-model",
+      reasoningEffort: "low" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+    };
+    const parent = await createSession(app.db, {
+      ...chat,
+      initialMessage: "",
+      createdBy: { kind: "subject", subjectId },
+      agent: { id: triage.id },
+    });
+    await withWorkspaceSubjectSessionActivityRls(app.db, workspaceId, subjectId, (db) =>
+      submitHumanPromptInTransaction(db, {
+        accountId,
+        workspaceId,
+        sessionId: parent.id,
+        subjectId,
+        actor: { type: "human", subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Triage this bug.",
+        resources: [],
+        reasoningEffort: "low",
+        reasoningEffortFallback: "low",
+        source: "user",
+      }),
+    );
+    const claimed = await claimSessionWorkForAttempt(app.db, workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      agentInstructionsProtocol: 1,
+    });
+    if (claimed.action !== "claimed") throw new Error(`not claimed: ${claimed.action}`);
+    const turn = claimed.turn;
+    const child = await createSession(app.db, {
+      ...chat,
+      initialMessage: "Fix it.",
+      parentSessionId: parent.id,
+      createdByActor: {
+        type: "agent_attempt",
+        attemptId: turn.activeAttemptId!,
+        sessionId: parent.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+      },
+      agent: { id: fixer.id },
+    });
+    const [row] = await shared.admin<
+      {
+        agent_id: string;
+        agent_prompt_revision: number;
+        parent_session_id: string;
+        agent_creation_attempt_id: string | null;
+      }[]
+    >`select agent_id::text, agent_prompt_revision, parent_session_id::text,
+        agent_creation_attempt_id::text from sessions where id = ${child.id}`;
+    expect(row).toEqual({
+      agent_id: fixer.id,
+      agent_prompt_revision: 1,
+      parent_session_id: parent.id,
+      agent_creation_attempt_id: turn.activeAttemptId!,
+    });
+    expect(await getSessionAgent(app.db, { workspaceId, sessionId: child.id })).toMatchObject({
+      agentChat: true,
+      agent: { id: fixer.id },
+    });
   }, 120_000);
 });

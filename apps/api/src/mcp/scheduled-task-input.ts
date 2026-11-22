@@ -7,6 +7,7 @@ import {
   ScheduledTaskOverlapPolicy,
   ScheduledTaskRunMode,
   ScheduledTaskScheduleSpec,
+  UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import { z } from "zod/v4";
 import { ToolArgumentError } from "./tool-argument-error";
@@ -142,6 +143,111 @@ export const SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG = {
   firstPartyMcpPermissions: true,
 } as const;
 
+/**
+ * The agent each run's chat is with, by name or id, as session_create's
+ * agentName takes it. The tool resolves it to the contract's agentId before
+ * the request is parsed, so the REST shape is unchanged.
+ */
+export function scheduledTaskAgentNameToolInput() {
+  return z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      'Name or id of an agent in this workspace (for example "Triage"): each run\'s chat is with that agent, with its Instructions, Memory and Can use. Use instead of agentId.',
+    );
+}
+
+export type ScheduledTaskAgentResolution =
+  | { ok: true; agentId: string }
+  | { ok: false; message: string };
+
+/** Where a tool takes an agent by name: create's agentConfig, update's agentConfigPatch. */
+export type ScheduledTaskAgentField = "agentConfig" | "agentConfigPatch";
+
+/**
+ * Why `agentName` named no agent the person this chat acts for
+ * can use, or several, worded for scheduling. Null for any other refusal,
+ * whose own message stands.
+ */
+export function scheduledTaskAgentNameRefusal(
+  ref: string,
+  refusal: { code: string; agentIds?: readonly string[] | undefined },
+  field: ScheduledTaskAgentField = "agentConfig",
+): string | null {
+  const name = ref.trim();
+  if (refusal.code === "agent_name_ambiguous") {
+    return `More than one agent is named "${name}". Give ${field}.agentId instead, one of: ${(refusal.agentIds ?? []).join(", ")}.`;
+  }
+  if (refusal.code === "agent_not_found") {
+    return field === "agentConfig"
+      ? `No agent named "${name}" is available here to the person this chat acts for. Check the agent's name, or give agentConfig.agentId; leave out agentConfig.agentName to schedule without an agent.`
+      : `No agent named "${name}" is available here to the person this chat acts for. Check the agent's name, or give agentConfigPatch.agentId; agentId null removes the agent.`;
+  }
+  return null;
+}
+
+/**
+ * Replace `agentName` in `agentConfig` (or update's `agentConfigPatch`) with
+ * the agentId it names. Input without one is returned as it is.
+ */
+export async function withResolvedScheduledTaskAgent(
+  input: Record<string, unknown>,
+  resolve: (ref: string) => Promise<ScheduledTaskAgentResolution>,
+  field: ScheduledTaskAgentField = "agentConfig",
+): Promise<Record<string, unknown>> {
+  const agentConfig = input[field];
+  if (typeof agentConfig !== "object" || agentConfig === null || Array.isArray(agentConfig))
+    return input;
+  const { agentName, ...rest } = agentConfig as Record<string, unknown>;
+  if (agentName === undefined) return input;
+  if (typeof agentName !== "string" || agentName.trim() === "")
+    throw new ToolArgumentError(`${field}.agentName must name an agent`);
+  if (rest.agentId !== undefined)
+    throw new ToolArgumentError(`Give ${field}.agentName or ${field}.agentId, not both`);
+  const resolved = await resolve(agentName);
+  if (!resolved.ok) throw new ToolArgumentError(resolved.message);
+  return { ...input, [field]: { ...rest, agentId: resolved.agentId } };
+}
+
+/**
+ * Validates an update call against the contract as it will be sent: an
+ * `agentConfigPatch.agentName` stands for the agentId it resolves to.
+ */
+export function scheduledTaskUpdateToolValidation() {
+  return z.record(z.string(), z.unknown()).superRefine((input, context) => {
+    const patch = input.agentConfigPatch;
+    let candidate = input;
+    if (typeof patch === "object" && patch !== null && !Array.isArray(patch)) {
+      const { agentName, ...rest } = patch as Record<string, unknown>;
+      if (agentName !== undefined) {
+        if (typeof agentName !== "string" || agentName.trim() === "") {
+          context.addIssue({
+            code: "custom",
+            path: ["agentConfigPatch", "agentName"],
+            message: "agentConfigPatch.agentName must name an agent",
+          });
+          return;
+        }
+        if (rest.agentId !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["agentConfigPatch", "agentName"],
+            message: "Give agentConfigPatch.agentName or agentConfigPatch.agentId, not both",
+          });
+          return;
+        }
+        // The name resolves to an id before the call is sent; null stands in for it here.
+        candidate = { ...input, agentConfigPatch: { ...rest, agentId: null } };
+      }
+    }
+    const parsed = UpdateScheduledTaskRequest.safeParse(candidate);
+    if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ ...issue });
+  });
+}
+
 export function scheduledTaskCreateToolInput(options: { events: boolean } = { events: false }) {
   return (
     z
@@ -166,6 +272,7 @@ export function scheduledTaskCreateToolInput(options: { events: boolean } = { ev
         agentConfig: z
           .object(ScheduledTaskAgentConfigInput.shape)
           .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
+          .extend({ agentName: scheduledTaskAgentNameToolInput() })
           .strict()
           .optional()
           .describe(

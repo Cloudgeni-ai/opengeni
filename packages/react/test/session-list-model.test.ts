@@ -199,6 +199,10 @@ describe("session-list-model", () => {
       tone: "waiting",
       pulse: false,
     });
+    // A connection card the agent waits on reads as waiting on you.
+    expect(
+      recentSessionStatus(session("x", { awaitingConnectionSince: "2026-11-19T14:00:00.000Z" })),
+    ).toEqual({ tone: "waiting", pulse: false });
     expect(
       recentSessionStatus(
         session("x", { backgroundCommandActivity: {} as Session["backgroundCommandActivity"] }),

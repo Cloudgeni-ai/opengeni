@@ -1,5 +1,31 @@
 # @opengeni/agent-host
 
+## 6.36.0
+
+### Patch Changes
+
+- 7c70b38: Show an app-managed computer as connecting while its local agent is running but the server reports it offline.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [e765d11]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+  - @opengeni/sdk@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

@@ -1,9 +1,9 @@
 import {
-  agentToolPermissionFor,
+  agentToolPermissionRuleFor,
   type AgentToolPermission,
   type AgentToolPermissionRule,
 } from "@opengeni/contracts";
-import type { ConnectorActionToolCall } from "@opengeni/runtime";
+import type { ConnectorActionAgentRule, ConnectorActionToolCall } from "@opengeni/runtime";
 import {
   GITHUB_REST_MCP_APP_SERVER_ID,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
@@ -18,8 +18,14 @@ import {
  * running under several agents (one delegated to another) gets the
  * strictest choice of any of them.
  */
+export type AgentCanUseRuleSet = {
+  /** The agent the rules belong to, named when one of them decides a call. */
+  agent: { id: string; name: string } | null;
+  rules: readonly AgentToolPermissionRule[];
+};
+
 export type AgentCanUse = {
-  ruleSets: readonly (readonly AgentToolPermissionRule[])[];
+  ruleSets: readonly AgentCanUseRuleSet[];
   /** Account-route server ids to the connector they route, with its provider. */
   routes: ReadonlyMap<string, { canonicalServerId: string; providerDomain: string | null }>;
   /** Provider domains of configured servers, by canonical id. */
@@ -38,7 +44,8 @@ const BUILT_IN_PROVIDER_DOMAINS: ReadonlyMap<string, string> = new Map([
 const STRICTNESS: Record<AgentToolPermission, number> = { allow: 0, ask: 1, block: 2 };
 
 export function agentCanUseFor(input: {
-  ruleSets: readonly (readonly AgentToolPermissionRule[])[];
+  /** Per agent; a plain rule list has no agent to name. */
+  ruleSets: readonly (AgentCanUseRuleSet | readonly AgentToolPermissionRule[])[];
   bindings:
     | readonly { serverId: string; canonicalServerId: string; providerDomain?: string | null }[]
     | null
@@ -48,7 +55,9 @@ export function agentCanUseFor(input: {
     connectionRef?: { providerDomain?: string | null } | null | undefined;
   }[];
 }): AgentCanUse | null {
-  const ruleSets = input.ruleSets.filter((rules) => rules.length > 0);
+  const ruleSets = input.ruleSets
+    .map((set): AgentCanUseRuleSet => ("rules" in set ? set : { agent: null, rules: set }))
+    .filter((set) => set.rules.length > 0);
   if (ruleSets.length === 0) return null;
   const routes = new Map<string, { canonicalServerId: string; providerDomain: string | null }>();
   const providerDomains = new Map<string, string>(BUILT_IN_PROVIDER_DOMAINS);
@@ -73,11 +82,26 @@ export function agentCanUseDecision(
   canUse: AgentCanUse,
   call: Pick<ConnectorActionToolCall, "serverId" | "toolName">,
 ): AgentToolPermission | null {
-  let strictest: AgentToolPermission | null = null;
-  for (const rules of canUse.ruleSets) {
-    const decision = ruleSetDecision(canUse, rules, call);
-    if (decision !== null && (strictest === null || STRICTNESS[decision] > STRICTNESS[strictest])) {
-      strictest = decision;
+  return agentCanUseMatch(canUse, call)?.rule.permission ?? null;
+}
+
+/**
+ * The strictest agent's deciding rule for one call, with that agent; the
+ * first agent of the chain on a tie. Null when no rule names the call.
+ */
+export function agentCanUseMatch(
+  canUse: AgentCanUse,
+  call: Pick<ConnectorActionToolCall, "serverId" | "toolName">,
+): { agent: AgentCanUseRuleSet["agent"]; rule: AgentToolPermissionRule } | null {
+  let strictest: { agent: AgentCanUseRuleSet["agent"]; rule: AgentToolPermissionRule } | null =
+    null;
+  for (const set of canUse.ruleSets) {
+    const rule = ruleSetDecision(canUse, set.rules, call);
+    if (
+      rule !== null &&
+      (strictest === null || STRICTNESS[rule.permission] > STRICTNESS[strictest.rule.permission])
+    ) {
+      strictest = { agent: set.agent, rule };
     }
   }
   return strictest;
@@ -87,15 +111,15 @@ function ruleSetDecision(
   canUse: AgentCanUse,
   rules: readonly AgentToolPermissionRule[],
   call: Pick<ConnectorActionToolCall, "serverId" | "toolName">,
-): AgentToolPermission | null {
+): AgentToolPermissionRule | null {
   const route = canUse.routes.get(call.serverId);
   const serverId = route?.canonicalServerId ?? call.serverId;
   const providerDomain = route?.providerDomain ?? canUse.providerDomains.get(serverId) ?? null;
   return (
-    agentToolPermissionFor(rules, { serverId, providerDomain, toolName: call.toolName }) ??
+    agentToolPermissionRuleFor(rules, { serverId, providerDomain, toolName: call.toolName }) ??
     // A rule may name the route itself.
     (serverId !== call.serverId
-      ? agentToolPermissionFor(rules, {
+      ? agentToolPermissionRuleFor(rules, {
           serverId: call.serverId,
           providerDomain,
           toolName: call.toolName,
@@ -114,11 +138,25 @@ export function withAgentCanUse<Call extends ConnectorActionToolCall>(
   call: Call,
 ): Call {
   if (!canUse) return call;
-  const decision = agentCanUseDecision(canUse, call);
-  if (decision === null || decision === "allow") return call;
+  const match = agentCanUseMatch(canUse, call);
+  const decision = match?.rule.permission ?? null;
+  if (match === null || decision === null || decision === "allow") return call;
+  // A stricter floor the call already had keeps its own reason.
+  const agentDecides = !(call.minimumDecision === "block" && decision === "ask");
+  const by: ConnectorActionAgentRule | null =
+    agentDecides && match.agent
+      ? {
+          agentId: match.agent.id,
+          agentName: match.agent.name,
+          connector: match.rule.connector,
+          tool: match.rule.tool,
+          permission: decision,
+        }
+      : null;
   return {
     ...call,
     minimumDecision: call.minimumDecision === "block" ? "block" : decision,
+    ...(by ? { minimumDecisionBy: by } : {}),
     ...(call.connectionId?.trim() ? {} : { connectionId: `agent-can-use:${call.serverId}` }),
   };
 }

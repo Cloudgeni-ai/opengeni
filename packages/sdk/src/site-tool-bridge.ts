@@ -360,6 +360,13 @@ export type SiteToolBridge = {
     connect: (item: ToolGatewaySiteSetupItem, options: { signal: AbortSignal }) => Promise<boolean>;
     show?: (options: { signal: AbortSignal }) => Promise<boolean> | boolean;
   };
+  /** The host's personal sync opt-in confirmation (`site.data.syncs.optIn`). */
+  syncs?: {
+    optIn: (
+      request: { syncId: string; optedIn: boolean },
+      options: { signal: AbortSignal },
+    ) => Promise<{ optedIn: boolean }>;
+  };
 };
 export type CreateSiteToolBridgeOptions = {
   workspaceTools: Pick<OpenGeniWorkspaceTools, "$catalog"> &
@@ -401,6 +408,15 @@ export type CreateSiteToolBridgeOptions = {
    * App asks (`site.connections.showCard()`), even after the viewer closed it.
    */
   connectCard?: { show?: (options: { signal: AbortSignal }) => Promise<boolean> | boolean };
+  /**
+   * Host UI that confirms joining or leaving one of the pinned Site's personal
+   * syncs with the viewer (naming the tool, account and collection) and
+   * posts the opt-in itself. Resolves the viewer's final state.
+   */
+  syncOptIn?: (
+    request: { syncId: string; optedIn: boolean },
+    options: { signal: AbortSignal },
+  ) => Promise<{ optedIn: boolean }>;
 } & (
   | { artifactId: string; siteVersionId: string; requestedTools: readonly ToolGatewayIdentity[] }
   | { artifactId?: never; siteVersionId?: never; requestedTools?: never }
@@ -762,6 +778,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         }
       : {}),
     ...(connections ? { connections } : {}),
+    ...(pinned && input.syncOptIn ? { syncs: { optIn: input.syncOptIn } } : {}),
     ...(input.fetchResponse && input.artifactId ? { siteData: true } : {}),
     ...(input.fetchResponse
       ? {

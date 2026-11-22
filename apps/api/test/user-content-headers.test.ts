@@ -52,9 +52,9 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     why: "git receive-pack results that refuse a push, read by git",
   },
   "personal-github-gateway.ts": {
-    count: 2,
+    count: 4,
     userContent: false,
-    why: "GitHub API passthrough and JSON errors for gh, behind the session pass (sandboxed, nosniff)",
+    why: "GitHub API passthrough (including created pull requests read for linking) and JSON errors for gh, behind the session pass (sandboxed, nosniff)",
   },
   "personal-github-git-broker.ts": {
     count: 2,
@@ -66,6 +66,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "server-drawn PNG avatar for Slack; image avatars are re-encoded, never passed through",
   },
+  "sidebar-layout.ts": {
+    count: 1,
+    userContent: true,
+    why: "an outside sidebar link's site icon (raster images only, sniffed)",
+  },
   "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
   "site-runtime.ts": {
     count: 2,
@@ -73,7 +78,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     why: "published Site version HTML for the gateway (scripts sandboxed in an opaque origin); a header-preserving copy to add Server-Timing",
   },
   "site-sql.ts": { count: 1, userContent: true, why: "Site SQL export download (sql, csv, json)" },
-  "workspace-artifacts.ts": { count: 1, userContent: true, why: "Site HTML (opaque origin)" },
+  "workspace-artifacts.ts": {
+    count: 2,
+    userContent: true,
+    why: "Site HTML (opaque origin), streamed or with its asset base",
+  },
   "workspace-state.ts": { count: 1, userContent: true, why: "workspace state export" },
 };
 

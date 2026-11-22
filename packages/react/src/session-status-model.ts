@@ -68,15 +68,21 @@ export function sessionAdmissionBlocked(session: {
 /**
  * The status to present for a session (or a list row carrying its admission
  * block and archive facts). An archived chat reads as archived whatever its
- * last run state was.
+ * last run state was. An idle chat whose agent waits on a connection card
+ * (`awaitingConnectionSince`) needs the person, so it reads as
+ * `requires_action`, though its own status stays idle.
  */
 export function sessionDisplayStatus(
   session: {
     status: SessionStatus;
     admissionBlock?: unknown;
+    awaitingConnectionSince?: string | null | undefined;
   } & SessionArchiveFacts,
 ): SessionDisplayStatus {
   if (sessionArchived(session)) return "archived";
+  if (session.status === "idle" && session.awaitingConnectionSince != null) {
+    return "requires_action";
+  }
   return sessionAdmissionBlocked(session) ? "blocked" : session.status;
 }
 

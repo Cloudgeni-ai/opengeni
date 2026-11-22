@@ -38,6 +38,9 @@ const ADDED_SESSION_COLUMNS = [
   // Migration 1521: who the chat waits on and its Linked items; NULL until set.
   "links",
   "waiting_on",
+  // Migration 1546: the connection cards the idle chat waits on; NULL until a card is posted.
+  "awaiting_connection_keys",
+  "awaiting_connection_since",
 ];
 /** Values that differ between any two runs (transaction ids, hashes of ids). */
 const VOLATILE_KEYS = new Set(["activity_xid", "activity_revision_pending_xid", "controlEtag"]);

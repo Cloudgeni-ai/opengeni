@@ -1,6 +1,8 @@
+import type { EventSourceStatus } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { getConnectionMetadata, listConnectionsMetadata } from "./connection-metadata";
+import { nestedPostgresSqlState } from "./persistence-errors";
 
 export type SlackBotAccess = {
   connectionId: string;
@@ -15,7 +17,11 @@ export async function readOrganizationSlackBotAccess(
   scope: { accountId: string; workspaceId: string; connectionId: string },
 ) {
   const rows = await withRlsContext(db, scope, async (tx) =>
-    rawRows<{ enabled: boolean; generation: number; workspace_ids: string[] | null }>(
+    rawRows<{
+      enabled: boolean;
+      generation: number;
+      workspace_ids: string[] | null;
+    }>(
       tx,
       sql`select * from opengeni_private.read_slack_bot_workspace_access(${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${scope.connectionId}::uuid)`,
     ),
@@ -78,12 +84,109 @@ export async function availableSlackBotConnectionMetadata(
         return row?.accountId === scope.accountId
           ? {
               ...row,
-              metadata: { ...row.metadata, organizationSharingGeneration: share.generation },
+              metadata: {
+                ...row.metadata,
+                organizationSharingGeneration: share.generation,
+              },
             }
           : null;
       }),
   );
   return [...local, ...shared.filter((row) => row !== null)];
+}
+
+/** A shared workspace's Slack source, with what recording a delivery into it needs. */
+export type SharedSlackEventSource = {
+  workspaceId: string;
+  sourceId: string;
+  status: EventSourceStatus;
+  statusReason: string | null;
+};
+
+export const SHARED_SLACK_EVENT_SOURCES_V2_ROUTINE =
+  "opengeni_private.list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)";
+
+/** A withheld definer is rechecked at most once a minute; once granted it stays so. */
+const V2_RECHECK_MS = 60_000;
+const v2Granted = new WeakMap<Database, { value: boolean; at: number }>();
+
+async function sharedSlackLookupV2Granted(db: Database, now: number): Promise<boolean> {
+  const cached = v2Granted.get(db);
+  if (cached && (cached.value || now - cached.at < V2_RECHECK_MS)) return cached.value;
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select coalesce(pg_catalog.has_function_privilege(
+      pg_catalog.to_regprocedure(${SHARED_SLACK_EVENT_SOURCES_V2_ROUTINE}), 'EXECUTE'), false) as granted`,
+  );
+  const value = row?.granted === true;
+  v2Granted.set(db, { value, at: now });
+  return value;
+}
+
+/**
+ * The Slack event sources, for one Slack team, of the other workspaces the
+ * organization currently shares this home bot with. Empty unless the bot is
+ * the active verified install and its sharing is enabled; the saved workspace
+ * allowlist applies. In one statement, with each source's status, so
+ * recording needs no further read. Once the runtime may call 1552's definer it
+ * is one indexed lookup whatever the organization's size; until then 1538's
+ * routine probes each covered workspace.
+ */
+export async function sharedSlackEventSources(
+  db: Database,
+  scope: {
+    accountId: string;
+    homeWorkspaceId: string;
+    connectionId: string;
+    externalKey: string;
+  },
+): Promise<SharedSlackEventSource[]> {
+  const read = (v2: boolean) =>
+    withRlsContext(
+      db,
+      { accountId: scope.accountId, workspaceId: scope.homeWorkspaceId },
+      async (tx) =>
+        rawRows<{
+          workspace_id: string;
+          source_id: string;
+          status: EventSourceStatus;
+          status_reason: string | null;
+        }>(
+          tx,
+          v2
+            ? sql`select workspace_id, source_id, status, status_reason
+            from opengeni_private.list_shared_slack_event_sources_v2(
+              ${scope.accountId}::uuid, ${scope.homeWorkspaceId}::uuid, ${scope.connectionId}::uuid,
+              ${scope.externalKey}::text)`
+            : sql`select workspace_id, source_id, status, status_reason
+            from opengeni_private.list_shared_slack_event_sources_v1(
+              ${scope.accountId}::uuid, ${scope.homeWorkspaceId}::uuid, ${scope.connectionId}::uuid,
+              ${scope.externalKey}::text)`,
+        ),
+    );
+  let rows: Awaited<ReturnType<typeof read>>;
+  if (await sharedSlackLookupV2Granted(db, Date.now())) {
+    try {
+      rows = await read(true);
+    } catch (error) {
+      // EXECUTE revoked or the routine gone: back to v1 until the next check.
+      // v2's own scope refusal (also 42501) is v1's answer too, so it stands.
+      const state = nestedPostgresSqlState(error);
+      const cause = error instanceof Error ? error.cause : undefined;
+      const refusedScope = /scope mismatch/iu.test(`${String(error)} ${String(cause ?? "")}`);
+      if ((state !== "42501" && state !== "42883") || refusedScope) throw error;
+      v2Granted.set(db, { value: false, at: Date.now() });
+      rows = await read(false);
+    }
+  } else {
+    rows = await read(false);
+  }
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sourceId: row.source_id,
+    status: row.status,
+    statusReason: row.status_reason,
+  }));
 }
 
 /**
@@ -128,7 +231,11 @@ export async function setOrganizationSlackBotAccess(
     workspaceIds?: string[] | null;
   },
   authorize: () => Promise<{ accountId: string; subjectId: string }>,
-): Promise<{ enabled: boolean; generation: number; workspaceIds: string[] | null }> {
+): Promise<{
+  enabled: boolean;
+  generation: number;
+  workspaceIds: string[] | null;
+}> {
   const actor = await authorize();
   if (actor.accountId !== input.accountId || !actor.subjectId)
     throw new Error("Organization administrator required");
@@ -192,7 +299,11 @@ export type PreparedBotMessage = {
   threadTimestamp: string | null;
   text: string;
 };
-type MessageScope = { accountId: string; workspaceId: string; sessionId: string };
+type MessageScope = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+};
 
 export async function prepareBotMessage(
   db: Database,

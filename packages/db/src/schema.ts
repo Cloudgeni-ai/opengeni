@@ -34,6 +34,7 @@ import type {
   SlackUserLinkAccessRequest,
   SubscriptionPersonalAuthorityV2,
   TimelineAnnotation,
+  SiteAssetManifest,
   ToolGatewayIdentity,
   UserResourceDelegation,
   VaultPolicy,
@@ -93,6 +94,7 @@ export * from "./managed-auth-session-set-schema";
 export * from "./secret-approvals-schema";
 export * from "./credential-profiles-schema";
 export * from "./slack-api-rate-limit-schema";
+export * from "./mcp-connection-rate-limit-schema";
 export * from "./organization-recovery-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
@@ -298,6 +300,8 @@ export const workspaceArtifacts = pgTable(
       .notNull()
       .default("workspace_shared"),
     ownerSubjectId: text("owner_subject_id"),
+    // Migration 1548: the app package it was installed or last upgraded from.
+    packageId: uuid("package_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -555,6 +559,8 @@ export const workspaceArtifactVersions = pgTable(
     sourceSha256: text("source_sha256"),
     sourceSizeBytes: bigint("source_size_bytes", { mode: "number" }),
     requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
+    /** Asset files of a multi-file build (migration 1522); null for a single-file app. */
+    assetManifest: jsonb("asset_manifest").$type<SiteAssetManifest>(),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
@@ -5544,6 +5550,11 @@ export const sessions = pgTable(
     inputWaitUntil: timestamp("input_wait_until", { withTimezone: true }),
     inputWaitReason: text("input_wait_reason"),
     inputWaitSetAt: timestamp("input_wait_set_at", { withTimezone: true }),
+    // Open connection-card notices the agent waits on (migration 1546): their
+    // keys and when the oldest was posted. Both null when none is open.
+    // Maintained only by the session_events trigger.
+    awaitingConnectionSince: timestamp("awaiting_connection_since", { withTimezone: true }),
+    awaitingConnectionKeys: text("awaiting_connection_keys").array(),
     // Actual input tokens reported for the latest authoritative ordinary model
     // call. Compaction/context clearing invalidates it to null; local history
     // estimates must never be stored here.
@@ -9110,6 +9121,12 @@ export const connectorActionRequests = pgTable(
     policyVersion: integer("policy_version"),
     policySource: text("policy_source").$type<"explicit" | "default" | "ambiguous">().notNull(),
     policyDecision: text("policy_decision").$type<ConnectorActionPolicyDecision>().notNull(),
+    /**
+     * The agent and Can use rule that made the call ask or blocked it; null
+     * when the connection's own settings decided (`policy_source` stays
+     * `default` for an agent rule, as before this column).
+     */
+    agentRule: jsonb("agent_rule").$type<import("@opengeni/contracts").ToolReviewAgentRule>(),
     actionFingerprint: text("action_fingerprint").notNull(),
     reviewArguments: text("review_arguments"),
     reviewContext: jsonb("review_context").$type<import("@opengeni/contracts").ToolReviewContext>(),
@@ -10471,6 +10488,8 @@ export const sessionHumanInputRequests = pgTable(
     response: jsonb("response").$type<HumanInputResponse>(),
     respondedBy: text("responded_by"),
     skillReviewHumanAuthorized: boolean("skill_review_human_authorized").notNull().default(false),
+    /** With the agent that started this sub-agent, not yet the person (1553). */
+    heldForAgent: boolean("held_for_agent").notNull().default(false),
     respondedAt: timestamp("responded_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

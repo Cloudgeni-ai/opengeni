@@ -281,7 +281,11 @@ describe("turn-capacity Prometheus alerts", () => {
       ],
       [
         "OpenGeniMcpStrictConnectFailed",
-        ["opengeni_mcp_lifecycle_operations_total", 'policy="strict"', 'outcome="failed"'],
+        [
+          "opengeni_mcp_lifecycle_operations_total",
+          'policy="strict"',
+          'outcome=~"failed|refused_by_policy"',
+        ],
       ],
       [
         "OpenGeniMcpCloseFailed",
@@ -289,7 +293,7 @@ describe("turn-capacity Prometheus alerts", () => {
       ],
       [
         "OpenGeniMcpBestEffortConnectFailureRatio",
-        ["opengeni_mcp_lifecycle_operations_total", 'policy="best_effort"'],
+        ["opengeni_mcp_lifecycle_operations_total", 'policy="best_effort"', 'outcome="failed"'],
       ],
       [
         "OpenGeniMcpToolFailureRatio",
@@ -325,6 +329,8 @@ describe("turn-capacity Prometheus alerts", () => {
         expect(expression).not.toContain("cancelled");
       }
     }
+    const bestEffort = alertExpression(template, "OpenGeniMcpBestEffortConnectFailureRatio");
+    expect(bestEffort.match(/outcome!="refused_by_policy"/g)).toHaveLength(2);
   });
 
   test("alerts on product-level failures users hit, with plain-language copy", async () => {

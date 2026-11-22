@@ -101,6 +101,16 @@ export {
 } from "./trace-context";
 export { traceClientCalls, traceFetch, tracedFetchTarget } from "./client-spans";
 export {
+  measureRecordingTiming,
+  recordActiveRecordingTiming,
+  recordRecordingTiming,
+  recordingTimingContext,
+  startActiveRecordingTiming,
+  startRecordingTiming,
+  withRecordingTiming,
+  type RecordingTimingStage,
+} from "./recording-timing";
+export {
   analyzeCpuSamples,
   captureCpuSamplingProfile,
   installCpuSamplingSignal,
@@ -580,6 +590,27 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // and whether the audio was a meeting or a dictation.
   ["providerRequestId", /^[A-Za-z0-9._:-]{1,128}$/],
   ["recordingPurpose", /^(?:meeting|dictation)$/],
+  ["recordingKey", /^rec_[0-9a-f]{32}$/],
+  ["recordingTimingSource", /^(?:client|capture_timestamp)$/],
+  ["recordingProviderRegion", /^[a-z0-9][a-z0-9-]{0,63}$/],
+]);
+
+const PUBLIC_RECORDING_NUMBER_FIELDS = new Set([
+  "audioSeconds",
+  "sentAudioSeconds",
+  "wallSeconds",
+  "queueSeconds",
+  "audioBytes",
+  "chunkNumber",
+  "trackNumber",
+  "providerAttempt",
+  "prepareWallSeconds",
+  "convertWallSeconds",
+  "diarizeWallSeconds",
+  "alignWallSeconds",
+  "transcribeWallSeconds",
+  "segmentWallSeconds",
+  "finishWallSeconds",
 ]);
 
 /**
@@ -692,6 +723,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "HostExportOperationError",
   "HttpOperationError",
   "IndependentSessionTitleError",
+  "InteractionControllerOperationError",
   "KnowledgeIndexOperationError",
   "McpLifecycleError",
   "McpOperationError",
@@ -752,6 +784,7 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "independent_session_title_provider_request_failed",
   "independent_session_title_response_failed",
   "independent_session_title_settlement_failed",
+  "interaction_controller_create_refused",
   "internal_error",
   "knowledge_index_defer_failed",
   "knowledge_index_embedding_failed",
@@ -1999,6 +2032,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     return {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
+      ...projectInteractionControllerDiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
@@ -2015,6 +2049,9 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       Object.entries(attributes).filter(([key, value]) => {
         if (value === undefined) return false;
         if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+        if (PUBLIC_RECORDING_NUMBER_FIELDS.has(key)) {
+          return typeof value === "number" && Number.isFinite(value) && value >= 0;
+        }
         const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
         if (clientErrorField) {
           return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
@@ -2065,6 +2102,21 @@ function projectContextCompactionAttributes(attributes: Attributes): Attributes 
       projected[key] = value;
   }
   return projected;
+}
+
+/**
+ * A browser or computer create the controller refused is settled as a failed
+ * receipt, not an HTTP failure, so this is where its reviewed cause (driver
+ * error class and code frame, never text from the machine) is logged.
+ */
+function projectInteractionControllerDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "InteractionControllerOperationError") return {};
+  const op = attributes.op;
+  return {
+    ...(op === "browser.create" || op === "computer.create" ? { op } : {}),
+    ...(attributes.outcome === "failed" ? { outcome: "failed" } : {}),
+    ...projectErrorCauseAttributes(attributes),
+  };
 }
 
 function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {

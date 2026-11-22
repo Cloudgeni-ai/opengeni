@@ -7,6 +7,7 @@ import { archiveActionLabel, requestSessionArchive } from "../../lib/archive-ses
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
 import { useSiteOpenedListener } from "../../lib/site-opened";
+import { SessionShellSlotsContext } from "./session-shell-slots";
 import { publishSiteSidebarBridge } from "../../lib/site-sidebar-bridge";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
@@ -486,6 +487,13 @@ export function SessionList() {
   // from anywhere in a workstream. Sorting and filtering still operate on
   // root workstreams and preserve their expandable descendant hierarchy.
   const hierarchyMode = search.length === 0;
+  // Apps as rows of their own (their chats under them), unless the person's
+  // sidebar options list apps' chats as ordinary chats. Until that's known
+  // the list waits, so it never draws app rows only to redraw without them.
+  const shellSlots = useContext(SessionShellSlotsContext);
+  const appRowsPending = shellSlots.sessionsShowApps === null;
+  const appRows = shellSlots.sessionsShowApps !== false;
+  const sidebarApps = shellSlots.sidebarApps;
   const channelMode = browseGroupBy === "project";
   const clearBrowseControls = useCallback(() => {
     updateBrowsePreferences(DEFAULT_SESSION_BROWSE_PREFERENCES);
@@ -510,7 +518,8 @@ export function SessionList() {
     ...(hierarchyMode ? { parentSessionId: null } : {}),
     // Sites are rows of their own: their conversations nest under them and
     // arrive as complete Site rows. Search and Archived list them as rows.
-    siteConversations: hierarchyMode && browseStatus !== "archived" ? "group" : "include",
+    siteConversations:
+      appRows && hierarchyMode && browseStatus !== "archived" ? "group" : "include",
     archiveStatus: browseStatus,
     ...(browseStatus === "archived" ? {} : { sortBy: browseSortBy }),
     pollIntervalMs: listHintsAvailable ? undefined : 15_000,
@@ -1705,7 +1714,7 @@ export function SessionList() {
       buildPinnedRailSections(projectedSessions, new Date(), {
         // Sites are stable rows whenever the rail is a hierarchy. Search is
         // flat: a matching conversation is listed as itself.
-        groupSites: hierarchyMode,
+        groupSites: appRows && hierarchyMode,
         siteGroups,
         archivedSiteIds,
         siteRowsByProject: channelMode,
@@ -1714,6 +1723,7 @@ export function SessionList() {
       }),
     [
       projectedSessions,
+      appRows,
       hierarchyMode,
       siteGroups,
       archivedSiteIds,
@@ -2328,9 +2338,10 @@ export function SessionList() {
                     void onMoveSite(origin, from, to),
                 }
               : {}),
+            ...(sidebarApps ? { sidebar: sidebarApps } : {}),
           }
         : null,
-    [context.client, onArchiveSite, onMoveSite, onPinSite],
+    [context.client, onArchiveSite, onMoveSite, onPinSite, sidebarApps],
   );
   // The open Site's page offers the same Pin and Archive as its row.
   const pinnedSiteIds = useMemo(
@@ -4060,10 +4071,12 @@ export function SessionList() {
               {announcement}
             </p>
             {(loading && allSessions.length === 0) ||
-            (channelMode && channelsQuery.loading && channels.length === 0) ? (
+            (channelMode && channelsQuery.loading && channels.length === 0) ||
+            appRowsPending ? (
               // The second clause holds the skeleton until the initial channels
               // read resolves, so the rail paints Recents/workstreams directly
-              // instead of flashing the old recency layout first.
+              // instead of flashing the old recency layout first. The third
+              // holds it until the person's choice of app rows is known.
               <SessionListSkeleton />
             ) : error && allSessions.length === 0 ? (
               <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">

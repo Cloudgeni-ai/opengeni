@@ -59,12 +59,33 @@ Bun.serve({
 ```
 
 The HTML entrypoint may import `.tsx`, CSS, and ordinary browser assets. The
-standalone browser build must produce one self-contained HTML document; inspect
+standalone browser build produces one self-contained HTML document; inspect
 the output directory and fail if runtime JS, CSS, or local asset files are still
-required beside it.
+required beside it. A large app builds as several files instead (see "Large apps" below).
 
 For the final browser test, serve that compiled HTML through the same host
-instead of rebundling the source with a different development configuration:
+instead of rebundling the source with a different development configuration.
+For a multi-file build, also serve the files in `dist/` and give the page
+`<base href="/">`, as the host gives it the version's folder:
+
+```ts
+const siteTools = createCodemodeSiteRequestHandler();
+Bun.serve({
+  async fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path.startsWith("/__opengeni/site-tools/")) return siteTools(request);
+    const file = Bun.file(`./dist${path}`);
+    if (path !== "/" && !path.endsWith(".html") && (await file.exists())) return new Response(file);
+    const html = (await Bun.file("./dist/index.html").text()).replace(
+      /<head[^>]*>/iu,
+      (head) => `${head}<base href="/">`,
+    );
+    return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+  },
+});
+```
+
+For a single-file build:
 
 ```ts
 const siteTools = createCodemodeSiteRequestHandler();
@@ -85,6 +106,49 @@ During development, open the sandbox-local URL with the available Browser tools.
 Exercise the real interactions at desktop and mobile widths, inspect console
 errors, and take a screenshot when visual quality matters. Do not declare the
 app complete from compilation alone.
+
+## Large apps: several files, each page loads its own code
+
+One HTML file means opening any page downloads every page's code. When the
+built HTML passes about 1 MB, or pages pull in heavy libraries (charts,
+editors, maps, PDF), build with code splitting so each page loads only its
+own code; the host keeps every file for a year in the browser. Small apps
+stay one file.
+
+- Load each page's component lazily: `const Reports = lazy(() => import("./reports"))`
+  inside `<Suspense>`. Libraries only one page needs then move into that page's file.
+- Build to a folder with relative paths:
+  `bun build ./index.html --outdir=dist --splitting --minify --production`
+  (Bun writes `./` paths). With Vite, set `base: "./"`. Never use absolute
+  `/assets/...` paths: the host serves the files from the version's own folder.
+- Every file besides `dist/index.html` is uploaded once as JSON (step 4 of
+  "Publish one immutable version"); no HTML pages among them (apps are
+  single-page), only `.js`, `.mjs`, `.css`, `.json`, `.map`, `.wasm`, fonts,
+  images, `.txt` and `.webmanifest`; keep other media in app files. Paths use
+  letters, digits and `._~@+-`. Up to 1,000 files, 16 MB each and 32 MB
+  together.
+- Every new version rebuilds from the saved source and uploads all its files
+  again; a version without them loses its code. Keep the source.
+
+```ts
+// assets.ts: bun assets.ts, then PUT assets.json to assets.putUrl
+import { Glob } from "bun";
+
+const files = [];
+for await (const path of new Glob("**/*").scan("dist")) {
+  if (path === "index.html") continue;
+  const bytes = await Bun.file(`dist/${path}`).bytes();
+  files.push({ path, base64: Buffer.from(bytes).toString("base64") });
+}
+await Bun.write("assets.json", JSON.stringify({ files }));
+```
+
+Keep using the host's address API for pages (below), not `window.location`.
+Bare `#section` links keep working. The page's base is the files' folder, so
+move between pages with `site.navigate` or hash routes, never a path router or
+`history.pushState()`, and give `fetch()` full `https://` URLs. Inline web workers
+(Vite `?worker&inline`, or a `blob:` URL): the app's frame can't start a
+worker from a file.
 
 ## Plain HTML that calls Opengeni
 
@@ -276,12 +340,14 @@ access limitation. Missing publishing access itself still blocks publication.
 
 ## Completion gate (full apps)
 
-This gate applies to full apps. A single-file app is done when its saved link is in
-the reply (see "Single-file app" in SKILL.md).
+This gate applies to full apps. A single-file app is done when it passes its
+browser check and its saved link is in the reply (see "Single-file app" in
+SKILL.md).
 
 - Tests and the production browser build pass.
 - The compiled runtime is one self-contained HTML document within the published
-  size limit.
+  size limit, or for a large app a split build whose files are all in the
+  assets upload, with no absolute paths.
 - Desktop and mobile interactions were exercised in the sandbox-local preview.
 - Reading text, controls and tables follow the chosen readable type scale;
   mobile and 200% text scaling do not clip or shrink primary content.
@@ -291,6 +357,12 @@ the reply (see "Single-file app" in SKILL.md).
 - The authenticated parent-frame wrapper exists only in the hosted product.
   Do not build a synthetic parent-frame harness in the sandbox. After local
   validation and publication, use the returned app link for the hosted check.
+- In that hosted check, click through the app's main flows in the browser
+  (add, edit, delete, filter, each view) on one record clearly marked as a
+  test, then delete it; never edit or delete records you didn't create.
+  Every change shows without a reload or a Refresh click. A build, a parse
+  check or a screenshot is not this check; report any flow you couldn't
+  exercise.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.

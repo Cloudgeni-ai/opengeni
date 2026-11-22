@@ -309,6 +309,43 @@ describe("schedule requests", () => {
     expect(moved.overlapPolicy).toBeUndefined();
   });
 
+  test("a change of agent is sent: with the config, or as a patch for an existing chat", () => {
+    const agentId = "00000000-0000-4000-8000-0000000000c1";
+    const nextAgentId = "00000000-0000-4000-8000-0000000000c2";
+    const chat: ScheduleDraft = {
+      ...base(),
+      agentId,
+      runMode: "existing_session",
+      targetSessionId: "chat",
+    };
+    const inChat = updateRequestFromDraft(
+      task({ runMode: "existing_session", targetSessionId: "chat" }),
+      chat,
+      { ...chat, agentId: nextAgentId },
+      { now: NOW },
+    );
+    expect(inChat.agentConfigPatch).toEqual({ agentId: nextAgentId });
+    expect(inChat.agentConfig).toBeUndefined();
+    const { agentId: _removed, ...withoutAgent } = chat;
+    expect(
+      updateRequestFromDraft(
+        task({ runMode: "existing_session", targetSessionId: "chat" }),
+        chat,
+        withoutAgent,
+        { now: NOW },
+      ).agentConfigPatch,
+    ).toEqual({ agentId: null });
+    const own: ScheduleDraft = { ...base(), agentId };
+    const separate = updateRequestFromDraft(
+      task({ agentConfig: { ...task().agentConfig, agentId } }),
+      own,
+      { ...own, agentId: nextAgentId },
+      { now: NOW },
+    );
+    expect(separate.agentConfig?.agentId).toBe(nextAgentId);
+    expect(separate.agentConfigPatch).toBeUndefined();
+  });
+
   test("Secrets narrowing is sent only when vaults are picked, and cleared back to all", () => {
     const vaultIds = ["00000000-0000-4000-8000-0000000000a1"];
     const all = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });
@@ -406,6 +443,37 @@ describe("schedule requests", () => {
     });
     expect("agentConfig" in request).toBe(false);
     expect("rigId" in request).toBe(false);
+  });
+
+  test("an agent's existing-chat automation names its agent and nothing else", () => {
+    const agentId = "00000000-0000-4000-8000-000000000042";
+    const request = createRequestFromDraft(
+      {
+        ...base(),
+        agentId,
+        runMode: "existing_session",
+        targetSessionId: "00000000-0000-4000-8000-000000000099",
+        rigId: "stale-environment",
+      },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect(request).toMatchObject({
+      runMode: "existing_session",
+      targetSessionId: "00000000-0000-4000-8000-000000000099",
+      agentConfig: {
+        agentId,
+        prompt: "Summarize open incidents.",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+    });
+    expect("rigId" in request).toBe(false);
+    const ownChat = createRequestFromDraft(
+      { ...base(), agentId, runMode: "reusable_session" },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect(ownChat).toMatchObject({ runMode: "reusable_session", agentConfig: { agentId } });
   });
 
   test("moving a schedule sends only its new destination and changed message", () => {

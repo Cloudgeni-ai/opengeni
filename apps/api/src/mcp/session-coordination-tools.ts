@@ -42,6 +42,11 @@ export type SessionLinkWake = (input: {
   prompt: string;
   eventType: "pull_request.closed" | "release.published";
   conditions: { field: string; op: "equals"; value: string | number | boolean }[];
+  /**
+   * Which GitHub reads the events: the workspace's GitHub App, or the
+   * person's own GitHub connection ("GitHub (your connection)").
+   */
+  via?: "app" | "personal";
 }) => Promise<unknown>;
 
 export type RegisterSessionCoordinationToolsInput = {
@@ -53,7 +58,9 @@ export type RegisterSessionCoordinationToolsInput = {
   /** Read when a tool runs, so a wake set up later in registration is seen. */
   wake: () => SessionLinkWake | null;
   /** The repository's canonical name and the pull request's state, or null when unreadable. */
-  wakeTarget: (link: SessionLink) => Promise<{ fullName: string; state: string | null } | null>;
+  wakeTarget: (
+    link: SessionLink,
+  ) => Promise<{ fullName: string; state: string | null; via?: "app" | "personal" } | null>;
   json: JsonResult;
 };
 
@@ -180,7 +187,7 @@ export function registerSessionCoordinationTools(
       const wake = wakeWhen ? input.wake() : null;
       if (wakeWhen && !wake) {
         throw new ToolArgumentError(
-          "wakeWhen needs automations with event triggers in this chat (scheduled_tasks_create and event_sources_list) and a GitHub event source in Automations. Link it without wakeWhen, or ask the person to add the GitHub event source.",
+          "wakeWhen needs automations with event triggers in this chat (scheduled_tasks_create and event_sources_list), and the workspace's GitHub app or your own GitHub connection. Link it without wakeWhen, or ask the person to connect GitHub.",
         );
       }
       const result = await addSessionLink(deps, {
@@ -202,7 +209,7 @@ export function registerSessionCoordinationTools(
           const target = await input.wakeTarget(result.link);
           if (!target) {
             throw new ToolArgumentError(
-              "The workspace's GitHub App can't read this repository, so its events can't wake this chat. A person installs the App on it in Settings.",
+              "Neither the workspace's GitHub app nor your own GitHub connection can read this repository, so its events can't wake this chat. A person installs the app on it in Settings, or allows the repository in Your GitHub.",
             );
           }
           if (wakeWhen === "merged" && target.state === "merged") {
@@ -215,7 +222,10 @@ export function registerSessionCoordinationTools(
               "This pull request was closed without merging, so it won't merge; tell the person instead of waiting.",
             );
           }
-          automation = await wake(sessionLinkWakeRequest(result.link, wakeWhen, target.fullName));
+          automation = await wake({
+            ...sessionLinkWakeRequest(result.link, wakeWhen, target.fullName),
+            ...(target.via ? { via: target.via } : {}),
+          });
         } catch (error) {
           if (!(error instanceof ToolArgumentError)) throw error;
           wakeNotSet = error.message;

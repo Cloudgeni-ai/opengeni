@@ -471,6 +471,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
   // No localStorage — only an in-memory default (toggle still works for the session).
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorHint, setInspectorHint] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
   useEffect(() => {
@@ -2867,6 +2868,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           setLatencyMode,
           inspectorOpen,
           setInspectorOpen,
+          inspectorHint,
+          setInspectorHint,
           session,
           setSession,
           sessionChannelProjectionAuthority,
@@ -3002,6 +3005,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     personalGitHubAuthority,
     githubCatalogReady,
     inspectorOpen,
+    inspectorHint,
     invalidSlackLinkQueryWorkspaceId,
     keyAuthRequired,
     manualRepos,

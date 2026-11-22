@@ -78,6 +78,10 @@ export const ACTION_SECRET_FIELD_EXCEPTIONS: ReadonlyArray<{ path: RegExp; reaso
  */
 export const ACTION_PLAIN_STRING_MAPS: ReadonlyArray<{ path: RegExp; reason: string }> = [
   {
+    path: /\.target\.columns$/,
+    reason: "a data sync's SQL column names mapped to record paths, not a credential",
+  },
+  {
     path: /^response\.requiredHeaders$/,
     reason: "the content type and checksum headers a presigned upload must carry, not a credential",
   },

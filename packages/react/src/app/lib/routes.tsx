@@ -124,6 +124,8 @@ export type SiteViewSearch = {
    * sends the viewer here). Dropped once used.
    */
   connect?: string | undefined;
+  /** The app's publishing settings, open over it; Back returns to the app. */
+  publishing?: true | undefined;
 } & SiteViewArtifactsReturn;
 
 /**
@@ -153,6 +155,10 @@ export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch 
       search.connect.length > 0 &&
       search.connect.length <= 512
         ? search.connect
+        : undefined,
+    publishing:
+      search.publishing === true || search.publishing === "true" || search.publishing === 1
+        ? true
         : undefined,
     // Every key, set or not: the router merges this over the raw search, so
     // an omitted key would let an unchecked raw value through.

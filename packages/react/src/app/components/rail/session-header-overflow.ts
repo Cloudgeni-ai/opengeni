@@ -15,7 +15,6 @@ export const SESSION_HEADER_PARTS = [
   "access",
   "fullAccess",
   "automations",
-  "pin",
   "find",
   "machine",
   "site",

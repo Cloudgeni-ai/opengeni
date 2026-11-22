@@ -4,9 +4,44 @@ import {
   clampSiteChatWidth,
   newlyWaitingConversation,
   readSiteChatPanelLayout,
+  readSiteChatOpen,
+  siteChatOpenStorageId,
   siteChatPanelStorageId,
   writeSiteChatPanelLayout,
+  writeSiteChatOpen,
 } from "./site-chat-panel";
+
+describe("whether a Site's chat is open", () => {
+  const store = () => {
+    const values = new Map<string, string>();
+    return {
+      values,
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => void values.set(key, value),
+    };
+  };
+  const id = siteChatOpenStorageId("someone");
+
+  test("is remembered per Site, and unknown until chosen", () => {
+    const storage = store();
+    expect(readSiteChatOpen(id, "a", storage)).toBeUndefined();
+    writeSiteChatOpen(id, "a", true, storage);
+    writeSiteChatOpen(id, "b", false, storage);
+    expect(readSiteChatOpen(id, "a", storage)).toBe(true);
+    expect(readSiteChatOpen(id, "b", storage)).toBe(false);
+    expect(readSiteChatOpen(siteChatOpenStorageId("other"), "a", storage)).toBeUndefined();
+  });
+
+  test("forgets the oldest choices first, and survives broken storage", () => {
+    const storage = store();
+    for (let index = 0; index < 205; index += 1) writeSiteChatOpen(id, `s${index}`, true, storage);
+    expect(readSiteChatOpen(id, "s0", storage)).toBeUndefined();
+    expect(readSiteChatOpen(id, "s204", storage)).toBe(true);
+    storage.values.set(id, "{");
+    expect(readSiteChatOpen(id, "s204", storage)).toBeUndefined();
+    expect(readSiteChatOpen(id, "a", null)).toBeUndefined();
+  });
+});
 
 describe("a Site conversation that starts waiting for the person", () => {
   const idle = { id: "open", status: "idle" };
@@ -62,8 +97,8 @@ describe("site chat panel layout", () => {
 
   test("round-trips a saved layout", () => {
     const storage = memory();
-    writeSiteChatPanelLayout(id, { width: 9999, collapsed: true, position: "left" }, storage);
-    const saved = { width: 720, collapsed: true, position: "left" } as const;
+    writeSiteChatPanelLayout(id, { width: 9999, position: "left" }, storage);
+    const saved = { width: 720, position: "left" } as const;
     expect(JSON.parse(storage.values.get(id)!)).toEqual(saved);
     expect(readSiteChatPanelLayout(id, storage)).toEqual(saved);
   });
@@ -81,14 +116,13 @@ describe("site chat panel layout", () => {
   });
 
   test("anything unreadable falls back to the default", () => {
-    const fallback = { width: 400, collapsed: false, position: "right" } as const;
+    const fallback = { width: 400, position: "right" } as const;
     expect(readSiteChatPanelLayout(id, memory())).toEqual(fallback);
     expect(readSiteChatPanelLayout(id, null)).toEqual(fallback);
-    for (const raw of ["{", "null", "[]", "42", JSON.stringify({ width: "wide", collapsed: 1 })])
+    for (const raw of ["{", "null", "[]", "42", JSON.stringify({ width: "wide" })])
       expect(readSiteChatPanelLayout(id, memory({ [id]: raw }))).toEqual(fallback);
     expect(readSiteChatPanelLayout(id, memory({ [id]: JSON.stringify({ width: 10 }) }))).toEqual({
       width: 320,
-      collapsed: false,
       position: "right",
     });
   });
@@ -104,11 +138,10 @@ describe("site chat panel layout", () => {
     };
     expect(readSiteChatPanelLayout(id, blocked)).toEqual({
       width: 400,
-      collapsed: false,
       position: "right",
     });
     expect(() =>
-      writeSiteChatPanelLayout(id, { width: 500, collapsed: false, position: "left" }, blocked),
+      writeSiteChatPanelLayout(id, { width: 500, position: "left" }, blocked),
     ).not.toThrow();
   });
 });

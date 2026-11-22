@@ -50,6 +50,7 @@ export type {
   McpElicitationValue,
 } from "@opengeni/contracts";
 import type { McpElicitationApprovalRequest, McpElicitationContent } from "@opengeni/contracts";
+import type { AppSyncPaging, AppSyncTableTarget } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -221,6 +222,8 @@ export type ToolGatewayCatalogEntry = {
   icons?: Array<Record<string, unknown>> | undefined;
   source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
   approval: "none" | "human" | "policy";
+  /** The effective permission from tool settings, for a connection-backed tool. */
+  permission?: { decision: "allow" | "ask" | "block"; fromSetting: boolean };
 };
 
 export type ToolGatewayCatalog = {
@@ -418,6 +421,13 @@ export type ToolGatewaySiteSetupItem = {
   connectionId: string | null;
   account: string | null;
   shared: boolean;
+  /**
+   * Set on `connect` when the connector takes an API key, not a sign-in: the
+   * workspace connects it once with a shared key from a vault. `add`: the
+   * viewer is a workspace admin and can add it; `ask_admin`: they can't, so
+   * the item only says to ask one.
+   */
+  sharedKey?: "add" | "ask_admin";
   /** The App's declared tools that wait on it. */
   tools: ToolGatewayIdentity[];
   /** On a published App: the App in Opengeni with this connect dialog open. */
@@ -2005,11 +2015,77 @@ export type SessionLinkLiveStatus = {
   title: string | null;
   checks: "passing" | "failing" | "pending" | "none" | null;
   review: "approved" | "changes_requested" | "review_required" | "none" | null;
+  /** Who a Linear issue is assigned to, by name. */
+  assignee?: string | null;
+  /** A Slack thread's reply count. */
+  replies?: number | null;
+  /** When a Slack thread's last reply was posted. */
+  lastReplyAt?: string | null;
 };
 
-export type SessionLinkWithStatus = SessionLink & { status: SessionLinkLiveStatus | null };
+/** The connector a viewer could connect to see a link's live status (Linear, Slack). */
+export type SessionLinkConnect = { name: string; capabilityId: string | null };
+
+export type SessionLinkWithStatus = SessionLink & {
+  status: SessionLinkLiveStatus | null;
+  /** Set when the viewer has no connection that can read this link. */
+  connect?: SessionLinkConnect | null;
+};
 
 export type SessionLinksResponse = { links: SessionLinkWithStatus[] };
+
+/** A person on a pull request (GitHub login). */
+export type SessionPullRequestPerson = { login: string; avatarUrl: string | null };
+
+/**
+ * A linked pull request in full, for a chat's PR panel: header facts, its
+ * description, changed files as structured hunks, commits, discussion and
+ * checks. Lists hold at most one GitHub page (100) each.
+ */
+export type SessionPullRequestDetail = {
+  url: string;
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  state: "open" | "draft" | "merged" | "closed";
+  author: SessionPullRequestPerson | null;
+  base: string;
+  head: string;
+  createdAt: string | null;
+  mergedAt: string | null;
+  body: string | null;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  commitCount: number;
+  commentCount: number;
+  /** GitHub's mergeability; null while GitHub computes it. */
+  mergeable: boolean | null;
+  checks: SessionLinkLiveStatus["checks"];
+  review: SessionLinkLiveStatus["review"];
+  files: GitFileDiff[];
+  /** More files changed than are listed. */
+  filesTruncated: boolean;
+  commits: { sha: string; message: string; author: string | null; date: string | null }[];
+  comments: {
+    id: string;
+    kind: "comment" | "review";
+    author: SessionPullRequestPerson | null;
+    body: string;
+    reviewState: "approved" | "changes_requested" | "commented" | null;
+    createdAt: string | null;
+    url: string | null;
+  }[];
+  checkRuns: {
+    name: string;
+    state: "passing" | "failing" | "pending" | "skipped";
+    url: string | null;
+  }[];
+};
+
+/** `pullRequest` is null when the workspace cannot read the pull request. */
+export type SessionPullRequestResponse = { pullRequest: SessionPullRequestDetail | null };
 
 export type AddSessionLinkRequest = { url: string; title?: string; kind?: SessionLinkKind };
 
@@ -2286,6 +2362,12 @@ export type Session = {
    * which owns the follow-up. Absent when false and on older servers.
    */
   failureHandled?: boolean | undefined;
+  /**
+   * True when this `requires_action` session waits only on questions it put
+   * to the agent that started it, which still has them. Absent when false and
+   * on older servers.
+   */
+  questionWithAgent?: boolean | undefined;
   /** Personal actively-working label. */
   activelyWorking?: boolean;
   /** Optimistic unread/actively-working revision. */
@@ -2340,6 +2422,12 @@ export type Session = {
    * list and lineage reads for `requires_action` sessions; null otherwise.
    */
   requiresActionSince?: string | null | undefined;
+  /**
+   * When the agent started waiting on a still-open connection card (connect,
+   * reconnect or more access) in this chat; null or absent when none is open.
+   * While the session is idle it needs the person, as an approval does.
+   */
+  awaitingConnectionSince?: string | null | undefined;
   /**
    * Set while the runtime refuses to start this session's next turn (status
    * `requires_action`, but nothing is asked of a person). Accepted work is
@@ -2397,6 +2485,7 @@ export type SessionListEntry = Pick<
   | "pinVersion"
   | "unread"
   | "failureHandled"
+  | "questionWithAgent"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"
@@ -2406,6 +2495,7 @@ export type SessionListEntry = Pick<
   | "archiveVersion"
   | "treeStats"
   | "requiresActionSince"
+  | "awaitingConnectionSince"
   | "admissionBlock"
   | "createdAt"
   | "updatedAt"
@@ -3789,6 +3879,8 @@ export type GitDiffRequest = {
   includeUntracked?: boolean;
   fromRef?: string;
   toRef?: string;
+  /** Compare against the merge base of fromRef and toRef (or HEAD and the working tree). */
+  mergeBase?: boolean;
   pathspec?: string[];
   contextLines?: number;
   maxBytesPerFile?: number;
@@ -4168,15 +4260,23 @@ export type ScheduledTaskAction =
       /** An App data sync (see the App sync methods); no model runs. */
       kind: "app_sync";
       siteId: string;
+      /** The collection it fills; for an SQL table (`target`), the table's name. */
       collection: string;
       mode: "shared" | "personal";
       ownerSubjectId: string;
       tool: { serverId: string; toolName: string };
       declaredTools: Array<{ serverId: string; toolName: string }>;
+      connectorTool?: { serverId: string; toolName: string } | null | undefined;
       arguments: Record<string, unknown>;
       recordsPath: string | null;
       key: string;
       fields: string[] | null;
+      target?: AppSyncTableTarget | null | undefined;
+      paging?: AppSyncPaging | null | undefined;
+      maxRecords?: number | null | undefined;
+      removeMissing?: boolean | undefined;
+      /** The account (route server id) the owner chose for a shared sync. */
+      ownerAccount?: string | null | undefined;
     };
 
 export type ScheduledTask = {
@@ -4824,6 +4924,9 @@ export type FirstPartyMcpToolName =
   | "app_sync_delete"
   | "app_sync_run"
   | "app_sync_opt_in"
+  | "app_webhook_save"
+  | "app_webhook_list"
+  | "app_webhook_delete"
   | "site_files_list"
   | "site_files_upload"
   | "site_files_delete"
@@ -4843,6 +4946,7 @@ export type FirstPartyMcpToolName =
   | "site_sql_reset"
   | "app_export"
   | "app_install"
+  | "app_upgrade"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -4896,7 +5000,7 @@ export type ModelCapabilitiesV1 = {
 };
 
 export type ModelCredentialSourceV1 =
-  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "aws_iam" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" | "claude" }
   | { kind: "workspace_connection"; mechanism: "api_key" }
   | { kind: "organization_connection"; mechanism: "api_key" };
@@ -8788,8 +8892,10 @@ export type SaveNewSessionDraftRequest = Omit<
 export type ScheduledTaskAgentConfigInput = {
   /**
    * The workspace agent each run's chat is with (an agent's "Starts when"):
-   * it runs with that agent's Instructions, Memory and Can use. Only for a
-   * task that starts a new chat each run. Older servers ignore it.
+   * it runs with that agent's Instructions, Memory and Can use. An
+   * automation's own chat is started with the agent and replaced when the
+   * agent changes; an existing chat must be one of the agent's. Older servers
+   * ignore it.
    */
   agentId?: string | undefined;
   /**
@@ -8964,6 +9070,8 @@ export type UpdateScheduledTaskRequest = {
         prompt?: string | undefined;
         model?: string | undefined;
         reasoningEffort?: ReasoningEffort | undefined;
+        /** The agent each run's chat is with; null runs without one. */
+        agentId?: string | null | undefined;
       }
     | undefined;
   status?: ScheduledTaskStatus | undefined;
@@ -10538,6 +10646,11 @@ export type InstalledSkillSummary = {
 
 export type ListInstalledSkillsResponse = {
   skills: InstalledSkillSummary[];
+};
+
+/** Reviewed library skills to add, `enabled` once added. */
+export type ListLibrarySkillsResponse = {
+  skills: CapabilityCatalogItem[];
 };
 
 export type SkillUninstallPreview = {

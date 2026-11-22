@@ -1,5 +1,43 @@
 # @opengeni/config
 
+## 6.36.0
+
+### Minor Changes
+
+- 8ace4d4: Run Claude on Amazon Bedrock with the deployment's AWS identity: set `OPENGENI_BEDROCK_REGION` to use the native Messages transport against Bedrock, with `eu.`/`us.`/`global.` inference profiles, inference-profile ARNs, model discovery, Bedrock pricing and opt-in per-user cost attribution through an assumed role. The deployment model credential source (`ModelCredentialSourceV1` `mechanism`) gains the value `aws_iam`; clients that switch on it should treat unknown values as a deployment credential. While Bedrock is on, `OPENGENI_MODEL_PROVIDERS_JSON` cannot use the provider id `bedrock`.
+- bede91b: The function `apply_patch` tool takes an optional `then` shell command. It runs once, only after every patch operation applied, through the same `exec_command` path (sandbox, lean defaults, turn cancellation, finish floor, secret references and leak guard, truncation and approval policy), inside the exclusive edit call, and its result follows the patch result in the same tool output. A failed patch leaves it unrun and says so. The tool description notes that one patch can change several files, and one system-prompt sentence suggests batching decided edits and passing the follow-up check as `then`.
+
+  The function `apply_patch` is applied one file section at a time: an Add File section without lines creates an empty file instead of failing the whole patch, an Invalid Context failure is followed by the closest matching region of the file with line numbers, a section whose hunks were written out of file order is retried in file order when each hunk matches exactly one place, and each section reports its own result.
+
+  All of this is on by default; `OPENGENI_EXPERIMENT_APPLY_PATCH_THEN=false` restores the previous plain tool.
+
+### Patch Changes
+
+- e765d11: Enable live browser and computer viewing through a product session proxy with an explicit viewer origin, without changing console CORS. Embedders can also hide advanced browser controls, render the intervention banner separately, and translate the task vault display name.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

@@ -22,10 +22,21 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { appSessionPath } from "@/app-links";
+import { viewerPath } from "@/artifacts";
 import { rankChatSearch, workspacesToSearch } from "@/chat-search";
 import { useServerChatSearch } from "@/use-server-chat-search";
 import { cachedLists, rememberLists, subscribeLists } from "@/session-list-cache";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
+import {
+  cachedSidebarLayout,
+  refreshSidebarLayout,
+  sidebarLayoutKey,
+  sidebarHiddenEntries,
+  sidebarMenuSections,
+  subscribeSidebarLayout,
+} from "@/sidebar-layout";
+import { SidebarLayoutSection } from "@/sidebar-layout-section";
+import { openOnWeb, webPaths } from "@/web-links";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
 
@@ -37,8 +48,9 @@ export default function SessionsScreen() {
   );
 }
 
-/* The web rail's session list at phone width: search, the person's pinned
-   chats, then the workspace's projects in their server order (running
+/* The web rail's session list at phone width: search, the workspace's
+   sidebar links (docs/sidebar-layout.md), the person's pinned chats, then
+   the workspace's projects in their server order (running
    sessions first in each), then Default for unfiled sessions (shared grouping
    rules). A long press on a row pins or unpins it, as on the web. Typing
    searches chat titles in all of the person's workspaces, as ⌘K does on the
@@ -48,8 +60,16 @@ function Sessions() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { client, models, workspaceId, workspaces, organizations, setWorkspaceId, reload } =
-    useAccount();
+  const {
+    client,
+    account,
+    models,
+    workspaceId,
+    workspaces,
+    organizations,
+    setWorkspaceId,
+    reload,
+  } = useAccount();
   // Home's search button opens this screen ready to type.
   const { search } = useLocalSearchParams<{ search?: string }>();
   // The last list paints at once; refreshes run quietly behind it.
@@ -62,6 +82,24 @@ function Sessions() {
   const [loaded, setLoaded] = useState(() => cachedLists(workspaceId).sessions !== undefined);
   const [pulling, setPulling] = useState(false);
   const [query, setQuery] = useState("");
+  // The sidebar's links, per account and workspace (they include the person's own).
+  const sidebarKey = account && workspaceId ? sidebarLayoutKey(account.id, workspaceId) : null;
+  const [sidebar, setSidebar] = useState(() =>
+    sidebarKey ? cachedSidebarLayout(sidebarKey) : null,
+  );
+  useEffect(() => {
+    setSidebar(sidebarKey ? cachedSidebarLayout(sidebarKey) : null);
+    if (!sidebarKey) return;
+    return subscribeSidebarLayout(sidebarKey, setSidebar);
+  }, [sidebarKey]);
+  const sidebarSections = useMemo(() => sidebarMenuSections(sidebar?.items), [sidebar]);
+  const automationsHidden = useMemo(
+    () => sidebarHiddenEntries(sidebar).includes("automations"),
+    [sidebar],
+  );
+  const loadSidebar = useCallback(async () => {
+    if (sidebarKey && workspaceId) await refreshSidebarLayout(client, sidebarKey, workspaceId);
+  }, [client, sidebarKey, workspaceId]);
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
@@ -100,7 +138,8 @@ function Sessions() {
   useFocusEffect(
     useCallback(() => {
       void load();
-    }, [load]),
+      void loadSidebar();
+    }, [load, loadSidebar]),
   );
 
   // Keep the cache in step with pin changes, so returning shows them at once.
@@ -183,7 +222,7 @@ function Sessions() {
             onRefresh={() => {
               setPulling(true);
               // Pull to refresh covers the workspace switcher above the list too.
-              void Promise.all([load(), reload()]).finally(() => setPulling(false));
+              void Promise.all([load(), loadSidebar(), reload()]).finally(() => setPulling(false));
             }}
           />
         }
@@ -228,8 +267,29 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
-        {searching ? null : (
+        {searching || automationsHidden ? null : (
           <RailRow icon="zap" label="Automations" onPress={() => router.push("/automations")} />
+        )}
+        {searching || !workspaceId ? null : (
+          <SidebarLayoutSection
+            sections={sidebarSections}
+            workspaceId={workspaceId}
+            client={client}
+            onOpenAgent={(row) => {
+              if (account) openOnWeb(account.baseUrl, webPaths.agent(workspaceId, row.agentId));
+            }}
+            onOpenApp={(row) =>
+              router.push(
+                viewerPath({
+                  id: row.appId,
+                  kind: "site",
+                  workspaceId,
+                  title: row.label,
+                  page: row.path ?? undefined,
+                }),
+              )
+            }
+          />
         )}
         {searching ? (
           <>

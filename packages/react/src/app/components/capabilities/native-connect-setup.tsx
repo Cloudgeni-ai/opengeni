@@ -57,6 +57,11 @@ export type NativeConnectRequest = {
   description?: string | undefined;
   logoUrl?: string | undefined;
   authorizeLabel?: string | undefined;
+  /**
+   * The provider's sign-in ends on a page that closes its popup instead of
+   * `returnUrl`, which would load a second copy of the app there.
+   */
+  finishInPopup?: true | undefined;
 };
 
 export function nativeConnectApiInput(request: NativeConnectRequest) {
@@ -64,6 +69,7 @@ export function nativeConnectApiInput(request: NativeConnectRequest) {
     providerId: request.providerId,
     ownership: request.ownership,
     returnUrl: request.returnUrl,
+    ...(request.finishInPopup ? { finishInPopup: true as const } : {}),
     idempotencyKey: request.idempotencyKey,
     ...(request.reconnectAccountId ? { reconnectAccountId: request.reconnectAccountId } : {}),
     ...(request.reconnectAccountId && request.requestedScopes?.length

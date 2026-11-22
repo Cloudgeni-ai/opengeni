@@ -10,6 +10,13 @@ export const englishMessages = {
    */
   "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
+  /** Under an action whose account lacks access; {access} as "organize your Gmail". */
+  "approvalSurface.consentAsksFirst":
+    "{consent} will ask you to allow {product} to {access} (one time).",
+  "approvalSurface.consentAsksFirstMoreAccess":
+    "{consent} will ask you to allow {product} more access to {provider} (one time).",
+  "approvalSurface.accessStillMissing":
+    "{provider} hasn't given {product} access for this yet; you'll be asked to allow it.",
   "approvalSurface.approveAction": "Approve action",
   /** Approves every waiting action the person may approve, one decision each. */
   "approvalSurface.approveAll": "Approve all {length}",
@@ -600,6 +607,9 @@ export const englishMessages = {
   "automations.source.addWorkspace": "Add this workspace",
   "automations.source.github.description":
     "Pull requests, issues, pushes, reviews and checks in the repositories you connected.",
+  "automations.source.githubPersonal.description":
+    "Merges and releases a chat waits for, read with your own GitHub connection. Only you can see them.",
+  "automations.source.githubPersonal.name": "GitHub (your connection)",
   "automations.source.gmail.description":
     "New messages in your connected mailbox. Only you can see them.",
   "automations.source.kind.appWebhook": "{app} webhook",
@@ -863,6 +873,7 @@ export const englishMessages = {
   "browserViewer.nameHiddenFromNewBrowsers":
     "{name} hidden from new browsers. Existing browsers are unchanged.",
   "browserViewer.nameOpensByDefault": "{name} will open by default in future browsers.",
+  "browserViewer.nameReason": "{name}. {reason}",
   "browserViewer.nameReasonOpenANew": "{name}. {reason} Open a new browser to continue.",
   "browserViewer.nameVersionOpensByDefault":
     "{name} version {ordinal} will open by default in future browsers.",
@@ -1891,6 +1902,7 @@ export const englishMessages = {
   "fileBrowser.refreshTheFileListTo": "refresh the file list to try again",
   "fileBrowser.rename": "Rename",
   "fileBrowser.retry": "Retry",
+  "fileBrowser.showHiddenFiles": "Show hidden files",
   "fileBrowser.thisDirectoryIsEmpty": "This directory is empty",
   "fileBrowser.workspaceFiles": "Workspace files",
   "formDialog.cancel": "Cancel",
@@ -2002,6 +2014,7 @@ export const englishMessages = {
     "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
   "humanInputForm.thisQuestionCanTBe": "This question can't be answered here.",
   "humanInputForm.typeYourAnswer": "Type your answer…",
+  "humanInputModel.accessToken": "Access token",
   "humanInputModel.apiKey": "API key",
   "humanInputModel.aStrongPasswordWillBe": "A strong password will be generated",
   "humanInputModel.chooseAtLeastMin": "Choose at least {min}.",
@@ -2011,6 +2024,8 @@ export const englishMessages = {
   "humanInputModel.chooseNoMoreThanOptions_one": "Choose no more than {count} option.",
   "humanInputModel.chooseNoMoreThanOptions_other": "Choose no more than {count} options.",
   "humanInputModel.chooseUpToMax": "Choose up to {max}.",
+  "humanInputModel.clientId": "Client ID",
+  "humanInputModel.clientSecret": "Client secret",
   "humanInputModel.collapse": "Collapse",
   "humanInputModel.deadlinePassed": "deadline passed",
   "humanInputModel.enterAValueForOther": "Enter a value for Other.",
@@ -2028,6 +2043,9 @@ export const englishMessages = {
   "humanInputModel.onlyMe": "Only me",
   "humanInputModel.optional": "Optional",
   "humanInputModel.other": "Other",
+  "humanInputModel.password": "Password",
+  "humanInputModel.pin": "PIN",
+  "humanInputModel.privateVaultName": "Private",
   "humanInputModel.savedToVaultnameItemname": "Saved to {vaultName} › {itemName}",
   "humanInputModel.savesToTheVaultVault": "Saves to the {vault} vault",
   "humanInputModel.savesToTheWorkspaceVault": "Saves to the workspace vault",
@@ -2036,6 +2054,7 @@ export const englishMessages = {
   "humanInputModel.saveTo": "Save to",
   "humanInputModel.sendAnswer": "Send answer",
   "humanInputModel.sendAnswers": "Send answers",
+  "humanInputModel.sharedVaultName": "Shared",
   "humanInputModel.show": "Show",
   "humanInputModel.skip": "Skip",
   "humanInputModel.submitting": "Submitting…",
@@ -2045,10 +2064,13 @@ export const englishMessages = {
     "This doesn't match the expected format. You can still send it.",
   "humanInputModel.thisQuestionIsRequired": "This question is required.",
   "humanInputModel.thisTask": "this task",
+  "humanInputModel.taskVaultName": "Task",
   "humanInputModel.thisTask2": "This task",
   "humanInputModel.thisWorkspace": "this workspace",
   "humanInputModel.thisWorkspace2": "This workspace",
+  "humanInputModel.token": "Token",
   "humanInputModel.undo": "Undo",
+  "humanInputModel.username": "Username",
   "humanInputModel.youCanTSaveTo":
     "You can't save to {requested}, so it will be saved to {actual}.",
   "humanInputModel.yourAgentIsDeciding": "Your agent is deciding",
@@ -3293,9 +3315,23 @@ export const englishMessages = {
   "meetings.transcript.valueMatch": "{value}% match",
   "meetings.transcript.whoIsDisplayname": "Who is {displayName}?",
   "meetings.transcript.yesItSDisplayname": "Yes, it's {displayName}",
-  "messageTimeline.accessDraftAndSendEmail": "draft and send email",
+  /** A step-up card: the provider's permission doesn't change what runs without asking. */
+  "messageTimeline.accessApprovalSettingsStillDecide":
+    "Your approval settings still decide what runs without asking.",
   "messageTimeline.accessJoin": " and ",
-  "messageTimeline.accessOrganizeMailbox": "organize your mailbox",
+  /** A step-up card for access the app has no plain words for. */
+  "messageTimeline.accessOneMoreKindOfAction":
+    "{consent} will ask you for one more kind of access.",
+  /** What organizing a mailbox includes, under the step-up card's title. */
+  "messageTimeline.accessOrganizeMailboxIncludes":
+    "This includes marking mail as read, labeling and archiving it.",
+  /** Completes "Allow {product} to …" on a step-up card. */
+  "messageTimeline.accessOrganizeProvider": "organize your {provider}",
+  /** Completes "Allow {product} to …" on a step-up card. */
+  "messageTimeline.accessWriteAndSendFromProvider": "write and send email from your {provider}",
+  /** What writing and sending email includes, under the step-up card's title. */
+  "messageTimeline.accessWriteAndSendIncludes":
+    "This includes writing drafts and sending mail as you.",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
   "messageTimeline.agentCarriesOnAfterAllowing":
@@ -3303,7 +3339,13 @@ export const englishMessages = {
   "messageTimeline.agentDecided": "Agent decided",
   "messageTimeline.agentDecidedSummary": "Agent decided: {summary}",
   "messageTimeline.agentSkipped": "Agent skipped",
-  "messageTimeline.allowAccess": "Allow",
+  /** A step-up card's button: it opens the consent page of {consent} ("Google"). */
+  "messageTimeline.allowInConsent": "Allow in {consent}",
+  "messageTimeline.allowProductMoreProviderAccess": "Allow {product} more access to {provider}",
+  /** A step-up card's title; {access} names the action ("organize your Gmail"). */
+  "messageTimeline.allowProductTo": "Allow {product} to {access}",
+  /** A step-up card once the person allowed it. */
+  "messageTimeline.allowed": "Allowed",
   "messageTimeline.answered": "Answered",
   "messageTimeline.answeredSummary": "Answered: {summary}",
   "messageTimeline.asked": "Asked",
@@ -3314,6 +3356,7 @@ export const englishMessages = {
   "messageTimeline.codexApps": "Codex Apps",
   "messageTimeline.compactingConversationHistory": "Compacting conversation history…",
   "messageTimeline.connect": "Connect",
+  "messageTimeline.connected": "Connected",
   "messageTimeline.connecting": "connecting",
   "messageTimeline.connectProvider": "Connect {provider}",
   "messageTimeline.continuingTowardTheGoal": "Continuing toward the goal",
@@ -3333,7 +3376,6 @@ export const englishMessages = {
   "messageTimeline.expired": "Expired",
   "messageTimeline.fromSource": "from {source}",
   "messageTimeline.generatedVideo": "Generated video",
-  "messageTimeline.giveProviderMoreAccess": "Give {provider} more access",
   "messageTimeline.goalCleared": "Goal cleared",
   "messageTimeline.goalCompleted": "Goal completed",
   "messageTimeline.goalHeld": "Goal held",
@@ -3344,8 +3386,6 @@ export const englishMessages = {
   "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
   "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
-  "messageTimeline.itNeedsPermissionTo":
-    "It needs your permission to {access}. Everything it can already do stays the same.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
   "messageTimeline.itsConnectionNeedsAttention": "Its connection needs attention.",
   "messageTimeline.connectedAccountLacksThisAccess":
@@ -3380,6 +3420,7 @@ export const englishMessages = {
   "messageTimeline.received": "Received",
   "messageTimeline.receivedClocktime": "Received {clockTime}",
   "messageTimeline.reconnect": "Reconnect",
+  "messageTimeline.reconnected": "Reconnected",
   "messageTimeline.reconnecting": "reconnecting",
   "messageTimeline.remove": "Remove",
   "messageTimeline.report": "Report",
@@ -3413,6 +3454,8 @@ export const englishMessages = {
   "messageTimeline.videoGenerationFailed": "Video generation failed",
   "messageTimeline.voiceHandoff": "Voice handoff",
   "messageTimeline.voiceRequest": "Voice request",
+  /** A step-up card's button while the consent page of {consent} ("Google") is open. */
+  "messageTimeline.waitingForConsent": "Waiting for {consent}…",
   "messageTimeline.workerCompleted": "Worker completed",
   "messageTimeline.workerFailed": "Worker failed",
   "messageTimeline.workerPaused": "Worker paused",
@@ -3490,6 +3533,7 @@ export const englishMessages = {
   "modelPolicy.credentialsRequired": "Credentials required",
   "modelPolicy.deploymentApiKey": "Deployment API key",
   "modelPolicy.deploymentAzureIdentity": "Deployment Azure identity",
+  "modelPolicy.deploymentAwsIdentity": "Deployment AWS identity",
   "modelPolicy.deploymentProvidedConnection": "Deployment-provided connection",
   "modelPolicy.external": "External",
   "modelPolicy.externalProviderNoOpengeniCredits": "External provider · no {product} credits",
@@ -3818,6 +3862,8 @@ export const englishMessages = {
   "native.timeline.imageViewer.couldnTShareThisImage": "Couldn't share this image.",
   "native.timeline.imageViewer.doubleTapToZoom": "Double-tap to zoom",
   "native.timeline.imageViewer.share": "Share",
+  "native.timeline.inChatConnect.askedAgain":
+    "The agent asked to connect {name}. It asked again below.",
   "native.timeline.inChatConnect.close": "Close",
   "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
   "native.timeline.landmarks.earlier": "+{count} earlier",
@@ -4462,6 +4508,7 @@ export const englishMessages = {
   "sandboxFiles.noFileSelected": "No file selected",
   "sandboxFiles.noRepo": "no repo",
   "sandboxFiles.noUncommittedChanges": "No uncommitted changes",
+  "sandboxFiles.onlyHiddenFilesHere": "Only hidden and tool folders here.",
   "sandboxFiles.onMachine": "On machine",
   "sandboxFiles.openingRequestedpathWhenTheLive":
     "Opening {requestedPath} when the live workspace is ready…",
@@ -5314,6 +5361,7 @@ export const englishMessages = {
   "thisComputer.card.subtitle": "Use your own computer in chats",
   "thisComputer.card.typeLabel": "Computer",
   "thisComputer.card.canUse": "Agents can use {machineName}",
+  "thisComputer.card.otherComputer": "{machineName} is another computer, not this one.",
   "thisComputer.card.offline":
     "{machineName} isn't available right now. Open {productName} on it and make sure it isn't paused.",
   "thisComputer.card.getApp":
@@ -6635,24 +6683,37 @@ export const englishMessages = {
   "usageMeter.yourUsage": "Your usage",
   "userMessageBody.showLess": "Show less",
   "userMessageBody.showMore": "Show more",
+  "workbenchChanges.showSplitDiff": "Split view",
+  "workbenchChanges.statusAdded": "Added",
+  "workbenchChanges.statusDeleted": "Deleted",
+  "workbenchChanges.statusModified": "Modified",
+  "workbenchChanges.statusRenamed": "Renamed",
+  "workbenchChanges.showUnifiedDiff": "Unified view",
   "workbenchChanges.asOfTurnRevisionTime": "as of turn {revision} · {time}",
   "workbenchChanges.binaryFile": "Binary file",
   "workbenchChanges.changedFile": "Changed file",
+  "workbenchChanges.changedFiles": "Changed files",
   "workbenchChanges.changedFileDiff": "Changed file diff",
   "workbenchChanges.changedFilesDiff": "Changed files diff",
   "workbenchChanges.diffTooLargeToShow": "Diff too large to show here",
+  "workbenchChanges.fileChange": "{status}, {additions} added, {deletions} removed",
   "workbenchChanges.filesChanged_one": "{count} file changed",
   "workbenchChanges.filesChanged_other": "{count} files changed",
   "workbenchChanges.noContentChanges": "No content changes",
   "workbenchChanges.liveDiff": "Live diff",
   "workbenchChanges.openInFiles": "Open in Files",
   "workbenchChanges.openPullRequest": "Open PR",
+  "workbenchChanges.view": "View",
   "workbenchChanges.viewOnGitHub": "View on GitHub",
   "workbenchChanges.root": "(root)",
   "workbenchChanges.workspace": "(workspace)",
+  "workspaceDock.closeTab": "Close {name}",
+  "workspaceDock.emptyTitle": "Nothing here yet",
+  "workspaceDock.emptyBody": "Changes, pull requests and files the agent makes show up here.",
   "workspaceDock.hideWorkspace": "Hide workspace",
   "workspaceDock.maximize": "Maximize",
   "workspaceDock.maximizeDock": "Maximize dock",
+  "workspaceDock.more": "More",
   "workspaceDock.openWorkspace": "Open workspace",
   "workspaceDock.restoreDock": "Restore dock",
   "workspaceDock.restoreEsc": "Restore (Esc)",

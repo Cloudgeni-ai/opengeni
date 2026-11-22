@@ -1008,6 +1008,35 @@ async function expectEachConversationOnce(titles: string[]) {
   expect(await counts()).toEqual(titles.map(() => 1));
 }
 
+test("with apps not grouped, the list waits for that choice instead of drawing app rows first", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light&appRows=pending`, { timeout: 60_000 });
+  await sidebar().locator(".animate-pulse").first().waitFor();
+  // Record every Site row the list ever draws from here on.
+  await page.evaluate(() => {
+    const seen = { siteRows: 0 };
+    Object.assign(window, { appRowsSeen: seen });
+    new MutationObserver(() => {
+      seen.siteRows = Math.max(seen.siteRows, document.querySelectorAll("[data-site-row]").length);
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  // The list reads meanwhile but draws nothing until the choice is known.
+  await page.waitForTimeout(500);
+  expect(await sidebar().locator("[data-site-row], a[data-session-row]").count()).toBe(0);
+  await page.evaluate(() =>
+    (
+      window as unknown as { sessionSidebarAppRows: (value: boolean) => void }
+    ).sessionSidebarAppRows(false),
+  );
+  // An app's chats are ordinary chats; no app row was ever drawn.
+  await railConversation("Time filters across all graphs").waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(0);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { appRowsSeen: { siteRows: number } }).appRowsSeen.siteRows,
+    ),
+  ).toBe(0);
+});
+
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteRow("Opengeni usage").waitFor();
@@ -1202,8 +1231,12 @@ test("the Site view starts below the desktop window bar", async () => {
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
     // Only the Site's own column: previews in its chat keep their spacing.
     expect(await page.locator("[data-site-column] [aria-label='Chat']").count()).toBe(0);
-    const toolbar = page.locator("[data-site-column] [data-artifact-toolbar]");
-    const first = await toolbar.locator(":scope > div > *").first().boundingBox();
+    // The Site's header row starts its column (this page has no window-bar
+    // row to lift it into).
+    const first = await page
+      .locator("[data-site-column] [data-site-header] > *")
+      .first()
+      .boundingBox();
     expect(first).not.toBeNull();
     await expectWindowTop(page, desktop);
     return first!;
@@ -1221,7 +1254,8 @@ test("the Site view starts below the desktop window bar", async () => {
     if (desktop === "macos" && rail === "collapsed") {
       await capture("site-view-macos-collapsed-rail");
       // Full screen starts below the bar too, with its usual spacing.
-      await page.getByRole("button", { name: "Open app full screen" }).click();
+      await page.getByRole("button", { name: "More app actions" }).click();
+      await page.getByRole("menuitem", { name: "Open app full screen" }).click();
       const back = await page.getByRole("button", { name: "Back", exact: true }).boundingBox();
       expect(back!.x).toBeLessThan(30);
       expect(back!.y).toBeGreaterThanOrEqual(WINDOW_BAR_HEIGHT);
@@ -1242,11 +1276,19 @@ test("the Site publish form starts below the desktop window bar in a narrow Site
         "og.site-view.chat:v1:sidebar-preview",
         JSON.stringify({ width: 720, collapsed: false }),
       );
+      // The chat is open for this person and Site.
+      localStorage.setItem(
+        "og.site-view.chat-open:v1:sidebar-preview",
+        JSON.stringify({ [path.split("/").pop()!]: true }),
+      );
       history.pushState(null, "", path);
       dispatchEvent(new PopStateEvent("popstate"));
     }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
-    await page.locator("[data-site-column]").getByRole("button", { name: "Publish" }).click();
+    await page
+      .locator("[data-site-column] [data-site-header]")
+      .getByRole("button", { name: "Share" })
+      .click();
     const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
     const header = form.locator(":scope > header");
     const back = header.getByRole("button").first();

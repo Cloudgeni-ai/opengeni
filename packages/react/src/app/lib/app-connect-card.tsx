@@ -1,9 +1,14 @@
 import type { ToolGatewaySiteSetupItem, ToolGatewaySiteSetupResponse } from "@opengeni/sdk";
-import { siteConnectCardDismissals, siteConnectCardLabel } from "@opengeni/sdk/site";
+import {
+  siteConnectCardDismissals,
+  siteConnectCardItemActionable,
+  siteConnectCardLabel,
+} from "@opengeni/sdk/site";
 import { XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../ui/button";
 import { useAppApi } from "./app-api";
+import { AppSharedKeyDialog } from "./app-shared-key-dialog";
 import {
   notifySiteToolReadinessChanged,
   subscribeSiteConnectCardShow,
@@ -23,7 +28,8 @@ export async function runSiteConnectCardItem(
   item: ToolGatewaySiteSetupItem,
   signal: AbortSignal,
 ): Promise<boolean> {
-  if (!item.capabilityId) return false;
+  // A shared key only a workspace admin can add: nothing to run here.
+  if (!item.capabilityId || !siteConnectCardItemActionable(item)) return false;
   if (item.action === "connect")
     return await consent.connectForToolCall({
       connect: { capabilityId: item.capabilityId, name: item.connector, providerDomain: "" },
@@ -53,7 +59,8 @@ export async function runSiteConnectCardItem(
 
 /**
  * The card itself: one button per tool still to connect, and a close button.
- * Nothing when there is nothing to connect.
+ * A tool waiting on a shared key the viewer can't add says to ask an admin,
+ * with nothing to click. Nothing when there is nothing to connect.
  */
 export function AppConnectCardView({
   items,
@@ -62,7 +69,8 @@ export function AppConnectCardView({
   onDismiss,
   className,
 }: {
-  items: readonly Pick<ToolGatewaySiteSetupItem, "key" | "action" | "connector" | "account">[];
+  items: readonly (Pick<ToolGatewaySiteSetupItem, "key" | "action" | "connector" | "account"> &
+    Partial<Pick<ToolGatewaySiteSetupItem, "sharedKey">>)[];
   busyKey?: string | null;
   onConnect: (key: string) => void;
   onDismiss: () => void;
@@ -82,17 +90,21 @@ export function AppConnectCardView({
       <ul className="flex min-w-0 flex-col gap-1">
         {items.map((item) => (
           <li key={item.key} className="min-w-0">
-            <Button
-              type="button"
-              size="sm"
-              className="w-full justify-start truncate"
-              disabled={busyKey !== null}
-              aria-busy={busyKey === item.key}
-              title={item.account ?? undefined}
-              onClick={() => onConnect(item.key)}
-            >
-              <span className="truncate">{siteConnectCardLabel(item)}</span>
-            </Button>
+            {siteConnectCardItemActionable(item) ? (
+              <Button
+                type="button"
+                size="sm"
+                className="w-full justify-start truncate"
+                disabled={busyKey !== null}
+                aria-busy={busyKey === item.key}
+                title={item.account ?? undefined}
+                onClick={() => onConnect(item.key)}
+              >
+                <span className="truncate">{siteConnectCardLabel(item)}</span>
+              </Button>
+            ) : (
+              <p className="px-3 py-1.5 text-sm text-fg-muted">{siteConnectCardLabel(item)}</p>
+            )}
           </li>
         ))}
       </ul>
@@ -145,6 +157,8 @@ export function AppConnectCard({
   const dismissals = useMemo(() => siteConnectCardDismissals(siteId), [siteId]);
   const [reloadToken, setReloadToken] = useState(0);
   const reload = useCallback(() => setReloadToken((value) => value + 1), []);
+  // The card item whose "Add a shared key" dialog is open.
+  const [sharedKeyItem, setSharedKeyItem] = useState<ToolGatewaySiteSetupItem | null>(null);
 
   useEffect(() => {
     if (!versionId) {
@@ -201,6 +215,13 @@ export function AppConnectCard({
     (key: string): boolean => {
       const item = items?.find((candidate) => candidate.key === key);
       if (!item || !consent || running.current) return false;
+      if (!siteConnectCardItemActionable(item)) return true;
+      if (item.action === "connect" && item.sharedKey === "add") {
+        if (sharedKeyItem) return false;
+        setBusyKey(key);
+        setSharedKeyItem(item);
+        return true;
+      }
       const abort = new AbortController();
       running.current = abort;
       setBusyKey(key);
@@ -216,7 +237,7 @@ export function AppConnectCard({
         });
       return true;
     },
-    [consent, items, reload, siteId, workspaceId],
+    [consent, items, reload, sharedKeyItem, siteId, workspaceId],
   );
 
   // Arrived from a published App's "Connect": open that dialog once. Until
@@ -237,17 +258,33 @@ export function AppConnectCard({
     // oxlint-disable-next-line react-hooks/exhaustive-deps
     [dismissals, dismissedGeneration, items],
   );
-  if (!consent || visible.length === 0) return null;
-  return (
-    <AppConnectCardView
-      items={visible}
-      busyKey={busyKey}
-      onConnect={connect}
-      onDismiss={() => {
-        dismissals.dismiss(visible.map((item) => item.key));
-        setDismissedGeneration((value) => value + 1);
+  const dialog = sharedKeyItem ? (
+    <AppSharedKeyDialog
+      api={api}
+      workspaceId={workspaceId}
+      item={sharedKeyItem}
+      onClose={(connected) => {
+        setSharedKeyItem(null);
+        setBusyKey(null);
+        if (connected) notifySiteToolReadinessChanged(siteId);
+        reload();
       }}
-      className={className}
     />
+  ) : null;
+  if (!consent || visible.length === 0) return dialog;
+  return (
+    <>
+      <AppConnectCardView
+        items={visible}
+        busyKey={busyKey}
+        onConnect={connect}
+        onDismiss={() => {
+          dismissals.dismiss(visible.map((item) => item.key));
+          setDismissedGeneration((value) => value + 1);
+        }}
+        className={className}
+      />
+      {dialog}
+    </>
   );
 }

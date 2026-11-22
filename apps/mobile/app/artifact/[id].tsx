@@ -77,8 +77,12 @@ function ArtifactViewer() {
     workspaceId?: string;
     title?: string;
     from?: string;
+    /** A Site's own page to open at (a sidebar link's path). */
+    page?: string;
   }>();
   const workspaceId = params.workspaceId || currentWorkspaceId || "";
+  // A repeated query value arrives as a list; only a single page is used.
+  const page = typeof params.page === "string" ? params.page : undefined;
   const kind = KINDS.find((each) => each === params.kind) ?? "file";
   const [item, setItem] = useState<ArtifactCatalogItem | null>(() =>
     workspaceId ? cachedArtifact(client, workspaceId, kind, params.id) : null,
@@ -273,8 +277,12 @@ function ArtifactViewer() {
       ) : account ? (
         <WebPageView
           account={account}
-          path={nativeViewPath(workspaceId, item)!}
-          fallbackPath={url ? new URL(url).pathname : "/"}
+          path={nativeViewPath(workspaceId, item, page)!}
+          fallbackPath={
+            url
+              ? `${new URL(url).pathname}${item.kind === "site" && page ? `?page=${encodeURIComponent(page)}` : ""}`
+              : "/"
+          }
         />
       ) : null;
   }

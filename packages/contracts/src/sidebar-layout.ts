@@ -1,11 +1,13 @@
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
+import { SessionAvatar } from "./bots";
 
 /**
  * The customizable sidebar (docs/sidebar-layout.md): a workspace default that
  * admins set, plus each person's own changes on top (hide, add, reorder,
  * reset). Items are groups, links to an app (optionally one of its pages),
- * https links, and live lists such as pinned or recent apps.
+ * links to an agent's page, https links, and live lists such as pinned or
+ * recent apps.
  *
  * Mixed versions: readers ignore item types they don't know, and writers
  * keep stored items they don't know untouched, so web, desktop and phone
@@ -43,6 +45,208 @@ export const SIDEBAR_LIVE_LIST_LABELS: Record<SidebarLiveListKind, string> = {
   pinned_apps: "Pinned apps",
   recent_apps: "Recent apps",
 };
+
+/**
+ * The icons a sidebar item may carry: lucide icon names (lucide.dev), drawn
+ * the same on web and phone. An item without one keeps its usual mark (an
+ * outside link shows its site's icon).
+ */
+export const SIDEBAR_ITEM_ICONS = [
+  "app-window",
+  "layout-dashboard",
+  "layout-grid",
+  "file-text",
+  "book-open",
+  "notebook-pen",
+  "chart-line",
+  "chart-column",
+  "table-2",
+  "list-checks",
+  "calendar",
+  "clock",
+  "folder",
+  "inbox",
+  "mail",
+  "message-square",
+  "users",
+  "bot",
+  "globe",
+  "link",
+  "house",
+  "store",
+  "briefcase",
+  "receipt",
+  "rocket",
+  "star",
+  "heart",
+  "flag",
+  "bookmark",
+  "target",
+  "zap",
+  "sparkles",
+  "lightbulb",
+  "megaphone",
+  "shield-check",
+  "code",
+  "terminal",
+  "database",
+  "server",
+  "git-pull-request",
+  "bug",
+  "wrench",
+  "flask-conical",
+  "pen-tool",
+  "image",
+  "graduation-cap",
+  "map",
+  "package",
+] as const;
+
+export const SidebarItemIcon = /* @__PURE__ */ defineSchema(() => z.enum(SIDEBAR_ITEM_ICONS));
+export type SidebarItemIcon = (typeof SIDEBAR_ITEM_ICONS)[number];
+
+/** Whether `value` is an icon this version draws. */
+export function isSidebarItemIcon(value: unknown): value is SidebarItemIcon {
+  return typeof value === "string" && (SIDEBAR_ITEM_ICONS as readonly string[]).includes(value);
+}
+
+/** The primary rail's built-in entries, which a person (or the default) can hide. */
+export const SIDEBAR_NAV_ENTRIES = [
+  "inbox",
+  "capabilities",
+  "knowledge",
+  "automations",
+  "agents",
+  "meetings",
+  "artifacts",
+] as const;
+export const SidebarNavEntry = /* @__PURE__ */ defineSchema(() => z.enum(SIDEBAR_NAV_ENTRIES));
+export type SidebarNavEntry = (typeof SIDEBAR_NAV_ENTRIES)[number];
+
+/** Settings pages a person moves under More in the settings rail, at most. */
+export const SIDEBAR_SETTINGS_MORE_MAX = 100;
+
+/** A settings rail entry's id, such as `workspace:general` or `organization:members`. */
+const SettingsEntryId = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(160)
+    .regex(/^[A-Za-z0-9:/$_-]+$/, "Use a settings entry id such as workspace:general"),
+);
+
+/**
+ * How the rest of the navigation looks, beside the items: each is unset by
+ * default, which keeps today's behaviour, and a person's own choice wins
+ * over the workspace default's.
+ */
+export const SidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Apps show as rows of their own in the Sessions list, their chats under them (default true). */
+      sessionsShowApps: z.boolean().optional(),
+      /** Built-in rail entries left out (default none). */
+      hiddenNavEntries: z.array(SidebarNavEntry).max(SIDEBAR_NAV_ENTRIES.length).optional(),
+      /** Settings entries moved under More in the settings rail; the rest stay at the top (default none). */
+      settingsMore: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_MORE_MAX).optional(),
+    })
+    .strict(),
+);
+export type SidebarLayoutOptions = z.infer<typeof SidebarLayoutOptions>;
+
+/** The options in effect for a person, after their own choices and the default's. */
+export const ResolvedSidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sessionsShowApps: z.boolean(),
+    hiddenNavEntries: z.array(z.string()),
+    /** Null: no settings entry is under More. */
+    settingsMore: z.array(z.string()).nullable(),
+  }),
+);
+export type ResolvedSidebarLayoutOptions = z.infer<typeof ResolvedSidebarLayoutOptions>;
+
+export const DEFAULT_SIDEBAR_LAYOUT_OPTIONS: ResolvedSidebarLayoutOptions = {
+  sessionsShowApps: true,
+  hiddenNavEntries: [],
+  settingsMore: null,
+};
+
+/** The option keys this version knows, from its schema. */
+function sidebarOptionKeys(): readonly string[] {
+  return Object.keys(SidebarLayoutOptions.shape);
+}
+
+/**
+ * Stored options, read leniently. Values this version reads are tidied
+ * (duplicates and malformed entries drop); everything else stays as it is,
+ * options a newer version added and values a newer version widened alike, so
+ * this version's writes keep them. Read them with knownSidebarOptions.
+ */
+export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
+  if (!isRecord(value)) return {};
+  const strings = (list: unknown, max: number) =>
+    Array.isArray(list)
+      ? [
+          ...new Set(
+            list.filter(
+              (entry): entry is string =>
+                typeof entry === "string" && SettingsEntryId.safeParse(entry).success,
+            ),
+          ),
+        ].slice(0, max)
+      : undefined;
+  const hidden = strings(value.hiddenNavEntries, 32);
+  const more = strings(value.settingsMore, SIDEBAR_SETTINGS_MORE_MAX);
+  return {
+    ...value,
+    ...(hidden ? { hiddenNavEntries: hidden as SidebarNavEntry[] } : {}),
+    ...(more ? { settingsMore: more } : {}),
+  } as SidebarLayoutOptions;
+}
+
+/** The options in effect: a person's own choice, else the default's, else today's behaviour. */
+export function mergeSidebarOptions(
+  workspace: SidebarLayoutOptions | undefined,
+  personal: SidebarLayoutOptions | undefined,
+): ResolvedSidebarLayoutOptions {
+  const own = knownSidebarOptions(personal);
+  const shared = knownSidebarOptions(workspace);
+  return {
+    sessionsShowApps:
+      own?.sessionsShowApps ??
+      shared?.sessionsShowApps ??
+      DEFAULT_SIDEBAR_LAYOUT_OPTIONS.sessionsShowApps,
+    hiddenNavEntries: [...(own?.hiddenNavEntries ?? shared?.hiddenNavEntries ?? [])],
+    settingsMore: own?.settingsMore ?? shared?.settingsMore ?? null,
+  };
+}
+
+/** Read a layout answer's options leniently: a server from before them shows today's behaviour. */
+export function readResolvedSidebarOptions(value: unknown): ResolvedSidebarLayoutOptions {
+  return mergeSidebarOptions(readStoredSidebarOptions(value), undefined);
+}
+
+/**
+ * Stored options as this version reads them, for answers: options a newer
+ * version added, values it widened and rail entries it added are left out
+ * (storage keeps them).
+ */
+export function knownSidebarOptions(
+  options: SidebarLayoutOptions | undefined,
+): SidebarLayoutOptions | undefined {
+  if (!options) return undefined;
+  const known: SidebarLayoutOptions = {};
+  const { sessionsShowApps, hiddenNavEntries, settingsMore } = options as Record<string, unknown>;
+  if (typeof sessionsShowApps === "boolean") known.sessionsShowApps = sessionsShowApps;
+  if (Array.isArray(hiddenNavEntries))
+    known.hiddenNavEntries = hiddenNavEntries.filter((entry): entry is SidebarNavEntry =>
+      (SIDEBAR_NAV_ENTRIES as readonly unknown[]).includes(entry),
+    );
+  if (Array.isArray(settingsMore))
+    known.settingsMore = settingsMore.filter((entry): entry is string => typeof entry === "string");
+  // Every option the schema has is read above.
+  return known;
+}
 
 export const SidebarItemId = /* @__PURE__ */ defineSchema(() =>
   z
@@ -103,6 +307,8 @@ export const SidebarAppLinkItem = /* @__PURE__ */ defineSchema(() =>
       path: SidebarAppPath.optional(),
       /** Shown instead of the app's own title. */
       label: Label.optional(),
+      /** Shown instead of the app mark. */
+      icon: SidebarItemIcon.optional(),
     })
     .strict(),
 );
@@ -116,10 +322,26 @@ export const SidebarExternalLinkItem = /* @__PURE__ */ defineSchema(() =>
       type: z.literal("link"),
       url: SidebarExternalUrl,
       label: Label,
+      /** Shown instead of the site's own icon. */
+      icon: SidebarItemIcon.optional(),
     })
     .strict(),
 );
 export type SidebarExternalLinkItem = z.infer<typeof SidebarExternalLinkItem>;
+
+/** A link to an agent's page; it shows the agent's name and avatar. */
+export const SidebarAgentLinkItem = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: SidebarItemId,
+      type: z.literal("agent"),
+      agentId: z.string().uuid(),
+      /** Shown instead of the agent's own name. */
+      label: Label.optional(),
+    })
+    .strict(),
+);
+export type SidebarAgentLinkItem = z.infer<typeof SidebarAgentLinkItem>;
 
 /** A list the sidebar fills in itself, such as pinned or recent apps. */
 export const SidebarLiveListItem = /* @__PURE__ */ defineSchema(() =>
@@ -136,7 +358,12 @@ export const SidebarLiveListItem = /* @__PURE__ */ defineSchema(() =>
 export type SidebarLiveListItem = z.infer<typeof SidebarLiveListItem>;
 
 export const SidebarChildItem = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("type", [SidebarAppLinkItem, SidebarExternalLinkItem, SidebarLiveListItem]),
+  z.discriminatedUnion("type", [
+    SidebarAppLinkItem,
+    SidebarExternalLinkItem,
+    SidebarLiveListItem,
+    SidebarAgentLinkItem,
+  ]),
 );
 export type SidebarChildItem = z.infer<typeof SidebarChildItem>;
 
@@ -149,6 +376,8 @@ export const SidebarGroupItem = /* @__PURE__ */ defineSchema(() =>
       label: Label,
       /** Starts collapsed; each person's open/closed choice is kept on their device. */
       collapsed: z.boolean().optional(),
+      /** Shown beside its name. */
+      icon: SidebarItemIcon.optional(),
       items: z.array(SidebarChildItem).max(SIDEBAR_GROUP_MAX_ITEMS),
     })
     .strict(),
@@ -161,13 +390,20 @@ export const SidebarItem = /* @__PURE__ */ defineSchema(() =>
     SidebarAppLinkItem,
     SidebarExternalLinkItem,
     SidebarLiveListItem,
+    SidebarAgentLinkItem,
   ]),
 );
 export type SidebarItem = z.infer<typeof SidebarItem>;
 export type SidebarItemType = SidebarItem["type"];
 
 /** Built-in item types; anything else is an item from a newer version. */
-export const SIDEBAR_ITEM_TYPES: readonly SidebarItemType[] = ["group", "app", "link", "live_list"];
+export const SIDEBAR_ITEM_TYPES: readonly SidebarItemType[] = [
+  "group",
+  "app",
+  "link",
+  "live_list",
+  "agent",
+];
 
 /**
  * Stored items as JSON. Known types are validated on write; unknown ones
@@ -175,10 +411,21 @@ export const SIDEBAR_ITEM_TYPES: readonly SidebarItemType[] = ["group", "app", "
  */
 export type StoredSidebarItem = { id: string; type: string; [key: string]: unknown };
 
-/** The workspace default, as stored. */
-export type StoredSidebarLayout = { version: number; items: StoredSidebarItem[] };
+/**
+ * The workspace default, as stored. Fields a newer version added (here and
+ * in `options`) are kept as they are when this version writes, so API
+ * replicas of different versions never drop each other's settings during a
+ * rolling deploy.
+ */
+export type StoredSidebarLayout = {
+  version: number;
+  items: StoredSidebarItem[];
+  /** Navigation options for everyone; unset keeps today's behaviour. */
+  options?: SidebarLayoutOptions;
+  [field: string]: unknown;
+};
 
-/** A person's own changes on top of the workspace default, as stored. */
+/** A person's own changes on top of the workspace default, as stored; newer fields are kept too. */
 export type StoredSidebarPersonalChanges = {
   version: number;
   /** Workspace items this person hid. */
@@ -187,12 +434,40 @@ export type StoredSidebarPersonalChanges = {
   added: { parentId: string | null; item: StoredSidebarItem }[];
   /** This person's order per level: `root` or a group's id → item ids. */
   order: Record<string, string[]>;
+  /** This person's own navigation options, over the default's. */
+  options?: SidebarLayoutOptions;
+  [field: string]: unknown;
 };
 
 export const EMPTY_SIDEBAR_LAYOUT: StoredSidebarLayout = {
   version: SIDEBAR_LAYOUT_VERSION,
   items: [],
 };
+
+/** The id of the built-in default's Pinned apps list. */
+export const SIDEBAR_BUILT_IN_PINNED_APPS_ID = "pinned-apps";
+
+/**
+ * The default of a workspace whose admins never changed it: the workspace's
+ * pinned apps. Clients leave out a live list with no apps, so a workspace
+ * without pins sees nothing. The first change to the default starts from
+ * this, so admins can remove it or build around it.
+ */
+export const BUILT_IN_SIDEBAR_LAYOUT: StoredSidebarLayout = {
+  version: SIDEBAR_LAYOUT_VERSION,
+  items: [{ id: SIDEBAR_BUILT_IN_PINNED_APPS_ID, type: "live_list", list: "pinned_apps" }],
+};
+
+/**
+ * The workspace default from its stored row: the built-in default when no
+ * admin ever saved one, else the saved layout as it is (an empty saved
+ * layout stays empty).
+ */
+export function readWorkspaceSidebarLayout(
+  row: { layout: unknown } | null | undefined,
+): StoredSidebarLayout {
+  return row ? readStoredSidebarLayout(row.layout) : structuredClone(BUILT_IN_SIDEBAR_LAYOUT);
+}
 
 export const EMPTY_SIDEBAR_PERSONAL_CHANGES: StoredSidebarPersonalChanges = {
   version: SIDEBAR_LAYOUT_VERSION,
@@ -203,6 +478,34 @@ export const EMPTY_SIDEBAR_PERSONAL_CHANGES: StoredSidebarPersonalChanges = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const SIDEBAR_LAYOUT_KEYS: ReadonlySet<string> = new Set(["version", "items", "options"]);
+const SIDEBAR_PERSONAL_KEYS: ReadonlySet<string> = new Set([
+  "version",
+  "hidden",
+  "added",
+  "order",
+  "options",
+]);
+
+/** The fields of `value` this version doesn't know (a newer version wrote them), as they are. */
+function fieldsBeyond(
+  value: Record<string, unknown>,
+  known: ReadonlySet<string>,
+): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !known.has(key)));
+}
+
+/**
+ * The stored version: a newer version's number stays, so its own fields stay
+ * meaningful. So a version bump must keep layouts readable and writable by
+ * older versions (new fields and values only, never a changed meaning).
+ */
+function storedVersion(value: unknown): number {
+  return typeof value === "number" && value > SIDEBAR_LAYOUT_VERSION
+    ? value
+    : SIDEBAR_LAYOUT_VERSION;
 }
 
 function storedItem(value: unknown): StoredSidebarItem | null {
@@ -222,16 +525,19 @@ function storedItem(value: unknown): StoredSidebarItem | null {
   return { ...value, id, type };
 }
 
-/** Read a stored workspace layout leniently: malformed entries drop, unknown types stay. */
+/** Read a stored workspace layout leniently: malformed entries drop, unknown types and fields stay. */
 export function readStoredSidebarLayout(value: unknown): StoredSidebarLayout {
   if (!isRecord(value) || !Array.isArray(value.items)) return EMPTY_SIDEBAR_LAYOUT;
+  const options = readStoredSidebarOptions(value.options);
   return {
-    version: typeof value.version === "number" ? value.version : SIDEBAR_LAYOUT_VERSION,
+    ...fieldsBeyond(value, SIDEBAR_LAYOUT_KEYS),
+    version: storedVersion(value.version),
     items: value.items.map(storedItem).filter((item): item is StoredSidebarItem => item !== null),
+    ...(Object.keys(options).length ? { options } : {}),
   };
 }
 
-/** Read stored personal changes leniently. */
+/** Read stored personal changes leniently; fields a newer version added stay. */
 export function readStoredSidebarPersonalChanges(value: unknown): StoredSidebarPersonalChanges {
   if (!isRecord(value)) return EMPTY_SIDEBAR_PERSONAL_CHANGES;
   const ids = (list: unknown) =>
@@ -244,17 +550,21 @@ export function readStoredSidebarPersonalChanges(value: unknown): StoredSidebarP
         const item = storedItem(entry.item);
         if (!item) return [];
         const parentId = typeof entry.parentId === "string" ? entry.parentId : null;
-        return [{ parentId, item }];
+        // Fields a newer version added to the entry stay.
+        return [{ ...entry, parentId, item }];
       })
     : [];
   const order: Record<string, string[]> = {};
   if (isRecord(value.order))
     for (const [key, list] of Object.entries(value.order)) order[key] = ids(list);
+  const options = readStoredSidebarOptions(value.options);
   return {
-    version: typeof value.version === "number" ? value.version : SIDEBAR_LAYOUT_VERSION,
+    ...fieldsBeyond(value, SIDEBAR_PERSONAL_KEYS),
+    version: storedVersion(value.version),
     hidden: ids(value.hidden),
     added,
     order,
+    ...(Object.keys(options).length ? { options } : {}),
   };
 }
 
@@ -266,12 +576,17 @@ function knownFields(item: StoredSidebarItem): StoredSidebarItem {
         ? SidebarExternalLinkItem.shape
         : item.type === "live_list"
           ? SidebarLiveListItem.shape
-          : item.type === "group"
-            ? SidebarGroupItem.shape
-            : null;
+          : item.type === "agent"
+            ? SidebarAgentLinkItem.shape
+            : item.type === "group"
+              ? SidebarGroupItem.shape
+              : null;
   if (!shape) return item;
+  // An icon a newer version added is left out here, so the item still shows.
   return Object.fromEntries(
-    Object.entries(item).filter(([key]) => Object.hasOwn(shape, key)),
+    Object.entries(item).filter(
+      ([key, value]) => Object.hasOwn(shape, key) && (key !== "icon" || isSidebarItemIcon(value)),
+    ),
   ) as StoredSidebarItem;
 }
 
@@ -396,6 +711,12 @@ export function mergeSidebarLayout(
 // Changes
 // ---------------------------------------------------------------------------
 
+/**
+ * A new item's id; the server makes one when it's omitted. A person's own
+ * items always get ids starting with `my-` (`SIDEBAR_PERSONAL_ID_PREFIX`): a
+ * given id without it is prefixed (`docs` becomes `my-docs`), so read the id
+ * back from the answer. Workspace ids can't start with `my-`.
+ */
 const NewItemId = /* @__PURE__ */ defineSchema(() => SidebarItemId.optional());
 
 /** A new item; the server picks an id when it's omitted. */
@@ -407,12 +728,14 @@ export const NewSidebarItem = /* @__PURE__ */ defineSchema(() =>
         type: z.literal("group"),
         label: Label,
         collapsed: z.boolean().optional(),
+        icon: SidebarItemIcon.optional(),
         items: z
           .array(
             z.discriminatedUnion("type", [
               SidebarAppLinkItem.extend({ id: NewItemId }),
               SidebarExternalLinkItem.extend({ id: NewItemId }),
               SidebarLiveListItem.extend({ id: NewItemId }),
+              SidebarAgentLinkItem.extend({ id: NewItemId }),
             ]),
           )
           .max(SIDEBAR_GROUP_MAX_ITEMS)
@@ -422,10 +745,22 @@ export const NewSidebarItem = /* @__PURE__ */ defineSchema(() =>
     SidebarAppLinkItem.extend({ id: NewItemId }),
     SidebarExternalLinkItem.extend({ id: NewItemId }),
     SidebarLiveListItem.extend({ id: NewItemId }),
+    SidebarAgentLinkItem.extend({ id: NewItemId }),
   ]),
 );
 export type NewSidebarItem = z.infer<typeof NewSidebarItem>;
 
+/**
+ * One change. Where `add` and `move` put an item (docs/sidebar-layout.md,
+ * "Placement"): `beforeId` if given, else `afterId`, else `index`, else the
+ * end of the level; give only one. A neighbour must be in the target level
+ * (the group named by `groupId`, else the top level for `add` and the item's
+ * current level for `move`). `index` counts the level including items the
+ * caller can't see (for a person's changes, the default's items they haven't
+ * hidden plus their own), and is clamped to its length. In a person's own
+ * changes a default item stays in the group the admin put it in; only their
+ * own items change groups.
+ */
 export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("op", [
     z
@@ -452,6 +787,8 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
         url: SidebarExternalUrl.optional(),
         collapsed: z.boolean().optional(),
         limit: z.number().int().min(1).max(SIDEBAR_LIVE_LIST_MAX_LIMIT).nullable().optional(),
+        /** App links, outside links and groups: an icon from SIDEBAR_ITEM_ICONS; null removes it. */
+        icon: SidebarItemIcon.nullable().optional(),
       })
       .strict(),
     z
@@ -485,6 +822,23 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
       })
       .strict(),
     z.object({ op: z.literal("reset") }).strict(),
+    z
+      .object({
+        /**
+         * Navigation options (see SidebarLayoutOptions). Each one given is
+         * set; null clears it, back to the default's (personal) or today's
+         * behaviour (workspace).
+         */
+        op: z.literal("options"),
+        sessionsShowApps: z.boolean().nullable().optional(),
+        hiddenNavEntries: z
+          .array(SidebarNavEntry)
+          .max(SIDEBAR_NAV_ENTRIES.length)
+          .nullable()
+          .optional(),
+        settingsMore: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_MORE_MAX).nullable().optional(),
+      })
+      .strict(),
   ]),
 );
 export type SidebarLayoutChange = z.infer<typeof SidebarLayoutChange>;
@@ -512,6 +866,14 @@ export class SidebarLayoutChangeError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SidebarLayoutChangeError";
+  }
+}
+
+/** A change that would go over a limit (items in the sidebar or a group). */
+export class SidebarLayoutLimitError extends SidebarLayoutChangeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SidebarLayoutLimitError";
   }
 }
 
@@ -560,6 +922,7 @@ function assignIds(
       id,
       type: "group",
       label: item.label,
+      ...(item.icon ? { icon: item.icon } : {}),
       ...(item.collapsed !== undefined ? { collapsed: item.collapsed } : {}),
       items: children,
     };
@@ -634,6 +997,11 @@ function updateItem(
       throw new SidebarLayoutChangeError("Only live lists have a limit");
     set("limit", change.limit);
   }
+  if (change.icon !== undefined) {
+    if (item.type !== "app" && item.type !== "link" && item.type !== "group")
+      throw new SidebarLayoutChangeError("Only app links, outside links and groups have an icon");
+    set("icon", change.icon);
+  }
   if (!knownSidebarItem(next))
     throw new SidebarLayoutChangeError("That change makes the item invalid");
   return next;
@@ -661,21 +1029,31 @@ function insertAt<T>(level: T[], item: T, index: number | undefined) {
 
 function checkLimits(items: StoredSidebarItem[]) {
   if (items.length > SIDEBAR_LAYOUT_MAX_ITEMS)
-    throw new SidebarLayoutChangeError(`A sidebar holds at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
+    throw new SidebarLayoutLimitError(`A sidebar holds at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
   for (const item of items)
     if (
       item.type === "group" &&
       Array.isArray(item.items) &&
       item.items.length > SIDEBAR_GROUP_MAX_ITEMS
     )
-      throw new SidebarLayoutChangeError(`A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`);
+      throw new SidebarLayoutLimitError(`A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`);
 }
 
 /** App ids linked anywhere in `items` (lowercase). */
 export function sidebarLinkedAppIds(items: readonly StoredSidebarItem[]): string[] {
+  return linkedIds(items, "app", "appId");
+}
+
+/** Agent ids linked anywhere in `items` (lowercase). */
+export function sidebarLinkedAgentIds(items: readonly StoredSidebarItem[]): string[] {
+  return linkedIds(items, "agent", "agentId");
+}
+
+function linkedIds(items: readonly StoredSidebarItem[], type: string, field: string): string[] {
   const ids = new Set<string>();
   const visit = (item: StoredSidebarItem) => {
-    if (item.type === "app" && typeof item.appId === "string") ids.add(item.appId.toLowerCase());
+    const id = item[field];
+    if (item.type === type && typeof id === "string") ids.add(id.toLowerCase());
     if (item.type === "group" && Array.isArray(item.items))
       for (const child of item.items as StoredSidebarItem[]) visit(child);
   };
@@ -688,8 +1066,27 @@ export function withoutGoneSidebarApps(
   items: readonly StoredSidebarItem[],
   live: ReadonlySet<string>,
 ): StoredSidebarItem[] {
-  const keep = (item: StoredSidebarItem) =>
-    item.type !== "app" || typeof item.appId !== "string" || live.has(item.appId.toLowerCase());
+  return withoutGone(items, "app", "appId", live);
+}
+
+/** `items` without links to agents that are gone (`live` holds the lowercase ids still there). */
+export function withoutGoneSidebarAgents(
+  items: readonly StoredSidebarItem[],
+  live: ReadonlySet<string>,
+): StoredSidebarItem[] {
+  return withoutGone(items, "agent", "agentId", live);
+}
+
+function withoutGone(
+  items: readonly StoredSidebarItem[],
+  type: string,
+  field: string,
+  live: ReadonlySet<string>,
+): StoredSidebarItem[] {
+  const keep = (item: StoredSidebarItem) => {
+    const id = item[field];
+    return item.type !== type || typeof id !== "string" || live.has(id.toLowerCase());
+  };
   return items
     .filter(keep)
     .map((item) =>
@@ -699,6 +1096,38 @@ export function withoutGoneSidebarApps(
     );
 }
 
+function applyOptions(
+  options: SidebarLayoutOptions | undefined,
+  change: Extract<SidebarLayoutChange, { op: "options" }>,
+): SidebarLayoutOptions | undefined {
+  const next: Record<string, unknown> = { ...options };
+  for (const key of sidebarOptionKeys()) {
+    const value = (change as Record<string, unknown>)[key];
+    if (value === null) delete next[key];
+    else if (value !== undefined)
+      next[key] = Array.isArray(value)
+        ? [...new Set([...value, ...unknownEntries(key, next[key])])]
+        : value;
+  }
+  return Object.keys(next).length ? (next as SidebarLayoutOptions) : undefined;
+}
+
+/**
+ * Hidden rail entries a newer version added: answers leave them out, so a
+ * client's list never names them; keep them when it replaces the list.
+ */
+function unknownEntries(key: string, stored: unknown): unknown[] {
+  if (key !== "hiddenNavEntries" || !Array.isArray(stored)) return [];
+  return stored.filter((entry) => !(SIDEBAR_NAV_ENTRIES as readonly unknown[]).includes(entry));
+}
+
+function withOptions<T extends { options?: SidebarLayoutOptions }>(
+  value: Omit<T, "options">,
+  options: SidebarLayoutOptions | undefined,
+): T {
+  return (options ? { ...value, options } : value) as T;
+}
+
 /** Apply changes to the workspace default. Throws SidebarLayoutChangeError. */
 export function applyWorkspaceSidebarChanges(
   layout: StoredSidebarLayout,
@@ -706,10 +1135,20 @@ export function applyWorkspaceSidebarChanges(
   randomId: () => string,
 ): StoredSidebarLayout {
   let items = cloneItems(layout.items);
+  let options = layout.options ? structuredClone(layout.options) : undefined;
+  // Fields a newer version added stay unless the default is reset.
+  let beyond = structuredClone(fieldsBeyond(layout, SIDEBAR_LAYOUT_KEYS));
+  let version = storedVersion(layout.version);
   for (const change of changes) {
     switch (change.op) {
       case "reset":
         items = [];
+        options = undefined;
+        beyond = {};
+        version = SIDEBAR_LAYOUT_VERSION;
+        break;
+      case "options":
+        options = applyOptions(options, change);
         break;
       case "add": {
         const item = assignIds(change.item, collectIds(items), randomId, "workspace");
@@ -761,7 +1200,7 @@ export function applyWorkspaceSidebarChanges(
     }
   }
   checkLimits(items);
-  return { version: SIDEBAR_LAYOUT_VERSION, items };
+  return withOptions<StoredSidebarLayout>({ ...beyond, version, items }, options);
 }
 
 /**
@@ -815,6 +1254,11 @@ export function applyPersonalSidebarChanges(
       case "reset":
         next = structuredClone(EMPTY_SIDEBAR_PERSONAL_CHANGES);
         break;
+      case "options": {
+        const { options: _options, ...rest } = next;
+        next = withOptions<StoredSidebarPersonalChanges>(rest, applyOptions(next.options, change));
+        break;
+      }
       case "add": {
         const taken = collectIds(workspace.items);
         for (const entry of next.added) collectIds([entry.item], taken);
@@ -824,7 +1268,7 @@ export function applyPersonalSidebarChanges(
           if (item.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
           if (!groupExists(groupId)) throw new SidebarLayoutChangeError(`No group "${groupId}"`);
           if (mergedLevelIds(groupId).length >= SIDEBAR_GROUP_MAX_ITEMS)
-            throw new SidebarLayoutChangeError(
+            throw new SidebarLayoutLimitError(
               `A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`,
             );
           const own = next.added.find(
@@ -863,8 +1307,12 @@ export function applyPersonalSidebarChanges(
       case "remove": {
         const index = ownIndex(change.itemId);
         const child = index < 0 ? ownChild(change.itemId) : null;
-        if (index >= 0) next.added.splice(index, 1);
-        else if (child) child.children.splice(child.index, 1);
+        if (index >= 0) {
+          const [removed] = next.added.splice(index, 1);
+          // Your group goes with its items, also ones stored beside it by an older version.
+          if (removed?.item.type === "group")
+            next.added = next.added.filter((entry) => entry.parentId !== removed.item.id);
+        } else if (child) child.children.splice(child.index, 1);
         else if (workspaceIds.has(change.itemId)) {
           if (!next.hidden.includes(change.itemId)) next.hidden.push(change.itemId);
         } else throw new SidebarLayoutChangeError(`No item "${change.itemId}"`);
@@ -884,18 +1332,34 @@ export function applyPersonalSidebarChanges(
           // Only your own items change group; workspace items keep the admin's grouping.
           const index = ownIndex(change.itemId);
           const child = index < 0 ? ownChild(change.itemId) : null;
-          let item: StoredSidebarItem | undefined;
-          if (index >= 0) item = next.added.splice(index, 1)[0]?.item;
-          else if (child) item = child.children.splice(child.index, 1)[0];
-          else
+          if (index < 0 && !child)
             throw new SidebarLayoutChangeError(
               "Workspace items stay in their group; move it within its level instead",
             );
-          if (target !== SIDEBAR_ROOT_KEY && item!.type === "group")
-            throw new SidebarLayoutChangeError("Groups don't nest");
-          if (target !== SIDEBAR_ROOT_KEY && !groupExists(target))
-            throw new SidebarLayoutChangeError(`No group "${target}"`);
-          next.added.push({ parentId: target === SIDEBAR_ROOT_KEY ? null : target, item: item! });
+          if (target !== SIDEBAR_ROOT_KEY) {
+            const moving = index >= 0 ? next.added[index]!.item : child!.children[child!.index]!;
+            if (moving.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
+            if (!groupExists(target)) throw new SidebarLayoutChangeError(`No group "${target}"`);
+            if (mergedLevelIds(target).length >= SIDEBAR_GROUP_MAX_ITEMS)
+              throw new SidebarLayoutLimitError(
+                `A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`,
+              );
+          }
+          let item: StoredSidebarItem | undefined;
+          if (index >= 0) item = next.added.splice(index, 1)[0]?.item;
+          else item = child!.children.splice(child!.index, 1)[0];
+          // Into your own group it goes inside it, as Add puts it, so it moves and goes with the group.
+          const own = next.added.find(
+            (entry) => entry.item.id === target && entry.item.type === "group",
+          );
+          if (own) {
+            const children = Array.isArray(own.item.items)
+              ? (own.item.items as StoredSidebarItem[])
+              : [];
+            children.push(item!);
+            own.item.items = children;
+          } else
+            next.added.push({ parentId: target === SIDEBAR_ROOT_KEY ? null : target, item: item! });
         }
         place(target, change.itemId, change);
         break;
@@ -903,7 +1367,7 @@ export function applyPersonalSidebarChanges(
     }
   }
   if (next.added.length > SIDEBAR_LAYOUT_MAX_ITEMS)
-    throw new SidebarLayoutChangeError(`You can add at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
+    throw new SidebarLayoutLimitError(`You can add at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
   checkLimits(next.added.map((entry) => entry.item));
   // Keep only order entries for levels and items that still exist.
   const merged = mergeSidebarLayout(workspace, next);
@@ -918,7 +1382,8 @@ export function applyPersonalSidebarChanges(
     const kept = level ? ids.filter((id) => level.has(id)) : [];
     if (kept.length) order[key] = kept;
   }
-  return { ...next, version: SIDEBAR_LAYOUT_VERSION, order };
+  // `next` keeps fields a newer version added (a reset clears them).
+  return { ...next, version: storedVersion(next.version), order };
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +1408,8 @@ export const ResolvedSidebarAppLink = /* @__PURE__ */ defineSchema(() =>
     path: z.string().nullable(),
     /** Its own label, else the app's title. */
     label: z.string(),
+    /** Its icon (a SIDEBAR_ITEM_ICONS name; a client draws its usual mark for one it doesn't know). */
+    icon: z.string().optional(),
   }),
 );
 export const ResolvedSidebarExternalLink = /* @__PURE__ */ defineSchema(() =>
@@ -951,6 +1418,8 @@ export const ResolvedSidebarExternalLink = /* @__PURE__ */ defineSchema(() =>
     type: z.literal("link"),
     url: z.string(),
     label: z.string(),
+    /** Its icon; without one, clients show the site's own icon. */
+    icon: z.string().optional(),
   }),
 );
 export const ResolvedSidebarLiveList = /* @__PURE__ */ defineSchema(() =>
@@ -964,11 +1433,24 @@ export const ResolvedSidebarLiveList = /* @__PURE__ */ defineSchema(() =>
     apps: z.array(SidebarLayoutApp),
   }),
 );
+/** A link to an agent's page, for people who can see the agent. */
+export const ResolvedSidebarAgentLink = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ...ResolvedBase,
+    type: z.literal("agent"),
+    agentId: z.string().uuid(),
+    /** Its own label, else the agent's name. */
+    label: z.string(),
+    /** The agent's avatar, or its initials when it has none. */
+    avatar: SessionAvatar,
+  }),
+);
 export const ResolvedSidebarChild = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("type", [
     ResolvedSidebarAppLink,
     ResolvedSidebarExternalLink,
     ResolvedSidebarLiveList,
+    ResolvedSidebarAgentLink,
   ]),
 );
 export type ResolvedSidebarChild = z.infer<typeof ResolvedSidebarChild>;
@@ -978,6 +1460,7 @@ export const ResolvedSidebarGroup = /* @__PURE__ */ defineSchema(() =>
     type: z.literal("group"),
     label: z.string(),
     collapsed: z.boolean(),
+    icon: z.string().optional(),
     items: z.array(ResolvedSidebarChild),
   }),
 );
@@ -987,6 +1470,7 @@ export const ResolvedSidebarItem = /* @__PURE__ */ defineSchema(() =>
     ResolvedSidebarAppLink,
     ResolvedSidebarExternalLink,
     ResolvedSidebarLiveList,
+    ResolvedSidebarAgentLink,
   ]),
 );
 export type ResolvedSidebarItem = z.infer<typeof ResolvedSidebarItem>;
@@ -1026,6 +1510,8 @@ export const SidebarLayoutResponse = /* @__PURE__ */ defineSchema(() =>
       revision: z.number().int(),
       /** Whether they changed anything, so Reset applies. */
       customized: z.boolean(),
+      /** Their own options, as set (unset ones follow the default). */
+      options: SidebarLayoutOptions.optional(),
     }),
     workspace: z.object({
       revision: z.number().int(),
@@ -1033,7 +1519,14 @@ export const SidebarLayoutResponse = /* @__PURE__ */ defineSchema(() =>
       canEdit: z.boolean(),
       /** The default as everyone sees it before their own changes; for admins only. */
       items: z.array(ResolvedSidebarItem).optional(),
+      /** The default's own options, as set (unset ones are left out); for admins only. */
+      options: SidebarLayoutOptions.optional(),
     }),
+    /**
+     * The navigation options in effect for this person. Absent from servers
+     * from before them: read it with readResolvedSidebarOptions.
+     */
+    options: ResolvedSidebarLayoutOptions.optional(),
   }),
 );
 export type SidebarLayoutResponse = z.infer<typeof SidebarLayoutResponse>;
@@ -1043,6 +1536,7 @@ export function sidebarPersonalChangesCustomized(personal: StoredSidebarPersonal
   return (
     personal.hidden.length > 0 ||
     personal.added.length > 0 ||
+    Object.keys(personal.options ?? {}).length > 0 ||
     Object.values(personal.order).some((ids) => ids.length > 0)
   );
 }
@@ -1061,4 +1555,44 @@ export function flattenSidebarItemsForMobile(
           }
         : item,
     );
+}
+
+/**
+ * What the sidebar itself shows: a live list with no apps is left out until
+ * it fills, so the built-in Pinned apps list shows only in a workspace with
+ * pins. A group left with only such lists goes too. The Sidebar page lists
+ * every item.
+ */
+export function sidebarItemsShown(items: readonly ResolvedSidebarItem[]): ResolvedSidebarItem[] {
+  const shown = (item: ResolvedSidebarChild) => item.type !== "live_list" || item.apps.length > 0;
+  return items.flatMap((item): ResolvedSidebarItem[] => {
+    if (item.type !== "group") return shown(item) ? [item] : [];
+    const children = item.items.filter(shown);
+    // A group left with nothing to show goes too; one that was empty stays (to fill).
+    return children.length > 0 || item.items.length === 0 ? [{ ...item, items: children }] : [];
+  });
+}
+
+type SidebarLayoutRevisions = {
+  personal?: { revision?: number } | null | undefined;
+  workspace?: { revision?: number } | null | undefined;
+};
+
+/**
+ * Whether `next` is older than `shown` in either scope, so a client keeps
+ * what it shows: answers to overlapping reads and updates can arrive out of
+ * order, and each scope's revision only grows. Two answers each newer in a
+ * different scope (rare) keep the one shown until the next read.
+ */
+export function sidebarLayoutIsOlder(
+  next: SidebarLayoutRevisions,
+  shown: SidebarLayoutRevisions | null | undefined,
+): boolean {
+  if (!shown) return false;
+  const revision = (scope: { revision?: number } | null | undefined) =>
+    typeof scope?.revision === "number" ? scope.revision : 0;
+  return (
+    revision(next.personal) < revision(shown.personal) ||
+    revision(next.workspace) < revision(shown.workspace)
+  );
 }

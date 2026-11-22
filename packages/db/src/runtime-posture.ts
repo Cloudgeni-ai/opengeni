@@ -73,7 +73,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * unpaid sandbox fleet counts behind the fleet limits (1486), and the
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
  * (1487), and the managed warm box count fleet pressure reads (1492), and
- * the subscription needs-sign-in notice sync (1503).
+ * the subscription needs-sign-in notice sync (1503), and the one-statement
+ * lookup of the Slack event sources a shared Slack bot reaches (1552).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -117,6 +118,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
+  "deliver_app_notification_v1(uuid)",
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
 ] as const;
 
 /**
@@ -168,6 +171,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, only a status write by the tables' owner (the definer that records
  * a model request refused after refresh, and the migration's backfill) opens
  * or resolves a notice, and the person dismisses one left after a reconnect.
+ * 1552 withholds the shared Slack bot's one-statement source lookup; until it
+ * is granted, a Slack callback keeps 1538's per-workspace probe.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -181,6 +186,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
+  "deliver_app_notification_v1(uuid)",
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -338,6 +345,18 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "opengeni_private.inbox_items",
     "opengeni_private.native_push_devices",
     "opengeni_private.native_push_deliveries",
+  ],
+  "deliver_app_notification_v1(uuid)": [
+    "app_notifications",
+    "auth_sessions",
+    "opengeni_private.inbox_items",
+    "opengeni_private.native_push_devices",
+    "opengeni_private.native_push_deliveries",
+  ],
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)": [
+    "event_sources",
+    "connections",
+    "opengeni_private.organization_tenancy_inventory_capabilities",
   ],
 };
 
@@ -563,6 +582,10 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // holding EXECUTE.
   "stamp_subscription_connection_sign_in()",
   "subscription_connection_relogin_notice()",
+  // Migration 1543: the app notification trigger (an invoker trigger that
+  // calls deliver_app_notification_v1 once the runtime may). Triggers fire
+  // without the inserting role holding EXECUTE.
+  "deliver_app_notification()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -2049,8 +2072,12 @@ export const FORCE_RLS_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
+  "app_notifications",
+  "app_package_exports",
+  "app_sync_keys",
   "app_sync_queue",
   "app_sync_subscriptions",
+  "app_webhooks",
   "attached_browser_devices",
   "attached_browser_inventories",
   "audit_events",
@@ -2250,6 +2277,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
   "managed_sign_in_method_operations",
+  "mcp_connection_rate_limits",
   "mcp_event_subscriptions",
   "mcp_operations",
   "memory_slack_publication_configurations",
@@ -2654,9 +2682,15 @@ export const RUNTIME_FULL_DML_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
+  // 1542_app_package_exports: stored app package files and their sweep.
+  "app_package_exports",
+  // 1541_app_sync_paging_and_leases: the keys each sync wrote (removeMissing).
+  "app_sync_keys",
   // 1520_app_data_sync: App data sync executor queue and personal opt-ins.
   "app_sync_queue",
   "app_sync_subscriptions",
+  // 1543_app_webhooks_and_notifications: an app's inbound webhook addresses.
+  "app_webhooks",
   "audit_events",
   "auth_identities",
   "auth_passkeys",
@@ -2733,6 +2767,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "mcp_connection_rate_limits",
   "mcp_event_subscriptions",
   "mcp_oauth_access_tokens",
   "mcp_oauth_authorization_codes",
@@ -3044,6 +3079,8 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 export const RUNTIME_READ_INSERT_TABLES = [
   // 1243_agents: immutable agent revisions.
   "agent_revisions",
+  // 1543_app_webhooks_and_notifications: app notifications, delivered by an owner trigger.
+  "app_notifications",
   "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",
