@@ -3516,6 +3516,11 @@ The runtime secret must provide values such as:
   rail (EU-pinned `opper/…` routes billed in Opengeni credits at Opper's
   reported cost plus the configured credit margin; default Claude Opus 5.5 EU); keep it in the runtime Secret,
   never catalog JSON
+- optional `OPENGENI_SKILL_IMPORT_GITHUB_TOKEN` for Skill preview/install reads
+  from GitHub (API and worker). Without it they share GitHub's anonymous 60
+  requests/hour per IP. Use a fine-grained token with public-repository read
+  access only; keep it in the runtime Secret. Non-public repositories are refused
+  even when the token could read them
 - optional `OPENGENI_MODEL_CATALOG_SOURCE=code|database` (default `code`),
   `OPENGENI_MODEL_COST_POLICY_JSON`, and `OPENGENI_MODEL_NOTES_JSON`
 - optional `OPENGENI_MANAGED_MODELS_JSON` (code mode only; ignored in database

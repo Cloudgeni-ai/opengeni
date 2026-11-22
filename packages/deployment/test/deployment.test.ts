@@ -848,6 +848,7 @@ describe("deployment contract", () => {
         OPENGENI_OPENAI_API_KEY: "openai",
         OPENGENI_OPENROUTER_API_KEY: "openrouter",
         OPENGENI_OPPER_API_KEY: "opper",
+        OPENGENI_SKILL_IMPORT_GITHUB_TOKEN: "github_pat_skill_import",
         OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
         OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
@@ -877,6 +878,9 @@ describe("deployment contract", () => {
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OPENROUTER_API_KEY=openrouter");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OPPER_API_KEY=opper");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_SKILL_IMPORT_GITHUB_TOKEN=github_pat_skill_import",
+    );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
     expect(artifacts.runtimeEnv).toContain(

@@ -14,6 +14,8 @@ const githubRequestTimeoutMs = 15_000;
 const githubMetadataMaxBytes = 4 * 1024 * 1024;
 // GitHub blobs are base64-encoded JSON; allow framing and line wrapping.
 const githubBlobResponseMaxBytes = PORTABLE_SKILL_MAX_FILE_BYTES * 2;
+// Commits move and a repository can be made private, so these stay fresh.
+const shortLivedGitHubPath = /^\/repos\/[^/]+\/[^/]+(?:\/commits\/.*)?$/u;
 
 type GitHubJsonRequest = (path: string, maxBytes: number, label: string) => Promise<unknown>;
 
@@ -34,7 +36,7 @@ export function createGitHubSkillSourceClient(
       if (cache.size >= 128) cache.delete(cache.keys().next().value!);
       cache.set(path, {
         payload,
-        expires: Date.now() + (path.includes("/commits/") ? 60_000 : 3_600_000),
+        expires: Date.now() + (shortLivedGitHubPath.test(path) ? 60_000 : 3_600_000),
       });
       return payload;
     });
@@ -45,13 +47,37 @@ export function createGitHubSkillSourceClient(
       pending.delete(path);
     }
   };
+  const repositoryPath = (owner: string, repository: string) =>
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+  // A configured token reads whatever its account can see. Imports are public
+  // only, so with a token every read first confirms the repository is public
+  // (anonymous reads can't see anything else). Private and internal
+  // repositories answer exactly like a missing one.
+  const requirePublicRepository = async (owner: string, repository: string) => {
+    if (!settings.skillImportGithubToken) return;
+    const payload = recordValue(
+      await requestJson(
+        repositoryPath(owner, repository),
+        githubMetadataMaxBytes,
+        "GitHub Skill repository",
+      ),
+      "GitHub repository",
+    );
+    if (
+      payload.private !== false ||
+      (payload.visibility !== undefined && payload.visibility !== "public")
+    ) {
+      throw new Error("GitHub Skill repository was not found or is not public");
+    }
+  };
   return {
     downloadSnapshot: (owner, repository, slug) =>
       downloadSkillSnapshot(settings, owner, repository, slug),
     resolveCommit: async (owner, repository, ref) => {
+      await requirePublicRepository(owner, repository);
       const payload = recordValue(
         await requestJson(
-          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/commits/${encodeURIComponent(ref)}`,
+          `${repositoryPath(owner, repository)}/commits/${encodeURIComponent(ref)}`,
           githubMetadataMaxBytes,
           "GitHub Skill commit",
         ),
@@ -62,9 +88,10 @@ export function createGitHubSkillSourceClient(
       return sha.toLowerCase();
     },
     listTree: async (owner, repository, commit) => {
+      await requirePublicRepository(owner, repository);
       const payload = recordValue(
         await requestJson(
-          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/git/trees/${encodeURIComponent(commit)}?recursive=1`,
+          `${repositoryPath(owner, repository)}/git/trees/${encodeURIComponent(commit)}?recursive=1`,
           githubMetadataMaxBytes,
           "GitHub Skill tree",
         ),
@@ -96,9 +123,10 @@ export function createGitHubSkillSourceClient(
       });
     },
     readBlob: async (owner, repository, sha) => {
+      await requirePublicRepository(owner, repository);
       const payload = recordValue(
         await requestJson(
-          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/git/blobs/${encodeURIComponent(sha)}`,
+          `${repositoryPath(owner, repository)}/git/blobs/${encodeURIComponent(sha)}`,
           githubBlobResponseMaxBytes,
           "GitHub Skill file",
         ),
@@ -182,7 +210,9 @@ async function downloadSkillSnapshot(
 /**
  * Headers for GitHub REST reads behind Skill preview and install. A configured
  * token lifts the shared per-IP budget unauthenticated callers get (60/hour for
- * the whole deployment) to the token's own 5,000/hour.
+ * the whole deployment) to the token's own 5,000/hour. They are only ever sent
+ * to the fixed `api.github.com` origin, and `pinnedFetch` never follows a
+ * redirect, so the token can't reach another host.
  */
 export function githubSkillSourceHeaders(settings: Settings): Record<string, string> {
   const headers: Record<string, string> = {
@@ -218,6 +248,11 @@ async function githubJson(
     if (!response.ok) {
       await readResponseTextBounded(response, 8_192, `${label} error`).catch(() => undefined);
       if (response.status === 404) throw new Error(`${label} was not found or is not public`);
+      if (response.status === 401 && settings.skillImportGithubToken) {
+        throw new Error(
+          "GitHub rejected this deployment's Skill import token; check OPENGENI_SKILL_IMPORT_GITHUB_TOKEN",
+        );
+      }
       if (response.status === 403 || response.status === 429) {
         throw new HTTPException(429, {
           message: settings.skillImportGithubToken

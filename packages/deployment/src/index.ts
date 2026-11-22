@@ -1612,6 +1612,7 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
     "OPENGENI_OPPER_API_KEY",
+    "OPENGENI_SKILL_IMPORT_GITHUB_TOKEN",
   ] as const) {
     if (env[key]) vars.push(key);
   }
@@ -2842,6 +2843,9 @@ function runtimeEnvValues(
       : []),
     ...(env.OPENGENI_OPPER_API_KEY
       ? [requiredEnv("OPENGENI_OPPER_API_KEY", env.OPENGENI_OPPER_API_KEY)]
+      : []),
+    ...(env.OPENGENI_SKILL_IMPORT_GITHUB_TOKEN
+      ? [requiredEnv("OPENGENI_SKILL_IMPORT_GITHUB_TOKEN", env.OPENGENI_SKILL_IMPORT_GITHUB_TOKEN)]
       : []),
   ];
 

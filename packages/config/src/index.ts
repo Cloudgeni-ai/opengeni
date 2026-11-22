@@ -2541,6 +2541,8 @@ const SettingsSchema = z.object({
    * Optional token for Skill source reads against GitHub (preview and install).
    * Without it those reads are unauthenticated, and GitHub budgets unauthenticated
    * callers per IP — one shared 60-requests/hour pool for the whole deployment.
+   * Use a fine-grained token with public-repository read access only; reads with
+   * it are still refused for any repository that isn't public.
    */
   skillImportGithubToken: z.string().min(1).optional(),
   signupChallengeEnabled: EnvBoolean.default(false),

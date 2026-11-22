@@ -760,6 +760,12 @@ version; omission is rejected and a stale version returns `409`, so two
 administrators cannot silently overwrite each other's accepted source
 revision.
 
+GitHub reads are anonymous unless the deployment sets
+`OPENGENI_SKILL_IMPORT_GITHUB_TOKEN`, which moves them from GitHub's shared
+per-IP limit to the token's own. The token is only sent to `api.github.com`,
+and with it every read first confirms the repository is public, so a token that
+can see private repositories still imports only public Skills.
+
 The authoritative persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under
 FORCE RLS. Runtime materialization revalidates the stored artifact and digest
