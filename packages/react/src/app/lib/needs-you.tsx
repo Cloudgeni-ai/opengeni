@@ -20,11 +20,13 @@ export function awaitsConnection(
  * Waits on something a person can act on: `requires_action` (an approval or a
  * question), or a connection card (`awaitsConnection`). A session the runtime
  * could not start (it carries an admission block) reads as Stuck with its own
- * Retry, so it is not counted as waiting on the person.
+ * Retry, so it is not counted as waiting on the person, nor is a sub-agent whose
+ * questions are still with the agent that started it (`questionWithAgent`).
  */
 export function awaitsPerson(session: Session): boolean {
   return (
     (session.status === "requires_action" &&
+      !session.questionWithAgent &&
       (session.admissionBlock === undefined || session.admissionBlock === null)) ||
     awaitsConnection(session)
   );

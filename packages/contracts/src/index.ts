@@ -17651,6 +17651,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * Absent when false and on older servers; treat absence as unhandled.
      */
     failureHandled: primitives.optionalBoolean,
+    /**
+     * True when this `requires_action` session waits only on questions it put
+     * to the agent that started it, which still has them, so it does not wait
+     * on a person. Absent when false and on older servers.
+     */
+    questionWithAgent: primitives.optionalBoolean,
     /** Personal power-user label for work the member intends to continue. */
     activelyWorking: primitives.boolean.default(false),
     /** Optimistic revision for unread/actively-working state. */
@@ -17686,6 +17692,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         runningDescendants: primitives.nonnegativeInteger,
         queuedDescendants: primitives.nonnegativeInteger,
         waitingDescendants: z.number().int().nonnegative().optional(),
+        /** Descendants waiting on a person (not those whose questions are with their agent). */
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
         /**
@@ -17894,6 +17901,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinVersion: true,
     unread: true,
     failureHandled: true,
+    questionWithAgent: true,
     activelyWorking: true,
     attentionVersion: true,
     archived: true,
