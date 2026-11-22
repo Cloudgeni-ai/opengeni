@@ -66,6 +66,15 @@ function boundedSet<V>(cache: Map<string, V>, key: string, value: V): void {
 
 export type GitHubRead = (path: string) => Promise<unknown>;
 
+/** Check-run conclusions that count as failing. */
+export const FAILED_CHECK_CONCLUSIONS: ReadonlySet<string> = new Set([
+  "failure",
+  "timed_out",
+  "cancelled",
+  "action_required",
+  "startup_failure",
+]);
+
 /** Checks summary from check runs and the combined commit status. */
 export function summarizeGitHubChecks(
   checkRuns: readonly { status?: unknown; conclusion?: unknown }[],
@@ -73,15 +82,8 @@ export function summarizeGitHubChecks(
   statusCount: number,
 ): SessionLinkLiveStatus["checks"] {
   if (checkRuns.length === 0 && statusCount === 0) return "none";
-  const failed = new Set([
-    "failure",
-    "timed_out",
-    "cancelled",
-    "action_required",
-    "startup_failure",
-  ]);
   if (
-    checkRuns.some((run) => failed.has(String(run.conclusion))) ||
+    checkRuns.some((run) => FAILED_CHECK_CONCLUSIONS.has(String(run.conclusion))) ||
     combinedState === "failure" ||
     combinedState === "error"
   ) {
@@ -265,7 +267,7 @@ async function installationToken(
 }
 
 /** A REST reader for one repository through the workspace's GitHub App, or null. */
-async function workspaceGitHubReader(
+export async function workspaceGitHubReader(
   deps: Pick<ApiRouteDeps, "db" | "settings">,
   workspaceId: string,
   owner: string,

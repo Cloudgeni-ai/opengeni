@@ -833,7 +833,12 @@ export type { SandboxTerminalProps, XtermTheme } from "./components/sandbox-term
 export { FileBrowser } from "./components/file-browser";
 export type { FileBrowserProps } from "./components/file-browser";
 export { WorkbenchChanges } from "./components/workbench-changes";
-export type { WorkbenchChangesProps, WorkbenchPullRequest } from "./components/workbench-changes";
+export type {
+  WorkbenchChangesComparison,
+  WorkbenchChangesProps,
+  WorkbenchPullRequest,
+} from "./components/workbench-changes";
+export type { WorkbenchChangesNavigation } from "./components/workbench-changes-nav";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
 export { PierreDiff } from "./components/pierre-diff";
@@ -880,6 +885,7 @@ export {
 } from "./components/sandbox-workspace";
 export type {
   SandboxWorkspaceSurface,
+  SandboxWorkspaceTabVisibility,
   SandboxWorkspaceProps,
   UseSandboxWorkspaceTabsOptions,
   UseSandboxWorkspaceTabsResult,

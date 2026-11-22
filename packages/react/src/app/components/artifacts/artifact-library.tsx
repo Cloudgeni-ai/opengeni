@@ -773,6 +773,7 @@ export function ArtifactCard({
   onArchive,
   loading,
   browseSearch,
+  quiet = false,
 }: {
   workspaceId: string;
   item: ArtifactCatalogItem;
@@ -783,6 +784,8 @@ export function ArtifactCard({
   onArchive?: ArtifactArchiveAction | undefined;
   loading?: boolean | undefined;
   browseSearch?: ArtifactReturnSearch | undefined;
+  /** Borderless, on a soft tile (the session panel). */
+  quiet?: boolean | undefined;
 }) {
   const { open, menu, link, dialog } = useArtifactOpen({
     workspaceId,
@@ -807,14 +810,17 @@ export function ArtifactCard({
   return (
     <li
       className={cn(
-        "group relative flex min-w-0 flex-col overflow-hidden rounded-[14px] border border-border bg-surface",
-        "transition-colors duration-[120ms] hover:border-border-strong",
+        "group relative flex min-w-0 flex-col overflow-hidden rounded-[14px]",
+        quiet
+          ? "transition-colors duration-[120ms] hover:bg-surface-2/60"
+          : "border border-border bg-surface transition-colors duration-[120ms] hover:border-border-strong",
         "has-[[data-card-action]:focus-visible]:outline-2 has-[[data-card-action]:focus-visible]:outline-offset-2 has-[[data-card-action]:focus-visible]:outline-brand/55",
       )}
     >
       <div
         className={cn(
-          "relative aspect-[16/10] w-full overflow-hidden border-b border-border bg-surface-2",
+          "relative aspect-[16/10] w-full overflow-hidden bg-surface-2",
+          quiet ? "rounded-[12px]" : "border-b border-border",
           archived && "opacity-70 grayscale",
         )}
       >
@@ -832,7 +838,12 @@ export function ArtifactCard({
           ) : null}
         </span>
       ) : null}
-      <div className="flex min-w-0 items-start gap-2 px-3.5 pt-3 pb-3.5">
+      <div
+        className={cn(
+          "flex min-w-0 items-start gap-2",
+          quiet ? "px-1 pt-2 pb-1.5" : "px-3.5 pt-3 pb-3.5",
+        )}
+      >
         <div className="min-w-0 flex-1">
           {link ? (
             <a {...actionProps} data-card-action="" href={link.href} onClick={link.onClick}>
@@ -1098,7 +1109,7 @@ export function ArtifactLibrary({
           <ul
             aria-label={searching ? "Search results" : "Artifacts"}
             aria-busy={loading || undefined}
-            className={GALLERY_GRID}
+            className={cn(GALLERY_GRID, compact && "gap-x-3 gap-y-2")}
           >
             {items.map((item) => (
               <ArtifactCard
@@ -1112,6 +1123,7 @@ export function ArtifactLibrary({
                 onArchive={onArchive}
                 loading={loading}
                 browseSearch={browseSearch}
+                quiet={compact}
               />
             ))}
           </ul>

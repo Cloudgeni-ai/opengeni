@@ -103,7 +103,7 @@ import { AppSyncJoinCard, AppSyncOptInHost } from "../lib/app-sync-opt-in";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
-import { useWindowBarTitle } from "../../ui/window-bar-title";
+import { useWindowBarCarriesBack, useWindowBarTitle } from "../../ui/window-bar-title";
 import { WindowBarEndControls } from "../components/window-bar";
 
 // Loaded when someone opens it, from the Artifacts route that already holds
@@ -287,9 +287,26 @@ export function SiteViewRoute({
   // the bar's row is hidden). The publish form, opened in front of the Site,
   // names the bar once it has loaded; the Site's claim mounted first, so it
   // yields while the form is open.
+  // Opened from Artifacts: the bar's trail ("Artifacts › name") is the one way
+  // back, so the toolbar drops its own back link while the bar shows it.
+  const artifactsBack = useArtifactsBackLink(workspaceId, back?.fromSession, back ?? undefined);
+  const artifactsBackHref = artifactsBack.href;
+  const artifactsBackClick = useRef(artifactsBack.onClick);
+  artifactsBackClick.current = artifactsBack.onClick;
+  const backPlace = useMemo(() => {
+    if (!back) return null;
+    const crumb = {
+      label: "Artifacts",
+      href: artifactsBackHref,
+      onClick: () => artifactsBackClick.current?.(),
+    };
+    return { section: crumb, parent: crumb };
+  }, [back, artifactsBackHref]);
   const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing, {
     copyable: true,
+    place: backPlace,
   });
+  const barCarriesBack = useWindowBarCarriesBack(titleInWindowBar);
   // Full screen is the route's so opening the form can leave it first.
   const [fullScreen, setFullScreen] = useState(false);
   const publishingSearch = useCallback(
@@ -366,9 +383,10 @@ export function SiteViewRoute({
   // address in, so it lives here, starting at `page`.
   const [embeddedLocation, setEmbeddedLocation] = useState(page ?? "/");
   const onEmbeddedLocationChange = useCallback((href: string) => setEmbeddedLocation(href), []);
-  const backControl = back ? (
-    <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
-  ) : undefined;
+  const backControl =
+    back && !(barCarriesBack && !fullScreen) ? (
+      <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
+    ) : undefined;
   const { layout, update: updateLayout } = useSiteChatPanelLayout(accessContext.subjectId);
   // Open or closed per person and app; see `useSiteChatOpen` for the default.
   const chat = useSiteChatOpen(accessContext.subjectId, siteId);

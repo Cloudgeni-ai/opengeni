@@ -370,12 +370,15 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     const groups = Array.from(container(r).querySelectorAll("[data-rail-group]"), (node) =>
       node.textContent?.trim(),
     );
-    expect(groups).toEqual(["api1", "web1"]);
+    expect(groups).toEqual(["api", "web"]);
     const fileRows = Array.from(
       container(r).querySelectorAll("[data-rail-file]"),
       (node) => node.textContent,
     );
-    expect(fileRows.every((text) => text?.includes("src/file-000.ts"))).toBe(true);
+    // The rail shows the file name, then its directory (inside the repository).
+    expect(fileRows.every((text) => text?.startsWith("file-000.ts") && text.includes("src"))).toBe(
+      true,
+    );
     await r.unmount();
   });
 
@@ -407,12 +410,13 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     await r.unmount();
   });
 
-  test("source badge reads 'Live diff' for the live source", async () => {
+  test("a live diff carries no source badge (the machine chip says it is live)", async () => {
     const r = await renderComponent(
       <WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />,
     );
     await flush();
-    expect(container(r).textContent).toContain("Live diff");
+    expect(container(r).textContent).not.toContain("Live diff");
+    expect(container(r).textContent).not.toContain("as of");
     await r.unmount();
   });
 
@@ -471,7 +475,8 @@ describe("WorkbenchChanges — per-file sections and the pull request action", (
       '[data-diff-file="src/file-000.ts"] > button',
     );
     expect(header?.getAttribute("aria-expanded")).toBe("true");
-    expect(header?.textContent).toContain("src/file-000.ts");
+    expect(header?.textContent).toContain("file-000.ts");
+    expect(header?.textContent).toContain("src");
     await act(async () => header!.click());
     await flush();
     const section = container(r).querySelector('[data-diff-file="src/file-000.ts"]');
@@ -482,6 +487,40 @@ describe("WorkbenchChanges — per-file sections and the pull request action", (
         .querySelector('[data-diff-file="src/file-001.ts"]')
         ?.hasAttribute("data-diff-collapsed"),
     ).toBe(false);
+    await r.unmount();
+  });
+
+  test("the tree navigation folds folders and selects a file", async () => {
+    const diff = [
+      fakeFileDiff({ path: "apps/api/src/a.ts", additions: 4, deletions: 1 }),
+      fakeFileDiff({ path: "apps/api/src/b.ts", additions: 0, deletions: 9 }),
+      fakeFileDiff({ path: "README.md", additions: 2, deletions: 0 }),
+    ];
+    const r = await renderComponent(
+      <WorkbenchChanges diff={diff} source="live" capturedAt={null} navigation="tree" />,
+    );
+    await flush();
+    const root = container(r);
+    expect(root.querySelector("[data-opengeni-changes-rail]")).toBeNull();
+    const tree = root.querySelector("[data-changes-tree]");
+    expect(tree?.getAttribute("aria-label")).toBe("Changed files");
+    // A chain of single folders folds into one row.
+    const dirs = [...root.querySelectorAll("[data-tree-dir]")].map((el) =>
+      el.getAttribute("data-tree-dir"),
+    );
+    expect(dirs).toEqual(["apps/api/src"]);
+    const file = (path: string) =>
+      root.querySelector<HTMLButtonElement>(`[data-changes-tree] [data-rail-file-path="${path}"]`);
+    expect(file("apps/api/src/a.ts")?.getAttribute("aria-current")).toBe("true");
+    await act(async () => file("apps/api/src/b.ts")!.click());
+    await flush();
+    expect(file("apps/api/src/b.ts")?.getAttribute("aria-current")).toBe("true");
+    expect(file("apps/api/src/a.ts")?.getAttribute("aria-current")).toBeNull();
+    // Closing the folder hides its files.
+    await act(async () => root.querySelector<HTMLButtonElement>("[data-tree-dir]")!.click());
+    await flush();
+    expect(file("apps/api/src/a.ts")).toBeNull();
+    expect(file("README.md")).not.toBeNull();
     await r.unmount();
   });
 

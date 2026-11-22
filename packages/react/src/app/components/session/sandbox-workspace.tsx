@@ -96,6 +96,11 @@ export function SessionWorkspace(props: {
     (activeTab: string) => rememberNavigation({ activeTab }),
     [rememberNavigation],
   );
+  // Closing the last tab is a choice too: the next visit opens empty.
+  const forgetActiveTab = useCallback(
+    () => rememberNavigation({ activeTab: null }),
+    [rememberNavigation],
+  );
   const rememberFilePath = useCallback(
     (filePath: string | null) => rememberNavigation({ filePath }),
     [rememberNavigation],
@@ -143,7 +148,9 @@ export function SessionWorkspace(props: {
       {...(props.leadingTabs ? { leadingTabs: props.leadingTabs } : {})}
       {...(props.trailingTabs ? { trailingTabs: props.trailingTabs } : {})}
       {...(initialTab ? { initialTab } : {})}
+      tabVisibility="relevant"
       onActiveTabChange={rememberActiveTab}
+      onStripEmptied={forgetActiveTab}
       openTabRequest={props.openTabRequest}
       {...(props.pullRequest ? { pullRequest: props.pullRequest } : {})}
       {...(props.onOpenPullRequest ? { onOpenPullRequest: props.onOpenPullRequest } : {})}

@@ -2034,6 +2034,59 @@ export type SessionLinkWithStatus = SessionLink & {
 
 export type SessionLinksResponse = { links: SessionLinkWithStatus[] };
 
+/** A person on a pull request (GitHub login). */
+export type SessionPullRequestPerson = { login: string; avatarUrl: string | null };
+
+/**
+ * A linked pull request in full, for a chat's PR panel: header facts, its
+ * description, changed files as structured hunks, commits, discussion and
+ * checks. Lists hold at most one GitHub page (100) each.
+ */
+export type SessionPullRequestDetail = {
+  url: string;
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  state: "open" | "draft" | "merged" | "closed";
+  author: SessionPullRequestPerson | null;
+  base: string;
+  head: string;
+  createdAt: string | null;
+  mergedAt: string | null;
+  body: string | null;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  commitCount: number;
+  commentCount: number;
+  /** GitHub's mergeability; null while GitHub computes it. */
+  mergeable: boolean | null;
+  checks: SessionLinkLiveStatus["checks"];
+  review: SessionLinkLiveStatus["review"];
+  files: GitFileDiff[];
+  /** More files changed than are listed. */
+  filesTruncated: boolean;
+  commits: { sha: string; message: string; author: string | null; date: string | null }[];
+  comments: {
+    id: string;
+    kind: "comment" | "review";
+    author: SessionPullRequestPerson | null;
+    body: string;
+    reviewState: "approved" | "changes_requested" | "commented" | null;
+    createdAt: string | null;
+    url: string | null;
+  }[];
+  checkRuns: {
+    name: string;
+    state: "passing" | "failing" | "pending" | "skipped";
+    url: string | null;
+  }[];
+};
+
+/** `pullRequest` is null when the workspace cannot read the pull request. */
+export type SessionPullRequestResponse = { pullRequest: SessionPullRequestDetail | null };
+
 export type AddSessionLinkRequest = { url: string; title?: string; kind?: SessionLinkKind };
 
 /** Whether the person can share a chat here, and their live link. */
