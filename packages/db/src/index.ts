@@ -73,11 +73,11 @@ import { type ActiveSandboxPointer } from "./active-sandbox";
 import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
-  codexCapacityWaitReason,
+  isProviderCapacityWaitReason,
   subscriptionCapacityWaitReasonText,
   subscriptionCapacityWaitNeedsAction,
   type SubscriptionReconnectAccount,
-} from "@opengeni/subscriptions";
+} from "@opengeni/contracts/subscription-capacity-wait";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -28211,7 +28211,7 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
-        const explanation = codexCapacityWaitReason(input.waitReason)
+        const explanation = isProviderCapacityWaitReason(input.waitReason)
           ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.reconnectAccount) ??
             undefined)
           : undefined;
@@ -28789,7 +28789,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
             vocabulary.label,
             waitEvaluation.reconnectAccount,
           );
-          const explanation = codexCapacityWaitReason(waitEvaluation.waitReason)
+          const explanation = isProviderCapacityWaitReason(waitEvaluation.waitReason)
             ? (reasonText ?? undefined)
             : undefined;
           // Whoever was told when the wait ends (a top-level chat's person,

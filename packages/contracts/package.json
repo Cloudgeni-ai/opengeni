@@ -306,6 +306,10 @@
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
     },
+    "./subscription-capacity-wait": {
+      "types": "./src/subscription-capacity-wait.ts",
+      "default": "./src/subscription-capacity-wait.ts"
+    },
     "./subscription-personal-authority-v2": {
       "types": "./src/subscription-personal-authority-v2.ts",
       "default": "./src/subscription-personal-authority-v2.ts"

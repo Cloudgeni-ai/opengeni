@@ -573,7 +573,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             await releaseSubscriptionTurnLease(tx, { ...lease, connectionId: reuse });
           return {
             kind: "wait",
-            ...projectSubscriptionCoreWait(input, decision, providerId),
+            ...projectSubscriptionCoreWait(input, decision, provider),
             healthRetryAt: await earliestHealthRetryAt(tx, identity),
             explicitConnectionId,
           };
@@ -925,7 +925,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         const binding = input.session.binding;
         return {
           kind: "wait",
-          ...projectSubscriptionCoreWait(input, decision, providerId),
+          ...projectSubscriptionCoreWait(input, decision, provider),
           healthRetryAt: await earliestHealthRetryAt(tx, identity),
           explicitConnectionId: binding?.choice === "explicit" ? binding.connectionId : null,
         };

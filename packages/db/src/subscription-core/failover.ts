@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { isProviderCapacityWaitReason } from "@opengeni/contracts/subscription-capacity-wait";
 import {
   bindingStickiness,
   connectionIneligibility,
@@ -72,9 +73,6 @@ class SubscriptionBindingConflict extends Error {}
 const BINDING_CONFLICT_RETRIES = 3;
 const FAILOVER_WAITS = new Set([
   "no_eligible_capacity",
-  "codex_relogin_required",
-  "codex_plan_no_capacity",
-  "codex_rate_limited",
   "model_not_allowed",
   "compaction_provider_locked",
 ]);
@@ -221,7 +219,11 @@ async function placeSubscriptionCoreTurnWithFailoverLocked(
   if (route.status === "home_only") return homePlacement();
   if (!route.value) {
     const result = await homePlacement();
-    if (result.kind !== "wait" || !FAILOVER_WAITS.has(result.reason)) return result;
+    if (
+      result.kind !== "wait" ||
+      (!FAILOVER_WAITS.has(result.reason) && !isProviderCapacityWaitReason(result.reason))
+    )
+      return result;
   }
   for (let attempt = 0; ; attempt++) {
     try {
@@ -335,7 +337,7 @@ async function placeFailoverOnce(
         const reason = failoverWaitReason(decision.reason, world);
         return {
           kind: "wait",
-          ...projectSubscriptionCoreWait(input, decision, subscriptionCoreProviderId(home)),
+          ...projectSubscriptionCoreWait(input, decision, home),
           ...(reason === "failover_no_model_mapping" ? { reason } : {}),
           healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, identity, world),
           explicitConnectionId: null,
@@ -428,7 +430,7 @@ export async function evaluateSubscriptionCorePlacementWithFailover(
       const reason = failoverWaitReason(decision.reason, world);
       return {
         kind: "wait",
-        ...projectSubscriptionCoreWait(world.input, decision, subscriptionCoreProviderId(home)),
+        ...projectSubscriptionCoreWait(world.input, decision, home),
         ...(reason === "failover_no_model_mapping" ? { reason } : {}),
         healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, request.identity, world),
         explicitConnectionId: null,

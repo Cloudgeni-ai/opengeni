@@ -1,6 +1,12 @@
-import type { SubscriptionCapacityWaitReason, SubscriptionReconnectAccount } from "./types";
+/** Provider diagnoses carried by the public capacity-wait events and notices. */
+export type ProviderCapacityWaitReason =
+  | "codex_relogin_required"
+  | "codex_plan_no_capacity"
+  | "codex_rate_limited";
 
-export function codexCapacityWaitReason(reason: string): boolean {
+export type SubscriptionReconnectAccount = { label: string; personal: boolean };
+
+export function isProviderCapacityWaitReason(reason: string): reason is ProviderCapacityWaitReason {
   return (
     reason === "codex_relogin_required" ||
     reason === "codex_plan_no_capacity" ||
@@ -15,7 +21,7 @@ export function subscriptionCapacityWaitReasonText(
   name: string,
   account?: SubscriptionReconnectAccount,
 ): string | null {
-  const messages: Record<SubscriptionCapacityWaitReason, string> = {
+  const messages = {
     pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. This turn continues automatically once it is available again.`,
     pinned_account_disabled: `The ${name} account pinned to this chat is turned off. Turn it back on, choose another account, or switch the chat to automatic. Waiting alone will not fix this.`,
     pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. This turn continues once another account is chosen or the session is switched back to automatic.`,
@@ -31,9 +37,7 @@ export function subscriptionCapacityWaitReasonText(
     accepted_authority_unavailable:
       "This work was accepted before the account move and its account access could not be carried. Send it again to continue.",
   };
-  return Object.hasOwn(messages, reason)
-    ? messages[reason as SubscriptionCapacityWaitReason]
-    : null;
+  return Object.hasOwn(messages, reason) ? messages[reason as keyof typeof messages] : null;
 }
 
 export function subscriptionCapacityWaitNeedsAction(reason: string): boolean {

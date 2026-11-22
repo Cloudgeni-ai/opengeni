@@ -2,10 +2,12 @@ import { CODEX_CREDENTIAL_LEASE_TTL_MS } from "@opengeni/db";
 import {
   subscriptionCapacityWaitReasonText,
   subscriptionCapacityWaitNeedsAction,
-  type WaitReason,
-  type SubscriptionCapacityWaitReason,
+  type ProviderCapacityWaitReason,
   type SubscriptionReconnectAccount,
-} from "@opengeni/subscriptions";
+} from "@opengeni/contracts/subscription-capacity-wait";
+import type { WaitReason } from "@opengeni/subscriptions";
+
+type SubscriptionCapacityWaitReason = WaitReason | ProviderCapacityWaitReason;
 
 /*
  * Failures of a chat turn on the shared subscription core, for any provider.

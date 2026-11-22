@@ -1,5 +1,4 @@
 import { sql, type SQL } from "drizzle-orm";
-import { codexPlanKey } from "@opengeni/codex";
 import type {
   ConnectionHealth,
   ConnectionKind,
@@ -255,8 +254,9 @@ export async function listSubscriptionConnectionsForPlacement(
       kind: row.kind,
       ownership,
       health,
-      ...(row.provider === "codex"
-        ? { label: row.label, planType: codexPlanKey(row.plan_type) }
+      ...(subscriptionCoreProviderIds().includes(row.provider) &&
+      subscriptionCoreProvider(row.provider).projectWait
+        ? { label: row.label, planType: row.plan_type }
         : {}),
       extraCreditsEnabled: row.extra_credits_enabled,
       allocatorEnabled: row.allocator_enabled,

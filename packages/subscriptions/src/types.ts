@@ -386,15 +386,6 @@ export type WaitReason =
    */
   | "accepted_authority_unavailable";
 
-/** Wait explanations projected by a provider from the allocator's decision. */
-export type SubscriptionCapacityWaitReason =
-  | WaitReason
-  | "codex_relogin_required"
-  | "codex_plan_no_capacity"
-  | "codex_rate_limited";
-
-export type SubscriptionReconnectAccount = { label: string; personal: boolean };
-
 export type PlacementDecision =
   | {
       kind: "run";

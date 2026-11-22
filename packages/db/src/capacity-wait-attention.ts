@@ -1,9 +1,9 @@
 import {
-  codexCapacityWaitReason,
+  isProviderCapacityWaitReason,
   subscriptionCapacityWaitNeedsAction,
   subscriptionCapacityWaitReasonText,
   type SubscriptionReconnectAccount,
-} from "@opengeni/subscriptions";
+} from "@opengeni/contracts/subscription-capacity-wait";
 
 /**
  * When a subscription capacity wait needs a person's (or a parent agent's)
@@ -43,7 +43,7 @@ export function capacityWaitAttention(input: {
   healthRetryAt: Date | null;
   now: Date;
 }): CapacityWaitAttention | null {
-  const resetsAt = codexCapacityWaitReason(input.waitReason)
+  const resetsAt = isProviderCapacityWaitReason(input.waitReason)
     ? input.earliestResetAt
     : (input.earliestResetAt ?? input.healthRetryAt ?? null);
   const long =
