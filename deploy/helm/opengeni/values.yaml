@@ -210,9 +210,6 @@ secret:
   # OpenRouter catalog. It belongs here, never in config or catalog JSON.
   # OPENGENI_OPPER_API_KEY likewise enables the reviewed Opper catalog
   # (default: Claude Opus 5.5 EU).
-  # OPENGENI_SKILL_IMPORT_GITHUB_TOKEN (optional, API and worker) authenticates
-  # Skill preview/install reads from GitHub; use a fine-grained token with
-  # public-repository read access only.
   # When integrations are enabled, this Secret must provide
   # OPENGENI_INTEGRATIONS_STATE_SECRET and OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY.
   # Never pass those values through Helm values or command-line --set arguments.
