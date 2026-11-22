@@ -4,6 +4,7 @@ import type {
   ModelDecisionRequest,
   ModelDecisionResponse,
 } from "@opengeni/contracts";
+import type { AppServerRun, AppServerStatus } from "@opengeni/contracts";
 import type {
   AppPackageExportRequest,
   AppPackageExportResponse,
@@ -10745,6 +10746,42 @@ export class OpenGeniClient {
     return await this.requestJson<AppSyncStatusResponse>(
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data/syncs`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Whether the app's current version has server code, and today's runs and errors. Needs a manager of the app. */
+  async getAppServerStatus(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppServerStatus> {
+    return await this.requestJson<AppServerStatus>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/server/status`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Recent runs of the app's server code, newest first. Needs a manager of the app. */
+  async listAppServerRuns(
+    workspaceId: string,
+    siteId: string,
+    query: { limit?: number; status?: "ok" | "error"; before?: string } = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ runs: AppServerRun[] }> {
+    const params = new URLSearchParams();
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    if (query.status) params.set("status", query.status);
+    if (query.before) params.set("before", query.before);
+    const search = params.toString();
+    return await this.requestJson<{ runs: AppServerRun[] }>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/server/runs${search ? `?${search}` : ""}`,
       undefined,
       undefined,
       options,

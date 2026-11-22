@@ -111,6 +111,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     documentEmbeddingBillingMode: "usage_only",
     sitesCloudflareStorageEnabled: false,
     sitesLiveEnabled: false,
+    sitesServerCodeEnabled: false,
     sitesGatewayInternalOrigin: undefined,
     sitesSqlFreeStorageBytes: 5 * 1024 * 1024 * 1024,
     sitesSqlFreeRowsReadPerMonth: undefined,

@@ -7,8 +7,8 @@ description: Build, edit, and publish apps. Use when the user asks for a site, d
 
 An app is a saved page or web app in the workspace: one HTML file (a large
 app adds build files) that the console shows, shares and can put on the web,
-plus optional editable source. Apps have no server of their own; Opengeni AI,
-tools and saved data come from the host.
+plus optional editable source. Opengeni AI, tools and saved data come from the
+host; optional server code runs as the app on Opengeni.
 
 Do not invent an app framework, deployment service, App Host, custom domain
 setup, provider-specific API wrapper, or platform-only build CLI. Putting a
@@ -221,7 +221,7 @@ tools, read `references/publish-to-web.md` and review who sees what.
 Full apps follow these two rules and read the references they need (Opengeni look:
 `references/build-and-preview.md`).
 
-### Apps have no server; AI comes from the host
+### AI and tools come from the host
 
 An app never needs its own server, API key, or hosting provider to reach
 the workspace. Model access, agent conversations, and workspace tools all come from
@@ -240,12 +240,10 @@ app data gives every published app persistent collections and files. A page
 calling a connected tool usually shows data only to viewers with their own
 connection; for a team, a shared sync (`app_sync_save`) fills a collection on a
 schedule, and a webhook (`app_webhook_save`) takes in other services' events.
-A separate server is only
-relevant for a genuinely external need: a third-party API that requires a
-secret the viewer's browser must not hold, relational queries or volumes app
-Data cannot serve, or live server-side compute. If the request seems to need
-one of those, or you cannot tell where the user wants the AI to run,
-say which designs are possible and ask before building.
+
+Server code (`references/server-code.md`) runs as the app: shared-connection
+data for permitted members, an API key, or checked writes.
+Never another host for that. If unsure where the user wants it to run, ask.
 
 ### Start from the durable app
 
@@ -272,6 +270,7 @@ Read the references the app needs with `skill_read`, for example
 | Saves or reacts to records or files (app data, syncs, webhooks) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (app SQL) | `references/site-sql.md` |
 | Invited or public, with data, tools or an embedded agent | `references/publish-to-web.md` |
+| Runs as the app: shared connections, API keys, server-side writes | `references/server-code.md` |
 | Moves to another workspace | `references/app-packages.md` |
 
 ## Show a visualization or app inside chat

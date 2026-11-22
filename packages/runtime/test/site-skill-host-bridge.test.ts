@@ -27,7 +27,7 @@ describe("Sites skill single-file path", () => {
     expect(choice).toBeGreaterThan(-1);
     expect(choice).toBeLessThan(simple);
     expect(simple).toBeLessThan(apps);
-    expect(simple).toBeLessThan(skill.indexOf("## Apps have no server"));
+    expect(simple).toBeLessThan(skill.indexOf("## AI and tools come from the host"));
     const section = skill.slice(simple, skill.indexOf("## Make new apps readable by default"));
     expect(section).toContain("Do not set a goal");
     expect(section).toContain("At most one quick look at phone width");
@@ -104,7 +104,7 @@ describe("Sites skill single-file path", () => {
 
 describe("Sites skill host-bridge rule", () => {
   test("states up front that a Site never needs its own server for Opengeni AI", () => {
-    const rule = skill.indexOf("## Apps have no server; AI comes from the host");
+    const rule = skill.indexOf("## AI and tools come from the host");
     const durable = skill.indexOf("## Start from the durable app");
     expect(rule).toBeGreaterThan(-1);
     expect(rule).toBeLessThan(durable);
@@ -125,7 +125,16 @@ describe("Sites skill host-bridge rule", () => {
     expect(section).toContain(
       "do not post a Connect card for a\nhosting provider the user did not name",
     );
-    expect(section).toContain("say which designs are possible and ask before building");
+    expect(section).toContain("`references/server-code.md`");
+    expect(section).toContain("Never another host for that.");
+  });
+
+  test("runs server code as the app on shared accounts only", () => {
+    const guide = reference("server-code.md");
+    expect(guide).toContain("runs **as the\napp**, never as the person viewing it");
+    expect(guide).toContain("never a viewer's own connection");
+    expect(guide).toContain("`site.server.fetch(path, init)`");
+    expect(guide).toContain("do not fall back to\nthe viewer's connection");
   });
 
   test("keeps the backend escape hatch scoped to external compute and asks first", () => {
@@ -139,7 +148,7 @@ describe("Sites skill host-bridge rule", () => {
   });
 
   test("points persistent data at Site Data instead of a separate server", () => {
-    const rule = skill.indexOf("## Apps have no server; AI comes from the host");
+    const rule = skill.indexOf("## AI and tools come from the host");
     const durable = skill.indexOf("## Start from the durable app");
     const section = skill.slice(rule, durable);
     expect(section).toContain("Saved data needs no server either");

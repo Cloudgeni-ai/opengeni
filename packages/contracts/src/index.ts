@@ -82,6 +82,7 @@ export * from "./app-webhook";
 import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
 export * from "./app-assets";
+export * from "./app-server";
 export * from "./site-sql";
 export * from "./app-package";
 export * from "./app-templates";
@@ -1331,6 +1332,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_webhook_save",
   "app_webhook_list",
   "app_webhook_delete",
+  "app_server_runs",
+  "app_server_run",
   "app_files_list",
   "app_files_upload",
   "app_files_delete",

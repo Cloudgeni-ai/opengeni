@@ -1,6 +1,7 @@
 import {
   WorkspaceArtifactRequestedTools,
   type McpConnectionAccountBinding,
+  type AppServerManifest,
   type SiteAssetManifest,
   type ToolGatewayIdentity,
   type WorkspaceArtifact,
@@ -708,6 +709,11 @@ type PublishMetadata = {
   requestedTools?: ToolGatewayIdentity[];
   /** Asset files of a multi-file build; omitted or null for a single-file app. */
   assetManifest?: SiteAssetManifest | null;
+  /**
+   * App server code (docs/app-server-code.md): a new version's code, null to
+   * remove it, or omitted to keep the current version's code (publish).
+   */
+  serverManifest?: AppServerManifest | null;
   /** `requestedTools` as the caller declared them, before the server paired connector identities. */
   declaredRequestedTools?: ToolGatewayIdentity[];
   operationKey: string;
@@ -1252,6 +1258,7 @@ export async function createWorkspaceArtifact(
               sourceSizeBytes: input.sourceSizeBytes,
               requestedTools: input.requestedTools ?? [],
               assetManifest: input.assetManifest ?? null,
+              serverManifest: input.serverManifest ?? null,
               operationKey: input.operationKey,
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
@@ -1413,6 +1420,8 @@ export async function duplicateWorkspaceArtifact(
             requestedTools,
             // The copy serves the same immutable files under its own version.
             assetManifest: source.assetManifest,
+            // And the same server code (its files are content-addressed per workspace).
+            serverManifest: source.serverManifest,
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
@@ -1535,6 +1544,11 @@ export async function publishWorkspaceArtifactVersion(
               sourceSizeBytes: input.sourceSizeBytes,
               requestedTools: input.requestedTools ?? current.requestedTools,
               assetManifest: input.assetManifest ?? null,
+              // Server code carries over unless this publish brings its own (or removes it).
+              serverManifest:
+                input.serverManifest === undefined
+                  ? (current.serverManifest ?? null)
+                  : input.serverManifest,
               operationKey: input.operationKey,
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,

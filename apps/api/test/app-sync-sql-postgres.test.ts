@@ -115,6 +115,8 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
     settings: testSettings({
       productAccessMode: "configured",
       sandboxBackend: "none",
+      // The fake orders tool, configured for the workspace (site-tool-data.ts).
+      mcpServers: [{ id: "orders-server", name: "Orders", url: "https://orders.example/mcp" }],
       ...overrides,
     }),
     objectStorage: {
