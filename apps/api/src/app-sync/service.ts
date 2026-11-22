@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { asAppAutomation, markToolData, siteToolDataTarget } from "../site-tool-data";
+import {
+  asAppAutomation,
+  keepSyncToolDataMarked,
+  markToolData,
+  siteToolDataTarget,
+} from "../site-tool-data";
 import {
   APP_SYNC_DEFAULT_PAGES,
   APP_SYNC_MAX_RECORDS,
@@ -1715,6 +1720,13 @@ export async function updateAppSync(
         events: patch.events,
       })
     : null;
+  // What the sync stored stays restricted after it changes mode or target.
+  await keepSyncToolDataMarked(
+    deps,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    siteId,
+    action,
+  );
   const updated = await deps.db.transaction(async (tx) => {
     const next = await updateScheduledTask(tx, grant.workspaceId, task.id, {
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
@@ -1788,7 +1800,14 @@ export async function deleteAppSync(
   syncId: string,
 ): Promise<{ deleted: string }> {
   const access = await managerAccess(deps, grant, siteId);
-  await requireSyncTask(deps, grant, siteId, syncId);
+  const { action } = await requireSyncTask(deps, grant, siteId, syncId);
+  // Its stored data outlives the sync, so it stays restricted.
+  await keepSyncToolDataMarked(
+    deps,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    siteId,
+    action,
+  );
   await deleteScheduledTaskLifecycle({
     db: deps.db,
     workspaceId: grant.workspaceId,

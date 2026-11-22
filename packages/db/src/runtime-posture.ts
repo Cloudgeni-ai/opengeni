@@ -2508,6 +2508,7 @@ export const FORCE_RLS_TABLES = [
   "site_sql_rate_windows",
   "site_sql_usage",
   "site_tool_allowances",
+  "site_tool_data_resets",
   "site_tool_data_sources",
   "site_viewer_sessions",
   "skill_config_conversion_receipts",
@@ -3139,8 +3140,6 @@ export const RUNTIME_READ_INSERT_TABLES = [
   // mirror of a visible message event.
   "session_message_search_texts",
   "session_spawn_denials",
-  // 1554_app_server_code: where an app stored shared-account tool data (marks only grow).
-  "site_tool_data_sources",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
@@ -3197,6 +3196,11 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "session_attempt_model_context_snapshots",
   "session_turn_startup_milestones",
   "site_auth_connections",
+  // 1555_sticky_tool_data_marks: when a manager last reset a target.
+  "site_tool_data_resets",
+  // 1554_app_server_code: where an app stored shared-account tool data;
+  // 1555 refreshes a mark's time when a reset target is marked again.
+  "site_tool_data_sources",
   "slack_user_link_access_requests",
   "workspace_interaction_revisions",
 ] as const;

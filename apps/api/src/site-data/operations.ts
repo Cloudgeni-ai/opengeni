@@ -1,5 +1,10 @@
 import { outsideAgentReach, type ApiRouteDeps } from "@opengeni/core";
-import { requireToolDataReader, siteToolDataTarget, toolDataReaderOf } from "../site-tool-data";
+import {
+  requireToolDataReader,
+  resetToolData,
+  siteToolDataTarget,
+  toolDataReaderOf,
+} from "../site-tool-data";
 import type {
   SiteDataCollectionDefinitionRequest,
   SiteDataDescribeResponse,
@@ -270,7 +275,9 @@ export async function deleteSiteDataCollection(
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   await consume(access, "write", 1);
-  return access.store.deleteCollection(access.caller, name);
+  const deleted = await access.store.deleteCollection(access.caller, name);
+  await resetCollectionToolData(deps, access, name);
+  return deleted;
 }
 
 export async function resetSiteDataCollection(
@@ -281,7 +288,19 @@ export async function resetSiteDataCollection(
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   await consume(access, "write", 1);
-  return access.store.resetCollection(access.caller, name);
+  const reset = await access.store.resetCollection(access.caller, name);
+  await resetCollectionToolData(deps, access, name);
+  return reset;
+}
+
+/** Its records are gone, so the collection's stored tool data marks stop counting. */
+async function resetCollectionToolData(deps: SiteDataDeps, access: SiteDataAccess, name: string) {
+  await resetToolData(
+    deps,
+    { accountId: access.caller.accountId, workspaceId: access.caller.workspaceId },
+    access.site.id,
+    siteToolDataTarget("collection", name),
+  );
 }
 
 /**

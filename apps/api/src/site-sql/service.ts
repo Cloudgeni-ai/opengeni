@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { requireToolDataReader, siteToolDataTarget, toolDataReaderOf } from "../site-tool-data";
+import {
+  requireToolDataReader,
+  resetToolData,
+  siteToolDataTarget,
+  toolDataReaderOf,
+} from "../site-tool-data";
 import { SITE_DB_OPERATION_METRIC, SITE_TIMING_BUCKETS } from "../site-live/metrics";
 import {
   compileSiteSql,
@@ -924,6 +929,8 @@ export async function resetSiteSql(
         await markSiteSqlRebuilt(tx, resolved.scope, usage.databaseBytes);
         return rebuilt;
       });
+      // The rows are gone, so the database's stored tool data marks stop counting.
+      await resetToolData(deps, resolved.scope, resolved.scope.siteId, siteToolDataTarget("sql"));
       return { applied, droppedSchema: drop };
     } finally {
       await meter(deps, resolved, usage, { countTowardCaps: false });
