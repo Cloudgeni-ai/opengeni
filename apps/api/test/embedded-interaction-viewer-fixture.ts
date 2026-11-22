@@ -315,8 +315,8 @@ async function registerFixtureApi(app: Hono, controller: BrowserControlServer, o
       controllerDataPlaneUrl: controller.url.replace("http:", "ws:"),
     }),
   }));
-  const { registerBrowserSessionRoutes } = await import("../../src/routes/browser-sessions");
-  const { registerComputerSessionRoutes } = await import("../../src/routes/computer-sessions");
+  const { registerBrowserSessionRoutes } = await import("../src/routes/browser-sessions");
+  const { registerComputerSessionRoutes } = await import("../src/routes/computer-sessions");
   const deps = {
     db: {},
     bus: new MemoryEventBus(),
