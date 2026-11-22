@@ -229,18 +229,16 @@ An App opened from the sidebar is a page of Opengeni: it fills the main area,
 its address (above) is the page URL, and it stays open when the person goes
 elsewhere. Make it feel native:
 
-- Follow `prefers-color-scheme`; inside Opengeni it is Opengeni's light or dark
-  theme and switches without a reload. Don't hard-code a white page.
-- For an App that should look like Opengeni (dashboards, tools, admin pages),
-  add `<link rel="stylesheet" href="/__opengeni/ui.css">` and use its `--og-*`
-  tokens (`--og-canvas`, `--og-surface`, `--og-border`, `--og-fg`,
-  `--og-fg-muted`, `--og-accent`, ...) and classes: `og-app` on `<body>`,
-  `og-page`, `og-title`, `og-heading`, `og-card`, `og-button`
-  (`og-button-primary`), `og-input`, `og-badge`, `og-table`. It styles only what
-  you mark, so a user's own design stays theirs. In a Bun + React app the
-  bundler can't resolve that link; put
-  `<style>@import "/__opengeni/ui.css";</style>` in `index.html` instead (the
-  build leaves it alone).
+- Its look is chosen as in the Skill's "Look": the Opengeni look unless a
+  design comes first. It follows `prefers-color-scheme` (Opengeni's light or
+  dark theme, switching without a reload); don't hard-code a white page.
+- The Opengeni look is `/__opengeni/ui.css`: `--og-*` tokens (`--og-canvas`,
+  `--og-surface`, `--og-border`, `--og-fg`, `--og-fg-muted`, `--og-accent`,
+  ...) and classes (`og-app` on `<body>`, `og-page`, `og-title`, `og-heading`,
+  `og-card`, `og-button`, `og-button-primary`, `og-input`, `og-badge`,
+  `og-table`). It styles only what you mark. A bundler can't resolve the
+  `<link>`, so a Bun + React app puts `<style>@import "/__opengeni/ui.css";</style>`
+  in `index.html` instead (the build leaves it alone).
 - Links to a page (`/releases`) work from the sidebar too: add one with
   `sidebar_layout_update` (an `app` item with the App's id and `path`).
 

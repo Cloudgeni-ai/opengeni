@@ -40,11 +40,10 @@ tool calls.
    tests, a preview server or a browser build for it.
 2. Write one `index.html` with inline CSS and script. Include
    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
-   follow the readable defaults below and let content reflow into one column
-   on a phone. Use system fonts, text, inline SVG or small data-URL images
-   such as icons and logos, so nothing has to load beside the file (draw a
-   chart as inline SVG). Photos and video go outside the HTML (see "Keep
-   the page small").
+   follow "Look" below and let content reflow into one column on a phone.
+   Use text, inline SVG or small data-URL images such as icons and logos, so
+   nothing else has to load beside the file (draw a chart as inline SVG).
+   Photos and video go outside the HTML (see "Keep the page small").
 3. To keep entries, load the host client with this exact tag before your own
    script, and use app data:
 
@@ -77,40 +76,27 @@ tool calls.
    phones"), offer to put it on the web and ask before making it public,
    then follow "Publish to the web".
 
-## Make new apps readable by default
+## Look
 
-Choose a clear type scale before building. For new apps without an explicit
-type scale, start main reading text at 16–18px, controls and table content at
-14–16px, and reserve smaller text for genuinely secondary metadata, not
-descriptions, navigation, labels needed to use a control, or key results.
-Use comfortable line heights (about 1.5–1.7 for prose) and reading widths of
-roughly 60–75 characters. Check the chosen font at its rendered size: a large
-headline does not make small body copy readable.
+Every new app, single-file apps included, takes the first look that applies:
 
-Use `rem`/`em` for text, keep the browser's root font size, and allow browser
-zoom and user text scaling. Do not shrink primary copy on mobile to fit more
-columns; reflow the layout, wrap content, or scroll a wide table instead.
-Keep form text readable and let controls grow with their labels.
+1. The person's requested design, or the existing app's.
+2. A design system the workspace keeps in Knowledge or Skills, if you find one.
+3. For an app about one product (a GitHub tracker, a PostHog dashboard), the
+   Opengeni look with that product's accent and logo, or the product's own look.
+4. Otherwise the Opengeni look: `<link rel="stylesheet" href="/__opengeni/ui.css">`
+   in `<head>`, `og-app` on `<body>`, its classes (`og-page`, `og-title`,
+   `og-heading`, `og-card`, `og-button` with `og-button-primary`, `og-input`,
+   `og-badge`, `og-table`, `og-muted`) and `--og-*` tokens for anything else.
+   It follows `prefers-color-scheme` and loads in the console and on the web,
+   so add no font, reset or hard-coded white page.
 
-These are authoring defaults, not a mandatory theme or runtime CSS override.
-Honor a user's deliberate design, retain an existing app's type system, and
-leave embedded components such as `SessionConversation` on their own styles.
-Do not inject a blanket font-size rule into existing apps or use `!important`
-to force this scale onto a component library. If `frontend-design` is available,
-use it for visual direction alongside these readability defaults.
+Keep text readable: prose on a page meant for reading at 1–1.125rem, line
+height about 1.6 and about 70ch wide; `rem`/`em` for your own sizes; reflow on
+a phone instead of shrinking text; browser zoom and text scaling left working.
+Leave embedded components such as `SessionConversation` on their own styles.
 
-For a new page, this optional starting point applies only to elements you mark
-with these classes; adapt it to the design rather than importing a global reset.
-The sizes below assume the usual 16px browser default and scale with it.
-
-```css
-.site-copy { font-size: 1.0625rem; line-height: 1.6; max-width: 70ch; }
-.site-control { font: inherit; font-size: 1rem; line-height: 1.5; }
-.site-table { font-size: 0.9375rem; line-height: 1.5; }
-.site-meta { font-size: 0.8125rem; line-height: 1.5; }
-```
-
-A single-file app that follows these defaults needs no more checking than its
+A single-file app that follows this needs no more checking than its
 one optional phone-width look. For a full app, before publishing, inspect actual
 paragraphs, labels, inputs, buttons, table cells and empty/error states at
 desktop and narrow mobile widths, then with text enlarged to 200%. Check
@@ -218,8 +204,8 @@ tools, read `references/publish-to-web.md` and review who sees what.
 
 ## Full apps
 
-Full apps follow these two rules and read the references they need (Opengeni look:
-`references/build-and-preview.md`).
+Full apps follow these two rules and read the references they need (the
+Opengeni look in a bundled app: `references/build-and-preview.md`).
 
 ### Apps have no server; AI comes from the host
 

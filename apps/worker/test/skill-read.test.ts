@@ -207,30 +207,25 @@ describe("skill_read gateway definition", () => {
               if (text?.type !== "text") throw new Error("missing Skill text");
               const rendered = JSON.parse(text.text).files[0].content as string;
               expect(rendered).toBe(markdown);
-              const start = rendered.indexOf("## Make new apps readable by default");
+              const start = rendered.indexOf("## Look");
               const build = rendered.indexOf("## Edit an existing app");
               expect(start).toBeGreaterThan(-1);
               expect(start).toBeLessThan(build);
               const guidance = rendered.slice(start, build).replace(/\s+/gu, " ");
               for (const rule of [
-                "16–18px",
-                "14–16px",
-                "genuinely secondary metadata",
-                "1.5–1.7 for prose",
-                "keep the browser's root font size",
-                "Do not shrink primary copy on mobile",
-                "Honor a user's deliberate design",
-                "retain an existing app's type system",
+                "single-file apps included",
+                "The person's requested design, or the existing app's.",
+                "Knowledge or Skills",
+                "that product's accent and logo",
+                '<link rel="stylesheet" href="/__opengeni/ui.css">',
+                "`og-app` on `<body>`",
+                "prefers-color-scheme",
+                "1–1.125rem",
+                "reflow on a phone instead of shrinking text",
                 "SessionConversation",
-                "not a mandatory theme or runtime CSS override",
-                "frontend-design",
                 "text enlarged to 200%",
               ])
                 expect(guidance).toContain(rule);
-              expect(guidance).toContain(".site-copy { font-size: 1.0625rem;");
-              expect(guidance).toContain(".site-control { font: inherit; font-size: 1rem;");
-              expect(guidance).toContain(".site-table { font-size: 0.9375rem;");
-              expect(guidance).toContain(".site-meta { font-size: 0.8125rem;");
             }
           }
         }
