@@ -242,6 +242,8 @@ import {
   scheduledTaskEventsToolInput,
   scheduledTaskOverlapPolicyToolInput,
   scheduledTaskAgentNameRefusal,
+  scheduledTaskAgentNameToolInput,
+  scheduledTaskUpdateToolValidation,
   withResolvedScheduledTaskAgent,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
@@ -1074,6 +1076,16 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
           .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
           .strict()
           .optional(),
+        agentConfigPatch: z4
+          .object({
+            ...UpdateScheduledTaskRequest.out.shape.agentConfigPatch.unwrap().shape,
+            agentName: scheduledTaskAgentNameToolInput(),
+          })
+          .strict()
+          .optional()
+          .describe(
+            "Change prompt, model, reasoningEffort or the agent (agentName or agentId; null removes it) without replacing agentConfig.",
+          ),
         ...(events ? { events: scheduledTaskEventsToolInput() } : {}),
       })
       // Only a person pins connector accounts; agents never do.
@@ -1085,7 +1097,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         ...(events ? {} : { events: true as const }),
       })
       .strict(),
-    UpdateScheduledTaskRequest,
+    scheduledTaskUpdateToolValidation(),
   );
 const scheduledTaskUpdateToolInputs = {
   withEvents: staticToolInput(() => buildScheduledTaskUpdateToolInput(true)),
@@ -2854,7 +2866,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_update",
       {
         description:
-          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top." +
+          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. To change the model, reasoning or agent of each run use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top." +
           (eventTriggers
             ? " events replaces the event triggers and their run policy; triggers: [] removes them."
             : ""),
@@ -2863,11 +2875,27 @@ export function buildOpenGeniMcpServer(
       async ({ id, ...requested }) => {
         const existing = await requireVisibleTask(id);
         const previous: ScheduledTaskRestoreState = { task: existing };
-        const { input: raw, timeZoneDefault } = await withAgentScheduleTimeZone(
+        const { input: zoned, timeZoneDefault } = await withAgentScheduleTimeZone(
           deps.db,
           grant,
           requested,
           existing.schedule,
+        );
+        // An agent named by name runs as the person this chat acts for may use it.
+        const raw = await withResolvedScheduledTaskAgent(
+          zoned,
+          async (ref) => {
+            const resolved = await resolveDelegationAgent(deps, grant, grant.workspaceId, ref);
+            return resolved.ok
+              ? { ok: true, agentId: resolved.agent.id }
+              : {
+                  ok: false,
+                  message:
+                    scheduledTaskAgentNameRefusal(ref, resolved, "agentConfigPatch") ??
+                    resolved.message,
+                };
+          },
+          "agentConfigPatch",
         );
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>

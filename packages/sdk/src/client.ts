@@ -8902,10 +8902,17 @@ export class OpenGeniClient {
   async listAgentChats(
     workspaceId: string,
     agentId: string,
-    options: { filter?: AgentChatsFilter; cursor?: string; limit?: number } = {},
+    options: {
+      filter?: AgentChatsFilter;
+      /** Only open chats that are with the agent itself: no Slack threads that only mentioned it, no cancelled chats. */
+      direct?: boolean;
+      cursor?: string;
+      limit?: number;
+    } = {},
   ): Promise<ListAgentChatsResponse> {
     const query = new URLSearchParams();
     if (options.filter) query.set("filter", options.filter);
+    if (options.direct) query.set("direct", "true");
     if (options.cursor) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     const suffix = query.size > 0 ? `?${query.toString()}` : "";

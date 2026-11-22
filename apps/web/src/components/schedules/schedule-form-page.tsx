@@ -8,7 +8,7 @@ import { Link } from "@tanstack/react-router";
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY } from "@opengeni/contracts";
-import type { Agent, AgentTemplate } from "@opengeni/sdk";
+import type { Agent, AgentChat, AgentTemplate } from "@opengeni/sdk";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
@@ -69,6 +69,11 @@ import {
 } from "@/lib/scheduled-tasks";
 import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
 import { listAgentChats } from "@opengeni/react/app/lib/agent-chats";
+import { useAgents } from "@opengeni/react/app/lib/agents";
+import {
+  ComposerAgentChip,
+  composerAgentSelectionFor,
+} from "@opengeni/react/app/components/agents/composer-agent-chip";
 import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 import { cn } from "@opengeni/react/app/lib/utils";
@@ -126,8 +131,19 @@ export type ScheduleFormMode =
       agentTrigger?: number;
       /** Cancel and Save go back to the agent's page (its "Starts when"). */
       returnTo?: "agent";
+      /** What Add trigger had when it opened this form: its note and chat choice. */
+      agentTriggerStart?: AgentTriggerStart;
     }
   | { kind: "edit"; scheduleId: string };
+
+/** Add trigger's note and chat choice, carried into the full form. */
+export type AgentTriggerStart = {
+  note?: string | undefined;
+  chat?:
+    | { mode: "new_session_per_run" | "reusable_session" }
+    | { mode: "existing_session"; sessionId: string }
+    | undefined;
+};
 
 /** The agent a new automation starts chats with, and its suggested trigger. */
 type AgentBinding =
@@ -602,12 +618,19 @@ function AgentScheduleForm({
   // so each run resolves the default afresh.
   const [initial] = useState<ScheduleDraft>(() => {
     const base = initialDraft();
-    // An agent's trigger starts a new chat with the agent on every run.
+    // An agent's trigger starts a new chat with the agent on every run,
+    // unless Add trigger chose another chat; its note is the message.
+    const start = mode.kind === "create" ? mode.agentTriggerStart : undefined;
+    const note = start?.note?.trim();
     return agent
       ? {
           ...base,
           agentId: agent.id,
-          runMode: "new_session_per_run",
+          runMode: start?.chat?.mode ?? "new_session_per_run",
+          ...(start?.chat?.mode === "existing_session"
+            ? { targetSessionId: start.chat.sessionId }
+            : {}),
+          ...(note ? { prompt: note } : {}),
           name: base.name || agent.name,
           ...(agent.visibility === "private" ? { visibility: "private" as const } : {}),
         }
@@ -790,27 +813,31 @@ function AgentScheduleForm({
   }, [draft.executionTarget, draft.machineSandboxId, inheritsChatSettings, sharedMachines]);
 
   /* ----- destination chats */
+  const workspaceAgents = useAgents(workspaceId);
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [sessionsError, setSessionsError] = useState<unknown>(null);
+  // An agent's automation posts only into that agent's chats, read filtered by
+  // the server; the chosen chat is always read in full into `sessions`.
+  const [agentChats, setAgentChats] = useState<AgentChat[]>([]);
+  const [chatListLoading, setChatListLoading] = useState(false);
+  const [chatListError, setChatListError] = useState<unknown>(null);
+  const [agentChatsLoading, setAgentChatsLoading] = useState(false);
+  const [agentChatsError, setAgentChatsError] = useState<unknown>(null);
   const [sessionsRetry, setSessionsRetry] = useState(0);
   const needsSessions = inheritsChatSettings && access.canTargetSessions;
   const sourceSessionId = mode.kind === "create" ? mode.sourceSessionId : undefined;
   const targetSessionId = materializedSessionId ?? draft.targetSessionId;
-  const agentId = draft.agentId;
+  const chatAgentId = draft.agentId;
+  const sessionsLoading = chatListLoading || agentChatsLoading;
+  const sessionsError = chatListError ?? agentChatsError;
   useEffect(() => {
     if (!needsSessions) return;
     let live = true;
-    setSessionsLoading(true);
-    setSessionsError(null);
+    setChatListLoading(true);
+    setChatListError(null);
     void Promise.allSettled([
-      materializedSessionId
+      materializedSessionId || chatAgentId
         ? Promise.resolve([] as Session[])
-        : // An agent's automation posts only into that agent's chats: list those,
-          // reading past the newest page until there are enough.
-          agentId
-          ? listAgentChats(client, workspaceId, agentId)
-          : client.listSessions(workspaceId, { limit: 100 }),
+        : client.listSessions(workspaceId, { limit: 100 }),
       targetSessionId
         ? client.getSession(workspaceId, targetSessionId, { fresh: true })
         : Promise.resolve(null),
@@ -829,20 +856,20 @@ function AgentScheduleForm({
           ),
         ].filter((session) => session.status !== "cancelled"),
       );
-      setSessionsError(
+      setChatListError(
         exactResult.status === "rejected"
           ? exactResult.reason
           : listResult.status === "rejected"
             ? listResult.reason
             : null,
       );
-      setSessionsLoading(false);
+      setChatListLoading(false);
     });
     return () => {
       live = false;
     };
   }, [
-    agentId,
+    chatAgentId,
     client,
     materializedSessionId,
     needsSessions,
@@ -850,6 +877,33 @@ function AgentScheduleForm({
     workspaceId,
     sessionsRetry,
   ]);
+  // The agent's chats, read once per agent: choosing a chat doesn't reread them.
+  useEffect(() => {
+    if (!needsSessions || materializedSessionId || !chatAgentId) {
+      setAgentChats([]);
+      setAgentChatsLoading(false);
+      setAgentChatsError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setAgentChats([]);
+    setAgentChatsLoading(true);
+    setAgentChatsError(null);
+    listAgentChats(client, workspaceId, chatAgentId, { signal: controller.signal }).then(
+      (chats) => {
+        if (controller.signal.aborted) return;
+        setAgentChats(chats);
+        setAgentChatsLoading(false);
+      },
+      (error: unknown) => {
+        if (controller.signal.aborted) return;
+        setAgentChats([]);
+        setAgentChatsError(error);
+        setAgentChatsLoading(false);
+      },
+    );
+    return () => controller.abort();
+  }, [chatAgentId, client, materializedSessionId, needsSessions, workspaceId, sessionsRetry]);
 
   /* ----- who can see it */
   const [canCreatePrivate, setCanCreatePrivate] = useState<boolean | null>(null);
@@ -1407,7 +1461,52 @@ function AgentScheduleForm({
         ? { disabled: true, disabledReason: NOT_AGENT_CHAT }
         : {}),
     })),
+    // The agent's other chats; choosing one reads it in full.
+    ...agentChats
+      .filter(
+        (chat) =>
+          chat.sessionId !== draft.targetSessionId &&
+          !sessions.some((session) => session.id === chat.sessionId),
+      )
+      .map((chat) => ({
+        value: chat.sessionId,
+        label: chat.title?.trim() || "Untitled chat",
+      })),
   ];
+
+  // Who each run's chat is with: the chat composer's agent picker, shown once
+  // there is an agent to pick (or the automation already has one).
+  const agentSelection = composerAgentSelectionFor(draft.agentId, workspaceAgents.agents, {
+    message: "This agent isn't available to you.",
+    name: agent?.id === draft.agentId ? agent?.name : undefined,
+  });
+  const agentChip =
+    agentSelection !== null ||
+    (workspaceAgents.supported && (workspaceAgents.agents?.length ?? 0) > 0) ? (
+      <ComposerAgentChip
+        workspaceId={workspaceId}
+        agents={workspaceAgents.agents}
+        selection={agentSelection}
+        disabled={noAccess}
+        onlyMeUnavailable={canCreatePrivate === false}
+        onSelect={(agentId) => {
+          const picked = workspaceAgents.agents?.find((entry) => entry.id === agentId);
+          setDraft((current) => {
+            const { agentId: previous, ...rest } = current;
+            const changed = (agentId ?? undefined) !== previous;
+            return {
+              ...rest,
+              ...(agentId ? { agentId } : {}),
+              // An existing chat keeps its agent, so a new agent needs one of its chats.
+              ...(changed && rest.runMode === "existing_session" ? { targetSessionId: "" } : {}),
+              // An Only me agent's automations are Only me too.
+              ...(picked?.visibility === "private" ? { visibility: "private" as const } : {}),
+            };
+          });
+          setErrors((current) => ({ ...current, target: undefined }));
+        }}
+      />
+    ) : null;
 
   return (
     <>
@@ -1417,7 +1516,10 @@ function AgentScheduleForm({
           editing ? (
             task?.name
           ) : agent ? (
-            `Each run starts a chat with ${agent.name}.`
+            // Only while it's true: the chip or the chat choice can change it.
+            draft.agentId === agent.id && draft.runMode !== "existing_session" ? (
+              `Each run starts a chat with ${agent.name}.`
+            ) : undefined
           ) : offerAgent ? (
             <>
               Rather describe it? <HelpLink onClick={ask.open}>Create with {productName}</HelpLink>
@@ -1457,32 +1559,35 @@ function AgentScheduleForm({
             </Notice>
           ) : null}
           <Field label="Chat">
-            <SelectMenu
-              value={eachRun}
-              onValueChange={(runMode) => update({ runMode: runMode as EachRun })}
-              options={[
-                {
-                  value: "existing_session",
-                  label: "Use an existing chat",
-                  description: "Continue a conversation with its current settings.",
-                  disabled: !access.canTargetSessions,
-                  disabledReason: "You need permission to open chats in this workspace.",
-                },
-                {
-                  value: "reusable_session",
-                  label: savedReusableSessionId
-                    ? "Use this automation's chat"
-                    : "Create a chat for this automation",
-                  description: "Keep the results together in one conversation.",
-                },
-                {
-                  value: "new_session_per_run",
-                  label: "Create a chat each run",
-                  description: "Start each run with a fresh conversation.",
-                },
-              ]}
-              className="max-w-full"
-            />
+            <div className="flex min-w-0 flex-wrap items-center gap-2 sm:flex-nowrap">
+              {agentChip}
+              <SelectMenu
+                value={eachRun}
+                onValueChange={(runMode) => update({ runMode: runMode as EachRun })}
+                options={[
+                  {
+                    value: "existing_session",
+                    label: "Use an existing chat",
+                    description: "Continue a conversation with its current settings.",
+                    disabled: !access.canTargetSessions,
+                    disabledReason: "You need permission to open chats in this workspace.",
+                  },
+                  {
+                    value: "reusable_session",
+                    label: savedReusableSessionId
+                      ? "Use this automation's chat"
+                      : "Create a chat for this automation",
+                    description: "Keep the results together in one conversation.",
+                  },
+                  {
+                    value: "new_session_per_run",
+                    label: "Create a chat each run",
+                    description: "Start each run with a fresh conversation.",
+                  },
+                ]}
+                className="min-w-0 max-w-full flex-1"
+              />
+            </div>
             {materializedSessionId ? (
               <p className="m-0 text-xs leading-4.5 text-fg-muted">
                 {access.canTargetSessions ? (
@@ -1524,12 +1629,12 @@ function AgentScheduleForm({
                 placeholder={
                   sessionsLoading
                     ? "Loading chats…"
-                    : sessions.length
+                    : sessionOptions.length
                       ? "Choose a chat"
                       : "No chats available"
                 }
                 searchPlaceholder="Search recent chats"
-                loading={sessionsLoading && sessions.length === 0}
+                loading={sessionsLoading && sessionOptions.length === 0}
                 disabled={!access.canTargetSessions}
                 disabledReason="You need permission to open chats in this workspace."
                 invalid={Boolean(errors.target)}

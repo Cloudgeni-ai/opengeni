@@ -128,7 +128,7 @@ path is the agent's home.
 | `POST /agents` | `sessions:create`; Only me needs a person who is a member of the organization; `organization` needs an organization admin |
 | `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates); changing it to `organization` also needs an organization admin |
 | `GET /agents/:id/revisions?cursor&limit` | `sessions:read` |
-| `GET /agents/:id/chats?filter=yours\|everyone&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner |
+| `GET /agents/:id/chats?filter=yours\|everyone&direct&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner; `direct=true` leaves out Slack threads that only mentioned the agent |
 | `GET /agents/:id/slack` | `sessions:read`; also catches the agent up in the linked Slack workspaces |
 | `PUT /agents/:id/slack/:connectionId` | `workspace:admin`; the older `open` field sets **Anyone in the organization** for the agent (turning it on needs an organization admin) |
 | `DELETE /agents/:id/slack/:connectionId` | always `409 agent_slack_always_available`: there is nothing to turn off |
@@ -553,16 +553,22 @@ whole.
   **New chat each run** (the default, `new_session_per_run`), **One chat
   for this trigger** (`reusable_session`) or **An existing chat**
   (`existing_session` with `targetSessionId`, offering only chats started
-  with this agent); the dialog's description says which. It saves
+  with this agent, read through the server's agent filter
+  `GET /v1/workspaces/:id/agents/:agentId/chats?filter=everyone&direct=true`, the
+  same list the automation form offers); the dialog's description says which. It saves
   through `createScheduledTask` with `agentConfig.agentId`, named
   `<agent>: <when>`, and with an explicit `visibility`: `private` for an
   Only me agent, otherwise `workspace` (never the organization's default
   for new schedules). The server's rules for who may create a shared
   automation still apply; a refused one says so in the dialog. **Open full
   form** opens the automation form with `?agent=<id>&returnTo=agent`, plus
-  `?source=<id>` for the source picked, for every other setting (the note
-  and chat choice aren't carried over); its back link, Cancel and Save
-  return to the agent's page.
+  `?source=<id>` for the source picked, for every other setting, with the
+  note and chat choice (in history state, `agentTriggerStart`, so the note
+  never enters the address); its back link, Cancel and Save
+  return to the agent's page. The automation form's **Chat** row starts
+  with the chat composer's agent picker, so an automation's agent can be
+  changed (or removed) there; the change is saved like any other edit
+  (`agentConfigPatch.agentId` for an existing chat).
   The list comes from the server
   (`GET /v1/workspaces/:id/scheduled-tasks?agentId=<id>`, SDK
   `listScheduledTasks({ agentId })`), which filters on

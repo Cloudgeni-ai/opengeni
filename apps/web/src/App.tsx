@@ -67,6 +67,7 @@ import {
   createRouter,
   lazyRouteComponent,
   redirect,
+  useLocation,
   useParams,
   useSearch,
 } from "@tanstack/react-router";
@@ -163,6 +164,7 @@ import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-contex
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
+import type { AgentTriggerStart } from "./components/schedules/schedule-form-page";
 import {
   capabilitiesSectionFromSearch,
   readyMadeKindFromSearch,
@@ -1712,6 +1714,9 @@ function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
   const { template, from, sourceSessionId, source, agent, agentTrigger, returnTo } =
     workspaceAutomationNewRoute.useSearch();
+  const agentTriggerStart = useLocation({
+    select: (location) => agentTriggerStartOf(location.state.agentTriggerStart),
+  });
   return (
     <LazyAutomationFormRoute
       workspaceId={workspaceId}
@@ -1724,9 +1729,26 @@ function AutomationNew() {
         agentId: agent,
         agentTrigger,
         returnTo,
+        ...(agent && agentTriggerStart ? { agentTriggerStart } : {}),
       }}
     />
   );
+}
+
+/** Add trigger's note and chat choice from history state, when well formed. */
+function agentTriggerStartOf(value: unknown): AgentTriggerStart | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { note, chat } = value as { note?: unknown; chat?: unknown };
+  const mode = (chat as { mode?: unknown } | null | undefined)?.mode;
+  const sessionId = (chat as { sessionId?: unknown } | null | undefined)?.sessionId;
+  return {
+    ...(typeof note === "string" && note.trim() ? { note } : {}),
+    ...(mode === "new_session_per_run" || mode === "reusable_session"
+      ? { chat: { mode } }
+      : mode === "existing_session" && typeof sessionId === "string"
+        ? { chat: { mode, sessionId } }
+        : {}),
+  };
 }
 
 function EventSources() {

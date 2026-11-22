@@ -24,6 +24,7 @@ import {
   getSlackAgent,
   insertSlackAgent,
   listAgentSlackInstalls,
+  listAgentChats,
   listAgentsMissingFromSlack,
   listSlackAgentIntroChannelIds,
   listSlackAgentsForConnection,
@@ -527,6 +528,20 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(
       await getSessionAgent(app.db, { workspaceId: org.home, sessionId: older }),
     ).toMatchObject({ agentChat: true, agent: { id: agent.id } });
+    // Listed as one of the agent's chats, except with direct, which keeps only
+    // chats that are with the agent themselves (what an automation can post into).
+    const listed = async (direct: boolean) =>
+      (
+        await listAgentChats(app.db, org.homeScope, {
+          agentId: agent.id,
+          viewerSubjectId: org.owner,
+          filter: "everyone",
+          direct,
+          limit: 10,
+        })
+      ).map((chat) => chat.sessionId);
+    expect(await listed(false)).toContain(older);
+    expect(await listed(true)).not.toContain(older);
     // Metadata a caller set on create never names the agent.
     expect(await getSessionAgent(app.db, { workspaceId: org.home, sessionId: forged })).toEqual({
       agentChat: true,
