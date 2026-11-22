@@ -15481,6 +15481,14 @@ export const ConnectionKind = /* @__PURE__ */ defineSchema(() =>
 );
 export type ConnectionKind = z.infer<typeof ConnectionKind>;
 
+/** Safe connection diagnostics written by MCP setup, also shown in connection settings. */
+export const MCP_DESTINATION_CONNECTION_ERRORS = {
+  blocked:
+    "This deployment does not allow the connector’s address. Use an allowed address, then reconnect.",
+  unresolvable:
+    "This deployment could not find the connector’s address. Check that the address is reachable from this deployment, then reconnect.",
+} as const;
+
 export const ConnectionStatus = /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "needs_reauth", "revoked", "error"]),
 );

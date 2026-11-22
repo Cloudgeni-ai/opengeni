@@ -601,7 +601,7 @@ spec:
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniMcpStrictConnectFailed
           expr: |
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome="failed"}[5m])) > 0
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome=~"failed|refused_by_policy"}[5m])) > 0
           for: 1m
           labels:
             severity: critical
@@ -631,10 +631,10 @@ spec:
             (
               sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])), 1)
+              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!="refused_by_policy"}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])) >= 5
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!="refused_by_policy"}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
