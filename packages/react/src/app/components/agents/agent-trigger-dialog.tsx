@@ -63,6 +63,7 @@ import {
   agentTriggerAwaitsSecret,
   agentTriggerCreateRequest,
   agentTriggerRepositoryEvents,
+  AGENT_TRIGGER_CHAT_REPOSITORIES_MAX,
   agentTriggerDraftForPick,
   agentTriggerDraftFromSuggestion,
   agentTriggerIssues,
@@ -381,6 +382,7 @@ function AgentTriggerDialogBody({
             listensOnGitHub && chat.mode !== "new_session_per_run"
               ? repositories
                   .filter((repo) => chosenRepositories.includes(repo.fullName))
+                  .slice(0, AGENT_TRIGGER_CHAT_REPOSITORIES_MAX)
                   .map((repo) => gitHubRepositoryResource(repo, ""))
               : [],
           sources: formSources ?? [],

@@ -66,6 +66,8 @@ export const AGENT_TRIGGER_REPOSITORY_FIELD = "data.repository.full_name";
 
 /** At most this many chosen repositories, the size of a condition's list. */
 export const AGENT_TRIGGER_REPOSITORIES_MAX = 50;
+/** A continued chat opens every chosen repository, so it takes fewer. */
+export const AGENT_TRIGGER_CHAT_REPOSITORIES_MAX = 5;
 
 /**
  * GitHub triggers narrowed to the chosen repositories (`owner/name`). None

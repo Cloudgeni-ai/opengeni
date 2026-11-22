@@ -8,7 +8,10 @@ import type { GitHubRepository } from "@opengeni/sdk";
 
 import { Field } from "../../../ui/field";
 import { SelectMenu, type SelectOption } from "../../../ui/select-menu";
-import { AGENT_TRIGGER_REPOSITORIES_MAX } from "./agent-trigger-model";
+import {
+  AGENT_TRIGGER_CHAT_REPOSITORIES_MAX,
+  AGENT_TRIGGER_REPOSITORIES_MAX,
+} from "./agent-trigger-model";
 
 export function AgentTriggerRepositories({
   repositories,
@@ -30,13 +33,14 @@ export function AgentTriggerRepositories({
       label: repo.fullName,
       leading: <GitBranchIcon className="size-3.5 text-fg-subtle" />,
     }));
-  const full = value.length >= AGENT_TRIGGER_REPOSITORIES_MAX;
+  const max = newChatPerRun ? AGENT_TRIGGER_REPOSITORIES_MAX : AGENT_TRIGGER_CHAT_REPOSITORIES_MAX;
+  const full = value.length >= max;
   return (
     <Field
       label="Repositories"
       hint={
         full
-          ? `Up to ${AGENT_TRIGGER_REPOSITORIES_MAX} repositories. For more, choose all.`
+          ? `Up to ${max}.${newChatPerRun ? " Remove them all to cover every repository." : ""}`
           : newChatPerRun
             ? "Each run opens the one its event is about."
             : value.length === 0

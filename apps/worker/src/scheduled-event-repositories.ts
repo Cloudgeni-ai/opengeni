@@ -29,6 +29,8 @@ import {
 import { attachSessionRepositoryResource } from "@opengeni/core";
 import {
   SessionRepositoryRemovedError,
+  eventOccurrenceIdFromProducerKey,
+  getEventOccurrenceForRun,
   getEventOccurrenceForScheduledTaskRun,
   listAllowedGitHubRepositoryIdsForWorkspace,
   listGitHubInstallationIdsForWorkspace,
@@ -42,6 +44,8 @@ import {
 
 /** At most this many repositories per run, for an occurrence that coalesced several events. */
 export const SCHEDULED_EVENT_REPOSITORY_LIMIT = 5;
+/** At most this many GitHub lookups per run, whatever they find. */
+export const SCHEDULED_EVENT_REPOSITORY_LOOKUPS = 10;
 
 const FULL_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const BRANCH = /^[^\s~^:?*[\\]{1,255}$/u;
@@ -136,15 +140,20 @@ export function eventRepositoryLookup(
  */
 export async function scheduledEventRepositoryResources(
   db: Database,
-  input: { workspaceId: string; runId: string },
+  /** The run's producer key (before the run exists), or the run's id. */
+  input: { workspaceId: string } & ({ producerKey: string } | { runId: string }),
   lookup: GitHubAppInstallationRepositoryLookup | null,
 ): Promise<RepositoryResourceRef[]> {
   if (!lookup) return [];
-  const occurrence = await getEventOccurrenceForScheduledTaskRun(
-    db,
-    input.workspaceId,
-    input.runId,
-  );
+  let occurrence;
+  if ("producerKey" in input) {
+    const occurrenceId = eventOccurrenceIdFromProducerKey(input.producerKey);
+    occurrence = occurrenceId
+      ? await getEventOccurrenceForRun(db, input.workspaceId, occurrenceId)
+      : null;
+  } else {
+    occurrence = await getEventOccurrenceForScheduledTaskRun(db, input.workspaceId, input.runId);
+  }
   if (!occurrence) return [];
   const repositories = githubEventRepositories(occurrence.events);
   if (repositories.length === 0) return [];
@@ -168,7 +177,7 @@ export async function scheduledEventRepositoryResources(
     repositories,
     installationFor,
     lookup,
-    input.runId,
+    "runId" in input ? input.runId : input.producerKey,
   );
 }
 
@@ -184,10 +193,13 @@ export async function confirmedEventRepositoryResources(
   runId: string,
 ): Promise<RepositoryResourceRef[]> {
   const resources: RepositoryResourceRef[] = [];
+  let lookups = 0;
   for (const repository of repositories) {
     if (resources.length >= SCHEDULED_EVENT_REPOSITORY_LIMIT) break;
     const installationId = installationFor.get(repository.id);
     if (installationId === undefined) continue;
+    if (lookups >= SCHEDULED_EVENT_REPOSITORY_LOOKUPS) break;
+    lookups += 1;
     const [owner = "", name = ""] = repository.fullName.split("/");
     let found;
     try {
@@ -220,26 +232,28 @@ export async function confirmedEventRepositoryResources(
 }
 
 /**
- * Attach an event run's repositories to its chat before its first turn, on
- * the scheduler's behalf: a repository someone removed from the chat stays
- * removed, and one refused since the allowlist read is left out.
+ * Attach an event run's repositories (`scheduledEventRepositoryResources`,
+ * resolved before any transaction, since it asks GitHub) to its chat before
+ * its first turn, on the scheduler's behalf: a repository someone removed
+ * from the chat stays removed, and one refused since the allowlist read is
+ * left out.
  */
 export async function attachScheduledEventRepositories(
-  deps: { db: Database; bus: EventBus; settings: Settings },
-  input: { workspaceId: string; runId: string; sessionId: string; deferPublication: boolean },
-  lookup: GitHubAppInstallationRepositoryLookup | null = eventRepositoryLookup(deps.settings),
+  deps: { db: Database; bus: EventBus },
+  input: {
+    workspaceId: string;
+    runId: string;
+    sessionId: string;
+    deferPublication: boolean;
+    resources: readonly RepositoryResourceRef[];
+  },
 ): Promise<{
   session: Session | null;
   events: Awaited<ReturnType<typeof attachSessionRepositoryResource>>["events"];
 }> {
   let session: Session | null = null;
   const events: Awaited<ReturnType<typeof attachSessionRepositoryResource>>["events"] = [];
-  const resources = await scheduledEventRepositoryResources(
-    deps.db,
-    { workspaceId: input.workspaceId, runId: input.runId },
-    lookup,
-  );
-  for (const resource of resources) {
+  for (const resource of input.resources) {
     try {
       const attached = await attachSessionRepositoryResource(
         { db: deps.db, bus: deps.bus },
