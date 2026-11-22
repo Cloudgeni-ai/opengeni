@@ -21,7 +21,11 @@ import type {
   OrganizationWorkspaceScope,
 } from "@opengeni/sdk";
 
-import { permissionLabel, WORKSPACE_KEY_PERMISSION_GROUPS } from "@/lib/api-key-presets";
+import {
+  apiKeyPresets,
+  permissionLabel,
+  WORKSPACE_KEY_PERMISSION_GROUPS,
+} from "@/lib/api-key-presets";
 
 export type { OrganizationAccessPolicy, OrganizationAccessPreset, OrganizationWorkspaceScope };
 
@@ -161,6 +165,31 @@ export function defaultPolicy(): OrganizationAccessPolicy {
   return {
     preset: "read_only",
     permissions: presetPermissions("read_only"),
+    workspaceScope: { kind: "all" },
+  };
+}
+
+/**
+ * Where a coding agent connecting as a person starts: everything Read only
+ * sees, plus the "Full workspace automation" level of workspace keys (chats,
+ * files, apps and their data, automations, using secrets). Never people, keys,
+ * billing or secret values. Capped by what the person can do (`ceiling`), so
+ * nothing they can't give starts checked. Shown as Custom, every box visible.
+ */
+export function connectedAgentDefaultPolicy(
+  ceiling?: ReadonlySet<string>,
+): OrganizationAccessPolicy {
+  const automation = apiKeyPresets().find((preset) => preset.id === "full_automation");
+  const wanted = new Set<string>([
+    ...presetPermissions("read_only"),
+    ...(automation?.permissions ?? []),
+  ]);
+  wanted.delete("secrets:read");
+  return {
+    preset: "custom",
+    permissions: allOrganizationPermissions().filter(
+      (permission) => wanted.has(permission) && (!ceiling || ceiling.has(permission)),
+    ),
     workspaceScope: { kind: "all" },
   };
 }

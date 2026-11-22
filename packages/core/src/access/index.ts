@@ -276,8 +276,26 @@ const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthoriz
  */
 const outsideAgentProofs = new WeakMap<DelegatedHumanAuthorization, OutsideAgentReach>();
 
-/** What an outside agent may do with app data: read like a viewer, or manage. */
-export type OutsideAgentReach = Readonly<{ appData: "viewer" | "manager" }>;
+/**
+ * What an outside agent may do with app data (read like a viewer, or manage),
+ * and the connected agent it is, when it signed in as one (a personal API key
+ * has none). Its writes are recorded as that connected agent.
+ */
+export type OutsideAgentReach = Readonly<{
+  appData: "viewer" | "manager";
+  connectionId?: string;
+}>;
+
+const CONNECTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+function frozenReach(reach: OutsideAgentReach): OutsideAgentReach {
+  return Object.freeze({
+    appData: reach.appData === "manager" ? "manager" : "viewer",
+    ...(typeof reach.connectionId === "string" && CONNECTION_ID.test(reach.connectionId)
+      ? { connectionId: reach.connectionId.toLowerCase() }
+      : {}),
+  });
+}
 
 /** Grant metadata key naming an outside agent's reach (see {@link outsideAgentReach}). */
 export const OUTSIDE_AGENT_GRANT_METADATA_KEY = "outsideAgent";
@@ -291,7 +309,7 @@ export function outsideAgentReach(
 ): OutsideAgentReach | null {
   const value = grant?.metadata?.[OUTSIDE_AGENT_GRANT_METADATA_KEY];
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-  return { appData: (value as { appData?: unknown }).appData === "manager" ? "manager" : "viewer" };
+  return frozenReach(value as OutsideAgentReach);
 }
 
 function withOutsideAgentMetadata<T extends { metadata?: Record<string, unknown> | undefined }>(
@@ -302,7 +320,7 @@ function withOutsideAgentMetadata<T extends { metadata?: Record<string, unknown>
   if (!reach) return grant;
   return {
     ...grant,
-    metadata: { ...grant.metadata, [OUTSIDE_AGENT_GRANT_METADATA_KEY]: { appData: reach.appData } },
+    metadata: { ...grant.metadata, [OUTSIDE_AGENT_GRANT_METADATA_KEY]: { ...reach } },
   };
 }
 /** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
@@ -393,8 +411,7 @@ export function stampDelegatedHumanAuthorization(
     workspaceScope,
   };
   Object.freeze(proof.permissions);
-  if (options.outsideAgent)
-    outsideAgentProofs.set(proof, Object.freeze({ appData: options.outsideAgent.appData }));
+  if (options.outsideAgent) outsideAgentProofs.set(proof, frozenReach(options.outsideAgent));
   delegatedHumanRequests.set(request, Object.freeze(proof));
 }
 
@@ -463,8 +480,7 @@ export function stampWorkspacePersonAuthorization(
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);
   const proof = Object.freeze(parsed);
-  if (options.outsideAgent)
-    outsideAgentProofs.set(proof, Object.freeze({ appData: options.outsideAgent.appData }));
+  if (options.outsideAgent) outsideAgentProofs.set(proof, frozenReach(options.outsideAgent));
   workspaceExternalPersonProofs.add(proof);
   delegatedHumanRequests.set(request, proof);
 }

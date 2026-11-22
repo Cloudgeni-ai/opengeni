@@ -378,8 +378,15 @@ export function connectClient(
   }
 }
 
-export function parseClients(value: string | undefined): ConnectClient[] | string {
-  if (value === undefined) return [];
+/**
+ * `--client`: named clients are set up even when they aren't detected; `all`
+ * (like no flag) means every client detected here, reporting the rest as
+ * skipped.
+ */
+export function parseClients(
+  value: string | undefined,
+): ConnectClient[] | "all" | { error: string } {
+  if (value === undefined) return "all";
   const wanted = value
     .split(",")
     .map((each) => each.trim().toLowerCase())
@@ -391,10 +398,12 @@ export function parseClients(value: string | undefined): ConnectClient[] | strin
           ? "claude"
           : each,
     );
-  if (wanted.includes("all")) return [...CONNECT_CLIENTS];
+  if (wanted.includes("all")) return "all";
   const unknown = wanted.filter((each) => !(CONNECT_CLIENTS as readonly string[]).includes(each));
   if (unknown.length > 0)
-    return `unknown client ${unknown.join(", ")}; use ${CONNECT_CLIENTS.join(", ")} or all.`;
+    return {
+      error: `unknown client ${unknown.join(", ")}; use ${CONNECT_CLIENTS.join(", ")} or all.`,
+    };
   return [...new Set(wanted)] as ConnectClient[];
 }
 
@@ -402,14 +411,16 @@ export function runConnect(
   deps: ConnectDeps,
   input: {
     baseUrl: string;
-    clients: ConnectClient[];
+    /** Named clients, or `all` for every client detected here. */
+    clients: ConnectClient[] | "all";
     skill: boolean;
     signIn: boolean;
   },
   io: { stdout(text: string): void; stderr(text: string): void },
 ): number {
   const url = mcpServerUrl(input.baseUrl);
-  const clients = input.clients.length > 0 ? input.clients : detectClients(deps);
+  const detected = input.clients === "all" || input.clients.length === 0;
+  const clients = detected ? detectClients(deps) : (input.clients as ConnectClient[]);
   if (clients.length === 0) {
     io.stderr(
       `No coding agent found here. Pass --client ${CONNECT_CLIENTS.join(",")} to set one up anyway.\n`,
@@ -422,6 +433,14 @@ export function runConnect(
     const step = connectClient(deps, client, url, input);
     failed ||= step.status === "failed";
     io.stdout(`  ${step.label}: ${step.detail}\n`);
+  }
+  // Nothing is written for a client that isn't installed: no config, no skill.
+  if (detected) {
+    for (const client of CONNECT_CLIENTS.filter((each) => !clients.includes(each))) {
+      io.stdout(
+        `  ${CLIENT_LABELS[client]}: Skipped, not installed here. Pass --client ${client} to set it up anyway.\n`,
+      );
+    }
   }
   io.stdout(
     `\nEach agent opens Opengeni sign-in in your browser the first time, where you pick the organization and what it may do.${input.skill ? " The opengeni skill tells each agent when to hand work over." : ""}\n`,

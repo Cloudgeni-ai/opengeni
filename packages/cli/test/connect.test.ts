@@ -102,13 +102,33 @@ describe("opengeni connect", () => {
   test("reports when nothing is installed and rejects unknown clients", async () => {
     const { deps } = fakeDeps();
     expect((await connect([], deps)).exitCode).toBe(1);
+    expect((await connect(["--client", "all"], deps)).exitCode).toBe(1);
     const bad = await connect(["--client", "emacs"], deps);
     expect(bad.exitCode).toBe(1);
     expect(bad.stderr).toContain("unknown client emacs");
   });
 
+  test("--client all sets up only the installed clients and lists the rest as skipped", async () => {
+    const home = "/home/user";
+    const { deps, files } = fakeDeps({ dirs: [join(home, ".cursor")] });
+    const result = await connect(["--client", "all", "--no-sign-in"], deps);
+    expect(result.exitCode).toBe(0);
+    expect([...files.keys()].sort()).toEqual([
+      join(home, ".cursor", "mcp.json"),
+      join(home, ".cursor", "skills", "opengeni", "SKILL.md"),
+    ]);
+    expect(result.stdout).toContain("Claude Code: Skipped, not installed here.");
+    expect(result.stdout).toContain("Codex: Skipped, not installed here.");
+    // Named explicitly, a client is set up even when it isn't detected.
+    const named = await connect(["--client", "codex", "--no-sign-in"], deps);
+    expect(named.exitCode).toBe(0);
+    expect(files.has(join(home, ".codex", "config.toml"))).toBe(true);
+  });
+
   test("helpers keep existing configuration", () => {
-    expect(parseClients("copilot,all")).toHaveLength(4);
+    expect(parseClients("copilot,all")).toBe("all");
+    expect(parseClients(undefined)).toBe("all");
+    expect(parseClients("copilot,claude-code")).toEqual(["vscode", "claude"]);
     expect(
       withJsonServer(`{"servers":{"opengeni":{"type":"http","url":"${URL}"}}}`, "servers", {
         type: "http",

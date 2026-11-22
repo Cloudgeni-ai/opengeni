@@ -79,9 +79,11 @@ export const WORKSPACE_KEY_PERMISSION_GROUPS: ReadonlyArray<{
       "files:write",
       "documents:search",
       "documents:manage",
-      "artifacts:read",
-      "artifacts:publish",
     ],
+  },
+  {
+    label: "Apps",
+    permissions: ["artifacts:read", "artifacts:publish"],
   },
   {
     label: "Automations",
@@ -132,8 +134,8 @@ const PERMISSION_LABELS: Record<string, string> = {
   "files:write": "Change files",
   "documents:search": "Search knowledge",
   "documents:manage": "Manage knowledge",
-  "artifacts:read": "Read artifacts",
-  "artifacts:publish": "Publish artifacts",
+  "artifacts:read": "Open apps and artifacts, use app data",
+  "artifacts:publish": "Change app data, save and publish apps",
   "scheduled_tasks:run": "Run automations",
   "scheduled_tasks:manage": "Manage automations",
   // Legacy names on existing keys, shown as what they now grant.
