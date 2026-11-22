@@ -149,8 +149,8 @@ The same rule holds for what is stored. Before a shared app sync run, or a
 run of code with tools or secrets, writes a collection (or, for a sync, the
 app's SQL database), the API marks the target in `site_tool_data_sources`
 with the connector and account route the data came from (`vault` for
-secrets). Marks only grow, and apps can't change them. A live shared sync
-(or deleted) shared sync also counts from its definition, so syncs saved by
+secrets). Marks only grow, and apps can't change them. A live (or deleted)
+shared sync also counts from its definition, so syncs saved by
 earlier releases are covered before their next run, with no backfill.
 
 Every read of a marked target needs a signed-in, live member of the
