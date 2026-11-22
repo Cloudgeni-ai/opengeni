@@ -43566,6 +43566,8 @@
       "newEventTriggerDraft": "value",
       "pastedWebhookSetup": "value",
       "PastedWebhookSetup": "type",
+      "PastedWebhookSteps": "value",
+      "PastedWebhookStepsProps": "type",
       "sameEventTriggers": "value",
       "SESSION_AUTOMATION_WAIT_LABEL": "value",
       "sessionAutomationWait": "value",
