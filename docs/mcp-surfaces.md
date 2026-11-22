@@ -172,11 +172,21 @@ connection's access setting; none adds authority.
   clock hour doesn't start the same work twice (the returned
   `idempotencyKey` makes it exact across hours; a new key sends the same
   text again on purpose). `app_save` keys a new version on the version it
-  builds on, so saving A, B, then A again makes three versions; `file_save`
-  returns the file a try saved in the last hour with the same name and
-  content. `tool_call` repeats safely with the same
+  builds on, so saving A, B, then A again makes three versions; a retry
+  whose first try already saved is recognised and answered as `replayed`.
+  A key the agent passes and reuses for different content is refused, and
+  nothing is saved. `file_save` returns the person's own file a try saved in
+  the last hour with the same name and content. `tool_call` repeats safely with the same
   `operationId`. Errors carry the key, `retrySafe` (repeating with it
   doesn't duplicate work) and `retryable` (whether repeating could help).
+- **Uploads.** For a multi-file `app_save` and an inline `file_save` the
+  server writes the bytes to the storage URL it prepared. Those URLs are
+  signed for the public storage address; where the server can't reach it
+  (some self-hosted storage), the error says to upload the bytes yourself
+  (`prepareUpload`, or `file_save` with `sizeBytes`).
+- **Sharing.** `app_publish` reads the app first and changes nothing when
+  it can't. `only_me` narrows visibility before taking the app off the web;
+  `public` restores the earlier visibility when the publication fails.
 - **Visibility.** A delegated chat uses the person's default chat visibility;
   Only me falls back to the workspace when the workspace doesn't allow it.
   Stopping a local wait only stops tracking; `session_pause` stops the chat.

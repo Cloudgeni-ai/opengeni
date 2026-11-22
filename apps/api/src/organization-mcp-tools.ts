@@ -413,6 +413,8 @@ type ToolSpec = {
   description: string;
   input: z.ZodType;
   readOnly: boolean;
+  /** Whether a call can put content on the open web. */
+  openWorld?: boolean;
   run: (context: OrganizationActionContext, args: never) => Promise<CallToolResult>;
 };
 
@@ -422,6 +424,7 @@ function tool<T extends z.ZodType>(spec: {
   description: string;
   input: T;
   readOnly: boolean;
+  openWorld?: boolean;
   run: (context: OrganizationActionContext, args: z.output<T>) => Promise<CallToolResult>;
 }): ToolSpec {
   return spec as unknown as ToolSpec;
@@ -1273,7 +1276,7 @@ function appUrl(context: OrganizationActionContext, workspaceId: string, id: str
 }
 
 function fileUrl(context: OrganizationActionContext, workspaceId: string, id: string): string {
-  return new URL(`/workspaces/${workspaceId}/artifacts/${id}`, webOrigin(context)).href;
+  return new URL(`/workspaces/${workspaceId}/artifacts/files/${id}`, webOrigin(context)).href;
 }
 
 function digest(value: unknown): string {
@@ -1294,33 +1297,56 @@ function putTarget(value: unknown): PutTarget | null {
   };
 }
 
-/** Send bytes to a storage URL Opengeni just prepared. */
+const PUT_TIMEOUT_MS = 60_000;
+
+/**
+ * Send bytes to a storage URL Opengeni just prepared. Upload URLs are signed
+ * for the public storage address; where the server can't reach it (some
+ * self-hosted storage), the caller uploads the bytes itself instead.
+ */
 async function putBytes(
   context: OrganizationActionContext,
   target: PutTarget,
   bytes: Uint8Array,
   contentType: string,
-): Promise<boolean> {
+): Promise<{ ok: true } | { ok: false; status?: number }> {
   const headers = new Headers({ "content-type": contentType });
   for (const [name, value] of Object.entries(target.requiredHeaders ?? {}))
     headers.set(name, value);
-  const response = await fetch(target.putUrl, {
-    method: "PUT",
-    headers,
-    body: bytes as Uint8Array<ArrayBuffer>,
-    ...(context.signal ? { signal: context.signal } : {}),
-  });
-  await response.body?.cancel();
-  return response.ok;
+  const timeout = AbortSignal.timeout(PUT_TIMEOUT_MS);
+  try {
+    const response = await fetch(target.putUrl, {
+      method: "PUT",
+      headers,
+      body: bytes as Uint8Array<ArrayBuffer>,
+      signal: context.signal ? AbortSignal.any([context.signal, timeout]) : timeout,
+    });
+    await response.body?.cancel();
+    return response.ok ? { ok: true } : { ok: false, status: response.status };
+  } catch {
+    return { ok: false };
+  }
 }
 
-function isReplayConflict(outcome: ActionOutcome): boolean {
+function uploadFailed(what: string, status: number | undefined, selfUpload: string) {
+  const retrySafe = status === undefined || status >= 500 || status === 429;
+  return failure(
+    `Uploading ${what} failed${status ? ` (${status})` : ""}. ${retrySafe ? "Retry, or " : ""}${selfUpload}`,
+    { retrySafe },
+  );
+}
+
+/** The route refused a reused idempotency key. */
+function isKeyConflict(outcome: ActionOutcome): boolean {
   return (
     !outcome.ok &&
     outcome.status === 409 &&
     /idempotency key was already used/iu.test(errorEnvelope(outcome.body).message ?? "")
   );
 }
+
+const KEY_REUSED =
+  "This idempotencyKey was already used for another save, so nothing was saved. Pass a new key, or none.";
 
 type AppVersionReceipt = {
   artifact?: { id?: string; title?: string; visibility?: string };
@@ -1347,8 +1373,20 @@ function savedApp(
 }
 
 type AppDetail = {
-  artifact?: { id?: string; currentVersion?: { id?: string; revision?: number } | null };
-  versions?: Array<{ id?: string; revision?: number }>;
+  artifact?: {
+    id?: string;
+    visibility?: string;
+    currentVersion?: VersionFacts | null;
+  };
+  versions?: VersionFacts[];
+};
+
+type VersionFacts = {
+  id?: string;
+  revision?: number;
+  sizeBytes?: number;
+  createdBySubjectId?: string;
+  createdAt?: string;
 };
 
 /** The app's current state, as the person sees it. */
@@ -1370,11 +1408,24 @@ async function appContent(
   workspaceId: string,
   args: z.output<typeof AppSaveInput>,
 ): Promise<
-  | { ok: true; content: { html: string } | { uploadId: string }; identity: string }
+  | {
+      ok: true;
+      content: { html: string } | { uploadId: string };
+      identity: string;
+      /** The entry HTML, for recognising a retry; absent for a caller's own upload. */
+      entryHtml?: string;
+      /** A multi-file build, uploaded only once a save is due. */
+      needsUpload?: boolean;
+    }
   | { ok: false; result: CallToolResult }
 > {
   if (args.html !== undefined)
-    return { ok: true, content: { html: args.html }, identity: digest(["html", args.html]) };
+    return {
+      ok: true,
+      content: { html: args.html },
+      identity: digest(["html", args.html]),
+      entryHtml: args.html,
+    };
   if (args.uploadId !== undefined)
     return {
       ok: true,
@@ -1396,20 +1447,41 @@ async function appContent(
       return { ok: false, result: failure(`Give content or base64 for ${file.path}.`) };
   }
   const identity = digest(["files", entryPath, files]);
+  return {
+    ok: true,
+    content: { html: entry.content },
+    identity,
+    entryHtml: entry.content,
+    needsUpload: files.length > 1,
+  };
+}
+
+/** Upload a multi-file build; returns the upload to save in place of inline HTML. */
+async function uploadFiles(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  args: z.output<typeof AppSaveInput>,
+): Promise<{ ok: true; uploadId: string } | { ok: false; result: CallToolResult }> {
+  const files = args.files ?? [];
+  const entryPath = args.entry ?? "index.html";
+  const entry = files.find((file) => file.path === entryPath);
   const assets = files.filter((file) => file !== entry);
-  if (assets.length === 0) return { ok: true, content: { html: entry.content }, identity };
   const prepared = await action(context, PREPARE_APP_UPLOAD, { pathParameters: { workspaceId } });
   if (!prepared.ok) return prepared;
-  const upload = prepared.body as { uploadId?: unknown; html?: unknown; assets?: unknown };
+  const upload = prepared.body as {
+    uploadId?: unknown;
+    html?: unknown;
+    assets?: unknown;
+    source?: unknown;
+  };
   const html = putTarget(upload.html);
   const bundle = putTarget(upload.assets);
   if (typeof upload.uploadId !== "string" || !html || !bundle)
     return { ok: false, result: failure("Opengeni returned an unexpected answer; retry.") };
   const encoder = new TextEncoder();
-  const sent =
-    (await putBytes(context, html, encoder.encode(entry.content), "text/html")) &&
-    (await putBytes(
-      context,
+  const parts: Array<[PutTarget, Uint8Array, string]> = [
+    [html, encoder.encode(entry?.content ?? ""), "text/html"],
+    [
       bundle,
       encoder.encode(
         JSON.stringify({
@@ -1420,13 +1492,117 @@ async function appContent(
         }),
       ),
       "application/json",
-    ));
-  if (!sent)
+    ],
+  ];
+  // The editable source: the text files, so the app can be changed in Opengeni later.
+  const source = putTarget(upload.source);
+  if (source)
+    parts.push([
+      source,
+      encoder.encode(
+        JSON.stringify({
+          entrypoint: entryPath,
+          files: files
+            .filter((file) => file.content !== undefined)
+            .map((file) => ({ path: file.path, content: file.content })),
+        }),
+      ),
+      "application/json",
+    ]);
+  for (const [target, bytes, contentType] of parts) {
+    const sent = await putBytes(context, target, bytes, contentType);
+    if (!sent.ok)
+      return {
+        ok: false,
+        result: uploadFailed(
+          "the app's files",
+          sent.status,
+          "upload them yourself: call app_save with prepareUpload, PUT the files, then call it with uploadId.",
+        ),
+      };
+  }
+  return { ok: true, uploadId: upload.uploadId };
+}
+
+/**
+ * A retried save whose first try succeeded: the current version is this
+ * caller's, recent, the same size, and the key derived from the version before
+ * it replays. Returns that version, or null to save normally.
+ */
+async function replayedVersion(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  args: z.output<typeof AppSaveInput>,
+  detail: AppDetail,
+  entryHtml: string,
+  versionKey: (base: string) => string,
+): Promise<AppVersionReceipt | null> {
+  const current = detail.artifact?.currentVersion;
+  if (context.caller.kind !== "person" || !current?.id || current.revision === undefined)
+    return null;
+  if (
+    current.createdBySubjectId !== context.caller.subjectId ||
+    Date.now() - Date.parse(current.createdAt ?? "") > SAVE_RETRY_WINDOW_MS ||
+    current.sizeBytes !== new TextEncoder().encode(entryHtml).byteLength
+  )
+    return null;
+  const previous = (detail.versions ?? [])
+    .filter((version) => (version.revision ?? 0) < (current.revision ?? 0) && version.id)
+    .sort((a, b) => (b.revision ?? 0) - (a.revision ?? 0))[0];
+  if (!previous?.id) return null;
+  // The route replays by key before checking the version, and refuses a stale
+  // version otherwise, so this probe never saves anything new.
+  const probe = await action(context, "publishWorkspaceArtifactVersion", {
+    pathParameters: { workspaceId, artifactId: args.appId ?? "" },
+    body: {
+      ...(args.name ? { title: args.name } : {}),
+      html: entryHtml,
+      ...(args.requestedTools ? { requestedTools: args.requestedTools } : {}),
+      expectedCurrentVersionId: previous.id,
+      idempotencyKey: versionKey(previous.id),
+    },
+  });
+  if (probe.ok) {
+    const receipt = probe.body as AppVersionReceipt;
+    return receipt.replayed === true ? receipt : null;
+  }
+  // The derived key encodes this content, so a refused reuse is this save's
+  // first try (it uploaded its files under another upload).
+  if (isKeyConflict(probe))
     return {
-      ok: false,
-      result: failure("Uploading the app's files failed; retry.", { retrySafe: true }),
+      artifact: { id: args.appId ?? "" },
+      version: { revision: current.revision },
+      replayed: true,
     };
-  return { ok: true, content: { uploadId: upload.uploadId }, identity };
+  return null;
+}
+
+/** The app an earlier try of this create made: the caller's newest app of that name. */
+async function createdApp(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  name: string,
+): Promise<string | null> {
+  const listed = await action(context, "listArtifactCatalog", {
+    pathParameters: { workspaceId },
+    query: { kind: "site", q: name, sort: "newest", limit: 20 },
+  });
+  if (!listed.ok) return null;
+  const items = ((listed.body as { items?: unknown } | null)?.items ?? []) as Array<{
+    id?: string;
+    title?: string;
+    ownedByViewer?: boolean;
+    createdAt?: string;
+  }>;
+  const since = Date.now() - 2 * SAVE_RETRY_WINDOW_MS;
+  return (
+    items.find(
+      (item) =>
+        item.title === name &&
+        item.ownedByViewer === true &&
+        Date.parse(item.createdAt ?? "") >= since,
+    )?.id ?? null
+  );
 }
 
 /** Define or change each named collection; report each one's outcome. */
@@ -1550,66 +1726,105 @@ const appSave = tool({
       const content = await appContent(context, workspaceId, args);
       if (!content.ok) return content.result;
       const tools = args.requestedTools ? { requestedTools: args.requestedTools } : {};
+      const callerChoseKey = args.idempotencyKey !== undefined;
+      let body: { html: string } | { uploadId: string } = content.content;
+      const upload = async (): Promise<CallToolResult | null> => {
+        if (!content.needsUpload) return null;
+        const sent = await uploadFiles(context, workspaceId, args);
+        if (!sent.ok) return sent.result;
+        body = { uploadId: sent.uploadId };
+        return null;
+      };
       let saved: ActionOutcome;
-      let key: string;
       if (!args.appId) {
-        key =
+        const name = args.name ?? "";
+        const key =
           args.idempotencyKey ??
           stableUuid(
             "mcp-app-create",
             workspaceId,
             callerKey(context),
             String(Math.floor(Date.now() / SAVE_RETRY_WINDOW_MS)),
-            digest([args.name, content.identity, args.requestedTools ?? null]),
+            digest([name, content.identity, args.requestedTools ?? null]),
           );
+        const uploadRefused = await upload();
+        if (uploadRefused) return uploadRefused;
         saved = await action(context, "createWorkspaceArtifact", {
           pathParameters: { workspaceId },
           body: {
-            title: args.name,
-            ...content.content,
+            title: name,
+            ...body,
             ...tools,
             visibility: "private",
             idempotencyKey: key,
           },
         });
-        if (isReplayConflict(saved))
+        if (isKeyConflict(saved)) {
+          if (callerChoseKey) return failure(KEY_REUSED, { retrySafe: false });
+          // An earlier try created it (a multi-file retry uploads anew, so the
+          // route sees different input under the same derived key).
+          const createdId = await createdApp(context, workspaceId, name);
+          if (createdId)
+            return json(
+              savedApp(context, workspaceId, {
+                artifact: { id: createdId, title: name },
+                replayed: true,
+              }),
+            );
           return failure(
             "An earlier try of this save already created the app; find it with apps_list. Pass a new idempotencyKey to create another.",
             { retrySafe: false },
           );
+        }
       } else {
-        const read = await readApp(context, workspaceId, args.appId);
+        const targetId = args.appId;
+        const read = await readApp(context, workspaceId, targetId);
         if (!read.ok) return read.result;
         const current = read.detail.artifact?.currentVersion?.id;
         if (!current) return failure("This app has no version to build on.");
         // The version it builds on is part of a derived key, so saving A, B,
         // then A again makes three versions.
-        key =
-          args.idempotencyKey ??
+        const versionKey = (base: string) =>
           stableUuid(
             "mcp-app-version",
             workspaceId,
             callerKey(context),
-            args.appId,
-            current,
+            targetId,
+            base,
             digest([args.name ?? null, content.identity, args.requestedTools ?? null]),
           );
+        if (!callerChoseKey && content.entryHtml !== undefined) {
+          const replay = await replayedVersion(
+            context,
+            workspaceId,
+            args,
+            read.detail,
+            content.entryHtml,
+            versionKey,
+          );
+          if (replay) return json(savedApp(context, workspaceId, replay));
+        }
+        const uploadRefused = await upload();
+        if (uploadRefused) return uploadRefused;
         saved = await action(context, "publishWorkspaceArtifactVersion", {
-          pathParameters: { workspaceId, artifactId: args.appId },
+          pathParameters: { workspaceId, artifactId: targetId },
           body: {
             ...(args.name ? { title: args.name } : {}),
-            ...content.content,
+            ...body,
             ...tools,
             expectedCurrentVersionId: current,
-            idempotencyKey: key,
+            idempotencyKey: args.idempotencyKey ?? versionKey(current),
           },
         });
-        if (isReplayConflict(saved)) {
-          const again = await readApp(context, workspaceId, args.appId);
+        if (isKeyConflict(saved)) {
+          if (callerChoseKey) return failure(KEY_REUSED, { retrySafe: false });
+          // The derived key encodes this content on this version: a multi-file
+          // retry of a save that already landed on it.
+          const again = await readApp(context, workspaceId, targetId);
           if (!again.ok) return again.result;
           return json(
             savedApp(context, workspaceId, {
-              artifact: { id: args.appId },
+              artifact: { id: targetId },
               version: { revision: again.detail.artifact?.currentVersion?.revision },
               replayed: true,
             }),
@@ -1664,27 +1879,49 @@ const appPublish = tool({
     "Choose who can open an app you manage: only_me, workspace (its members) or public (anyone with the link, on its own hostname). The answer lists readiness warnings; apply their fixes by calling again with fixes. Make an app public only when the person asked for it.",
   input: AppPublishInput,
   readOnly: false,
+  openWorld: true,
   run: async (context, args) =>
     inWorkspace(context, args.workspaceId, async (workspaceId) => {
       const path = { workspaceId, artifactId: args.appId };
+      const read = await readApp(context, workspaceId, args.appId);
+      if (!read.ok) return read.result;
+      const before = read.detail.artifact?.visibility === "workspace" ? "workspace" : "private";
       const existing = await action(context, PUBLICATION_GET, { pathParameters: path });
+      // Only "not published" (or no sites domain here) reads as unpublished;
+      // any other failure changes nothing.
+      if (!existing.ok && existing.status !== 404 && existing.status !== 503)
+        return existing.result;
       const published = existing.ok ? (existing.body as PublicationView) : null;
+      const setVisibility = (visibility: "private" | "workspace") =>
+        action(context, "updateWorkspaceArtifactVisibility", {
+          pathParameters: path,
+          body: { visibility },
+        });
+      const link = appUrl(context, workspaceId, args.appId);
       if (args.access === "only_me") {
+        // The owner-only step first, so a refusal changes nothing.
+        if (before !== "private") {
+          const narrowed = await setVisibility("private");
+          if (!narrowed.ok) return narrowed.result;
+        }
         if (published?.status === "active") {
           const stopped = await action(context, PUBLICATION_PUT, {
             pathParameters: path,
             body: { status: "unpublished" },
           });
-          if (!stopped.ok) return stopped.result;
+          if (!stopped.ok)
+            return failure(
+              `The app is now visible only to you, but taking it off the web failed: ${errorMessage(stopped.status ?? 400, stopped.body)} Call app_publish with only_me again.`,
+              { retrySafe: true },
+            );
         }
+        return json({ appId: args.appId, access: "only_me", link });
       }
-      const visibility = await action(context, "updateWorkspaceArtifactVisibility", {
-        pathParameters: path,
-        body: { visibility: args.access === "only_me" ? "private" : "workspace" },
-      });
-      if (!visibility.ok) return visibility.result;
-      const link = appUrl(context, workspaceId, args.appId);
-      if (args.access === "only_me") return json({ appId: args.appId, access: "only_me", link });
+      const widened = before !== "workspace";
+      if (widened) {
+        const shared = await setVisibility("workspace");
+        if (!shared.ok) return shared.result;
+      }
       // Workspace without a hostname stays in the app, unless it was already
       // on the web: then only members may open it there.
       const onTheWeb = args.access === "public" || args.hostname !== undefined;
@@ -1702,7 +1939,17 @@ const appPublish = tool({
             status: "active",
           },
         });
-        if (!upserted.ok) return upserted.result;
+        if (!upserted.ok) {
+          const reason = errorMessage(upserted.status ?? 400, upserted.body);
+          if (!widened) return upserted.result;
+          const restored = await setVisibility("private");
+          return failure(
+            restored.ok
+              ? `${reason} Nothing changed.`
+              : `${reason} The app is now visible to the workspace; set it back with app_publish only_me.`,
+            errorFacts(upserted.status ?? 400, upserted.body),
+          );
+        }
         publication = upserted.body as PublicationView;
       }
       const fixed: Array<{ fix: unknown; ok: boolean; error?: string }> = [];
@@ -1728,6 +1975,9 @@ const appPublish = tool({
         link,
         ...(summary ? { publication: summary } : {}),
         ...(fixed.length ? { fixes: fixed } : {}),
+        ...(args.fixes?.length && !publication
+          ? { fixesIgnored: "Fixes apply to an app on the web; this one isn't published." }
+          : {}),
         ...(fixable
           ? {
               nextStep:
@@ -1839,10 +2089,18 @@ const fileSave = tool({
         const since = Date.now() - SAVE_RETRY_WINDOW_MS;
         const page = listed.body as { files?: unknown } | null;
         const files = (Array.isArray(page?.files) ? page.files : []) as Array<
-          SavedFile & { sha256?: string | null; status?: string; createdAt?: string }
+          SavedFile & {
+            sha256?: string | null;
+            status?: string;
+            createdAt?: string;
+            ownerSubjectId?: string | null;
+          }
         >;
+        const owner = context.caller.kind === "person" ? context.caller.subjectId : null;
         const earlier = files.find(
           (file) =>
+            owner !== null &&
+            file.ownerSubjectId === owner &&
             file.filename === args.name &&
             file.sha256 === sha256 &&
             file.status === "ready" &&
@@ -1852,15 +2110,21 @@ const fileSave = tool({
       }
       const begun = await action(context, "beginFileUpload", {
         pathParameters: { workspaceId },
-        body: { scope, filename: args.name, contentType, sizeBytes: bytes.byteLength },
+        // With its checksum, storage verifies the bytes and the file records it.
+        body: { scope, filename: args.name, contentType, sizeBytes: bytes.byteLength, sha256 },
       });
       if (!begun.ok) return begun.result;
       const upload = begun.body as { uploadId?: unknown };
       const target = putTarget(begun.body);
       if (typeof upload.uploadId !== "string" || !target)
         return failure("Opengeni returned an unexpected answer; retry.");
-      if (!(await putBytes(context, target, bytes, contentType)))
-        return failure("Uploading the file failed; retry.", { retrySafe: true });
+      const sent = await putBytes(context, target, bytes, contentType);
+      if (!sent.ok)
+        return uploadFailed(
+          "the file",
+          sent.status,
+          "upload it yourself: call file_save with name and sizeBytes, PUT the bytes, then call it with uploadId.",
+        );
       const completed = await action(context, "completeFileUpload", {
         pathParameters: { workspaceId, uploadId: upload.uploadId },
       });
@@ -2477,7 +2741,7 @@ export function namedToolDescriptors() {
     }) as never,
     annotations: {
       readOnlyHint: spec.readOnly,
-      ...(spec.readOnly ? {} : { openWorldHint: false }),
+      ...(spec.readOnly ? {} : { openWorldHint: spec.openWorld === true }),
     },
   }));
 }
