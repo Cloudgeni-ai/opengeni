@@ -35,9 +35,9 @@ suffix.
 | `skills_sync`, `skills_list`, `knowledge_search`, `knowledge_get`, `knowledge_save` | Share Skills and Knowledge with the workspace. |
 
 `skills_sync` uploads local Skill folders as Personal unless `scope` is
-`workspace` (which may wait for review, per the workspace's Agent learning
-setting); `pull` gets the workspace's Skills; `repository` syncs a GitHub
-repository's Skill folders. Schedules, agents (their instructions) and
+`workspace` or `organization` (which may wait for review, per the workspace's
+Agent learning setting); `direction: "pull"` gets the workspace's Skills;
+`direction: "repository"` syncs a GitHub repository's Skill folders. Schedules, agents (their instructions) and
 workspace instructions change through `opengeni_actions_search`, then
 `opengeni_action_call`.
 
@@ -103,7 +103,7 @@ Call `delegate` with the brief as `message`, a short `title`, and the
 workspace defaults apply otherwise. Retrying `delegate` with the same input
 doesn't start a second chat; errors say whether a retry is safe.
 
-Pushing, merging and deploying need the user's permission.
+Pushing, merging, deploying and messaging people need the user's permission.
 
 Report the returned `url`, then tell the user what you delegated and how you
 will follow up.

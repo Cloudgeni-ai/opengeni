@@ -1337,6 +1337,17 @@ function uploadFailed(what: string, status: number | undefined, selfUpload: stri
 }
 
 /** The route refused a reused idempotency key. */
+/**
+ * The route refused a derived key because this same save already used it with
+ * another upload: the first try of this save landed.
+ */
+function isSameSaveConflict(outcome: ActionOutcome): boolean {
+  return (
+    isKeyConflict(outcome) &&
+    /different (publication input|request)/iu.test(errorEnvelope(outcome.body).message ?? "")
+  );
+}
+
 function isKeyConflict(outcome: ActionOutcome): boolean {
   return (
     !outcome.ok &&
@@ -1568,7 +1579,7 @@ async function replayedVersion(
   }
   // The derived key encodes this content, so a refused reuse is this save's
   // first try (it uploaded its files under another upload).
-  if (isKeyConflict(probe))
+  if (isSameSaveConflict(probe))
     return {
       artifact: { id: args.appId ?? "" },
       version: { revision: current.revision },
@@ -1761,6 +1772,7 @@ const appSave = tool({
         });
         if (isKeyConflict(saved)) {
           if (callerChoseKey) return failure(KEY_REUSED, { retrySafe: false });
+          if (!saved.ok && !isSameSaveConflict(saved)) return saved.result;
           // An earlier try created it (a multi-file retry uploads anew, so the
           // route sees different input under the same derived key).
           const createdId = await createdApp(context, workspaceId, name);
@@ -1818,6 +1830,7 @@ const appSave = tool({
         });
         if (isKeyConflict(saved)) {
           if (callerChoseKey) return failure(KEY_REUSED, { retrySafe: false });
+          if (!saved.ok && !isSameSaveConflict(saved)) return saved.result;
           // The derived key encodes this content on this version: a multi-file
           // retry of a save that already landed on it.
           const again = await readApp(context, workspaceId, targetId);
@@ -1887,10 +1900,9 @@ const appPublish = tool({
       if (!read.ok) return read.result;
       const before = read.detail.artifact?.visibility === "workspace" ? "workspace" : "private";
       const existing = await action(context, PUBLICATION_GET, { pathParameters: path });
-      // Only "not published" (or no sites domain here) reads as unpublished;
-      // any other failure changes nothing.
-      if (!existing.ok && existing.status !== 404 && existing.status !== 503)
-        return existing.result;
+      // Only "not published" (or publishing off on this deployment, also a
+      // 404) reads as unpublished; any other failure changes nothing.
+      if (!existing.ok && existing.status !== 404) return existing.result;
       const published = existing.ok ? (existing.body as PublicationView) : null;
       const setVisibility = (visibility: "private" | "workspace") =>
         action(context, "updateWorkspaceArtifactVisibility", {

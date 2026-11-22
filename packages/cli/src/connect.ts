@@ -56,9 +56,10 @@ this conversation or this computer: give it a self-contained brief.
   \`needsApproval\`, show the user \`approvalUrl\`; after they approve, call again
   with the same \`operationId\`.
 - **Skills and Knowledge**: \`skills_sync\` uploads local Skill folders as
-  Personal unless \`scope\` is \`workspace\` (which may wait for review, per the
-  workspace's Agent learning setting); \`pull\` gets the workspace's Skills;
-  \`repository\` syncs a GitHub repository's Skill folders. Knowledge:
+  Personal unless \`scope\` is \`workspace\` or \`organization\` (which may wait
+  for review, per the workspace's Agent learning setting);
+  \`direction: "pull"\` gets the workspace's Skills; \`direction: "repository"\`
+  syncs a GitHub repository's Skill folders. Knowledge:
   \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
 - **Schedules, agents and workspace instructions**: change them with
   \`opengeni_actions_search\`, then \`opengeni_action_call\`.
