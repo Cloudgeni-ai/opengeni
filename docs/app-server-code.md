@@ -81,7 +81,7 @@ installer publishes the code again.
    The caller must be able to open the app (the same check as app data);
    a Site frame may call only its own app.
 2. The API starts the run under the rate limits: an `app_server_runs` row
-   inserted as `running` (per app 300 a minute, per viewer 60; a guest's
+   inserted as `running` (per app 300 a minute, per viewer 60, all guests together 150; a guest's
    runs also count against the guest write limit per visitor and client
    address). It checks the deployer's authority (below), loads the current
    version's manifest and files (checking each SHA-256), mints a run token
@@ -157,7 +157,7 @@ what guests reach before publishing to the web).
 | Outbound response body / timeout | 4 MB / 15 s |
 | Code | 1 MB in at most 50 files |
 | Egress hosts / secrets per version | 20 / 20 |
-| Runs per app / per viewer per minute | 300 / 60 (guests also meet the guest write limit) |
+| Runs per app / per viewer per minute | 300 / 60; all guests together 150 (guests also meet the guest write limit) |
 | Logs kept per run | 8,000 characters |
 | Runs kept | 14 days |
 

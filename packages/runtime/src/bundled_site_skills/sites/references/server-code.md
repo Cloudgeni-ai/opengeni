@@ -77,7 +77,8 @@ A refused call throws an `Error` whose `code` says why, for example
 Limits per run: 30 seconds, 5 seconds of CPU, 50 calls to tools, data and
 fetch, 1 MB request and 4 MB response bodies. All code together is at most
 1 MB in 50 files. An app starts at most 300 runs a minute, one person at most
-60, and guests also count against the app's guest write limit.
+60, all guests together at most 150, and guests also count against the app's
+guest write limit.
 
 ## Call it from the page
 

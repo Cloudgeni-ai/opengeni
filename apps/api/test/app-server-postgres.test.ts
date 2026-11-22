@@ -12,6 +12,7 @@ import {
   createOrganizationApiKey,
   createWorkspace,
   ensureExternalIdentity,
+  startAppServerRun,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -332,6 +333,7 @@ async function fixture() {
   return {
     app,
     base,
+    scope: { accountId, workspaceId: workspace.id },
     runtime,
     owner,
     member,
@@ -532,6 +534,54 @@ test("the API counts a run's calls back and stops them at the limit or a new ver
   await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/" });
   expect(stale?.status).toBe(409);
   expect(f.toolCalls).toEqual([]);
+});
+
+test("a data error reaches the code with its reason instead of a server error", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  const defined = await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/notes`, {
+    accessMode: "shared",
+  });
+  expect(defined.status, JSON.stringify(defined.json)).toBe(201);
+  let reply: HostReply | undefined;
+  f.setIsolate(async (_run, host) => {
+    reply = await host("data.write", {
+      operations: [
+        { op: "put", collection: "notes", key: "a", data: { text: "x" }, expectedVersion: 7 },
+      ],
+    });
+    return {};
+  });
+  await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/" });
+  expect(reply!.status, JSON.stringify(reply!.json)).toBeLessThan(500);
+  expect(reply!.status).toBeGreaterThanOrEqual(400);
+  expect(typeof reply!.json.error.details?.reason).toBe("string");
+});
+
+test("guests together get only part of an app's runs, so members keep theirs", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  const limits = { perApp: 4, perViewer: 4, perGuests: 2 };
+  const start = (viewerSubjectId: string) =>
+    startAppServerRun(
+      db.db,
+      f.scope,
+      {
+        id: crypto.randomUUID(),
+        siteId: f.siteId,
+        versionId: f.versionId(),
+        trigger: "request",
+        target: "GET /",
+        viewerSubjectId,
+      },
+      limits,
+    );
+  expect(await start("guest:a")).toBe("started");
+  expect(await start("guest:b")).toBe("started");
+  expect(await start("guest:c")).toBe("guest_limit");
+  expect(await start(f.member.subjectId)).toBe("started");
+  expect(await start(f.member.subjectId)).toBe("started");
+  expect(await start(f.member.subjectId)).toBe("app_limit");
 });
 
 test("the code pauses once the publisher can no longer manage the app", async () => {

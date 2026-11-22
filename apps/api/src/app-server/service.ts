@@ -14,6 +14,7 @@ import {
   APP_SERVER_RUNS_KEPT_DAYS,
   APP_SERVER_RUNS_PER_MINUTE,
   APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE,
+  APP_SERVER_GUEST_RUNS_PER_MINUTE,
   AppServerBundle,
   AppServerFetchRequest,
   AppServerHostRequest,
@@ -650,14 +651,20 @@ export async function runAppServer(
       target: `${request.method} ${request.path}`,
       viewerSubjectId: input.viewer?.id ?? null,
     },
-    { perApp: APP_SERVER_RUNS_PER_MINUTE, perViewer: APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE },
+    {
+      perApp: APP_SERVER_RUNS_PER_MINUTE,
+      perViewer: APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE,
+      perGuests: APP_SERVER_GUEST_RUNS_PER_MINUTE,
+    },
   );
   if (started !== "started")
     throw new AppServerError(
       "rate_limited",
       started === "app_limit"
         ? `This app's server code runs at most ${APP_SERVER_RUNS_PER_MINUTE} times a minute. Try again shortly.`
-        : `One person can run this app's server code at most ${APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE} times a minute. Try again shortly.`,
+        : started === "guest_limit"
+          ? `Visitors can run this app's server code at most ${APP_SERVER_GUEST_RUNS_PER_MINUTE} times a minute. Try again shortly.`
+          : `One person can run this app's server code at most ${APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE} times a minute. Try again shortly.`,
       { reason: started },
     );
   let result: AppServerGatewayRunResult | null = null;
@@ -1193,99 +1200,110 @@ export async function handleAppServerHostCall(
   // Even an outbound fetch stops once the deployer can no longer manage the app.
   const state = runStateFor(deps, deployment, claims.runId);
   const authority = await state.authority;
-  switch (call.op) {
-    case "fetch":
-      return {
-        result: await appServerOutboundFetch(deps, scope, deployment.manifest, call.input, app),
-      };
-    case "tools.call": {
-      const tool = toolIdentityOf(call.input.tool);
-      const args = call.input.arguments ?? {};
-      if (!args || typeof args !== "object" || Array.isArray(args))
-        throw invalid("arguments must be an object");
-      if (containsSecretReference(args))
-        throw forbidden("Tool arguments from server code can't carry vault references", {
-          reason: "secret_in_arguments",
-        });
-      let inventory: SiteToolAccountInventory;
-      try {
-        state.inventory ??= (deps.appServerToolInventory ?? readSiteToolAccountInventory)(
-          deps,
-          authority.grant,
-        );
-        inventory = await state.inventory;
-      } catch {
-        state.inventory = undefined;
-        throw new AppServerError(
-          "unavailable",
-          "The workspace's connections can't be read right now. Try again shortly.",
-        );
-      }
-      const identity = routeAppServerTool(
-        inventory,
-        appServerDeclaredTools(deployment.manifest),
-        tool,
-      );
-      try {
-        const result = await (deps.appServerToolCaller ?? callAppSyncToolThroughGateway)({
-          deps,
-          grant: authority.grant,
-          identity,
-          arguments: args as Record<string, unknown>,
-        });
-        return { result };
-      } catch (error) {
-        const status = (error as { status?: unknown }).status;
-        const message = error instanceof Error ? error.message : "";
-        if (status === 409 || message.includes("approval_required"))
-          throw forbidden(
-            "This tool asks for approval before each use, so server code can't call it. A workspace admin can allow it without asking.",
-            { reason: "approval_required" },
-          );
-        if (status === 404 || status === 403)
-          throw forbidden("This tool isn't available to the app's server code here.", {
-            reason: "tool_unavailable",
+  try {
+    switch (call.op) {
+      case "fetch":
+        return {
+          result: await appServerOutboundFetch(deps, scope, deployment.manifest, call.input, app),
+        };
+      case "tools.call": {
+        const tool = toolIdentityOf(call.input.tool);
+        const args = call.input.arguments ?? {};
+        if (!args || typeof args !== "object" || Array.isArray(args))
+          throw invalid("arguments must be an object");
+        if (containsSecretReference(args))
+          throw forbidden("Tool arguments from server code can't carry vault references", {
+            reason: "secret_in_arguments",
           });
-        throw new AppServerError("unavailable", "The tool call failed. Try again shortly.");
+        let inventory: SiteToolAccountInventory;
+        try {
+          state.inventory ??= (deps.appServerToolInventory ?? readSiteToolAccountInventory)(
+            deps,
+            authority.grant,
+          );
+          inventory = await state.inventory;
+        } catch {
+          state.inventory = undefined;
+          throw new AppServerError(
+            "unavailable",
+            "The workspace's connections can't be read right now. Try again shortly.",
+          );
+        }
+        const identity = routeAppServerTool(
+          inventory,
+          appServerDeclaredTools(deployment.manifest),
+          tool,
+        );
+        try {
+          const result = await (deps.appServerToolCaller ?? callAppSyncToolThroughGateway)({
+            deps,
+            grant: authority.grant,
+            identity,
+            arguments: args as Record<string, unknown>,
+          });
+          return { result };
+        } catch (error) {
+          const status = (error as { status?: unknown }).status;
+          const message = error instanceof Error ? error.message : "";
+          if (status === 409 || message.includes("approval_required"))
+            throw forbidden(
+              "This tool asks for approval before each use, so server code can't call it. A workspace admin can allow it without asking.",
+              { reason: "approval_required" },
+            );
+          if (status === 404 || status === 403)
+            throw forbidden("This tool isn't available to the app's server code here.", {
+              reason: "tool_unavailable",
+            });
+          throw new AppServerError("unavailable", "The tool call failed. Try again shortly.");
+        }
+      }
+      case "data.query": {
+        const query = parseWith(SiteDataQueryRequest, call.input);
+        await requireSharedCollection(authority.access, query.collection);
+        return {
+          result: await authority.access.store.query(authority.access.caller, {
+            collection: query.collection,
+            ...(query.where ? { where: query.where } : {}),
+            ...(query.sort ? { sort: query.sort } : {}),
+            ...(query.limit === undefined ? {} : { limit: query.limit }),
+            ...(query.cursor ? { cursor: query.cursor } : {}),
+            ...(query.count ? { count: true } : {}),
+          }),
+        };
+      }
+      case "data.get": {
+        const get = parseWith(SiteDataGetRequest, call.input);
+        await requireSharedCollection(authority.access, get.collection);
+        return {
+          result: await authority.access.store.get(
+            authority.access.caller,
+            get.collection,
+            get.id !== undefined ? { id: get.id } : { key: get.key! },
+          ),
+        };
+      }
+      case "data.write": {
+        const write = parseWith(SiteDataWriteRequest, call.input);
+        for (const name of new Set(write.operations.map((operation) => operation.collection)))
+          await requireSharedCollection(authority.access, name);
+        return {
+          result: await writeSiteDataWithAccess(
+            deps,
+            authority.access,
+            write.operations as SiteDataWriteOp[],
+          ),
+        };
       }
     }
-    case "data.query": {
-      const query = parseWith(SiteDataQueryRequest, call.input);
-      await requireSharedCollection(authority.access, query.collection);
-      return {
-        result: await authority.access.store.query(authority.access.caller, {
-          collection: query.collection,
-          ...(query.where ? { where: query.where } : {}),
-          ...(query.sort ? { sort: query.sort } : {}),
-          ...(query.limit === undefined ? {} : { limit: query.limit }),
-          ...(query.cursor ? { cursor: query.cursor } : {}),
-          ...(query.count ? { count: true } : {}),
-        }),
-      };
-    }
-    case "data.get": {
-      const get = parseWith(SiteDataGetRequest, call.input);
-      await requireSharedCollection(authority.access, get.collection);
-      return {
-        result: await authority.access.store.get(
-          authority.access.caller,
-          get.collection,
-          get.id !== undefined ? { id: get.id } : { key: get.key! },
-        ),
-      };
-    }
-    case "data.write": {
-      const write = parseWith(SiteDataWriteRequest, call.input);
-      for (const name of new Set(write.operations.map((operation) => operation.collection)))
-        await requireSharedCollection(authority.access, name);
-      return {
-        result: await writeSiteDataWithAccess(
-          deps,
-          authority.access,
-          write.operations as SiteDataWriteOp[],
-        ),
-      };
-    }
+  } catch (error) {
+    // Data errors reach the code with their reason (validation, conflict, quota), not as a 500.
+    if (error instanceof SiteDataError)
+      throw new AppServerError(
+        error.code === "quota_exceeded" ? "conflict" : error.code,
+        error.message,
+        { ...error.details, reason: error.code },
+      );
+    throw error;
   }
 }
 

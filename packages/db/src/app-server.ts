@@ -82,23 +82,33 @@ export async function startAppServerRun(
   db: Database,
   scope: Scope,
   run: AppServerRunStart,
-  limits: { perApp: number; perViewer: number },
-): Promise<"started" | "app_limit" | "viewer_limit"> {
+  limits: { perApp: number; perViewer: number; perGuests: number },
+): Promise<"started" | "app_limit" | "viewer_limit" | "guest_limit"> {
   return await withRlsContext(db, scope, async (tx) => {
     await rawRows(
       tx,
       sql`select pg_advisory_xact_lock(hashtextextended(${`app_server_runs:${run.siteId}`}, 0))`,
     );
-    const [counts] = await rawRows<{ app: number | string; viewer: number | string }>(
+    const [counts] = await rawRows<{
+      app: number | string;
+      viewer: number | string;
+      guests: number | string;
+    }>(
       tx,
       sql`select count(*) as app,
-          count(*) filter (where viewer_subject_id is not distinct from ${run.viewerSubjectId}) as viewer
+          count(*) filter (where viewer_subject_id is not distinct from ${run.viewerSubjectId}) as viewer,
+          count(*) filter (where viewer_subject_id like 'guest:%') as guests
         from app_server_runs
         where workspace_id = ${scope.workspaceId} and site_id = ${run.siteId}
           and created_at > now() - interval '1 minute'`,
     );
     if (Number(counts?.app ?? 0) >= limits.perApp) return "app_limit";
     if (Number(counts?.viewer ?? 0) >= limits.perViewer) return "viewer_limit";
+    if (
+      run.viewerSubjectId?.startsWith("guest:") &&
+      Number(counts?.guests ?? 0) >= limits.perGuests
+    )
+      return "guest_limit";
     await rawRows(
       tx,
       sql`insert into app_server_runs (id, account_id, workspace_id, site_id, version_id, trigger,

@@ -4640,7 +4640,7 @@ function registerWorkspaceArtifactTools(
       ]);
       // The version's server code: download each file to edit it, then upload
       // the whole bundle again ({main, files, tools, egress, secrets}).
-      const server = serverManifest
+      const serverCode = serverManifest
         ? {
             main: serverManifest.main,
             tools: serverManifest.tools ?? [],
@@ -4661,7 +4661,7 @@ function registerWorkspaceArtifactTools(
         detail,
         version: projectedVersion,
         downloads,
-        server,
+        server: serverCode,
         artifactReference: `[Open app](artifact:${artifactId})`,
       });
     },

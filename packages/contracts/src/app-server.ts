@@ -47,6 +47,8 @@ export const APP_SERVER_LOG_MAX_CHARS = 8_000;
 export const APP_SERVER_RUNS_PER_MINUTE = 300;
 /** Runs one viewer may start per app per minute (guests also count against the guest write limit). */
 export const APP_SERVER_RUNS_PER_VIEWER_PER_MINUTE = 60;
+/** Runs all guests together may start per app per minute, so visitors can't use up members' share. */
+export const APP_SERVER_GUEST_RUNS_PER_MINUTE = 150;
 /** Most tools one version's server code may declare. */
 export const APP_SERVER_MAX_TOOLS = 50;
 /** Largest outbound response body one fetch may read. */
