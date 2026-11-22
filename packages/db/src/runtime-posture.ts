@@ -573,6 +573,10 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  // Migration 1554: called only behind the existing vault routine grants.
+  "vault_turn_context(uuid, uuid, uuid, uuid)",
+  "human_input_secret_target_reachable(jsonb, jsonb, text, uuid)",
+  "human_input_secret_save_targets(jsonb, uuid, uuid)",
   "wake_teams_route_for_session_event()",
   // Migration 1213: clears a new session's archive marker; triggers fire
   // without the inserting role holding EXECUTE.

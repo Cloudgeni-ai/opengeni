@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import {
+  createSecretResolver,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   applySessionTurnSettlement,
   appendSessionEvents,
@@ -7,16 +11,22 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  encryptEnvironmentValue,
+  ensureDefaultVault,
   getSession,
   submitHumanPromptInTransaction,
   updateWorkspaceSettings,
+  upsertVaultItem,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
+  formatSecretReference,
+  parseSecretReference,
   signDelegatedAccessToken,
   skillReviewHumanInput,
+  type HumanInputQuestion,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -25,10 +35,30 @@ import { Hono } from "hono";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const DELEGATION_SECRET = "session-human-input-route-secret";
+const ENCRYPTION_KEY = Buffer.alloc(32, 44);
 const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: DELEGATION_SECRET,
+  environmentsEncryptionKey: ENCRYPTION_KEY.toString("base64"),
 });
+
+const SECRET_QUESTION: HumanInputQuestion = {
+  id: "sample-password",
+  kind: "secret",
+  prompt: "Enter your example password.",
+  options: [],
+  required: true,
+  allowOther: false,
+  secret: {
+    item: "Example login",
+    field: "password",
+    fieldKind: "concealed",
+    itemType: "login",
+    saveTo: "workspace",
+    allowGenerate: false,
+    autocomplete: "current-password",
+  },
+};
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -77,6 +107,7 @@ async function frozenFixture(
   options: {
     optionalText?: boolean;
     skillReview?: boolean;
+    secretQuestion?: "saved-logins-on" | "saved-logins-off";
     allowSkip?: boolean;
     expiresAt?: Date | null;
   } = {},
@@ -93,6 +124,15 @@ async function frozenFixture(
     subjectId,
   });
   const grant = access.workspaceGrants[0]!;
+  if (options.secretQuestion) {
+    const [personal] = await shared.admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name) values (${grant.accountId}::uuid, 'Personal')
+      returning id::text as id`;
+    await shared.admin`
+      insert into organization_memberships (account_id, subject_id, status, role, personal_workspace_id)
+      values (${grant.accountId}::uuid, ${subjectId}, 'active', 'member', ${personal!.id}::uuid)
+      on conflict do nothing`;
+  }
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -103,6 +143,9 @@ async function frozenFixture(
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "none",
+    ...(options.secretQuestion === "saved-logins-off"
+      ? { firstPartyMcpPermissions: ["sessions:read", "sessions:control"] }
+      : {}),
   });
   await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId!, subjectId, (db) =>
     submitHumanPromptInTransaction(db, {
@@ -131,35 +174,37 @@ async function frozenFixture(
   });
   if (claimed.action !== "claimed") throw new Error(`fixture claim failed: ${claimed.reason}`);
   const requestId = crypto.randomUUID();
-  const questions = options.skillReview
-    ? skillReviewHumanInput({
-        sourceOperationId: crypto.randomUUID(),
-        skillId: crypto.randomUUID(),
-        revisionId: crypto.randomUUID(),
-        expectedRevisionId: null,
-        expectedScopeVersion: 1,
-      }).questions
-    : options.optionalText
-      ? [
-          {
-            id: "note",
-            kind: "text" as const,
-            prompt: "Anything else?",
-            options: [],
-            required: false,
-            allowOther: false,
-          },
-        ]
-      : [
-          {
-            id: "environment",
-            kind: "single_select" as const,
-            prompt: "Which environment?",
-            options: [{ id: "staging", label: "Staging" }],
-            required: true,
-            allowOther: false,
-          },
-        ];
+  const questions = options.secretQuestion
+    ? [SECRET_QUESTION]
+    : options.skillReview
+      ? skillReviewHumanInput({
+          sourceOperationId: crypto.randomUUID(),
+          skillId: crypto.randomUUID(),
+          revisionId: crypto.randomUUID(),
+          expectedRevisionId: null,
+          expectedScopeVersion: 1,
+        }).questions
+      : options.optionalText
+        ? [
+            {
+              id: "note",
+              kind: "text" as const,
+              prompt: "Anything else?",
+              options: [],
+              required: false,
+              allowOther: false,
+            },
+          ]
+        : [
+            {
+              id: "environment",
+              kind: "single_select" as const,
+              prompt: "Which environment?",
+              options: [{ id: "staging", label: "Staging" }],
+              required: true,
+              allowOther: false,
+            },
+          ];
   const allowSkip = options.allowSkip ?? false;
   const expiresAt = options.expiresAt ?? null;
   await applySessionTurnSettlement(client.db, grant.workspaceId!, {
@@ -202,11 +247,17 @@ async function frozenFixture(
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     subjectId,
-    permissions: ["sessions:read", "sessions:control"],
+    permissions: [
+      "sessions:read",
+      "sessions:control",
+      ...(options.secretQuestion ? ["secrets:write" as const] : []),
+    ],
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   return {
+    accountId: grant.accountId,
+    subjectId,
     workspaceId: grant.workspaceId!,
     sessionId: session.id,
     requestId,
@@ -216,6 +267,125 @@ async function frozenFixture(
 }
 
 describe("structured human-input HTTP surface (real PostgreSQL)", () => {
+  test("the asking chat's delegated scope controls save choices and the resumed turn can resolve a Task answer", async () => {
+    const fixture = await frozenFixture({ secretQuestion: "saved-logins-off" });
+    const { accountId, workspaceId, sessionId, subjectId, requestId } = fixture;
+    const writer = { kind: "subject" as const, accountId, workspaceId, subjectId };
+    const sharedVault = await ensureDefaultVault(client.db, writer, {
+      workspaceId,
+      ownerKind: "workspace",
+    });
+    const savedValue = "example-existing-saved-login";
+    await upsertVaultItem(client.db, writer, {
+      vaultId: sharedVault.id,
+      name: "Example login",
+      type: "login",
+      fields: [
+        {
+          name: "password",
+          kind: "concealed",
+          valueSize: savedValue.length,
+          valueEncrypted: encryptEnvironmentValue(ENCRYPTION_KEY, savedValue),
+        },
+      ],
+    });
+    const base = `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    const headers = { authorization: fixture.authorization, "content-type": "application/json" };
+    const list = await app.request(`${base}/human-input-requests?status=pending`, { headers });
+    expect(list.status).toBe(200);
+    expect(await list.json()).toMatchObject({
+      requests: [
+        {
+          id: requestId,
+          questions: [{ secret: { saveTo: "workspace" } }],
+          secretSaveTargets: ["task"],
+        },
+      ],
+    });
+    const detail = await app.request(`${base}/human-input-requests/${requestId}`, { headers });
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({ id: requestId, secretSaveTargets: ["task"] });
+
+    const value = "test-value-only-for-this-task";
+    const answer = (saveTo: "workspace" | "task", vaultId?: string) =>
+      app.request(`${base}/events`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          type: "user.humanInputResponse",
+          clientEventId: crypto.randomUUID(),
+          payload: {
+            requestId,
+            response: {
+              outcome: "answered",
+              answers: [],
+              secretAnswers: [{ questionId: SECRET_QUESTION.id, value, saveTo, vaultId }],
+            },
+          },
+        }),
+      });
+    expect((await answer("workspace")).status).toBe(403);
+    expect((await answer("task", sharedVault.id)).status).toBe(403);
+    const accepted = await answer("task");
+    expect(accepted.status).toBe(202);
+    const event = await accepted.json();
+    const reference = formatSecretReference({
+      vault: "Task",
+      item: "Example login",
+      field: "password",
+    });
+    expect(event.payload.response.answers).toMatchObject([
+      { secret: { reference, saveTo: "task" }, values: [reference] },
+    ]);
+    expect(JSON.stringify(event)).not.toContain(value);
+
+    const attemptId = crypto.randomUUID();
+    const resumed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "approval", triggerEventId: event.id },
+    });
+    if (resumed.action !== "claimed") throw new Error(`question did not resume: ${resumed.reason}`);
+    const resolver = createSecretResolver(
+      { db: client.db, encryptionKey: ENCRYPTION_KEY },
+      {
+        kind: "attempt",
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId,
+        turnId: resumed.turn.id,
+        executionGeneration: resumed.turn.executionGeneration,
+      },
+      { capabilityEnabled: true },
+    );
+    const use = { surface: "mcp", toolName: "example_login" } as const;
+    const resolved = await resolver.resolve([parseSecretReference(reference)], use);
+    expect([...resolved.values()].map((entry) => entry.material)).toEqual([
+      { type: "text", value },
+    ]);
+    const savedReference = formatSecretReference({
+      vault: "Shared",
+      item: "Example login",
+      field: "password",
+    });
+    await expect(
+      resolver.resolve([parseSecretReference(savedReference)], use),
+    ).rejects.toMatchObject({ failures: [{ code: "denied" }] });
+  });
+
+  test("a chat with saved-logins access still offers its workspace vault", async () => {
+    const fixture = await frozenFixture({ secretQuestion: "saved-logins-on" });
+    const base = `http://x/v1/workspaces/${fixture.workspaceId}/sessions/${fixture.sessionId}`;
+    const response = await app.request(`${base}/human-input-requests/${fixture.requestId}`, {
+      headers: { authorization: fixture.authorization },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ secretSaveTargets: ["task", "workspace"] });
+  });
   test("conversation projections name the session sequence they reflect", async () => {
     const fixture = await frozenFixture();
     const base = `/v1/workspaces/${fixture.workspaceId}/sessions/${fixture.sessionId}`;

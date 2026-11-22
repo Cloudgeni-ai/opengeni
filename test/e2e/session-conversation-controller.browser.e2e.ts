@@ -38,7 +38,12 @@ describe("persistent stock conversation controller", () => {
         timeoutMs: 60_000,
       },
     );
-    browser = await chromium.launch({ args: ["--disable-dev-shm-usage"] });
+    browser = await chromium.launch({
+      ...(process.env.CHROMIUM_EXECUTABLE_PATH
+        ? { executablePath: process.env.CHROMIUM_EXECUTABLE_PATH }
+        : {}),
+      args: ["--disable-dev-shm-usage"],
+    });
   }, 90_000);
 
   afterAll(async () => {
@@ -151,7 +156,57 @@ describe("persistent stock conversation controller", () => {
   const goalPill = (page: Page) => page.locator('[data-og-session-chrome-signal="goal"]');
   const queueChip = (page: Page) => page.locator('[data-og-session-chrome-signal="queue"]');
 
+  test("a legacy server can still render the old secure-question save picker", async () => {
+    await open(1440, "controller=1&scenario=secure-question&legacy=1", async (page) => {
+      const card = page.locator("[data-human-input-request]");
+      await card.waitFor();
+      const destination = card.getByLabel("Save to", { exact: true });
+      expect(await destination.locator("option").allTextContents()).toEqual([
+        "Only me",
+        "This task",
+        "This workspace",
+      ]);
+      expect(await destination.inputValue()).toBe("workspace");
+      const evidence = process.env.OPENGENI_CONVERSATION_EVIDENCE_DIR;
+      if (evidence) {
+        mkdirSync(evidence, { recursive: true });
+        await card.screenshot({ path: `${evidence}/secure-question-card-before.png` });
+      }
+    });
+  }, 60_000);
+
   for (const width of [1440, 390]) {
+    test(`secure question offers and submits only This task at ${width}px`, async () => {
+      await open(width, "controller=1&scenario=secure-question", async (page) => {
+        const card = page.locator("[data-human-input-request]");
+        await card.waitFor();
+        expect(await card.getByText("Save to: This task", { exact: true }).isVisible()).toBe(true);
+        expect(await card.locator("select").count()).toBe(0);
+        const password = card.getByLabel("Password", { exact: true });
+        expect(await password.getAttribute("type")).toBe("password");
+        const evidence = process.env.OPENGENI_CONVERSATION_EVIDENCE_DIR;
+        if (evidence) {
+          mkdirSync(evidence, { recursive: true });
+          await page.screenshot({ path: `${evidence}/secure-question-${width}.png` });
+          if (width === 1440)
+            await card.screenshot({ path: `${evidence}/secure-question-card-after.png` });
+        }
+        await password.fill("browser-test-password");
+        await card.locator('button[type="submit"]').click();
+        await card.waitFor({ state: "detached" });
+        expect(
+          await page.evaluate(
+            () =>
+              (
+                window as unknown as {
+                  embeddedConversationHarness: { secretSaveTargets: string[] };
+                }
+              ).embeddedConversationHarness.secretSaveTargets,
+          ),
+        ).toEqual(["task"]);
+      });
+    }, 60_000);
+
     test(`by default the goal pill shows with its pause reason at ${width}px`, async () => {
       await open(width, "scenario=waiting&goal=paused", async (page) => {
         await goalPill(page).waitFor();

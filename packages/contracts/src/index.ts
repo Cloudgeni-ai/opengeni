@@ -173,7 +173,7 @@ export const HostMcpCreateSelections = /* @__PURE__ */ defineSchema(() =>
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { SessionOrgAgent } from "./organization-agents";
-import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
+import { SECRET_SAVE_TO, VaultFieldName, VaultName, VaultPolicy } from "./vaults";
 import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
@@ -22055,6 +22055,8 @@ export const SessionHumanInputRequest = /* @__PURE__ */ defineSkillContractSchem
      */
     origin: z.enum(["tool_call", "secret_use_approval"]).optional(),
     questions: z.array(HumanInputQuestion).min(1).max(20),
+    /** Allowed destinations for a pending secret answer under this reader's authority. */
+    secretSaveTargets: z.array(SECRET_SAVE_TO).optional(),
     allowSkip: primitives.boolean,
     response: HumanInputResponse.nullable(),
     respondedBy: z.string().max(1024).nullable(),

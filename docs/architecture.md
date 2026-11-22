@@ -1768,6 +1768,9 @@ Tool approval and structured human input durably interrupt execution. The worker
 retains exact protocol state without pairing unfinished calls into model history.
 Responses bind the pending request, target turn, execution generation, requester,
 and current authorization.
+Pending secret questions project save destinations separately from the frozen
+question. The database shares the asking turn's vault reach between this
+projection, answer admission, and live-attempt reference resolution.
 
 See [Tool approvals](tool-approvals.md) for canonical policy, portable review and durable programmatic continuation.
 
