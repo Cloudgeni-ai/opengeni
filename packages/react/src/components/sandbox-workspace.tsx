@@ -1114,6 +1114,9 @@ export type SandboxWorkspaceProps = ClientOverride<ChatClient> & {
    *  `UseSandboxWorkspaceTabsOptions.tabVisibility`. */
   tabVisibility?: SandboxWorkspaceTabVisibility | undefined;
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
+  /** With `tabVisibility="relevant"`: the person closed the last tab and the
+   *  dock is back on its empty view. Hosts that remember the tab forget it. */
+  onStripEmptied?: (() => void) | undefined;
   /** Open a built-in or host-injected tab. A new requestId reopens the same tab.
    *  `expand: false` selects it without opening a closed dock. */
   openTabRequest?: { tab: string; requestId: number; expand?: boolean } | null | undefined;
@@ -1182,6 +1185,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     initialTab,
     tabVisibility,
     onActiveTabChange,
+    onStripEmptied,
     openTabRequest,
     initialFilePath,
     onFilePathChange,
@@ -1230,6 +1234,9 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const nextFileRequestId = useRef(0);
   const nextComputerRequestId = useRef(0);
   const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
+  // The tab the dock actually shows ("" for its empty view). Data hooks follow
+  // it, so a tab the dock fell back from, or hid, stops reading live.
+  const [shownTab, setShownTab] = useState<{ sessionId: string; tab: string } | null>(null);
   const handledTabRequest = useRef<{ sessionId: string; requestId: number } | null>(null);
   useEffect(() => {
     if (
@@ -1307,7 +1314,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(machinesEnabled !== undefined ? { machinesEnabled } : {}),
     ...(initialTab ? { initialTab } : {}),
     ...(tabVisibility ? { tabVisibility } : {}),
-    activeTab: activeTabHint,
+    activeTab: shownTab?.sessionId === sessionId ? shownTab.tab : activeTabHint,
     workspaceVisible: collapsed !== true,
     ...(onNotify ? { onNotify } : {}),
     ...(browserWebSocketFactory ? { browserWebSocketFactory } : {}),
@@ -1368,11 +1375,23 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     setStoredSelection({ sessionId, tab: defaultTab, picked: Boolean(initialTab) });
   }, [defaultTab, initialTab, selectedTab, sessionId]);
   const picked = storedSelection?.sessionId === sessionId && storedSelection.picked === true;
+  const landingShown =
+    tabVisibility === "relevant" && !picked && tabs.length > 0 && tabs.every((tab) => tab.optional);
+  const shownNow = landingShown ? "" : (activeTab ?? null);
+  useEffect(() => {
+    if (shownNow === null) return;
+    setShownTab((previous) =>
+      previous?.sessionId === sessionId && previous.tab === shownNow
+        ? previous
+        : { sessionId, tab: shownNow },
+    );
+  }, [sessionId, shownNow]);
   const backToLanding = useCallback(() => {
     setStoredSelection((previous) =>
       previous?.sessionId === sessionId ? { ...previous, picked: false } : previous,
     );
-  }, [sessionId]);
+    onStripEmptied?.();
+  }, [onStripEmptied, sessionId]);
 
   return (
     <WorkspaceDock
@@ -1391,8 +1410,10 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       activeTab !== WORKBENCH_TAB_DESKTOP
         ? {
             headerAccessory: <MachineStateChip chip={machine.chip} />,
-            // Waking or offline is worth seeing without opening the menu.
-            headerAccessoryPinned: machine.chip.state !== "live",
+            // Waking or an unreachable machine is worth seeing without opening
+            // the menu; a sleeping box is ordinary.
+            headerAccessoryPinned:
+              machine.chip.state === "waking" || machine.chip.unreachable === true,
           }
         : {})}
       {...(mobileLeadingControl !== undefined ? { mobileLeadingControl } : {})}

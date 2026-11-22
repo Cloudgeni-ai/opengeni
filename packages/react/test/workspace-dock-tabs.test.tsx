@@ -159,6 +159,8 @@ describe("WorkspaceDock tab strip", () => {
     expect(rendered.container.querySelector("[data-dock-landing]")).not.toBeNull();
     expect(shown()).toEqual([]);
     expect(rendered.container.textContent).not.toContain("Changes content");
+    // "+" stays reachable on the empty view, so nothing is hidden there.
+    expect(rendered.container.querySelector("[data-dock-menu]")).not.toBeNull();
 
     await click(rendered.container.querySelector('[data-dock-landing-tab="terminal"]'));
     await flush();

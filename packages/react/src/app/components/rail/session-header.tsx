@@ -619,7 +619,13 @@ export function SessionHeader({
             variant={inspectorOpen ? "secondary" : "ghost"}
             size="icon-sm"
             onClick={onToggleInspector}
-            aria-label={inspectorOpen ? "Hide workspace" : "Open workspace"}
+            aria-label={
+              inspectorOpen
+                ? "Hide workspace"
+                : inspectorHint
+                  ? "Open workspace, something new"
+                  : "Open workspace"
+            }
             aria-keyshortcuts={panelKeys?.ariaKeys}
             title={
               (inspectorOpen ? "Hide workspace" : "Open workspace") +

@@ -860,12 +860,14 @@ function DockChrome({
   const menuTabs = tabs.filter((tab) => !shownTabs.includes(tab));
   const menuAccessory = accessoryInMenu && accessory ? accessory : null;
   const actions = menuActions ?? [];
-  // The empty view lists its tabs itself; the menu returns with the first tab.
-  const hasMenu = !landing && (menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null);
+  // The empty view offers its first tabs inline; "+" keeps everything else in
+  // reach there too.
+  const hasMenu = menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null;
 
   // One pill slides under the selected tab. It's positioned directly (no
   // state), so a switch costs no extra render.
   const stripRef = useRef<HTMLDivElement | null>(null);
+  const chromeRef = useRef<HTMLDivElement | null>(null);
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pillRef = useRef<HTMLSpanElement | null>(null);
   const shownKey = shownTabs.map((tab) => tab.id).join("\u0000");
@@ -934,14 +936,15 @@ function DockChrome({
 
   return (
     <div
+      ref={chromeRef}
       data-dock-chrome
       className="flex h-full min-h-0 min-w-0 flex-col bg-og-bg [--og-color-bg:var(--og-color-canvas)] [--color-bg:var(--og-color-canvas)] [--og-diff-separator:color-mix(in_oklch,var(--og-color-fg)_4%,transparent)]"
     >
       <div
         className={cn(
           "min-h-11 shrink-0 items-center gap-1 bg-[radial-gradient(120%_180%_at_100%_0%,color-mix(in_oklch,var(--og-color-accent)_8%,transparent),transparent_70%)] px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
-          // The empty view needs no header unless it carries host controls.
-          landing && !leading && !controls ? "hidden" : "flex",
+          // The empty view needs no header unless it carries controls.
+          landing && !leading && !controls && !hasMenu ? "hidden" : "flex",
         )}
       >
         {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
@@ -1016,13 +1019,18 @@ function DockChrome({
                       title={msg("workspaceDock.closeTab", { name: tabName(tab) })}
                       onClick={() => {
                         onClose(tab.id);
-                        // Keep focus in the strip: the selected tab, else "+".
+                        // Keep focus in the dock: the selected tab, else the
+                        // empty view's first choice, else "+".
                         requestAnimationFrame(() => {
                           const strip = stripRef.current;
                           const target =
                             strip?.querySelector<HTMLElement>(
                               '[role="tab"][aria-selected="true"]',
-                            ) ?? menuTriggerRef.current;
+                            ) ??
+                            chromeRef.current?.querySelector<HTMLElement>(
+                              "[data-dock-landing-tab]",
+                            ) ??
+                            menuTriggerRef.current;
                           target?.focus();
                         });
                       }}

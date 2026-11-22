@@ -2151,18 +2151,20 @@ function SessionDockPanel(props: SessionDockProps) {
   );
   const contentBits =
     (hasChanges ? 1 : 0) | (pullRequestLink ? 2 : 0) | (artifactSummaries.length > 0 ? 4 : 0);
+  // Links and artifacts load after the chat opens; what they bring then isn't new.
+  const contentLoaded = linkState.status !== "loading" && artifactState.status !== "loading";
   const seenContent = useRef<{ sessionId: string; bits: number } | null>(null);
   const setInspectorHint = context.setInspectorHint;
   useEffect(() => {
     if (!setInspectorHint) return;
     const seen = seenContent.current;
-    if (!seen || seen.sessionId !== props.sessionId || !props.dockCollapsed) {
+    if (!seen || seen.sessionId !== props.sessionId || !props.dockCollapsed || !contentLoaded) {
       seenContent.current = { sessionId: props.sessionId, bits: contentBits };
       setInspectorHint(false);
       return;
     }
     if ((contentBits & ~seen.bits) !== 0) setInspectorHint(true);
-  }, [contentBits, props.dockCollapsed, props.sessionId, setInspectorHint]);
+  }, [contentBits, contentLoaded, props.dockCollapsed, props.sessionId, setInspectorHint]);
   useEffect(() => () => setInspectorHint?.(false), [setInspectorHint]);
   const pullRequestNumberLabel = pullRequestLink ? pullRequestNumber(pullRequestLink) : null;
   const leadingTabs: WorkspaceTab[] = pullRequestLink
