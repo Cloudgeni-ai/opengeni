@@ -15,10 +15,8 @@ query. Then tell the user in plain words who sees what. An app that uses
 personal-account tools shows clear connect states from
 `site.tools.$readiness`, so it works for teammates who have not connected yet.
 
-Server code (`references/server-code.md`) reaches the workspace's shared
-accounts, the app's shared data and vault-backed hosts for everyone who can
-open the app, guests included. Check that it refuses what each `env.viewer.kind`
-shouldn't reach, and tell the user what guests would reach before publishing.
+Server code tool calls and vault secrets (`references/server-code.md`) only
+work for workspace members permitted to use the tool; visitors get a refusal.
 
 ## Viewers, the embedded agent and limits
 

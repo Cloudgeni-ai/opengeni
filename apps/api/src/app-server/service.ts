@@ -422,20 +422,54 @@ const DEPLOYER_CANNOT_MANAGE =
 const DEPLOYER_CANNOT_USE_SECRETS =
   "This version's server code uses vault secrets, and the person who made it current isn't a workspace admin who may use them, so it is paused. A workspace admin should publish it again.";
 
+/** A person's own live grant in the workspace as a member; null when they aren't one. */
+async function liveMemberGrant(
+  deps: Pick<ApiRouteDeps, "db">,
+  scope: { accountId: string; workspaceId: string },
+  subjectId: string,
+): Promise<AccessGrant | null> {
+  return await withWorkspaceSubjectRls(deps.db, scope.workspaceId, subjectId, async (tx) => {
+    if (!(await subjectHasLiveWorkspaceAuthorityInScope(tx, { ...scope, subjectId }))) return null;
+    return await getWorkspaceGrant(tx, subjectId, scope.workspaceId, {
+      principalKind: "human_session",
+    });
+  });
+}
+
 /** The deployer's own live workspace grant; null once they are gone. */
 async function deployerGrant(
   deps: AppServerDeps,
   deployment: AppServerDeployment,
 ): Promise<AccessGrant | null> {
   if (deps.appServerDeployerGrant) return await deps.appServerDeployerGrant(deployment);
-  const scope = { accountId: deployment.accountId, workspaceId: deployment.workspaceId };
-  const subjectId = deployment.deployerSubjectId;
-  return await withWorkspaceSubjectRls(deps.db, deployment.workspaceId, subjectId, async (tx) => {
-    if (!(await subjectHasLiveWorkspaceAuthorityInScope(tx, { ...scope, subjectId }))) return null;
-    return await getWorkspaceGrant(tx, subjectId, deployment.workspaceId, {
-      principalKind: "human_session",
-    });
-  });
+  return await liveMemberGrant(
+    deps,
+    { accountId: deployment.accountId, workspaceId: deployment.workspaceId },
+    deployment.deployerSubjectId,
+  );
+}
+
+/**
+ * Code that calls tools or uses vault secrets reaches the workspace's shared
+ * accounts, so it runs only for a signed-in member of the app's workspace,
+ * and each call only for a member who may use that tool or secret themselves
+ * (docs/app-server-code.md, "Who may run it"). Whatever the app's sharing
+ * setting, guests, invited people and other outsiders are refused.
+ */
+export function appServerReachesSharedAccounts(manifest: AppServerManifest): boolean {
+  return (manifest.tools?.length ?? 0) > 0 || manifest.secrets.length > 0;
+}
+
+const NOT_PERMITTED =
+  "This app's server code uses the workspace's connections, so only members of its workspace who may use them can run it.";
+
+function notPermitted(message = NOT_PERMITTED, details: Record<string, unknown> = {}) {
+  return forbidden(message, { ...details, reason: "not_permitted" });
+}
+
+/** `user:<subject>` -> subject; a guest or no viewer -> null. */
+function viewerSubjectOf(viewerId: string | null | undefined): string | null {
+  return viewerId?.startsWith("user:") ? viewerId.slice("user:".length) || null : null;
 }
 
 type ServerAuthority = { grant: AccessGrant; access: SiteDataAccess };
@@ -508,6 +542,9 @@ type RunState = {
   key: string;
   authority: Promise<ServerAuthority>;
   inventory?: Promise<SiteToolAccountInventory> | undefined;
+  /** The run's viewer as a live member (null: not one), checked once per run. */
+  viewer?: Promise<AccessGrant | null> | undefined;
+  viewerInventory?: Promise<SiteToolAccountInventory> | undefined;
   expiresAt: number;
 };
 const runStates = new Map<string, RunState>();
@@ -638,6 +675,12 @@ export async function runAppServer(
   if (body.byteLength > APP_SERVER_REQUEST_BODY_MAX_BYTES)
     throw invalid(`The request body is over ${APP_SERVER_REQUEST_BODY_MAX_BYTES / 1024 / 1024} MB`);
   const manifest = deployment.manifest;
+  // Checked here from the verified viewer, whatever the code does with env.viewer.
+  if (appServerReachesSharedAccounts(manifest)) {
+    const subjectId = input.viewer?.kind === "guest" ? null : viewerSubjectOf(input.viewer?.id);
+    const member = subjectId ? await liveMemberGrant(deps, input.scope, subjectId) : null;
+    if (!member) throw notPermitted();
+  }
   const runId = crypto.randomUUID();
   const startedAt = Date.now();
   const started = await startAppServerRun(
@@ -988,6 +1031,28 @@ export function routeAppServerTool(
   });
 }
 
+/**
+ * Whether a viewer may use the routed identity themselves: the same shared
+ * account route is in their own tool inventory (the connection reaches them
+ * as it would in their chats), or the account-less server is configured for
+ * them.
+ */
+export function appServerViewerMayUse(
+  viewerInventory: SiteToolAccountInventory,
+  identity: ToolGatewayIdentity,
+): boolean {
+  if (
+    viewerInventory.accounts.some(
+      (account) => account.serverId === identity.serverId && account.shared === true,
+    )
+  )
+    return true;
+  return (
+    viewerInventory.plain.has(identity.serverId) &&
+    !viewerInventory.canonical.has(identity.serverId)
+  );
+}
+
 function toolIdentityOf(value: unknown): ToolGatewayIdentity {
   if (typeof value === "string") {
     const at = value.indexOf("/");
@@ -1053,6 +1118,7 @@ export async function appServerOutboundFetch(
   manifest: AppServerManifest,
   input: unknown,
   app?: { siteId: string; versionId: string },
+  options: { mayUseSecrets?: () => Promise<boolean> } = {},
 ): Promise<{ status: number; headers: Array<[string, string]>; bodyBase64: string }> {
   const request = parseWith(AppServerOutboundRequest, input);
   let url: URL;
@@ -1089,9 +1155,14 @@ export async function appServerOutboundFetch(
   const body = request.bodyBase64 ? Buffer.from(request.bodyBase64, "base64") : null;
   if (body && body.includes(SECRET_MARK))
     throw invalid("Put secrets in request headers, not the body");
+  const usesSecrets = Object.values(headers).some((value) => value.includes(SECRET_MARK));
+  if (usesSecrets && options.mayUseSecrets && !(await options.mayUseSecrets()))
+    throw notPermitted(
+      "This app's server code uses a vault secret you may not use in this workspace, so it can't use it for you.",
+    );
   let resolved: Record<string, string>;
   try {
-    resolved = Object.values(headers).some((value) => value.includes(SECRET_MARK))
+    resolved = usesSecrets
       ? await resolveSecretHeaders(deps, scope, headers, url.toString(), app)
       : headers;
   } catch (error) {
@@ -1176,11 +1247,11 @@ export async function handleAppServerHostCall(
     limit: APP_SERVER_HOST_CALLS_PER_RUN,
     maxAgeMs: APP_SERVER_RUN_TIMEOUT_MS + 5_000,
   });
-  if (claimed === "ended")
+  if (claimed.outcome === "ended")
     throw forbidden("This run has ended, so it can't call Opengeni any more", {
       reason: "run_ended",
     });
-  if (claimed === "limit")
+  if (claimed.outcome === "limit")
     throw new AppServerError(
       "rate_limited",
       `This run made more than ${APP_SERVER_HOST_CALLS_PER_RUN} calls to tools, data and fetch`,
@@ -1200,11 +1271,28 @@ export async function handleAppServerHostCall(
   // Even an outbound fetch stops once the deployer can no longer manage the app.
   const state = runStateFor(deps, deployment, claims.runId);
   const authority = await state.authority;
+  /** The run's viewer as a live member of the workspace, or a refusal. */
+  const viewerGrant = async (): Promise<AccessGrant> => {
+    const subjectId = viewerSubjectOf(claimed.viewerSubjectId);
+    state.viewer ??= subjectId ? liveMemberGrant(deps, scope, subjectId) : Promise.resolve(null);
+    const grant = await state.viewer.catch((error) => {
+      state.viewer = undefined;
+      throw error;
+    });
+    if (!grant) throw notPermitted();
+    return grant;
+  };
   try {
     switch (call.op) {
       case "fetch":
         return {
-          result: await appServerOutboundFetch(deps, scope, deployment.manifest, call.input, app),
+          result: await appServerOutboundFetch(deps, scope, deployment.manifest, call.input, app, {
+            // Vault secrets go out only for a member who may use them.
+            mayUseSecrets: async () => {
+              const viewer = await viewerGrant();
+              return hasPermission(viewer.permissions, "secrets:use", viewer.permissionMode);
+            },
+          }),
         };
       case "tools.call": {
         const tool = toolIdentityOf(call.input.tool);
@@ -1234,6 +1322,26 @@ export async function handleAppServerHostCall(
           appServerDeclaredTools(deployment.manifest),
           tool,
         );
+        // The viewer must be able to use this same shared account themselves.
+        const viewer = await viewerGrant();
+        let viewerInventory: SiteToolAccountInventory;
+        try {
+          state.viewerInventory ??= (deps.appServerToolInventory ?? readSiteToolAccountInventory)(
+            deps,
+            viewer,
+          );
+          viewerInventory = await state.viewerInventory;
+        } catch {
+          state.viewerInventory = undefined;
+          throw new AppServerError(
+            "unavailable",
+            "The workspace's connections can't be read right now. Try again shortly.",
+          );
+        }
+        if (!appServerViewerMayUse(viewerInventory, identity))
+          throw notPermitted(
+            "You can't use this tool's connection in this workspace, so this app's server code can't use it for you. A workspace admin can give you access.",
+          );
         try {
           const result = await (deps.appServerToolCaller ?? callAppSyncToolThroughGateway)({
             deps,

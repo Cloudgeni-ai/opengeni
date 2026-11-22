@@ -11,6 +11,7 @@ import {
   AppServerError,
   appServerManifestOf,
   appServerOutboundFetch,
+  appServerViewerMayUse,
   routeAppServerTool,
   type AppServerDeps,
 } from "../src/app-server/service";
@@ -266,5 +267,39 @@ describe("app server outbound fetch", () => {
         bodyBase64: Buffer.from(SECRET).toString("base64"),
       }),
     ).rejects.toThrow(/not the body/);
+  });
+
+  test("a secret goes out only for a viewer who may use it", async () => {
+    const before = sent.length;
+    const refused = await appServerOutboundFetch(
+      deps,
+      scope,
+      manifest,
+      { url: "https://api.example.com/", headers: [["authorization", SECRET]] },
+      undefined,
+      { mayUseSecrets: async () => false },
+    ).catch((error: AppServerError) => error);
+    expect(refused).toBeInstanceOf(AppServerError);
+    expect((refused as AppServerError).details.reason).toBe("not_permitted");
+    expect(sent.length).toBe(before);
+  });
+});
+
+describe("app server viewer permission", () => {
+  const viewer: SiteToolAccountInventory = {
+    canonical: new Map([["linear", { name: "Linear" } as never]]),
+    plain: new Set(["weather"]),
+    accounts: [
+      { serverId: "linear__team", canonicalServerId: "linear", shared: true } as never,
+      { serverId: "linear__mine", canonicalServerId: "linear", shared: false } as never,
+    ],
+  };
+  test("the viewer must reach the same shared account, or the account-less server", () => {
+    expect(appServerViewerMayUse(viewer, { serverId: "linear__team", toolName: "x" })).toBe(true);
+    expect(appServerViewerMayUse(viewer, { serverId: "weather", toolName: "x" })).toBe(true);
+    // Their own account doesn't count, nor a shared account they can't reach.
+    expect(appServerViewerMayUse(viewer, { serverId: "linear__mine", toolName: "x" })).toBe(false);
+    expect(appServerViewerMayUse(viewer, { serverId: "linear__other", toolName: "x" })).toBe(false);
+    expect(appServerViewerMayUse(viewer, { serverId: "linear", toolName: "x" })).toBe(false);
   });
 });

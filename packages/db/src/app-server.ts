@@ -154,25 +154,29 @@ export async function finishAppServerRun(
  * Count one call back to Opengeni against a live run: the run must be the
  * app's and version's, still `running` and inside its deadline, and under
  * `limit` calls. The API enforces this whatever the code does in its isolate.
+ * Returns the run's viewer (recorded by the API at start) for per-call checks.
  */
 export async function claimAppServerHostCall(
   db: Database,
   scope: Scope,
   call: { runId: string; siteId: string; versionId: string; limit: number; maxAgeMs: number },
-): Promise<"ok" | "ended" | "limit"> {
-  if (!UUID.test(call.runId)) return "ended";
+): Promise<{ outcome: "ok" | "ended" | "limit"; viewerSubjectId: string | null }> {
+  if (!UUID.test(call.runId)) return { outcome: "ended", viewerSubjectId: null };
   return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ host_calls: number | string }>(
+    const [row] = await rawRows<{ host_calls: number | string; viewer_subject_id: string | null }>(
       tx,
       sql`update app_server_runs set host_calls = host_calls + 1
         where id = ${call.runId} and workspace_id = ${scope.workspaceId}
           and site_id = ${call.siteId} and version_id = ${call.versionId}
           and status = 'running'
           and created_at > now() - make_interval(secs => ${call.maxAgeMs / 1000})
-        returning host_calls`,
+        returning host_calls, viewer_subject_id`,
     );
-    if (!row) return "ended";
-    return Number(row.host_calls) > call.limit ? "limit" : "ok";
+    if (!row) return { outcome: "ended", viewerSubjectId: null };
+    return {
+      outcome: Number(row.host_calls) > call.limit ? "limit" : "ok",
+      viewerSubjectId: row.viewer_subject_id,
+    };
   });
 }
 

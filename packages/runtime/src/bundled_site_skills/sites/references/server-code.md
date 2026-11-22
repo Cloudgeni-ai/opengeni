@@ -16,17 +16,14 @@ Use it when the app needs one of those. Do not add it for things the page can
 already do: workspace tools as the viewer, AI, app data, and scheduled refills
 (`app_sync_save`) or inbound events (`app_webhook_save`) need no server code.
 
-## The code is the app's security boundary
+## Who can run it
 
-Everyone who can open the app can call its server code, with the shared
-accounts and secrets behind it. That includes invited people and, for an app
-published to the web, anonymous guests. So:
+Code that calls tools or uses vault secrets runs only for signed-in members
+of the app's workspace who may use that tool or secret themselves; Opengeni
+refuses everyone else (`not_permitted`), whatever the app's sharing setting.
+Code without tools or secrets follows the app's usual access.
 
-- Check `env.viewer` before anything sensitive: `env.viewer.kind` is
-  `member`, `invited`, `user` or `guest`. Return 403 when it doesn't fit.
 - Return only what the caller should see; filter on the server.
-- Before publishing to the web, ask the user whether guests should reach the
-  shared accounts at all, and say what they would reach.
 - The code is not secret: anyone who can read the app's source can read it.
   Keys live only in the vault (below), never in the code.
 
@@ -38,7 +35,6 @@ One or more ES modules. The main module exports `fetch`:
 // server/index.js
 export default {
   async fetch(request, env) {
-    if (env.viewer?.kind !== "member") return new Response("Members only", { status: 403 });
     const url = new URL(request.url);
     if (url.pathname === "/issues") {
       const result = await env.tools.call("linear/list_issues", { first: 20 });
@@ -90,8 +86,8 @@ const issues = await response.json();
 
 `site.server.fetch(path, init)` takes a path (with query) and the usual
 `method`, `headers` and `body` (a string, bytes, `FormData`, or a value sent
-as JSON), and returns a `Response`. It works for every viewer who can open
-the app, including invited people and public visitors.
+as JSON), and returns a `Response`. When the code uses tools or secrets, only
+workspace members who may use them get an answer; show others a short note.
 
 ## Ship it
 

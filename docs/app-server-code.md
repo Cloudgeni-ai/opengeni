@@ -121,10 +121,26 @@ still a live member who manages the app. If they lose that, the code pauses
 with `deployer_cannot_manage` until a manager publishes again; runs stop
 before the code starts, and the status line says so.
 
-Everyone who can open the app can call its code, guests of a public app
-included, so the code is the authorization boundary for what it exposes:
-it checks `env.viewer` (the sites Skill says so, and asks agents to review
-what guests reach before publishing to the web).
+### Who may run it
+
+Code that calls tools or uses vault secrets reaches the workspace's shared
+accounts, so Opengeni enforces, from the verified viewer and whatever the
+app's sharing setting:
+
+- **At run start**, the viewer must be a signed-in, live member of the app's
+  workspace. Guests, invited people, other signed-in users and API keys get
+  `not_permitted` and the code doesn't start (no run is recorded).
+- **On each tool call**, the shared account route the call uses must be in
+  the viewer's own tool inventory (the connection reaches them as it would in
+  their chats), or the account-less server must be configured for them.
+- **On each fetch that carries a vault secret**, the viewer must hold
+  `secrets:use`.
+
+The run's viewer is recorded on its row at start, and calls back read it
+from there, never from the code. Code without tools or secrets keeps the
+app's usual access rules. Data that syncs, webhooks or earlier runs stored in
+app data is served under that data's own collection rules; see the gap noted
+on OPE-1057.
 
 - **Tools** (`env.tools.call`): only tools the server bundle lists in
   `tools` (separate from the page's `requestedTools`, which run as the

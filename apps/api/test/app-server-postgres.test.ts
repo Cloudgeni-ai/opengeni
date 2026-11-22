@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   APP_SERVER_RUN_TOKEN_HEADER,
   appServerHostSuffix,
+  type AccessGrant,
   type AppServerGatewayRunRequest,
   type AppServerGatewayRunResult,
 } from "@opengeni/contracts";
@@ -19,7 +20,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
-import type { AppServerDeps } from "../src/app-server/service";
+import { AppServerError, runAppServer, type AppServerDeps } from "../src/app-server/service";
 import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteToolAccountInventory } from "../src/site-tool-routing";
 
@@ -145,7 +146,7 @@ async function fixture() {
   const memory = memoryObjectStorage();
   const toolCalls: ToolCall[] = [];
   let isolate: Isolate = async () => ({ status: 200 });
-  let inventory: SiteToolAccountInventory = {
+  let inventory: SiteToolAccountInventory | ((grant: AccessGrant) => SiteToolAccountInventory) = {
     canonical: new Map([["linear", { name: "Linear" } as never]]),
     plain: new Set(),
     accounts: [
@@ -200,7 +201,8 @@ async function fixture() {
         ...result,
       } satisfies AppServerGatewayRunResult);
     },
-    appServerToolInventory: async () => inventory,
+    appServerToolInventory: async (_deps, grant) =>
+      typeof inventory === "function" ? inventory(grant) : inventory,
     appServerToolCaller: async (input) => {
       toolCalls.push({
         serverId: input.identity.serverId,
@@ -334,6 +336,10 @@ async function fixture() {
     app,
     base,
     scope: { accountId, workspaceId: workspace.id },
+    /** Someone signed in to the same organization who isn't a workspace member. */
+    outsider: async () =>
+      (await ensureExternalIdentity(db.db, { accountId, source, externalId: crypto.randomUUID() }))
+        .subjectId,
     runtime,
     owner,
     member,
@@ -347,7 +353,10 @@ async function fixture() {
     setIsolate: (next: Isolate) => {
       isolate = next;
     },
-    setInventory: (next: SiteToolAccountInventory) => {
+    deps: deps as unknown as AppServerDeps,
+    setInventory: (
+      next: SiteToolAccountInventory | ((grant: AccessGrant) => SiteToolAccountInventory),
+    ) => {
       inventory = next;
     },
     removeMember: async (who: Who) => {
@@ -359,6 +368,16 @@ async function fixture() {
     },
   };
 }
+
+const PLAIN_CODE = {
+  main: "index.js",
+  files: [
+    {
+      path: "index.js",
+      content: 'export default { async fetch() { return Response.json({ hello: "world" }); } };',
+    },
+  ],
+};
 
 const SERVER_CODE = {
   main: "index.js",
@@ -605,7 +624,7 @@ test("an upload of no files removes the code", async () => {
   expect(status.json.hasCode).toBe(false);
 });
 
-test("a public visitor reaches the code as a guest through the published app", async () => {
+test("a public visitor is refused code that uses tools, and reaches code that doesn't", async () => {
   const f = await fixture();
   expect((await f.publish(SERVER_CODE)).status).toBe(200);
   const published = await f.app.request(`${f.base}/${f.siteId}/publication`, {
@@ -617,13 +636,80 @@ test("a public visitor reaches the code as a guest through the published app", a
   const hostname = String(((await published.json()) as { hostname: string }).hostname);
   f.setIsolate(async () => ({ bodyBase64: Buffer.from("{}").toString("base64") }));
   const visitor = randomBytes(18).toString("base64url");
-  const ran = await f.runtime(
+  const before = f.runs.length;
+  const refused = await f.runtime(
     hostname,
     "/published-artifacts/current/server",
     { path: "/issues" },
     visitor,
   );
+  expect(refused.status, JSON.stringify(refused.json)).toBe(403);
+  expect(refused.json.error.details?.reason).toBe("not_permitted");
+  expect(f.runs.length).toBe(before);
+  expect(f.toolCalls).toEqual([]);
+
+  // Code without tools or secrets keeps the app's usual access.
+  expect((await f.publish(PLAIN_CODE)).status).toBe(200);
+  const ran = await f.runtime(
+    hostname,
+    "/published-artifacts/current/server",
+    { path: "/hello" },
+    visitor,
+  );
   expect(ran.status, JSON.stringify(ran.json)).toBe(200);
   expect(f.runs.at(-1)!.context.viewer).toMatchObject({ kind: "guest", email: null });
   expect(f.runs.at(-1)!.context.viewer!.id).toStartWith("guest:");
+});
+
+test("a signed-in person outside the workspace is refused, whatever kind they claim", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  const outsider = await f.outsider();
+  for (const kind of ["member", "invited", "user"] as const) {
+    const refused = await runAppServer(f.deps, {
+      scope: f.scope,
+      siteId: f.siteId,
+      viewer: { id: `user:${outsider}`, email: null, name: null, kind },
+      trigger: "request",
+      request: { path: "/issues" },
+    }).catch((error: AppServerError) => error);
+    expect(refused).toBeInstanceOf(AppServerError);
+    expect((refused as AppServerError).details.reason).toBe("not_permitted");
+  }
+  // A member who has left is an outsider too.
+  await f.removeMember(f.member);
+  const left = await runAppServer(f.deps, {
+    scope: f.scope,
+    siteId: f.siteId,
+    viewer: { id: `user:${f.member.subjectId}`, email: null, name: null, kind: "member" },
+    trigger: "request",
+    request: { path: "/issues" },
+  }).catch((error: AppServerError) => error);
+  expect((left as AppServerError).details?.reason).toBe("not_permitted");
+  expect(f.runs).toEqual([]);
+  expect(f.toolCalls).toEqual([]);
+});
+
+test("a member who can't use the shared connection themselves is refused the tool call", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  const teamLinear = {
+    canonical: new Map([["linear", { name: "Linear" } as never]]),
+    plain: new Set<string>(),
+    accounts: [{ serverId: "linear__team", canonicalServerId: "linear", shared: true } as never],
+    capabilityServers: new Set<string>(),
+  };
+  // The publisher reaches the shared account; this member doesn't.
+  f.setInventory((grant) =>
+    grant.subjectId === f.member.subjectId ? { ...teamLinear, accounts: [] } : teamLinear,
+  );
+  let refused: HostReply | undefined;
+  f.setIsolate(async (_run, host) => {
+    refused = await host("tools.call", { tool: "linear/list_issues", arguments: {} });
+    return {};
+  });
+  await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/issues" });
+  expect(refused?.status).toBe(403);
+  expect(refused?.json.error.details.reason).toBe("not_permitted");
+  expect(f.toolCalls).toEqual([]);
 });
