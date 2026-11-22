@@ -34,6 +34,7 @@ import {
 import {
   eventSourceChoiceOf,
   eventSourceStatusBadge,
+  isAppWebhookChoice,
   eventSourceSubjectOfChoice,
   type EventSourceChoice,
   type EventSourceChoiceMeta,
@@ -73,11 +74,18 @@ export type AgentTriggerPick =
  * What a new kind of source takes before its events can start the agent:
  * Opengeni adds a GitHub, Slack or This workspace source right here
  * (`create`), a webhook is created here and shows its URL (`create_webhook`),
- * GitHub first needs connecting to the workspace (`connect_github`), and any
- * other kind (a connection to pick, a secret to paste, or a kind this client
- * doesn't know) is added on the Add a source page (`add_source`).
+ * a Linear, Sentry or Tailscale webhook is created here, shows its URL and
+ * takes the secret that app shows (`create_pasted`), GitHub first needs
+ * connecting to the workspace (`connect_github`), and any other kind (a
+ * connection or server to pick, or a kind this client doesn't know) is added
+ * on the Add a source page (`add_source`).
  */
-export type AgentTriggerSetup = "create" | "create_webhook" | "connect_github" | "add_source";
+export type AgentTriggerSetup =
+  | "create"
+  | "create_webhook"
+  | "create_pasted"
+  | "connect_github"
+  | "add_source";
 
 export interface AgentTriggerOption {
   key: string;
@@ -107,6 +115,7 @@ export function agentTriggerNewSetup(
   if (choice === "github") return options.githubConnected === false ? "connect_github" : "create";
   if (choice === "slack" || choice === "workspace") return "create";
   if (choice === "webhook") return "create_webhook";
+  if (isAppWebhookChoice(choice)) return "create_pasted";
   return "add_source";
 }
 
@@ -146,7 +155,8 @@ export function agentTriggerOptions(
         label: source.name,
         subject: source,
       };
-      if (source.status === "active") return option;
+      // A webhook waiting for its app's secret can be picked: the secret is pasted here.
+      if (source.status === "active" || agentTriggerAwaitsSecret(source)) return option;
       const badge = eventSourceStatusBadge(t, source);
       return { ...option, unavailable: badge?.reason ?? badge?.label ?? "Unavailable" };
     });
@@ -248,7 +258,22 @@ export function agentTriggerSourceStep(
   options: { githubConnected: boolean | null },
 ): AgentTriggerSetup {
   const setup = agentTriggerNewSetup(automationTemplateSourceChoice(wanted), options);
-  return setup === "create_webhook" ? "add_source" : setup;
+  return setup === "create_webhook" || setup === "create_pasted" ? "add_source" : setup;
+}
+
+/** A pasted webhook (Linear, Sentry, another app) whose secret isn't set yet. */
+export function agentTriggerAwaitsSecret(
+  source: Pick<EventSource, "kind" | "awaitingSigningSecret"> | undefined,
+): boolean {
+  return source?.kind === "webhook" && source.awaitingSigningSecret === true;
+}
+
+/** Why a pasted secret can't be saved, or undefined when it can. */
+export function agentTriggerSecretIssue(
+  value: string,
+  setup: { app: string; secretName: string },
+): string | undefined {
+  return value.trim().length < 8 ? `Paste the ${setup.secretName} ${setup.app} shows.` : undefined;
 }
 
 /**

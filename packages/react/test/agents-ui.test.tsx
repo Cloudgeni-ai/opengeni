@@ -1472,6 +1472,54 @@ test("Create a webhook makes its URL right there, then its events start the agen
   expect(button(dialog, "Add trigger")).toBeTruthy();
 });
 
+test("Linear's webhook is made in place and takes its secret in one field, never shown again", async () => {
+  const { client, dialog } = await openAgentTrigger({});
+  await pickTrigger(dialog, "new:linear");
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-setup='create_pasted']")).not.toBeNull();
+  await act(async () => button(dialog, "Add Linear").click());
+  await flush();
+  const request = client.calls.find((call) => call[0] === "createEventSource")?.[2];
+  expect(request).toEqual(expect.objectContaining({ kind: "webhook", adapter: "custom" }));
+  expect(request).not.toHaveProperty("signingSecret");
+  // The URL to paste into Linear, and one field for the secret it shows.
+  const step = dialog.querySelector<HTMLElement>("[data-agent-trigger-secret]")!;
+  expect(step).not.toBeNull();
+  const url = step.querySelector<HTMLTextAreaElement | HTMLInputElement>("textarea, input");
+  expect(url?.value).toContain("https://hooks.example.com/");
+  const field = step.querySelector<HTMLInputElement>("input[type='password']")!;
+  expect(field).not.toBeNull();
+  expect(dialog.querySelector("textarea")).toBeNull();
+  // Too short: refused here, nothing sent.
+  await act(async () => setValue(field, "short"));
+  await act(async () => button(dialog, "Save secret").click());
+  await flush();
+  expect(client.calls.some((call) => call[0] === "updateEventSource")).toBe(false);
+  expect(dialog.textContent).toContain("Paste the signing secret Linear shows.");
+  await act(async () => setValue(field, "  lin_wh_secret_value_123  "));
+  await act(async () => button(dialog, "Save secret").click());
+  await flush();
+  const update = client.calls.find((call) => call[0] === "updateEventSource");
+  expect(update?.[3]).toEqual({ signingSecret: "lin_wh_secret_value_123" });
+  // Saved: the value is gone from the dialog; it only says the secret is set.
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).toBeNull();
+  expect(dialog.innerHTML).not.toContain("lin_wh_secret_value_123");
+  expect(dialog.querySelector("[data-agent-trigger-secret-set]")?.textContent).toContain(
+    "Signing secret set.",
+  );
+  expect(button(dialog, "Add trigger")).toBeTruthy();
+  // Replace opens an empty field again, and Keep current goes back.
+  await act(async () => button(dialog, "Replace").click());
+  await flush();
+  const again = dialog.querySelector<HTMLInputElement>(
+    "[data-agent-trigger-secret] input[type='password']",
+  );
+  expect(again?.value).toBe("");
+  await act(async () => button(dialog, "Keep current signing secret").click());
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).toBeNull();
+});
+
 async function chooseFrom(dialog: HTMLElement, current: string, option: string) {
   const trigger = [...dialog.querySelectorAll<HTMLElement>("[role='combobox']")].find((entry) =>
     entry.textContent?.includes(current),

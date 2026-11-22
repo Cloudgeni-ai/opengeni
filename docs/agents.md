@@ -542,11 +542,16 @@ whole.
   know, shows up with no change here. Picking a source shows its events and
   optional conditions; picking a kind not added yet shows its setup step in
   place: Opengeni adds GitHub, Slack or This workspace right there, a
-  webhook is created right there and shows its URL and signing secret,
-  GitHub not yet connected to the workspace makes **Connect GitHub** the
-  one action (Connected tools), and any other kind (a connection to pick or
-  a secret to paste) makes **Add <source>** the one action (the Add a
-  source page). A GitHub event can add one repository. The **Note** is
+  webhook is created right there and shows its URL and signing secret, a
+  Linear, Sentry or Tailscale webhook is created right there and then shows
+  its URL with one field for the secret that app shows and **Save secret**
+  (sent once with `updateEventSource`, stored encrypted on the source like
+  the Add a source page does, never returned or shown again; afterwards the
+  dialog says only "<secret> set." with **Replace**; a webhook still waiting
+  for its secret can be picked to paste it), GitHub not yet connected to the
+  workspace makes **Connect GitHub** the one action (Connected tools), and
+  any other kind (Gmail's mailbox to connect or pick, an MCP server to pick)
+  makes **Add <source>** the one action (the Add a source page). A GitHub event can add one repository. The **Note** is
   optional: each run gets the event and the agent's Instructions do the
   rest (an empty note sends "Handle this event." or "Do your scheduled
   work."). **Chat** (`agent-trigger-chat-field.tsx`) says where runs go:

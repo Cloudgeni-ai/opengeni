@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
-import { createDb, rawRows, withRlsContext } from "../src/database";
+import { createDb, rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { createConnection, createEventSource, nestedPostgresSqlState } from "../src";
@@ -13,13 +13,15 @@ import {
 
 const postgresTest = process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? test : test.skip;
 const signature = "list_shared_slack_event_sources_v1(uuid, uuid, uuid, text)";
+const signatureV2 = "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)";
 
 postgresTest(
-  "1538 lists the Slack sources of the workspaces a bot is live-shared with, as the runtime",
+  "1538 and 1552 list the Slack sources of the workspaces a bot is live-shared with, as the runtime",
   async () => {
     const owned = await acquireOwnerMigratedTestDatabase("shared-slack-event-sources");
     if (!owned) throw new Error("PostgreSQL required");
     let client: ReturnType<typeof createDb> | undefined;
+    let grantedClient: ReturnType<typeof createDb> | undefined;
     try {
       await migrate(owned.ownerUrl);
       await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
@@ -91,13 +93,6 @@ postgresTest(
         visibility: "workspace",
         externalKey: "team:T0OTHER01",
       });
-      const list = async () =>
-        await sharedSlackEventSources(db, {
-          accountId,
-          homeWorkspaceId: home.workspaceId,
-          connectionId: bot.id,
-          externalKey,
-        });
       const shareTarget: SharedSlackEventSource[] = [
         {
           workspaceId: target.workspaceId,
@@ -107,86 +102,174 @@ postgresTest(
         },
       ];
 
-      // Not shared: nothing.
-      expect(await list()).toEqual([]);
-      await owned.admin`insert into opengeni_private.organization_slack_bot_access(
+      // The same scenario through whichever routine the runtime may call.
+      const exercise = async (runtimeDb: Database, routine: string) => {
+        const list = async () =>
+          await sharedSlackEventSources(runtimeDb, {
+            accountId,
+            homeWorkspaceId: home.workspaceId,
+            connectionId: bot.id,
+            externalKey,
+          });
+        // Not shared: nothing.
+        expect(await list()).toEqual([]);
+        await owned.admin`insert into opengeni_private.organization_slack_bot_access(
           connection_id,account_id,home_workspace_id,enabled,generation,updated_by_subject_id)
         values (${bot.id},${accountId},${home.workspaceId},true,1,'user:owner')`;
-      // Shared with every workspace: the other workspaces of this organization
-      // that have a source, never the home one or another organization's.
-      expect(await list()).toEqual(shareTarget);
-      await owned.admin`update opengeni_private.organization_slack_bot_access
+        // Shared with every workspace: the other workspaces of this organization
+        // that have a source, never the home one or another organization's.
+        expect(await list()).toEqual(shareTarget);
+        await owned.admin`update opengeni_private.organization_slack_bot_access
         set workspace_ids = ${[unsourced.workspaceId]}::uuid[] where connection_id = ${bot.id}`;
-      expect(await list()).toEqual([]);
-      await owned.admin`update opengeni_private.organization_slack_bot_access
+        expect(await list()).toEqual([]);
+        await owned.admin`update opengeni_private.organization_slack_bot_access
         set workspace_ids = ${[target.workspaceId, foreign.workspaceId]}::uuid[]
         where connection_id = ${bot.id}`;
-      expect(await list()).toEqual(shareTarget);
-      // A saved selection naming the home workspace or another organization's
-      // never reaches them, and nothing outside it is visited.
-      await owned.admin`update opengeni_private.organization_slack_bot_access
+        expect(await list()).toEqual(shareTarget);
+        // A saved selection naming the home workspace or another organization's
+        // never reaches them, and nothing outside it is visited.
+        await owned.admin`update opengeni_private.organization_slack_bot_access
         set workspace_ids = ${[home.workspaceId, foreign.workspaceId]}::uuid[]
         where connection_id = ${bot.id}`;
-      expect(await list()).toEqual([]);
-      await owned.admin`update opengeni_private.organization_slack_bot_access
+        expect(await list()).toEqual([]);
+        await owned.admin`update opengeni_private.organization_slack_bot_access
         set workspace_ids = ${[target.workspaceId]}::uuid[] where connection_id = ${bot.id}`;
-      // Each source comes with its status, so recording reads nothing else.
-      await withRlsContext(db, target, async (tx) => {
-        await tx.execute(sql`update event_sources
+        // Each source comes with its status, so recording reads nothing else.
+        await withRlsContext(runtimeDb, target, async (tx) => {
+          await tx.execute(sql`update event_sources
           set status = 'disabled', status_reason = 'Turned off'
           where id = ${sources[target.workspaceId]!}::uuid`);
-      });
-      expect(await list()).toEqual([
-        { ...shareTarget[0]!, status: "disabled", statusReason: "Turned off" },
-      ]);
-      await withRlsContext(db, target, async (tx) => {
-        await tx.execute(sql`update event_sources set status = 'active', status_reason = null
-          where id = ${sources[target.workspaceId]!}::uuid`);
-      });
-      expect(await list()).toEqual(shareTarget);
-      // Revoked: nothing.
-      await owned.admin`update opengeni_private.organization_slack_bot_access
-        set enabled = false where connection_id = ${bot.id}`;
-      expect(await list()).toEqual([]);
-      await owned.admin`update opengeni_private.organization_slack_bot_access
-        set enabled = true, workspace_ids = null where connection_id = ${bot.id}`;
-      expect(await list()).toEqual(shareTarget);
-      // A bot that needs reconnecting is not shared.
-      const setBotStatus = async (status: string) =>
-        await withRlsContext(db, home, async (tx) => {
-          await tx.execute(sql`update connections set status = ${status} where id = ${bot.id}`);
         });
-      await setBotStatus("error");
-      expect(await list()).toEqual([]);
-      await setBotStatus("active");
-      expect(await list()).toEqual(shareTarget);
+        expect(await list()).toEqual([
+          {
+            ...shareTarget[0]!,
+            status: "disabled",
+            statusReason: "Turned off",
+          },
+        ]);
+        await withRlsContext(runtimeDb, target, async (tx) => {
+          await tx.execute(sql`update event_sources set status = 'active', status_reason = null
+          where id = ${sources[target.workspaceId]!}::uuid`);
+        });
+        expect(await list()).toEqual(shareTarget);
+        // Revoked: nothing.
+        await owned.admin`update opengeni_private.organization_slack_bot_access
+        set enabled = false where connection_id = ${bot.id}`;
+        expect(await list()).toEqual([]);
+        await owned.admin`update opengeni_private.organization_slack_bot_access
+        set enabled = true, workspace_ids = null where connection_id = ${bot.id}`;
+        expect(await list()).toEqual(shareTarget);
+        // A bot that needs reconnecting is not shared.
+        const setBotStatus = async (status: string) =>
+          await withRlsContext(runtimeDb, home, async (tx) => {
+            await tx.execute(sql`update connections set status = ${status} where id = ${bot.id}`);
+          });
+        await setBotStatus("error");
+        expect(await list()).toEqual([]);
+        await setBotStatus("active");
+        expect(await list()).toEqual(shareTarget);
 
-      // The caller's workspace setting is restored after the call.
-      const restored = await withRlsContext(db, home, async (tx) => {
-        await rawRows(
-          tx,
-          sql`select * from opengeni_private.list_shared_slack_event_sources_v1(
+        // The caller's workspace setting is restored after the call.
+        const restored = await withRlsContext(runtimeDb, home, async (tx) => {
+          await rawRows(
+            tx,
+            sql`select * from opengeni_private.${sql.raw(routine)}(
             ${accountId}::uuid, ${home.workspaceId}::uuid, ${bot.id}::uuid, ${externalKey}::text)`,
+          );
+          return await rawRows<{ workspace: string }>(
+            tx,
+            sql`select current_setting('opengeni.workspace_id', true) as workspace`,
+          );
+        });
+        expect(restored[0]?.workspace).toBe(home.workspaceId);
+
+        // Only from the home workspace's own scope.
+        const mismatch = await withRlsContext(runtimeDb, target, async (tx) =>
+          rawRows(
+            tx,
+            sql`select * from opengeni_private.${sql.raw(routine)}(
+            ${accountId}::uuid, ${home.workspaceId}::uuid, ${bot.id}::uuid, ${externalKey}::text)`,
+          ),
+        ).then(
+          () => null,
+          (error) => nestedPostgresSqlState(error),
         );
-        return await rawRows<{ workspace: string }>(
-          tx,
-          sql`select current_setting('opengeni.workspace_id', true) as workspace`,
+        expect(mismatch).toBe("42501");
+        await owned.admin`delete from opengeni_private.organization_slack_bot_access
+        where connection_id = ${bot.id}`;
+      };
+
+      // Until a later migration grants 1552's definer, the runtime keeps v1.
+      const [deferred] = await owned.admin`
+        select has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as execute,
+          p.prosecdef as definer,
+          exists (
+            select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+          ) as public_execute,
+          p.proconfig as config
+        from pg_proc p where p.oid = ${`opengeni_private.${signatureV2}`}::regprocedure`;
+      expect({
+        execute: deferred!.execute,
+        definer: deferred!.definer,
+        public_execute: deferred!.public_execute,
+      }).toEqual({ execute: false, definer: true, public_execute: false });
+      expect(String(deferred!.config)).toContain("search_path=pg_catalog");
+      await exercise(db, "list_shared_slack_event_sources_v1");
+
+      // Granted (as the follow-up migration will): one indexed lookup with
+      // the same results and the same checks.
+      await owned.admin.unsafe(
+        `grant execute on function opengeni_private.${signatureV2} to opengeni_app`,
+      );
+      grantedClient = createDb(appUrl.toString());
+      await exercise(grantedClient.db, "list_shared_slack_event_sources_v2");
+
+      // The lookup is one probe of 1551's partial index, not a scan per workspace.
+      await owned.admin`analyze event_sources`;
+      const plan = await owned.admin.begin(async (tx) => {
+        await tx`set local enable_seqscan = off`;
+        return await tx.unsafe(
+          `explain (format json) select s.workspace_id from event_sources s
+            where s.account_id = $1::uuid and s.kind = 'slack'
+              and s.external_key = $2 and s.workspace_id <> $3::uuid`,
+          [accountId, externalKey, home.workspaceId],
         );
       });
-      expect(restored[0]?.workspace).toBe(home.workspaceId);
+      expect(JSON.stringify(plan)).toContain("event_sources_slack_team_idx");
 
-      // Only from the home workspace's own scope.
-      const mismatch = await withRlsContext(db, target, async (tx) =>
-        rawRows(
-          tx,
-          sql`select * from opengeni_private.list_shared_slack_event_sources_v1(
-            ${accountId}::uuid, ${home.workspaceId}::uuid, ${bot.id}::uuid, ${externalKey}::text)`,
-        ),
+      // The runtime gains no read: it can't open the owner inventory window or
+      // see another workspace's source, and the window closes after each call.
+      const runtimeWindow = await withRlsContext(grantedClient.db, home, async (tx) =>
+        tx.execute(sql`insert into opengeni_private.organization_tenancy_inventory_capabilities
+          (backend_pid, transaction_id) values (pg_backend_pid(), pg_current_xact_id())`),
       ).then(
         () => null,
         (error) => nestedPostgresSqlState(error),
       );
-      expect(mismatch).toBe("42501");
+      expect(runtimeWindow).toBe("42501");
+      await owned.admin`insert into opengeni_private.organization_slack_bot_access(
+          connection_id,account_id,home_workspace_id,enabled,generation,updated_by_subject_id)
+        values (${bot.id},${accountId},${home.workspaceId},true,1,'user:owner')`;
+      const afterCall = await withRlsContext(grantedClient.db, home, async (tx) => {
+        const listed = await rawRows<{ workspace_id: string }>(
+          tx,
+          sql`select workspace_id from opengeni_private.list_shared_slack_event_sources_v2(
+            ${accountId}::uuid, ${home.workspaceId}::uuid, ${bot.id}::uuid, ${externalKey}::text)`,
+        );
+        const visible = await rawRows<{ id: string }>(
+          tx,
+          sql`select id from event_sources where kind = 'slack'`,
+        );
+        const [open] = await rawRows<{ open: boolean }>(
+          tx,
+          sql`select opengeni_private.organization_tenancy_inventory_capability_active() as open`,
+        );
+        return { listed, visible, open: open?.open };
+      });
+      expect(afterCall.listed).toEqual([{ workspace_id: target.workspaceId }]);
+      expect(afterCall.visible).toEqual([{ id: sources[home.workspaceId]! }]);
+      expect(afterCall.open).toBe(false);
 
       const [privileges] = await owned.admin`
         select has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as execute,
@@ -203,6 +286,7 @@ postgresTest(
       });
     } finally {
       await client?.close();
+      await grantedClient?.close();
       await owned.release();
     }
   },
