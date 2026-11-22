@@ -1,9 +1,30 @@
 import {
   isProviderCapacityWaitReason,
-  subscriptionCapacityWaitNeedsAction,
-  subscriptionCapacityWaitReasonText,
+  providerCapacityWaitNeedsAction,
+  providerCapacityWaitReasonText,
   type SubscriptionReconnectAccount,
 } from "@opengeni/contracts/subscription-capacity-wait";
+import {
+  subscriptionCapacityWaitNeedsAction as baseWaitNeedsAction,
+  subscriptionCapacityWaitReasonText as baseWaitReasonText,
+} from "@opengeni/subscriptions";
+
+/** The same wait guidance for worker events, parent notices and the inbox. */
+export function subscriptionCapacityWaitReasonText(
+  reason: string,
+  name: string,
+  account?: SubscriptionReconnectAccount,
+): string | null {
+  return isProviderCapacityWaitReason(reason)
+    ? providerCapacityWaitReasonText(reason, account)
+    : baseWaitReasonText(reason, name);
+}
+
+export function subscriptionCapacityWaitNeedsAction(reason: string): boolean {
+  return isProviderCapacityWaitReason(reason)
+    ? providerCapacityWaitNeedsAction(reason)
+    : baseWaitNeedsAction(reason);
+}
 
 /**
  * When a subscription capacity wait needs a person's (or a parent agent's)

@@ -1,9 +1,11 @@
-import { CODEX_CREDENTIAL_LEASE_TTL_MS } from "@opengeni/db";
 import {
+  CODEX_CREDENTIAL_LEASE_TTL_MS,
   subscriptionCapacityWaitReasonText,
   subscriptionCapacityWaitNeedsAction,
-  type ProviderCapacityWaitReason,
-  type SubscriptionReconnectAccount,
+} from "@opengeni/db";
+import type {
+  ProviderCapacityWaitReason,
+  SubscriptionReconnectAccount,
 } from "@opengeni/contracts/subscription-capacity-wait";
 import type { WaitReason } from "@opengeni/subscriptions";
 

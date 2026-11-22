@@ -74,8 +74,6 @@ import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./s
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
   isProviderCapacityWaitReason,
-  subscriptionCapacityWaitReasonText,
-  subscriptionCapacityWaitNeedsAction,
   type SubscriptionReconnectAccount,
 } from "@opengeni/contracts/subscription-capacity-wait";
 import {
@@ -1361,6 +1359,8 @@ import {
   capacityWaitNoticeWithdrawal,
   capacityWaitNotificationPayload,
   readCapacityWaitNotice,
+  subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitReasonText,
   withoutCapacityWaitNotice,
 } from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";

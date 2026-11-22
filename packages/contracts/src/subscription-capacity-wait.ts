@@ -1,8 +1,3 @@
-import {
-  subscriptionCapacityWaitNeedsAction as baseWaitNeedsAction,
-  subscriptionCapacityWaitReasonText as baseWaitReasonText,
-} from "@opengeni/subscriptions";
-
 /** Provider diagnoses carried by the public capacity-wait events and notices. */
 export type ProviderCapacityWaitReason =
   | "codex_relogin_required"
@@ -21,12 +16,10 @@ export function isProviderCapacityWaitReason(reason: string): reason is Provider
 
 /** Current wait guidance shared by initial parking and later reclassification.
  * These are new audit events only; never rewrite an earlier model request. */
-export function subscriptionCapacityWaitReasonText(
-  reason: string,
-  name: string,
+export function providerCapacityWaitReasonText(
+  reason: ProviderCapacityWaitReason,
   account?: SubscriptionReconnectAccount,
-): string | null {
-  if (!isProviderCapacityWaitReason(reason)) return baseWaitReasonText(reason, name);
+): string {
   const messages: Record<ProviderCapacityWaitReason, string> = {
     codex_relogin_required: `The Codex account${account ? ` ${account.label}` : ""} needs a new sign-in. ${account?.personal ? "Its owner" : "An admin"} must reconnect it.`,
     codex_plan_no_capacity:
@@ -37,10 +30,6 @@ export function subscriptionCapacityWaitReasonText(
   return messages[reason];
 }
 
-export function subscriptionCapacityWaitNeedsAction(reason: string): boolean {
-  return (
-    reason === "codex_relogin_required" ||
-    reason === "codex_plan_no_capacity" ||
-    baseWaitNeedsAction(reason)
-  );
+export function providerCapacityWaitNeedsAction(reason: ProviderCapacityWaitReason): boolean {
+  return reason === "codex_relogin_required" || reason === "codex_plan_no_capacity";
 }
