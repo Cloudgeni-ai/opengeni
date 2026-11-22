@@ -6,7 +6,11 @@ import type {
   SessionEvent,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { createOpenGeniText } from "../src/messages/runtime";
+import {
+  createOpenGeniText,
+  OpenGeniMessagesProvider,
+  type OpenGeniMessages,
+} from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 import { act, type ReactNode } from "react";
@@ -26,6 +30,7 @@ const {
   secretFieldLabel,
   secretInputMode,
   secretPatternMismatch,
+  secretUsernameLabel,
   secretVaultForTarget,
 } = await import("../src/human-input-model");
 
@@ -70,6 +75,7 @@ function requestWith(questions: HumanInputQuestion[], allowSkip = false) {
 
 type FormOptions = {
   provider?: boolean;
+  messages?: OpenGeniMessages;
   allowedSaveTo?: Array<"user" | "task" | "workspace">;
   onSubmit?: (response: SubmitHumanInputResponseRequest) => void | Promise<void>;
 };
@@ -94,7 +100,9 @@ async function renderForm(questions: HumanInputQuestion[], options: FormOptions 
   ) : (
     form
   );
-  mounted = await renderComponent(node);
+  mounted = await renderComponent(
+    <OpenGeniMessagesProvider messages={options.messages}>{node}</OpenGeniMessagesProvider>,
+  );
   return { container: mounted.container, submissions };
 }
 
@@ -355,7 +363,7 @@ describe("secret ask card: browser and password-manager attributes", () => {
       autocomplete: "current-password",
       inputMode: null,
       type: "text",
-      label: "Host name",
+      label: "host_name",
       generate: false,
     },
   ];
@@ -394,6 +402,54 @@ describe("secret ask card: browser and password-manager attributes", () => {
       "Client secret",
     );
     expect(secretFieldLabel(englishText, { item: "a", itemType: "note" })).toBe("Note");
+  });
+
+  test("common field names use messages and custom names remain verbatim", () => {
+    const text = createOpenGeniText({
+      messages: {
+        "humanInputModel.username": "Brukernavn",
+        "humanInputModel.apiKey": "API-nøkkel",
+        "humanInputModel.oneTimeCode": "Engangskode",
+        "humanInputModel.clientSecret": "Klienthemmelighet",
+      },
+    });
+    for (const [field, label] of [
+      ["username", "Brukernavn"],
+      ["API_key", "API-nøkkel"],
+      ["otp", "Engangskode"],
+      ["one-time code", "Engangskode"],
+      ["client-secret", "Klienthemmelighet"],
+      ["regional_signing_key", "regional_signing_key"],
+    ] as const) {
+      expect(secretFieldLabel(text, { item: "Example", field })).toBe(label);
+    }
+    expect(secretUsernameLabel(text, "Account name on this device")).toBe(
+      "Account name on this device",
+    );
+  });
+
+  test("renders translated labels and submits the same username and password values", async () => {
+    const spec = {
+      item: "GitHub",
+      field: "password",
+      username: { prompt: "Username", value: "octocat" },
+    };
+    const { container, submissions } = await renderForm([secretQuestion(spec)], {
+      messages: {
+        "humanInputModel.username": "Brukernavn",
+        "humanInputModel.password": "Passord",
+      },
+    });
+    const username = container.querySelector<HTMLInputElement>('input[name="username"]')!;
+    const password = secretInput(container);
+    expect(container.querySelector(`label[for="${username.id}"]`)?.textContent).toBe("Brukernavn");
+    expect(container.querySelector(`label[for="${password.id}"]`)?.textContent).toBe("Passord");
+    await typeSecret(password, SECRET);
+    await submit(container);
+    expect(secretAnswersOf(submissions[0])).toEqual([
+      { questionId: "github", username: "octocat", value: SECRET, saveTo: "user" },
+    ]);
+    expect(spec.field).toBe("password");
   });
 
   test("username comes first, prefilled, paired for password managers inside the form", async () => {
@@ -649,54 +705,56 @@ describe("secret ask card: answered history", () => {
     };
   }
 
-  test("an answered secret shows where it was saved, never a value", async () => {
+  test("an answered secret shows the localized vault but preserves the original reference", async () => {
     sequence = 0;
     mounted = await renderComponent(
-      <MessageTimeline
-        events={[
-          event("session.humanInput.requested", {
-            request: {
-              id: "request-1",
-              questions: [
-                {
-                  id: "github",
-                  kind: "secret",
-                  label: "GitHub password",
-                  prompt: "Your GitHub password",
-                  options: [],
-                  required: true,
-                  secret: { item: "GitHub", username: { prompt: "Username" } },
-                },
-              ],
-            },
-          }),
-          event("user.humanInputResponse", {
-            requestId: "request-1",
-            response: {
-              outcome: "answered",
-              answers: [
-                {
-                  questionId: "github",
-                  values: [],
-                  secret: {
-                    reference: "{{secret:Private/GitHub/password}}",
-                    username: "octocat",
-                    vaultName: "Private",
-                    itemName: "GitHub",
-                    saveTo: "user",
+      <OpenGeniMessagesProvider messages={{ "humanInputModel.privateVaultName": "Privat" }}>
+        <MessageTimeline
+          events={[
+            event("session.humanInput.requested", {
+              request: {
+                id: "request-1",
+                questions: [
+                  {
+                    id: "github",
+                    kind: "secret",
+                    label: "GitHub password",
+                    prompt: "Your GitHub password",
+                    options: [],
+                    required: true,
+                    secret: { item: "GitHub", username: { prompt: "Username" } },
                   },
-                },
-              ],
-            },
-          }),
-          event("turn.completed", {}),
-        ]}
-      />,
+                ],
+              },
+            }),
+            event("user.humanInputResponse", {
+              requestId: "request-1",
+              response: {
+                outcome: "answered",
+                answers: [
+                  {
+                    questionId: "github",
+                    values: [],
+                    secret: {
+                      reference: "{{secret:Private/GitHub/password}}",
+                      username: "octocat",
+                      vaultName: "Private",
+                      itemName: "GitHub",
+                      saveTo: "user",
+                    },
+                  },
+                ],
+              },
+            }),
+            event("turn.completed", {}),
+          ]}
+        />
+      </OpenGeniMessagesProvider>,
     );
     await flush();
     const chip = mounted.container.querySelector<HTMLElement>("[data-og-secret-answer]");
     expect(chip).not.toBeNull();
-    expect(chip!.textContent).toContain("Saved to Private › GitHub");
+    expect(chip!.textContent).toContain("Saved to Privat › GitHub");
     expect(chip!.textContent).toContain("octocat");
     expect(chip!.getAttribute("title")).toBe("{{secret:Private/GitHub/password}}");
     expect(chip!.tagName).toBe("SPAN");
