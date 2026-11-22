@@ -23,11 +23,13 @@ import {
   withoutGoneSidebarAgents,
   withoutGoneSidebarApps,
   knownSidebarItem,
+  knownSidebarOptions,
   mergeSidebarOptions,
   readResolvedSidebarOptions,
   readStoredSidebarOptions,
   DEFAULT_SIDEBAR_LAYOUT_OPTIONS,
   ResolvedSidebarItem,
+  SidebarLayoutResponse,
   type SidebarLayoutChange,
   type MergedSidebarGroup,
 } from "../src/sidebar-layout";
@@ -769,5 +771,105 @@ describe("options", () => {
         options: { sessionsShowApps: false },
       }).options,
     ).toEqual({ sessionsShowApps: false });
+  });
+});
+
+describe("rolling deploy: this version writing what a newer one stored", () => {
+  // What a newer API replica stored: an option, a top-level field and a
+  // version this one doesn't know, beside ones it does.
+  const NEWER_OPTIONS = {
+    sessionsShowApps: false,
+    settingsMore: ["workspace:usage"],
+    railDensity: "compact",
+    pinnedSections: { inbox: true },
+  };
+  const newerWorkspace = {
+    version: 2,
+    items: [{ id: "a", type: "app", appId: APP_A }],
+    options: NEWER_OPTIONS,
+    sections: [{ id: "s1" }],
+  };
+  const newerPersonal = {
+    version: 2,
+    hidden: [],
+    added: [],
+    order: {},
+    options: NEWER_OPTIONS,
+    sections: [{ id: "s1" }],
+  };
+
+  test("the workspace default keeps the newer fields through an unrelated change", () => {
+    const written = applyWorkspaceSidebarChanges(
+      readStoredSidebarLayout(structuredClone(newerWorkspace)),
+      parseChanges([
+        { op: "add", item: { id: "b", type: "app", appId: APP_B } },
+        { op: "options", sessionsShowApps: true },
+      ]),
+      ids(),
+    );
+    // Stored as JSON and read back, as the next replica (of either version) would.
+    const reread = JSON.parse(JSON.stringify(written));
+    expect(reread).toEqual({
+      version: 2,
+      items: [
+        { id: "a", type: "app", appId: APP_A },
+        { id: "b", type: "app", appId: APP_B },
+      ],
+      options: { ...NEWER_OPTIONS, sessionsShowApps: true },
+      sections: [{ id: "s1" }],
+    });
+    // Reset is the one change that clears them.
+    const reset = applyWorkspaceSidebarChanges(
+      readStoredSidebarLayout(reread),
+      parseChanges([{ op: "reset" }]),
+      ids(),
+    );
+    expect(reset).toEqual({ version: 1, items: [] });
+  });
+
+  test("a person's own changes keep the newer fields through an unrelated change", () => {
+    const workspace = readStoredSidebarLayout(structuredClone(newerWorkspace));
+    const written = applyPersonalSidebarChanges(
+      workspace,
+      readStoredSidebarPersonalChanges(structuredClone(newerPersonal)),
+      parseChanges([
+        { op: "remove", itemId: "a" },
+        { op: "options", settingsMore: null },
+      ]),
+      ids(),
+    );
+    const reread = JSON.parse(JSON.stringify(written));
+    expect(reread).toEqual({
+      version: 2,
+      hidden: ["a"],
+      added: [],
+      order: {},
+      options: { sessionsShowApps: false, railDensity: "compact", pinnedSections: { inbox: true } },
+      sections: [{ id: "s1" }],
+    });
+    expect(
+      applyPersonalSidebarChanges(
+        workspace,
+        readStoredSidebarPersonalChanges(reread),
+        parseChanges([{ op: "reset" }]),
+        ids(),
+      ),
+    ).toEqual(EMPTY_SIDEBAR_PERSONAL_CHANGES);
+  });
+
+  test("answers show only the options this version knows", () => {
+    const stored = readStoredSidebarPersonalChanges(structuredClone(newerPersonal)).options;
+    const known = knownSidebarOptions(stored);
+    expect(known).toEqual({ sessionsShowApps: false, settingsMore: ["workspace:usage"] });
+    // The answer's schema is strict: unknown options would fail it.
+    expect(() =>
+      SidebarLayoutResponse.parse({
+        items: [],
+        hidden: [],
+        personal: { available: true, revision: 1, customized: true, options: known },
+        workspace: { revision: 1, canEdit: false },
+        options: mergeSidebarOptions(undefined, known),
+      }),
+    ).not.toThrow();
   });
 });

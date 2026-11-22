@@ -20,6 +20,7 @@ const { useSidebarLayout, resetSidebarLayoutCache } = await import("./use-sideba
 registerDom();
 afterEach(() => {
   resetSidebarLayoutCache();
+  window.localStorage.clear();
   document.body.replaceChildren();
 });
 
@@ -93,6 +94,78 @@ describe("useSidebarLayout", () => {
       await flush();
       expect(getSidebarLayout).toHaveBeenCalledTimes(2);
       expect(labels(hook.result.current.layout)).toEqual(["both"]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+});
+
+describe("options before the layout arrives", () => {
+  const appsOff = (): SidebarLayoutResponse => ({
+    ...layout("x", 1, 0),
+    options: { sessionsShowApps: false, hiddenNavEntries: ["meetings"], settingsMore: null },
+  });
+
+  test("unknown at first, so the rail waits; then remembered for the next load", async () => {
+    const answer = deferred<SidebarLayoutResponse>();
+    context.client = { getSidebarLayout: mock(() => answer.promise) };
+    const first = await renderHook(() => useSidebarLayout("w"), {});
+    try {
+      expect(first.result.current.options).toBeNull();
+      await actRun(async () => {
+        answer.resolve(appsOff());
+        await answer.promise;
+      });
+      await flush();
+      expect(first.result.current.options?.sessionsShowApps).toBe(false);
+    } finally {
+      await first.unmount();
+    }
+    // A reload: nothing in memory, the read still under way.
+    resetSidebarLayoutCache();
+    context.client = { getSidebarLayout: mock(() => new Promise(() => undefined)) };
+    const reload = await renderHook(() => useSidebarLayout("w"), {});
+    try {
+      expect(reload.result.current.layout).toBeNull();
+      expect(reload.result.current.options).toEqual({
+        sessionsShowApps: false,
+        hiddenNavEntries: ["meetings"],
+        settingsMore: null,
+      });
+    } finally {
+      await reload.unmount();
+    }
+  });
+
+  test("another person or workspace doesn't get the remembered options", async () => {
+    context.client = { getSidebarLayout: mock(async () => appsOff()) };
+    const hook = await renderHook(() => useSidebarLayout("w"), {});
+    await flush();
+    await hook.unmount();
+    resetSidebarLayoutCache();
+    context.client = { getSidebarLayout: mock(() => new Promise(() => undefined)) };
+    const other = await renderHook(() => useSidebarLayout("other"), {});
+    try {
+      expect(other.result.current.options).toBeNull();
+    } finally {
+      await other.unmount();
+    }
+  });
+
+  test("a layout that can't be read draws the defaults", async () => {
+    context.client = {
+      getSidebarLayout: mock(async () => {
+        throw new Error("offline");
+      }),
+    };
+    const hook = await renderHook(() => useSidebarLayout("w"), {});
+    try {
+      await flush();
+      expect(hook.result.current.options).toEqual({
+        sessionsShowApps: true,
+        hiddenNavEntries: [],
+        settingsMore: null,
+      });
     } finally {
       await hook.unmount();
     }

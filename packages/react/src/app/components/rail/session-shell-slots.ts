@@ -36,9 +36,11 @@ export type SessionShellSlots = Readonly<{
   /**
    * Whether apps show as rows of their own in the Sessions list, their chats
    * under them (docs/sidebar-layout.md, `sessionsShowApps`). False lists an
-   * app's chats as ordinary chats. Default true.
+   * app's chats as ordinary chats. Null: not known yet, so the list waits
+   * (showing its loading state) rather than drawing app rows and then
+   * redrawing. Default true.
    */
-  sessionsShowApps?: boolean | undefined;
+  sessionsShowApps?: boolean | null | undefined;
   /**
    * "Add to sidebar" in an app row's menu: `has` says whether the app is
    * already in the person's sidebar (the item is left out then).

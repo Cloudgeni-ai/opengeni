@@ -212,7 +212,12 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   lists, Show. The page's More (next to Add) switches the options above
   (Group chats under their app, and Menu entries for each rail entry) and
   holds Reset to workspace default; for you and, for admins, as the default.
-  A settings entry's button does **Move to More** or **Show at top**. Groups
+  A settings entry's button says what it does, **Move to More** or **Show
+  at top**, while the pointer is over the entry (a small arrow, always shown,
+  on touch screens). The rail draws the options as this browser last saw
+  them while the layout loads, so the Sessions list, hidden entries and
+  More don't redraw after it arrives; with none seen yet the Sessions list
+  waits for them (up to two seconds) before drawing. Groups
   remember open or closed per browser. The icon-only rail
   leaves the section out. Changes made elsewhere (an agent's tool call,
   another tab or device) show when the window regains focus, on return to
@@ -268,10 +273,13 @@ layouts. An older client simply doesn't show newer item types: agent links
 are left out of web and phone clients from before they existed, and an older
 API replica keeps them in storage without showing them.
 
-Icons and options follow the same rule: older clients ignore them. An older
-API replica writing a layout during a rolling deploy keeps unknown item
-fields (icons) but drops the layout's `options`; set them again if a change
-made then is lost.
+Icons and options follow the same rule: older clients ignore them. Writers
+keep what they don't know at every level: unknown item fields (icons),
+unknown options and unknown layout fields stay in storage through an older
+replica's write, and answers carry only what the replica knows. Reset is
+the one change that clears them. API replicas from before this rule (before
+options existed) drop the layout's `options` when they write; set them
+again if a change made during such a rollout is lost.
 
 ## Storage
 
