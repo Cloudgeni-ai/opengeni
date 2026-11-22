@@ -18,7 +18,7 @@
 //!    delay (a ~30s FAST phase of ≤3s retries so a rolling-deploy blip recovers
 //!    in seconds, then exponential up to a 10s cap for a prolonged outage)
 //!    before reconnecting — NEVER a tight loop (the #1 outage cause). Expected
-//!    short-lived NATS credential rotation reconnects immediately. A reconnect
+//!    NATS credential rotation prepares fresh sockets before retiring the old pair. A reconnect
 //!    re-subscribes the RPC subject (a fresh subscription), which — together with
 //!    the ~5s heartbeat on this same connection — is what restores the machine's
 //!    `last_seen`/ping liveness the attach gate reads.
@@ -62,6 +62,9 @@ use crate::engine::Engine;
 /// The control plane may later override it via the [`HelloAck`](v1::HelloAck)
 /// (M-later); the connect path holds this cadence today.
 const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(5);
+/// NATS reports the remaining lifetime of the user JWT on the connected socket.
+const NATS_USER_INFO: &str = "$SYS.REQ.USER.INFO";
+const NATS_ROTATION_MARGIN: Duration = Duration::from_secs(30);
 /// Engine housekeeping cadence (registry GC + queue-wait expiry) — pacing.
 const HOUSEKEEPING_TICK: Duration = Duration::from_secs(30);
 /// Host-capacity resample cadence (budgets track the host over time) — pacing.
@@ -672,6 +675,59 @@ struct ConnectedNats {
     owner: NatsConnectionOwner,
 }
 
+struct NatsSubscriptions {
+    rpc: async_nats::Subscriber,
+    replay: async_nats::Subscriber,
+    ack: async_nats::Subscriber,
+}
+
+/// Both authenticated sockets and all subscriptions are ready before the old
+/// generation is detached. Only the supervisor's single serving loop dispatches.
+struct PreparedNats {
+    control: ConnectedNats,
+    bulk: ConnectedNats,
+    subscriptions: NatsSubscriptions,
+    rotate_at: Option<tokio::time::Instant>,
+}
+
+async fn nats_rotation_at(
+    client: &async_nats::Client,
+    inbox_prefix: &str,
+) -> Option<tokio::time::Instant> {
+    #[derive(serde::Deserialize)]
+    struct Info {
+        data: UserInfo,
+    }
+    #[derive(serde::Deserialize)]
+    struct UserInfo {
+        expires: u64, // NATS encodes a remaining Go duration in nanoseconds.
+    }
+    // Anchor the broker's relative deadline before the request so neither
+    // wall clock skew nor reply latency can postpone renewal. Use an inbox
+    // inside the authenticated process's existing subscription permissions.
+    let started = tokio::time::Instant::now();
+    let reply = client.send_request(
+        NATS_USER_INFO,
+        async_nats::Request::new()
+            .inbox(format!("{inbox_prefix}.user-info.{}", uuid::Uuid::new_v4()))
+            .timeout(Some(Duration::from_secs(2))),
+    );
+    let response = tokio::time::timeout(Duration::from_secs(2), reply)
+        .await
+        .ok()?
+        .ok()?;
+    let remaining = Duration::from_nanos(
+        serde_json::from_slice::<Info>(&response.payload)
+            .ok()?
+            .data
+            .expires,
+    );
+    let margin = NATS_ROTATION_MARGIN.min(remaining / 4);
+    // Older servers without permission for USER.INFO keep the existing
+    // expiry recovery. A zero/absent deadline is not a reason to spin.
+    (!remaining.is_zero()).then(|| started + remaining - margin)
+}
+
 /// The generation owns the socket, not the last RPC holding a client clone.
 /// Dropping this guard also cancels an in-progress library reconnect. Accepted
 /// physical work and its replay receipts remain owned by the engine.
@@ -689,6 +745,12 @@ struct GenerationEnds<'a> {
     control_lost: TransportLossSignal,
     bulk_lost: TransportLossSignal,
     reconnect: &'a mut tokio::sync::watch::Receiver<u64>,
+    rotation: Option<NatsRotation>,
+}
+
+enum NatsRotation {
+    Discover(async_nats::Client),
+    Scheduled(tokio::time::Instant),
 }
 
 /// Ending either half retires the generation, rather than silently serving
@@ -816,6 +878,8 @@ struct WorkspaceLink<P: Platform> {
     compute: Option<ComputeLink>,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
+    /// A same-scope settings change replaces the link, not the runner.
+    reconfiguring: AtomicBool,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
     /// second NATS connection so saturated op flow cannot head-of-line-block
     /// control liveness — invariant #4). Job emit hooks read this per frame;
@@ -847,6 +911,7 @@ impl<P: Platform> WorkspaceLink<P> {
             compute: definition.compute,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
+            reconfiguring: AtomicBool::new(false),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
             control: Arc::new(std::sync::RwLock::new(None)),
             uploads: Arc::new(std::sync::Mutex::new(crate::uploads::Uploads::default())),
@@ -1462,6 +1527,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             link.refresh_credentials(candidate)
                         });
                         if !unchanged {
+                            link.reconfiguring.store(same_scope && !removed_or_rescoped.contains(id), Ordering::Release);
                             link.shutdown.request();
                         }
                     }
@@ -1532,6 +1598,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let mut backoff = Backoff::standard();
         let mut reconnect = self.reconnect.subscribe();
         let mut credentials = link.nats_bearer.subscribe();
+        let mut prepared: Option<Box<PreparedNats>> = None;
         info!(
             connection_id = %link.connection_id,
             agent_id = %link.creds.agent_id,
@@ -1548,6 +1615,10 @@ impl<P: Platform + 'static> Supervisor<P> {
             // could publish going-offline, which is exactly the bug this fixes. The
             // shutdown is now owned by whichever phase holds the live client.
             if self.link_stop_requested(link) {
+                if let Some(prepared) = prepared {
+                    self.announce_going_offline(link, &prepared.control.client)
+                        .await;
+                }
                 info!("clean shutdown requested before/between connections");
                 return;
             }
@@ -1556,7 +1627,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             reconnect.mark_unchanged();
             credentials.mark_unchanged();
             match self
-                .serve_one_connection(link, &mut backoff, &mut reconnect)
+                .serve_one_connection(link, &mut backoff, &mut reconnect, prepared.take())
                 .await
             {
                 ConnectionOutcome::CleanShutdown => return,
@@ -1595,6 +1666,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                         "NATS user credential rotated; reconnecting immediately"
                     );
                 }
+                ConnectionOutcome::RotateTo(next) => {
+                    info!(connection_id = %link.connection_id, "rotating NATS sockets before credential expiry");
+                    prepared = Some(next);
+                }
                 ConnectionOutcome::Reconnect => {
                     info!(
                         connection_id = %link.connection_id,
@@ -1632,43 +1707,51 @@ impl<P: Platform + 'static> Supervisor<P> {
         link: &WorkspaceLink<P>,
         backoff: &mut Backoff,
         reconnect: &mut tokio::sync::watch::Receiver<u64>,
+        prepared: Option<Box<PreparedNats>>,
     ) -> ConnectionOutcome {
-        // The dial has no client yet, so a shutdown here just exits (nothing to
-        // announce).
-        let (connect, bearer) = match self.dial(link, reconnect).await {
-            Ok(result) => result,
-            Err(outcome) => return outcome,
+        let prepared = if let Some(prepared) = prepared {
+            *prepared
+        } else {
+            match self.establish_generation(link, reconnect).await {
+                Ok(prepared) => prepared,
+                Err(outcome) => return outcome,
+            }
         };
+        let PreparedNats {
+            control,
+            bulk,
+            subscriptions,
+            rotate_at,
+        } = prepared;
         let ConnectedNats {
             client,
             transport_lost: control_transport_lost,
             owner: _control_owner,
-        } = match connect {
-            Ok(connection) => connection,
-            Err(e @ SupervisorError::Authentication(_)) => {
-                // Renewal runs independently and the file watcher adopts fresh
-                // credentials. Explicit reconnect is recovery only when the
-                // existing grant/key cannot authorize automatic renewal.
-                let reconnect_command = rejected_bearer_reconnect_command(
-                    link.api_url.as_deref(),
-                    &link.creds.workspace_id,
-                );
-                error!(
-                    connection_id = %link.connection_id,
-                    error = %e,
-                    "control plane rejected this connection's credentials; transport retries paused pending renewal. Inspect `opengeni-agent connections`; if reconnect is required, use `{reconnect_command}`"
-                );
-                return ConnectionOutcome::AuthenticationRejected(bearer);
-            }
-            Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
-        };
-        info!(connection_id = %link.connection_id, agent_id = %link.creds.agent_id, "connected to control plane");
+        } = control;
+        let ConnectedNats {
+            client: bulk_client,
+            transport_lost: bulk_transport_lost,
+            owner: bulk_owner,
+        } = bulk;
+        let NatsSubscriptions { rpc, replay, ack } = subscriptions;
+        let subscription = rpc_messages(rpc, replay);
 
-        // A shutdown latched during the dial select — before any hello established a
-        // lease — has nothing meaningful to announce; close cleanly without a hello.
         if self.link_stop_requested(link) {
+            self.announce_going_offline(link, &client).await;
             return ConnectionOutcome::CleanShutdown;
         }
+        if control_transport_lost.is_requested() {
+            return transport_loss_outcome("control", &control_transport_lost);
+        }
+        if bulk_transport_lost.is_requested() {
+            return transport_loss_outcome("bulk", &bulk_transport_lost);
+        }
+        let rotation = link.compute.is_none().then(|| {
+            rotate_at.map_or_else(
+                || NatsRotation::Discover(bulk_client.clone()),
+                NatsRotation::Scheduled,
+            )
+        });
 
         // Following the relay credential before the hello means the first
         // stream Opengeni asks for finds it.
@@ -1677,41 +1760,6 @@ impl<P: Platform + 'static> Supervisor<P> {
             Err(outcome) => return outcome,
         };
 
-        // Subscribe to the RPC subject — this IS the registry.
-        let subscription = match client.subscribe(link.rpc_subject()).await {
-            Ok(sub) => sub,
-            Err(e) => return ConnectionOutcome::Disconnected(format!("subscribe failed: {e}")),
-        };
-        debug!(subject = %link.rpc_subject(), "subscribed to rpc subject");
-        let replay_subscription = match client
-            .subscribe(format!("{}.replay.>", link.rpc_subject()))
-            .await
-        {
-            Ok(sub) => sub,
-            Err(e) => {
-                return ConnectionOutcome::Disconnected(format!("replay subscribe failed: {e}"))
-            }
-        };
-        let subscription = rpc_messages(subscription, replay_subscription);
-
-        // The ack subject rides the SAME control connection (PROTOCOL.md
-        // §Subjects: subscribed alongside rpc at establishment).
-        let ack_subscription = match client.subscribe(link.ack_subject()).await {
-            Ok(sub) => sub,
-            Err(e) => return ConnectionOutcome::Disconnected(format!("ack subscribe failed: {e}")),
-        };
-
-        // The BULK connection: op frames publish here so a saturated stream
-        // can never head-of-line-block control liveness (invariant #4). Its
-        // loss is a generation loss (conservative: detach + reconnect).
-        let ConnectedNats {
-            client: bulk_client,
-            transport_lost: bulk_transport_lost,
-            owner: _bulk_owner,
-        } = match self.dial_bulk(link, &client, reconnect).await {
-            Ok(connection) => connection,
-            Err(outcome) => return outcome,
-        };
         let (bulk_tx, bulk_rx) =
             tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
         // A new connection reports the link's operations afresh.
@@ -1737,26 +1785,182 @@ impl<P: Platform + 'static> Supervisor<P> {
                 link,
                 &client,
                 subscription,
-                ack_subscription,
+                ack,
                 GenerationEnds {
                     control_lost: control_transport_lost,
                     bulk_lost: bulk_transport_lost,
                     reconnect,
+                    rotation,
                 },
             )
             .await
         };
 
-        // Tear the bulk lane down with the generation: hooks see None and
-        // drop frames until the next generation re-attaches consumers.
+        // Retire the old bulk publisher BEFORE waiting on the pumps' detach
+        // receipts. A dead or blocked socket must not keep a full frame lane
+        // alive and delay readiness of the replacement pair.
         *link.bulk_tx.write().expect("bulk lock") = None;
         publisher.abort();
+        drop(bulk_owner);
+        if !matches!(&outcome, ConnectionOutcome::CleanShutdown) {
+            client.close();
+        }
         if let Err(error) = publisher.await {
             if !error.is_cancelled() {
                 warn!(%error, "bulk publisher task failed during generation teardown");
             }
         }
+        self.engine.detach_scope(&link.connection_id).await;
+        self.engine.clear_link_max_payload(&link.connection_id);
+        if matches!(&outcome, ConnectionOutcome::CleanShutdown) {
+            self.announce_going_offline(link, &client).await;
+        }
         outcome
+    }
+
+    async fn establish_generation(
+        &self,
+        link: &WorkspaceLink<P>,
+        reconnect: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> Result<PreparedNats, ConnectionOutcome> {
+        // The dial has no client yet, so a shutdown here just exits (nothing to
+        // announce).
+        let (connect, bearer) = match self.dial(link, reconnect).await {
+            Ok(result) => result,
+            Err(outcome) => return Err(outcome),
+        };
+        let control = match connect {
+            Ok(connection) => connection,
+            Err(e @ SupervisorError::Authentication(_)) => {
+                // Renewal runs independently and the file watcher adopts fresh
+                // credentials. Explicit reconnect is recovery only when the
+                // existing grant/key cannot authorize automatic renewal.
+                let reconnect_command = rejected_bearer_reconnect_command(
+                    link.api_url.as_deref(),
+                    &link.creds.workspace_id,
+                );
+                error!(
+                    connection_id = %link.connection_id,
+                    error = %e,
+                    "control plane rejected this connection's credentials; transport retries paused pending renewal. Inspect `opengeni-agent connections`; if reconnect is required, use `{reconnect_command}`"
+                );
+                return Err(ConnectionOutcome::AuthenticationRejected(bearer));
+            }
+            Err(e) => return Err(ConnectionOutcome::Disconnected(e.to_string())),
+        };
+        info!(connection_id = %link.connection_id, agent_id = %link.creds.agent_id, "connected to control plane");
+
+        // A shutdown latched during the dial select — before any hello established a
+        // lease — has nothing meaningful to announce; close cleanly without a hello.
+        if self.link_stop_requested(link) {
+            return Err(ConnectionOutcome::CleanShutdown);
+        }
+        // The BULK connection: op frames publish here so a saturated stream
+        // can never head-of-line-block control liveness (invariant #4). Its
+        // loss is a generation loss (conservative: detach + reconnect).
+        let bulk = self.dial_bulk(link, &control.client, reconnect).await?;
+        let subscriptions = Self::subscribe_generation(link, &control.client)
+            .await
+            .map_err(ConnectionOutcome::Disconnected)?;
+        Ok(PreparedNats {
+            control,
+            bulk,
+            subscriptions,
+            rotate_at: None,
+        })
+    }
+
+    async fn subscribe_generation(
+        link: &WorkspaceLink<P>,
+        client: &async_nats::Client,
+    ) -> Result<NatsSubscriptions, String> {
+        let rpc = link.rpc_subject();
+        let replay = format!("{rpc}.replay.>");
+        let (rpc, replay) = if link.compute.is_some() {
+            tokio::try_join!(client.subscribe(rpc), client.subscribe(replay))
+        } else {
+            // The replacement can register interest before the incumbent
+            // closes without delivering a legacy mutation to both sockets.
+            let queue = link.connection_instance_id.clone();
+            tokio::try_join!(
+                client.queue_subscribe(rpc, queue.clone()),
+                client.queue_subscribe(replay, queue)
+            )
+        }
+        .map_err(|e| format!("rpc subscribe failed: {e}"))?;
+        let ack = client
+            .subscribe(link.ack_subject())
+            .await
+            .map_err(|e| format!("ack subscribe failed: {e}"))?;
+        Ok(NatsSubscriptions { rpc, replay, ack })
+    }
+
+    async fn pair_rotation_at(
+        control: &async_nats::Client,
+        bulk: &async_nats::Client,
+        prefix: &str,
+    ) -> Option<tokio::time::Instant> {
+        let (control_at, bulk_at) = tokio::join!(
+            nats_rotation_at(control, prefix),
+            nats_rotation_at(bulk, prefix)
+        );
+        Some(control_at?.min(bulk_at?))
+    }
+
+    async fn prepare_rotation(
+        &self,
+        link: &WorkspaceLink<P>,
+        control: &async_nats::Client,
+        rotation: Option<NatsRotation>,
+    ) -> Box<PreparedNats> {
+        let prefix = link.subject_prefix();
+        let at = match rotation {
+            Some(NatsRotation::Scheduled(at)) => Some(at),
+            Some(NatsRotation::Discover(bulk)) => {
+                Self::pair_rotation_at(control, &bulk, &prefix).await
+            }
+            None => None,
+        };
+        let Some(at) = at else {
+            return std::future::pending().await;
+        };
+        tokio::time::sleep_until(at).await;
+        let mut backoff = Backoff::standard();
+        loop {
+            let bearer = link.nats_bearer.borrow().clone();
+            let prepare = async {
+                let (control, bulk) = tokio::try_join!(
+                    self.connect_with_bearer(link, &bearer),
+                    self.connect_with_bearer(link, &bearer),
+                )
+                .map_err(|e| e.to_string())?;
+                let subscriptions = Self::subscribe_generation(link, &control.client).await?;
+                // A broker response on the control socket also proves it has
+                // processed all the preceding SUBs. A local flush alone does not.
+                let rotate_at = Self::pair_rotation_at(&control.client, &bulk.client, &prefix)
+                    .await
+                    .ok_or("could not confirm replacement credentials with the broker")?;
+                if control.transport_lost.is_requested() || bulk.transport_lost.is_requested() {
+                    return Err("replacement socket disconnected before handoff".to_string());
+                }
+                Ok(Box::new(PreparedNats {
+                    control,
+                    bulk,
+                    subscriptions,
+                    rotate_at: Some(rotate_at),
+                }))
+            };
+            match tokio::time::timeout(NATS_ROTATION_MARGIN, Box::pin(prepare)).await {
+                Ok(Ok(prepared)) => return prepared,
+                Ok(Err(error)) => {
+                    warn!(connection_id = %link.connection_id, %error, "could not prepare fresh NATS sockets; retaining current sockets");
+                }
+                Err(_) => {
+                    warn!(connection_id = %link.connection_id, "timed out preparing fresh NATS sockets; retaining current sockets");
+                }
+            }
+            tokio::time::sleep(backoff.next_delay()).await;
+        }
     }
 
     /// Serves one subscribed NATS generation until shutdown or disconnect. Host
@@ -1774,7 +1978,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             control_lost: control_transport_lost,
             bulk_lost: bulk_transport_lost,
             reconnect,
+            rotation,
         } = ends;
+        let mut rotation = Box::pin(self.prepare_rotation(link, client, rotation));
         let _serving = ServingControl::bind(&link.control, client);
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1809,6 +2015,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
                 Ok(()) = reconnect.changed() => {
                     break ConnectionOutcome::Reconnect;
+                }
+                prepared = &mut rotation => {
+                    break ConnectionOutcome::RotateTo(prepared);
                 }
                 // Heartbeat is deliberately ahead of inbound work in this biased
                 // select. A ready subscription can never starve the liveness tick.
@@ -1868,32 +2077,14 @@ impl<P: Platform + 'static> Supervisor<P> {
         // op-stream jobs also detach and replay after the next connection.
         let generation_bound_tasks = rpc_tasks.len();
         if generation_bound_tasks > 0 {
-            let reason = match &outcome {
-                ConnectionOutcome::CleanShutdown => "shutdown",
-                ConnectionOutcome::CredentialRotation => "credential_rotation",
-                ConnectionOutcome::Reconnect => "reconnect",
-                ConnectionOutcome::AuthenticationRejected(_) => "authentication_rejected",
-                ConnectionOutcome::Disconnected(_) => "disconnect",
-            };
             info!(
-                reason = reason,
+                reason = outcome.reason(),
                 generation_bound_tasks,
                 "ending generation-bound reply tasks; established op-stream jobs remain running"
             );
         }
         rpc_tasks.shutdown().await;
 
-        // The transport is gone: every live op detaches and keeps running
-        // (op ⊥ connection — the server re-attaches per op after reconnect).
-        // Await every pump's FIFO completion receipt before returning this
-        // generation: a successor bulk lane must not become visible while an
-        // old pump can still emit through the shared sender cell.
-        self.engine.detach_scope(&link.connection_id).await;
-        self.engine.clear_link_max_payload(&link.connection_id);
-
-        if matches!(&outcome, ConnectionOutcome::CleanShutdown) {
-            self.announce_going_offline(link, client).await;
-        }
         outcome
     }
 
@@ -3085,6 +3276,13 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Publishes a clean [`GoingOffline`] event so the lease flips offline
     /// immediately (§23.0), then flushes so the message leaves before we close.
     async fn announce_going_offline(&self, link: &WorkspaceLink<P>, client: &async_nats::Client) {
+        // Removing a link or stopping the daemon retires the runner. Replacing
+        // settings on the same exact link does not: GoingOffline would clear
+        // its DB claim, bump the generation on reconnect and allow inventory
+        // to discard live foreground work (or the reaper to mark it lost).
+        if link.reconfiguring.load(Ordering::Acquire) && !self.shutdown.is_requested() {
+            return;
+        }
         let updating = self.shutdown.is_update();
         #[cfg(unix)]
         if updating
@@ -3468,10 +3666,24 @@ enum ConnectionOutcome {
     Disconnected(String),
     /// An older server expired the NATS user credential. Reconnect immediately.
     CredentialRotation,
+    /// A proactive rotation already authenticated and subscribed its successor.
+    RotateTo(Box<PreparedNats>),
     /// A reconnect was asked for ([`ReconnectSignal`]): dial again at once.
     Reconnect,
     /// A clean shutdown was requested; the run loop should exit.
     CleanShutdown,
+}
+
+impl ConnectionOutcome {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::CleanShutdown => "shutdown",
+            Self::CredentialRotation | Self::RotateTo(_) => "credential_rotation",
+            Self::Reconnect => "reconnect",
+            Self::AuthenticationRejected(_) => "authentication_rejected",
+            Self::Disconnected(_) => "disconnect",
+        }
+    }
 }
 
 /// A short label for the op in a `ControlRequest`, for structured logs. Never
@@ -5976,6 +6188,7 @@ mod tests {
                 control_lost: control_transport_lost,
                 bulk_lost: bulk_transport_lost.clone(),
                 reconnect: &mut reconnect,
+                rotation: None,
             },
         );
         let sever_bulk = async move {
@@ -6057,6 +6270,7 @@ mod tests {
                 control_lost: control_transport_lost,
                 bulk_lost: bulk_transport_lost,
                 reconnect: &mut reconnect,
+                rotation: None,
             },
         );
         let sever_control = async move {
@@ -7369,15 +7583,12 @@ mod tests {
             .send(vec![refreshed.clone(), second.clone()])
             .expect("credential refresh");
         assert!(
-            it::wait_for_event(&mut first_events, Duration::from_secs(5), |event| {
-                matches!(event.event, Some(Event::GoingOffline(_)))
-            })
-            .await,
-            "old generation goes offline"
-        );
-        assert!(
             it::wait_for_event(&mut first_events, Duration::from_secs(10), |event| {
-                matches!(event.event, Some(Event::Heartbeat(_)))
+                assert!(
+                    !matches!(event.event, Some(Event::GoingOffline(_))),
+                    "replacing the transport must not release its exact runner's claim"
+                );
+                matches!(&event.event, Some(Event::Heartbeat(heartbeat)) if heartbeat.seq == 1)
             })
             .await,
             "replacement generation becomes live"
@@ -7757,6 +7968,9 @@ mod tests {
         let Ok(url) = std::env::var("OPENGENI_ROTATION_PROBE_NATS") else {
             return;
         };
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
         let root = std::path::PathBuf::from(
             std::env::var("OPENGENI_ROTATION_PROBE_ROOT").expect("probe root"),
         );

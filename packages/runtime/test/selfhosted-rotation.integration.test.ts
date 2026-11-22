@@ -4,7 +4,14 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ControlRequest, ControlResponse, ErrorCode, ExecRequest } from "@opengeni/agent-proto";
+import {
+  AgentEvent,
+  ControlRequest,
+  ControlResponse,
+  ErrorCode,
+  ExecRequest,
+  type InventoryOperation,
+} from "@opengeni/agent-proto";
 import {
   connect,
   createNatsEventBus,
@@ -26,7 +33,7 @@ const brokerBinary = process.env.OPENGENI_NATS_SERVER_BIN;
 const clockShim = process.env.OPENGENI_TEST_CLOCK_SHIM;
 
 test.skipIf(!agentBinary || !brokerBinary)(
-  "native control requests survive repeated JWT expiry without duplicate execution",
+  "native JWT rotation keeps its exact runner and a running command across socket handoff",
   async () => {
     const output = join(import.meta.dir, "../../../target");
     await mkdir(output, { recursive: true });
@@ -64,21 +71,29 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
         }
       }
       let authorizations = 0;
+      const instances = new Set<string>();
       auth.subscribe("$SYS.REQ.USER.AUTH", {
         callback(error, message) {
           if (error) throw error;
           const request = decodeAuthRequest(new TextDecoder().decode(message.data))!;
           authorizations++;
+          instances.add(request.name ?? "");
           const userJwt = mintUserJwt({
             userPublicKey: request.userNkey,
             accountSeed,
             name: "rotation-probe",
             audienceAccount: "APP",
             permissions: {
-              pub: { allow: ["agent.hx-test-ws.hx-test-agent.connection.>", "_INBOX.>"] },
+              pub: {
+                allow: [
+                  "agent.hx-test-ws.hx-test-agent.connection.>",
+                  "_INBOX.>",
+                  "$SYS.REQ.USER.INFO",
+                ],
+              },
               sub: { allow: ["agent.hx-test-ws.hx-test-agent.connection.>", "_INBOX.>"] },
             },
-            expiresAtSeconds: Math.floor(Date.now() / 1000) + 2,
+            expiresAtSeconds: Math.floor(Date.now() / 1000) + 5,
           });
           message.respond(
             new TextEncoder().encode(
@@ -104,10 +119,24 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
         "agent.hx-test-ws.hx-test-agent.connection.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.rpc";
       let hellos = 0;
       let firstHelloAuthorizations = 0;
+      let goingOffline = 0;
+      const inventory: Array<{ hello: number; op: InventoryOperation }> = [];
       auth.subscribe(subject.replace(/\.rpc$/, ".hello"), {
         callback: () => {
           if (hellos === 0) firstHelloAuthorizations = authorizations;
           hellos++;
+        },
+      });
+      auth.subscribe(subject.replace(/\.rpc$/, ".events"), {
+        callback(error, message) {
+          if (error) throw error;
+          const event = AgentEvent.decode(message.data).event;
+          if (event?.$case === "goingOffline") goingOffline++;
+          if (event?.$case === "operationInventory") {
+            inventory.push(
+              ...event.operationInventory.operations.map((op) => ({ hello: hellos, op })),
+            );
+          }
         },
       });
       await auth.flush();
@@ -236,7 +265,7 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
           }
         }),
       ]);
-      expect(hellos).toBeGreaterThan(3);
+      expect(hellos).toBeGreaterThanOrEqual(3);
       expect(authorizations).toBeGreaterThan(6);
       const executions = (await readdir(root)).filter((name) => name.startsWith("execution-"));
       expect(executions).toHaveLength(inputs);
@@ -256,6 +285,7 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
         agentId: "hx-test-agent",
         connectionInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         epoch: 0,
+        connectionGeneration: "7",
         controlRpc: rpc,
         rpcSubject: subject,
         transport: new NatsOpStreamTransport(async () => bus!.getOpStreamConnection!()),
@@ -263,25 +293,60 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
         retryClock: defaultSelfhostedRetryClock,
       });
       const streamStarted = performance.now();
+      const streamOpId = crypto.randomUUID();
       const streaming = stream.exec(
-        crypto.randomUUID(),
+        streamOpId,
         ExecRequest.fromPartial({
           command: [
             "/bin/sh",
             "-c",
-            "printf x >> stream-executions; printf before; sleep 4; printf after",
+            "printf x >> stream-executions; printf before; while [ ! -f release-stream ]; do sleep 0.05; done; printf after",
           ],
           cwd: root,
-          timeoutMs: 10_000,
+          timeoutMs: 15_000,
         }),
-        10_000,
+        15_000,
         45_000,
       );
-      // Lose the controller's side too, while the same physical exec continues.
-      // Its shared-bus reconnect and the runner's subsequent Hello both heal
-      // the existing subscription; neither starts another process.
-      await Bun.sleep(1_000);
+      // A plain NATS ping (no control-replay retries) keeps checking that the
+      // exact runner is routable, while the real command is held across a
+      // broker-authenticated replacement pair and reports itself still running.
+      const commandStartedBy = performance.now() + 3_000;
+      while (!(await Bun.file(join(root, "stream-executions")).exists())) {
+        expect(performance.now()).toBeLessThan(commandStartedBy);
+        await Bun.sleep(10);
+      }
+      const beforeRotation = hellos;
+      const rotationBy = performance.now() + 7_000;
+      while (!inventory.some(({ hello, op }) => hello > beforeRotation && op.opId === streamOpId)) {
+        expect(performance.now()).toBeLessThan(rotationBy);
+        const ping = await auth.request(
+          subject,
+          ControlRequest.encode(
+            ControlRequest.fromPartial({
+              requestId: "during-rotation",
+              op: { $case: "ping", ping: {} },
+            }),
+          ).finish(),
+          { timeout: 1_000 },
+        );
+        expect(ControlResponse.decode(ping.data).result?.$case).toBe("ping");
+        await Bun.sleep(10);
+      }
+      expect(
+        inventory.find(({ hello, op }) => hello > beforeRotation && op.opId === streamOpId)?.op,
+      ).toMatchObject({ complete: false, connectionGeneration: "7" });
+      expect([...instances]).toEqual([
+        "opengeni-agent/connection/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ]);
+      expect(goingOffline).toBe(0);
+      const agentLog = await readFile(join(root, "agent.log"), "utf8");
+      expect(agentLog).toContain("rotating NATS sockets before credential expiry");
+      expect(agentLog).not.toMatch(/User Authentication Expired|nats event: disconnected/i);
+
+      // Lose the controller's side too, still without starting another process.
       await controller!.reconnect();
+      await writeFile(join(root, "release-stream"), "");
       const streamed = await streaming;
       const streamMs = Math.round(performance.now() - streamStarted);
       console.info(
