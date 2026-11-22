@@ -723,6 +723,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "HostExportOperationError",
   "HttpOperationError",
   "IndependentSessionTitleError",
+  "InteractionControllerOperationError",
   "KnowledgeIndexOperationError",
   "McpLifecycleError",
   "McpOperationError",
@@ -783,6 +784,7 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "independent_session_title_provider_request_failed",
   "independent_session_title_response_failed",
   "independent_session_title_settlement_failed",
+  "interaction_controller_create_refused",
   "internal_error",
   "knowledge_index_defer_failed",
   "knowledge_index_embedding_failed",
@@ -2030,6 +2032,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     return {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
+      ...projectInteractionControllerDiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
@@ -2099,6 +2102,21 @@ function projectContextCompactionAttributes(attributes: Attributes): Attributes 
       projected[key] = value;
   }
   return projected;
+}
+
+/**
+ * A browser or computer create the controller refused is settled as a failed
+ * receipt, not an HTTP failure, so this is where its reviewed cause (driver
+ * error class and code frame, never text from the machine) is logged.
+ */
+function projectInteractionControllerDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "InteractionControllerOperationError") return {};
+  const op = attributes.op;
+  return {
+    ...(op === "browser.create" || op === "computer.create" ? { op } : {}),
+    ...(attributes.outcome === "failed" ? { outcome: "failed" } : {}),
+    ...projectErrorCauseAttributes(attributes),
+  };
 }
 
 function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {

@@ -157,6 +157,7 @@ import {
 import {
   observeComputerActionResult,
   observeComputerFrameEvidenceMismatch,
+  observeLifecycleControllerFailure,
   observeLifecycleResult,
 } from "../interaction-metrics";
 import {
@@ -517,6 +518,7 @@ export function registerComputerSessionRoutes(
               ).catch(() => undefined);
             }
             if (rethrowAfterFailure) throw error;
+            observeLifecycleControllerFailure(deps.observability, "computer.create", error);
             return failed;
           }
           // These facts come from the physical adapter after its native helper
