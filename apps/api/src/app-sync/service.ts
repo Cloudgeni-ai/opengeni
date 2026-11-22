@@ -906,7 +906,7 @@ async function runForPerson(
           seen.add(record.key);
           fresh += 1;
         }
-      if (summary.pages > 1) await markTarget();
+      await markTarget();
       summary.written += await writer.write(extracted.records);
       if (action.removeMissing)
         await recordAppSyncKeys(deps.db, {
