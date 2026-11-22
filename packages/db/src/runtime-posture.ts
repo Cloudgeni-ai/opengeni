@@ -73,7 +73,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * unpaid sandbox fleet counts behind the fleet limits (1486), and the
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
  * (1487), and the managed warm box count fleet pressure reads (1492), and
- * the subscription needs-sign-in notice sync (1503).
+ * the subscription needs-sign-in notice sync (1503), and the one-statement
+ * lookup of the Slack event sources a shared Slack bot reaches (1552).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -118,6 +119,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
 ] as const;
 
 /**
@@ -169,6 +171,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, only a status write by the tables' owner (the definer that records
  * a model request refused after refresh, and the migration's backfill) opens
  * or resolves a notice, and the person dismisses one left after a reconnect.
+ * 1552 withholds the shared Slack bot's one-statement source lookup; until it
+ * is granted, a Slack callback keeps 1538's per-workspace probe.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -183,6 +187,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -347,6 +352,11 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "opengeni_private.inbox_items",
     "opengeni_private.native_push_devices",
     "opengeni_private.native_push_deliveries",
+  ],
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)": [
+    "event_sources",
+    "connections",
+    "opengeni_private.organization_tenancy_inventory_capabilities",
   ],
 };
 

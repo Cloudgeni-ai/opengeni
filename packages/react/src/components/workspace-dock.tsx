@@ -37,6 +37,7 @@ import { cn } from "../lib/cn";
 import { inertProps } from "../lib/inert";
 import { useWindowLayerOpen } from "../lib/window-layer";
 import { useOpenGeniText } from "../messages/runtime";
+import { fitDockTabs } from "./workspace-dock-fit";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -57,11 +58,17 @@ export type WorkspaceTab = {
   /** A small badge after the label (e.g. dirty count, live pill). */
   badge?: ReactNode | undefined;
   /**
-   * Listed in the strip's "+" menu until the person opens it; then it stays
-   * on the strip, with a close button, until they close it. Omitted: the tab
-   * is always on the strip.
+   * Shown on the strip while there is room for it, after the tabs that are
+   * always there; otherwise listed in the strip's "+" menu until the person
+   * opens it, when it stays on the strip, with a close button, until they
+   * close it. Omitted: the tab is always on the strip.
    */
   optional?: boolean | undefined;
+  /**
+   * With `optional`, stays in the "+" menu even when the strip has room (a
+   * rarely used panel, such as Settings or Debug) until the person opens it.
+   */
+  inMenu?: boolean | undefined;
 };
 
 export type WorkspaceDockProps = {
@@ -320,15 +327,70 @@ export function WorkspaceDock({
   );
   const showLanding =
     landing && opened.length === 0 && tabs.length > 0 && tabs.every((tab) => tab.optional);
-  const shownTabs = useMemo(
+  // Tabs on the strip whatever the room; optional ones fill what is left.
+  const requiredIds = useMemo(
     () =>
-      showLanding
-        ? []
-        : tabs.filter(
-            (tab) =>
-              !tab.optional || opened.includes(tab.id) || (tab.id === current && tab.optional),
-          ),
+      new Set(
+        showLanding
+          ? []
+          : tabs
+              .filter((tab) => !tab.optional || opened.includes(tab.id) || tab.id === current)
+              .map((tab) => tab.id),
+      ),
     [tabs, opened, current, showLanding],
+  );
+  const fillableIds = useMemo(
+    () =>
+      new Set(
+        showLanding ? [] : tabs.filter((tab) => tab.optional && !tab.inMenu).map((tab) => tab.id),
+      ),
+    [tabs, showLanding],
+  );
+  const optionalKey = tabs
+    .filter((tab) => tab.optional)
+    .map((tab) => tab.id)
+    .join("\u0000");
+  const optionalIds = useMemo(
+    () => new Set(optionalKey ? optionalKey.split("\u0000") : []),
+    [optionalKey],
+  );
+  const [stripRoom, setStripRoom] = useState<StripRoom | null>(null);
+  const measureStrip = useCallback(
+    (next: StripRoom) =>
+      setStripRoom((previous) => (previous && sameStripRoom(previous, next) ? previous : next)),
+    [],
+  );
+  const tabOrderKey = tabs.map((tab) => tab.id).join("\u0000");
+  const fit = useMemo(
+    () =>
+      fitDockTabs({
+        order: tabOrderKey ? tabOrderKey.split("\u0000") : [],
+        required: requiredIds,
+        fillable: fillableIds,
+        optional: optionalIds,
+        widths: stripRoom?.widths ?? {},
+        available: stripRoom?.available ?? 0,
+        gap: TAB_GAP,
+        closeWidth: stripRoom?.closeWidth ?? 0,
+      }),
+    [fillableIds, optionalIds, requiredIds, stripRoom, tabOrderKey],
+  );
+  const shownTabs = useMemo(
+    () => tabs.filter((tab) => requiredIds.has(tab.id) || fit.filled.has(tab.id)),
+    [fit, requiredIds, tabs],
+  );
+  // Tabs measured for the strip: everything it may show.
+  const measuredTabs = useMemo(
+    () => tabs.filter((tab) => requiredIds.has(tab.id) || fillableIds.has(tab.id)),
+    [fillableIds, requiredIds, tabs],
+  );
+  // A tab there only because the person opened (or selected) it can be closed.
+  const closableIds = useMemo(
+    () =>
+      new Set(
+        shownTabs.filter((tab) => tab.optional && !fit.natural.has(tab.id)).map((tab) => tab.id),
+      ),
+    [fit, shownTabs],
   );
   const closeTab = useCallback(
     (id: string) => {
@@ -545,6 +607,9 @@ export function WorkspaceDock({
           <DockChrome
             tabs={tabs}
             shownTabs={shownTabs}
+            measuredTabs={measuredTabs}
+            closableIds={closableIds}
+            onMeasure={measureStrip}
             landing={showLanding}
             current={current}
             onTab={setTab}
@@ -585,17 +650,9 @@ export function WorkspaceDock({
   // there; a maximized dock still offers Restore.
   const showMaximize = maximized || !expandClaims[current];
   const showCollapse = !(hostControlled && !showCollapseControl);
+  // Maximize is one button on the strip (it toggles to Restore), so the menu
+  // keeps only Hide.
   const menuActions: DockMenuAction[] = [
-    ...(showMaximize
-      ? [
-          {
-            id: "maximize",
-            label: maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock"),
-            icon: maximized ? <Minimize2Icon /> : <Maximize2Icon />,
-            onSelect: () => setMaximized((m) => !m),
-          },
-        ]
-      : []),
     ...(showCollapse
       ? [
           {
@@ -607,10 +664,32 @@ export function WorkspaceDock({
         ]
       : []),
   ];
+  const maximizeButton = showMaximize ? (
+    <ChromeButton
+      onClick={(event) => {
+        // Restoring a panel that owns its expand removes this button;
+        // keep keyboard focus in the dock instead of dropping it.
+        if (maximized && expandClaims[current]) {
+          const next =
+            (event.currentTarget.nextElementSibling as HTMLElement | null) ??
+            rootRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+          requestAnimationFrame(() => next?.focus());
+        }
+        setMaximized((m) => !m);
+      }}
+      title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
+      label={maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")}
+    >
+      {maximized ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
+    </ChromeButton>
+  ) : null;
   const dockChrome = (
     <DockChrome
       tabs={tabs}
       shownTabs={shownTabs}
+      measuredTabs={measuredTabs}
+      closableIds={closableIds}
+      onMeasure={measureStrip}
       landing={showLanding}
       current={current}
       onTab={setTab}
@@ -620,35 +699,11 @@ export function WorkspaceDock({
       accessoryInMenu={essentials && !headerAccessoryPinned}
       menuActions={essentials ? menuActions : undefined}
       controls={
-        essentials ? null : (
+        essentials ? (
+          maximizeButton
+        ) : (
           <>
-            {showMaximize ? (
-              <ChromeButton
-                onClick={(event) => {
-                  // Restoring a panel that owns its expand removes this button;
-                  // keep keyboard focus in the dock instead of dropping it.
-                  if (maximized && expandClaims[current]) {
-                    const next =
-                      (event.currentTarget.nextElementSibling as HTMLElement | null) ??
-                      rootRef.current?.querySelector<HTMLElement>(
-                        '[role="tab"][aria-selected="true"]',
-                      );
-                    requestAnimationFrame(() => next?.focus());
-                  }
-                  setMaximized((m) => !m);
-                }}
-                title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
-                label={
-                  maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")
-                }
-              >
-                {maximized ? (
-                  <Minimize2Icon className="size-3.5" />
-                ) : (
-                  <Maximize2Icon className="size-3.5" />
-                )}
-              </ChromeButton>
-            ) : null}
+            {maximizeButton}
             {hostControlled && !showCollapseControl ? null : (
               <ChromeButton
                 onClick={collapse}
@@ -781,6 +836,27 @@ type DockMenuAction = {
 // chat shows the tabs the person had opened there.
 const OPENED_TABS = new Map<string, readonly string[]>();
 
+/** The strip's room and its tabs' natural widths, measured by the chrome. */
+type StripRoom = {
+  available: number;
+  widths: Readonly<Record<string, number>>;
+  /** A tab's extra width with its close button. */
+  closeWidth: number;
+};
+
+function sameStripRoom(a: StripRoom, b: StripRoom): boolean {
+  if (Math.abs(a.available - b.available) >= 1) return false;
+  if (Math.abs(a.closeWidth - b.closeWidth) >= 1) return false;
+  const keys = Object.keys(a.widths);
+  return (
+    keys.length === Object.keys(b.widths).length &&
+    keys.every((key) => Math.abs((a.widths[key] ?? 0) - (b.widths[key] ?? -1)) < 1)
+  );
+}
+
+/** The strip's gap between tabs (`gap-0.5`). */
+const TAB_GAP = 2;
+
 function useOpenedTabs(
   scope: string | undefined,
 ): [readonly string[], (update: (ids: readonly string[]) => readonly string[]) => void] {
@@ -815,6 +891,9 @@ function tabName(tab: WorkspaceTab): string {
 function DockChrome({
   tabs,
   shownTabs,
+  measuredTabs,
+  closableIds,
+  onMeasure,
   landing = false,
   current,
   onTab,
@@ -830,6 +909,12 @@ function DockChrome({
   tabs: WorkspaceTab[];
   /** The tabs on the strip, in order; the rest are in the menu. */
   shownTabs: WorkspaceTab[];
+  /** The tabs the strip may show, measured for the room they need. */
+  measuredTabs: WorkspaceTab[];
+  /** Tabs on the strip with a close button (opened by the person, not there by room). */
+  closableIds: ReadonlySet<string>;
+  /** The strip's room and its tabs' widths, as they change. */
+  onMeasure: (room: StripRoom) => void;
   /** Show the empty view (nothing has content yet) instead of a tab. */
   landing?: boolean | undefined;
   current: string;
@@ -868,9 +953,93 @@ function DockChrome({
   // state), so a switch costs no extra render.
   const stripRef = useRef<HTMLDivElement | null>(null);
   const chromeRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const measureRef = useRef<HTMLDivElement | null>(null);
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pillRef = useRef<HTMLSpanElement | null>(null);
   const shownKey = shownTabs.map((tab) => tab.id).join("\u0000");
+  const measuredKey = measuredTabs.map((tab) => tab.id).join("\u0000");
+  // The strip's room: the header's width less everything else in it (each at
+  // its natural width, so a shrinking chip never makes room that isn't
+  // there), and each tab's natural width from a hidden copy of the strip,
+  // with a close button and "+" sized as this screen draws them.
+  useLayoutEffect(() => {
+    const header = headerRef.current;
+    const box = measureRef.current;
+    if (!header || !box) return;
+    const measure = () => {
+      const widths: Record<string, number> = {};
+      for (const node of box.querySelectorAll<HTMLElement>("[data-dock-tab-measure]")) {
+        const id = node.getAttribute("data-dock-tab-measure");
+        if (id !== null) widths[id] = node.offsetWidth;
+      }
+      // The close button replaces part of the tab's end padding with its
+      // margin, so the tab grows by the button's own width.
+      const closeWidth =
+        box.querySelector<HTMLElement>("[data-dock-close-measure]")?.offsetWidth ?? 0;
+      const menuWidth =
+        box.querySelector<HTMLElement>("[data-dock-menu-measure]")?.offsetWidth ?? 0;
+      const style = getComputedStyle(header);
+      const gap = Number.parseFloat(style.columnGap) || 0;
+      let others = 0;
+      let items = 0;
+      let hasStrip = false;
+      let menuDrawn = false;
+      for (const child of Array.from(header.children)) {
+        if (!(child instanceof HTMLElement) || child === box) continue;
+        items += 1;
+        if (child === stripRef.current) {
+          hasStrip = true;
+          continue;
+        }
+        if (child === menuTriggerRef.current) menuDrawn = true;
+        if (child.hasAttribute("data-dock-spacer")) continue;
+        // Unshrunk for the reading: a truncating chip counts at full width.
+        const shrink = child.style.flexShrink;
+        child.style.flexShrink = "0";
+        others += Math.max(child.offsetWidth, child.scrollWidth);
+        child.style.flexShrink = shrink;
+      }
+      if (!hasStrip) items += 1;
+      if (!menuDrawn) {
+        items += 1;
+        others += menuWidth;
+      }
+      const padding =
+        (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+      onMeasure({
+        available: Math.floor(header.clientWidth - padding - others - gap * Math.max(0, items - 1)),
+        widths,
+        closeWidth,
+      });
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    // The header, the measuring copy and everything else in the header (a
+    // chip turning pinned, controls changing, "+" appearing).
+    const observeAll = () => {
+      observer.disconnect();
+      observer.observe(header);
+      if (box.firstElementChild) observer.observe(box.firstElementChild);
+      for (const child of Array.from(header.children)) {
+        if (child !== box && child !== stripRef.current) observer.observe(child);
+      }
+    };
+    observeAll();
+    const mutations =
+      typeof MutationObserver === "undefined"
+        ? null
+        : new MutationObserver(() => {
+            observeAll();
+            measure();
+          });
+    mutations?.observe(header, { childList: true });
+    return () => {
+      observer.disconnect();
+      mutations?.disconnect();
+    };
+  }, [measuredKey, onMeasure]);
   useLayoutEffect(() => {
     const strip = stripRef.current;
     const pill = pillRef.current;
@@ -941,12 +1110,44 @@ function DockChrome({
       className="flex h-full min-h-0 min-w-0 flex-col bg-og-bg [--og-color-bg:var(--og-color-canvas)] [--color-bg:var(--og-color-canvas)] [--og-diff-separator:color-mix(in_oklch,var(--og-color-fg)_4%,transparent)]"
     >
       <div
+        ref={headerRef}
         className={cn(
-          "min-h-11 shrink-0 items-center gap-1 bg-[radial-gradient(120%_180%_at_100%_0%,color-mix(in_oklch,var(--og-color-accent)_8%,transparent),transparent_70%)] px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
+          "relative min-h-11 shrink-0 items-center gap-1 bg-[radial-gradient(120%_180%_at_100%_0%,color-mix(in_oklch,var(--og-color-accent)_8%,transparent),transparent_70%)] px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
           // The empty view needs no header unless it carries controls.
           landing && !leading && !controls && !hasMenu ? "hidden" : "flex",
         )}
       >
+        {/* Each tab the strip may show, at its natural width, for measuring
+            only: never seen, focused or read. */}
+        <div
+          ref={measureRef}
+          aria-hidden
+          {...inertProps(true)}
+          data-dock-tab-measures=""
+          className="pointer-events-none invisible absolute top-0 left-0 h-0 w-0 overflow-hidden"
+        >
+          <div className="flex w-max">
+            {measuredTabs.map((tab) => (
+              <span
+                key={tab.id}
+                data-dock-tab-measure={tab.id}
+                className="flex shrink-0 items-center gap-1.5 px-3 text-[12.5px] font-medium tracking-[-0.005em]"
+              >
+                {tab.icon ? <span className="flex size-3.5 shrink-0" /> : null}
+                <span className="max-w-[12rem] truncate whitespace-nowrap">{tab.label}</span>
+                {tab.badge ? <span className="shrink-0">{tab.badge}</span> : null}
+              </span>
+            ))}
+            <span
+              data-dock-close-measure=""
+              className="inline-flex size-4 shrink-0 max-[1023px]:size-8 pointer-coarse:size-8"
+            />
+            <span
+              data-dock-menu-measure=""
+              className="inline-flex size-7 shrink-0 max-[1023px]:size-11 pointer-coarse:size-11"
+            />
+          </div>
+        </div>
         {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
         {shownTabs.length > 0 ? (
           <div
@@ -965,6 +1166,7 @@ function DockChrome({
             {shownTabs.map((tab, index) => {
               const selected = tab.id === current;
               const tabIndex = tabs.indexOf(tab);
+              const closable = closableIds.has(tab.id);
               return (
                 <div
                   key={tab.id}
@@ -990,7 +1192,7 @@ function DockChrome({
                     data-dock-tab={tab.id}
                     className={cn(
                       "flex min-h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium tracking-[-0.005em] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-                      tab.optional && "pr-1.5",
+                      closable && "pr-1.5",
                     )}
                   >
                     {tab.icon ? (
@@ -1012,11 +1214,15 @@ function DockChrome({
                     </span>
                     {tab.badge ? <span className="shrink-0">{tab.badge}</span> : null}
                   </button>
-                  {tab.optional ? (
+                  {closable ? (
                     <button
                       type="button"
-                      aria-label={msg("workspaceDock.closeTab", { name: tabName(tab) })}
-                      title={msg("workspaceDock.closeTab", { name: tabName(tab) })}
+                      aria-label={msg("workspaceDock.closeTab", {
+                        name: tabName(tab),
+                      })}
+                      title={msg("workspaceDock.closeTab", {
+                        name: tabName(tab),
+                      })}
                       onClick={() => {
                         onClose(tab.id);
                         // Keep focus in the dock: the selected tab, else the
@@ -1118,7 +1324,7 @@ function DockChrome({
             </DropdownMenuContent>
           </DropdownMenu>
         ) : null}
-        <div className="min-w-0 flex-1" />
+        <div data-dock-spacer="" className="min-w-0 flex-1" />
         {accessory && !menuAccessory ? (
           <div className="my-auto min-w-0 shrink text-og-fg-muted">{accessory}</div>
         ) : null}

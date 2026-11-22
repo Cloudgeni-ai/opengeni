@@ -13,6 +13,71 @@ export type FileNodeVisibilityPredicate = (
 
 export type FilePathVisibility = "visible" | "hidden" | "unknown";
 
+/**
+ * Tool, dependency and cache folders, wherever they are: they belong to the
+ * tools, not the work, so the Files view leaves them out until the person
+ * shows hidden files.
+ */
+const TOOL_AND_CACHE_DIRS = new Set([
+  ".bun",
+  ".cache",
+  ".git",
+  ".gradle",
+  ".mypy_cache",
+  ".npm",
+  ".pnpm-store",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".turbo",
+  ".venv",
+  ".yarn",
+  "__pycache__",
+  "node_modules",
+]);
+
+/** Dot folders at the top that people edit on purpose (agent skills, CI). */
+const KEPT_DOT_DIRS = new Set([".agents", ".claude", ".github"]);
+
+/**
+ * Whether the Files view leaves an entry out by default, behind its Show
+ * hidden toggle: tool and cache folders anywhere, and hidden (dot) folders at
+ * the top of a workspace that isn't itself a repository (the sandbox's home,
+ * where tools keep `.bun`, `.config` and the like). Dotfiles such as `.env`,
+ * skill and CI folders, and everything inside a repository stay in view.
+ * Presentation only: nothing is removed or made unreachable.
+ */
+export function isHiddenByDefault(
+  node: FileTreeNode,
+  context: FileNodeVisibilityContext,
+  rootIsRepository: boolean,
+): boolean {
+  if (node.kind !== "dir") return false;
+  if (TOOL_AND_CACHE_DIRS.has(node.name)) return true;
+  return (
+    context.depth === 0 &&
+    !rootIsRepository &&
+    node.name.startsWith(".") &&
+    !KEPT_DOT_DIRS.has(node.name)
+  );
+}
+
+/** Whether the tree's top is a repository's own root (it holds `.git`). */
+export function treeRootIsRepository(nodes: readonly FileTreeNode[]): boolean {
+  return nodes.some((node) => node.name === ".git");
+}
+
+/**
+ * Whether a path lies inside a tool or cache folder, judged from its name
+ * alone (for a path whose folders aren't loaded yet; the top level always is,
+ * so its dot folders are judged from the tree).
+ */
+export function pathMayBeHiddenByDefault(path: string): boolean {
+  const segments = path.split(/[/\\]/u);
+  // The last segment is the entry itself; only the folders above it hide it.
+  return segments.slice(0, -1).some((segment) => TOOL_AND_CACHE_DIRS.has(segment));
+}
+
 function pathIsInsideDirectory(path: string, directory: string): boolean {
   if (!path.startsWith(directory) || path === directory) return false;
   if (directory.endsWith("/") || directory.endsWith("\\")) return true;

@@ -1100,6 +1100,8 @@ const SettingsSchema = z.object({
   // call the public API with bearer credentials, but never receive credentialed
   // CORS responses.
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
+  // Exact product origins allowed for authenticated server-side interaction attachments.
+  interactionViewerOrigins: z.string().optional(),
   // `local` access mode only: extra exact browser origins, comma-separated,
   // that may call the unauthenticated API besides this stack's own web and
   // public origins. Local access mode ignores `corsAllowOriginRegex`.
@@ -6552,6 +6554,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
+    interactionViewerOrigins: optional("OPENGENI_INTERACTION_VIEWER_ORIGINS"),
     localAllowedOrigins: optional("OPENGENI_LOCAL_ALLOWED_ORIGINS"),
     landingOrigins: optional("OPENGENI_LANDING_ORIGINS"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
@@ -13640,6 +13643,11 @@ export function localAllowedOriginEntries(raw: string | undefined): string[] {
   return exactOriginEntries(raw, "OPENGENI_LOCAL_ALLOWED_ORIGINS", "http://127.0.0.1:5173");
 }
 
+/** Exact viewer origins, separate from the API's browser/CORS policy. */
+export function interactionViewerOriginEntries(raw: string | undefined): string[] {
+  return exactOriginEntries(raw, "OPENGENI_INTERACTION_VIEWER_ORIGINS", "https://app.example.com");
+}
+
 /**
  * Parse `OPENGENI_LANDING_ORIGINS`: comma-separated exact marketing-site origins
  * allowed to read `GET /v1/auth/display-identity` with cookies. Same strict
@@ -13768,6 +13776,7 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  interactionViewerOriginEntries(settings.interactionViewerOrigins);
   landingOriginEntries(settings.landingOrigins);
   validateSitesDomain(settings);
   if (

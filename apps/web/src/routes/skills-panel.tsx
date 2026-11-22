@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { GraduationCapIcon, LinkIcon, PlusIcon } from "lucide-react";
 import { ConnectionInstalled } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
@@ -52,9 +52,35 @@ const SKILL_SCOPE_LABEL: Record<SkillScope, string> = {
   user: "Yours",
 };
 
+/** Whose Skills the list shows, picked next to the Capabilities search. */
+export type SkillOwnerFilter = "all" | "mine" | "workspace" | "organization";
+
+export const SKILL_OWNER_FILTER_OPTIONS: ReadonlyArray<{
+  value: SkillOwnerFilter;
+  label: string;
+}> = [
+  { value: "all", label: "All" },
+  { value: "mine", label: SKILL_SCOPE_LABEL.user },
+  { value: "workspace", label: SKILL_SCOPE_LABEL.workspace },
+  { value: "organization", label: SKILL_SCOPE_LABEL.organization },
+];
+
+/** The server-side list filter for a choice; the list is paged, so the server filters. */
+export function skillOwnerListFilter(owner: SkillOwnerFilter): { scope?: SkillScope } {
+  if (owner === "mine") return { scope: "user" };
+  if (owner === "workspace" || owner === "organization") return { scope: owner };
+  return {};
+}
+
+function matchesOwner(skill: SkillSummary, owner: SkillOwnerFilter): boolean {
+  const { scope } = skillOwnerListFilter(owner);
+  return !scope || skill.scope === scope;
+}
+
 export function SkillsPanel({
   workspaceId,
   query = "",
+  owner = "all",
   onFindSkill,
   onImportSkill,
   refreshRevision = 0,
@@ -64,6 +90,7 @@ export function SkillsPanel({
 }: {
   workspaceId: string;
   query?: string;
+  owner?: SkillOwnerFilter;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
   refreshRevision?: number;
@@ -76,6 +103,7 @@ export function SkillsPanel({
       context={useAppContext()}
       workspaceId={workspaceId}
       query={query}
+      owner={owner}
       onFindSkill={onFindSkill}
       onImportSkill={onImportSkill}
       refreshRevision={refreshRevision}
@@ -90,6 +118,7 @@ export function SkillsPanelContent({
   context,
   workspaceId,
   query = "",
+  owner = "all",
   onFindSkill,
   onImportSkill,
   refreshRevision = 0,
@@ -100,6 +129,7 @@ export function SkillsPanelContent({
   context: AppContextValue;
   workspaceId: string;
   query?: string;
+  owner?: SkillOwnerFilter;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
   refreshRevision?: number;
@@ -108,6 +138,10 @@ export function SkillsPanelContent({
   openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   const { client } = context;
+  const listFilter = useMemo(() => skillOwnerListFilter(owner), [owner]);
+  // The refresh below reads the current filter without re-running on a filter change.
+  const listFilterRef = useRef(listFilter);
+  listFilterRef.current = listFilter;
   // Inside Capabilities a skill opens as its own page in the route's page slot
   // (`?open=skill:<id>`); elsewhere the page replaces the list in place.
   const slot = useCapabilityPageSlot();
@@ -190,7 +224,7 @@ export function SkillsPanelContent({
     setNextCursor(null);
     setError(null);
     void client
-      .listWorkspaceSkills(workspaceId)
+      .listWorkspaceSkills(workspaceId, listFilter)
       .then((result) => {
         if (inventoryGeneration.current === current) {
           setLoading(false);
@@ -212,19 +246,22 @@ export function SkillsPanelContent({
       // eslint-disable-next-line react-hooks/exhaustive-deps
       inventoryGeneration.current++;
     };
-  }, [client, workspaceId, reload]);
+  }, [client, workspaceId, reload, listFilter]);
 
   useEffect(() => {
     onSkillsChange?.(
-      skills.filter((skill) => skill.availableHere !== false || canManageOrganization),
+      skills.filter(
+        (skill) =>
+          (skill.availableHere !== false || canManageOrganization) && matchesOwner(skill, owner),
+      ),
     );
-  }, [skills, onSkillsChange, canManageOrganization]);
+  }, [skills, onSkillsChange, canManageOrganization, owner]);
   useEffect(() => {
     if (!refreshRevision) return;
     let live = true;
     const current = ++inventoryGeneration.current;
     void client
-      .listWorkspaceSkills(workspaceId)
+      .listWorkspaceSkills(workspaceId, listFilterRef.current)
       .then((result) => {
         if (live && current === inventoryGeneration.current) {
           setLoading(false);
@@ -299,7 +336,10 @@ export function SkillsPanelContent({
     setBusy(true);
     setError(null);
     try {
-      const page = await client.listWorkspaceSkills(workspaceId, { cursor: nextCursor });
+      const page = await client.listWorkspaceSkills(workspaceId, {
+        ...listFilter,
+        cursor: nextCursor,
+      });
       if (inventoryGeneration.current !== inventoryRequest) return;
       setSkills((previous) => [
         ...new Map([...previous, ...page.skills].map((skill) => [skill.id, skill])).values(),
@@ -311,7 +351,7 @@ export function SkillsPanelContent({
     } finally {
       if (generation.current === current) setBusy(false);
     }
-  }, [nextCursor, busy, client, workspaceId]);
+  }, [nextCursor, busy, client, workspaceId, listFilter]);
 
   useEffect(() => {
     if (query.trim() && nextCursor && !busy && !error) void loadMore();
@@ -416,7 +456,7 @@ export function SkillsPanelContent({
       const inventoryRequest = ++inventoryGeneration.current;
       const [updated, inventory] = await Promise.all([
         client.readWorkspaceSkill(workspaceId, record.id, record.revisionId),
-        client.listWorkspaceSkills(workspaceId),
+        client.listWorkspaceSkills(workspaceId, listFilter),
       ]);
       if (inventoryGeneration.current === inventoryRequest) {
         setSkills(inventory.skills);
@@ -471,14 +511,14 @@ export function SkillsPanelContent({
       if (receipt.removed) {
         setRecord(null);
         if (slot?.openKey?.startsWith("skill:")) slot.close({ replace: true });
-        setSkills((await client.listWorkspaceSkills(workspaceId)).skills);
+        setSkills((await client.listWorkspaceSkills(workspaceId, listFilter)).skills);
         setNotice("Skill and all stored revisions permanently deleted.");
         return;
       }
       const inventoryRequest = ++inventoryGeneration.current;
       const [updated, inventory, detail] = await Promise.all([
         client.readWorkspaceSkill(workspaceId, receipt.skillId),
-        client.listWorkspaceSkills(workspaceId),
+        client.listWorkspaceSkills(workspaceId, listFilter),
         client.getPreferenceRegistry(workspaceId, receipt.skillId),
       ]);
       if (inventoryGeneration.current === inventoryRequest) {
@@ -553,6 +593,7 @@ export function SkillsPanelContent({
   const matchingSkills = skills.filter(
     (skill) =>
       (skill.availableHere !== false || canManageOrganization) &&
+      matchesOwner(skill, owner) &&
       `${skill.title} ${skill.stableKey}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
 
@@ -709,7 +750,9 @@ export function SkillsPanelContent({
           </p>
         ) : null}
         {loading ? <p role="status">Loading Skills…</p> : null}
-        {!loading && !error && !skills.length ? (
+        {!loading && !error && !skills.length && owner !== "all" ? (
+          <p className="text-sm text-fg-subtle">No skills here.</p>
+        ) : !loading && !error && !skills.length ? (
           <p className="text-sm text-fg-subtle">
             {onFindSkill
               ? "No skills installed yet. Browse the catalog below or add your own."

@@ -797,7 +797,14 @@ if (frame) {
     viewer: () => viewerHandlers,
     location: () => locationHandlers,
   });
+  // The app's first load replaces the shell's loading screen.
+  const loading = document.getElementById("og-loading");
+  const loaded = () => {
+    if (loading) loading.hidden = true;
+  };
+  frame.addEventListener("error", loaded);
   frame.addEventListener("load", () => {
+    loaded();
     const frameWindow = frame.contentWindow;
     if (frameWindow) host.load(frameWindow);
     measure({ kind: "app_load", ms: performance.now(), outcome: "ok" });

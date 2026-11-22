@@ -1307,8 +1307,12 @@ export function applyPersonalSidebarChanges(
       case "remove": {
         const index = ownIndex(change.itemId);
         const child = index < 0 ? ownChild(change.itemId) : null;
-        if (index >= 0) next.added.splice(index, 1);
-        else if (child) child.children.splice(child.index, 1);
+        if (index >= 0) {
+          const [removed] = next.added.splice(index, 1);
+          // Your group goes with its items, also ones stored beside it by an older version.
+          if (removed?.item.type === "group")
+            next.added = next.added.filter((entry) => entry.parentId !== removed.item.id);
+        } else if (child) child.children.splice(child.index, 1);
         else if (workspaceIds.has(change.itemId)) {
           if (!next.hidden.includes(change.itemId)) next.hidden.push(change.itemId);
         } else throw new SidebarLayoutChangeError(`No item "${change.itemId}"`);
@@ -1328,18 +1332,34 @@ export function applyPersonalSidebarChanges(
           // Only your own items change group; workspace items keep the admin's grouping.
           const index = ownIndex(change.itemId);
           const child = index < 0 ? ownChild(change.itemId) : null;
-          let item: StoredSidebarItem | undefined;
-          if (index >= 0) item = next.added.splice(index, 1)[0]?.item;
-          else if (child) item = child.children.splice(child.index, 1)[0];
-          else
+          if (index < 0 && !child)
             throw new SidebarLayoutChangeError(
               "Workspace items stay in their group; move it within its level instead",
             );
-          if (target !== SIDEBAR_ROOT_KEY && item!.type === "group")
-            throw new SidebarLayoutChangeError("Groups don't nest");
-          if (target !== SIDEBAR_ROOT_KEY && !groupExists(target))
-            throw new SidebarLayoutChangeError(`No group "${target}"`);
-          next.added.push({ parentId: target === SIDEBAR_ROOT_KEY ? null : target, item: item! });
+          if (target !== SIDEBAR_ROOT_KEY) {
+            const moving = index >= 0 ? next.added[index]!.item : child!.children[child!.index]!;
+            if (moving.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
+            if (!groupExists(target)) throw new SidebarLayoutChangeError(`No group "${target}"`);
+            if (mergedLevelIds(target).length >= SIDEBAR_GROUP_MAX_ITEMS)
+              throw new SidebarLayoutLimitError(
+                `A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`,
+              );
+          }
+          let item: StoredSidebarItem | undefined;
+          if (index >= 0) item = next.added.splice(index, 1)[0]?.item;
+          else item = child!.children.splice(child!.index, 1)[0];
+          // Into your own group it goes inside it, as Add puts it, so it moves and goes with the group.
+          const own = next.added.find(
+            (entry) => entry.item.id === target && entry.item.type === "group",
+          );
+          if (own) {
+            const children = Array.isArray(own.item.items)
+              ? (own.item.items as StoredSidebarItem[])
+              : [];
+            children.push(item!);
+            own.item.items = children;
+          } else
+            next.added.push({ parentId: target === SIDEBAR_ROOT_KEY ? null : target, item: item! });
         }
         place(target, change.itemId, change);
         break;

@@ -70,8 +70,9 @@ tool calls.
   id, the same collection name and `accessMode`: `per_viewer` for each
   person's own entries (add `privateRecords: true` for health or other
   personal data), `append_only` for a form that collects answers. Skip
-  `jsonSchema`; check values in the page.
-6. Reply with the link as soon as it is saved, in the person's words: what
+  `jsonSchema`; check values in the page. Then add a test entry in the saved
+  app in a browser: it must show without a reload; delete it.
+6. Reply with the link once that works, in the person's words: what
    it does and how to use it. The link opens for workspace members only.
    When the person wants others to open it (family, customers, "on their
    phones"), offer to put it on the web and ask before making it public,
@@ -95,13 +96,12 @@ Keep form text readable and let controls grow with their labels.
 These are authoring defaults, not a mandatory theme or runtime CSS override.
 Honor a user's deliberate design, retain an existing app's type system, and
 leave embedded components such as `SessionConversation` on their own styles.
-Do not inject a blanket font-size rule into existing apps or use `!important`
-to force this scale onto a component library. If `frontend-design` is available,
+Do not force this scale onto existing apps or a component library (no blanket
+font-size rule or `!important`). If `frontend-design` is available,
 use it for visual direction alongside these readability defaults.
 
 For a new page, this optional starting point applies only to elements you mark
 with these classes; adapt it to the design rather than importing a global reset.
-The sizes below assume the usual 16px browser default and scale with it.
 
 ```css
 .site-copy { font-size: 1.0625rem; line-height: 1.6; max-width: 70ch; }
@@ -236,12 +236,14 @@ inside an app, that bridge is the design. Do not propose Vercel, another
 server, a tunnel, or a Connected Machine for workspace AI access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. Saved data needs no server either:
-app data gives every published app persistent collections and files,
-and a data sync (`app_sync_save`) refills them with no model run.
+app data gives every published app persistent collections and files. A page
+calling a connected tool usually shows data only to viewers with their own
+connection; for a team, a shared sync (`app_sync_save`) fills a collection on a
+schedule, and a webhook (`app_webhook_save`) takes in other services' events.
 
-Server code (`references/server-code.md`) runs as the app, not the viewer:
-shared-connection data every viewer sees, an API key the browser must not
-hold, or writes the page must not skip. Never another host for that.
+Server code (`references/server-code.md`) runs as the app: shared-connection
+data for permitted members, an API key, or checked writes.
+Never another host for that. If unsure where the user wants it to run, ask.
 
 ### Start from the durable app
 
@@ -265,7 +267,7 @@ Read the references the app needs with `skill_read`, for example
 | --- | --- |
 | Every full app: packages, build, local preview with live tools, pages and addresses (`/admin`, `?t=` links), requested tools, the completion gate | `references/build-and-preview.md` |
 | Inline AI results, an embedded conversation, Opengeni UI components or the typed client | `references/ai-and-chat.md` |
-| Saves or reacts to records or files (app data) | `references/site-data.md` |
+| Saves or reacts to records or files (app data, syncs, webhooks) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (app SQL) | `references/site-sql.md` |
 | Invited or public, with data, tools or an embedded agent | `references/publish-to-web.md` |
 | Runs as the app: shared connections, API keys, server-side writes | `references/server-code.md` |
@@ -285,12 +287,9 @@ To embed a published app, use a fenced `opengeni-site` block containing JSON:
 Use the actual returned ids. `versionId` is optional: omitted, the embed loads
 the current version; included, it keeps that version. The viewer can pick
 another version in the embed without publishing or rolling back. The embed
-uses the same app renderer, reload/full-screen controls, tool declarations and
-viewer permissions as the app page, in the chat's workspace. Keep a normal app
+works like the app page (tools, viewer permissions), in the chat's workspace. Keep a normal app
 link when it helps the user reopen or share it. Archived or inaccessible apps
 show as unavailable.
 
 Use inline HTML for a visualization that belongs in this response. Use an app
-for a reusable app or durable page, and embed it when useful. Both can be small;
-neither requires a dashboard or full-page layout. React apps still use the
-normal build and publish workflow.
+for a reusable app or durable page, and embed it when useful.

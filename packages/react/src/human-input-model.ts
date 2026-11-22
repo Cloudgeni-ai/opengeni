@@ -335,15 +335,49 @@ export function secretCanGenerate(spec: HumanInputSecretSpec): boolean {
 
 /** The input's label: "Password", "API key", "One-time code", or the field name. */
 export function secretFieldLabel(t: OpenGeniText, spec: HumanInputSecretSpec): string {
-  const field = spec.field?.trim() || "password";
-  if (spec.fieldKind === "totp" && field.toLowerCase() === "password")
-    return t("humanInputModel.oneTimeCode");
-  if (spec.itemType === "api_key" && field.toLowerCase() === "password")
-    return t("humanInputModel.apiKey");
-  if (spec.itemType === "note" && field.toLowerCase() === "password")
-    return t("humanInputModel.note");
-  const words = field.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  const field = spec.field?.trim() ? spec.field : "password";
+  switch (
+    field
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, " ")
+  ) {
+    case "password":
+      if (spec.fieldKind === "totp") return t("humanInputModel.oneTimeCode");
+      if (spec.itemType === "api_key") return t("humanInputModel.apiKey");
+      if (spec.itemType === "note") return t("humanInputModel.note");
+      return t("humanInputModel.password");
+    case "username":
+    case "user name":
+      return t("humanInputModel.username");
+    case "otp":
+    case "totp":
+    case "one time code":
+    case "one time password":
+    case "verification code":
+      return t("humanInputModel.oneTimeCode");
+    case "apikey":
+    case "api key":
+      return t("humanInputModel.apiKey");
+    case "pin":
+      return t("humanInputModel.pin");
+    case "token":
+      return t("humanInputModel.token");
+    case "access token":
+      return t("humanInputModel.accessToken");
+    case "client id":
+      return t("humanInputModel.clientId");
+    case "client secret":
+      return t("humanInputModel.clientSecret");
+    default:
+      return field;
+  }
+}
+
+/** Translate the standard paired username label, not a prompt written by the agent. */
+export function secretUsernameLabel(t: OpenGeniText, prompt: string): string {
+  const name = prompt.trim().toLowerCase();
+  return name === "username" || name === "user name" ? t("humanInputModel.username") : prompt;
 }
 
 export type SecretSaveToChoice = {
@@ -445,5 +479,14 @@ export function secretAnswerLabel(
   messageOverrides: Partial<HumanInputFormMessages> = {},
 ): string {
   const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
-  return messages.secretSaved(result.vaultName, result.itemName);
+  const { saveTo, vaultName, itemName } = result;
+  const displayName =
+    saveTo === "task" && vaultName === "Task"
+      ? t("humanInputModel.taskVaultName")
+      : saveTo === "user" && vaultName === "Private"
+        ? t("humanInputModel.privateVaultName")
+        : saveTo === "workspace" && vaultName === "Shared"
+          ? t("humanInputModel.sharedVaultName")
+          : vaultName;
+  return messages.secretSaved(displayName, itemName);
 }

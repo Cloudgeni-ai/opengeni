@@ -25,7 +25,11 @@ work for workspace members permitted to use the tool; visitors get a refusal.
   hosts that don't report viewers. Guests have no name or email. Offer a
   sign-in button that calls `site.auth.signIn()`; never build your own login.
 - Embedded agent and limits: the publication turns the app's agent on or
-  off and picks its model. Workspace members are never limited by the app.
+  off and picks its model. The published page draws no chat of its own; the
+  agent is reachable only through the app's code. So when the user turns the
+  agent on or wants people to chat and the app has no conversation surface,
+  add one that suits the app (an "Ask the board" panel, a question box; see
+  ai-and-chat.md), shown only while `caps.agent` is true. Workspace members are never limited by the app.
   People outside the workspace share one app limit ($10 a month by
   default) and an optional per-person limit, which workspace admins set;
   anonymous guests also meet bot guards. Non-member model calls use organization

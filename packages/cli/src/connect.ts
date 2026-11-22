@@ -28,8 +28,9 @@ name: opengeni
 description: >-
   Hand work to Opengeni agents in the cloud and use the Opengeni workspace's
   apps, tools, Skills and Knowledge. Use when the user asks to run something
-  in the cloud, in the background or in parallel, "on Opengeni", or to check
-  on, follow up or get the result of an Opengeni chat.
+  in the cloud, in the background or in parallel, "on Opengeni", to check on
+  or follow up an Opengeni chat, to share Skills, Knowledge, apps or files
+  with the workspace, or to change its schedules or agents.
 ---
 
 # Opengeni
@@ -49,11 +50,20 @@ this conversation or this computer: give it a self-contained brief.
   Stopping your wait doesn't stop the chat; \`session_pause\` does.
 - **Follow up**: \`session_send\`, then \`wait_for\` with its cursor and turnId.
 - **Apps**: \`apps_list\`, \`app_describe\`, \`app_query\`, \`app_write\`.
+- **Share**: \`app_save\` (an app or a new version), \`app_publish\` (who can
+  open it), \`file_save\` (a file and its link).
 - **Tools**: \`tools_search\`, then \`tool_call\`. If it returns
   \`needsApproval\`, show the user \`approvalUrl\`; after they approve, call again
   with the same \`operationId\`.
-- **Skills and Knowledge**: \`skills_sync\` (upload local Skill folders or pull
-  the workspace's), \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
+- **Skills and Knowledge**: \`skills_sync\` uploads local Skill folders as
+  Personal unless \`scope\` is \`workspace\` or \`organization\` (which may wait
+  for review, per the workspace's Agent learning setting);
+  \`direction: "pull"\` gets the workspace's Skills; \`direction: "repository"\`
+  syncs a public GitHub repository's Skill folders. Knowledge:
+  \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
+- **Schedules, agents and workspace instructions**: change them with
+  \`opengeni_actions_search\`, \`opengeni_action_describe\`, then
+  \`opengeni_action_call\`.
 - Several workspaces: pass \`workspaceId\`, or \`workspace_use\` once.
 
 Retrying a call with the same input doesn't start the work twice. Never put
@@ -368,8 +378,15 @@ export function connectClient(
   }
 }
 
-export function parseClients(value: string | undefined): ConnectClient[] | string {
-  if (value === undefined) return [];
+/**
+ * `--client`: named clients are set up even when they aren't detected; `all`
+ * (like no flag) means every client detected here, reporting the rest as
+ * skipped.
+ */
+export function parseClients(
+  value: string | undefined,
+): ConnectClient[] | "all" | { error: string } {
+  if (value === undefined) return "all";
   const wanted = value
     .split(",")
     .map((each) => each.trim().toLowerCase())
@@ -381,10 +398,15 @@ export function parseClients(value: string | undefined): ConnectClient[] | strin
           ? "claude"
           : each,
     );
-  if (wanted.includes("all")) return [...CONNECT_CLIENTS];
+  if (wanted.includes("all"))
+    return wanted.every((each) => each === "all")
+      ? "all"
+      : { error: "use --client all on its own, or name the clients to set up." };
   const unknown = wanted.filter((each) => !(CONNECT_CLIENTS as readonly string[]).includes(each));
   if (unknown.length > 0)
-    return `unknown client ${unknown.join(", ")}; use ${CONNECT_CLIENTS.join(", ")} or all.`;
+    return {
+      error: `unknown client ${unknown.join(", ")}; use ${CONNECT_CLIENTS.join(", ")} or all.`,
+    };
   return [...new Set(wanted)] as ConnectClient[];
 }
 
@@ -392,14 +414,16 @@ export function runConnect(
   deps: ConnectDeps,
   input: {
     baseUrl: string;
-    clients: ConnectClient[];
+    /** Named clients, or `all` for every client detected here. */
+    clients: ConnectClient[] | "all";
     skill: boolean;
     signIn: boolean;
   },
   io: { stdout(text: string): void; stderr(text: string): void },
 ): number {
   const url = mcpServerUrl(input.baseUrl);
-  const clients = input.clients.length > 0 ? input.clients : detectClients(deps);
+  const detected = input.clients === "all" || input.clients.length === 0;
+  const clients = detected ? detectClients(deps) : (input.clients as ConnectClient[]);
   if (clients.length === 0) {
     io.stderr(
       `No coding agent found here. Pass --client ${CONNECT_CLIENTS.join(",")} to set one up anyway.\n`,
@@ -412,6 +436,14 @@ export function runConnect(
     const step = connectClient(deps, client, url, input);
     failed ||= step.status === "failed";
     io.stdout(`  ${step.label}: ${step.detail}\n`);
+  }
+  // Nothing is written for a client that isn't installed: no config, no skill.
+  if (detected) {
+    for (const client of CONNECT_CLIENTS.filter((each) => !clients.includes(each))) {
+      io.stdout(
+        `  ${CLIENT_LABELS[client]}: Skipped, not installed here. Pass --client ${client} to set it up anyway.\n`,
+      );
+    }
   }
   io.stdout(
     `\nEach agent opens Opengeni sign-in in your browser the first time, where you pick the organization and what it may do.${input.skill ? " The opengeni skill tells each agent when to hand work over." : ""}\n`,

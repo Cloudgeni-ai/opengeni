@@ -754,9 +754,16 @@ export function siteDataPrincipal(
   return `service:${grant.subjectId}`;
 }
 
-/** The writer recorded on records: agents are distinct from the person they act for. */
+/**
+ * The writer recorded on records: agents are distinct from the person they act
+ * for. A connected agent (a coding agent signed in over MCP) writes as its
+ * connection, `agent:connection:<connectionId>`; the record's owner stays the
+ * person.
+ */
 export function siteDataActor(grant: AccessGrant, subjectId: string | null): string {
   if (grant.principalKind === "agent_attempt") return agentPrincipal(grant);
+  const connectionId = outsideAgentReach(grant)?.connectionId;
+  if (connectionId) return `agent:connection:${connectionId}`;
   return siteDataPrincipal(grant, subjectId);
 }
 

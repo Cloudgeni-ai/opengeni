@@ -211,7 +211,7 @@ being observed.
 | `openTabRequest` | a host request `{ tab, requestId }` that selects an available built-in or host-injected tab and expands the dock. Change `requestId` to repeat an open; ordinary rerenders do not steal the user's selection. Unknown tab IDs are ignored. This is presentation state, not artifact or compute authority. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 | `pullRequest` / `onOpenPullRequest` | optional. `pullRequest: { url, number? }` shows **View on GitHub** in the Changes summary bar; otherwise `onOpenPullRequest` shows **Open PR** (the host decides how to ask for one; `apps/web` asks the agent). Omit both and the bar is unchanged. Every embedder gets the collapsible per-file headers. See [session-status-and-links.md](session-status-and-links.md). |
-| `tabVisibility` | `"all"` (default) shows every allowed surface as a tab, as before. `"relevant"` is the essentials layout: Changes shows only when there are changes (or the person picked a comparison) and lists its files as a folder tree; Files, Terminal, Browser and Desktop open from the dock's "+" menu and stay on the strip for that chat until closed; expand/hide move into that menu too. Every surface stays reachable either way. |
+| `tabVisibility` | `"all"` (default) shows every allowed surface as a tab, as before. `"relevant"` is the essentials layout: Changes shows only when there are changes (or the person picked a comparison) and lists its files as a folder tree; Files, Terminal, Browser and Desktop show on the strip while it has room and otherwise open from the dock's "+" menu, staying on the strip for that chat until closed; hide moves into that menu, and one maximize/restore button stays on the strip. Every surface stays reachable either way. |
 
 For chat or timeline Markdown, wire `Markdown.onSandboxFile` to
 `SandboxWorkspace.openFileRequest`. `sandbox:` is an application protocol, not a
@@ -221,12 +221,18 @@ separate, explicit retained-artifact actions.
 
 Workspace surfaces use a keyboard-navigable tab strip across the top of the
 dock. Left/Right move between tabs and Home/End jump to the ends. A
-`WorkspaceTab` with `optional: true` starts in the dock's "+" menu; once the
-person opens it, it stays on the strip with a close button that puts it back. `WorkspaceDock`'s `tabScope` remembers opened tabs per value,
+`WorkspaceTab` with `optional: true` shows on the strip while there is room for
+it after the other tabs, in order, and otherwise waits in the dock's "+" menu;
+once the person opens it from there, it stays on the strip with a close button
+that puts it back. `inMenu: true` keeps an optional tab in "+" even when there
+is room (the chat's Settings and Debug). `WorkspaceDock`'s `tabScope` remembers opened tabs per value,
 such as the chat's id (`SandboxWorkspace` passes its `sessionId`). Tabs without
-`optional` always show, so embedders passing their own tabs keep today's
-behaviour. `WorkspaceDock`'s `essentials` prop also moves the expand and hide
-buttons and the header accessory into that menu (`SandboxWorkspace` sets it
+`optional` always show. An `optional` tab that should wait in "+" until it is
+relevant (as Changes does with no changes, and Artifacts with none) also sets
+`inMenu: true`. Optional tabs used to stay in "+" whatever the room; add
+`inMenu: true` to keep that menu-only behaviour. `WorkspaceDock`'s `essentials` prop also moves the hide button and
+the header accessory into that menu, leaving one maximize/restore button on
+the strip (Esc also restores) (`SandboxWorkspace` sets it
 for `tabVisibility="relevant"`); `headerAccessoryPinned` keeps the accessory in
 the header (`SandboxWorkspace` pins the machine chip while it isn't live).
 With `landing`, a dock whose tabs are all optional and unopened shows one line
@@ -240,6 +246,17 @@ keeps their scroll and selection.
 for its view menu, which also holds the unified/split choice, `hideSummary`
 to drop its summary row when the host draws its own header, and `navigation`:
 `"rail"` (default, the flat file list) or `"tree"` (folders with +/− change bars).
+
+Files leaves tool and cache folders (`node_modules`, `.cache`, `.bun`,
+`.npm`, `__pycache__` and the like, and the sandbox home's top-level dot
+folders other than `.agents`, `.claude` and `.github`) out of the tree. One
+**Show hidden files** toggle in its toolbar brings them back; the choice is
+remembered in the browser (`localStorage` key `og.files.show-hidden:v1`).
+Opening a file inside a hidden folder shows hidden files in that view only.
+This is presentation only and combines with your `isFileNodeVisible` (both
+must pass), so your predicate still hides what it hides. Pass
+`hideToolFolders={false}` to `SandboxWorkspace` or `SandboxFiles` to show
+everything and drop the toggle.
 
 The machine-state chip is rendered in the dock header automatically. Managed
 cold compute reads `Sleeping` with saved-workspace freshness, for example

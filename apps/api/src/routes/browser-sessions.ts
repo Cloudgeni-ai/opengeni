@@ -270,6 +270,7 @@ import {
 import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { requireInteractionAttachmentAccess } from "../http/interaction-attachment";
 import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
@@ -2388,11 +2389,11 @@ export function registerBrowserSessionRoutes(
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/attachments",
     async (context) => {
-      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+      const { workspaceId, grant, origin } = await requireInteractionAttachmentAccess(
         context,
-        "stream:view",
+        deps,
       );
-      const origin = requestOrigin(context, deps.settings);
+      const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionAttachmentRequest);
       const result = await withActiveBrowserController(
         context,

@@ -190,3 +190,34 @@ test("an organization Skill this workspace doesn't use is shown only to whoever 
     await owner.unmount();
   }
 });
+
+test("the owner filter asks the server for that scope and keeps the list to it", async () => {
+  const personal: SkillRecord = { ...skill, id: "personal", title: "My notes", scope: "user" };
+  const list = mock(async (_workspaceId: string, options?: { scope?: string }) => ({
+    // A stale or unfiltered answer still shows only the chosen owner's skills.
+    skills: [skill, personal],
+    nextCursor: null,
+    options,
+  }));
+  const context = {
+    authSession: null,
+    accessContext: { accountGrants: [], workspaceGrants: [] },
+    client: { listWorkspaceSkills: list },
+  } as unknown as AppContextValue;
+  const render = (owner: "all" | "mine") => (
+    <SkillsPanelContent context={context} workspaceId="workspace" owner={owner} />
+  );
+  const view = await renderComponent(render("all"));
+  try {
+    await flush();
+    expect(list.mock.calls.at(-1)?.[1]).toEqual({});
+    expect(view.container.textContent).toContain("Existing skill");
+    await view.rerender(render("mine"));
+    await flush();
+    expect(list.mock.calls.at(-1)?.[1]).toEqual({ scope: "user" });
+    expect(view.container.textContent).toContain("My notes");
+    expect(view.container.textContent).not.toContain("Existing skill");
+  } finally {
+    await view.unmount();
+  }
+});

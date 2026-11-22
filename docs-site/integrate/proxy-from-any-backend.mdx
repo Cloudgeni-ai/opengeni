@@ -72,6 +72,10 @@ exposure list with `*` on credentialed requests.
 
 To set the user's permissions from your own roles, add `"membership":{"permissions":["workspace:read","sessions:create","sessions:read"]}` to the actor JSON. Opengeni makes the user's workspace grant exactly that set before authorizing the request; see [External users](/reference/authentication#external-users).
 
+### Live browser and desktop viewers
+
+If you embed `BrowserViewer` or `ComputerViewer`, serve the viewer and relay on the same product origin. List that exact origin (for example, `https://app.example.com`) in the API deployment's `OPENGENI_INTERACTION_VIEWER_ORIGINS`. On `POST workspaces/{ws}/{browser-sessions|computer-sessions}/{id}/attachments` only, require the incoming `Origin` to match that configured product origin, then send it upstream as `X-OpenGeni-Interaction-Viewer-Origin` alongside the external actor. Never forward the browser's `Origin` or any client-supplied value for this header. Both the user and organization key need `stream:view` to attach and `sessions:control` for input. This does not change console CORS. The viewer connects directly to the frame URL returned in the attachment, so allow that endpoint in your product's `connect-src` if you use a Content Security Policy.
+
 ## Security rules
 
 - Authenticate the user on every request and derive the workspace and user id on the server.

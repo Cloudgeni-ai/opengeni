@@ -55,7 +55,7 @@ describe("Sites skill single-file path", () => {
     expect(section).toContain("`opengeni__app_data_define_collection`");
     expect(section).toContain("`per_viewer`");
     expect(section).toContain("preview servers and test harnesses");
-    expect(section).toContain("Reply with the link as soon as it is saved");
+    expect(section).toContain("Reply with the link once that works");
     expect(skill).toContain("Mention source files, tests or tool names only to");
   });
 

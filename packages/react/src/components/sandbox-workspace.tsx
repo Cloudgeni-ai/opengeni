@@ -357,6 +357,8 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride<ChatClient> & {
   onFilePathChange?: ((path: string | null) => void) | undefined;
   /** Presentation-only filter for Files tree nodes and selected-file viewing. */
   isFileNodeVisible?: FileNodeVisibilityPredicate | undefined;
+  /** Files leaves tool and cache folders behind Show hidden (default `true`). */
+  hideToolFolders?: boolean | undefined;
   initialBrowserSessionId?: string | null | undefined;
   onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
   initialComputerSessionId?: string | null | undefined;
@@ -421,6 +423,7 @@ export function useSandboxWorkspaceTabs(
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
+    hideToolFolders,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,
@@ -820,7 +823,7 @@ export function useSandboxWorkspaceTabs(
         !captureHasChanges &&
         !eventsShowChanges &&
         !(storedChangesComparison?.sessionId === sessionId && storedChangesComparison.picked)
-          ? { optional: true }
+          ? { optional: true, inMenu: true }
           : {}),
         content: (
           <ChangesTabBody
@@ -858,6 +861,7 @@ export function useSandboxWorkspaceTabs(
             files={files}
             git={git}
             isNodeVisible={isFileNodeVisible}
+            hideToolFolders={hideToolFolders}
             fileSystemAvailable={fileSystemOn || captureAvailable}
             editable={
               filesEditable && files.source === "live" && files.error === null && !files.loading
@@ -1033,6 +1037,7 @@ export function useSandboxWorkspaceTabs(
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
+    hideToolFolders,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,
@@ -1124,6 +1129,8 @@ export type SandboxWorkspaceProps = ClientOverride<ChatClient> & {
   onFilePathChange?: ((path: string | null) => void) | undefined;
   /** Presentation-only filter for Files tree nodes and selected-file viewing. */
   isFileNodeVisible?: FileNodeVisibilityPredicate | undefined;
+  /** Files leaves tool and cache folders behind Show hidden (default `true`). */
+  hideToolFolders?: boolean | undefined;
   /**
    * Host request to open a workspace file (and optional line) in Files. A new
    * `requestId` re-opens even the same path.
@@ -1190,6 +1197,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
+    hideToolFolders,
     openFileRequest,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
@@ -1325,6 +1333,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
+    hideToolFolders,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,
