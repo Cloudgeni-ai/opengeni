@@ -968,7 +968,7 @@ export const SITE_BROWSER_RUNTIME: string = [
   "retention:session.retention}",
   ":{",
   "}",
-  ",archiveVersion:session.archiveVersion??0,treeStats:session.treeStats,requiresActionSince:session.requiresActionSince,...session.admissionBlock!==void 0?{",
+  ",archiveVersion:session.archiveVersion??0,treeStats:session.treeStats,requiresActionSince:session.requiresActionSince,awaitingConnectionSince:session.awaitingConnectionSince,...session.admissionBlock!==void 0?{",
   "admissionBlock:session.admissionBlock}",
   ":{",
   "}",

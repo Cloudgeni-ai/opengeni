@@ -76,8 +76,8 @@ test("an account that needs more access keeps the notice's own step-up for that 
   // No connect card that would read as already connected.
   expect(sessionAuthRecommendation(t, moreAccess, [item])).toBeUndefined();
   const presented = authNeededPresentation(t, moreAccess);
-  expect(presented.title).toBe("Give Gmail more access");
-  expect(presented.actionLabel).toBe("Allow");
+  expect(presented.title).toBe("Allow Opengeni to write and send email from your Gmail");
+  expect(presented.actionLabel).toBe("Allow in Google");
   expect(presented.canRecover).toBe(true);
   // Without an exact account there is nothing to step up: the catalog card stays.
   expect(

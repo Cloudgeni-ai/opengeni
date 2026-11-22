@@ -21,6 +21,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./browser-navigation": {
+      "types": "./src/browser-navigation.ts",
+      "default": "./src/browser-navigation.ts"
     }
   },
   "publishConfig": {

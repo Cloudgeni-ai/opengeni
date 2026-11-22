@@ -141,6 +141,7 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   appendTurnCapabilityCardOnce,
+  withConnectionCardNotice,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   getSandbox,
@@ -8988,7 +8989,7 @@ function registerCapabilityDiscoveryTools(
         claims.callerTurnId,
         claims.callerExecutionGeneration,
         claims.callerAttemptId,
-        [{ type: "tool.auth_needed", payload }],
+        withConnectionCardNotice([{ type: "tool.auth_needed" as const, payload }]),
       );
       if (!appended.accepted) {
         throw new Error("The calling turn was replaced before the setup request committed.");
@@ -9293,7 +9294,7 @@ async function appendCapabilityCardEvent(
     claims.callerTurnId,
     claims.callerExecutionGeneration,
     claims.callerAttemptId,
-    [{ type: "tool.auth_needed", payload }],
+    withConnectionCardNotice([{ type: "tool.auth_needed" as const, payload }]),
   );
   if (!appended.accepted) {
     throw new Error("The calling turn was replaced before the authorization request committed.");

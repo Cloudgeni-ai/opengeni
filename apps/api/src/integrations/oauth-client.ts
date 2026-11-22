@@ -299,6 +299,11 @@ type OAuthStatePayload = {
   resource: string;
   requestedScopes: string[];
   authorizeScopes: string[];
+  /**
+   * Added access this sign-in asked for that the account didn't hold yet (a
+   * step-up). Only these must be granted; a plain reconnect may narrow.
+   */
+  stepUpScopes?: string[];
   encryptedPkceVerifier: string;
   clientId: string;
   tokenEndpoint: string;
@@ -795,6 +800,7 @@ async function startMcpOAuthWithinDeadline(
       ? [...profile.requestedScopes]
       : uniqueStrings(context.payload.requestedScopes ?? []),
     authorizeScopes,
+    ...stepUpScopesFor(context.payload.requestedScopes, existing?.grantedScopes, authorizeScopes),
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
     clientId: client.clientId,
     tokenEndpoint: discovery.as.tokenEndpoint,
@@ -1300,10 +1306,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
     const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile).filter(
       (scope) => !(scope === "openid" && stableAccountSubjectKeyFor(state.mcpUrl)),
     );
-    if (
-      profile?.fullRequestedScopesRequired &&
-      profile.requestedScopes?.some((scope) => !scopes.includes(scope))
-    ) {
+    if (profile && missingRequiredScopes(profile, state.stepUpScopes ?? [], scopes).length > 0) {
       throw new OAuthCallbackStageError(
         "token_exchange",
         "insufficient_scope",
@@ -2973,6 +2976,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     resource,
     requestedScopes: stringArray(payload.requestedScopes),
     authorizeScopes: stringArray(payload.authorizeScopes),
+    ...(Array.isArray(payload.stepUpScopes)
+      ? { stepUpScopes: stringArray(payload.stepUpScopes) }
+      : {}),
     encryptedPkceVerifier: requiredString(
       payload.encryptedPkceVerifier,
       "state.encryptedPkceVerifier",
@@ -4648,6 +4654,46 @@ function chooseProfileAuthorizeScopes(
   return input.authorizationServerScopesSupported?.includes("offline_access")
     ? uniqueStrings([...scopes, "offline_access"])
     : scopes;
+}
+
+/**
+ * Added access a reconnect asks for that the account doesn't hold yet, when
+ * it is actually requested from the provider. Empty for a plain reconnect.
+ */
+export function stepUpScopesFor(
+  requested: readonly string[] | undefined,
+  held: readonly string[] | undefined,
+  authorizeScopes: readonly string[],
+): { stepUpScopes?: string[] } {
+  if (!held || !requested?.length) return {};
+  const added = uniqueStrings(
+    requested.filter((scope) => !held.includes(scope) && authorizeScopes.includes(scope)),
+  );
+  return added.length ? { stepUpScopes: added } : {};
+}
+
+/**
+ * Scopes a full-grant profile asked for that the provider left out: its fixed
+ * list, plus the added access this sign-in asked for (a step-up). A person
+ * who unticks the added access on the consent page gets a failed attempt
+ * with the account unchanged, not an "allowed" that still can't act. A plain
+ * reconnect asks for no added access, so a narrower grant is accepted.
+ */
+export function missingRequiredScopes(
+  profile: Pick<
+    OAuthProviderProfile,
+    "fullRequestedScopesRequired" | "requestedScopes" | "incrementalScopes"
+  >,
+  asked: readonly string[],
+  granted: readonly string[],
+): string[] {
+  if (!profile.fullRequestedScopesRequired) return [];
+  const incremental = new Set(profile.incrementalScopes ?? []);
+  const required = uniqueStrings([
+    ...(profile.requestedScopes ?? []),
+    ...asked.filter((scope) => incremental.has(scope)),
+  ]);
+  return required.filter((scope) => !granted.includes(scope));
 }
 
 function grantedScopes(

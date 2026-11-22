@@ -663,10 +663,15 @@ test.each([
       // Later reconnects keep the added access and add only what is asked for.
       const later = await begin("gmail", completed.account.id, {}, [modifyScope]);
       expect(askedScopes(later.attempt)).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES].sort());
-      // The person may decline the extra access on Google's screen; the account
-      // then keeps working with what it already had.
+      // The person may decline the extra access on Google's screen: the attempt
+      // fails rather than reporting access it didn't get, and the account keeps
+      // working with what it already had.
       await callback(later.state);
-      expect(await read(later.attempt.id)).toMatchObject({ state: "complete" });
+      expect(await read(later.attempt.id)).toMatchObject({
+        state: "failed",
+        credentialsCommitted: false,
+        error: { code: "insufficient_scope" },
+      });
       expect(await grants()).toEqual([readonlyScope, composeScope]);
       // Additional access is only asked for when reconnecting an account.
       const unbound = await app.request(base, {

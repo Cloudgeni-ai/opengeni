@@ -38,8 +38,10 @@ export function slackServerQuestion(question: McpElicitationApprovalRequest): {
 export function slackToolReviewCanDecide(review: ToolActionReview): boolean {
   // Delivery retries belong to the original review event. Its content must not
   // change when a later decision changes status, revision or availableActions.
+  // Access the account lacks is asked for in the chat, before approving.
   return (
     review.detailsAvailable &&
+    !review.accessNeeded &&
     reviewLines(review).every((line) => line.length <= 2800) &&
     JSON.stringify({
       title: review.title,

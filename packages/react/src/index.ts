@@ -463,7 +463,11 @@ export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
 export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
 export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
-export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
+export type {
+  ApprovalSurfaceMessages,
+  ApprovalSurfaceProps,
+  ToolReviewAccessNeeded,
+} from "./components/approval-surface";
 
 // Structured human input: event projection, authoritative hook, and styled form.
 export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
@@ -756,6 +760,11 @@ export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type {
+  AuthNeededRecoveryHandler,
+  AuthNeededRecoveryOptions,
+  AuthNeededRecoveryResult,
+} from "./components/auth-needed-row";
 export { MessageSenderLabel } from "./timeline/message-sender";
 export type { RenderMessageSender } from "./timeline/message-sender";
 export type { MessageSender } from "./timeline";
