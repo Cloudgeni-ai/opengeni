@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { isProviderCapacityWaitReason } from "@opengeni/contracts/subscription-capacity-wait";
 import {
   bindingStickiness,
   connectionIneligibility,
@@ -40,6 +41,7 @@ import {
   type SubscriptionCoreFailoverWorld,
   type SubscriptionCoreFailoverWorldRequest,
 } from "./failover-world";
+import { projectSubscriptionCoreWait } from "./wait-reason";
 
 export type SubscriptionCoreFailoverRequest = SubscriptionCorePlacementRequest &
   SubscriptionCoreFailoverWorldRequest;
@@ -217,7 +219,11 @@ async function placeSubscriptionCoreTurnWithFailoverLocked(
   if (route.status === "home_only") return homePlacement();
   if (!route.value) {
     const result = await homePlacement();
-    if (result.kind !== "wait" || !FAILOVER_WAITS.has(result.reason)) return result;
+    if (
+      result.kind !== "wait" ||
+      (!FAILOVER_WAITS.has(result.reason) && !isProviderCapacityWaitReason(result.reason))
+    )
+      return result;
   }
   for (let attempt = 0; ; attempt++) {
     try {
@@ -327,16 +333,17 @@ async function placeFailoverOnce(
           holderId: existing.holderId,
           generation: existing.generation,
         });
-      if (decision.kind === "wait")
+      if (decision.kind === "wait") {
+        const reason = failoverWaitReason(decision.reason, world);
         return {
           kind: "wait",
-          reason: failoverWaitReason(decision.reason, world),
-          earliestResetAt:
-            decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+          ...projectSubscriptionCoreWait(input, decision, home),
+          ...(reason === "failover_no_model_mapping" ? { reason } : {}),
           healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, identity, world),
           explicitConnectionId: null,
           candidateProviders: world.candidateProviders,
         };
+      }
       const connection = input.connections.find((row) => row.id === decision.connectionId);
       if (!connection) throw new Error("Failover chose a connection outside its world");
       const acquired = await acquireSubscriptionTurnLease(tx, {
@@ -418,17 +425,17 @@ export async function evaluateSubscriptionCorePlacementWithFailover(
     false,
     async (tx, world): Promise<SubscriptionCoreFailoverEvaluation> => {
       const decision = decisionFor(world);
-      return decision.kind === "run"
-        ? { ...decision, candidateProviders: world.candidateProviders }
-        : {
-            kind: "wait",
-            reason: failoverWaitReason(decision.reason, world),
-            earliestResetAt:
-              decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
-            healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, request.identity, world),
-            explicitConnectionId: null,
-            candidateProviders: world.candidateProviders,
-          };
+      if (decision.kind === "run")
+        return { ...decision, candidateProviders: world.candidateProviders };
+      const reason = failoverWaitReason(decision.reason, world);
+      return {
+        kind: "wait",
+        ...projectSubscriptionCoreWait(world.input, decision, home),
+        ...(reason === "failover_no_model_mapping" ? { reason } : {}),
+        healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, request.identity, world),
+        explicitConnectionId: null,
+        candidateProviders: world.candidateProviders,
+      };
     },
   );
   return result.status === "home_only"

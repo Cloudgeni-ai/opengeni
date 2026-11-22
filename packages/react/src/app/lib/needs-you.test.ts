@@ -60,6 +60,14 @@ describe("needs you", () => {
     expect(filterNeedsYou([stuck])).toEqual([]);
   });
 
+  test("a sub-agent whose questions are with the agent that started it does not wait on the person", () => {
+    const waiting = { id: "b", status: "requires_action" as const, parentSessionId: "a" };
+    const withAgent = session({ ...waiting, rootSessionId: "a", questionWithAgent: true });
+    expect(awaitsPerson(withAgent)).toBe(false);
+    expect(filterNeedsYou([withAgent])).toEqual([]);
+    expect(awaitsPerson(session({ ...waiting, rootSessionId: "a" }))).toBe(true);
+  });
+
   test("a root needs you when it, or a spawned agent, waits on a person or failed", () => {
     expect(rootNeedsYou(session({ id: "a", status: "requires_action" }))).toBe(true);
     expect(rootNeedsYou(session({ id: "a", status: "failed" }))).toBe(true);

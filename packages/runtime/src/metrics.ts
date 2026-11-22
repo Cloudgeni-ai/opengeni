@@ -56,7 +56,7 @@ export function isMcpToolMetricLabel(value: unknown): value is string {
 
 export const MCP_LIFECYCLE_PHASES = ["connect", "close"] as const;
 export const MCP_LIFECYCLE_POLICIES = ["strict", "best_effort"] as const;
-export const MCP_LIFECYCLE_OUTCOMES = ["completed", "failed"] as const;
+export const MCP_LIFECYCLE_OUTCOMES = ["completed", "failed", "refused_by_policy"] as const;
 
 /**
  * Closed outcomes of one fresh-box command-readiness replacement decision:

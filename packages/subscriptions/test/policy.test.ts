@@ -1503,6 +1503,36 @@ describe("quota freshness and observations", () => {
     expect(quotaCapacity(later, NOW)).toEqual({ kind: "unknown" });
   });
 
+  test("a cooldown cause only follows a deadline it still explains", () => {
+    const model = "example/a";
+    const until = NOW + 60_000;
+    const current = quota({
+      observedAt: NOW - 1_000,
+      modelCooldowns: { [model]: until },
+      modelCooldownCauses: { [model]: { until, cause: "rate_limit" } },
+    });
+    const merge = (observation: SubscriptionQuota) =>
+      applyQuotaObservation({ refreshGeneration: 1, quota: current }, observation)!;
+    expect(merge(quota({ observedAt: NOW })).modelCooldownCauses).toEqual(
+      current.modelCooldownCauses,
+    );
+    expect(
+      merge(quota({ observedAt: NOW, modelCooldowns: { [model]: until + 1 } })).modelCooldownCauses,
+    ).toBeUndefined();
+    expect(
+      merge(
+        quota({
+          observedAt: NOW,
+          modelCooldowns: { [model]: until },
+          modelCooldownCauses: { [model]: { until, cause: "entitlement" } },
+        }),
+      ).modelCooldownCauses,
+    ).toBeUndefined();
+    expect(
+      storedQuotaDocument({ ...current, modelCooldowns: {} }).modelCooldownCauses,
+    ).toBeUndefined();
+  });
+
   test("SUB-ELIG-06: a header reading, refusal or partial usage reading that omits a running exhausted window keeps it until its reset; a complete usage reading or one that reports it again replaces it", () => {
     const weekly = { id: "weekly", usedPercent: 100, resetsAt: NOW + 86_400_000 };
     // Omitted windows that are not carried: one that is not exhausted, and

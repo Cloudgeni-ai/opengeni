@@ -27,6 +27,7 @@ import {
   agentInstructionsContextText,
   allAgentCapabilities,
   skillCatalogContextItem,
+  sessionSystemUpdateBatchHistoryItem,
   workspaceGovernanceContextItem,
   renderUserMessageContentForModel,
   type ResolvedAgentConfig,
@@ -411,7 +412,8 @@ export type TurnTrigger =
   | { kind: "message"; text: string; attachment?: boolean }
   | { kind: "scheduled"; text: string }
   | { kind: "goal_continuation" }
-  | { kind: "child_result"; text: string };
+  | { kind: "child_result"; text: string }
+  | { kind: "child_capacity_wait"; summary: string; noticeId: string };
 
 function goalSnapshot(state: SessionState["goal"]): SessionGoalSnapshot {
   if (state === "none") return { state: "none", capturedAt: "2026-01-01T00:00:00.000Z" };
@@ -893,6 +895,17 @@ function channelItem(channel: string, value: string): AgentInputItem {
 }
 
 function triggerItem(trigger: TurnTrigger, state: SessionState): AgentInputItem {
+  if (trigger.kind === "child_capacity_wait") {
+    return sessionSystemUpdateBatchHistoryItem([{
+      id: trigger.noticeId,
+      kind: "child_waiting_capacity",
+      classification: "info",
+      sourceId: trigger.noticeId,
+      summary: trigger.summary,
+      payload: { type: "child_waiting_capacity", provider: "codex", resetsAt: null },
+      lineage: {},
+    }]) as AgentInputItem;
+  }
   const text =
     trigger.kind === "goal_continuation"
       ? "Continue working toward the session goal."

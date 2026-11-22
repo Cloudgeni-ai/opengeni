@@ -29,6 +29,7 @@ import {
 import type { SubscriptionCoreAdapter, SubscriptionQuota } from "@opengeni/subscriptions";
 import { withCodexTokenDeadline } from "./codex-token-resolver";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
+import { projectCodexSubscriptionWait } from "./subscription-core-codex-wait-reason";
 import {
   SubscriptionCoreCodexAccessLostError,
   SubscriptionCoreCodexLeaseLostError,
@@ -260,6 +261,7 @@ export function subscriptionCoreCodexProvider(
 ): SubscriptionCoreProvider<SubscriptionCoreCodexTokens> {
   return {
     adapter: subscriptionCoreCodexAdapter(deps),
+    projectWait: projectCodexSubscriptionWait,
     // Automatic failover keeps a remote_v2 session on Codex: only a turn on
     // another model the user chose rebuilds its history in portable form.
     sessionCompactionLock: sql`session.codex_compaction_mode = 'remote_v2'`,

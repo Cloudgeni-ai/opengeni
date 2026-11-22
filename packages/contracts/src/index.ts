@@ -11706,8 +11706,12 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * waiter when a later check finds its reset later than the parent was told
  * (the time passed without capacity, or a longer limit binds) or unknown; its
  * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
+ *
+ * 5: new Codex wait notices can name an actionable cause or rate limit. If
+ * the cause changes, a new notice adds the child's waiting-event sequence to
+ * its dedupe key. Previously stored summaries keep their original text.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 5;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -15481,6 +15485,14 @@ export const ConnectionKind = /* @__PURE__ */ defineSchema(() =>
 );
 export type ConnectionKind = z.infer<typeof ConnectionKind>;
 
+/** Safe connection diagnostics written by MCP setup, also shown in connection settings. */
+export const MCP_DESTINATION_CONNECTION_ERRORS = {
+  blocked:
+    "This deployment does not allow the connector’s address. Use an allowed address, then reconnect.",
+  unresolvable:
+    "This deployment could not find the connector’s address. Check that the address is reachable from this deployment, then reconnect.",
+} as const;
+
 export const ConnectionStatus = /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "needs_reauth", "revoked", "error"]),
 );
@@ -17651,6 +17663,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * Absent when false and on older servers; treat absence as unhandled.
      */
     failureHandled: primitives.optionalBoolean,
+    /**
+     * True when this `requires_action` session waits only on questions it put
+     * to the agent that started it, which still has them, so it does not wait
+     * on a person. Absent when false and on older servers.
+     */
+    questionWithAgent: primitives.optionalBoolean,
     /** Personal power-user label for work the member intends to continue. */
     activelyWorking: primitives.boolean.default(false),
     /** Optimistic revision for unread/actively-working state. */
@@ -17686,6 +17704,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         runningDescendants: primitives.nonnegativeInteger,
         queuedDescendants: primitives.nonnegativeInteger,
         waitingDescendants: z.number().int().nonnegative().optional(),
+        /** Descendants waiting on a person (not those whose questions are with their agent). */
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
         /**
@@ -17894,6 +17913,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinVersion: true,
     unread: true,
     failureHandled: true,
+    questionWithAgent: true,
     activelyWorking: true,
     attentionVersion: true,
     archived: true,
@@ -23794,7 +23814,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("deployment"),
-          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+          mechanism: z.enum(["api_key", "azure_ad_bearer", "aws_iam"]),
         })
         .strict(),
       z

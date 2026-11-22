@@ -2215,7 +2215,11 @@ describe("core Codex failure settlement", () => {
         expect(quarantine).not.toHaveBeenCalled();
         const call = cooldown.mock.calls[0]!;
         expect(call.slice(0, 3)).toEqual([{}, identity, ref]);
-        expect(call[3]).toMatchObject({ modelId: "codex/gpt-5.5", refreshGeneration: 5 });
+        expect(call[3]).toMatchObject({
+          modelId: "codex/gpt-5.5",
+          refreshGeneration: 5,
+          cause: "entitlement",
+        });
         expect((call[3] as { until: Date }).until.getTime()).toBeGreaterThan(
           Date.now() + 23 * 3_600_000,
         );

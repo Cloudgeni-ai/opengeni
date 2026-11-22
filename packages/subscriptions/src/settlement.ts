@@ -3,7 +3,7 @@ import {
   type ProviderErrorOutcome,
   type SubscriptionCoreAdapter,
 } from "./adapter";
-import type { ModelId, SubscriptionQuota } from "./types";
+import type { ModelCooldownCause, ModelId, SubscriptionQuota } from "./types";
 
 /**
  * How a reserved model request settles (the request ledger's outcome):
@@ -19,7 +19,7 @@ export type SubscriptionCoreRefusalHealth =
   /** A quota observation: exhausted (usage limit, spend budget or rate limit) until `exhaustedUntil`. */
   | { kind: "quota"; observation: SubscriptionQuota }
   /** One model rests on the connection until `until`. */
-  | { kind: "model_cooldown"; modelId: ModelId; until: number }
+  | { kind: "model_cooldown"; modelId: ModelId; until: number; cause: ModelCooldownCause }
   /** `sign_in`: needs a new sign-in or key; `forbidden`: quarantine per the adapter's health policy. */
   | { kind: "quarantine"; reason: "sign_in" | "forbidden" };
 
@@ -116,6 +116,7 @@ export function planSubscriptionCoreRefusal(
     return settle({
       kind: "model_cooldown",
       modelId: outcome.modelId,
+      cause: outcome.kind === "rate_limited" ? "rate_limit" : "quota",
       until:
         known !== null && known.until > now
           ? known.until
@@ -159,6 +160,7 @@ export function planSubscriptionCoreRefusal(
       return settle({
         kind: "model_cooldown",
         modelId: outcome.modelId,
+        cause: "entitlement",
         until: now + adapter.health.entitlementCooldownMs,
       });
     case "unauthorized":

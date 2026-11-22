@@ -23,6 +23,7 @@ import {
   containsSecretReference,
   credentialHeadersHaveSecretReferences,
   isVaultCredentialConnection,
+  MCP_DESTINATION_CONNECTION_ERRORS,
 } from "@opengeni/contracts";
 import {
   isNangoConnectionCredential,
@@ -150,6 +151,10 @@ export type ResolveConnectionCredentialResult =
       connectionId: string;
       /** Exact durable version when the credential came from the local connection store. */
       connectionVersion?: number;
+      /** Mark a rejected MCP setup on the exact native credential version that was used. */
+      reportMcpDestinationRefusal?: (
+        reason: keyof typeof MCP_DESTINATION_CONNECTION_ERRORS,
+      ) => Promise<boolean>;
       /** Actual provider grants; never inferred from requested connection scopes. */
       grantedScopes?: string[];
       /** Metadata-only owner attribution from the immediate pre-use fence. */
@@ -782,6 +787,22 @@ export function buildConnectionTokenResolver(
       ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
+      ...(recordUsage && inputCredentialTarget === "mcp" && connectionUseAttribution
+        ? {
+            reportMcpDestinationRefusal: (reason: keyof typeof MCP_DESTINATION_CONNECTION_ERRORS) =>
+              deps.setStatus(
+                db,
+                cred.workspaceId,
+                "error",
+                MCP_DESTINATION_CONNECTION_ERRORS[reason],
+                {
+                  id: cred.id,
+                  version: cred.version,
+                  subjectId: cred.subjectId,
+                },
+              ),
+          }
+        : {}),
       // Reviewed bridges gate each tool on the provider's actual OAuth grants.
       ...(cred.providerDomain.toLowerCase() === "slack.com"
         ? { grantedScopes: normalizeSlackScopes(cred.grantedScopes) }

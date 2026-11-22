@@ -1,10 +1,12 @@
 import { beginMcpPhase, traceparent } from "@opengeni/observability";
 import { CODEMODE_ARGUMENTS_MAX_BYTES, MCP_MAX_CATALOG_TOOL_ENTRIES } from "@opengeni/contracts";
 import {
+  DestinationPolicyError,
   isNonPublicAddress,
   pinnedFetch,
   resolvePinnedDestination,
   type DnsLookup,
+  type DestinationPolicyReason,
   type FetchLike,
   type OutboundNetworkSettings,
 } from "@opengeni/network";
@@ -69,6 +71,7 @@ export type McpTransportFailureCauseDiagnostic = Readonly<{
 export type McpTransportRequestFailureDiagnostic = Readonly<{
   httpMethod: string;
   rpcMethod?: string;
+  destinationPolicyReason?: DestinationPolicyReason;
   /** The thrown source is first, followed by its successive `cause` values. */
   causeChain: readonly McpTransportFailureCauseDiagnostic[];
   causeChainComplete: boolean;
@@ -389,6 +392,9 @@ function recordMcpTransportRequestFailure(
       Object.freeze({
         httpMethod: request.httpMethod,
         ...(request.rpcMethod ? { rpcMethod: request.rpcMethod } : {}),
+        ...(error instanceof DestinationPolicyError
+          ? { destinationPolicyReason: error.reason }
+          : {}),
         ...snapshotMcpTransportFailureCauseChain(error),
       }),
     );
@@ -428,6 +434,14 @@ export function mcpTransportRequestFailureDiagnostic(
     }
   }
   return null;
+}
+
+/** DNS resolver failures can recover on their own; an address failing admission is different. */
+export function mcpDestinationRefusal(
+  reason: DestinationPolicyReason | undefined,
+): "blocked" | "unresolvable" | undefined {
+  if (reason === undefined || reason === "dns_failed") return undefined;
+  return reason === "dns_not_found" || reason === "dns_empty" ? "unresolvable" : "blocked";
 }
 
 export function mcpJsonRpcErrorPayloadForRequest(

@@ -19,16 +19,32 @@ import { secretAnswerLabel } from "../src/human-input-model";
 
 const englishText = createOpenGeniText();
 
-test("hosts can translate the task vault display name without changing named vaults", () => {
+test("hosts can translate the built-in vault names without changing custom names or references", () => {
   const result = {
     reference: "unchanged-reference",
     username: null,
     vaultName: "Task",
     itemName: "Login",
   };
-  const text = createOpenGeniText({ messages: { "humanInputModel.taskVaultName": "Chat" } });
+  const text = createOpenGeniText({
+    messages: {
+      "humanInputModel.taskVaultName": "Chat",
+      "humanInputModel.sharedVaultName": "Team",
+      "humanInputModel.privateVaultName": "Personal",
+    },
+  });
   expect(secretAnswerLabel(text, { ...result, saveTo: "task" })).toBe("Saved to Chat › Login");
   expect(secretAnswerLabel(text, { ...result, saveTo: "workspace" })).toBe("Saved to Task › Login");
+  expect(secretAnswerLabel(text, { ...result, vaultName: "Shared", saveTo: "workspace" })).toBe(
+    "Saved to Team › Login",
+  );
+  expect(secretAnswerLabel(text, { ...result, vaultName: "Private", saveTo: "user" })).toBe(
+    "Saved to Personal › Login",
+  );
+  expect(
+    secretAnswerLabel(text, { ...result, vaultName: "Finance Ops", saveTo: "workspace" }),
+  ).toBe("Saved to Finance Ops › Login");
+  expect(result.reference).toBe("unchanged-reference");
 });
 
 registerDom();

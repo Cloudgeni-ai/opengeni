@@ -245,6 +245,7 @@ export type DestinationPolicyReason =
   | "invalid_url"
   | "unsupported_protocol"
   | "https_required"
+  | "dns_not_found"
   | "dns_failed"
   | "dns_empty"
   | "invalid_dns_answer"
@@ -425,6 +426,9 @@ export async function resolvePinnedDestination(
   } catch (error) {
     if (error instanceof DestinationPolicyError && error.reason === "invalid_dns_answer") {
       throw error;
+    }
+    if (error instanceof Error && "code" in error && error.code === "ENOTFOUND") {
+      throw new DestinationPolicyError("dns_not_found", `${label} hostname was not found`);
     }
     throw new DestinationPolicyError("dns_failed", `${label} hostname could not be resolved`);
   }

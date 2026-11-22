@@ -1467,8 +1467,17 @@ still checks the source session and issues the same expiring view grants.
 
 For a compact browser viewer, pass `showAdvancedControls={false}`. You can
 also render `InteractionInterventionBanner` independently from the same
-subpath. Use the message override `humanInputModel.taskVaultName` to translate
-the displayed task vault name without renaming the vault or its references.
+subpath.
+
+### Secret question display labels
+
+Use React message overrides such as `humanInputModel.username`,
+`humanInputModel.password`, `humanInputModel.oneTimeCode` and
+`humanInputModel.apiKey` for the form, and `humanInputModel.privateVaultName`,
+`humanInputModel.sharedVaultName` and `humanInputModel.taskVaultName` for the
+built-in vault names in the answer timeline. Custom field and vault names are
+shown as written. None of these overrides renames a stored field or vault, or
+changes a secret reference.
 
 ## Browser and React integration
 

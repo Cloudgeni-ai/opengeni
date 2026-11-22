@@ -16,6 +16,8 @@ export type ChildRequiresActionRoute = {
   via: RouteSession;
   /** The parent that could not act, when the question went further up. */
   escalatedFromSessionId: string | null;
+  /** Whether the target's agent can answer it now: not the fallback parent, not waiting for capacity. */
+  targetCanAct: boolean;
 };
 
 /** Bounded walk: a question goes to the nearest ancestor that can act, never further. */
@@ -70,6 +72,7 @@ export async function childRequiresActionRouteTx(
     targetSessionId: session.parentSessionId,
     via: session,
     escalatedFromSessionId: null,
+    targetCanAct: true,
   };
   if (targetSessionId === session.parentSessionId) return direct;
   let via: RouteSession = session;
@@ -84,18 +87,21 @@ export async function childRequiresActionRouteTx(
       ? current.id === targetSessionId
       : sessionCanActOnChildQuestion(current);
     if (reached) {
+      const targetCanAct =
+        current.status !== "waiting_capacity" && sessionCanActOnChildQuestion(current);
       return hop === 0
-        ? direct
+        ? { ...direct, targetCanAct }
         : {
             targetSessionId: current.id,
             via,
             escalatedFromSessionId: session.parentSessionId,
+            targetCanAct,
           };
     }
     via = current;
     currentId = current.parentSessionId;
   }
-  return direct;
+  return { ...direct, targetCanAct: false };
 }
 
 /** The session the outbox sent this exact child question to, if it is still recorded. */

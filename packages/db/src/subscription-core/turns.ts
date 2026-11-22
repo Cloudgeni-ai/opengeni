@@ -33,13 +33,13 @@ import {
   quotaCapacity,
   storedQuotaDocument,
   type Ineligibility,
+  type ModelCooldownCause,
   type PlacementDecision,
   type PlacementInput,
   type PlacementSwitch,
   type ReselectionPoint,
   type ReselectionReason,
   type SubscriptionQuota,
-  type WaitReason,
 } from "@opengeni/subscriptions";
 
 import { rawRows, withRlsContext, type Database } from "../database";
@@ -76,6 +76,7 @@ import {
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "./provider";
+import { projectSubscriptionCoreWait, type SubscriptionCoreWaitPresentation } from "./wait-reason";
 
 /** The exact accepted turn plus its immutable v2 authority, read once per attempt. */
 export type SubscriptionCoreTurnIdentity = SubscriptionCoreAcceptedTurnIdentity & {
@@ -226,14 +227,12 @@ export type SubscriptionCorePlacement =
    * deciding (retried like a busy lease).
    */
   | { kind: "lease_busy"; leasedUntil: Date | null; cause?: "binding_conflict" }
-  | {
+  | (SubscriptionCoreWaitPresentation & {
       kind: "wait";
-      reason: WaitReason;
-      earliestResetAt: Date | null;
       /** When a quarantined connection in this world returns, if any. */
       healthRetryAt: Date | null;
       explicitConnectionId: string | null;
-    }
+    })
   | {
       kind: "run";
       connectionId: string;
@@ -346,14 +345,12 @@ async function readLastContextReplacedAt(
 export type SubscriptionCorePlacementEvaluation =
   | { kind: "not_visible" }
   | { kind: "run"; connectionId: string; switch: PlacementSwitch }
-  | {
+  | (SubscriptionCoreWaitPresentation & {
       kind: "wait";
-      reason: WaitReason;
-      earliestResetAt: Date | null;
       /** When a quarantined connection in this world returns, if sooner than any reset. */
       healthRetryAt: Date | null;
       explicitConnectionId: string | null;
-    };
+    });
 
 async function readAttemptFence(
   tx: Database,
@@ -577,9 +574,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             await releaseSubscriptionTurnLease(tx, { ...lease, connectionId: reuse });
           return {
             kind: "wait",
-            reason: decision.reason,
-            earliestResetAt:
-              decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+            ...projectSubscriptionCoreWait(input, decision, provider),
             healthRetryAt: await earliestHealthRetryAt(tx, identity),
             explicitConnectionId,
           };
@@ -931,9 +926,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         const binding = input.session.binding;
         return {
           kind: "wait",
-          reason: decision.reason,
-          earliestResetAt:
-            decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+          ...projectSubscriptionCoreWait(input, decision, provider),
           healthRetryAt: await earliestHealthRetryAt(tx, identity),
           explicitConnectionId: binding?.choice === "explicit" ? binding.connectionId : null,
         };
@@ -1021,8 +1014,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   }
 
   /**
-   * Keep one model off the leased connection until `until` after the plan
-   * refused it (SUB-ELIG-03). The cooldown is part of the connection's quota
+   * Keep one model off the leased connection until `until` after a refusal
+   * (SUB-ELIG-03). The cooldown is part of the connection's quota
    * state, so placement excludes the model there, a waiter learns when it
    * returns, and a plan change seen on refresh clears it early. Fenced on the
    * refresh generation the refused bearer carried; never shortens a cooldown.
@@ -1039,7 +1032,13 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     db: Database,
     identity: SubscriptionCoreTurnIdentity,
     lease: SubscriptionCoreLeaseRef,
-    input: { modelId: string; until: Date; refreshGeneration: number; refusedAt?: number },
+    input: {
+      modelId: string;
+      until: Date;
+      refreshGeneration: number;
+      refusedAt?: number;
+      cause?: ModelCooldownCause;
+    },
   ): Promise<boolean> {
     if (!input.modelId.trim() || input.modelId.length > 256) return false;
     const claimSince =
@@ -1055,18 +1054,26 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         return false;
       const empty = {
         windows: [],
-        modelCooldowns: {},
+        modelCooldowns: { [input.modelId]: input.until.getTime() },
+        ...(input.cause
+          ? {
+              modelCooldownCauses: {
+                [input.modelId]: { until: input.until.getTime(), cause: input.cause },
+              },
+            }
+          : {}),
         exhaustedUntil: null,
         exhaustedKind: null,
         source: "refusal",
       };
       const stored = sql`subscription_connection_quota.quota`;
+      const oldUntil = sql`coalesce((${stored}->'modelCooldowns'->>${input.modelId}::text)::bigint, 0)`;
       const until = sql`greatest(
-        coalesce((${stored}->'modelCooldowns'->>${input.modelId}::text)::bigint, 0),
+        ${oldUntil},
         ${input.until.getTime()}::bigint
       )`;
       const claim = sql`(${stored}->'modelCooldownClaims'->${input.modelId}::text)`;
-      const cooled = sql`jsonb_set(
+      const withDeadline = sql`jsonb_set(
         case when jsonb_typeof(${stored}->'modelCooldowns') = 'object'
           then ${stored}
           else jsonb_set(${stored}, '{modelCooldowns}', '{}'::jsonb)
@@ -1074,6 +1081,23 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         array['modelCooldowns', ${input.modelId}],
         to_jsonb(${until})
       )`;
+      const causes = sql`case when jsonb_typeof(${stored}->'modelCooldownCauses') = 'object'
+        then ${stored}->'modelCooldownCauses' else '{}'::jsonb end`;
+      // A shorter refusal does not explain the winning deadline. An equal
+      // deadline with conflicting evidence is also ambiguous.
+      const cooled = sql`case when ${oldUntil} > ${input.until.getTime()}::bigint
+        then ${withDeadline}
+        else jsonb_set(${withDeadline}, '{modelCooldownCauses}',
+          ((${causes}) - ${input.modelId}::text) || case
+            when ${input.cause ?? null}::text is not null and (
+              ${oldUntil} < ${input.until.getTime()}::bigint or (
+                (${causes})->${input.modelId}::text->>'cause' = ${input.cause ?? null}::text
+                and (${causes})->${input.modelId}::text->'until' = to_jsonb(${oldUntil})
+              )
+            ) then jsonb_build_object(${input.modelId}::text,
+              jsonb_build_object('until', ${until}, 'cause', ${input.cause ?? null}::text))
+            else '{}'::jsonb end)
+        end`;
       // The same refusal's claim, still tied to the stored deadline.
       const keepClaim = sql`(
         ${claimSince}::bigint is not null
@@ -1089,8 +1113,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
           account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
         ) values (
           ${identity.accountId}::uuid, ${lease.connectionId}::uuid,
-          jsonb_set(${JSON.stringify(empty)}::jsonb, array['modelCooldowns', ${input.modelId}],
-            to_jsonb(${input.until.getTime()}::bigint)),
+          ${JSON.stringify(empty)}::jsonb,
           ${input.refreshGeneration}, 1, clock_timestamp()
         )
         on conflict (connection_id) do update

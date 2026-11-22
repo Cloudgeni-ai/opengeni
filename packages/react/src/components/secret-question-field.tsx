@@ -14,6 +14,7 @@ import {
   secretFieldLabel,
   secretInputMode,
   secretPatternMismatch,
+  secretUsernameLabel,
   secretVaultForTarget,
   type HumanInputFormMessages,
   type SecretFieldReading,
@@ -167,7 +168,7 @@ export function SecretQuestionField({
       {spec.username ? (
         <div className="flex min-w-0 flex-col gap-1.5">
           <label htmlFor={usernameId} className="text-og-sm font-medium text-og-fg">
-            {spec.username.prompt}
+            {secretUsernameLabel(t, spec.username.prompt)}
           </label>
           <input
             ref={usernameRef}
