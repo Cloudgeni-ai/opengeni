@@ -812,22 +812,51 @@ test("the chat can be hidden and shown again, and stays as it was left", async (
   expect(panel(again.container).hidden).toBe(true);
 });
 
-test("the chat starts closed on an app no one has chatted with, open on one they have", async () => {
+test("every app offers its chat beside it in a wide window, until the person closes it", async () => {
   conversations = [];
   const { container } = await render();
-  expect(panel(container).hidden).toBe(true);
-  expect(container.querySelector("button[aria-label='Show chat']")).not.toBeNull();
+  expect(panel(container).hidden).toBe(false);
+  expect(container.querySelector("button[aria-label='Show chat']")).toBeNull();
   // Nothing is remembered until the person chooses.
   expect(localStorage.getItem(openKey)).toBeNull();
-  act(() => root?.unmount());
-  conversations = [conversation(1, "Time filters across all graphs", 2)];
-  const chatted = await render();
-  expect(panel(chatted.container).hidden).toBe(false);
-  expect(localStorage.getItem(openKey)).toBeNull();
-  // The default is kept, so the next visit starts open instead of opening late.
-  expect(JSON.parse(localStorage.getItem("og.site-view.chat-default:v1:me")!)).toEqual({
-    [siteId]: true,
-  });
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  expect(panel(container).hidden).toBe(true);
+  // Closed, one labelled button in the app's header brings it back.
+  const show = container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!;
+  expect(show.textContent).toBe("Chat");
+  expect(show.closest("[data-site-header]")).not.toBeNull();
+  expect(openChoices()).toEqual({ [siteId]: false });
+});
+
+test("in a narrow window the chat starts closed on an app no one has chatted with, open on one they have", async () => {
+  const matchMedia = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+  try {
+    conversations = [];
+    const { container } = await render();
+    expect(panel(container).hidden).toBe(true);
+    expect(container.querySelector("button[aria-label='Show chat']")).not.toBeNull();
+    // Nothing is remembered until the person chooses.
+    expect(localStorage.getItem(openKey)).toBeNull();
+    act(() => root?.unmount());
+    conversations = [conversation(1, "Time filters across all graphs", 2)];
+    const chatted = await render();
+    expect(panel(chatted.container).hidden).toBe(false);
+    expect(localStorage.getItem(openKey)).toBeNull();
+    // The default is kept, so the next visit starts open instead of opening late.
+    expect(JSON.parse(localStorage.getItem("og.site-view.chat-default:v1:me")!)).toEqual({
+      [siteId]: true,
+    });
+  } finally {
+    window.matchMedia = matchMedia;
+  }
 });
 
 test("arriving from a chat, or choosing one, shows a hidden chat", async () => {

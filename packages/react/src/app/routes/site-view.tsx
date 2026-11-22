@@ -16,11 +16,10 @@ import {
   CopyIcon,
   LinkIcon,
   Maximize2Icon,
+  MessageSquareIcon,
   MoreHorizontalIcon,
   PanelLeftCloseIcon,
-  PanelLeftOpenIcon,
   PanelRightCloseIcon,
-  PanelRightOpenIcon,
   PinIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -388,8 +387,13 @@ export function SiteViewRoute({
       <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
     ) : undefined;
   const { layout, update: updateLayout } = useSiteChatPanelLayout(accessContext.subjectId);
-  // Open or closed per person and app; see `useSiteChatOpen` for the default.
+  // Open or closed per person and app. Until the person chooses, every app
+  // offers its chat beside it where there is room for both (a wide window);
+  // a narrower one, where the chat stacks under the app, opens it only for
+  // an app they have chatted with (`useSiteChatOpen`).
   const chat = useSiteChatOpen(accessContext.subjectId, siteId);
+  const wide = useWideWindow();
+  const chatOpen = chat.chosen ? chat.open : chat.open || wide;
   const setChatOpen = chat.setOpen;
   // Hiding and showing move focus to the control that undoes it.
   const [chatFocus, setChatFocus] = useState<"show" | "hide" | null>(null);
@@ -483,10 +487,7 @@ export function SiteViewRoute({
       </>
     ) : null;
   // While the chat is closed the app has the whole width; this brings it back.
-  const showChatButton =
-    artifact && !chat.open ? (
-      <ShowChatButton position={layout.position} onClick={showChat} />
-    ) : null;
+  const showChatButton = artifact && !chatOpen ? <ShowChatButton onClick={showChat} /> : null;
   return (
     <div
       className={cn(
@@ -596,7 +597,7 @@ export function SiteViewRoute({
           </div>
         )}
         {publishing ? null : connectCard}
-        <ChatFileDropCover relay={relay} enabled={chat.open} />
+        <ChatFileDropCover relay={relay} enabled={chatOpen} />
       </div>
       <ChatFileDropRelayProvider relay={relay}>
         <SiteChatPanel
@@ -613,7 +614,7 @@ export function SiteViewRoute({
           artifactsReturn={back}
           layout={layout}
           updateLayout={updateLayout}
-          open={chat.open}
+          open={chatOpen}
           onOpen={setChatOpen}
           onHide={hideChat}
           onHasConversations={chat.setFallback}
@@ -743,31 +744,47 @@ function SiteLiveStateLabel({ state }: { state: SiteLiveState | undefined }) {
   );
 }
 
-/** Brings back a closed chat, on the side it opens on. */
-function ShowChatButton({
-  position,
-  onClick,
-}: {
-  position: SiteChatPanelLayout["position"];
-  onClick: () => void;
-}) {
+/**
+ * Whether the window is wide enough for the chat to sit beside the app (the
+ * layout's `lg` breakpoint); without media queries (tests, old hosts) it is.
+ */
+function useWideWindow(): boolean {
+  const query = "(min-width: 1024px)";
+  const [wide, setWide] = useState(() =>
+    typeof window === "undefined" || typeof window.matchMedia !== "function"
+      ? true
+      : window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const list = window.matchMedia(query);
+    const update = () => setWide(list.matches);
+    update();
+    list.addEventListener?.("change", update);
+    return () => list.removeEventListener?.("change", update);
+  }, []);
+  return wide;
+}
+
+/**
+ * Brings back a closed chat: a labelled button in the app's header (or the
+ * macOS window bar), so the chat is always one visible click away.
+ */
+function ShowChatButton({ onClick }: { onClick: () => void }) {
   return (
     <Button
       type="button"
-      variant="ghost"
-      size="icon-sm"
+      variant="outline"
+      size="sm"
       aria-label="Show chat"
       title="Show chat"
       aria-expanded={false}
       data-site-chat-show=""
-      className="size-8 rounded-md text-fg-muted hover:text-fg pointer-coarse:size-11"
+      className="h-7 gap-1.5 rounded-full px-2.5 text-xs pointer-coarse:h-11"
       onClick={onClick}
     >
-      {position === "left" ? (
-        <PanelLeftOpenIcon aria-hidden="true" className="size-4" />
-      ) : (
-        <PanelRightOpenIcon aria-hidden="true" className="size-4" />
-      )}
+      <MessageSquareIcon aria-hidden="true" className="size-3.5" />
+      Chat
     </Button>
   );
 }

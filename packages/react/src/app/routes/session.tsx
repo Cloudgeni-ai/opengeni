@@ -2252,6 +2252,8 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Settings",
       icon: <SettingsIcon />,
       optional: true,
+      // Rarely needed: kept in "+" even when the strip has room.
+      inMenu: true,
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening settings" />}>
           <LazyAgentConfigurationPanel
@@ -2273,6 +2275,7 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Debug",
       icon: <BugIcon />,
       optional: true,
+      inMenu: true,
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector

@@ -188,6 +188,8 @@ export function writeSiteChatOpen(
  * has chatted with, open for one that has conversations or was reached from a
  * chat. That default is remembered too, so the next visit starts with it
  * rather than opening the chat once the conversations have loaded.
+ * (The Site view also opens it, until the person chooses, wherever the window
+ * has room for the chat beside the Site.)
  */
 export function useSiteChatOpen(subjectId: string, siteId: string) {
   const storageId = siteChatOpenStorageId(subjectId);

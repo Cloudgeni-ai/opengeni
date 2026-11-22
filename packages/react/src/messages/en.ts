@@ -1901,6 +1901,7 @@ export const englishMessages = {
   "fileBrowser.refreshTheFileListTo": "refresh the file list to try again",
   "fileBrowser.rename": "Rename",
   "fileBrowser.retry": "Retry",
+  "fileBrowser.showHiddenFiles": "Show hidden files",
   "fileBrowser.thisDirectoryIsEmpty": "This directory is empty",
   "fileBrowser.workspaceFiles": "Workspace files",
   "formDialog.cancel": "Cancel",
@@ -4495,6 +4496,7 @@ export const englishMessages = {
   "sandboxFiles.noFileSelected": "No file selected",
   "sandboxFiles.noRepo": "no repo",
   "sandboxFiles.noUncommittedChanges": "No uncommitted changes",
+  "sandboxFiles.onlyHiddenFilesHere": "Only hidden and tool folders here.",
   "sandboxFiles.onMachine": "On machine",
   "sandboxFiles.openingRequestedpathWhenTheLive":
     "Opening {requestedPath} when the live workspace is ready…",

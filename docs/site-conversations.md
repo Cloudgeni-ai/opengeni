@@ -165,11 +165,12 @@
     Site's column. The chat panel's header moves the chat to the other
     side, opens the conversation as a full chat, or hides the chat, in one
     click. A hidden chat leaves no strip: the Site takes the whole width
-    and **Show chat** sits in the header on the chat's side. Whether the
-    chat is open is remembered per person and Site
-    (`og.site-view.chat-open`); until they choose, it opens for a Site
-    they have conversations with or reach from a chat (`?conversation`,
-    Edit with Opengeni) and stays closed otherwise. Settings opened from
+    and a labelled **Chat** button sits in the header on the chat's side.
+    Whether the chat is open is remembered per person and Site
+    (`og.site-view.chat-open`); until they choose, it opens beside every
+    Site in a window wide enough for both, and in a narrower one (where it
+    stacks under the Site) for a Site they have conversations with or reach
+    from a chat (`?conversation`, Edit with Opengeni). Settings opened from
     the "…" goes back to the Site. Settings has one row style: the publish
     form (search engines and reports collapsed in it, open while a report
     waits), then workspace access, then the rarer actions (duplicate,

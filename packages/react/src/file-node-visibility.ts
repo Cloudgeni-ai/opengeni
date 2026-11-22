@@ -13,6 +13,62 @@ export type FileNodeVisibilityPredicate = (
 
 export type FilePathVisibility = "visible" | "hidden" | "unknown";
 
+/**
+ * Tool, dependency and cache folders, wherever they are: they belong to the
+ * tools, not the work, so the Files view leaves them out until the person
+ * shows hidden files.
+ */
+const TOOL_AND_CACHE_DIRS = new Set([
+  ".bun",
+  ".cache",
+  ".git",
+  ".gradle",
+  ".mypy_cache",
+  ".npm",
+  ".pnpm-store",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".turbo",
+  ".venv",
+  ".yarn",
+  "__pycache__",
+  "node_modules",
+]);
+
+/**
+ * Whether the Files view leaves an entry out by default, behind its Show
+ * hidden toggle: tool and cache folders anywhere, and every hidden (dot)
+ * entry at the top of a workspace that isn't itself a repository (the
+ * sandbox's home, where tools keep `.bun`, `.config` and the like). Inside a
+ * repository its own dotfiles (`.github`, `.env.example`) stay in view.
+ * Presentation only: nothing is removed or made unreachable.
+ */
+export function isHiddenByDefault(
+  node: FileTreeNode,
+  context: FileNodeVisibilityContext,
+  rootIsRepository: boolean,
+): boolean {
+  if (node.kind === "dir" && TOOL_AND_CACHE_DIRS.has(node.name)) return true;
+  return context.depth === 0 && !rootIsRepository && node.name.startsWith(".");
+}
+
+/** Whether the tree's top is a repository's own root (it holds `.git`). */
+export function treeRootIsRepository(nodes: readonly FileTreeNode[]): boolean {
+  return nodes.some((node) => node.name === ".git");
+}
+
+/**
+ * Whether a path may lie under an entry the Files view hides by default,
+ * judged from its name alone (for a path whose folders aren't loaded yet).
+ * Errs towards yes: it only decides whether to show hidden files.
+ */
+export function pathMayBeHiddenByDefault(path: string): boolean {
+  return path
+    .split(/[/\\]/u)
+    .some((segment) => segment.startsWith(".") || TOOL_AND_CACHE_DIRS.has(segment));
+}
+
 function pathIsInsideDirectory(path: string, directory: string): boolean {
   if (!path.startsWith(directory) || path === directory) return false;
   if (directory.endsWith("/") || directory.endsWith("\\")) return true;
