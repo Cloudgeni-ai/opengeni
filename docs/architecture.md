@@ -179,7 +179,9 @@ request/reply and machine streams, never commit evidence.
 Connected Machine socket credentials retain their five-minute revocation bound.
 Exact runner leases fence routing and event ingestion; enrollment-token renewal
 updates future dials in place. The native supervisor owns and closes
-each generation's control and bulk socket tasks independently of retained work.
+each generation's control and bulk socket tasks independently of retained work,
+preparing the replacement pair before the broker-reported JWT deadline without
+changing the exact runner lease.
 See [Connected Machines](connected-machines.md#control-transport-recovery).
 
 API replicas share the `opengeni-agent-state-ingestion` Core NATS queue group

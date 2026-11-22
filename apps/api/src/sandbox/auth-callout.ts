@@ -281,6 +281,9 @@ export async function handleAuthorizationRequest(
     claims.agentId,
     connectionInstanceId,
   );
+  // Only the broker's own per-client information, not account/system monitoring.
+  // Its answer inbox lives below the agent's existing exact process scope.
+  permissions.pub.allow = [...(permissions.pub.allow ?? []), "$SYS.REQ.USER.INFO"];
   const nowSeconds = Math.floor(Date.now() / 1000);
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,

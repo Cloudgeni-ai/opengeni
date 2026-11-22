@@ -30,9 +30,9 @@ import { decideInventoryPage, type ReportedOperation } from "../src/sandbox/oper
 // it holds output nobody released; Opengeni answers in the same exchange which
 // ops to end. A command row of that exact process decides by custody: output
 // is ended only once Opengeni stored it, and output it never stored is
-// collected instead. Without a row, the connection generation the op's OpStart
-// carried decides: work from an earlier generation is ended, whatever happened
-// to its chat. Nothing is sent to a runner that is not reporting.
+// collected instead. Without a row, generation fences compute work, but does
+// not prove that a Connected Machine's original requester gave up.
+// Nothing is sent to a runner that is not reporting.
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -207,7 +207,29 @@ function answers(sent: Array<{ subject: string; payload: Uint8Array }>) {
   });
 }
 
-test("old -> new -> old: the returning runner ends what was settled or orphaned while it was replaced", async () => {
+test("same runner reclaims its lease without retiring running operations", async () => {
+  const machine = await seedMachine();
+  const { bus, sent } = answerChannel();
+  const instance = crypto.randomUUID();
+  const generation = await claim(machine, instance);
+  const background = `background-${crypto.randomUUID()}`;
+  const foreground = `foreground-${crypto.randomUUID()}`;
+  await insertCommand(machine, instance, background);
+
+  // On a disconnected socket the lease can lapse without a different process
+  // claiming the enrollment. Both replacement lane dials reclaim the same owner.
+  await shared.admin`update enrollments set connection_lease_expires_at = now() - interval '1 second' where id = ${machine.enrollment.id}`;
+  expect(await claim(machine, instance)).toBe(generation);
+  expect(await claim(machine, instance)).toBe(generation);
+  await report(machine, bus, instance, [
+    [background, generation],
+    [foreground, generation],
+  ]);
+  expect(answers(sent)).toMatchObject([{ endOpIds: [] }]);
+  expect(await commandRows(machine)).toMatchObject([{ state: "running", op_id: background }]);
+});
+
+test("old -> new -> old: the returning machine ends settled commands, not work without loss proof", async () => {
   const machine = await seedMachine();
   const { bus, sent } = answerChannel();
   const oldInstance = crypto.randomUUID();
@@ -279,7 +301,7 @@ test("old -> new -> old: the returning runner ends what was settled or orphaned 
       subject: ack(oldInstance),
       reportId: "9",
       page: 0,
-      endOpIds: [orphan, deleted, foreground].sort(),
+      endOpIds: [orphan],
     },
   ]);
   // Answering changed no settled record, also after the runner pushes the
@@ -295,18 +317,6 @@ test("old -> new -> old: the returning runner ends what was settled or orphaned 
     OperationCompleted.fromPartial({ opId: orphan, exit: { exitCode: -1, cancelled: true } }),
   );
   expect(await commandRows(machine)).toEqual(settled);
-});
-
-test("a plain reconnect of the same process keeps its generation, so nothing it runs is ended, however long it runs", async () => {
-  const machine = await seedMachine();
-  const { bus, sent } = answerChannel();
-  const instance = crypto.randomUUID();
-  const opId = `foreground-${crypto.randomUUID()}`;
-  expect(await claim(machine, instance)).toBe(1);
-  await shared.admin`update enrollments set connection_lease_expires_at = now() - interval '1 second' where id = ${machine.enrollment.id}`;
-  expect(await claim(machine, instance)).toBe(1);
-  await report(machine, bus, instance, [[opId, 1]]);
-  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[]]);
 });
 
 test("a returning runner's report makes the running commands it did not answer for due again, and only those", async () => {
@@ -364,11 +374,9 @@ test("a returning runner's report makes the running commands it did not answer f
   );
 });
 
-test("a foreground op's output that nobody released is kept while its generation is current, however long ago it completed", async () => {
-  // The reviewer's case: a foreground op completed 900,001 ms ago (past the
-  // start-resend horizon) and its release never happened. No durable record
-  // shows its consumer finished, and age is not consumption (the runner no
-  // longer even reports it), so it is kept; a takeover ends it.
+test("a returning machine retains foreground output unless the server has custody proof", async () => {
+  // Neither age nor a lease generation change shows the foreground consumer
+  // finished. It can still attach to the original process and collect output.
   const machine = await seedMachine();
   const { bus, sent } = answerChannel();
   const instance = crypto.randomUUID();
@@ -381,7 +389,7 @@ test("a foreground op's output that nobody released is kept while its generation
   expect(await claim(machine, crypto.randomUUID())).toBe(2);
   expect(await claim(machine, instance)).toBe(3);
   await report(machine, bus, instance, [[opId, 1, "complete"]]);
-  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[opId]]);
+  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[]]);
 });
 
 test("output Opengeni has not stored is never ended: it is collected, and ended once stored", async () => {
@@ -533,12 +541,12 @@ test("the decision: custody for a command, the OpStart generation for anything e
   const decide = (
     operations: ReportedOperation[],
     commands: Record<string, ReturnType<typeof command>[]> = {},
-    connectionGeneration = "3",
+    computeConnectionGeneration: string | undefined = "3",
   ) => {
     const decision = decideInventoryPage({
       operations,
       commands: new Map(Object.entries(commands)),
-      connectionGeneration,
+      computeConnectionGeneration,
     });
     return {
       end: decision.end,
