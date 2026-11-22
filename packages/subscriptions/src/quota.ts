@@ -116,6 +116,7 @@ export type StoredQuotaDocument = Pick<
   SubscriptionQuota,
   | "windows"
   | "modelCooldowns"
+  | "modelCooldownCauses"
   | "modelCooldownClaims"
   | "exhaustedUntil"
   | "exhaustedKind"
@@ -133,9 +134,15 @@ export function storedQuotaDocument(quota: SubscriptionQuota): StoredQuotaDocume
     if (claim) modelCooldownClaims[modelId] = claim;
   }
   const exhaustedClaim = quotaBlockClaim(quota, null);
+  const modelCooldownCauses = Object.fromEntries(
+    Object.entries(quota.modelCooldownCauses ?? {}).filter(
+      ([modelId, evidence]) => evidence.until === quota.modelCooldowns[modelId],
+    ),
+  );
   return {
     windows: quota.windows,
     modelCooldowns: quota.modelCooldowns,
+    ...(Object.keys(modelCooldownCauses).length > 0 ? { modelCooldownCauses } : {}),
     ...(Object.keys(modelCooldownClaims).length > 0 ? { modelCooldownClaims } : {}),
     exhaustedUntil: quota.exhaustedUntil,
     exhaustedKind: quota.exhaustedKind,
@@ -304,6 +311,20 @@ export function applyQuotaObservation(
   // merged deadline explained it (`QuotaBlockClaim`).
   const sources = [current, observation];
   const modelCooldownClaims: Record<string, QuotaBlockClaim> = {};
+  const modelCooldownCauses: NonNullable<SubscriptionQuota["modelCooldownCauses"]> =
+    Object.fromEntries(
+      Object.entries(modelCooldowns).flatMap(([modelId, until]) => {
+        const winning = sources.filter((source) => source.modelCooldowns[modelId] === until);
+        const evidence = winning[0]?.modelCooldownCauses?.[modelId];
+        return evidence?.until === until &&
+          winning.every((source) => {
+            const other = source.modelCooldownCauses?.[modelId];
+            return other?.until === until && other.cause === evidence.cause;
+          })
+          ? [[modelId, evidence] as const]
+          : [];
+      }),
+    );
   for (const [modelId, until] of Object.entries(modelCooldowns)) {
     const claim = mergedClaim(
       until,
@@ -352,8 +373,10 @@ export function applyQuotaObservation(
     exhaustedKind,
   };
   delete merged.modelCooldownClaims;
+  delete merged.modelCooldownCauses;
   delete merged.exhaustedClaim;
   if (Object.keys(modelCooldownClaims).length > 0) merged.modelCooldownClaims = modelCooldownClaims;
+  if (Object.keys(modelCooldownCauses).length > 0) merged.modelCooldownCauses = modelCooldownCauses;
   if (exhaustedClaim) merged.exhaustedClaim = exhaustedClaim;
   const providerDetails = mergeQuotaProviderDetails(
     current.providerDetails,

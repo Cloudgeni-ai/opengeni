@@ -140,6 +140,8 @@ export async function listSubscriptionConnectionsForPlacement(
     ownership: "shared" | "personal";
     owner_membership_id: string | null;
     health: string;
+    label: string | null;
+    plan_type: string | null;
     extra_credits_enabled: boolean;
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
@@ -165,7 +167,8 @@ export async function listSubscriptionConnectionsForPlacement(
         input.health === "effective"
           ? subscriptionConnectionEffectiveStatus("connection", sql`${now}::timestamptz`)
           : sql`connection.status`
-      } as health, connection.allocator_enabled, connection.extra_credits_enabled,
+      } as health, connection.label, connection.plan_type,
+      connection.allocator_enabled, connection.extra_credits_enabled,
       null::text[] as entitled_model_ids, connection.excluded_models,
       case when quota.model_catalog_refresh_generation = connection.refresh_generation
         and quota.model_catalog_observed_at <= ${now}::timestamptz
@@ -252,6 +255,10 @@ export async function listSubscriptionConnectionsForPlacement(
       kind: row.kind,
       ownership,
       health,
+      ...(subscriptionCoreProviderIds().includes(row.provider) &&
+      subscriptionCoreProvider(row.provider).projectWait
+        ? { label: row.label, planType: row.plan_type }
+        : {}),
       extraCreditsEnabled: row.extra_credits_enabled,
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
@@ -367,6 +374,22 @@ export function decodeSubscriptionQuota(row: {
   // Block evidence is optional and fails closed: a malformed claim is
   // dropped (its block runs to its own deadline), never the quota.
   const claims = raw.modelCooldownClaims;
+  const causes = raw.modelCooldownCauses;
+  if (causes !== null && typeof causes === "object" && !Array.isArray(causes)) {
+    const parsed: Record<string, NonNullable<SubscriptionQuota["modelCooldownCauses"]>[string]> =
+      {};
+    for (const [modelId, evidence] of Object.entries(causes)) {
+      if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) continue;
+      const { until, cause } = evidence as Record<string, unknown>;
+      if (
+        typeof until === "number" &&
+        until === modelCooldowns[modelId] &&
+        (cause === "entitlement" || cause === "rate_limit" || cause === "quota")
+      )
+        parsed[modelId] = { until, cause };
+    }
+    if (Object.keys(parsed).length > 0) quota.modelCooldownCauses = parsed;
+  }
   if (claims !== null && typeof claims === "object" && !Array.isArray(claims)) {
     const parsed: Record<string, QuotaBlockClaim> = {};
     for (const [modelId, claim] of Object.entries(claims)) {

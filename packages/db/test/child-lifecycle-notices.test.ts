@@ -1746,6 +1746,58 @@ describe("child lifecycle notices", () => {
     ).toBe(false);
   });
 
+  test("a changed Codex blocker appends a new parent notice without rewriting the first", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "codex work" });
+    const armed = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      turnId: child.turn.id,
+      attemptId: child.attemptId,
+      waitReason: "codex_plan_no_capacity",
+      earliestResetAt: null,
+      failurePayload: {},
+    });
+    if (armed.action !== "waiting") throw new Error("expected a parked child");
+    const base = { childSessionId: child.session.id, waiterId: armed.waiter.waiterId };
+    const originalKey = childWaitingCapacityDedupeKey(base);
+    const original = await outbox(grant, originalKey);
+    expect(original?.summary).toContain("don’t provide Codex capacity for this model");
+    expect(original?.summary).not.toContain("resumes by itself");
+
+    const reevaluate = () =>
+      reconcileSubscriptionCoreCapacityWait(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: child.session.id,
+        waiterId: armed.waiter.waiterId,
+        generation: armed.waiter.generation,
+        evaluatedWakeRevision: armed.waiter.wakeRevision,
+        evaluation: {
+          kind: "wait",
+          waitReason: "codex_relogin_required",
+          reconnectAccount: { label: "“Primary”", personal: false },
+          earliestResetAt: null,
+          healthRetryAt: null,
+        },
+      });
+    const changed = await reevaluate();
+    expect(changed.events).toHaveLength(1);
+    const nextKey = childWaitingCapacityDedupeKey({
+      ...base,
+      restatedReasonSequence: changed.events[0]!.sequence,
+    });
+    const next = await outbox(grant, nextKey);
+    expect(next?.summary).toContain(
+      "account “Primary” needs a new sign-in. An admin must reconnect it.",
+    );
+    expect(next?.summary).not.toContain("resumes by itself");
+    expect((await outbox(grant, originalKey))?.summary).toBe(original?.summary);
+    expect((await reevaluate()).events).toEqual([]);
+  });
+
   test("a child_requires_action auto-resumes a cap-paused parent goal and wakes it", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });

@@ -71,6 +71,7 @@ export function codexUsageResetsAt(events: readonly SessionEvent[]): string | nu
 /** Waits that only capacity coming back (a usage reset) ends. */
 const USAGE_WAIT_REASONS: ReadonlySet<string> = new Set([
   "no_eligible_capacity",
+  "codex_rate_limited",
   "compaction_provider_locked",
   // The chat's pinned account is out of usage until its reset.
   "pinned_account_unavailable",

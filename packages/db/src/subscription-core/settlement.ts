@@ -77,6 +77,7 @@ export const subscriptionCoreSettlement = memoByProvider((provider: Subscription
           until: new Date(health.until),
           refreshGeneration: input.refreshGeneration,
           refusedAt: input.now,
+          cause: health.cause,
         });
         break;
       case "quarantine":

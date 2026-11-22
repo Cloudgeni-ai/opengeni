@@ -73,9 +73,9 @@ import { type ActiveSandboxPointer } from "./active-sandbox";
 import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
-  subscriptionCapacityWaitReasonText,
-  subscriptionCapacityWaitNeedsAction,
-} from "@opengeni/subscriptions";
+  isProviderCapacityWaitReason,
+  type SubscriptionReconnectAccount,
+} from "@opengeni/contracts/subscription-capacity-wait";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -1360,6 +1360,8 @@ import {
   capacityWaitNoticeWithdrawal,
   capacityWaitNotificationPayload,
   readCapacityWaitNotice,
+  subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitReasonText,
   withoutCapacityWaitNotice,
 } from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
@@ -28042,6 +28044,7 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
   goalId?: string | null;
   goalVersion?: number | null;
   waitReason: string;
+  reconnectAccount?: SubscriptionReconnectAccount;
   earliestResetAt: Date | null;
   healthRetryAt?: Date | null;
   /** From a fresh failover-aware accepted-turn evaluation; never caller authority.
@@ -28209,6 +28212,10 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
+        const explanation = isProviderCapacityWaitReason(input.waitReason)
+          ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.reconnectAccount) ??
+            undefined)
+          : undefined;
         const attention = capacityWaitAttention({
           waitReason: input.waitReason,
           earliestResetAt: input.earliestResetAt,
@@ -28223,6 +28230,7 @@ export async function armSubscriptionCoreCapacityWait(
                   provider,
                   resetsAt: attention.resetsAt,
                   waitReason: input.waitReason,
+                  ...(input.reconnectAccount ? { reconnectAccount: input.reconnectAccount } : {}),
                 }),
               )
             : null;
@@ -28238,6 +28246,7 @@ export async function armSubscriptionCoreCapacityWait(
                 [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
                   personNotice.key,
                   attention!.resetsAt,
+                  explanation,
                 ),
               }
             : {}),
@@ -28343,6 +28352,13 @@ export async function armSubscriptionCoreCapacityWait(
                   payload: {
                     ...input.failurePayload,
                     ...vocabulary.waitingPayload,
+                    ...(explanation
+                      ? {
+                          error: explanation,
+                          waitReason: input.waitReason,
+                          actionRequired: subscriptionCapacityWaitNeedsAction(input.waitReason),
+                        }
+                      : {}),
                     waiterId: waiter.waiterId,
                     generation: waiter.generation,
                     goalId,
@@ -28414,6 +28430,7 @@ export async function armSubscriptionCoreCapacityWait(
                         waiterId: waiter.waiterId,
                       }),
                       attention.resetsAt,
+                      explanation,
                     ),
                   }
                 : waitingMetadata,
@@ -28456,6 +28473,7 @@ export async function armSubscriptionCoreCapacityWait(
             provider,
             nextCheckAt,
             resetsAt: attention.resetsAt,
+            ...(explanation ? { explanation } : {}),
           });
         }
         if (input.leaseFence) {
@@ -28480,6 +28498,7 @@ export type SubscriptionCoreCodexWaitEvaluation =
   | {
       kind: "wait";
       waitReason: string;
+      reconnectAccount?: SubscriptionReconnectAccount;
       earliestResetAt: Date | null;
       healthRetryAt: Date | null;
       /** Entire freshly derived candidate set, not a union with stored hints. */
@@ -28766,10 +28785,14 @@ export async function reconcileSubscriptionCoreCapacityWait(
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
           );
           if (!row) return { action: "stale", events: [] } as const;
-          const changedReasonText =
-            waiter.waitReason !== waitEvaluation.waitReason
-              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
-              : null;
+          const reasonText = subscriptionCapacityWaitReasonText(
+            waitEvaluation.waitReason,
+            vocabulary.label,
+            waitEvaluation.reconnectAccount,
+          );
+          const explanation = isProviderCapacityWaitReason(waitEvaluation.waitReason)
+            ? (reasonText ?? undefined)
+            : undefined;
           // Whoever was told when the wait ends (a top-level chat's person,
           // or a worker's parent) is told again once the reset they heard no
           // longer holds (it passed without capacity, or a longer limit
@@ -28778,22 +28801,27 @@ export async function reconcileSubscriptionCoreCapacityWait(
           // the reset that now holds. Only an evaluation that found no
           // capacity says when it returns; a held false-resumption delay or
           // legacy evaluation restates nothing.
-          const attention =
-            evaluation.kind !== "wait"
-              ? null
-              : capacityWaitAttention({
-                  waitReason: waitEvaluation.waitReason,
-                  earliestResetAt: waitEvaluation.earliestResetAt,
-                  healthRetryAt: waitEvaluation.healthRetryAt,
-                  now,
-                });
           const toldKey = session.parentSessionId
             ? CAPACITY_WAIT_PARENT_NOTICE_KEY
             : CAPACITY_WAIT_NOTICE_KEY;
           const told = readCapacityWaitNotice(blockedTurn.metadata, toldKey);
+          const attention =
+            evaluation.kind !== "wait"
+              ? null
+              : (capacityWaitAttention({
+                  waitReason: waitEvaluation.waitReason,
+                  earliestResetAt: waitEvaluation.earliestResetAt,
+                  healthRetryAt: waitEvaluation.healthRetryAt,
+                  now,
+                }) ?? (told?.explanation ? { resetsAt: waitEvaluation.earliestResetAt } : null));
+          const explanationChanged = attention !== null && told?.explanation !== explanation;
+          const changedReason =
+            waiter.waitReason !== waitEvaluation.waitReason || explanationChanged;
           const restate =
             attention !== null &&
-            (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+            (!told ||
+              explanationChanged ||
+              capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
           // What agents see (a worker's parent woken by a notice, the
           // session's own timeline) is restated only for a real change: the
           // first long wait, a told time that passed without capacity, a
@@ -28807,6 +28835,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           const restateToAgents =
             restate &&
             (!told ||
+              explanationChanged ||
               toldTimePassed ||
               waitEvaluation.earliestResetAt !== null ||
               attention!.resetsAt === null);
@@ -28819,16 +28848,15 @@ export async function reconcileSubscriptionCoreCapacityWait(
                     provider: waiter.provider,
                     resetsAt: attention!.resetsAt,
                     waitReason: waitEvaluation.waitReason,
+                    ...(waitEvaluation.reconnectAccount
+                      ? { reconnectAccount: waitEvaluation.reconnectAccount }
+                      : {}),
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
                 })
               : null;
-          const waitingText =
-            changedReasonText ??
-            (restateToAgents
-              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
-              : null);
+          const waitingText = changedReason || restateToAgents ? reasonText : null;
           const restated = [
             ...(waitingText
               ? [
@@ -28892,12 +28920,17 @@ export async function reconcileSubscriptionCoreCapacityWait(
           // A worker's parent hears the restated reset in a new notice (the
           // system-update outbox delivers it), keyed by that reset so it never
           // collides with the arm's notice or an earlier restatement.
+          const restatedReasonSequence = explanationChanged ? session.lastSequence + 1 : undefined;
+          const restatement = {
+            ...(restatedReasonSequence === undefined ? {} : { restatedReasonSequence }),
+            restatedResetsAt: attention?.resetsAt?.toISOString() ?? null,
+          };
           const parentNoticeKey =
             restateToAgents && session.parentSessionId
               ? childWaitingCapacityDedupeKey({
                   childSessionId: session.id,
                   waiterId: waiter.waiterId,
-                  restatedResetsAt: attention!.resetsAt?.toISOString() ?? null,
+                  ...restatement,
                 })
               : null;
           if (parentNoticeKey) {
@@ -28907,7 +28940,8 @@ export async function reconcileSubscriptionCoreCapacityWait(
               provider: waiter.provider,
               nextCheckAt,
               resetsAt: attention!.resetsAt,
-              restated: true,
+              restatement,
+              ...(explanation ? { explanation } : {}),
             });
           }
           const noticeKey = personNotice?.key ?? parentNoticeKey;
@@ -28919,7 +28953,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
               .set({
                 metadata: {
                   ...blockedTurn.metadata,
-                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt),
+                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt, explanation),
                 },
                 version: blockedTurn.version + 1,
                 updatedAt: now,
@@ -95431,8 +95465,8 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
-    /** A later notice restating the reset of a wait the parent already heard of. */
-    restated?: boolean;
+    explanation?: string;
+    restatement?: { restatedResetsAt: string | null; restatedReasonSequence?: number };
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -95448,11 +95482,11 @@ async function enqueueChildWaitingCapacityOutboxTx(
     dedupeKey: childWaitingCapacityDedupeKey({
       childSessionId: session.id,
       waiterId: input.waiterId,
-      ...(input.restated ? { restatedResetsAt: payload.resetsAt } : {}),
+      ...input.restatement,
     }),
     kind: "child_waiting_capacity",
     classification: "info",
-    summary: childWaitingCapacitySummary(session.id, payload),
+    summary: childWaitingCapacitySummary(session.id, payload, input.explanation),
     payload,
     lineage: { turnId: input.turnId },
   });
