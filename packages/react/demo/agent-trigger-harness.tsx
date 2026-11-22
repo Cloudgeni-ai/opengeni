@@ -13,8 +13,6 @@ import { AgentTriggerDialog } from "@opengeni/react/app/components/agents/agent-
 import linearLogo from "../../../data/catalog/logos/linear-app-4b4a9f349c60.png?url";
 import sentryLogo from "../../../data/catalog/logos/sentry-io-2bcd2164011c.svg?url";
 import slackLogo from "../../../data/catalog/logos/slack-com-5a15dccc0dc0.jpg?url";
-import githubLogo from "../../../apps/web/public/capability-logos/github.svg?url";
-import gmailLogo from "../../../apps/web/public/capability-logos/gmail.ico?url";
 import "./agent-settings.css";
 
 /** The catalog's own logo files, as the API serves them. */
@@ -22,8 +20,6 @@ const LOGOS: Record<string, string> = {
   "logos/linear-app-4b4a9f349c60.png": linearLogo,
   "logos/sentry-io-2bcd2164011c.svg": sentryLogo,
   "logos/slack-com-5a15dccc0dc0.jpg": slackLogo,
-  "capability-logos/github.svg": githubLogo,
-  "capability-logos/gmail.ico": gmailLogo,
 };
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
@@ -161,18 +157,6 @@ function Preview() {
             runtime: {},
             providerDomain: "slack.com",
             logoAssetPath: "logos/slack-com-5a15dccc0dc0.jpg",
-          },
-          {
-            id: "github",
-            runtime: {},
-            providerDomain: "github.com",
-            logoAssetPath: "capability-logos/github.svg",
-          },
-          {
-            id: "gmail",
-            runtime: {},
-            providerDomain: "mail.google.com",
-            logoAssetPath: "capability-logos/gmail.ico",
           },
         ],
         captureWorkspaceInvocation: () => ({}),
