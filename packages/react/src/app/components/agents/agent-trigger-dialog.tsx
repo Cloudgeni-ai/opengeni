@@ -17,7 +17,7 @@
  * source picked, with the note and chat choice. Its Cancel and Save come
  * back here.
  */
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { GitBranchIcon } from "lucide-react";
 import type {
   Agent,
