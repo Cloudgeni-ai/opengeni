@@ -201,6 +201,7 @@ test("a product-origin Chromium viewer paints and controls a browser and a deskt
       const page = await chromiumBrowser.newPage({
         viewport: viewer === "browser" ? { width: 980, height: 700 } : { width: 420, height: 800 },
       });
+      if (viewer === "browser") await page.clock.install();
       await page
         .context()
         .addCookies([{ name: "product-session", value: "fixture", url: product.url.origin }]);
@@ -233,6 +234,14 @@ test("a product-origin Chromium viewer paints and controls a browser and a deskt
         );
       await expectPixel(255, 0);
       if (viewer === "browser") {
+        // An embedded viewer must count as browser activity without any human input.
+        const heartbeat = page.waitForResponse((response) =>
+          response.url().endsWith(`/browser-sessions/${browserSessionId}/heartbeat`),
+        );
+        await page.clock.fastForward(31_000);
+        const response = await heartbeat;
+        expect(response.status()).toBe(200);
+        expect(await response.json()).toMatchObject({ browserSessionId, alive: true });
         expect(await page.getByRole("textbox", { name: "Address" }).inputValue()).toBe(
           browserTarget.url,
         );
