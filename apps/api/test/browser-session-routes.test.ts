@@ -1556,8 +1556,11 @@ describe("BrowserSession route discipline", () => {
       ),
       source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/heartbeat"'),
     );
-    expect(attachment).toContain("requireInteractionAttachmentAccess(context, deps)");
-    expect(attachment.indexOf("requireInteractionAttachmentAccess")).toBeLessThan(
+    const access = /\brequireInteractionAttachmentAccess\(\s*context,\s*deps,?\s*\)/.exec(
+      attachment,
+    );
+    expect(access).not.toBeNull();
+    expect(access!.index).toBeLessThan(
       attachment.indexOf("parseJsonBody(context, BrowserSessionAttachmentRequest)"),
     );
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
