@@ -145,6 +145,7 @@ import {
 } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { requireInteractionAttachmentAccess } from "../http/interaction-attachment";
 import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
@@ -873,8 +874,11 @@ export function registerComputerSessionRoutes(
   app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments",
     async (context) => {
-      const { workspaceId, grant, computerSessionId } = await routePreamble(context, "stream:view");
-      const origin = requestOrigin(context, deps.settings);
+      const { workspaceId, grant, origin } = await requireInteractionAttachmentAccess(
+        context,
+        deps,
+      );
+      const computerSessionId = requireUuidParam(context, "computerSessionId");
       const request = await parseJsonBody(context, ComputerSessionAttachmentRequest);
       const result = await withActiveComputerController(
         context,

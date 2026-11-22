@@ -3120,6 +3120,13 @@ checks desktop/mobile chunks.
 Products use server-side SDK proxies/optional React surfaces; in-process
 embedding preserves boundaries.
 
+For human browser and computer viewers the product's session proxy authenticates
+the user as usual. Only attachment POSTs may carry its asserted, deployment-allowed
+viewer origin. The browser opens the returned, scoped frame transport directly;
+human actions still use the authenticated session proxy. This does not add an
+origin to API CORS or change console attachments. See
+[`product-integration.md`](product-integration.md#live-browser-and-computer-viewers).
+
 `.agents/skills/opengeni-client` guides implementation only. Product backends
 select end-user runtime Skills independently; never attach implementation guidance. See
 [`product-integration.md`](product-integration.md).

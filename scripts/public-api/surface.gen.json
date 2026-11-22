@@ -43868,6 +43868,8 @@
       "EmbeddedInteractionClientOverride": "type",
       "EmbeddedInterventionClientLike": "type",
       "EmbeddedInterventionClientOverride": "type",
+      "InteractionInterventionBanner": "value",
+      "InteractionInterventionBannerProps": "type",
       "InteractionInterventionsClient": "type",
       "NetworkRoutesClient": "type",
       "SiteAuthConnectionsClient": "type",

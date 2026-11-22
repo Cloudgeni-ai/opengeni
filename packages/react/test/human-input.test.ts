@@ -15,8 +15,21 @@ import {
 import type { SessionHumanInputRequest } from "@opengeni/sdk";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { secretAnswerLabel } from "../src/human-input-model";
 
 const englishText = createOpenGeniText();
+
+test("hosts can translate the task vault display name without changing named vaults", () => {
+  const result = {
+    reference: "unchanged-reference",
+    username: null,
+    vaultName: "Task",
+    itemName: "Login",
+  };
+  const text = createOpenGeniText({ messages: { "humanInputModel.taskVaultName": "Chat" } });
+  expect(secretAnswerLabel(text, { ...result, saveTo: "task" })).toBe("Saved to Chat › Login");
+  expect(secretAnswerLabel(text, { ...result, saveTo: "workspace" })).toBe("Saved to Task › Login");
+});
 
 registerDom();
 

@@ -1442,6 +1442,34 @@ to share the live artifact link instead of promising a PDF or DOCX, so a host
 that needs file delivery of documents should plan on the artifact page rather
 than an export.
 
+## Live browser and computer viewers
+
+`BrowserViewer` and `ComputerViewer` from `@opengeni/react/interaction` use
+your product's session proxy to request an attachment and send user actions.
+The viewer opens the returned live frame endpoint directly.
+
+1. Set `interactionViewerOrigin: "https://app.example.com"` in
+   `createSessionProxyHandler` (or its framework adapter). Use the exact origin
+   where the viewer runs, with no trailing slash. Mount the proxy on the same origin.
+2. On the Opengeni API deployment, include that origin in
+   `OPENGENI_INTERACTION_VIEWER_ORIGINS` (comma-separated exact origins; in Helm,
+   set it in `api.extraEnv`). Do **not** add it to `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`.
+3. The external user and organization key must have `stream:view` for live
+   frames and `sessions:control` for input, in addition to ordinary session
+   access. Connected Machine desktop input still requires screen-control consent.
+   The browser must be able to reach the returned frame endpoint; if your product
+   uses a Content Security Policy, allow that endpoint in `connect-src`.
+
+The proxy checks the browser's `Origin` on each attachment POST and asserts the
+configured value on the authenticated server-to-server request. It doesn't
+accept a browser-provided assertion. The origin is not a credential; Opengeni
+still checks the source session and issues the same expiring view grants.
+
+For a compact browser viewer, pass `showAdvancedControls={false}`. You can
+also render `InteractionInterventionBanner` independently from the same
+subpath. Use the message override `humanInputModel.taskVaultName` to translate
+the displayed task vault name without renaming the vault or its references.
+
 ## Browser and React integration
 
 For organization-wide server-enforced Connect acquisition choices, use the
