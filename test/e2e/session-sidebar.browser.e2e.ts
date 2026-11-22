@@ -1256,7 +1256,10 @@ test("the Site publish form starts below the desktop window bar in a narrow Site
       dispatchEvent(new PopStateEvent("popstate"));
     }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
-    await page.locator("[data-site-column] [data-site-header]").getByRole("button", { name: "Publish" }).click();
+    await page
+      .locator("[data-site-column] [data-site-header]")
+      .getByRole("button", { name: "Publish" })
+      .click();
     const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
     const header = form.locator(":scope > header");
     const back = header.getByRole("button").first();
