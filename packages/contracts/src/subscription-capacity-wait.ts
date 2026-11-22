@@ -1,3 +1,8 @@
+import {
+  subscriptionCapacityWaitNeedsAction as baseWaitNeedsAction,
+  subscriptionCapacityWaitReasonText as baseWaitReasonText,
+} from "@opengeni/subscriptions";
+
 /** Provider diagnoses carried by the public capacity-wait events and notices. */
 export type ProviderCapacityWaitReason =
   | "codex_relogin_required"
@@ -21,32 +26,21 @@ export function subscriptionCapacityWaitReasonText(
   name: string,
   account?: SubscriptionReconnectAccount,
 ): string | null {
-  const messages = {
-    pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. This turn continues automatically once it is available again.`,
-    pinned_account_disabled: `The ${name} account pinned to this chat is turned off. Turn it back on, choose another account, or switch the chat to automatic. Waiting alone will not fix this.`,
-    pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. This turn continues once another account is chosen or the session is switched back to automatic.`,
-    no_eligible_capacity: `No ${name} subscription has capacity for this turn right now. It continues automatically when an account is available.`,
+  if (!isProviderCapacityWaitReason(reason)) return baseWaitReasonText(reason, name);
+  const messages: Record<ProviderCapacityWaitReason, string> = {
     codex_relogin_required: `The Codex account${account ? ` ${account.label}` : ""} needs a new sign-in. ${account?.personal ? "Its owner" : "An admin"} must reconnect it.`,
     codex_plan_no_capacity:
       "The ChatGPT plans available to this chat don’t provide Codex capacity for this model. Connect an account with access or switch to another model.",
     codex_rate_limited:
       "Codex is rate-limited. This turn continues automatically when an account has capacity again.",
-    model_not_allowed: `This model is not allowed for the ${name} subscriptions available here. This turn continues if that changes.`,
-    compaction_provider_locked:
-      "This session is tied to a provider that has no capacity right now. It continues automatically when an account is available.",
-    accepted_authority_unavailable:
-      "This work was accepted before the account move and its account access could not be carried. Send it again to continue.",
   };
-  return Object.hasOwn(messages, reason) ? messages[reason as keyof typeof messages] : null;
+  return messages[reason];
 }
 
 export function subscriptionCapacityWaitNeedsAction(reason: string): boolean {
-  return [
-    "pinned_account_disabled",
-    "pinned_account_ineligible",
-    "model_not_allowed",
-    "codex_relogin_required",
-    "codex_plan_no_capacity",
-    "accepted_authority_unavailable",
-  ].includes(reason);
+  return (
+    reason === "codex_relogin_required" ||
+    reason === "codex_plan_no_capacity" ||
+    baseWaitNeedsAction(reason)
+  );
 }
