@@ -43,7 +43,10 @@ import {
   type EventSourceChoice,
 } from "../../../components/automations/event-source-model";
 import { useEventSourceStandIns } from "../../../components/automations/event-source-stand-ins";
-import { eventSourceLogoResolver } from "../../../components/automations/event-source-tile";
+import {
+  EventSourceTile,
+  eventSourceLogoResolver,
+} from "../../../components/automations/event-source-tile";
 import { eventTypesLabel } from "../../../components/automations/event-trigger-model";
 import type { AutomationDraft } from "../../../components/automations/automation-model";
 import { CopyField } from "../../../ui/copy-field";
@@ -472,6 +475,7 @@ function AgentTriggerDialogBody({
           <PastedSecretStep
             key={`${pickedSource.id}:${replacingSecret ?? ""}`}
             url={pickedSource.webhookUrl}
+            tile={<EventSourceTile source={pickedSource} logo={sourceLogo} size="sm" />}
             setup={pasted}
             inputRef={secretField}
             onChange={() => {
@@ -641,6 +645,7 @@ function WebhookCreated({ url, secret }: { url: string; secret?: string | undefi
  */
 function PastedSecretStep({
   url,
+  tile,
   setup,
   inputRef,
   onChange,
@@ -649,6 +654,8 @@ function PastedSecretStep({
   onKeep,
 }: {
   url: string | null;
+  /** The source's logo, beside its URL. */
+  tile: ReactNode;
   setup: { app: string; secretName: string; urlStep: string; secretStep: string };
   inputRef: RefObject<HTMLInputElement | null>;
   onChange: () => void;
@@ -661,7 +668,12 @@ function PastedSecretStep({
   return (
     <div data-agent-trigger-secret="" className="flex min-w-0 flex-col gap-3">
       <Field label="Webhook URL" hint={setup.urlStep}>
-        <CopyField variant="field" value={url ?? ""} label="webhook URL" placeholder="No URL" />
+        <div className="flex min-w-0 items-center gap-2">
+          {tile}
+          <div className="min-w-0 flex-1">
+            <CopyField variant="field" value={url ?? ""} label="webhook URL" placeholder="No URL" />
+          </div>
+        </div>
       </Field>
       <Field label={label} hint={setup.secretStep} error={error}>
         <TextInput
