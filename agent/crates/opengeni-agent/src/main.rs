@@ -609,16 +609,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         !screen_control_turned_off(),
     );
     platform = next_platform;
-    // Only the agent holding the instance lock may remove helper generations
-    // that earlier releases left behind; the removal runs off the startup path.
-    if let (Some(_), Some(directory)) = (&instance_lock_guard, config_dir.clone()) {
-        std::thread::spawn(move || {
-            let removed = embedded_runtime::prune_stale_generations(&directory);
-            if removed > 0 {
-                info!(removed, "removed earlier interaction runtime generations");
-            }
-        });
-    }
+    prune_interaction_runtime(instance_lock_guard.is_some(), config_dir.clone());
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     // A successor image keeps its predecessor's connection instance, so the
@@ -790,6 +781,25 @@ fn install_shell_tools(config_dir: Option<&Path>, prune: bool) {
     }
 }
 
+/// Removes the interaction runtime generations earlier releases left behind,
+/// off the startup path. Only the agent holding the instance lock may (`prune`),
+/// so no other agent is using them. Both `run` and `run --compute` call this:
+/// a sandbox agent updates itself too, and each release otherwise leaves its
+/// helpers (some 200 MB) on the sandbox's disk for as long as it lives.
+fn prune_interaction_runtime(
+    prune: bool,
+    config_dir: Option<std::path::PathBuf>,
+) -> Option<std::thread::JoinHandle<usize>> {
+    let directory = config_dir.filter(|_| prune)?;
+    Some(std::thread::spawn(move || {
+        let removed = embedded_runtime::prune_stale_generations(&directory);
+        if removed > 0 {
+            info!(removed, "removed earlier interaction runtime generations");
+        }
+        removed
+    }))
+}
+
 /// `run --compute`: the agent in an Opengeni compute sandbox, started by the
 /// sandbox's guest init (`compute/docs/agent-link.md`, section 2). It serves
 /// one link, dialed through the sandbox's host with no credential, and keeps
@@ -843,6 +853,7 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone(), true);
+    prune_interaction_runtime(instance_lock_guard.is_some(), config_dir.clone());
 
     let credentials = link_config.credentials();
     let relay = RelayCredential::pending();
@@ -1747,6 +1758,42 @@ mod anyhow_lite {
     pub type Result = std::result::Result<(), BoxError>;
     /// A handler result returning a value.
     pub type ResultOf<T> = std::result::Result<T, BoxError>;
+}
+
+#[cfg(test)]
+mod interaction_runtime_prune_tests {
+    use super::{embedded_runtime, prune_interaction_runtime};
+
+    fn earlier_generation(root: &std::path::Path) -> std::path::PathBuf {
+        let earlier = root
+            .join("interaction-runtime")
+            .join("0123456789abcdef01234567");
+        std::fs::create_dir_all(&earlier).expect("earlier generation");
+        earlier
+    }
+
+    #[test]
+    fn an_agent_without_the_instance_lock_leaves_generations_alone() {
+        let root = tempfile::tempdir().expect("config root");
+        let earlier = earlier_generation(root.path());
+        assert!(prune_interaction_runtime(false, Some(root.path().to_path_buf())).is_none());
+        assert!(prune_interaction_runtime(true, None).is_none());
+        assert!(earlier.is_dir());
+    }
+
+    #[test]
+    fn the_lock_holder_removes_earlier_generations() {
+        let root = tempfile::tempdir().expect("config root");
+        let earlier = earlier_generation(root.path());
+        let removed = prune_interaction_runtime(true, Some(root.path().to_path_buf()))
+            .expect("pruning started")
+            .join()
+            .expect("pruning finished");
+        // A build without an embedded runtime has no generation of its own
+        // to keep, so it removes nothing.
+        assert_eq!(removed, usize::from(embedded_runtime::EMBEDDED));
+        assert_eq!(earlier.exists(), !embedded_runtime::EMBEDDED);
+    }
 }
 
 #[cfg(test)]
