@@ -49,6 +49,7 @@ import {
 } from "@opengeni/react/app/components/capabilities/excel-addin-catalog-link";
 import {
   CatalogConnectedAccounts,
+  mcpDestinationConnectionError,
   type CatalogConnectedAccountsManagement,
   type CatalogConnectedAccountsProps,
 } from "./catalog-connected-accounts";
@@ -184,6 +185,8 @@ export function CatalogItemPage({
     ),
   ].slice(0, 4);
   const reconnect = capabilityReconnectPlan(item, health);
+  const destinationError =
+    health.state === "attention" && mcpDestinationConnectionError(health.connection);
   const repair = connectionRepair(health);
   const missingPersonalAccount =
     item.enabled &&
@@ -636,14 +639,20 @@ export function CatalogItemPage({
               title={
                 missingPersonalAccount
                   ? `Connect your ${title} account`
-                  : `Sign in again to keep using ${title}`
+                  : destinationError
+                    ? "Connector address unavailable"
+                    : `Sign in again to keep using ${title}`
               }
             >
               {missingPersonalAccount
                 ? "This connector is enabled for the workspace. Each person connects their own account."
-                : connectedScope === "personal"
-                  ? "Your connection stopped working."
-                  : "The workspace connection stopped working."}
+                : destinationError
+                  ? connectionAccounts?.connections?.some(({ id }) => id === health.connection?.id)
+                    ? "Check the affected account below before reconnecting."
+                    : destinationError
+                  : connectedScope === "personal"
+                    ? "Your connection stopped working."
+                    : "The workspace connection stopped working."}
             </Notice>
           </DetailSection>
         ) : null;

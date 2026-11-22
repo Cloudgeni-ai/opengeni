@@ -2698,6 +2698,9 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 
 ## Native Claude Messages
 
+Self-hosted deployments can also run Claude on Amazon Bedrock with the pod's AWS
+identity; see [Amazon Bedrock](./amazon-bedrock.md).
+
 Workspace and organization Models support **Anthropic API** keys and **Claude subscription**
 sign-in as separate connections. **Sign in to Claude** opens Claude's approval page;
 paste its authorization code back into Opengeni. This grants model and profile

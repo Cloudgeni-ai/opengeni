@@ -1,9 +1,15 @@
-import { CODEX_CREDENTIAL_LEASE_TTL_MS } from "@opengeni/db";
 import {
+  CODEX_CREDENTIAL_LEASE_TTL_MS,
   subscriptionCapacityWaitReasonText,
   subscriptionCapacityWaitNeedsAction,
-  type WaitReason,
-} from "@opengeni/subscriptions";
+} from "@opengeni/db";
+import type {
+  ProviderCapacityWaitReason,
+  SubscriptionReconnectAccount,
+} from "@opengeni/contracts/subscription-capacity-wait";
+import type { WaitReason } from "@opengeni/subscriptions";
+
+type SubscriptionCapacityWaitReason = WaitReason | ProviderCapacityWaitReason;
 
 /*
  * Failures of a chat turn on the shared subscription core, for any provider.
@@ -27,7 +33,7 @@ export type SubscriptionCoreCodexFailurePayload = {
   retryable: boolean;
   detail?: string;
   /** Placement wait reason when `code` is `subscription_capacity_unavailable`. */
-  waitReason?: WaitReason;
+  waitReason?: SubscriptionCapacityWaitReason;
   /** Refusal class when `code` is `subscription_account_refused`. */
   refusal?: SubscriptionCoreAccountRefusal;
   /** ISO time the earliest known capacity returns, when placement knows it. */
@@ -64,7 +70,9 @@ export class SubscriptionCoreCodexTurnError extends Error {
   }
 }
 
-const WAIT_COPY = (name: string): Record<WaitReason, string> => ({
+const WAIT_COPY = (
+  name: string,
+): Partial<Record<SubscriptionCapacityWaitReason, string>> & Record<WaitReason, string> => ({
   pinned_account_disabled: `The ${name} account pinned to this chat is turned off. Turn it back on, choose another account, or switch the chat to automatic. Waiting alone will not fix this.`,
   pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. Send a new message once it is available again, or switch the session back to automatic.`,
   pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. Choose another account or switch the session back to automatic.`,
@@ -82,12 +90,13 @@ const WAIT_COPY = (name: string): Record<WaitReason, string> => ({
  * earliest known reset.
  */
 export function subscriptionCoreCapacityWaitPayload(
-  reason: WaitReason,
+  reason: SubscriptionCapacityWaitReason,
   earliestResetAt: Date | null,
   displayName: string = DEFAULT_DISPLAY_NAME,
+  account?: SubscriptionReconnectAccount,
 ): Record<string, unknown> {
   return {
-    error: subscriptionCapacityWaitReasonText(reason, displayName),
+    error: subscriptionCapacityWaitReasonText(reason, displayName, account),
     code: "subscription_capacity_unavailable",
     waitReason: reason,
     ...(subscriptionCapacityWaitNeedsAction(reason) ? { actionRequired: true } : {}),
@@ -136,13 +145,16 @@ export function subscriptionCoreServingFailoverExhaustedFailure(
  * cannot wait.
  */
 export function subscriptionCoreCapacityFailure(
-  reason: WaitReason,
+  reason: SubscriptionCapacityWaitReason,
   earliestResetAt: Date | null,
   displayName: string = DEFAULT_DISPLAY_NAME,
+  account?: SubscriptionReconnectAccount,
 ): SubscriptionCoreCodexTurnError {
   return new SubscriptionCoreCodexTurnError(
     {
-      error: WAIT_COPY(displayName)[reason],
+      error:
+        WAIT_COPY(displayName)[reason] ??
+        subscriptionCapacityWaitReasonText(reason, displayName, account)!,
       code: "subscription_capacity_unavailable",
       retryable: false,
       waitReason: reason,

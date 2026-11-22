@@ -1,3 +1,4 @@
+import { MCP_DESTINATION_CONNECTION_ERRORS } from "@opengeni/contracts";
 import {
   CONNECTION_LABEL_MAX_LENGTH,
   connectionAccountIdentityLabel,
@@ -40,6 +41,14 @@ const ACCOUNT_STATUS = {
   error: "failed",
   revoked: "not_connected",
 } as const satisfies Record<ConnectionMetadata["status"], ProductStatus>;
+
+export function mcpDestinationConnectionError(account: ConnectionMetadata | null) {
+  return account?.status === "error"
+    ? Object.values(MCP_DESTINATION_CONNECTION_ERRORS).find(
+        (message) => message === account.lastError,
+      )
+    : undefined;
+}
 
 /** Per-account management. The API re-checks every action; these rules only
  * keep the page from offering what the server would refuse. */
@@ -316,6 +325,7 @@ export function CatalogConnectedAccounts({
               const row = rows.get(account.id)!;
               const label = row.label;
               const unfinished = connectedAccountSignInUnfinished(account);
+              const destinationError = mcpDestinationConnectionError(account);
               // Re-signing in refreshes the same row wherever it was added. An
               // account from before its service could be identified offers it too.
               const reconnect =
@@ -338,6 +348,11 @@ export function CatalogConnectedAccounts({
                     <div className="mt-1 flex flex-wrap items-center gap-2">
                       <MetaChip>{row.scope}</MetaChip>
                     </div>
+                    {destinationError ? (
+                      <p className="m-0 mt-1 text-xs leading-4.5 text-fg-muted">
+                        {destinationError}
+                      </p>
+                    ) : null}
                   </div>
                   {unfinished ? (
                     <StatusBadge status="needs_reconnect" variant="dot">

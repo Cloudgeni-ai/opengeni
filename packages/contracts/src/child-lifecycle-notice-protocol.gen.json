@@ -1333,7 +1333,7 @@
       ]
     }
   },
-  "revision": 4,
+  "revision": 5,
   "wakeClasses": {
     "child_paused": "deferred",
     "child_progress": "deferred",

@@ -75,9 +75,9 @@ import { type ActiveSandboxPointer } from "./active-sandbox";
 import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
-  subscriptionCapacityWaitReasonText,
-  subscriptionCapacityWaitNeedsAction,
-} from "@opengeni/subscriptions";
+  isProviderCapacityWaitReason,
+  type SubscriptionReconnectAccount,
+} from "@opengeni/contracts/subscription-capacity-wait";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -1351,6 +1351,7 @@ import {
   childRequiresActionSummary,
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
+  humanInputQuestionIsPersonOnly,
 } from "./child-lifecycle-notices";
 import {
   CAPACITY_WAIT_NOTICE_KEY,
@@ -1361,6 +1362,8 @@ import {
   capacityWaitNoticeWithdrawal,
   capacityWaitNotificationPayload,
   readCapacityWaitNotice,
+  subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitReasonText,
   withoutCapacityWaitNotice,
 } from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
@@ -28043,6 +28046,7 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
   goalId?: string | null;
   goalVersion?: number | null;
   waitReason: string;
+  reconnectAccount?: SubscriptionReconnectAccount;
   earliestResetAt: Date | null;
   healthRetryAt?: Date | null;
   /** From a fresh failover-aware accepted-turn evaluation; never caller authority.
@@ -28210,6 +28214,10 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
+        const explanation = isProviderCapacityWaitReason(input.waitReason)
+          ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.reconnectAccount) ??
+            undefined)
+          : undefined;
         const attention = capacityWaitAttention({
           waitReason: input.waitReason,
           earliestResetAt: input.earliestResetAt,
@@ -28224,6 +28232,7 @@ export async function armSubscriptionCoreCapacityWait(
                   provider,
                   resetsAt: attention.resetsAt,
                   waitReason: input.waitReason,
+                  ...(input.reconnectAccount ? { reconnectAccount: input.reconnectAccount } : {}),
                 }),
               )
             : null;
@@ -28239,6 +28248,7 @@ export async function armSubscriptionCoreCapacityWait(
                 [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
                   personNotice.key,
                   attention!.resetsAt,
+                  explanation,
                 ),
               }
             : {}),
@@ -28344,6 +28354,13 @@ export async function armSubscriptionCoreCapacityWait(
                   payload: {
                     ...input.failurePayload,
                     ...vocabulary.waitingPayload,
+                    ...(explanation
+                      ? {
+                          error: explanation,
+                          waitReason: input.waitReason,
+                          actionRequired: subscriptionCapacityWaitNeedsAction(input.waitReason),
+                        }
+                      : {}),
                     waiterId: waiter.waiterId,
                     generation: waiter.generation,
                     goalId,
@@ -28415,6 +28432,7 @@ export async function armSubscriptionCoreCapacityWait(
                         waiterId: waiter.waiterId,
                       }),
                       attention.resetsAt,
+                      explanation,
                     ),
                   }
                 : waitingMetadata,
@@ -28457,6 +28475,7 @@ export async function armSubscriptionCoreCapacityWait(
             provider,
             nextCheckAt,
             resetsAt: attention.resetsAt,
+            ...(explanation ? { explanation } : {}),
           });
         }
         if (input.leaseFence) {
@@ -28481,6 +28500,7 @@ export type SubscriptionCoreCodexWaitEvaluation =
   | {
       kind: "wait";
       waitReason: string;
+      reconnectAccount?: SubscriptionReconnectAccount;
       earliestResetAt: Date | null;
       healthRetryAt: Date | null;
       /** Entire freshly derived candidate set, not a union with stored hints. */
@@ -28767,10 +28787,14 @@ export async function reconcileSubscriptionCoreCapacityWait(
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
           );
           if (!row) return { action: "stale", events: [] } as const;
-          const changedReasonText =
-            waiter.waitReason !== waitEvaluation.waitReason
-              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
-              : null;
+          const reasonText = subscriptionCapacityWaitReasonText(
+            waitEvaluation.waitReason,
+            vocabulary.label,
+            waitEvaluation.reconnectAccount,
+          );
+          const explanation = isProviderCapacityWaitReason(waitEvaluation.waitReason)
+            ? (reasonText ?? undefined)
+            : undefined;
           // Whoever was told when the wait ends (a top-level chat's person,
           // or a worker's parent) is told again once the reset they heard no
           // longer holds (it passed without capacity, or a longer limit
@@ -28779,22 +28803,27 @@ export async function reconcileSubscriptionCoreCapacityWait(
           // the reset that now holds. Only an evaluation that found no
           // capacity says when it returns; a held false-resumption delay or
           // legacy evaluation restates nothing.
-          const attention =
-            evaluation.kind !== "wait"
-              ? null
-              : capacityWaitAttention({
-                  waitReason: waitEvaluation.waitReason,
-                  earliestResetAt: waitEvaluation.earliestResetAt,
-                  healthRetryAt: waitEvaluation.healthRetryAt,
-                  now,
-                });
           const toldKey = session.parentSessionId
             ? CAPACITY_WAIT_PARENT_NOTICE_KEY
             : CAPACITY_WAIT_NOTICE_KEY;
           const told = readCapacityWaitNotice(blockedTurn.metadata, toldKey);
+          const attention =
+            evaluation.kind !== "wait"
+              ? null
+              : (capacityWaitAttention({
+                  waitReason: waitEvaluation.waitReason,
+                  earliestResetAt: waitEvaluation.earliestResetAt,
+                  healthRetryAt: waitEvaluation.healthRetryAt,
+                  now,
+                }) ?? (told?.explanation ? { resetsAt: waitEvaluation.earliestResetAt } : null));
+          const explanationChanged = attention !== null && told?.explanation !== explanation;
+          const changedReason =
+            waiter.waitReason !== waitEvaluation.waitReason || explanationChanged;
           const restate =
             attention !== null &&
-            (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+            (!told ||
+              explanationChanged ||
+              capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
           // What agents see (a worker's parent woken by a notice, the
           // session's own timeline) is restated only for a real change: the
           // first long wait, a told time that passed without capacity, a
@@ -28808,6 +28837,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           const restateToAgents =
             restate &&
             (!told ||
+              explanationChanged ||
               toldTimePassed ||
               waitEvaluation.earliestResetAt !== null ||
               attention!.resetsAt === null);
@@ -28820,16 +28850,15 @@ export async function reconcileSubscriptionCoreCapacityWait(
                     provider: waiter.provider,
                     resetsAt: attention!.resetsAt,
                     waitReason: waitEvaluation.waitReason,
+                    ...(waitEvaluation.reconnectAccount
+                      ? { reconnectAccount: waitEvaluation.reconnectAccount }
+                      : {}),
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
                 })
               : null;
-          const waitingText =
-            changedReasonText ??
-            (restateToAgents
-              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
-              : null);
+          const waitingText = changedReason || restateToAgents ? reasonText : null;
           const restated = [
             ...(waitingText
               ? [
@@ -28893,12 +28922,17 @@ export async function reconcileSubscriptionCoreCapacityWait(
           // A worker's parent hears the restated reset in a new notice (the
           // system-update outbox delivers it), keyed by that reset so it never
           // collides with the arm's notice or an earlier restatement.
+          const restatedReasonSequence = explanationChanged ? session.lastSequence + 1 : undefined;
+          const restatement = {
+            ...(restatedReasonSequence === undefined ? {} : { restatedReasonSequence }),
+            restatedResetsAt: attention?.resetsAt?.toISOString() ?? null,
+          };
           const parentNoticeKey =
             restateToAgents && session.parentSessionId
               ? childWaitingCapacityDedupeKey({
                   childSessionId: session.id,
                   waiterId: waiter.waiterId,
-                  restatedResetsAt: attention!.resetsAt?.toISOString() ?? null,
+                  ...restatement,
                 })
               : null;
           if (parentNoticeKey) {
@@ -28908,7 +28942,8 @@ export async function reconcileSubscriptionCoreCapacityWait(
               provider: waiter.provider,
               nextCheckAt,
               resetsAt: attention!.resetsAt,
-              restated: true,
+              restatement,
+              ...(explanation ? { explanation } : {}),
             });
           }
           const noticeKey = personNotice?.key ?? parentNoticeKey;
@@ -28920,7 +28955,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
               .set({
                 metadata: {
                   ...blockedTurn.metadata,
-                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt),
+                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt, explanation),
                 },
                 version: blockedTurn.version + 1,
                 updatedAt: now,
@@ -36515,6 +36550,8 @@ type SessionRow = typeof schema.sessions.$inferSelect & {
   meaningfulSequence?: number;
   /** See sessionFailureHandledByParentSql. */
   failureHandled?: boolean;
+  /** See sessionQuestionsWithAgentSql. */
+  questionWithAgent?: boolean;
 };
 
 /** A session row with its Skill folders, which a complete `Session` carries. */
@@ -36922,6 +36959,7 @@ async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
   const handledFailures = await sessionIdsWithHandledFailure(db, workspaceId, rows);
+  const questionsWithAgent = await sessionIdsWithQuestionsWithAgent(db, workspaceId, rows);
   const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
     const cursor = cursorBySessionId.get(row.id);
     if (
@@ -36937,6 +36975,7 @@ async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
       lastSequence: cursor.lastSequence,
       meaningfulSequence: cursor.meaningfulSequence,
       ...(handledFailures.has(row.id) ? { failureHandled: true } : {}),
+      ...(questionsWithAgent.has(row.id) ? { questionWithAgent: true } : {}),
     };
   });
   return includeEffectivePolicy
@@ -37129,6 +37168,84 @@ async function sessionIdsWithHandledFailure(
     `,
   );
   return new Set(handled.map((row) => row.id));
+}
+
+/**
+ * Whether a session waits only on questions still with the agent that
+ * started it (`held_for_agent`, see migration 1553): their notice is on its
+ * way, queued, or in a turn that has not ended, and that agent can act.
+ * Person-facing attention leaves such a session out.
+ */
+function sessionQuestionsWithAgentSql(workspaceId: string | SQL, sessionId: SQL): SQL {
+  return sql`(exists (
+      select 1 from ${schema.sessionHumanInputRequests} asked
+      where asked.workspace_id = ${workspaceId}
+        and asked.session_id = ${sessionId}
+        and asked.status = 'pending'
+    )
+    and not exists (
+      select 1 from ${schema.sessionHumanInputRequests} asked
+      where asked.workspace_id = ${workspaceId}
+        and asked.session_id = ${sessionId}
+        and asked.status = 'pending'
+        and not (asked.held_for_agent and exists (
+          select 1
+          from ${schema.sessionSystemUpdateOutbox} notice
+          join ${schema.sessions} agent
+            on agent.workspace_id = notice.workspace_id
+           and agent.id = notice.target_session_id
+          left join ${schema.sessionSystemUpdates} received
+            on received.workspace_id = notice.workspace_id
+           and received.session_id = notice.target_session_id
+           and received.dedupe_key = notice.dedupe_key
+          where notice.workspace_id = ${workspaceId}
+            and notice.dedupe_key = ${childRequiresActionDedupeKeySql(
+              sql`asked.session_id`,
+              sql`asked.turn_id`,
+              sql`asked.turn_generation`,
+            )}
+            and agent.status not in ('failed', 'cancelled', 'waiting_capacity')
+            and (
+              received.state = 'pending'
+              or (received.id is null and notice.status = 'pending')
+              or (received.state = 'delivered' and exists (
+                select 1 from ${schema.sessionTurns} answering
+                where answering.workspace_id = ${workspaceId}
+                  and answering.session_id = notice.target_session_id
+                  and answering.id = received.delivered_turn_id
+                  and answering.finished_at is null
+              ))
+            )
+        ))
+    ))`;
+}
+
+/** `requires_action` sessions among `rows` whose questions are with their agent. */
+async function sessionIdsWithQuestionsWithAgent(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Pick<SessionRow, "id" | "status" | "parentSessionId">[],
+): Promise<Set<string>> {
+  const waitingChildIds = [
+    ...new Set(
+      rows
+        .filter((row) => row.status === "requires_action" && row.parentSessionId)
+        .map((row) => row.id),
+    ),
+  ];
+  if (waitingChildIds.length === 0) return new Set();
+  const withAgent = await rawRows<{ id: string }>(
+    db,
+    sql`
+      select child.id
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and ${anyOf(sql`child.id`, waitingChildIds, "uuid")}
+        and child.status = 'requires_action'
+        and ${sessionQuestionsWithAgentSql(workspaceId, sql`child.id`)}
+    `,
+  );
+  return new Set(withAgent.map((row) => row.id));
 }
 
 /**
@@ -37429,7 +37546,11 @@ export async function sessionTreeStatsForSessions(
                 workspaceId,
                 sql`numbered.id`,
                 sql`numbered.parent_session_id`,
-              )} else false end as failure_handled
+              )} else false end as failure_handled,
+            case when numbered.status = 'requires_action' then not ${sessionQuestionsWithAgentSql(
+              workspaceId,
+              sql`numbered.id`,
+            )} else false end as awaits_person
           from numbered
           left join ${schema.sessionPins} personal
             on ${subjectId ?? null}::text is not null
@@ -37473,7 +37594,8 @@ export async function sessionTreeStatsForSessions(
               )
           )::int as "waitingDescendants",
           count(*) filter (
-            where ${sessionNeedsPersonSql(sql`status`, sql`awaiting_connection_since`)}
+            where awaits_person
+              or ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
           )::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
           count(*) filter (
@@ -37504,7 +37626,7 @@ export async function sessionTreeStatsForSessions(
               where waiting_turn.workspace_id = ${workspaceId}
                 and waiting_turn.session_id = counted.id
                 and waiting_turn.status = 'requires_action'
-            )) filter (where status = 'requires_action'),
+            )) filter (where awaits_person),
             min(awaiting_connection_since) filter (
               where ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
             )
@@ -37687,7 +37809,11 @@ function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefine
 /** Exact target grants never imply visibility of relatives. */
 function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): SQL {
   return sql`(
-    ${schema.sessions.status} in ('requires_action', 'failed')
+    ${schema.sessions.status} = 'failed'
+    or (
+      ${schema.sessions.status} = 'requires_action'
+      and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`${schema.sessions.id}`)}
+    )
     or ${sessionAwaitsConnectionSql(schema.sessions.status, schema.sessions.awaitingConnectionSince)}
     or (
       ${schema.sessions.parentSessionId} is null
@@ -37704,7 +37830,9 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
           where child.workspace_id = ${schema.sessions.workspaceId}
         )
         select 1 from attention_tree
-        where ${sessionNeedsPersonSql(sql`status`, sql`awaiting_connection_since`)}
+        where (status = 'requires_action'
+            and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`attention_tree.id`)})
+          or ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
       )
     )
   )`;
@@ -37717,11 +37845,6 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
  */
 function sessionAwaitsConnectionSql(status: SQLWrapper, awaitingSince: SQLWrapper): SQL {
   return sql`(${status} = 'idle' and ${awaitingSince} is not null)`;
-}
-
-/** Waits on the person: an approval or question, or a connection card. */
-function sessionNeedsPersonSql(status: SQLWrapper, awaitingSince: SQLWrapper): SQL {
-  return sql`(${status} = 'requires_action' or ${sessionAwaitsConnectionSql(status, awaitingSince)})`;
 }
 
 /**
@@ -37918,8 +38041,9 @@ async function sessionListTotalsInScope(
         on child.parent_session_id = parent.id
       where parent.related
     ), attention_roots as (
-      select root_id,
-        bool_or(${sessionNeedsPersonSql(sql`status`, sql`awaiting_connection_since`)}) as attention
+      select root_id, bool_or(case when status = 'requires_action'
+        then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
+        else ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)} end) as attention
       from nodes group by root_id
     ), root_attention as materialized (
       select root.id, not root.archived and (
@@ -37949,8 +38073,10 @@ async function sessionListTotalsInScope(
             and turn.status = 'requires_action'
         ) when ${sessionAwaitsConnectionSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
           then nodes.awaiting_connection_since end as attention_since,
-        ${sessionNeedsPersonSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
-          as needs_person,
+        case when nodes.status = 'requires_action'
+          then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
+          else ${sessionAwaitsConnectionSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
+          end as needs_person,
         nodes.status = 'idle' and nodes.active_turn_id is null
           and nodes.input_wait_until is not null
           and nodes.input_wait_turn_id = (
@@ -37990,7 +38116,7 @@ async function sessionListTotalsInScope(
     ), grouped as (
       select channel_id as "channelId", count(*)::int as total,
         count(*) filter (where needs_person)::int as attention,
-        min(attention_since) as "attentionSince",
+        min(attention_since) filter (where needs_person) as "attentionSince",
         count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
           (status in ('running', 'recovering') or input_wait))::int as active,
@@ -38124,7 +38250,7 @@ async function sessionListTotalsInScope(
       -- Status counts follow project totals: active, unpinned trees only.
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
         count(*) filter (where node.needs_person)::int as attention,
-        min(node.attention_since) as "attentionSince",
+        min(node.attention_since) filter (where node.needs_person) as "attentionSince",
         count(*) filter (where node.status = 'failed' and node.unread
           and not node.failure_handled)::int as failed,
         count(*) filter (where node.pause_revision is null and
@@ -39798,12 +39924,16 @@ export async function getSessionForSubject(
     const handledFailure = (
       await sessionIdsWithHandledFailure(scopedDb, workspaceId, [row.session])
     ).has(sessionId);
+    const questionWithAgent = (
+      await sessionIdsWithQuestionsWithAgent(scopedDb, workspaceId, [row.session])
+    ).has(sessionId);
     const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
       {
         ...row.session,
         lastSequence: row.cursor.lastSequence,
         meaningfulSequence: row.cursor.lastMeaningfulSequence,
         ...(handledFailure ? { failureHandled: true } : {}),
+        ...(questionWithAgent ? { questionWithAgent: true } : {}),
       },
     ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
@@ -92224,6 +92354,7 @@ export async function applySessionTurnSettlement(
             "pendingApprovalsCodecVersion",
           ),
         );
+        const newHumanInputRequestIds: string[] = [];
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
             if (request.questions.length === 1 && request.questions[0]!.skillReview) {
@@ -92298,12 +92429,16 @@ export async function applySessionTurnSettlement(
                     is not distinct from ${request.expiresAt?.toISOString() ?? null}::timestamptz
                 `,
               })
-              .returning({ id: schema.sessionHumanInputRequests.id });
+              .returning({
+                id: schema.sessionHumanInputRequests.id,
+                inserted: sql<boolean>`(xmax = 0)`,
+              });
             if (!persistedRequest) {
               throw new Error(
                 `Human-input request ${request.id} changed contract or settled before re-freeze`,
               );
             }
+            if (persistedRequest.inserted) newHumanInputRequestIds.push(persistedRequest.id);
           }
         }
         for (const request of interactionInterventionRequests) {
@@ -92354,6 +92489,7 @@ export async function applySessionTurnSettlement(
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               humanInputRequests,
+              newHumanInputRequestIds,
               pendingApprovals: input.runState.pendingApprovals.filter(undecided),
             },
           );
@@ -95187,6 +95323,8 @@ async function enqueueChildRequiresActionOutboxTx(
     turnId: string;
     turnGeneration: number;
     humanInputRequests: Parameters<typeof buildChildRequiresActionPayload>[0]["humanInputRequests"];
+    /** Requests this freeze created; only these can be held. */
+    newHumanInputRequestIds: readonly string[];
     pendingApprovals: readonly unknown[];
   },
 ): Promise<boolean> {
@@ -95206,12 +95344,13 @@ async function enqueueChildRequiresActionOutboxTx(
     parentSessionId: session.parentSessionId,
   });
   const summary = childRequiresActionSummary(session.id, payload);
-  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
-    dedupeKey: childRequiresActionDedupeKey({
-      childSessionId: session.id,
-      turnId: input.turnId,
-      turnGeneration: input.turnGeneration,
-    }),
+  const dedupeKey = childRequiresActionDedupeKey({
+    childSessionId: session.id,
+    turnId: input.turnId,
+    turnGeneration: input.turnGeneration,
+  });
+  const enqueued = await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey,
     kind: "child_requires_action",
     classification: "action_required",
     summary: route.escalatedFromSessionId
@@ -95221,6 +95360,30 @@ async function enqueueChildRequiresActionOutboxTx(
     lineage: { turnId: input.turnId },
     route,
   });
+  // The agent gets the whole pause or none of it.
+  const hold =
+    enqueued &&
+    route.targetCanAct &&
+    !payload.truncated &&
+    payload.requests.length === input.humanInputRequests.length &&
+    input.humanInputRequests.every((request) =>
+      request.questions.every((question) => !humanInputQuestionIsPersonOnly(question)),
+    );
+  if (hold && input.newHumanInputRequestIds.length > 0) {
+    // Before the pause's request events: the inbox and push triggers skip a
+    // held question, and release it when the agent no longer has it (1553).
+    await tx
+      .update(schema.sessionHumanInputRequests)
+      .set({ heldForAgent: true })
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, session.id),
+          inArray(schema.sessionHumanInputRequests.id, [...input.newHumanInputRequestIds]),
+        ),
+      );
+  }
+  return enqueued;
 }
 
 async function enqueueChildRequiresActionResolvedOutboxTx(
@@ -95304,8 +95467,8 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
-    /** A later notice restating the reset of a wait the parent already heard of. */
-    restated?: boolean;
+    explanation?: string;
+    restatement?: { restatedResetsAt: string | null; restatedReasonSequence?: number };
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -95321,11 +95484,11 @@ async function enqueueChildWaitingCapacityOutboxTx(
     dedupeKey: childWaitingCapacityDedupeKey({
       childSessionId: session.id,
       waiterId: input.waiterId,
-      ...(input.restated ? { restatedResetsAt: payload.resetsAt } : {}),
+      ...input.restatement,
     }),
     kind: "child_waiting_capacity",
     classification: "info",
-    summary: childWaitingCapacitySummary(session.id, payload),
+    summary: childWaitingCapacitySummary(session.id, payload, input.explanation),
     payload,
     lineage: { turnId: input.turnId },
   });
@@ -95415,6 +95578,15 @@ export function childFailedTurnDedupeKey(childSessionId: string, turnId: string)
 /** SQL form of childFailedTurnDedupeKey; keep the two in step. */
 function childFailedTurnDedupeKeySql(childSessionId: SQL, turnId: SQL): SQL {
   return sql`('child-completion:' || (${childSessionId})::text || ':turn:' || (${turnId})::text)`;
+}
+
+/** SQL twin of childRequiresActionDedupeKey. */
+function childRequiresActionDedupeKeySql(
+  childSessionId: SQL,
+  turnId: SQL,
+  turnGeneration: SQL,
+): SQL {
+  return sql`('child-requires-action:' || (${childSessionId})::text || ':' || (${turnId})::text || ':' || (${turnGeneration})::text)`;
 }
 
 async function enqueueFailedChildOutboxWithoutTurnTx(
@@ -101227,6 +101399,7 @@ function mapSessionFields(
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,
     ...(row.failureHandled ? { failureHandled: true } : {}),
+    ...(row.questionWithAgent ? { questionWithAgent: true } : {}),
     nestedAgentDepth: row.nestedAgentDepth,
     maxNestedAgentDepthOverride: row.maxNestedAgentDepthOverride ?? null,
     effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,

@@ -702,7 +702,9 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       update subscription_connections set status = 'needs_relogin' where id = ${pinned}::uuid`;
     expect(await place(turn)).toMatchObject({
       kind: "wait",
-      reason: "pinned_account_unavailable",
+      reason: "codex_relogin_required",
+      explicitConnectionId: pinned,
+      reconnectAccount: { label: `(${pinned})`, personal: false },
     });
     // ...and a pin that can never serve this work says so (its model list
     // excludes the turn's model).

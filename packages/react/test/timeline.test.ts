@@ -430,6 +430,27 @@ describe("buildTimeline", () => {
   });
 
   test.each([
+    [
+      "codex_relogin_required",
+      "The Codex account “Primary” needs a new sign-in. An admin must reconnect it.",
+    ],
+    [
+      "codex_plan_no_capacity",
+      "The ChatGPT plans available to this chat don’t provide Codex capacity for this model.",
+    ],
+    [
+      "codex_rate_limited",
+      "Codex is rate-limited. This turn continues automatically when an account has capacity again.",
+    ],
+  ])("a %s wait keeps the recorded reason in the timeline", (waitReason, error) => {
+    reset();
+    const [item] = buildTimeline(englishText, [
+      event("codex.capacity.waiting", { waitReason, error }),
+    ]);
+    expect(item).toMatchObject({ text: error, capacityWait: { detail: error } });
+  });
+
+  test.each([
     [{ waitReason: "no_eligible_capacity" }],
     [{ waitReason: "pinned_account_unavailable" }],
     [{ waitReason: "compaction_provider_locked" }],

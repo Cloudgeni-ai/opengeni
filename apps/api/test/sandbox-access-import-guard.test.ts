@@ -25,6 +25,9 @@ const FORBIDDEN_SPECIFIERS = new Set([
 ]);
 
 const ALLOWED_RUNTIME_SUBPATHS = new Set([
+  // Amazon Bedrock signing, attribution and model discovery. This leaf
+  // imports only @opengeni/config and the AWS signer/credential chain.
+  "@opengeni/runtime/bedrock",
   // EU-only calling-workspace host matching shared with the runtime's remote
   // MCP transport. This leaf imports only @opengeni/config and contracts.
   "@opengeni/runtime/calling-workspace",

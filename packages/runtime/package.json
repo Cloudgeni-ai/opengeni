@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "6.35.0",
+  "version": "6.36.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -41,6 +41,10 @@
       "types": "./src/model-call.ts",
       "default": "./src/model-call.ts"
     },
+    "./bedrock": {
+      "types": "./src/bedrock.ts",
+      "default": "./src/bedrock.ts"
+    },
     "./gmail-rest-mcp": {
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"
@@ -77,6 +81,7 @@
   },
   "dependencies": {
     "@alibaba-group/opensandbox": "0.1.11",
+    "@aws-sdk/credential-provider-node": "3.972.78",
     "@grpc/grpc-js": "1.14.7",
     "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -99,6 +104,7 @@
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/vaults": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
+    "@smithy/signature-v4": "5.6.12",
     "debug": "4.4.3",
     "e2b": "2.56.0",
     "libheif-js": "1.23.5",
