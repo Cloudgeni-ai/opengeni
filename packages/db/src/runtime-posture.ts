@@ -2686,7 +2686,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   // 1542_app_package_exports: stored app package files and their sweep.
   "app_package_exports",
-  // 1553_app_server_code: runs of an app's server code (inserts, prune deletes).
+  // 1554_app_server_code: runs of an app's server code (inserts, prune deletes).
   "app_server_runs",
   // 1541_app_sync_paging_and_leases: the keys each sync wrote (removeMissing).
   "app_sync_keys",
@@ -3139,7 +3139,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   // mirror of a visible message event.
   "session_message_search_texts",
   "session_spawn_denials",
-  // 1553_app_server_code: where an app stored shared-account tool data (marks only grow).
+  // 1554_app_server_code: where an app stored shared-account tool data (marks only grow).
   "site_tool_data_sources",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",

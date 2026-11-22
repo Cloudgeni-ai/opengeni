@@ -562,7 +562,7 @@ export const workspaceArtifactVersions = pgTable(
     requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
     /** Asset files of a multi-file build (migration 1522); null for a single-file app. */
     assetManifest: jsonb("asset_manifest").$type<SiteAssetManifest>(),
-    /** App server code of this version (migration 1553); null without server code. */
+    /** App server code of this version (migration 1554); null without server code. */
     serverManifest: jsonb("server_manifest").$type<AppServerManifest>(),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
