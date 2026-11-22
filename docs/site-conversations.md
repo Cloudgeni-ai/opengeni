@@ -54,7 +54,9 @@
   `SessionUiFeaturesOff`), narrower, titled in its header: the same composer,
   messages and status row as on the chat's own page, so paste and drop of
   files, the attach button, dictation, voice, the model chip and the queue
-  and steer row all work there. Files dragged over the page cover the Site
+  and steer row all work there. A new conversation there starts on the
+  Site's configured model (`agentModel` on `getSitePublicationLink`) when
+  the workspace allows it, else the workspace's default. Files dragged over the page cover the Site
   (`ChatFileDropCover`), so a drop on the Site attaches to the chat rather
   than going to the Site's frame; the cover shows only while files are
   dragged and the chat is shown and takes files. A Site with its own file
@@ -134,10 +136,11 @@
     so "live" never reads as "on the web".
   - The header's one publication control (`SitePublicationControl`, read
     with the viewer's own `getSitePublicationLink`) says whether the Site is
-    on the web. **Published** opens a menu with the address (the primary URL
+    on the web, labelled **Share** so sharing is one visible click.
+    **Share** on a published Site opens a menu with the address (the primary URL
     the API reports), **Open**, **Copy link** and, for people with
     `artifacts:publish`, **Publishing settings**. An unpublished Site shows
-    **Publish** to those people and nothing to anyone else; a taken-down
+    **Share** (opening the publish form) to those people and nothing to anyone else; a taken-down
     Site says **Taken down**. Publish and Publishing settings open the
     Site's own publish form (`SitePublishPage` with `useSiteManagement`,
     exactly as its Settings tab) as a page in place of the Site, which stays

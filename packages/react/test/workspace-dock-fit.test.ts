@@ -6,6 +6,7 @@ const base: DockTabFitInput = {
   order,
   required: new Set(["artifacts"]),
   fillable: new Set(["changes", "files", "terminal", "browser"]),
+  optional: new Set(["changes", "files", "terminal", "browser", "settings"]),
   // Tabs kept in the menu are never measured.
   widths: { artifacts: 90, changes: 90, files: 70, terminal: 90, browser: 90 },
   available: 400,
@@ -34,6 +35,18 @@ test("an opened tab that wouldn't fit by itself keeps its room and its close but
   expect(fit.natural.has("browser")).toBe(false);
   // Artifacts 90 + browser 92+16 = 198, leaving room for changes and files.
   expect([...fit.filled]).toEqual(["changes", "files"]);
+});
+
+test("an opened menu-only tab takes its close button's room too", () => {
+  const fit = fitDockTabs({
+    ...base,
+    required: new Set(["artifacts", "settings"]),
+    widths: { ...base.widths, settings: 90 },
+    available: 360,
+  });
+  // Artifacts 90 + settings 92+16 = 198; changes 92 makes 290 and files 72
+  // more makes 362, past 360 + 1, so only changes fits.
+  expect([...fit.filled]).toEqual(["changes"]);
 });
 
 test("nothing fills before the strip is measured", () => {

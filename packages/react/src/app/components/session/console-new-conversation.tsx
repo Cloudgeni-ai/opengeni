@@ -20,7 +20,7 @@ import { ChatViewportFileDropTarget } from "./chat-viewport-file-drop-target";
 
 export type ConsoleNewConversationProps = Pick<
   UseNewConversationOptions,
-  "createSession" | "onCreated" | "enabled" | "scopeKey"
+  "createSession" | "onCreated" | "enabled" | "scopeKey" | "defaultModel"
 > & {
   workspaceId: string;
   /** The line above the composer, such as what to ask about. */
@@ -37,6 +37,7 @@ export function ConsoleNewConversation(props: ConsoleNewConversationProps) {
     onCreated: props.onCreated,
     enabled: props.enabled,
     scopeKey: props.scopeKey,
+    defaultModel: props.defaultModel,
     modelPicker: true,
   });
   const { composer, catalog, files, uploadsEnabled, available } = creation;

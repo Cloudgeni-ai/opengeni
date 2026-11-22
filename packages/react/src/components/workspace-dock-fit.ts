@@ -10,6 +10,8 @@ export type DockTabFitInput = {
   required: ReadonlySet<string>;
   /** Optional tabs that may fill spare room (not the ones kept in the menu). */
   fillable: ReadonlySet<string>;
+  /** Every optional tab: one the person opened carries a close button. */
+  optional: ReadonlySet<string>;
   /** Each tab's natural width without a close button, in px. */
   widths: Readonly<Record<string, number>>;
   /** The room the strip may take, in px. */
@@ -50,8 +52,9 @@ function fill(
     if (reserved.has(id) || !input.fillable.has(id)) continue;
     const next = used + width(id) + (count > 0 ? input.gap : 0);
     // In order: the first tab that doesn't fit ends the strip, so tabs never
-    // jump past one another as the dock is resized.
-    if (next > input.available) break;
+    // jump past one another as the dock is resized. A pixel of slack absorbs
+    // rounded measurements.
+    if (next > input.available + 1) break;
     used = next;
     count += 1;
     fitted.add(id);
@@ -70,11 +73,12 @@ export function fitDockTabs(input: DockTabFitInput): DockTabFit {
     input.order.filter((id) => input.required.has(id) && !input.fillable.has(id)),
   );
   const natural = fill(input, always, () => false);
-  // Then room for what they opened (with its close button) comes first.
+  // Then room for what they opened (with its close button, menu-only tabs
+  // too) comes first.
   const filled = fill(
     input,
     input.required,
-    (id) => input.fillable.has(id) && input.required.has(id) && !natural.has(id),
+    (id) => input.optional.has(id) && input.required.has(id) && !natural.has(id),
   );
   return { filled, natural };
 }

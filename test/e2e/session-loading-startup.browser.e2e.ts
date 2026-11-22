@@ -1813,7 +1813,11 @@ test("a mounted tab refreshes a changed deployment while retaining its URL, draf
     await page.screenshot({ path: `${output}/deployment-refresh-draft-protected.png` });
     await input.fill("");
     await page.clock.runFor(1_000);
-    await page.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
+    await page
+      .locator("header")
+      .getByRole("button", { name: "More session actions", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
     await pin.entered;
     const duringPin = page.waitForResponse((response) =>
       response.url().endsWith("/v1/config/client"),
@@ -1974,20 +1978,12 @@ for (const [mismatch, width] of [
       await page.screenshot({
         path: `${output}/contract-${mismatch}-${width}-notice-controls.png`,
       });
-      // Phones pin from the header's "…" menu; wider headers keep the button.
-      const phone = width < 640;
+      // Pin lives in the header's "…" menu at every width.
       const moreButton = page
         .locator("header")
         .getByRole("button", { name: "More session actions", exact: true });
-      if (phone) {
-        await moreButton.click();
-        await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
-      } else {
-        await page
-          .locator("header")
-          .getByRole("button", { name: "Pin session", exact: true })
-          .click();
-      }
+      await moreButton.click();
+      await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
       await pin.entered;
       assert.deepEqual(pinWrites, [true], "A real pointer click must reach the save exactly once");
       await input.fill("");
@@ -2006,14 +2002,10 @@ for (const [mismatch, width] of [
       pin.release();
       await pinned;
       await page.clock.runFor(1_000);
-      const unpinButton = phone
-        ? page.getByRole("menuitem", { name: "Unpin", exact: true })
-        : page.locator("header").getByRole("button", { name: "Unpin session", exact: true });
-      if (phone) {
-        await moreButton.focus();
-        await moreButton.press("Enter");
-        await unpinButton.waitFor();
-      }
+      const unpinButton = page.getByRole("menuitem", { name: "Unpin", exact: true });
+      await moreButton.focus();
+      await moreButton.press("Enter");
+      await unpinButton.waitFor();
       await unpinButton.focus();
       const unpinned = page.waitForResponse((response) =>
         response.url().endsWith(`/${sessionId}/pin`),

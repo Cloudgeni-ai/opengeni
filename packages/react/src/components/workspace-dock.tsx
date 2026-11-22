@@ -346,6 +346,14 @@ export function WorkspaceDock({
       ),
     [tabs, showLanding],
   );
+  const optionalKey = tabs
+    .filter((tab) => tab.optional)
+    .map((tab) => tab.id)
+    .join("\u0000");
+  const optionalIds = useMemo(
+    () => new Set(optionalKey ? optionalKey.split("\u0000") : []),
+    [optionalKey],
+  );
   const [stripRoom, setStripRoom] = useState<StripRoom | null>(null);
   const measureStrip = useCallback(
     (next: StripRoom) =>
@@ -359,12 +367,13 @@ export function WorkspaceDock({
         order: tabOrderKey ? tabOrderKey.split("\u0000") : [],
         required: requiredIds,
         fillable: fillableIds,
+        optional: optionalIds,
         widths: stripRoom?.widths ?? {},
         available: stripRoom?.available ?? 0,
         gap: TAB_GAP,
-        closeWidth: TAB_CLOSE_WIDTH,
+        closeWidth: stripRoom?.closeWidth ?? 0,
       }),
-    [fillableIds, requiredIds, stripRoom, tabOrderKey],
+    [fillableIds, optionalIds, requiredIds, stripRoom, tabOrderKey],
   );
   const shownTabs = useMemo(
     () => tabs.filter((tab) => requiredIds.has(tab.id) || fit.filled.has(tab.id)),
@@ -641,17 +650,9 @@ export function WorkspaceDock({
   // there; a maximized dock still offers Restore.
   const showMaximize = maximized || !expandClaims[current];
   const showCollapse = !(hostControlled && !showCollapseControl);
+  // Maximize is one button on the strip (it toggles to Restore), so the menu
+  // keeps only Hide.
   const menuActions: DockMenuAction[] = [
-    ...(showMaximize
-      ? [
-          {
-            id: "maximize",
-            label: maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock"),
-            icon: maximized ? <Minimize2Icon /> : <Maximize2Icon />,
-            onSelect: () => setMaximized((m) => !m),
-          },
-        ]
-      : []),
     ...(showCollapse
       ? [
           {
@@ -663,6 +664,25 @@ export function WorkspaceDock({
         ]
       : []),
   ];
+  const maximizeButton = showMaximize ? (
+    <ChromeButton
+      onClick={(event) => {
+        // Restoring a panel that owns its expand removes this button;
+        // keep keyboard focus in the dock instead of dropping it.
+        if (maximized && expandClaims[current]) {
+          const next =
+            (event.currentTarget.nextElementSibling as HTMLElement | null) ??
+            rootRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+          requestAnimationFrame(() => next?.focus());
+        }
+        setMaximized((m) => !m);
+      }}
+      title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
+      label={maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")}
+    >
+      {maximized ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
+    </ChromeButton>
+  ) : null;
   const dockChrome = (
     <DockChrome
       tabs={tabs}
@@ -679,35 +699,11 @@ export function WorkspaceDock({
       accessoryInMenu={essentials && !headerAccessoryPinned}
       menuActions={essentials ? menuActions : undefined}
       controls={
-        essentials ? null : (
+        essentials ? (
+          maximizeButton
+        ) : (
           <>
-            {showMaximize ? (
-              <ChromeButton
-                onClick={(event) => {
-                  // Restoring a panel that owns its expand removes this button;
-                  // keep keyboard focus in the dock instead of dropping it.
-                  if (maximized && expandClaims[current]) {
-                    const next =
-                      (event.currentTarget.nextElementSibling as HTMLElement | null) ??
-                      rootRef.current?.querySelector<HTMLElement>(
-                        '[role="tab"][aria-selected="true"]',
-                      );
-                    requestAnimationFrame(() => next?.focus());
-                  }
-                  setMaximized((m) => !m);
-                }}
-                title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
-                label={
-                  maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")
-                }
-              >
-                {maximized ? (
-                  <Minimize2Icon className="size-3.5" />
-                ) : (
-                  <Maximize2Icon className="size-3.5" />
-                )}
-              </ChromeButton>
-            ) : null}
+            {maximizeButton}
             {hostControlled && !showCollapseControl ? null : (
               <ChromeButton
                 onClick={collapse}
@@ -844,10 +840,13 @@ const OPENED_TABS = new Map<string, readonly string[]>();
 type StripRoom = {
   available: number;
   widths: Readonly<Record<string, number>>;
+  /** A tab's extra width with its close button. */
+  closeWidth: number;
 };
 
 function sameStripRoom(a: StripRoom, b: StripRoom): boolean {
   if (Math.abs(a.available - b.available) >= 1) return false;
+  if (Math.abs(a.closeWidth - b.closeWidth) >= 1) return false;
   const keys = Object.keys(a.widths);
   return (
     keys.length === Object.keys(b.widths).length &&
@@ -857,10 +856,6 @@ function sameStripRoom(a: StripRoom, b: StripRoom): boolean {
 
 /** The strip's gap between tabs (`gap-0.5`). */
 const TAB_GAP = 2;
-/** A close button's extra width on a tab: the button and its margin, less the padding it replaces. */
-const TAB_CLOSE_WIDTH = 16;
-/** Room kept for the "+" menu while it isn't drawn (`size-7`). */
-const MENU_BUTTON_WIDTH = 28;
 
 function useOpenedTabs(
   scope: string | undefined,
@@ -966,7 +961,8 @@ function DockChrome({
   const measuredKey = measuredTabs.map((tab) => tab.id).join("\u0000");
   // The strip's room: the header's width less everything else in it (each at
   // its natural width, so a shrinking chip never makes room that isn't
-  // there), and each tab's natural width from a hidden copy of the strip.
+  // there), and each tab's natural width from a hidden copy of the strip,
+  // with a close button and "+" sized as this screen draws them.
   useLayoutEffect(() => {
     const header = headerRef.current;
     const box = measureRef.current;
@@ -977,6 +973,12 @@ function DockChrome({
         const id = node.getAttribute("data-dock-tab-measure");
         if (id !== null) widths[id] = node.offsetWidth;
       }
+      // The close button replaces part of the tab's end padding with its
+      // margin, so the tab grows by the button's own width.
+      const closeWidth =
+        box.querySelector<HTMLElement>("[data-dock-close-measure]")?.offsetWidth ?? 0;
+      const menuWidth =
+        box.querySelector<HTMLElement>("[data-dock-menu-measure]")?.offsetWidth ?? 0;
       const style = getComputedStyle(header);
       const gap = Number.parseFloat(style.columnGap) || 0;
       let others = 0;
@@ -992,26 +994,51 @@ function DockChrome({
         }
         if (child === menuTriggerRef.current) menuDrawn = true;
         if (child.hasAttribute("data-dock-spacer")) continue;
+        // Unshrunk for the reading: a truncating chip counts at full width.
+        const shrink = child.style.flexShrink;
+        child.style.flexShrink = "0";
         others += Math.max(child.offsetWidth, child.scrollWidth);
+        child.style.flexShrink = shrink;
       }
       if (!hasStrip) items += 1;
       if (!menuDrawn) {
         items += 1;
-        others += MENU_BUTTON_WIDTH;
+        others += menuWidth;
       }
       const padding =
         (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
       onMeasure({
         available: Math.floor(header.clientWidth - padding - others - gap * Math.max(0, items - 1)),
         widths,
+        closeWidth,
       });
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
-    observer.observe(header);
-    if (box.firstElementChild) observer.observe(box.firstElementChild);
-    return () => observer.disconnect();
+    // The header, the measuring copy and everything else in the header (a
+    // chip turning pinned, controls changing, "+" appearing).
+    const observeAll = () => {
+      observer.disconnect();
+      observer.observe(header);
+      if (box.firstElementChild) observer.observe(box.firstElementChild);
+      for (const child of Array.from(header.children)) {
+        if (child !== box && child !== stripRef.current) observer.observe(child);
+      }
+    };
+    observeAll();
+    const mutations =
+      typeof MutationObserver === "undefined"
+        ? null
+        : new MutationObserver(() => {
+            observeAll();
+            measure();
+          });
+    mutations?.observe(header, { childList: true });
+    return () => {
+      observer.disconnect();
+      mutations?.disconnect();
+    };
   }, [measuredKey, onMeasure]);
   useLayoutEffect(() => {
     const strip = stripRef.current;
@@ -1111,6 +1138,14 @@ function DockChrome({
                 {tab.badge ? <span className="shrink-0">{tab.badge}</span> : null}
               </span>
             ))}
+            <span
+              data-dock-close-measure=""
+              className="inline-flex size-4 shrink-0 max-[1023px]:size-8 pointer-coarse:size-8"
+            />
+            <span
+              data-dock-menu-measure=""
+              className="inline-flex size-7 shrink-0 max-[1023px]:size-11 pointer-coarse:size-11"
+            />
           </div>
         </div>
         {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}

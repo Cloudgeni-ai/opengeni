@@ -36,12 +36,15 @@ const TOOL_AND_CACHE_DIRS = new Set([
   "node_modules",
 ]);
 
+/** Dot folders at the top that people edit on purpose (agent skills, CI). */
+const KEPT_DOT_DIRS = new Set([".agents", ".claude", ".github"]);
+
 /**
  * Whether the Files view leaves an entry out by default, behind its Show
- * hidden toggle: tool and cache folders anywhere, and every hidden (dot)
- * entry at the top of a workspace that isn't itself a repository (the
- * sandbox's home, where tools keep `.bun`, `.config` and the like). Inside a
- * repository its own dotfiles (`.github`, `.env.example`) stay in view.
+ * hidden toggle: tool and cache folders anywhere, and hidden (dot) folders at
+ * the top of a workspace that isn't itself a repository (the sandbox's home,
+ * where tools keep `.bun`, `.config` and the like). Dotfiles such as `.env`,
+ * skill and CI folders, and everything inside a repository stay in view.
  * Presentation only: nothing is removed or made unreachable.
  */
 export function isHiddenByDefault(
@@ -49,8 +52,14 @@ export function isHiddenByDefault(
   context: FileNodeVisibilityContext,
   rootIsRepository: boolean,
 ): boolean {
-  if (node.kind === "dir" && TOOL_AND_CACHE_DIRS.has(node.name)) return true;
-  return context.depth === 0 && !rootIsRepository && node.name.startsWith(".");
+  if (node.kind !== "dir") return false;
+  if (TOOL_AND_CACHE_DIRS.has(node.name)) return true;
+  return (
+    context.depth === 0 &&
+    !rootIsRepository &&
+    node.name.startsWith(".") &&
+    !KEPT_DOT_DIRS.has(node.name)
+  );
 }
 
 /** Whether the tree's top is a repository's own root (it holds `.git`). */
@@ -59,14 +68,14 @@ export function treeRootIsRepository(nodes: readonly FileTreeNode[]): boolean {
 }
 
 /**
- * Whether a path may lie under an entry the Files view hides by default,
- * judged from its name alone (for a path whose folders aren't loaded yet).
- * Errs towards yes: it only decides whether to show hidden files.
+ * Whether a path lies inside a tool or cache folder, judged from its name
+ * alone (for a path whose folders aren't loaded yet; the top level always is,
+ * so its dot folders are judged from the tree).
  */
 export function pathMayBeHiddenByDefault(path: string): boolean {
-  return path
-    .split(/[/\\]/u)
-    .some((segment) => segment.startsWith(".") || TOOL_AND_CACHE_DIRS.has(segment));
+  const segments = path.split(/[/\\]/u);
+  // The last segment is the entry itself; only the folders above it hide it.
+  return segments.slice(0, -1).some((segment) => TOOL_AND_CACHE_DIRS.has(segment));
 }
 
 function pathIsInsideDirectory(path: string, directory: string): boolean {

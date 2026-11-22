@@ -521,7 +521,7 @@ export function SessionHeader({
             )}
           </div>
         )}
-        {/* Below lg, machine, find and pin live in the "…" menu. */}
+        {/* Below lg, machine and find live in the "…" menu; pin is always there. */}
         {sandboxSlot && !inMenu("machine") ? (
           <span ref={part("machine")} className="hidden items-center lg:flex">
             {sandboxSlot}
@@ -540,22 +540,6 @@ export function SessionHeader({
             className="hidden pointer-coarse:size-11 lg:inline-flex"
           >
             <SearchIcon className="size-4" />
-          </Button>
-        )}
-        {inMenu("pin") || !canPin ? null : (
-          <Button
-            ref={part("pin")}
-            type="button"
-            variant={session.pinned ? "secondary" : "ghost"}
-            size="icon-sm"
-            aria-label={session.pinned ? "Unpin session" : "Pin session"}
-            aria-pressed={Boolean(session.pinned)}
-            aria-busy={pin.busy}
-            disabled={pin.busy}
-            className="hidden pointer-coarse:size-11 lg:inline-flex"
-            onClick={pin.toggle}
-          >
-            <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
           </Button>
         )}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -743,7 +727,6 @@ export function SessionHeader({
             ) : null}
             {canPin ? (
               <DropdownMenuItem
-                className={inMenu("pin") ? undefined : "lg:hidden"}
                 aria-keyshortcuts={pinKeys?.ariaKeys}
                 disabled={pin.busy}
                 onSelect={() => pin.toggle()}

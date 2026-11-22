@@ -71,19 +71,22 @@ describe("file node visibility", () => {
       expect(isHiddenByDefault(dir(name), inside, true)).toBe(true);
     }
     expect(isHiddenByDefault(dir(".config"), top, false)).toBe(true);
-    expect(isHiddenByDefault({ path: ".bashrc", name: ".bashrc", kind: "file" }, top, false)).toBe(
-      true,
-    );
-    // The work stays: repositories and their own dotfiles.
+    // Dotfiles stay: people edit `.env` on purpose.
+    expect(isHiddenByDefault({ path: ".env", name: ".env", kind: "file" }, top, false)).toBe(false);
+    // The work stays: repositories, their own dot folders, skills and CI.
     expect(isHiddenByDefault(dir("repos"), top, false)).toBe(false);
     expect(isHiddenByDefault(dir(".github"), inside, false)).toBe(false);
     expect(isHiddenByDefault(dir(".github"), top, true)).toBe(false);
+    for (const name of [".agents", ".claude", ".github"])
+      expect(isHiddenByDefault(dir(name), top, false)).toBe(false);
     // A file named like a cache folder is just a file.
     expect(
       isHiddenByDefault({ path: "node_modules", name: "node_modules", kind: "file" }, top, false),
     ).toBe(false);
     expect(pathMayBeHiddenByDefault("repos/app/node_modules/x/index.js")).toBe(true);
-    expect(pathMayBeHiddenByDefault(".opengeni/files/a.png")).toBe(true);
+    // Only tool and cache folders count; ordinary dot folders in a repo don't.
+    expect(pathMayBeHiddenByDefault("repos/app/.github/workflows/ci.yml")).toBe(false);
+    expect(pathMayBeHiddenByDefault("./repos/app/.changeset/x.md")).toBe(false);
     expect(pathMayBeHiddenByDefault("repos/app/src/index.ts")).toBe(false);
   });
 
@@ -163,6 +166,8 @@ describe("file node visibility", () => {
     expect(rendered.container.querySelector("[data-opengeni-selected-file]")?.textContent).toBe(
       ".opengeni/notes.md",
     );
+    // Shown for this view only; the remembered choice is the toggle's.
+    expect(localStorage.getItem("og.files.show-hidden:v1")).toBeNull();
     await rendered.unmount();
     localStorage.clear();
   });

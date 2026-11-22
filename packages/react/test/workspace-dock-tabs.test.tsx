@@ -50,7 +50,9 @@ describe("WorkspaceDock tab strip", () => {
     const actions = [
       ...rendered.container.querySelectorAll<HTMLElement>("[data-dock-menu-action]"),
     ].map((item) => item.getAttribute("data-dock-menu-action"));
-    expect(actions).toEqual(["maximize", "hide"]);
+    expect(actions).toEqual(["hide"]);
+    // Maximize is one toggle on the strip, not a menu entry.
+    expect(rendered.container.querySelector('[title="Maximize"]')).not.toBeNull();
 
     await click(rendered.container.querySelector('[data-dock-menu-tab="files"]'));
     await flush();

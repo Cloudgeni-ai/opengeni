@@ -618,6 +618,9 @@ export function SiteViewRoute({
           onOpen={setChatOpen}
           onHide={hideChat}
           onHasConversations={chat.setFallback}
+          agentModel={
+            publication.load.state === "ready" ? (publication.load.link.agentModel ?? null) : null
+          }
           onEvent={(event) => {
             // A publish or restore from this conversation shows at once.
             if (siteMayHaveChanged(event)) check();
@@ -1000,6 +1003,7 @@ function SiteChatPanel({
   onOpen,
   onHide,
   onHasConversations,
+  agentModel,
   onEvent,
 }: {
   workspaceId: string;
@@ -1025,6 +1029,8 @@ function SiteChatPanel({
   onHide: () => void;
   /** Whether this person has chatted with the Site, which opens it by default. */
   onHasConversations: (has: boolean) => void;
+  /** The model the app's chat is set to start with, preselected when allowed. */
+  agentModel: string | null;
   /** Each new event in the open conversation, so the Site can follow its edits. */
   onEvent: (event: SessionEvent) => void;
 }) {
@@ -1399,6 +1405,7 @@ function SiteChatPanel({
               key={`new:${siteId}`}
               workspaceId={workspaceId}
               createSession={createSession}
+              defaultModel={agentModel}
               title={ready ? `Ask about ${ready.title}` : "New conversation"}
               onCreated={(created) => {
                 setHandoff({
