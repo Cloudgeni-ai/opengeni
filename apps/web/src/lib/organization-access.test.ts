@@ -46,6 +46,8 @@ describe("connected agent sign-in defaults", () => {
       "codemode:call",
       "mcp_servers:attach",
       "workspace:admin",
+      "agents:read",
+      "billing:manage",
       "members:manage",
       "api_keys:manage",
       "account:admin",
@@ -68,7 +70,9 @@ describe("connected agent sign-in defaults", () => {
   });
 
   test("app data has its own group in the permission list", () => {
-    const apps = ORGANIZATION_PERMISSION_GROUPS.find((group) => group.label === "Apps");
+    const apps = ORGANIZATION_PERMISSION_GROUPS.find(
+      (group) => group.label === "Apps and artifacts",
+    );
     expect(apps?.permissions).toEqual(["artifacts:read", "artifacts:publish"]);
   });
 

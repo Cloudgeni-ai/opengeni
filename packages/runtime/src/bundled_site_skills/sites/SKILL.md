@@ -72,7 +72,7 @@ tool calls.
   personal data), `append_only` for a form that collects answers. Skip
   `jsonSchema`; check values in the page. Then add a test entry in the saved
   app in a browser: it must show without a reload; delete it.
-6. Reply with the link as soon as it is saved, in the person's words: what
+6. Reply with the link once that works, in the person's words: what
    it does and how to use it. The link opens for workspace members only.
    When the person wants others to open it (family, customers, "on their
    phones"), offer to put it on the web and ask before making it public,
@@ -237,7 +237,7 @@ server, a tunnel, or a Connected Machine for workspace AI access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. Saved data needs no server either:
 app data gives every published app persistent collections and files. A page
-calling a connected tool shows data only to viewers with their own
+calling a connected tool usually shows data only to viewers with their own
 connection; for a team, a shared sync (`app_sync_save`) fills a collection on a
 schedule, and a webhook (`app_webhook_save`) takes in other services' events.
 A separate server is only

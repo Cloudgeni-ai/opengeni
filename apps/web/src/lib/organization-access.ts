@@ -169,12 +169,13 @@ export function defaultPolicy(): OrganizationAccessPolicy {
 /**
  * Where a coding agent connecting as a person starts: Read only plus
  * CONNECTED_AGENT_EVERYDAY_PERMISSIONS. Capped by what the person can do
- * (`ceiling`), so nothing they can't give starts checked. Shown as Custom,
- * every box visible.
+ * (`ceiling`), so nothing they can't give starts checked, and limited to the
+ * permissions the page shows. Shown as Custom, every box visible.
  */
 export function connectedAgentDefaultPolicy(
   ceiling?: ReadonlySet<string>,
 ): OrganizationAccessPolicy {
+  const shown = new Set(ORGANIZATION_PERMISSION_GROUPS.flatMap((group) => group.permissions));
   const wanted = new Set<string>([
     ...presetPermissions("read_only"),
     ...CONNECTED_AGENT_EVERYDAY_PERMISSIONS,
@@ -182,7 +183,8 @@ export function connectedAgentDefaultPolicy(
   return {
     preset: "custom",
     permissions: allOrganizationPermissions().filter(
-      (permission) => wanted.has(permission) && (!ceiling || ceiling.has(permission)),
+      (permission) =>
+        wanted.has(permission) && shown.has(permission) && (!ceiling || ceiling.has(permission)),
     ),
     workspaceScope: { kind: "all" },
   };

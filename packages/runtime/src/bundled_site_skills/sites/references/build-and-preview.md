@@ -340,8 +340,9 @@ access limitation. Missing publishing access itself still blocks publication.
 
 ## Completion gate (full apps)
 
-This gate applies to full apps. A single-file app is done when its saved link is in
-the reply (see "Single-file app" in SKILL.md).
+This gate applies to full apps. A single-file app is done when it passes its
+browser check and its saved link is in the reply (see "Single-file app" in
+SKILL.md).
 
 - Tests and the production browser build pass.
 - The compiled runtime is one self-contained HTML document within the published

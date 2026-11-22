@@ -19,8 +19,8 @@ import {
    agent acts as the person signing in, never with more than they can do; the
    person picks the organization, what it can do and where. It starts in the
    organization they last worked in, with the everyday-work set (Custom, every
-   box visible: no people, keys, billing, connections or secret values) in
-   every workspace. Allow returns to the agent.
+   box visible: never managing people, keys, billing or connections, never
+   reading secret values) in every workspace. Allow returns to the agent.
    -------------------------------------------------------------------------- */
 
 export function McpConsentPage({
