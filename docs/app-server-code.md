@@ -1,0 +1,154 @@
+# App server code
+
+An app (a published Site) can carry server code: JavaScript modules that
+ship with an app version and run on Opengeni when the app's page calls
+`site.server.fetch`. The code runs **as the app, never as the viewer**:
+
+- tool calls use only the workspace's shared connector accounts, never a
+  viewer's (or the publisher's) personal connection;
+- outbound `fetch` may carry workspace vault secrets the version lists, in
+  request headers, resolved on the server;
+- app data calls read and write shared collections as the app.
+
+So a member without their own Linear connection sees the same Linear issues
+as everyone else, an app can use an API key without exposing it, and writes
+and rules run where the page can't skip them. Scheduled refreshes and inbound
+events stay with [data syncs](app-sync.md) and [app webhooks](app-webhooks.md);
+server code serves requests from the app's page.
+
+Code: `packages/contracts/src/app-server.ts` (schemas, limits),
+`packages/db/src/app-server.ts`, `apps/api/src/app-server/` (service, run
+token), `apps/api/src/routes/app-server.ts`, the `server.fetch` operation and
+host route in `apps/api/src/routes/site-runtime.ts`,
+`apps/api/src/mcp/app-server-tools.ts`, `apps/site-gateway/src/app-server.ts`,
+`packages/sdk/src/site-server.ts`, migration `1550_app_server_code.sql`.
+
+## Setup
+
+People set it up only by asking in the app's chat: the agent writes the code,
+uploads it with the app and publishes (the bundled sites Skill's
+`references/server-code.md`). The console shows managers one line in the app
+header when there is something to act on: `Server code: 2 errors today`, or
+`Server code: not available here`.
+
+A deployment runs server code when all of these hold:
+
+| Setting | Purpose |
+| --- | --- |
+| `OPENGENI_SITES_SERVER_CODE_ENABLED=true` | Turns the feature on (off by default). |
+| Site gateway with a `LOADER` binding (`[[worker_loaders]]`, Workers Paid) | Runs the code in Cloudflare Dynamic Workers. |
+| `SITES_GATEWAY_INTERNAL_ORIGIN`, `SITES_GATEWAY_SECRET`, `SITES_DOMAIN` | The API reaches the gateway's signed internal route, and the gateway calls back. |
+| Object storage | Stores the code by content. |
+
+Without them, publishing a version with server code is refused, and an app
+that already has code reports `app_server_unavailable`.
+
+## Versions
+
+The uploaded bundle is JSON `{main, files: [{path, content}], egress?,
+secrets?}` (`server` upload from `artifacts_prepare_upload`). Publishing
+freezes it into a manifest on the version (`workspace_artifact_versions.
+server_manifest`): the main module, each file's path, SHA-256 and size,
+the egress hosts, the listed secrets and a digest over all of them. Files are
+stored once per workspace by content
+(`workspaces/<workspace>/app-server-files/<sha256>`).
+
+- A publish without a server upload keeps the current version's code; an
+  upload of `{"files": []}` removes it.
+- Rolling back the app rolls back its code: a run always uses the current
+  version's manifest.
+- Duplicating an app copies its code.
+- `artifacts_get_source` returns the version's files as download URLs, so an
+  agent edits and republishes the whole bundle.
+- Listing vault secrets needs a workspace integration admin with
+  `secrets:use`, and each secret must resolve when publishing.
+
+App packages don't carry server code yet.
+
+## Running a request
+
+1. The page calls `site.server.fetch(path, init)` (the `server.fetch` Site
+   operation, `POST .../published-artifacts/current/server`) or a member's
+   console calls `POST /v1/workspaces/:ws/published-artifacts/:id/server`.
+   The caller must be able to open the app (the same check as app data);
+   a Site frame may call only its own app.
+2. The API loads the current version's manifest and files (checking each
+   SHA-256), mints a run token bound to the account, workspace, app,
+   version, run id and deadline (HMAC keyed from the gateway secret), and
+   posts the run to the gateway's signed internal route
+   `/_og/internal/app-server/<siteId>/run`.
+3. The gateway loads the code with the Worker Loader, keyed by app, version
+   and digest. The isolate has `globalOutbound: null` (no network), a CPU
+   limit and a wall-clock deadline. Its only binding is `HOST`, a loopback
+   entrypoint pinned to that app and version.
+4. Inside, a wrapper builds `env` for the request (`viewer`, `app`,
+   `trigger`, `runId`, `tools`, `data`, `fetch`), routes `console` and the
+   global `fetch` to the request being served, and counts calls back to
+   Opengeni.
+5. Each call goes through `HOST` to the API's
+   `POST /app-server/<siteId>/<versionId>/host` on the sites apex, with the
+   run token. The API checks the token matches the app and version, that
+   the version is still current, and that the deployer still manages the
+   app, then runs the call.
+6. The API records the run (`app_server_runs`: trigger, method and path,
+   status, HTTP status, duration, error, logs, viewer) and returns the
+   response to the page. `Set-Cookie` and hop-by-hop headers are dropped.
+
+The viewer the code sees (`env.viewer`) is who called: `user:<subject>` for a
+signed-in person or `guest:<visitor>` for a public visitor, with their kind
+(`member`, `invited`, `user`, `guest`). Only their identity reaches the code;
+their credentials never do.
+
+## Authority
+
+Calls run on the app's own principal `server:<appId>` at manager level on
+shared data, as long as the person who published the current version is
+still a live member who manages the app. If they lose that, the code pauses
+with `deployer_cannot_manage` until a manager publishes again.
+
+- **Tools** (`env.tools.call`): only tools the version declares in
+  `requestedTools`, routed to a connector account shared with the workspace.
+  A personal account route is redirected to the shared one; without a shared
+  account the call fails with `shared_account_required`. First-party tool
+  servers that act as a person (Opengeni, files, docs) are refused. Tool
+  arguments may not contain vault references.
+- **Data** (`env.data`): shared, shared_read and append_only collections;
+  `per_viewer` collections are refused, since the code isn't a viewer.
+- **Fetch**: HTTPS on the default port to hosts in the version's `egress`,
+  public addresses only (private networks are refused whatever integrations
+  allow), no redirects followed. Vault references may appear only in header
+  values and only for secrets the version lists; they resolve with the
+  workspace's own reach, never a person's.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Run time (wall clock) | 30 s |
+| CPU per run | 5 s |
+| Calls to tools, data and fetch per run | 50 |
+| Request body / response body | 1 MB / 4 MB |
+| Outbound response body / timeout | 4 MB / 15 s |
+| Code | 1 MB in at most 50 files |
+| Egress hosts / secrets per version | 20 / 20 |
+| Runs per app per minute | 300 |
+| Logs kept per run | 8,000 characters |
+| Runs kept | 14 days |
+
+## Managing
+
+- `GET .../published-artifacts/:id/server/status`: has code, available,
+  today's runs and errors, last error, egress and secrets (managers, not
+  from inside the app's frame).
+- `GET .../published-artifacts/:id/server/runs?limit=&status=&before=`:
+  recent runs with logs and errors.
+- Agent tools: `app_server_runs` (status and runs) and `app_server_run`
+  (one manual request as the calling manager, with its logs).
+- SDK: `getAppServerStatus`, `listAppServerRuns`; in the page,
+  `site.server.fetch`.
+
+## Self-hosting
+
+Server code needs Cloudflare Dynamic Workers. A deployment without the
+gateway's `LOADER` binding keeps every other app feature; publishing server
+code is refused while the setting is off.

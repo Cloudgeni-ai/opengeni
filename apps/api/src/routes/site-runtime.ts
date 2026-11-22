@@ -206,6 +206,9 @@ import {
 } from "../site-publishing/viewer";
 import { runSiteSqlQuery } from "../site-sql/service";
 import { notifyFromApp } from "../app-notify/service";
+import { handleAppServerHostCall, runAppServerAs } from "../app-server/service";
+import { runAppServerRoute } from "./app-server";
+import { APP_SERVER_RUN_TOKEN_HEADER } from "@opengeni/contracts";
 import { siteDataHttpError } from "./site-data";
 import { runSiteSqlRoute } from "./site-sql";
 
@@ -640,6 +643,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       return await platformRequests(request);
     if (method === "POST" && suffix === "/platform/timings") return await platformTimings(request);
     if (method === "POST" && suffix === "/live/admit") return await liveAdmit(request);
+    const serverHost = /^\/app-server\/([0-9a-f-]{36})\/([0-9a-f-]{36})\/host$/u.exec(suffix);
+    if (method === "POST" && serverHost)
+      return await appServerHost(request, serverHost[1]!, serverHost[2]!);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
     const tool = /^\/tools\/([a-z][a-z-]*)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
@@ -647,6 +653,33 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const matched = matchSiteOperation(method, sitePath);
     if (!matched) throw unsupported();
     return await operation(request, matched.operation.id);
+  };
+
+  /**
+   * A call back to Opengeni from an app's server code (docs/app-server-code.md),
+   * forwarded by the gateway's `AppServerHost` entrypoint and signed on the
+   * Sites domain apex with the isolate's own app and version in the path. The
+   * run's token must name the same app and version.
+   */
+  const appServerHost = async (
+    request: RuntimeRequest,
+    siteId: string,
+    versionId: string,
+  ): Promise<Response> => {
+    const apex = request.domain.toLowerCase();
+    if (request.fields.host.toLowerCase().replace(/\.$/u, "") !== apex)
+      throw invalid("App server calls are signed for the Sites domain");
+    const token = request.context.req.header(APP_SERVER_RUN_TOKEN_HEADER) ?? "";
+    return request.context.json(
+      await runAppServerRoute(() =>
+        handleAppServerHostCall(deps, {
+          siteId,
+          versionId,
+          token,
+          body: parseJson(request.body, z.unknown()),
+        }),
+      ),
+    );
   };
 
   /**
@@ -1304,6 +1337,27 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return await siteData(request, host, viewer, limits.guestWritesPerMinute);
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
+      case "server.fetch":
+        // The app's server code, told who is asking; it runs as the app.
+        return context.json(
+          await runAppServerRoute(() =>
+            runAppServerAs(
+              deps,
+              publishedViewer(host, viewer),
+              host.site.id,
+              parseJson(request.body, z.unknown()),
+              {
+                frameSiteId: host.site.id,
+                viewer: {
+                  id: viewer.principal,
+                  email: viewer.kind === "guest" ? null : viewer.email,
+                  name: viewer.kind === "guest" ? null : viewer.name,
+                  kind: viewer.kind,
+                },
+              },
+            ),
+          ),
+        );
       case "site.notify":
         // Members only: notifyFromApp refuses guests and invited viewers.
         return context.json(

@@ -462,6 +462,7 @@ import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
 import { registerAppSyncRoutes } from "./routes/app-sync";
 import { registerAppWebhookRoutes } from "./routes/app-webhooks";
+import { registerAppServerRoutes } from "./routes/app-server";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
@@ -2899,6 +2900,7 @@ export function createAppComposition(
   registerSiteDataRoutes(app, routeDeps);
   registerAppSyncRoutes(app, routeDeps);
   registerAppWebhookRoutes(app, routeDeps);
+  registerAppServerRoutes(app, routeDeps);
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);

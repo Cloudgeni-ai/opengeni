@@ -34,6 +34,7 @@ import {
   type OpenGeniSiteNotifyResult,
 } from "./site-data";
 import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
+import { createOpenGeniSiteServer, type OpenGeniSiteServer } from "./site-server";
 import { createOpenGeniSiteAi, type OpenGeniSiteAi } from "./site-ai";
 import {
   isOpenGeniSiteConnectionStatus,
@@ -57,6 +58,12 @@ export type {
   OpenGeniSiteAiOptions,
   OpenGeniSiteAiWait,
 } from "./site-ai";
+export {
+  OpenGeniSiteServerError,
+  type OpenGeniSiteServer,
+  type OpenGeniSiteServerErrorCode,
+  type OpenGeniSiteServerInit,
+} from "./site-server";
 export {
   OpenGeniSiteSqlError,
   type OpenGeniSiteSql,
@@ -422,6 +429,12 @@ export type OpenGeniSiteClient = {
    */
   readonly sql: OpenGeniSiteSql;
   /**
+   * The app's own server code, when its version has some
+   * (`await site.server.fetch("/issues")` resolves with a `Response`). It runs
+   * as the app on the workspace's shared connections, never as the viewer.
+   */
+  readonly server: OpenGeniSiteServer;
+  /**
    * The person viewing this Site, resolved once from the host and cached for
    * the life of the client (`await site.viewer`). In the console this is the
    * signed-in workspace member; on a published Site it is the signed-in
@@ -576,6 +589,10 @@ export function createOpenGeniSiteClient(
     (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
     () => transport.siteDataSupported(),
   );
+  const siteServer = createOpenGeniSiteServer(
+    (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
+    () => transport.siteDataSupported(),
+  );
   let viewer: Promise<OpenGeniSiteViewer | null> | null = null;
   let capabilities: Promise<OpenGeniSiteCapabilities | null> | null = null;
   const client = new OpenGeniClient({
@@ -599,6 +616,7 @@ export function createOpenGeniSiteClient(
     data: siteData.data,
     files: siteData.files,
     sql: siteSql,
+    server: siteServer,
     get viewer() {
       if (!viewer) {
         const pending = transport.viewer();

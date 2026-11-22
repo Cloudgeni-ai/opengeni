@@ -2334,6 +2334,10 @@ const SettingsSchema = z.object({
   // "Change events"). Turn on once the gateway has its SITE_LIVE binding; it
   // also needs the gateway's internal origin and secret.
   sitesLiveEnabled: EnvBoolean.default(false),
+  // App server code (docs/app-server-code.md): run an app version's server
+  // code in a Cloudflare Dynamic Worker the gateway loads (its LOADER
+  // binding). Also needs the gateway's internal origin and secret.
+  sitesServerCodeEnabled: EnvBoolean.default(false),
   sitesGatewayInternalOrigin: z
     .string()
     .url()
@@ -6924,6 +6928,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
     sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
     sitesLiveEnabled: optional("OPENGENI_SITES_LIVE_ENABLED"),
+    sitesServerCodeEnabled: optional("OPENGENI_SITES_SERVER_CODE_ENABLED"),
     sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
     sitesSqlFreeStorageBytes: optional("OPENGENI_SITES_SQL_FREE_STORAGE_BYTES"),
     sitesSqlFreeRowsReadPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_READ_PER_MONTH"),
