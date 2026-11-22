@@ -183,8 +183,10 @@ version 8 UUID), so every export of one app, and of every copy installed from
 it, carries the same id. Upgrade compares it (see the rule above); packages
 without one aren't checked. The id is a claim the package makes, not a
 signature: it guards against mistakes, not a crafted package. A duplicated
-app starts without one. The ids are in the install and upgrade responses; in
-the console, another app's package shows as a note to confirm.
+app starts without one. A copy installed before migration 1545 has no
+recorded id, so its next upgrade asks once to confirm; the upgrade then
+records the package's id. The ids are in the install and upgrade responses;
+in the console, another app's package shows as a note to confirm.
 
 ## Syncs
 

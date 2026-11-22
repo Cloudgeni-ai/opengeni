@@ -101,8 +101,8 @@ describe("app package asset files and package id", () => {
 
   test("ignores an invalid package id and refuses invalid asset files", () => {
     expect(parseAppPackage({ ...base, packageId: "nope" }).package.packageId).toBeUndefined();
-    expect(() =>
-      parseAppPackage({ ...base, app: { ...base.app, assets: { files: [] } } }),
-    ).toThrow(AppPackageFormatError);
+    expect(() => parseAppPackage({ ...base, app: { ...base.app, assets: { files: [] } } })).toThrow(
+      AppPackageFormatError,
+    );
   });
 });
