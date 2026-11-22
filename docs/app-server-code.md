@@ -138,9 +138,31 @@ app's sharing setting:
 
 The run's viewer is recorded on its row at start, and calls back read it
 from there, never from the code. Code without tools or secrets keeps the
-app's usual access rules. Data that syncs, webhooks or earlier runs stored in
-app data is served under that data's own collection rules; see the gap noted
-on OPE-1057.
+app's usual access rules.
+
+### Stored tool data
+
+The same rule holds for what is stored. Before a shared app sync run, or a
+run of code with tools or secrets, writes a collection (or, for a sync, the
+app's SQL database), the API marks the target in `site_tool_data_sources`
+with the connector and account route the data came from (`vault` for
+secrets). Marks only grow, and apps can't change them. A live shared sync
+also counts from its definition, so syncs saved by earlier releases are
+covered before their next run, with no backfill.
+
+Every read of a marked target needs a signed-in, live member of the
+workspace. A route that is a workspace-shared account needs that same route
+in the member's own tool inventory; any other route needs an account of the
+same connector (or the account-less server); `vault` needs `secrets:use`.
+This covers Site Data query, get and export, Site SQL queries, statements
+and export (the whole database: SQL can join any table), the published app's
+agent tools, and server code's own data reads, which are checked against the
+run's viewer. Guests, invited people and other users get a refusal naming
+the connector, whatever the collection's guest access or the app's sharing
+setting says. A member's inventory is kept for 30 seconds per API process.
+App webhooks store payloads that outside services push in, not
+shared-account data, so they don't mark. The publication readiness check
+shows managers one line per affected collection or database.
 
 - **Tools** (`env.tools.call`): only tools the server bundle lists in
   `tools` (separate from the page's `requestedTools`, which run as the

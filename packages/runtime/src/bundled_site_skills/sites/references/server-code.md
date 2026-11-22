@@ -21,7 +21,8 @@ already do: workspace tools as the viewer, AI, app data, and scheduled refills
 Code that calls tools or uses vault secrets runs only for signed-in members
 of the app's workspace who may use that tool or secret themselves; Opengeni
 refuses everyone else (`not_permitted`), whatever the app's sharing setting.
-Code without tools or secrets follows the app's usual access.
+Code without tools or secrets follows the app's usual access. Data the code
+stores while it can use tools or secrets is held to the same rule when read.
 
 - Return only what the caller should see; filter on the server.
 - The code is not secret: anyone who can read the app's source can read it.

@@ -1,4 +1,5 @@
 import { outsideAgentReach, type ApiRouteDeps } from "@opengeni/core";
+import { requireToolDataReader, siteToolDataTarget, toolDataReaderOf } from "../site-tool-data";
 import type {
   SiteDataCollectionDefinitionRequest,
   SiteDataDescribeResponse,
@@ -287,6 +288,20 @@ export async function resetSiteDataCollection(
  * Mark the Site watched by a live connection and return its change number
  * and the collections this caller may read (live hints name only those).
  */
+/** Stored shared-account tool data is read only by members who may use it (site-tool-data.ts). */
+async function requireCollectionReader(
+  deps: SiteDataDeps,
+  access: SiteDataAccess,
+  collection: string,
+): Promise<void> {
+  await requireToolDataReader(deps, {
+    scope: { accountId: access.caller.accountId, workspaceId: access.caller.workspaceId },
+    siteId: access.site.id,
+    target: siteToolDataTarget("collection", collection),
+    reader: toolDataReaderOf(access),
+  });
+}
+
 export async function watchSiteData(
   deps: SiteDataDeps,
   grant: SiteDataAuthority,
@@ -305,6 +320,7 @@ export async function querySiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await requireCollectionReader(deps, access, query.collection);
   await consume(access, "read", 1);
   return access.store.query(access.caller, {
     collection: query.collection,
@@ -329,6 +345,7 @@ export async function getSiteDataRecord(
   surface: SiteDataSurface = {},
 ): Promise<SiteDataRecord | null> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await requireCollectionReader(deps, access, request.collection);
   await consume(access, "read", 1);
   return access.store.get(
     access.caller,
@@ -620,6 +637,7 @@ export async function exportSiteData(
   content: string;
 }> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
+  await requireCollectionReader(deps, access, collection);
   const records: SiteDataRecord[] = [];
   let cursor: string | null = null;
   let truncated = false;

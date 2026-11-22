@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  liveMemberGrant,
+  markToolData,
+  requireToolDataReader,
+  siteToolDataTarget,
+  type SiteToolDataSource,
+} from "../site-tool-data";
+import {
   APP_SERVER_BUNDLE_MAX_BYTES,
   APP_SERVER_CPU_MS,
   APP_SERVER_FETCH_RESPONSE_MAX_BYTES,
@@ -50,13 +57,10 @@ import {
   getAppServerDeployment,
   getAppServerRun,
   getVerifiedSubjectEmail,
-  getWorkspaceGrant,
   listAppServerRuns,
   SiteDataError,
   startAppServerRun,
-  subjectHasLiveWorkspaceAuthorityInScope,
   summarizeAppServerRuns,
-  withWorkspaceSubjectRls,
   workspaceMemberDisplayName,
   WorkspaceArtifactOperationError,
   type AppServerDeployment,
@@ -421,20 +425,6 @@ const DEPLOYER_CANNOT_MANAGE =
   "The person who published this version can no longer manage the app, so its server code is paused. Someone who manages the app should publish it again.";
 const DEPLOYER_CANNOT_USE_SECRETS =
   "This version's server code uses vault secrets, and the person who made it current isn't a workspace admin who may use them, so it is paused. A workspace admin should publish it again.";
-
-/** A person's own live grant in the workspace as a member; null when they aren't one. */
-async function liveMemberGrant(
-  deps: Pick<ApiRouteDeps, "db">,
-  scope: { accountId: string; workspaceId: string },
-  subjectId: string,
-): Promise<AccessGrant | null> {
-  return await withWorkspaceSubjectRls(deps.db, scope.workspaceId, subjectId, async (tx) => {
-    if (!(await subjectHasLiveWorkspaceAuthorityInScope(tx, { ...scope, subjectId }))) return null;
-    return await getWorkspaceGrant(tx, subjectId, scope.workspaceId, {
-      principalKind: "human_session",
-    });
-  });
-}
 
 /** The deployer's own live workspace grant; null once they are gone. */
 async function deployerGrant(
@@ -1271,6 +1261,50 @@ export async function handleAppServerHostCall(
   // Even an outbound fetch stops once the deployer can no longer manage the app.
   const state = runStateFor(deps, deployment, claims.runId);
   const authority = await state.authority;
+  /** Stored tool data the code reads is held to the run's viewer (site-tool-data.ts). */
+  const requireRunViewerReads = async (collection: string) => {
+    try {
+      await requireToolDataReader(deps, {
+        scope,
+        siteId: deployment.siteId,
+        target: siteToolDataTarget("collection", collection),
+        reader: { subjectId: viewerSubjectOf(claimed.viewerSubjectId) },
+      });
+    } catch (error) {
+      if (error instanceof SiteDataError) throw notPermitted(error.message, { collection });
+      throw error;
+    }
+  };
+  /** The connectors this version's data may come from: its declared tools' routes and the vault. */
+  const serverToolDataSources = async (): Promise<SiteToolDataSource[]> => {
+    const manifest = deployment.manifest!;
+    let inventory: SiteToolAccountInventory | null = null;
+    try {
+      state.inventory ??= (deps.appServerToolInventory ?? readSiteToolAccountInventory)(
+        deps,
+        authority.grant,
+      );
+      inventory = await state.inventory;
+    } catch {
+      state.inventory = undefined;
+    }
+    const declared = appServerDeclaredTools(manifest);
+    const sources: SiteToolDataSource[] = declared.map((tool) => {
+      const canonical =
+        inventory?.accounts.find((account) => account.serverId === tool.serverId)
+          ?.canonicalServerId ?? tool.serverId;
+      try {
+        if (!inventory) throw new Error("no inventory");
+        const routed = routeAppServerTool(inventory, declared, tool);
+        return { target: "", connector: canonical, route: routed.serverId, shared: true };
+      } catch {
+        return { target: "", connector: canonical, route: canonical, shared: false };
+      }
+    });
+    if (manifest.secrets.length > 0)
+      sources.push({ target: "", connector: "vault", route: "vault", shared: false });
+    return sources;
+  };
   /** The run's viewer as a live member of the workspace, or a refusal. */
   const viewerGrant = async (): Promise<AccessGrant> => {
     const subjectId = viewerSubjectOf(claimed.viewerSubjectId);
@@ -1368,6 +1402,7 @@ export async function handleAppServerHostCall(
       case "data.query": {
         const query = parseWith(SiteDataQueryRequest, call.input);
         await requireSharedCollection(authority.access, query.collection);
+        await requireRunViewerReads(query.collection);
         return {
           result: await authority.access.store.query(authority.access.caller, {
             collection: query.collection,
@@ -1382,6 +1417,7 @@ export async function handleAppServerHostCall(
       case "data.get": {
         const get = parseWith(SiteDataGetRequest, call.input);
         await requireSharedCollection(authority.access, get.collection);
+        await requireRunViewerReads(get.collection);
         return {
           result: await authority.access.store.get(
             authority.access.caller,
@@ -1392,8 +1428,23 @@ export async function handleAppServerHostCall(
       }
       case "data.write": {
         const write = parseWith(SiteDataWriteRequest, call.input);
-        for (const name of new Set(write.operations.map((operation) => operation.collection)))
-          await requireSharedCollection(authority.access, name);
+        const names = new Set(write.operations.map((operation) => operation.collection));
+        for (const name of names) await requireSharedCollection(authority.access, name);
+        // Code that reaches shared accounts marks what it writes before writing it.
+        if (appServerReachesSharedAccounts(deployment.manifest)) {
+          const sources = await serverToolDataSources();
+          await markToolData(
+            deps,
+            scope,
+            deployment.siteId,
+            [...names].flatMap((name) =>
+              sources.map((source) => ({
+                ...source,
+                target: siteToolDataTarget("collection", name),
+              })),
+            ),
+          );
+        }
         return {
           result: await writeSiteDataWithAccess(
             deps,

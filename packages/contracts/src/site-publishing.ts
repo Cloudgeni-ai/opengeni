@@ -437,6 +437,11 @@ export const SITE_PUBLISH_WARNING_CODES = [
    * Opengeni first. A notice about the deployment, with nothing to fix.
    */
   "public_sign_in_required",
+  /**
+   * The page shows data stored from a workspace-shared account (a shared
+   * sync or server code), which only members who may use that connector see.
+   */
+  "tool_data_members_only",
 ] as const;
 
 /** Warnings that only inform: nothing on the Site can or needs to change. */

@@ -15,8 +15,15 @@
 --   count started runs) and its calls back to Opengeni are counted on it
 --   (host_calls), so the API enforces the per-run limits whatever the code
 --   does in its isolate. The API prunes rows older than 14 days.
+-- * site_tool_data_sources: which connectors' shared-account tool data an
+--   app stored where (a collection, or the app's SQL database), written by
+--   the API before a shared sync run or server code with tools stores it.
+--   Reads of a marked target are allowed only for workspace members who may
+--   use that connector themselves. Live shared syncs also count from their
+--   definitions, so no backfill is needed and a sync saved by the previous
+--   release is covered too.
 --
--- Rolling: a nullable column and a new table the previous release never
+-- Rolling: a nullable column and new tables the previous release never
 -- reads or writes.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
@@ -78,6 +85,48 @@ BEGIN
     -- Default privileges may already have granted more; start from none.
     EXECUTE 'REVOKE ALL ON TABLE app_server_runs FROM opengeni_app';
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app_server_runs TO opengeni_app';
+  END IF;
+END
+$$;
+
+CREATE TABLE site_tool_data_sources (
+  account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  site_id uuid NOT NULL,
+  -- 'collection:<name>' or 'sql' (the app's whole SQL database).
+  target text NOT NULL,
+  -- The connector (canonical server id), or 'vault' for vault secrets.
+  connector text NOT NULL,
+  -- The account route the data came from (equal to connector when unknown).
+  route text NOT NULL,
+  -- Whether the route is a workspace-shared account.
+  shared boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT site_tool_data_sources_pkey PRIMARY KEY (workspace_id, site_id, target, connector, route),
+  CONSTRAINT site_tool_data_sources_target_check
+    CHECK (target = 'sql' OR (target LIKE 'collection:%' AND char_length(target) BETWEEN 12 AND 80)),
+  CONSTRAINT site_tool_data_sources_connector_check CHECK (char_length(connector) BETWEEN 1 AND 256),
+  CONSTRAINT site_tool_data_sources_route_check CHECK (char_length(route) BETWEEN 1 AND 256),
+  CONSTRAINT site_tool_data_sources_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
+  CONSTRAINT site_tool_data_sources_site_fk FOREIGN KEY (workspace_id, site_id)
+    REFERENCES workspace_artifacts(workspace_id, id) ON DELETE CASCADE
+);
+COMMENT ON TABLE site_tool_data_sources IS 'Connectors whose shared-account tool data an app stored in a collection or its SQL database; reads need a member who may use them.';
+
+ALTER TABLE site_tool_data_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE site_tool_data_sources FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspace_isolation ON site_tool_data_sources
+  USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
+  WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+
+REVOKE ALL ON TABLE site_tool_data_sources FROM PUBLIC;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE 'REVOKE ALL ON TABLE site_tool_data_sources FROM opengeni_app';
+    EXECUTE 'GRANT SELECT, INSERT ON TABLE site_tool_data_sources TO opengeni_app';
   END IF;
 END
 $$;

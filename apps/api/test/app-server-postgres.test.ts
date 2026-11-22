@@ -354,6 +354,7 @@ async function fixture() {
       isolate = next;
     },
     deps: deps as unknown as AppServerDeps,
+    person,
     setInventory: (
       next: SiteToolAccountInventory | ((grant: AccessGrant) => SiteToolAccountInventory),
     ) => {
@@ -712,4 +713,83 @@ test("a member who can't use the shared connection themselves is refused the too
   expect(refused?.status).toBe(403);
   expect(refused?.json.error.details.reason).toBe("not_permitted");
   expect(f.toolCalls).toEqual([]);
+});
+
+test("stored shared-account data is shown only to members who may use its connector", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  const defined = await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/issues`, {
+    accessMode: "shared",
+    guestAccess: "read",
+  });
+  expect(defined.status, JSON.stringify(defined.json)).toBe(201);
+  const published = await f.app.request(`${f.base}/${f.siteId}/publication`, {
+    method: "PUT",
+    headers: f.owner.headers,
+    body: JSON.stringify({ access: "public" }),
+  });
+  expect(published.status, await published.clone().text()).toBe(201);
+  const hostname = String(((await published.json()) as { hostname: string }).hostname);
+  // A member's run stores what the shared account returned.
+  let wrote: HostReply | undefined;
+  f.setIsolate(async (_run, host) => {
+    wrote = await host("data.write", {
+      operations: [{ op: "put", collection: "issues", key: "ENG-1", data: { title: "Shared" } }],
+    });
+    return {};
+  });
+  await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/refresh" });
+  expect(wrote?.status, JSON.stringify(wrote?.json)).toBe(200);
+
+  // Whatever the collection's guest access says, a visitor gets nothing.
+  const visitor = randomBytes(18).toString("base64url");
+  const guest = await f.runtime(
+    hostname,
+    "/published-artifacts/current/data/query",
+    { collection: "issues" },
+    visitor,
+  );
+  expect(guest.status, JSON.stringify(guest.json)).toBe(403);
+  expect(JSON.stringify(guest.json)).not.toContain("Shared");
+
+  // A member who reaches the shared account reads it.
+  const member = await f.request(f.member, "POST", `/${f.siteId}/data/query`, {
+    collection: "issues",
+  });
+  expect(member.status, JSON.stringify(member.json)).toBe(200);
+  expect(member.json.records[0].data).toEqual({ title: "Shared" });
+
+  // A member who can't use the connection is refused.
+  const other = await f.person(["workspace:read", "sessions:read", "artifacts:read"]);
+  const reachable = {
+    canonical: new Map([["linear", { name: "Linear" } as never]]),
+    plain: new Set<string>(),
+    accounts: [{ serverId: "linear__team", canonicalServerId: "linear", shared: true } as never],
+    capabilityServers: new Set<string>(),
+  };
+  f.setInventory((grant) =>
+    grant.subjectId === other.subjectId ? { ...reachable, accounts: [] } : reachable,
+  );
+  const refused = await f.request(other, "POST", `/${f.siteId}/data/query`, {
+    collection: "issues",
+  });
+  expect(refused.status, JSON.stringify(refused.json)).toBe(403);
+  expect(JSON.stringify(refused.json)).toContain("Linear");
+
+  // Server code without tools can't hand it to a visitor either.
+  expect((await f.publish(PLAIN_CODE)).status).toBe(200);
+  let read: HostReply | undefined;
+  f.setIsolate(async (_run, host) => {
+    read = await host("data.query", { collection: "issues" });
+    return {};
+  });
+  const ran = await f.runtime(
+    hostname,
+    "/published-artifacts/current/server",
+    { path: "/issues" },
+    visitor,
+  );
+  expect(ran.status, JSON.stringify(ran.json)).toBe(200);
+  expect(read?.status).toBe(403);
+  expect(read?.json.error.details?.reason).toBe("not_permitted");
 });

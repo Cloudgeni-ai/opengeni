@@ -16,6 +16,7 @@ import {
   type AppServerDeps,
 } from "../src/app-server/service";
 import { mintAppServerRunToken, verifyAppServerRunToken } from "../src/app-server/token";
+import { memberMayUseSource, sourceOfSyncAction } from "../src/site-tool-data";
 import type { SiteToolAccountInventory } from "../src/site-tool-routing";
 
 const SECRET = ["{", "{secret:Shared/Weather/api key}}"].join("");
@@ -301,5 +302,67 @@ describe("app server viewer permission", () => {
     expect(appServerViewerMayUse(viewer, { serverId: "linear__mine", toolName: "x" })).toBe(false);
     expect(appServerViewerMayUse(viewer, { serverId: "linear__other", toolName: "x" })).toBe(false);
     expect(appServerViewerMayUse(viewer, { serverId: "linear", toolName: "x" })).toBe(false);
+  });
+});
+
+describe("stored tool data", () => {
+  const member = { permissions: ["workspace:read"], permissionMode: "exact" } as never;
+  const inventory: SiteToolAccountInventory = {
+    canonical: new Map([["linear", { name: "Linear" } as never]]),
+    plain: new Set(["weather"]),
+    accounts: [{ serverId: "linear__mine", canonicalServerId: "linear", shared: false } as never],
+  };
+  test("data from a shared account needs that same account; other data needs the connector", () => {
+    const shared = { target: "sql", connector: "linear", route: "linear__team", shared: true };
+    expect(memberMayUseSource(member, inventory, shared)).toBe(false);
+    expect(
+      memberMayUseSource(
+        member,
+        {
+          ...inventory,
+          accounts: [
+            { serverId: "linear__team", canonicalServerId: "linear", shared: true } as never,
+          ],
+        },
+        shared,
+      ),
+    ).toBe(true);
+    const owners = { target: "sql", connector: "linear", route: "linear__owner", shared: false };
+    expect(memberMayUseSource(member, inventory, owners)).toBe(true);
+    expect(memberMayUseSource(member, { ...inventory, accounts: [] }, owners)).toBe(false);
+    expect(
+      memberMayUseSource(member, inventory, { ...owners, connector: "weather", route: "weather" }),
+    ).toBe(true);
+    expect(
+      memberMayUseSource(member, inventory, { ...owners, connector: "vault", route: "vault" }),
+    ).toBe(false);
+  });
+  test("a live shared sync counts from its definition", () => {
+    expect(
+      sourceOfSyncAction({
+        kind: "app_sync",
+        collection: "issues",
+        mode: "shared",
+        tool: { serverId: "linear__owner", toolName: "list_issues" },
+        declaredTools: [
+          { serverId: "linear__owner", toolName: "list_issues" },
+          { serverId: "linear", toolName: "list_issues" },
+        ],
+        ownerAccount: null,
+      }),
+    ).toEqual({
+      target: "collection:issues",
+      connector: "linear",
+      route: "linear__owner",
+      shared: false,
+    });
+    expect(
+      sourceOfSyncAction({
+        collection: "rows",
+        target: { table: "rows" },
+        tool: { serverId: "linear", toolName: "list_issues" },
+        declaredTools: [],
+      })?.target,
+    ).toBe("sql");
   });
 });

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { markToolData, siteToolDataTarget } from "../site-tool-data";
 import {
   APP_SYNC_DEFAULT_PAGES,
   APP_SYNC_MAX_RECORDS,
@@ -837,6 +838,27 @@ async function runForPerson(
       );
     const writer = await syncWriter(deps, grant, task, action, context);
     const identity = await toolForPerson(deps, grant, action, chosenAccount);
+    // A shared sync's target holds this account's data: mark it before
+    // writing, so reads need a member who may use the connector.
+    if (action.mode === "shared") {
+      const inventory = await readInventory(deps, grant).catch(() => null);
+      const account = inventory?.accounts.find((item) => item.serverId === identity.serverId);
+      await markToolData(
+        deps,
+        { accountId: task.accountId, workspaceId: task.workspaceId },
+        action.siteId,
+        [
+          {
+            target: action.target
+              ? siteToolDataTarget("sql")
+              : siteToolDataTarget("collection", action.collection),
+            connector: account?.canonicalServerId ?? connectorToolOf(action).serverId,
+            route: identity.serverId,
+            shared: account?.shared === true,
+          },
+        ],
+      );
+    }
     const limit = Math.min(action.maxRecords ?? APP_SYNC_MAX_RECORDS, APP_SYNC_MAX_RUN_RECORDS);
     const paging = action.paging ?? null;
     const maxPages = paging ? (paging.maxPages ?? APP_SYNC_DEFAULT_PAGES) : 1;

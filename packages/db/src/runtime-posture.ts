@@ -2498,6 +2498,7 @@ export const FORCE_RLS_TABLES = [
   "site_sql_rate_windows",
   "site_sql_usage",
   "site_tool_allowances",
+  "site_tool_data_sources",
   "site_viewer_sessions",
   "skill_config_conversion_receipts",
   "skill_source_bindings",
@@ -3128,6 +3129,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   // mirror of a visible message event.
   "session_message_search_texts",
   "session_spawn_denials",
+  // 1550_app_server_code: where an app stored shared-account tool data (marks only grow).
+  "site_tool_data_sources",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
