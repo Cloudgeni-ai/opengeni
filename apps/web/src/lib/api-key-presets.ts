@@ -134,7 +134,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   "files:write": "Change files",
   "documents:search": "Search knowledge",
   "documents:manage": "Manage knowledge",
-  "artifacts:read": "Open apps and artifacts, read and add app data as each app allows",
+  "artifacts:read": "Open apps and artifacts, read and change app data as each app allows",
   "artifacts:publish": "Save, publish and archive apps and documents; manage app data",
   "scheduled_tasks:run": "Run automations",
   "scheduled_tasks:manage": "Manage automations",

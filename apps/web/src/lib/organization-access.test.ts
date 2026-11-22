@@ -31,7 +31,6 @@ describe("connected agent sign-in defaults", () => {
         "sessions:control",
         "sessions:create",
         "stream:acknowledge",
-        "stream:control",
       ].filter((permission) => !readOnly.has(permission)),
     );
     for (const permission of [

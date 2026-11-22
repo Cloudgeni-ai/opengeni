@@ -166,14 +166,13 @@ export const McpConnectionDecision = /* @__PURE__ */ defineSchema(() =>
 /**
  * Everyday work a coding agent connecting as a person starts with, on top of
  * Read only: chats, files, knowledge, apps and their data, automations, and
- * using (never reading or changing) secrets, GitHub and machines. Never
- * managing people, keys, billing, connections, capabilities, machines or
- * terminals, and never reading secret values.
+ * using (never reading or changing) secrets, GitHub and sandbox environments.
+ * Never managing people, keys, billing, connections, capabilities, machines or
+ * terminals, controlling live screens, or reading secret values.
  */
 export const CONNECTED_AGENT_EVERYDAY_PERMISSIONS: readonly Permission[] = [
   "sessions:create",
   "sessions:control",
-  "stream:control",
   "stream:acknowledge",
   "goals:manage",
   "files:upload",
