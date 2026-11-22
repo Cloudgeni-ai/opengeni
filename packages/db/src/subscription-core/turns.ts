@@ -969,7 +969,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
    * Record a refusal that survived refresh as connection health, so eligibility
    * excludes the connection and sticky placement does not return to it:
    * a revoked sign-in becomes `needs_relogin` (cleared only by a new sign-in),
-   * and a 403 becomes a time-bound `error` quarantine. Written only for the
+   * and a 403 becomes an `error` quarantine, until reconnect unless the
+   * provider defines a retry window. Written only for the
    * exact accepted turn holding the live lease, under the refresh-generation
    * compare-and-swap of the credential that was refused.
    */
@@ -985,6 +986,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   ): Promise<boolean> {
     const now = input.now ?? new Date();
     const forbidden = input.kind === "forbidden";
+    const retryMs = provider.adapter.health.forbiddenQuarantineMs;
     const access = await withLeasedConnection(db, identity, lease, async (tx) => {
       const [row] = await rawRows<{ marked: boolean }>(
         tx,
@@ -996,15 +998,13 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
           ${forbidden ? "error" : "needs_relogin"},
           ${
             forbidden
-              ? "model request was forbidden for this credential"
+              ? retryMs === null
+                ? "The provider denied model access for this account (HTTP 403). Check its permissions, then reconnect it."
+                : "model request was forbidden for this credential"
               : "model request remained unauthorized after refresh"
           },
           ${
-            forbidden
-              ? new Date(
-                  now.getTime() + provider.adapter.health.forbiddenQuarantineMs,
-                ).toISOString()
-              : null
+            forbidden && retryMs !== null ? new Date(now.getTime() + retryMs).toISOString() : null
           }::timestamptz
         ) as marked`,
       );

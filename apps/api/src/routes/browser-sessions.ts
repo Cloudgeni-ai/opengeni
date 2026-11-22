@@ -270,6 +270,7 @@ import {
 import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { requireInteractionAttachmentAccess } from "../http/interaction-attachment";
 import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
@@ -288,9 +289,14 @@ import {
   observeAuthMutation,
   observeBrowserActionResult,
   observeBrowserRevisionPublication,
+  observeLifecycleControllerFailure,
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import {
+  agentCallerSessionId,
+  connectedInteractionRouteSession,
+} from "../connected-interaction-route";
 import {
   connectedMachineBrowserClosingNotice,
   withBrowserClosingNotice,
@@ -762,6 +768,7 @@ export function registerBrowserSessionRoutes(
                     placement.controllerHostSandboxGroupId,
                   ).catch(() => undefined);
                 }
+                observeLifecycleControllerFailure(deps.observability, "browser.create", error);
                 return failed;
               }
               // Once the controller has accepted the exact binding, a persistence
@@ -2382,11 +2389,11 @@ export function registerBrowserSessionRoutes(
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/attachments",
     async (context) => {
-      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+      const { workspaceId, grant, origin } = await requireInteractionAttachmentAccess(
         context,
-        "stream:view",
+        deps,
       );
-      const origin = requestOrigin(context, deps.settings);
+      const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionAttachmentRequest);
       const result = await withActiveBrowserController(
         context,
@@ -2877,7 +2884,13 @@ export function registerBrowserSessionRoutes(
         };
         await prepareRestore();
 
-        const sourceSession = await requireSourceSession(deps, workspaceId, before.sourceSessionId);
+        const sourceSession = await browserRouteSession(
+          deps,
+          grant,
+          before,
+          await requireSourceSession(deps, workspaceId, before.sourceSessionId),
+          "session.control",
+        );
         // A full controller saves its least recently used idle browser once,
         // as for a create, so a saved browser can come back while the machine
         // is at its limit.
@@ -3233,7 +3246,13 @@ export function registerBrowserSessionRoutes(
     ) {
       throw new BrowserSessionStateError("BrowserSession controller authority changed");
     }
-    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    const sourceSession = await browserRouteSession(
+      deps,
+      grant,
+      record,
+      await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+      "session.control",
+    );
     if (
       record.session.placement.kind === "connected_machine" &&
       sourceSession.activeSandboxId !== record.session.placement.sandboxId
@@ -3885,7 +3904,13 @@ export function registerBrowserSessionRoutes(
       }
       const sourceSession =
         checkpoint.capacityFor?.routeSourceSession ??
-        (await requireSourceSession(deps, workspaceId, record.sourceSessionId));
+        (await browserRouteSession(
+          deps,
+          grant,
+          record,
+          await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+          "session.control",
+        ));
       const response = await withBrowserPlacement(
         sourceSession,
         grant,
@@ -4647,6 +4672,15 @@ export function registerBrowserSessionRoutes(
       stages?.mark("authorize");
       let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
+        if (sourceSession) {
+          sourceSession = await browserRouteSession(
+            deps,
+            grant,
+            record,
+            sourceSession,
+            authorizationOperation,
+          );
+        }
         if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
           throw sourcePlacementElsewhereApiError(
             "browser_session",
@@ -4953,10 +4987,12 @@ export function registerBrowserSessionRoutes(
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
       if (record.session.placement.kind === "connected_machine") {
-        const source = await requireSourceSession(
+        const source = await browserRouteSession(
           routeDeps,
-          record.session.workspaceId,
-          record.sourceSessionId,
+          grant,
+          record,
+          await requireSourceSession(routeDeps, record.session.workspaceId, record.sourceSessionId),
+          authorizationOperation,
         );
         if (source.activeSandboxId !== record.session.placement.sandboxId) {
           throw sourcePlacementElsewhereApiError(
@@ -5072,7 +5108,13 @@ export function registerBrowserSessionRoutes(
       return { unavailable: "It kept no private profile to continue" };
     }
     const rootSecret = browserAuthorityRoot(deps);
-    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    const sourceSession = await browserRouteSession(
+      deps,
+      grant,
+      record,
+      await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+      "session.control",
+    );
     if (
       record.session.placement.kind === "connected_machine" &&
       sourceSession.activeSandboxId !== record.session.placement.sandboxId
@@ -5268,7 +5310,13 @@ export function registerBrowserSessionRoutes(
     }
     if (binding) {
       browserAuthorityRoot(deps);
-      const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+      const sourceSession = await browserRouteSession(
+        deps,
+        grant,
+        record,
+        await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+        "session.control",
+      );
       await withBrowserPlacement(
         sourceSession,
         grant,
@@ -5327,7 +5375,13 @@ export function registerBrowserSessionRoutes(
     }
     const binding = record.session.controller;
     if (binding) {
-      const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+      const sourceSession = await browserRouteSession(
+        deps,
+        grant,
+        record,
+        await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+        "session.control",
+      );
       await withBrowserPlacement(
         sourceSession,
         grant,
@@ -6409,6 +6463,32 @@ async function requireSourceSession(
   const session = await getSession(deps.db, workspaceId, sessionId);
   if (!session) throw new BrowserSessionNotFoundError("Associated session not found");
   return session;
+}
+
+/** The chat whose route reaches a browser. A browser on a Connected Machine
+ * is reached through the chat that opened it while that chat works there.
+ * Once that chat has moved away, an agent chat now working on that machine (a
+ * child given its parent's browser, say) reaches it by its own route, as for a
+ * Desktop. Otherwise the opener, whose route keeps refusing it. */
+async function browserRouteSession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  record: Pick<BrowserSessionControlRecord, "sourceSessionId" | "session">,
+  source: Session,
+  operation: SessionAuthorizationOperation,
+): Promise<Session> {
+  const placement = record.session.placement;
+  if (placement?.kind !== "connected_machine" || source.activeSandboxId === placement.sandboxId) {
+    return source;
+  }
+  const callerId = agentCallerSessionId(grant);
+  if (callerId === null || callerId === record.sourceSessionId) return source;
+  const caller = await getSession(deps.db, record.session.workspaceId, callerId);
+  if (!caller || connectedInteractionRouteSession(placement.sandboxId, source, caller) !== caller) {
+    return source;
+  }
+  await authorizeSourceSession(deps, grant, caller.id, operation);
+  return caller;
 }
 
 async function authorizeSourceSession(

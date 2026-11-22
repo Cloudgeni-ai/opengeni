@@ -420,15 +420,23 @@ export default function PageConnectedAgentsSection() {
       </KitBlock>
       <KitBlock
         title="Sign-in: choose its access"
-        description="Opens in the browser when the agent signs in. It acts as the person; Read only in every workspace is the default. Permissions beyond their own access stay off."
+        description="Opens in the browser when the agent signs in. It acts as the person. It starts in the organization they last worked in, with everyday work selected as Custom in every workspace. Permissions beyond their own access stay off."
       >
         <PagePreview label="Connect Claude Code" height={1300}>
           <McpConsentPage
             request={{
               client: { name: "Claude Code", host: "localhost" },
               person: { name: "Bendik Hansen" },
-              defaultOrganizationId: organization.id,
+              // The server's default is the person's own organization; the
+              // page starts in the one they last used instead.
+              defaultOrganizationId: "personal-organization",
               organizations: [
+                {
+                  id: "personal-organization",
+                  name: "Bendik",
+                  workspaces: accessWorkspaces.filter((workspace) => workspace.personal),
+                  grantable: MEMBER_GRANTABLE,
+                },
                 {
                   id: organization.id,
                   name: organization.name,
@@ -437,6 +445,7 @@ export default function PageConnectedAgentsSection() {
                 },
               ],
             }}
+            lastUsedOrganizationId={organization.id}
             onAnswer={async () => {}}
           />
         </PagePreview>

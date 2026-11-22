@@ -5,6 +5,10 @@ import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
+  agentCallerSessionId,
+  connectedInteractionRouteSession,
+} from "../connected-interaction-route";
+import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
   sandboxFleetLimits,
@@ -141,6 +145,7 @@ import {
 } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { requireInteractionAttachmentAccess } from "../http/interaction-attachment";
 import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
@@ -157,6 +162,7 @@ import {
 import {
   observeComputerActionResult,
   observeComputerFrameEvidenceMismatch,
+  observeLifecycleControllerFailure,
   observeLifecycleResult,
 } from "../interaction-metrics";
 import {
@@ -517,6 +523,7 @@ export function registerComputerSessionRoutes(
               ).catch(() => undefined);
             }
             if (rethrowAfterFailure) throw error;
+            observeLifecycleControllerFailure(deps.observability, "computer.create", error);
             return failed;
           }
           // These facts come from the physical adapter after its native helper
@@ -867,8 +874,11 @@ export function registerComputerSessionRoutes(
   app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments",
     async (context) => {
-      const { workspaceId, grant, computerSessionId } = await routePreamble(context, "stream:view");
-      const origin = requestOrigin(context, deps.settings);
+      const { workspaceId, grant, origin } = await requireInteractionAttachmentAccess(
+        context,
+        deps,
+      );
+      const computerSessionId = requireUuidParam(context, "computerSessionId");
       const request = await parseJsonBody(context, ComputerSessionAttachmentRequest);
       const result = await withActiveComputerController(
         context,
@@ -1802,7 +1812,7 @@ export function registerComputerSessionRoutes(
           callerId !== record.sourceSessionId
             ? await requireSourceSession(deps, workspaceId, callerId)
             : null;
-        const routed = connectedDesktopRouteSession(machineId, sourceSession, caller);
+        const routed = connectedInteractionRouteSession(machineId, sourceSession, caller);
         if (!routed) {
           throw sourcePlacementElsewhereApiError(
             "computer_session",
@@ -2117,26 +2127,6 @@ export function registerComputerSessionRoutes(
       computerSessionId: requireUuidParam(context, "computerSessionId"),
     };
   }
-}
-
-/** The chat whose route reaches a Desktop on Connected Machine `machineId`:
- * the chat that opened it while that chat works there, or else the agent
- * chat now using it from that machine. Null when neither works there. */
-export function connectedDesktopRouteSession<S extends { activeSandboxId?: string | null }>(
-  machineId: string,
-  source: S | null,
-  caller: S | null,
-): S | null {
-  if (source?.activeSandboxId === machineId) return source;
-  if (caller?.activeSandboxId === machineId) return caller;
-  return null;
-}
-
-/** The agent chat a grant acts for, or null for a person or service. */
-function agentCallerSessionId(grant: AccessGrant): string | null {
-  if (grant.principalKind !== "agent_attempt") return null;
-  const sessionId = grant.metadata?.["sessionId"];
-  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
 }
 
 function sourcePlacementElsewhereApiError(

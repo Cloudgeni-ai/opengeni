@@ -96,7 +96,13 @@ export function fakeAgentsClient(
     /** Workspace Skills by stable key. */
     skills?: string[];
     /** Event sources automations listen to. */
-    eventSources?: { id: string; name: string; kind?: string; status?: string }[];
+    eventSources?: {
+      id: string;
+      name: string;
+      kind?: string;
+      status?: string;
+      [field: string]: unknown;
+    }[];
     /** Makes createScheduledTask fail with this error. */
     createTaskError?: unknown;
     /** Chats in the workspace, with the agent each was started with. */
@@ -111,10 +117,12 @@ export function fakeAgentsClient(
     chatsError?: unknown;
     /** Makes createEventSource fail with this error. */
     createSourceError?: unknown;
+    updateSourceError?: unknown;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
   const calls: unknown[][] = [];
+  const createdSources = new Map<string, Record<string, unknown>>();
   const held: Array<() => void> = [];
   const find = (id: string) => {
     const agent = agents.get(id);
@@ -259,20 +267,52 @@ export function fakeAgentsClient(
       if (options.createSourceError) throw options.createSourceError;
       const id = uuid();
       const kind = String(request.kind);
-      return {
-        source: {
-          id,
-          workspaceId,
-          kind,
-          adapter: (request.adapter as string | undefined) ?? null,
-          format: null,
-          name: (request.name as string | undefined) ?? kind,
-          status: "active",
-          mcp: null,
-          webhookUrl: kind === "webhook" ? `https://hooks.example.com/${id}` : null,
-        },
-        ...(kind === "webhook" ? { signingSecret: "whsec_test" } : {}),
+      // An app's webhook (Linear, Sentry) waits for the secret that app shows.
+      const pasted = kind === "webhook" && request.adapter === "custom";
+      const awaiting = pasted && request.signingSecret === undefined;
+      const source = {
+        id,
+        workspaceId,
+        kind,
+        adapter: (request.adapter as string | undefined) ?? null,
+        format: (request.format as unknown) ?? null,
+        name: (request.name as string | undefined) ?? kind,
+        status: awaiting ? "blocked" : "active",
+        statusReasonCode: awaiting ? "awaiting_secret" : null,
+        statusReason: awaiting ? "Paste the signing secret." : null,
+        awaitingSigningSecret: awaiting,
+        mcp: null,
+        webhookUrl: kind === "webhook" ? `https://hooks.example.com/${id}` : null,
       };
+      createdSources.set(id, source);
+      return {
+        source,
+        ...(kind === "webhook" && !pasted ? { signingSecret: "whsec_test" } : {}),
+      };
+    },
+    async updateEventSource(
+      workspaceId: string,
+      sourceId: string,
+      request: Record<string, unknown>,
+    ) {
+      calls.push(["updateEventSource", workspaceId, sourceId, request]);
+      if (options.updateSourceError) throw options.updateSourceError;
+      const current =
+        createdSources.get(sourceId) ??
+        (options.eventSources ?? []).find((source) => source.id === sourceId);
+      if (!current) throw new Error(`no source ${sourceId}`);
+      const updated =
+        request.signingSecret !== undefined
+          ? {
+              ...current,
+              status: "active",
+              statusReasonCode: null,
+              statusReason: null,
+              awaitingSigningSecret: false,
+            }
+          : current;
+      createdSources.set(sourceId, updated);
+      return updated;
     },
     async createScheduledTask(workspaceId: string, request: Record<string, unknown>) {
       calls.push(["createScheduledTask", workspaceId, request]);

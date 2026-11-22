@@ -10,7 +10,7 @@
 //   ?closed=1      the panel starts closed; ?hint=1 adds the header's new-content dot
 //   ?tab=<id>      the tab the person last opened (e.g. browser)
 import type { SessionLinkWithStatus, SessionPullRequestDetail } from "@opengeni/sdk";
-import { GitPullRequestIcon, PanelsTopLeftIcon } from "lucide-react";
+import { BugIcon, GitPullRequestIcon, PanelsTopLeftIcon, SettingsIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
@@ -198,6 +198,23 @@ function Harness() {
                   onRetry={() => {}}
                 />
               ),
+            },
+            // As the chat's own: rarely used, kept in "+" even with room.
+            {
+              id: "agent",
+              label: "Settings",
+              icon: <SettingsIcon />,
+              optional: true,
+              inMenu: true,
+              content: <p className="p-4 text-sm text-fg-muted">Agent settings</p>,
+            },
+            {
+              id: "debug",
+              label: "Debug",
+              icon: <BugIcon />,
+              optional: true,
+              inMenu: true,
+              content: <p className="p-4 text-sm text-fg-muted">Debug inspector</p>,
             },
           ]}
           {...(withPr

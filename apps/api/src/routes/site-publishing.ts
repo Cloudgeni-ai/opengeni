@@ -216,6 +216,9 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
       siteId: publication.siteId,
       ...publishedSiteAddress(publication.label, domain),
       status: publication.status,
+      // Which model the app's chat starts with is not a setting secret: the
+      // chat beside the app preselects it for anyone who can open the app.
+      agentModel: publication.agent.model,
     };
     return context.json(link);
   });

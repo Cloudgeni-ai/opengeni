@@ -717,10 +717,21 @@ bot must still be the active, verified install, sharing must be on, and the
 saved workspace selection (or all workspaces) must include that workspace. The
 home workspace's delivery is recorded before Slack is acknowledged; the shared
 workspaces' are not waited for. One SQL call per callback finds their sources
-with each source's status (`opengeni_private.list_shared_slack_event_sources_v1`,
-migration `1538_shared_slack_event_sources.sql`, a SECURITY INVOKER read under
-each workspace's own RLS context, probing a saved selection by id), and their
-deliveries are then written a few at a time. Turning sharing off or removing a
+with each source's status, and their deliveries are then written a few at a
+time. The call is `opengeni_private.list_shared_slack_event_sources_v2`
+(migration `1552_shared_slack_event_sources_v2.sql`): a SECURITY DEFINER read,
+callable only from the home workspace's own RLS context, that returns nothing
+unless the bot is the active verified install with sharing on, and otherwise
+reads every covered workspace's source for that Slack team in one probe of the
+partial index `event_sources_slack_team_idx` (migration 1551), so its cost does
+not grow with the number of workspaces in the organization. It returns only
+workspace, source id, status and status reason; `event_sources` stays FORCE RLS
+and the runtime role gains no read (the definer opens the owner inventory
+window for its own statement, and its owner-only policy covers Slack rows
+only). Until a later migration grants the runtime EXECUTE on it (a release
+that doesn't know a definer refuses a runtime grant on it), the runtime keeps
+calling 1538's `list_shared_slack_event_sources_v1`, a SECURITY INVOKER read
+under each covered workspace's own RLS context. Turning sharing off or removing a
 workspace from it stops delivery from the next callback; its source stays,
 reads as blocked with "The Slack bot isn't shared with this workspace anymore"
 (code `connector_removed`, nothing stored), and reads as active and receives

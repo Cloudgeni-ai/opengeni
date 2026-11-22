@@ -12,6 +12,8 @@ import {
   agentTriggerMissingSource,
   agentTriggerOptions,
   agentTriggerPickKey,
+  agentTriggerAwaitsSecret,
+  agentTriggerSecretIssue,
   agentTriggerSourceStep,
   agentTriggerSaveError,
   agentTriggerWithSources,
@@ -71,6 +73,51 @@ test("a suggestion starts with its events, conditions and message on the person'
   expect(
     agentTriggerSourceStep({ kind: "webhook", adapter: "standard" }, { githubConnected: true }),
   ).toBe("add_source");
+  // A suggested app webhook is added on the Add a source page too.
+  expect(
+    agentTriggerSourceStep({ kind: "webhook", adapter: "custom", preset: "linear" } as never, {
+      githubConnected: true,
+    }),
+  ).toBe("add_source");
+});
+
+test("a pasted webhook waiting for its secret can be picked, and a short secret is refused", () => {
+  const linear = {
+    id: "source-linear",
+    name: "Linear",
+    kind: "webhook",
+    adapter: "custom",
+    format: { preset: "linear", signature: { scheme: "hmac_sha256" } },
+    status: "blocked",
+    statusReason: "Paste the signing secret Linear shows for this webhook.",
+    statusReasonCode: "awaiting_secret",
+    awaitingSigningSecret: true,
+    mcp: null,
+  } as unknown as EventSource;
+  expect(agentTriggerAwaitsSecret(linear)).toBe(true);
+  expect(agentTriggerAwaitsSecret({ ...linear, awaitingSigningSecret: false })).toBe(false);
+  expect(agentTriggerAwaitsSecret(GITHUB)).toBe(false);
+  expect(agentTriggerAwaitsSecret(undefined)).toBe(false);
+  const option = agentTriggerOptions(t, {
+    choices: eventSourceChoices(t),
+    sources: [linear],
+    eventTriggers: true,
+    githubConnected: true,
+  }).find((entry) => entry.key === "source:source-linear");
+  expect(option?.unavailable).toBeUndefined();
+  // Any other blocked webhook still can't be picked.
+  const other = agentTriggerOptions(t, {
+    choices: eventSourceChoices(t),
+    sources: [{ ...linear, awaitingSigningSecret: false } as EventSource],
+    eventTriggers: true,
+    githubConnected: true,
+  }).find((entry) => entry.key === "source:source-linear");
+  expect(other?.unavailable).toBeDefined();
+  const setup = { app: "Linear", secretName: "signing secret" };
+  expect(agentTriggerSecretIssue("  short  ", setup)).toBe(
+    "Paste the signing secret Linear shows.",
+  );
+  expect(agentTriggerSecretIssue("lin_wh_0123456789", setup)).toBeUndefined();
 });
 
 test("the picker offers a schedule, the person's sources and every kind they can still add", () => {
@@ -92,7 +139,10 @@ test("the picker offers a schedule, the person's sources and every kind they can
   expect(setupOf("new:slack")).toBe("create");
   expect(setupOf("new:workspace")).toBe("create");
   expect(setupOf("new:webhook")).toBe("create_webhook");
-  expect(setupOf("new:linear")).toBe("add_source");
+  expect(setupOf("new:linear")).toBe("create_pasted");
+  expect(setupOf("new:sentry")).toBe("create_pasted");
+  expect(setupOf("new:tailscale")).toBe("create_pasted");
+  expect(setupOf("new:mcp")).toBe("add_source");
   expect(setupOf("new:gmail")).toBe("add_source");
   expect(options.find((option) => option.key === "new:webhook")?.label).toBe("Create a webhook");
   // Without GitHub connected, picking GitHub starts with connecting it.

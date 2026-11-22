@@ -4467,7 +4467,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("a forbidden connection is quarantined, excluded, and recovers when its retry time passes", async () => {
+    test("a forbidden connection stays excluded according to the adapter's recovery policy", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `a-${crypto.randomUUID()}`);
       const b = await sharedConnection(org, `b-${crypto.randomUUID()}`);
@@ -4481,8 +4481,18 @@ export function describeSubscriptionCoreConformance<Credential>(
       });
       const quarantined = await connectionRow(refused);
       expect(quarantined.status).toBe("error");
+      const quarantineMs = provider.adapter.health.forbiddenQuarantineMs;
+      if (quarantineMs === null) {
+        expect(quarantined.health_retry_at).toBeNull();
+        expect(await runtime().recoverSubscriptionCoreConnectionHealth(db(), turn.identity)).toBe(
+          0,
+        );
+        expect(await placeChecked(turn)).toMatchObject({ kind: "run", connectionId: other });
+        await expectForeignUntouched(org);
+        return;
+      }
       // Quarantined for the adapter's forbidden quarantine, not longer or shorter.
-      const quarantineEnd = refusedAt + provider.adapter.health.forbiddenQuarantineMs;
+      const quarantineEnd = refusedAt + quarantineMs;
       expect(
         Math.abs(new Date(quarantined.health_retry_at!).getTime() - quarantineEnd),
       ).toBeLessThan(5_000);

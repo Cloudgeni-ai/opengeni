@@ -43,6 +43,7 @@ import {
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   DropdownMenu,
@@ -66,6 +67,7 @@ import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
 import { IconMenu, SidebarIcon } from "@/components/sidebar-layout/sidebar-icons";
+import { MoveToGroupMenu, type SidebarGroupChoice } from "@/components/sidebar-layout/group-menu";
 import { appPagePaths, typedPagePath } from "@/components/sidebar-layout/app-pages";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 
@@ -181,6 +183,8 @@ export function RenameField({
 function ItemRow({
   item,
   siblings,
+  parentId,
+  groups,
   indent,
   scope,
   workspaceId,
@@ -189,6 +193,10 @@ function ItemRow({
   item: ResolvedSidebarItem;
   /** The ids of the item's level, in order; moves name a neighbour. */
   siblings: readonly string[];
+  /** The item's group, or null at the top level. */
+  parentId: string | null;
+  /** The groups at this scope, for Move to group. */
+  groups: readonly SidebarGroupChoice[];
   indent?: boolean;
   scope: Scope;
   workspaceId: string;
@@ -286,6 +294,13 @@ function ItemRow({
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         ) : null}
+        {canEdit && item.type !== "group" ? (
+          <MoveToGroupMenu
+            groups={groups}
+            current={parentId}
+            onSelect={(groupId) => onChange([{ op: "move", itemId: item.id, groupId }])}
+          />
+        ) : null}
         <DropdownMenuItem
           variant={fromWorkspace ? "default" : "destructive"}
           onSelect={() => onChange([{ op: "remove", itemId: item.id }])}
@@ -310,12 +325,17 @@ function ItemRows({
 }) {
   const rows: ReactNode[] = [];
   const topIds = items.map((item) => item.id);
+  const groups = items.flatMap((item) =>
+    item.type === "group" ? [{ id: item.id, label: item.label }] : [],
+  );
   items.forEach((item) => {
     rows.push(
       <ItemRow
         key={item.id}
         item={item}
         siblings={topIds}
+        parentId={null}
+        groups={groups}
         scope={scope}
         workspaceId={workspaceId}
         onChange={onChange}
@@ -329,6 +349,8 @@ function ItemRows({
             key={child.id}
             item={child}
             siblings={childIds}
+            parentId={item.id}
+            groups={groups}
             indent
             scope={scope}
             workspaceId={workspaceId}
@@ -734,6 +756,7 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
   const { layout, failed, update, reload } = useSidebarLayout(workspaceId);
   const [scope, setScope] = useState<Scope>("personal");
   const [adding, setAdding] = useState<AddKind | null>(null);
+  const [confirmingReset, setConfirmingReset] = useState(false);
   const canEditWorkspace = layout?.workspace.canEdit === true;
   const personalAvailable = layout?.personal.available !== false;
   const effectiveScope: Scope =
@@ -749,9 +772,9 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
   const groups = items
     .filter((item) => item.type === "group")
     .map((item) => ({ value: item.id, label: item.label }));
-  const change = async (changes: SidebarLayoutChange[]) => {
+  const change = async (changes: SidebarLayoutChange[], target: Scope = effectiveScope) => {
     try {
-      await update({ scope: effectiveScope, changes });
+      await update({ scope: target, changes });
     } catch (error) {
       toast.error("Couldn't change the sidebar", {
         description: userErrorText(error),
@@ -799,7 +822,7 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
                 onChange={onChange}
                 onReset={
                   effectiveScope === "personal" && layout.personal.customized
-                    ? () => onChange([{ op: "reset" }])
+                    ? () => setConfirmingReset(true)
                     : null
                 }
               />
@@ -875,6 +898,21 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
           </Section>
         ) : null}
       </div>
+      <ConfirmDialog
+        open={confirmingReset}
+        onOpenChange={setConfirmingReset}
+        title="Reset your sidebar?"
+        description="Your own links, groups and changes are removed and you see the workspace default."
+        confirmLabel="Reset"
+        cancelAutoFocus
+        onConfirm={() =>
+          // Reset only ever clears your own changes, never the workspace default.
+          change([{ op: "reset" }], "personal").then(
+            () => true,
+            () => false,
+          )
+        }
+      />
     </ContentPage>
   );
 }

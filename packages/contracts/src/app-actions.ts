@@ -31,6 +31,8 @@ export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
   "/v1/workspaces/:workspaceId/integrations/preview",
   "/v1/workspaces/:workspaceId/plugins/preview",
   "/v1/workspaces/:workspaceId/skills/preview",
+  "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/query",
+  "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
   "/v1/organizations/:organizationId/external-identities/lookup",
 ]);
 

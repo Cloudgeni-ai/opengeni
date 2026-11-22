@@ -172,7 +172,7 @@ test("a publish from the side chat reloads the preview with the new version", as
   expect(preview(container)).toContain("background:white");
   expect(chip(container)).toBe("v4");
   // The Site view never says "Live": it stays current, and says so only
-  // while Updating or Reconnecting, so "Published" is its one indicator.
+  // while Updating or Reconnecting, so the published dot is its one indicator.
   expect(label(container)).toBeUndefined();
   expect(container.textContent).not.toContain("Live");
 
@@ -222,8 +222,10 @@ test("a published Site says Published in the header, keeps it, and says so when 
     await settle();
     const published = () =>
       container.querySelector<HTMLButtonElement>('[data-site-publication="published"]');
-    expect(published()?.textContent).toBe("Published");
-    expect(published()?.getAttribute("aria-label")).toBe("Published at usage.sites.example.test");
+    expect(published()?.textContent).toBe("Share");
+    expect(published()?.getAttribute("aria-label")).toBe(
+      "Share, published at usage.sites.example.test",
+    );
     expect(container.textContent).not.toContain("Live");
     // Its menu names the address and opens it.
     await act(async () => {
@@ -254,7 +256,7 @@ test("a published Site says Published in the header, keeps it, and says so when 
     expect(preview(container)).toContain("background:white");
     expect(label(container)).toBe("Reconnecting");
     expect(region()?.textContent).toBe("Reconnecting");
-    expect(published()?.textContent).toBe("Published");
+    expect(published()?.textContent).toBe("Share");
   } finally {
     server.failHtml = false;
     publishedLink = null;

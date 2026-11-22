@@ -2162,6 +2162,8 @@ export function createAppComposition(
         ? {
             outsideAgent: {
               appData: connectionSettings?.settings.appDataAccess ?? "viewer",
+              // Its writes are recorded as this connected agent, not as the person.
+              ...(connectionSettings ? { connectionId: connectionSettings.id } : {}),
             },
           }
         : {}),

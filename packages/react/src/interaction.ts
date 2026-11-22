@@ -79,6 +79,8 @@ export type {
 } from "./hooks/use-browser-frame-stream";
 export { BrowserViewer } from "./components/browser-viewer";
 export type { BrowserViewerNotification, BrowserViewerProps } from "./components/browser-viewer";
+export { InteractionInterventionBanner } from "./components/interaction-intervention-banner";
+export type { InteractionInterventionBannerProps } from "./components/interaction-intervention-banner";
 export { useComputerSessions } from "./hooks/use-computer-sessions";
 export type {
   ComputerSessionsClient,

@@ -78,11 +78,12 @@ export function withoutRetiredProviderKeys<T>(effective: T): T {
 
 /**
  * The status of `alias`'s connection row as an availability read sees it at
- * `now`. A 403 quarantine is `error` with `health_retry_at` (only the
- * quarantine writer sets it; any other status or error write drops it) and
- * it ends by itself at that time: from then on the connection reads
+ * `now`. A timed 403 quarantine is `error` with `health_retry_at` (only the
+ * quarantine writer sets it; any other status or error write drops it).
+ * From that time on the connection reads
  * `active`, without waiting for a turn to run the recovery routine, which
  * stores the same transition for the connections that turn may lease.
+ * A quarantine without a deadline remains an error until reconnect.
  */
 export function subscriptionConnectionEffectiveStatus(
   alias: string,

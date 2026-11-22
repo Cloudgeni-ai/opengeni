@@ -244,6 +244,13 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/embedded-interaction-viewer.browser.e2e.ts": [
+    "@opengeni/api-router",
+    "@opengeni/browserd",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/chat-media-entry.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",

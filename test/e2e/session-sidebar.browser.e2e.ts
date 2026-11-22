@@ -1287,7 +1287,7 @@ test("the Site publish form starts below the desktop window bar in a narrow Site
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
     await page
       .locator("[data-site-column] [data-site-header]")
-      .getByRole("button", { name: "Publish" })
+      .getByRole("button", { name: "Share" })
       .click();
     const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
     const header = form.locator(":scope > header");

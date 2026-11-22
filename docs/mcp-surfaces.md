@@ -152,6 +152,9 @@ connection's access setting; none adds authority.
 | `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Find, read and control chats |
 | `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; `workspace_use` sets the connection's default workspace |
 | `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change app data ([App data](site-data.md)); `app_query` runs a named query when given `sqlQuery` |
+| `app_save` | Creates an app from `html`, `files` (a multi-file build, uploaded for the agent) or `uploadId` (`prepareUpload` first), saves a new version of one the person manages (`appId`), rolls back (`rollbackTo`, a version number) and defines its `collections`. A new app is Only me. Returns `appId`, `version` and `link` |
+| `app_publish` | Who can open an app: `only_me`, `workspace` or `public` (its own `hostname`), through the publication routes and their readiness check; `fixes` applies the warnings' safe fixes |
+| `file_save` | Saves a local file as a workspace file (Only me by default) and returns its `link`: inline up to 4 MB (`content` or `base64`), or `sizeBytes` for a `putUrl`, then `uploadId` |
 | `tools_search`, `tool_call` | Search and call the workspace's connected tools; each result's `approval` (`none`, `human`, `blocked`) and `approvalSource` (`tool`, or `policy` when the person's or workspace's tool settings decide) say whether a call needs approval |
 | `skills_sync`, `skills_list` | Upload local Skill folders (`direction: "upload"`), pull the workspace's (`direction: "pull"`), or sync every Skill folder of a GitHub repository (`direction: "repository"`, `repository`: a repository or folder URL) |
 | `knowledge_search`, `knowledge_get`, `knowledge_save` | Search, read and save Knowledge |
@@ -163,14 +166,27 @@ connection's access setting; none adds authority.
   workspace (set with `workspace_use`, or `defaultWorkspaceId` on the
   connection), else the only workspace the connection reaches. With several
   and no default, the error lists them.
-- **Retries.** `delegate`, `session_send`, `knowledge_save` and
-  `skills_sync` derive their idempotency key from the caller, workspace and
+- **Retries.** `delegate`, `session_send`, `knowledge_save`, `skills_sync`
+  and `app_save` derive their idempotency key from the caller, workspace and
   input when the agent sends none, so retrying the same call in the same
   clock hour doesn't start the same work twice (the returned
   `idempotencyKey` makes it exact across hours; a new key sends the same
-  text again on purpose). `tool_call` repeats safely with the same
+  text again on purpose). `app_save` keys a new version on the version it
+  builds on, so saving A, B, then A again makes three versions; a retry
+  whose first try already saved is recognised and answered as `replayed`.
+  A key the agent passes and reuses for different content is refused, and
+  nothing is saved. `file_save` returns the person's own file a try saved in
+  the last hour with the same name and content. `tool_call` repeats safely with the same
   `operationId`. Errors carry the key, `retrySafe` (repeating with it
   doesn't duplicate work) and `retryable` (whether repeating could help).
+- **Uploads.** For a multi-file `app_save` and an inline `file_save` the
+  server writes the bytes to the storage URL it prepared. Those URLs are
+  signed for the public storage address; where the server can't reach it
+  (some self-hosted storage), the error says to upload the bytes yourself
+  (`prepareUpload`, or `file_save` with `sizeBytes`).
+- **Sharing.** `app_publish` reads the app first and changes nothing when
+  it can't. `only_me` narrows visibility before taking the app off the web;
+  `public` restores the earlier visibility when the publication fails.
 - **Visibility.** A delegated chat uses the person's default chat visibility;
   Only me falls back to the workspace when the workspace doesn't allow it.
   Stopping a local wait only stops tracking; `session_pause` stops the chat.

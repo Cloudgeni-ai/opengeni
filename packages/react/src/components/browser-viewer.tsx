@@ -117,6 +117,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride<ChatCl
   /** Whether the Browser tab is selected. Keeps the mounted media stream warm
    * while pausing semantic reads behind other dock tabs. */
   active?: boolean | undefined;
+  /** Hide workspace browser switching, browser/profile creation and diagnostics.
+   * Keeps the current chat's tabs, address, live view, input and interventions. Defaults to true. */
+  showAdvancedControls?: boolean | undefined;
   className?: string | undefined;
   onNotify?: ((notification: BrowserViewerNotification) => void) | undefined;
   /** Tests/demos only. Production uses the browser's native WebSocket. */
@@ -179,6 +182,7 @@ export function BrowserViewer({
   sessionId,
   enabled = true,
   active = true,
+  showAdvancedControls = true,
   className,
   onNotify,
   webSocketFactory,
@@ -192,7 +196,7 @@ export function BrowserViewer({
 }: BrowserViewerProps) {
   const t = useOpenGeniText();
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
-  const attached = useAttachedBrowsers({ ...override, enabled });
+  const attached = useAttachedBrowsers({ ...override, enabled: enabled && showAdvancedControls });
   const { client: configClient } = useEmbeddedBrowserInteraction(override);
   // The deployment's own branded extension when it ships one.
   const browserExtensionName = useClientConfigFlags(configClient as never).browserExtension?.name;
@@ -200,10 +204,14 @@ export function BrowserViewer({
     () => attached.bridges.filter((bridge) => bridge.state === "online"),
     [attached.bridges],
   );
-  const profiles = useBrowserIdentities({ ...override, enabled, includeArchived: true });
+  const profiles = useBrowserIdentities({
+    ...override,
+    enabled: enabled && showAdvancedControls,
+    includeArchived: true,
+  });
   const siteAuth = useSiteAuthConnections({
     ...override,
-    enabled: enabled && profiles.identities.length > 0,
+    enabled: enabled && showAdvancedControls && profiles.identities.length > 0,
   });
   const createRegistryBrowser = registry.create;
   const refreshRegistry = registry.refresh;
@@ -407,6 +415,7 @@ export function BrowserViewer({
     browserSessionId: selection?.sessionId ?? null,
     enabled:
       enabled &&
+      showAdvancedControls &&
       diagnosticsView !== null &&
       controllerReady &&
       browser.session?.capabilities.downloads === true,
@@ -830,8 +839,8 @@ export function BrowserViewer({
       />
     );
   }
-  if (liveSessions.length === 0) {
-    if (renderEmpty && !unavailableBrowser)
+  if (liveSessions.length === 0 || (!showAdvancedControls && !selectedRegistrySession)) {
+    if (showAdvancedControls && renderEmpty && !unavailableBrowser)
       return <>{renderEmpty(() => createBrowser(), creating)}</>;
     return (
       <div
@@ -841,8 +850,11 @@ export function BrowserViewer({
           <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
             <Globe2Icon className="size-4.5" />
           </span>
-          {unavailableBrowser && !attachedGenerationLoss ? (
-            <BrowserUnavailableNotice session={unavailableBrowser} />
+          {unavailableBrowser && (!attachedGenerationLoss || !showAdvancedControls) ? (
+            <BrowserUnavailableNotice
+              session={unavailableBrowser}
+              canOpenNewBrowser={showAdvancedControls}
+            />
           ) : (
             <>
               <p className="mt-3 text-og-menu font-medium text-og-fg">
@@ -857,18 +869,20 @@ export function BrowserViewer({
               </p>
             </>
           )}
-          <BrowserLaunchMenu
-            attachedBridges={onlineAttachedBridges}
-            attachedDevices={attached.devices}
-            identities={profiles.identities}
-            creating={creating}
-            mutatingProfile={savingProfile}
-            onCreate={createBrowser}
-            onRestore={(identity) => updateProfile(identity, { status: "active" })}
-            setupUrl={browserExtensionSetupUrl}
-            extensionName={browserExtensionName}
-            prominent
-          />
+          {showAdvancedControls ? (
+            <BrowserLaunchMenu
+              attachedBridges={onlineAttachedBridges}
+              attachedDevices={attached.devices}
+              identities={profiles.identities}
+              creating={creating}
+              mutatingProfile={savingProfile}
+              onCreate={createBrowser}
+              onRestore={(identity) => updateProfile(identity, { status: "active" })}
+              setupUrl={browserExtensionSetupUrl}
+              extensionName={browserExtensionName}
+              prominent
+            />
+          ) : null}
           {registry.error ? (
             <p className="mt-3 text-og-control text-og-danger">{registry.error.message}</p>
           ) : null}
@@ -881,38 +895,40 @@ export function BrowserViewer({
     <div
       className={cn("relative flex h-full min-h-0 flex-col overflow-hidden bg-og-bg", className)}
     >
-      <BrowserToolbar
-        sessions={liveSessions}
-        relevantSessionIds={new Set(relevant.map((session) => session.id))}
-        selectedSessionId={selection?.sessionId ?? null}
-        identities={profiles.identities}
-        attachedBridges={onlineAttachedBridges}
-        attachedDevices={attached.devices}
-        selectedProfile={selectedProfile}
-        baseRevisionOrdinal={baseRevisionOrdinal}
-        profileHistory={profileHistory}
-        authConnections={selectedProfileAuth}
-        creating={creating}
-        savingProfile={savingProfile}
-        refreshing={registry.refreshing || attached.refreshing}
-        interventionCounts={interventionCounts}
-        onSelect={(browserSessionId) =>
-          selectBrowserSession({ sessionId: browserSessionId, pinned: true })
-        }
-        onFollow={() => {
-          const preferred = relevant[0];
-          if (preferred) selectBrowserSession({ sessionId: preferred.id, pinned: false });
-        }}
-        onCreate={createBrowser}
-        onSaveProfile={saveProfileVersion}
-        onUpdateProfile={updateProfile}
-        onOpenProfileVersion={(identityId, baseRevisionId) =>
-          createBrowser({ kind: "profile", identityId, baseRevisionId })
-        }
-        onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
-        setupUrl={browserExtensionSetupUrl}
-        extensionName={browserExtensionName}
-      />
+      {showAdvancedControls ? (
+        <BrowserToolbar
+          sessions={liveSessions}
+          relevantSessionIds={new Set(relevant.map((session) => session.id))}
+          selectedSessionId={selection?.sessionId ?? null}
+          identities={profiles.identities}
+          attachedBridges={onlineAttachedBridges}
+          attachedDevices={attached.devices}
+          selectedProfile={selectedProfile}
+          baseRevisionOrdinal={baseRevisionOrdinal}
+          profileHistory={profileHistory}
+          authConnections={selectedProfileAuth}
+          creating={creating}
+          savingProfile={savingProfile}
+          refreshing={registry.refreshing || attached.refreshing}
+          interventionCounts={interventionCounts}
+          onSelect={(browserSessionId) =>
+            selectBrowserSession({ sessionId: browserSessionId, pinned: true })
+          }
+          onFollow={() => {
+            const preferred = relevant[0];
+            if (preferred) selectBrowserSession({ sessionId: preferred.id, pinned: false });
+          }}
+          onCreate={createBrowser}
+          onSaveProfile={saveProfileVersion}
+          onUpdateProfile={updateProfile}
+          onOpenProfileVersion={(identityId, baseRevisionId) =>
+            createBrowser({ kind: "profile", identityId, baseRevisionId })
+          }
+          onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
+          setupUrl={browserExtensionSetupUrl}
+          extensionName={browserExtensionName}
+        />
+      ) : null}
       <InteractionInterventionBanner
         interventions={selectedInterventions}
         activeTargetId={browser.selectedTarget?.id ?? null}
@@ -1079,7 +1095,7 @@ export function BrowserViewer({
               onObserveForInput={browser.observeForInput}
               onSelectFromObservation={browser.actFromObservation}
               onReconnect={
-                selectedChromeGenerationLoss
+                selectedChromeGenerationLoss && showAdvancedControls
                   ? () => {
                       if (replacementChromeDevice) {
                         createBrowser({ kind: "attached", device: replacementChromeDevice });
@@ -1091,7 +1107,7 @@ export function BrowserViewer({
                     }
               }
               reconnectLabel={
-                selectedChromeGenerationLoss && replacementChromeDevice
+                selectedChromeGenerationLoss && showAdvancedControls && replacementChromeDevice
                   ? t("browserViewer.openAFreshConnectedChrome")
                   : undefined
               }
@@ -1102,7 +1118,7 @@ export function BrowserViewer({
               }
               onError={(cause) => notifyError(cause, t("browserViewer.browserInputFailed2"))}
             />
-            {diagnosticsView ? (
+            {showAdvancedControls && diagnosticsView ? (
               <BrowserDiagnosticsDrawer
                 session={browser.session}
                 profile={selectedProfile}
@@ -1126,6 +1142,7 @@ export function BrowserViewer({
           <BrowserStatusBar
             session={browser.session}
             profile={selectedProfile}
+            showProfile={showAdvancedControls}
             target={browser.selectedTarget}
             observation={browser.observation}
             inputFailure={browser.inputFailure}
@@ -1140,7 +1157,13 @@ export function BrowserViewer({
                   }
                 : undefined
             }
-            onDiagnostics={diagnosticsView ? closeDiagnostics : loadDiagnostics}
+            onDiagnostics={
+              showAdvancedControls
+                ? diagnosticsView
+                  ? closeDiagnostics
+                  : loadDiagnostics
+                : undefined
+            }
           />
         </>
       )}
@@ -1352,7 +1375,13 @@ function BrowserUnselectedPanel(props: {
   );
 }
 
-function BrowserUnavailableNotice({ session }: { session: BrowserSession }) {
+function BrowserUnavailableNotice({
+  session,
+  canOpenNewBrowser = true,
+}: {
+  session: BrowserSession;
+  canOpenNewBrowser?: boolean;
+}) {
   const t = useOpenGeniText();
   const reason =
     session.failureCode === "provider_deadline_rotation"
@@ -1370,7 +1399,10 @@ function BrowserUnavailableNotice({ session }: { session: BrowserSession }) {
         {t("browserViewer.browserUnavailable")}
       </p>
       <p className="mt-1 break-words text-og-control leading-5 text-og-fg-muted">
-        {t("browserViewer.nameReasonOpenANew", { name: session.name, reason })}
+        {t(canOpenNewBrowser ? "browserViewer.nameReasonOpenANew" : "browserViewer.nameReason", {
+          name: session.name,
+          reason,
+        })}
       </p>
     </div>
   );
@@ -2853,6 +2885,7 @@ function SemanticBrowserFallback(props: {
 function BrowserStatusBar(props: {
   session: BrowserSession | null;
   profile: BrowserIdentity | null;
+  showProfile: boolean;
   target: BrowserTarget | null;
   observation: ReturnType<typeof useBrowserSession>["observation"];
   inputFailure: ReturnType<typeof useBrowserSession>["inputFailure"];
@@ -2860,7 +2893,7 @@ function BrowserStatusBar(props: {
   refreshing: boolean;
   diagnosticsOpen: boolean;
   onOpenComputer?: (() => void) | undefined;
-  onDiagnostics: () => void;
+  onDiagnostics?: (() => void) | undefined;
 }) {
   const t = useOpenGeniText();
   const errors =
@@ -2891,7 +2924,9 @@ function BrowserStatusBar(props: {
             : t("browserViewer.inputResultUnknown")}
         </span>
       ) : null}
-      <span>{props.profile?.name ?? t("browserViewer.temporaryBrowser")}</span>
+      {props.showProfile ? (
+        <span>{props.profile?.name ?? t("browserViewer.temporaryBrowser")}</span>
+      ) : null}
       <span className="min-w-0 flex-1 truncate">{props.target?.title}</span>
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
       {props.onOpenComputer ? (
@@ -2905,19 +2940,21 @@ function BrowserStatusBar(props: {
           {t("browserViewer.desktop")}
         </button>
       ) : null}
-      <button
-        type="button"
-        onClick={props.onDiagnostics}
-        aria-expanded={props.diagnosticsOpen}
-        aria-controls="browser-diagnostics-drawer"
-        className={cn(
-          "flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg",
-          props.diagnosticsOpen && "bg-og-surface-2 text-og-fg",
-        )}
-      >
-        <BugIcon className="size-3" />
-        {errors + failed > 0 ? errors + failed : t("browserViewer.debug")}
-      </button>
+      {props.onDiagnostics ? (
+        <button
+          type="button"
+          onClick={props.onDiagnostics}
+          aria-expanded={props.diagnosticsOpen}
+          aria-controls="browser-diagnostics-drawer"
+          className={cn(
+            "flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg",
+            props.diagnosticsOpen && "bg-og-surface-2 text-og-fg",
+          )}
+        >
+          <BugIcon className="size-3" />
+          {errors + failed > 0 ? errors + failed : t("browserViewer.debug")}
+        </button>
+      ) : null}
     </div>
   );
 }
