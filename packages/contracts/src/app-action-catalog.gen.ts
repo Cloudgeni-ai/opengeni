@@ -3600,6 +3600,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getAppServerStatus",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/status",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "getAppSyncOptInReview",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/opt-in",
@@ -5671,6 +5678,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ApiKey"
     ]
+  },
+  {
+    "id": "listAppServerRuns",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/runs",
+    "request": [],
+    "query": [
+      "before",
+      "limit",
+      "status"
+    ],
+    "response": []
   },
   {
     "id": "listAppSyncs",
@@ -8061,6 +8080,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SiteTakedownRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/server",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server",
+    "request": [],
     "response": []
   },
   {
