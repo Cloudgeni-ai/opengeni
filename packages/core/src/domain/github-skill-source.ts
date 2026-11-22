@@ -250,7 +250,7 @@ async function githubJson(
       if (response.status === 404) throw new Error(`${label} was not found or is not public`);
       if (response.status === 401 && settings.skillImportGithubToken) {
         throw new Error(
-          "GitHub rejected this deployment's Skill import token; check OPENGENI_SKILL_IMPORT_GITHUB_TOKEN",
+          "GitHub rejected this deployment's Skill import token. Ask its administrator to check OPENGENI_SKILL_IMPORT_GITHUB_TOKEN.",
         );
       }
       if (response.status === 403 || response.status === 429) {
