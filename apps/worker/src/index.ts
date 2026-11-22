@@ -7,6 +7,7 @@ import {
   temporalConnectionOptions,
   type Settings,
 } from "@opengeni/config";
+import { startBedrockModelDiscovery } from "@opengeni/runtime/bedrock";
 import {
   assertRuntimeDatabaseReadiness,
   isRetryableRuntimeDatabaseStartupError,
@@ -283,6 +284,13 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   const observability =
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
+  // Amazon Bedrock: the same model list the API offers (docs/amazon-bedrock.md).
+  await startBedrockModelDiscovery(settings, {
+    onError: (error) =>
+      observability.warn("Amazon Bedrock model discovery failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+  });
   const shutdownTiming = resolveWorkerShutdownTiming(options.role, settings);
   if (shutdownTiming.configuredGraceMs !== undefined) {
     observability.warn("turn worker shutdown grace shortened to keep the checkpoint window", {

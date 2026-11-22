@@ -25,6 +25,18 @@ export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
 export * from "./side-feature-residency";
+export * from "./bedrock";
+import {
+  BEDROCK_MODEL_ID_PREFIX,
+  BEDROCK_PROVIDER_ID,
+  bedrockApplicationProfileBase,
+  bedrockClaudeBaseModelId,
+  bedrockDiscoveredModels,
+  bedrockPriceMultiplier,
+  bedrockProductModelId,
+  bedrockProfileGeo,
+  bedrockRouteScope,
+} from "./bedrock";
 import {
   parseSideFeatureResidencyJson,
   sideFeatureResidencyDeclarationWarnings,
@@ -90,6 +102,7 @@ import {
   type Session,
   ModelResidencyDeclaration,
   ModelResidencyV1,
+  EU_AWS_REGIONS,
   UNKNOWN_MODEL_RESIDENCY,
   isEuResidency,
   modelResidencyClaim,
@@ -1390,6 +1403,25 @@ const SettingsSchema = z.object({
   // registry provider's models. validateSettings parses this at boot so a
   // malformed registry / unresolvable key / id collision fails fast.
   modelProvidersJson: z.string().default("[]"),
+  // Amazon Bedrock (docs/amazon-bedrock.md). A region turns it on. AWS
+  // credentials come from the AWS SDK default chain, never from settings.
+  bedrockRegion: z
+    .string()
+    .regex(/^[a-z]{2}(-[a-z]+)+-\d+$/u, "must be an AWS region such as eu-west-1")
+    .optional(),
+  // Bedrock runtime endpoint override, such as a VPC interface endpoint URL.
+  bedrockEndpointUrl: z.string().url().optional(),
+  // Comma-separated inference profile ids, model ids or inference-profile ARNs.
+  bedrockModels: z.string().optional(),
+  // List the Claude models the account can use (ListInferenceProfiles/
+  // ListFoundationModels). On unless set to false.
+  bedrockModelDiscovery: EnvBoolean.optional(),
+  // Opt-in per-user cost attribution: each person's requests assume this role
+  // with their own session name, which AWS CUR 2.0 records per request.
+  bedrockAttributionRoleArn: z
+    .string()
+    .regex(/^arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@/-]+$/u, "must be an IAM role ARN")
+    .optional(),
   // Where each built-in OpenAI/Azure model processes data: a JSON object from
   // model id to residency declaration. An undeclared model uses a built-in
   // rule: Azure is unknown, never EU.
@@ -3895,7 +3927,7 @@ export type ModelExecutionLimitsV1 = {
 };
 
 export type CredentialSourceV1 =
-  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "aws_iam" | "none" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" | "claude" }
   | { kind: "workspace_connection"; mechanism: "api_key" }
   | { kind: "organization_connection"; mechanism: "api_key" };
@@ -4096,6 +4128,14 @@ export const AzureEntraProviderCredential = z.discriminatedUnion("source", [
 ]);
 export type AzureEntraProviderCredential = z.infer<typeof AzureEntraProviderCredential>;
 
+/** An Amazon Bedrock route: SigV4 with the AWS SDK default credential chain. */
+const BedrockProviderOptions = z
+  .object({
+    region: z.string().min(1),
+    attributionRoleArn: z.string().min(1).optional(),
+  })
+  .strict();
+
 const RegistryProviderSchema = z
   .object({
     kind: RegistryProviderKind.default("api-key"),
@@ -4103,6 +4143,8 @@ const RegistryProviderSchema = z
     label: z.string().min(1).optional(),
     api: ModelProviderApi.default("chat"),
     anthropic: AnthropicProviderOptions.optional(),
+    // Native Claude Messages on Amazon Bedrock; set only by OPENGENI_BEDROCK_*.
+    bedrock: BedrockProviderOptions.optional(),
     // Generic OpenAI-compatible stream silence bound; overrides the deployment
     // `modelStreamIdleTimeoutMs` for this provider only.
     streamIdleTimeoutMs: z
@@ -4288,6 +4330,7 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   "workspace-anthropic",
   "workspace-claude-subscription",
   CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  BEDROCK_PROVIDER_ID,
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
@@ -5072,6 +5115,8 @@ export function parseConnectResultPageTextJson(raw: string | undefined): Connect
  */
 export interface ResolvedModelProvider {
   anthropic?: z.infer<typeof AnthropicProviderOptions> | undefined;
+  /** Amazon Bedrock route: requests are SigV4-signed instead of carrying `apiKey`. */
+  bedrock?: z.infer<typeof BedrockProviderOptions> | undefined;
   id: string; // "openai" | "azure" | registry id
   label: string;
   kind: RegistryProviderKind | "openrouter-managed" | "opper-managed";
@@ -6640,6 +6685,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opperApiKey: optional("OPENGENI_OPPER_API_KEY"),
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
+    bedrockRegion: optional("OPENGENI_BEDROCK_REGION"),
+    bedrockEndpointUrl: optional("OPENGENI_BEDROCK_ENDPOINT_URL"),
+    bedrockModels: optional("OPENGENI_BEDROCK_MODELS"),
+    bedrockModelDiscovery: optional("OPENGENI_BEDROCK_MODEL_DISCOVERY"),
+    bedrockAttributionRoleArn: optional("OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN"),
     builtinModelResidencyJson: optional("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON"),
     sideFeatureResidencyJson: optional("OPENGENI_SIDE_FEATURE_RESIDENCY_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
@@ -8244,7 +8294,189 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
     ? opperRegistryProvider(settings, { kind: "opper-managed", apiKey: settings.opperApiKey })
     : null;
   if (opper) injected.push(opper);
+  const bedrock = bedrockRegistryProvider(settings);
+  if (bedrock) injected.push(bedrock);
   return injected;
+}
+
+const BEDROCK_GEO_LABELS: Record<string, string> = {
+  eu: "EU",
+  us: "US",
+  "us-gov": "US GovCloud",
+  apac: "APAC",
+  au: "Australia",
+  jp: "Japan",
+  ca: "Canada",
+};
+
+/** Where a Bedrock route processes data, from AWS's documented profile scopes. */
+function bedrockModelResidency(
+  upstreamModelId: string,
+  region: string,
+): z.output<typeof ModelResidencyDeclaration> | undefined {
+  const base = bedrockApplicationProfileBase(upstreamModelId) ?? upstreamModelId;
+  const scope = bedrockRouteScope(base);
+  const evidence = {
+    source: "provider_documentation" as const,
+    reference: "https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html",
+    verifiedAt: "2026-11-22",
+  };
+  if (scope === "global")
+    return { geography: "global", deploymentType: "bedrock_global_profile", regions: [], evidence };
+  // An application profile is identified by an ARN, so EU rules that read the
+  // profile prefix cannot confirm it: it stays unknown unless it is global.
+  if (base !== upstreamModelId) return undefined;
+  if (scope === "geo") {
+    const geo = bedrockProfileGeo(base);
+    return {
+      geography: geo === "eu" ? "eu" : geo === "us" || geo === "us-gov" ? "us" : "other",
+      deploymentType: "bedrock_geo_profile",
+      // The EU profile routes among AWS's EU regions only.
+      regions: geo === "eu" ? [...EU_AWS_REGIONS] : [],
+      evidence,
+    };
+  }
+  if (scope === "regional")
+    return {
+      geography: region.startsWith("eu-") ? "eu" : region.startsWith("us-") ? "us" : "other",
+      deploymentType: "bedrock_regional",
+      regions: [region],
+      evidence,
+    };
+  return undefined;
+}
+
+function scaledPricing(price: ModelPricing, factor: number): ModelPricing {
+  const scale = (value: number | undefined) =>
+    value === undefined ? undefined : Math.round(value * factor);
+  return {
+    ...price,
+    inputMicrosPerMillionTokens: scale(price.inputMicrosPerMillionTokens)!,
+    outputMicrosPerMillionTokens: scale(price.outputMicrosPerMillionTokens)!,
+    ...(price.cachedInputMicrosPerMillionTokens === undefined
+      ? {}
+      : { cachedInputMicrosPerMillionTokens: scale(price.cachedInputMicrosPerMillionTokens) }),
+    ...(price.cacheWriteMicrosPerMillionTokens === undefined
+      ? {}
+      : { cacheWriteMicrosPerMillionTokens: scale(price.cacheWriteMicrosPerMillionTokens) }),
+  };
+}
+
+/** Bedrock's price for a Claude route: Anthropic's list price at the route's multiplier. */
+export function bedrockModelPricing(upstreamModelId: string): ModelPricingScheduleV1 | undefined {
+  const base = bedrockClaudeBaseModelId(upstreamModelId);
+  const factor = bedrockPriceMultiplier(upstreamModelId);
+  const schedule = base === undefined ? undefined : reviewedModelListPricing[base];
+  if (!schedule || factor === undefined) return undefined;
+  return {
+    ...schedule,
+    default: scaledPricing(schedule.default, factor),
+    ...(schedule.inputTokenTiers
+      ? {
+          inputTokenTiers: schedule.inputTokenTiers.map((tier) => ({
+            ...tier,
+            pricing: scaledPricing(tier.pricing, factor),
+          })),
+        }
+      : {}),
+  };
+}
+
+/**
+ * The Amazon Bedrock provider (docs/amazon-bedrock.md): native Claude
+ * Messages on bedrock-runtime, signed with the deployment's AWS identity.
+ * Its models are the configured ids, the ids the account offers (discovery)
+ * and a `bedrock/` default model, each priced and placed from its profile.
+ */
+function bedrockRegistryProvider(settings: Settings): InternalRegistryProvider | null {
+  const region = settings.bedrockRegion;
+  if (!region) return null;
+  const endpoint = (
+    settings.bedrockEndpointUrl ?? `https://bedrock-runtime.${region}.amazonaws.com`
+  ).replace(/\/+$/u, "");
+  const names = new Map<string, string | undefined>();
+  for (const id of splitCsv(settings.bedrockModels ?? ""))
+    names.set(
+      id.startsWith(BEDROCK_MODEL_ID_PREFIX) ? id.slice(BEDROCK_MODEL_ID_PREFIX.length) : id,
+      undefined,
+    );
+  for (const model of bedrockDiscoveredModels())
+    if (!names.get(model.upstreamModelId)) names.set(model.upstreamModelId, model.name);
+  // A default or allowed `bedrock/<profile id>` model works without listing it.
+  for (const id of [settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]) {
+    const upstream = id.startsWith(BEDROCK_MODEL_ID_PREFIX)
+      ? id.slice(BEDROCK_MODEL_ID_PREFIX.length)
+      : "";
+    if (upstream && !upstream.includes("/") && !names.has(upstream))
+      names.set(upstream, undefined);
+  }
+  const models: RegistryProvider["models"] = [];
+  for (const [upstreamModelId, name] of names) {
+    const base = bedrockClaudeBaseModelId(upstreamModelId);
+    // Only Claude runs on this route (Messages API). An application profile
+    // whose base model discovery could not read is offered without a profile.
+    if (base === undefined && bedrockRouteScope(upstreamModelId) !== "application") continue;
+    const scope = bedrockRouteScope(upstreamModelId);
+    // `claude-opus-4-6` → "Claude Opus 4.6"; a trailing date is left out.
+    const baseLabel = base
+      ? base
+          .replace(/-\d{8}$/u, "")
+          .replace(/^claude-([a-z]+)-(\d+)(?:-(\d+))?$/u, (_, family: string, major, minor) =>
+            [
+              "Claude",
+              family[0]!.toUpperCase() + family.slice(1),
+              minor ? `${major}.${minor}` : major,
+            ].join(" "),
+          )
+      : "Claude";
+    const geo = bedrockProfileGeo(upstreamModelId);
+    const label =
+      scope === "application"
+        ? name
+          ? `${name} (${baseLabel})`
+          : `${baseLabel} (application profile)`
+        : scope === "global"
+          ? `${baseLabel} (Global)`
+          : scope === "geo"
+            ? `${baseLabel} (${(geo && BEDROCK_GEO_LABELS[geo]) ?? geo})`
+            : `${baseLabel} (${region})`;
+    const pricing = bedrockModelPricing(upstreamModelId);
+    const residency = bedrockModelResidency(upstreamModelId, region);
+    models.push({
+      ...nativeClaudeModelDefinition(settings, {
+        id: bedrockProductModelId(upstreamModelId),
+        upstreamModelId,
+        label,
+        // Anthropic's server-side web search is not available on Bedrock;
+        // Opengeni's own web search tool still is.
+        hostedWebSearch: false,
+      }),
+      ...(pricing ? { pricing } : {}),
+      ...(residency ? { residency } : {}),
+    });
+  }
+  if (!models.length) return null;
+  return {
+    id: BEDROCK_PROVIDER_ID,
+    label: "Amazon Bedrock",
+    kind: "api-key",
+    api: "anthropic-messages",
+    wireProfile: "openai",
+    baseUrl: `${endpoint}/anthropic/v1`,
+    anthropic: {
+      auth: "api-key",
+      cacheTtl: "5m",
+      maxOutputTokens: 128000,
+      streamIdleTimeoutMs: 600000,
+    },
+    bedrock: {
+      region,
+      ...(settings.bedrockAttributionRoleArn
+        ? { attributionRoleArn: settings.bedrockAttributionRoleArn }
+        : {}),
+    },
+    models,
+  } as InternalRegistryProvider;
 }
 
 /**
@@ -9294,6 +9526,10 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "direct-compatible-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
+      // Amazon Bedrock signs with the deployment's AWS identity, never a key.
+      return provider.bedrock
+        ? { kind: "deployment", mechanism: "aws_iam" }
+        : { kind: "deployment", mechanism: "api_key" };
     case "vercel-gateway-managed":
     case "openrouter-managed":
     case "opper-managed":
@@ -10162,6 +10398,7 @@ export function configuredProviders(
       kind: provider.kind,
       api: provider.api,
       anthropic: provider.anthropic,
+      ...(provider.bedrock ? { bedrock: provider.bedrock } : {}),
       wireProfile: provider.wireProfile,
       builtin: false,
       baseUrl: provider.baseUrl,
@@ -15063,9 +15300,67 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
   ],
 ]);
 export function claudeNativeModelProfile(upstreamModelId: string) {
-  return Object.hasOwn(CLAUDE_NATIVE_MODEL_PROFILES, upstreamModelId)
-    ? CLAUDE_NATIVE_MODEL_PROFILES[upstreamModelId]
+  if (Object.hasOwn(CLAUDE_NATIVE_MODEL_PROFILES, upstreamModelId))
+    return CLAUDE_NATIVE_MODEL_PROFILES[upstreamModelId];
+  // A Bedrock profile id, model id or ARN serves the same Claude model.
+  const bedrock = bedrockClaudeBaseModelId(upstreamModelId);
+  return bedrock !== undefined && Object.hasOwn(CLAUDE_NATIVE_MODEL_PROFILES, bedrock)
+    ? CLAUDE_NATIVE_MODEL_PROFILES[bedrock]
     : undefined;
+}
+
+function claudeModelLabel(upstreamModelId: string): string {
+  return upstreamModelId === "claude-fable-5-2"
+    ? "Claude Fable 5.2"
+    : upstreamModelId === "claude-opus-5-5"
+      ? "Claude Opus 5.5"
+      : upstreamModelId === "claude-sonnet-5-5"
+        ? "Claude Sonnet 5.5"
+        : upstreamModelId === "claude-haiku-5-5"
+          ? "Claude Haiku 5.5"
+          : upstreamModelId;
+}
+
+/** A native Claude Messages model: limits, thinking and caching from its profile. */
+function nativeClaudeModelDefinition(
+  settings: Settings,
+  input: { id: string; upstreamModelId: string; label: string; hostedWebSearch: boolean },
+): RegistryProvider["models"][number] {
+  const profile = claudeNativeModelProfile(input.upstreamModelId);
+  const adaptiveThinking = Boolean(profile?.efforts.length);
+  const contextWindowTokens = profile?.contextWindowTokens ?? 200_000;
+  const outputReserve = profile?.maxOutputTokens ?? 32_000;
+  return {
+    contextWindowTokens,
+    effectiveContextWindowTokens: contextWindowTokens - outputReserve,
+    autoCompactTokenLimit:
+      profile?.autoCompactTokenLimit ??
+      (contextWindowTokens === 1_000_000
+        ? 800_000
+        : Math.min(150_000, contextWindowTokens - outputReserve - 18_000)),
+    id: input.id,
+    upstreamModelId: input.upstreamModelId,
+    label: input.label,
+    reasoningEffort: adaptiveThinking,
+    hostedWebSearch: input.hostedWebSearch,
+    capabilities: {
+      ...legacyModelCapabilities(settings, {
+        reasoningEffort: adaptiveThinking,
+        hostedWebSearch: input.hostedWebSearch,
+        vision: true,
+      }),
+      inputFileMediaTypes: [],
+      reasoning: {
+        upstream: adaptiveThinking ? "supported" : "unknown",
+        runnable: adaptiveThinking,
+        efforts: [...(profile?.efforts ?? [])],
+        defaultEffort: profile?.defaultEffort ?? null,
+        required: false,
+      },
+      functionCalling: { upstream: "supported", runnable: true },
+      promptCaching: { upstream: "supported", runnable: true, mode: "automatic" },
+    },
+  };
 }
 /**
  * Models a new Claude connection offers without anyone adding them. Seeded
@@ -15121,55 +15416,16 @@ export function withClaudeConnectionCatalog(
         maxOutputTokens: 128000,
         streamIdleTimeoutMs: 600000,
       },
-      models: connection.models.map((model) => {
-        const profile = claudeNativeModelProfile(model.upstreamModelId);
-        const adaptiveThinking = Boolean(profile?.efforts.length);
-        const contextWindowTokens = profile?.contextWindowTokens ?? 200_000;
-        const outputReserve = profile?.maxOutputTokens ?? 32_000;
-        return {
-          contextWindowTokens,
-          effectiveContextWindowTokens: contextWindowTokens - outputReserve,
-          autoCompactTokenLimit:
-            profile?.autoCompactTokenLimit ??
-            (contextWindowTokens === 1_000_000
-              ? 800_000
-              : Math.min(150_000, contextWindowTokens - outputReserve - 18_000)),
+      models: connection.models.map((model) =>
+        nativeClaudeModelDefinition(settings, {
           id: id + "/" + model.upstreamModelId,
           upstreamModelId: model.upstreamModelId,
-          label:
-            model.label ??
-            (model.upstreamModelId === "claude-fable-5-2"
-              ? "Claude Fable 5.2"
-              : model.upstreamModelId === "claude-opus-5-5"
-                ? "Claude Opus 5.5"
-                : model.upstreamModelId === "claude-sonnet-5-5"
-                  ? "Claude Sonnet 5.5"
-                  : model.upstreamModelId === "claude-haiku-5-5"
-                    ? "Claude Haiku 5.5"
-                    : model.upstreamModelId),
-          reasoningEffort: adaptiveThinking,
+          label: model.label ?? claudeModelLabel(model.upstreamModelId),
           // Claude's server-side web search runs on every Claude route (API
           // key and subscription) under the deployment's web search switch.
           hostedWebSearch: settings.webSearchEnabled,
-          capabilities: {
-            ...legacyModelCapabilities(settings, {
-              reasoningEffort: adaptiveThinking,
-              hostedWebSearch: settings.webSearchEnabled,
-              vision: true,
-            }),
-            inputFileMediaTypes: [],
-            reasoning: {
-              upstream: adaptiveThinking ? "supported" : "unknown",
-              runnable: adaptiveThinking,
-              efforts: [...(profile?.efforts ?? [])],
-              defaultEffort: profile?.defaultEffort ?? null,
-              required: false,
-            },
-            functionCalling: { upstream: "supported", runnable: true },
-            promptCaching: { upstream: "supported", runnable: true, mode: "automatic" },
-          },
-        };
-      }),
+        }),
+      ),
     });
   }
   return {

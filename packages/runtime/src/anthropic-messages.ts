@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
+import { bedrockFetch } from "./bedrock";
 import { isCompactionSummary } from "./context-compaction";
 import {
   ANTHROPIC_IMAGE_MAX_ENCODED_BYTES,
@@ -1471,11 +1472,15 @@ export class AnthropicMessagesModel implements Model {
   private readonly refusedApiKeys = new Set<string>();
   /** The pooled API key each accepted response was sent with. */
   private readonly responseApiKeys = new WeakMap<Response, string>();
+  private readonly fetch: typeof globalThis.fetch;
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
-    private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
-  ) {}
+    fetch: typeof globalThis.fetch = globalThis.fetch,
+  ) {
+    // Amazon Bedrock: the same Messages requests, SigV4-signed with AWS credentials.
+    this.fetch = provider.bedrock ? bedrockFetch(provider, fetch) : fetch;
+  }
 
   /**
    * The provider as this request sends it: with an organization's several
@@ -1657,7 +1662,7 @@ export class AnthropicMessagesModel implements Model {
       betas.add("mid-conversation-system-2026-04-07");
       headers.set("anthropic-beta", [...betas].join(","));
     }
-    if (provider.kind !== "anonymous") {
+    if (provider.kind !== "anonymous" && !provider.bedrock) {
       if (!provider.apiKey) throw new AnthropicProtocolError("Claude credentials are unavailable");
       if (provider.anthropic?.auth === "oauth") {
         headers.delete("x-api-key");

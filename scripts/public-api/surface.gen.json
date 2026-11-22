@@ -25448,7 +25448,7 @@
         "$": "union=[\"kind=connected_subscription\",\"kind=deployment\",\"kind=organization_connection\",\"kind=workspace_connection\"]",
         "$|kind=deployment": "object",
         "$|kind=deployment.kind": "const!=[\"\\\"deployment\\\"\"]",
-        "$|kind=deployment.mechanism": "enum!=[\"\\\"api_key\\\"\",\"\\\"azure_ad_bearer\\\"\"]",
+        "$|kind=deployment.mechanism": "enum!=[\"\\\"api_key\\\"\",\"\\\"aws_iam\\\"\",\"\\\"azure_ad_bearer\\\"\"]",
         "$|kind=connected_subscription": "object",
         "$|kind=connected_subscription.kind": "const!=[\"\\\"connected_subscription\\\"\"]",
         "$|kind=connected_subscription.provider": "enum!=[\"\\\"claude\\\"\",\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",

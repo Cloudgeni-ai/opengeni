@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   contractForProfile,
   deploymentProfiles,
+  BEDROCK_PASSTHROUGH_ENV,
   CREDIT_MARGIN_BPS_PASSTHROUGH_ENV,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
@@ -1882,6 +1883,28 @@ describe("deployment contract", () => {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }
+  });
+
+  test("a Bedrock-only deployment passes its Bedrock settings and needs no OpenAI key", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const bedrock = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_BEDROCK_REGION: "eu-west-1",
+      OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN: "arn:aws:iam::123456789012:role/opengeni-users",
+      OPENGENI_OPENAI_MODEL: "bedrock/eu.anthropic.claude-opus-5-5",
+    });
+    expect(bedrock.runtimeEnv).toContain("OPENGENI_BEDROCK_REGION=eu-west-1");
+    expect(bedrock.runtimeEnv).toContain(
+      "OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN=arn:aws:iam::123456789012:role/opengeni-users",
+    );
+    expect(bedrock.missingEnvVars).not.toContain("OPENGENI_OPENAI_API_KEY");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.missingEnvVars).toContain("OPENGENI_OPENAI_API_KEY");
+    for (const key of BEDROCK_PASSTHROUGH_ENV) expect(absent.runtimeEnv).not.toContain(`${key}=`);
   });
 
   test("passes the optional credit margin override through without making it required", () => {
