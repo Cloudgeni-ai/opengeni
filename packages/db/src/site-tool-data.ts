@@ -23,16 +23,18 @@ export const siteToolDataTarget = (kind: "collection" | "sql", name?: string): s
   kind === "sql" ? "sql" : `collection:${name}`;
 
 /**
- * A reset clears only marks made at least this long before it: a write that
- * marked its target just before a reset may still land after it, so such a
- * mark keeps counting. Longer than any sync or server-code run.
+ * A reset removes only marks made at least this long before it: a write
+ * that marked its target just before a reset may still land after it, so
+ * such a mark stays. Writers mark right before each write (a sync before
+ * each page, server code before each write call), so one page or call is
+ * the window this covers.
  */
 const SITE_TOOL_DATA_RESET_GRACE = sql.raw("interval '1 minute'");
 export const SITE_TOOL_DATA_RESET_GRACE_MS = 60_000;
 
 /**
  * Mark targets before the data is stored. Marks stay until a manager resets
- * the target; marking a target again after its reset refreshes the mark.
+ * the target, which removes them; a later write marks it again.
  */
 export async function markSiteToolData(
   db: Database,
@@ -49,14 +51,7 @@ export async function markSiteToolData(
             (account_id, workspace_id, site_id, target, connector, route, shared)
           values (${scope.accountId}, ${scope.workspaceId}, ${siteId}, ${source.target},
             ${source.connector.slice(0, 256)}, ${source.route.slice(0, 256)}, ${source.shared})
-          on conflict (workspace_id, site_id, target, connector, route) do update
-            set created_at = now()
-            where exists (
-              select 1 from site_tool_data_resets reset
-              where reset.workspace_id = site_tool_data_sources.workspace_id
-                and reset.site_id = site_tool_data_sources.site_id
-                and reset.target = site_tool_data_sources.target
-                and reset.reset_at - ${SITE_TOOL_DATA_RESET_GRACE} >= site_tool_data_sources.created_at)`,
+          on conflict do nothing`,
       );
   });
 }
@@ -68,14 +63,22 @@ export async function resetSiteToolData(
   siteId: string,
   target: string,
 ): Promise<void> {
-  await withRlsContext(db, scope, (tx) =>
-    rawRows(
+  await withRlsContext(db, scope, async (tx) => {
+    await rawRows(
       tx,
       sql`insert into site_tool_data_resets (account_id, workspace_id, site_id, target)
         values (${scope.accountId}, ${scope.workspaceId}, ${siteId}, ${target})
         on conflict (workspace_id, site_id, target) do update set reset_at = now()`,
-    ),
-  );
+    );
+    // Removing the mark (not just timestamping it) lets any writer, including
+    // a release that only inserts marks, mark the target again.
+    await rawRows(
+      tx,
+      sql`delete from site_tool_data_sources
+        where workspace_id = ${scope.workspaceId} and site_id = ${siteId} and target = ${target}
+          and created_at <= now() - ${SITE_TOOL_DATA_RESET_GRACE}`,
+    );
+  });
 }
 
 /**
@@ -94,17 +97,10 @@ export async function listSiteToolDataSources(
   resets: Map<string, Date>;
 }> {
   const { marks, resets } = await withRlsContext(db, scope, async (tx) => ({
-    // A mark from well before its target's latest reset no longer counts.
     marks: await rawRows<{ target: string; connector: string; route: string; shared: boolean }>(
       tx,
-      sql`select mark.target, mark.connector, mark.route, mark.shared
-        from site_tool_data_sources mark
-        where mark.workspace_id = ${scope.workspaceId} and mark.site_id = ${siteId}
-          and not exists (
-            select 1 from site_tool_data_resets reset
-            where reset.workspace_id = mark.workspace_id and reset.site_id = mark.site_id
-              and reset.target = mark.target
-              and reset.reset_at - ${SITE_TOOL_DATA_RESET_GRACE} >= mark.created_at)
+      sql`select target, connector, route, shared from site_tool_data_sources
+        where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
         limit 2000`,
     ),
     resets: await rawRows<{ target: string; reset_at: Date | string }>(

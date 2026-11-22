@@ -843,26 +843,30 @@ async function runForPerson(
       );
     const writer = await syncWriter(deps, grant, task, action, context);
     const identity = await toolForPerson(deps, grant, action, chosenAccount);
-    // A shared sync's target holds this account's data: mark it before
-    // writing, so reads need a member who may use the connector.
+    // A shared sync's target holds this account's data: mark it before each
+    // write, so reads need a member who may use the connector. Marking per
+    // page keeps it marked if a manager resets the data while this run is
+    // still writing (a reset removes earlier marks).
+    let markTarget = async () => {};
     if (action.mode === "shared") {
       const inventory = await readInventory(deps, grant).catch(() => null);
       const account = inventory?.accounts.find((item) => item.serverId === identity.serverId);
-      await markToolData(
-        deps,
-        { accountId: task.accountId, workspaceId: task.workspaceId },
-        action.siteId,
-        [
-          {
-            target: action.target
-              ? siteToolDataTarget("sql")
-              : siteToolDataTarget("collection", action.collection),
-            connector: account?.canonicalServerId ?? connectorToolOf(action).serverId,
-            route: identity.serverId,
-            shared: account?.shared === true,
-          },
-        ],
-      );
+      const source = {
+        target: action.target
+          ? siteToolDataTarget("sql")
+          : siteToolDataTarget("collection", action.collection),
+        connector: account?.canonicalServerId ?? connectorToolOf(action).serverId,
+        route: identity.serverId,
+        shared: account?.shared === true,
+      };
+      markTarget = () =>
+        markToolData(
+          deps,
+          { accountId: task.accountId, workspaceId: task.workspaceId },
+          action.siteId,
+          [source],
+        );
+      await markTarget();
     }
     const limit = Math.min(action.maxRecords ?? APP_SYNC_MAX_RECORDS, APP_SYNC_MAX_RUN_RECORDS);
     const paging = action.paging ?? null;
@@ -902,6 +906,7 @@ async function runForPerson(
           seen.add(record.key);
           fresh += 1;
         }
+      if (summary.pages > 1) await markTarget();
       summary.written += await writer.write(extracted.records);
       if (action.removeMissing)
         await recordAppSyncKeys(deps.db, {

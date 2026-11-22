@@ -3,14 +3,15 @@
 -- (docs/app-server-code.md, "Stored tool data").
 --
 -- * site_tool_data_resets: when a manager last reset a target (a collection,
---   or the app's SQL database). Marks and deleted shared syncs from before
---   that time no longer count; live shared syncs always do.
--- * site_tool_data_sources gains UPDATE, so a target marked again after a
---   reset refreshes its mark's time.
+--   or the app's SQL database). Deleted shared syncs from before that time
+--   no longer count; live shared syncs always do.
+-- * site_tool_data_sources gains UPDATE and DELETE (full DML): a reset
+--   removes the target's marks, so any later write, even from the previous
+--   release (which only inserts marks), marks it again.
 --
 -- Rolling: a new table the previous release never reads, and an added
--- privilege. The previous release ignores resets, so it keeps treating reset
--- targets as marked (it refuses more, never less).
+-- privilege. The previous release ignores resets, so it keeps treating
+-- deleted shared syncs' targets as marked (it refuses more, never less).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
 
@@ -44,7 +45,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     EXECUTE 'REVOKE ALL ON TABLE site_tool_data_resets FROM opengeni_app';
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON TABLE site_tool_data_resets TO opengeni_app';
-    EXECUTE 'GRANT UPDATE ON TABLE site_tool_data_sources TO opengeni_app';
+    EXECUTE 'GRANT UPDATE, DELETE ON TABLE site_tool_data_sources TO opengeni_app';
   END IF;
 END
 $$;

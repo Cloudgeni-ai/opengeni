@@ -158,11 +158,13 @@ shared-account data, it stays marked when the sync that filled it is
 switched to a personal account, pointed at another target or deleted
 (the API marks the old target when the sync changes, and a deleted shared
 sync keeps counting). Only a manager resetting the data clears it: resetting
-or removing a collection, or resetting the SQL database, records the time in
-`site_tool_data_resets`, and marks and deleted syncs from more than a minute
-before it stop counting. The minute covers a write that marked its target
-just before the reset and lands after it. Live shared syncs always count,
-and marking a target again after a reset makes it count again.
+or removing a collection, or resetting the SQL database, removes the
+target's marks made more than a minute before, and records the time in
+`site_tool_data_resets` so deleted syncs from before it stop counting.
+Writers mark right before each write (a sync before every page, server code
+before every write call), so a run still writing during a reset marks the
+target again; the minute covers a write already past its mark. Live shared
+syncs always count.
 
 Every read of a marked target needs a signed-in, live member of the
 workspace. A route that is a workspace-shared account needs that same route

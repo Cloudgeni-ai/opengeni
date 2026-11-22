@@ -2913,6 +2913,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_rate_windows",
   "site_sql_usage",
   "site_tool_allowances",
+  // 1554_app_server_code: where an app stored shared-account tool data;
+  // 1555 lets a manager's reset remove stale marks.
+  "site_tool_data_sources",
   "site_viewer_sessions",
   "slack_agent_intro_posts",
   "slack_agent_proposals",
@@ -3198,9 +3201,6 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "site_auth_connections",
   // 1555_sticky_tool_data_marks: when a manager last reset a target.
   "site_tool_data_resets",
-  // 1554_app_server_code: where an app stored shared-account tool data;
-  // 1555 refreshes a mark's time when a reset target is marked again.
-  "site_tool_data_sources",
   "slack_user_link_access_requests",
   "workspace_interaction_revisions",
 ] as const;
