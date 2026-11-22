@@ -207,7 +207,9 @@ shows managers one line per affected collection or database.
   app's frame). The console's one line shows while the newest run fails, the
   code is paused or the deployment can't run it, and opens the app's chat.
 - `GET .../published-artifacts/:id/server/runs?limit=&status=&before=`:
-  recent runs with logs and errors.
+  recent runs with logs and errors. For a version whose code uses tools or
+  secrets, a manager who can't use each of them (the stored tool data rule)
+  gets the runs without logs, errors or the request's path and query.
 - Agent tools: `app_server_runs` (status and runs) and `app_server_run`
   (one manual request as the calling manager, with its logs).
 - SDK: `getAppServerStatus`, `listAppServerRuns`; in the page,

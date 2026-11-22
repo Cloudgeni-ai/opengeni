@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import {
   liveMemberGrant,
   markToolData,
+  memberMayUseSource,
+  memberToolInventory,
   requireToolDataReader,
   siteToolDataTarget,
   type SiteToolDataSource,
@@ -55,6 +57,7 @@ import {
   claimAppServerHostCall,
   finishAppServerRun,
   getAppServerDeployment,
+  getAppServerManifest,
   getAppServerRun,
   getVerifiedSubjectEmail,
   listAppServerRuns,
@@ -1511,6 +1514,7 @@ export async function appServerStatus(
       tools: [],
     };
   const summary = await summarizeAppServerRuns(deps.db, scope, access.site.id, startOfUtcDay());
+  const mayRead = runOutputReader(deps, grant, access.site.id);
   let paused: string | null = null;
   try {
     await serverAuthority(deps, deployment);
@@ -1523,7 +1527,12 @@ export async function appServerStatus(
     available: appServerAvailable(deps.settings),
     errorsToday: summary.errors,
     runsToday: summary.runs,
-    lastError: summary.lastError,
+    lastError:
+      summary.lastError && (await mayRead(deployment.versionId, deployment.manifest))
+        ? summary.lastError
+        : summary.lastError
+          ? { ...summary.lastError, message: RUN_OUTPUT_WITHHELD }
+          : null,
     lastRunFailed: summary.lastRunFailed,
     paused,
     egress: deployment.manifest.egress,
@@ -1539,13 +1548,13 @@ export async function appServerRuns(
   options: { limit?: number; status?: "running" | "ok" | "error"; before?: string },
 ): Promise<{ runs: AppServerRun[] }> {
   const { access, scope } = await managerScope(deps, grant, siteId);
-  return {
-    runs: await listAppServerRuns(deps.db, scope, access.site.id, {
-      limit: options.limit ?? 20,
-      ...(options.status ? { status: options.status } : {}),
-      ...(options.before ? { before: options.before } : {}),
-    }),
-  };
+  const runs = await listAppServerRuns(deps.db, scope, access.site.id, {
+    limit: options.limit ?? 20,
+    ...(options.status ? { status: options.status } : {}),
+    ...(options.before ? { before: options.before } : {}),
+  });
+  const mayRead = runOutputReader(deps, grant, access.site.id);
+  return { runs: await Promise.all(runs.map((run) => withheldUnlessPermitted(run, mayRead))) };
 }
 
 /** One run of the app, for its managers. */
@@ -1556,7 +1565,69 @@ export async function appServerRun(
   runId: string,
 ): Promise<AppServerRun | null> {
   const { access, scope } = await managerScope(deps, grant, siteId);
-  return await getAppServerRun(deps.db, scope, access.site.id, runId);
+  const run = await getAppServerRun(deps.db, scope, access.site.id, runId);
+  return run
+    ? await withheldUnlessPermitted(run, runOutputReader(deps, grant, access.site.id))
+    : null;
+}
+
+const RUN_OUTPUT_WITHHELD =
+  "Hidden: this version's code uses tools or secrets you can't use, so its logs and errors may hold their data.";
+
+/**
+ * Whether a manager may read a version's run output (logs, errors, request
+ * path). Code with tools or secrets may log their data, so its output is held
+ * to the stored tool data rule: a live member who may use each declared tool's
+ * connector, and `secrets:use` when it uses vault secrets.
+ */
+function runOutputReader(deps: AppServerDeps, grant: AccessGrant, siteId: string) {
+  const verdicts = new Map<string, Promise<boolean>>();
+  return (versionId: string, known?: AppServerManifest | null): Promise<boolean> => {
+    let verdict = verdicts.get(versionId);
+    if (!verdict) {
+      verdict = (async () => {
+        const manifest =
+          known !== undefined
+            ? known
+            : await getAppServerManifest(deps.db, grant.workspaceId, siteId, versionId);
+        const tools = manifest ? appServerDeclaredTools(manifest) : [];
+        const secrets = manifest ? manifest.secrets.length > 0 : false;
+        if (tools.length === 0 && !secrets) return true;
+        const member = await liveMemberGrant(
+          deps,
+          { accountId: grant.accountId, workspaceId: grant.workspaceId },
+          grant.subjectId,
+        );
+        if (!member) return false;
+        const inventory = await memberToolInventory(deps, member).catch(() => null);
+        if (!inventory && tools.length > 0) return false;
+        const sources: SiteToolDataSource[] = tools.map((tool) => ({
+          target: "",
+          connector: tool.serverId,
+          route: tool.serverId,
+          shared: false,
+        }));
+        if (secrets)
+          sources.push({ target: "", connector: "vault", route: "vault", shared: false });
+        return sources.every((source) => memberMayUseSource(member, inventory!, source));
+      })();
+      verdicts.set(versionId, verdict);
+    }
+    return verdict;
+  };
+}
+
+async function withheldUnlessPermitted(
+  run: AppServerRun,
+  mayRead: (versionId: string) => Promise<boolean>,
+): Promise<AppServerRun> {
+  if (await mayRead(run.versionId)) return run;
+  return {
+    ...run,
+    target: run.target.split(" ")[0] ?? "",
+    logs: "",
+    error: run.error ? RUN_OUTPUT_WITHHELD : null,
+  };
 }
 
 /** A manager (or their agent) tries the app's server code: a recorded `manual` run as themselves. */

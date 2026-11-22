@@ -715,6 +715,36 @@ test("a member who can't use the shared connection themselves is refused the too
   expect(f.toolCalls).toEqual([]);
 });
 
+test("a manager who can't use the code's tools doesn't see its run logs or errors", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  f.setIsolate(async (_run, host) => {
+    const called = await host("tools.call", { tool: "linear/list_issues", arguments: {} });
+    return { logs: `got ${JSON.stringify(called.json.result)}\n`, error: "Shared issue failed" };
+  });
+  await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/issues?team=ENG" });
+  const visible = await f.request(f.owner, "GET", `/${f.siteId}/server/runs`);
+  expect(visible.json.runs[0].logs).toContain("Shared issue");
+
+  // The same manager, once they can no longer use the shared connection.
+  const teamLinear = {
+    canonical: new Map([["linear", { name: "Linear" } as never]]),
+    plain: new Set<string>(),
+    accounts: [{ serverId: "linear__team", canonicalServerId: "linear", shared: true } as never],
+    capabilityServers: new Set<string>(),
+  };
+  f.setInventory((grant) =>
+    grant.subjectId === f.owner.subjectId ? { ...teamLinear, accounts: [] } : teamLinear,
+  );
+  const hidden = await f.request(f.owner, "GET", `/${f.siteId}/server/runs`);
+  expect(hidden.status, JSON.stringify(hidden.json)).toBe(200);
+  expect(hidden.json.runs[0]).toMatchObject({ logs: "", target: "GET" });
+  expect(JSON.stringify(hidden.json)).not.toContain("Shared issue");
+  expect(JSON.stringify(hidden.json)).not.toContain("team=ENG");
+  const status = await f.request(f.owner, "GET", `/${f.siteId}/server/status`);
+  expect(JSON.stringify(status.json)).not.toContain("Shared issue");
+});
+
 test("stored shared-account data is shown only to members who may use its connector", async () => {
   const f = await fixture();
   expect((await f.publish(SERVER_CODE)).status).toBe(200);
