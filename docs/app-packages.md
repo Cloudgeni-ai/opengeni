@@ -19,8 +19,9 @@ One JSON file, named `<title>.opengeni-app.json`:
 | Field | Contents |
 | --- | --- |
 | `format`, `version` | `"opengeni.app-package"`, `1` |
+| `packageId` | The app's id across its packages (see [Provenance](#provenance)) |
 | `exportedAt` | ISO time of the export |
-| `app` | `title`, `description`, `html` of the current version, and its retained editable `source` when it has one |
+| `app` | `title`, `description`, `html` of the current version, its retained editable `source` when it has one, and a [multi-file](published-sites.md) build's `assets` (`{ files: [{ path, base64 }] }`, the same shape as an asset upload) |
 | `tools` | The tools the version requests ([requested tools](published-sites.md)), as connector-level entries: the author's account routes become their connector (`connectorToolIdentities` in `apps/api/src/site-tool-routing.ts`) |
 | `data.collections` | Site Data collection definitions (name, access mode, schema), no records |
 | `sql.migrations` | Site SQL migrations in applied order (`name`, `sql`) |
@@ -34,13 +35,21 @@ Limits: 24 MiB per package; demo data at most 1,000 records per collection,
 base64 size); 50 syncs; 10 sidebar links. Parts over a limit are left
 out and listed in the export's `notExported`, not a failed export.
 
-Every addition since the first release is optional (`demoData.files`, blob
-values), so older version 1 packages stay readable and the version stays 1.
+Every addition since the first release is optional (`packageId`,
+`app.assets`, `demoData.files`, blob values), so older version 1 packages stay readable and the version stays 1.
 
 Install validates leniently: unknown fields are ignored, a newer `version` is
 read as far as version 1 goes, and an invalid collection, migration, query,
 sync or record is skipped and reported. Only a file that isn't a package at all
-(wrong `format`, or no app HTML) is refused.
+(wrong `format`, or no app HTML) is refused, and so is a package whose asset
+files are invalid: its HTML loads them, so the copy would be broken. An
+invalid `packageId` is ignored.
+
+Asset files count toward the 24 MiB package limit with their base64 size,
+before demo data; export checks this from the version's manifest before it
+reads any file, and refuses an app whose files don't fit with 413. Install
+and upgrade refuse a package over the same 24 MiB, so every installed copy
+can be exported again.
 
 ## Export
 
@@ -69,12 +78,15 @@ shared collection, table and shared file. Returns `{ package, filename, notExpor
 
 `POST /v1/workspaces/:workspaceId/app-packages/install` (`artifacts:publish`,
 like creating an app). Body `{ package, title?, visibility?, demoData?, idempotencyKey }`.
-Returns 201 with `{ app, replayed, installed, notInstalled }`, or 200 with
+Returns 201 with `{ app, packageId, replayed, installed, notInstalled }`, or 200 with
 `replayed: true` when the same key installed it before.
 
 Steps, each reported rather than failing the install:
 
-1. Create the app from the package's version, with the person as owner.
+1. Store the asset files (content-addressed, like an upload; a bad file
+   refuses the install before anything exists), then create the app from the
+   package's version, with the person as owner. The copy's files get their
+   own token. Record the package's `packageId` on the app.
 2. Define the collections.
 3. If Site SQL is available: enable it, apply the migrations in order (an
    existing migration name is skipped; the first failure stops the rest), then
@@ -112,7 +124,8 @@ title, sharing and publication stay), and runs only what is new. The plan:
 
 | Part | Lists |
 | --- | --- |
-| `version` | Whether the HTML, source or tools differ (`changed` when any does) |
+| `version` | Whether the HTML, source, tools or asset files differ (`changed` when any does) |
+| `package` | `id` (the package's `packageId`) and `current` (the one the app came from), null when unknown |
 | `tools` | Tools `added` and `removed`, compared as connector-level entries |
 | `collections` | `added`, `changed`, `unchanged`, and `kept`: the app's collections the package doesn't have |
 | `migrations` | `applied` (same name and SQL), `new`, `conflicting` (a known name with different SQL) |
@@ -124,6 +137,12 @@ title, sharing and publication stay), and runs only what is new. The plan:
 
 Rules:
 
+- **Another app's package** (its `packageId` differs from the app's) is
+  listed in `destructive` and needs `allowDestructive`, like other risky
+  changes; the 409 names it. After an applied upgrade the app comes from the
+  package.
+- **Asset files are checked first.** An invalid file is a conflict in the
+  plan (a dry run shows it), so nothing runs.
 - **Nothing is deleted.** Collections and syncs missing from the package are
   kept and listed. Records, rows and files stay.
 - **Destructive changes need `allowDestructive: true`.** New migrations whose
@@ -154,6 +173,20 @@ Rules:
 - **Agents** may only declare tools their chat has: added tools it lacks are
   left out and reported; when it lacks a tool the app already uses, the
   upgrade is refused (upgrade from the console instead).
+
+## Provenance
+
+`workspace_artifacts.package_id` (migration 1548) records the package an app
+was installed or last upgraded from. Export writes it as `packageId`; an app
+made here exports, and is compared by, a fixed id derived from its own id (a
+version 8 UUID), so every export of one app, and of every copy installed from
+it, carries the same id. Upgrade compares it (see the rule above); packages
+without one aren't checked. The id is a claim the package makes, not a
+signature: it guards against mistakes, not a crafted package. A duplicated
+app starts without one. A copy installed before migration 1548 has no
+recorded id, so its next upgrade asks once to confirm; the upgrade then
+records the package's id. The ids are in the install and upgrade responses;
+in the console, another app's package shows as a note to confirm.
 
 ## Syncs
 

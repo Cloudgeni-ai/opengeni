@@ -10,6 +10,7 @@ import {
 import { APP_PACKAGE_SYNC_HOOKS } from "../src/app-sync/package-hooks";
 import {
   claimAppSyncRun,
+  claimEventSourceFeed,
   claimEventTriggerDispatch,
   createDb,
   createEventSource,
@@ -21,11 +22,13 @@ import {
   finishAppSyncRun,
   SiteDataError,
   createWorkspace,
+  deleteEventSource,
   enqueueAppSyncRun,
   ensureExternalIdentity,
   eventOccurrenceProducerKey,
   getScheduledTask,
   listScheduledTaskRuns,
+  markEventOccurrenceStarted,
   recordEventDelivery,
   type DbClient,
 } from "@opengeni/db";
@@ -240,6 +243,7 @@ async function fixture() {
   const siteId = String(published.json.artifact.id);
   const versionId = String(published.json.version.id);
   return {
+    app,
     deps: deps as AppDependencies & AppSyncDeps,
     accountId,
     workspace,
@@ -1807,4 +1811,272 @@ test("a sync hears its owner's own event sources; a personal run from one is onl
   expect(new Set(fake.calls.slice(1).map((call) => call.subjectId))).toEqual(
     new Set([f.owner.subjectId, f.alice.subjectId]),
   );
+});
+
+test("a personal sync's trigger on the owner's Gmail also hears each subscriber's own Gmail, only for them", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.owner.subjectId]: [{ serverId: "account-owner" }],
+    [f.alice.subjectId]: [{ serverId: "account-alice" }],
+    [f.bob.subjectId]: [{ serverId: "account-bob" }],
+  });
+  for (const [name, accessMode] of [
+    ["mine", "per_viewer"],
+    ["team", "shared_read"],
+  ] as const)
+    await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/${name}`, { accessMode });
+  const gmail = async (who: Who) =>
+    (
+      await createEventSource(f.deps.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        createdBySubjectId: who.subjectId,
+        kind: "gmail",
+        name: "Gmail",
+        ownerSubjectId: who.subjectId,
+        visibility: "private",
+        externalKey: `email:${who.subjectId}@example.test`,
+      })
+    ).source;
+  const [ownerMail, aliceMail, bobMail] = [
+    await gmail(f.owner),
+    await gmail(f.alice),
+    await gmail(f.bob),
+  ];
+  const save = async (mode: "personal" | "shared", collection: string) => {
+    const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+      name: `Mail ${mode}`,
+      collection,
+      mode,
+      tool: { serverId: "orders", toolName: "list_orders" },
+      key: "id",
+      schedule: { type: "manual" },
+      events: { triggers: [{ sourceId: ownerMail.id, eventTypes: ["message.received"] }] },
+    });
+    expect(created.status, JSON.stringify(created.json)).toBe(201);
+    return String(created.json.id);
+  };
+  const personal = await save("personal", "mine");
+  const sharedSync = await save("shared", "team");
+  // Alice opts in; Bob doesn't.
+  expect(
+    (await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${personal}/subscription`)).status,
+  ).toBe(200);
+
+  // Alice's own Gmail is now read for the sync; Bob's isn't.
+  const wanted = async (sourceId: string) =>
+    (await claimEventSourceFeed(f.deps.db, f.workspace.id, sourceId, 1_000))?.wanted ?? null;
+  expect(await wanted(aliceMail.id)).toBe(true);
+  expect(await wanted(bobMail.id)).toBe(false);
+
+  const deliver = async (sourceId: string) => {
+    const payload = new TextEncoder().encode(crypto.randomUUID());
+    return await recordEventDelivery(f.deps.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      sourceId,
+      status: "accepted",
+      reason: null,
+      dedupeKey: `gmail:${crypto.randomUUID()}`,
+      body: payload,
+      bodyBytes: payload.byteLength,
+      bodySha256: createHash("sha256").update(payload).digest("hex"),
+      headers: {},
+      events: [
+        {
+          externalId: crypto.randomUUID(),
+          streamKey: "",
+          type: "message.received",
+          occurredAt: new Date(),
+          subject: "Hello",
+          summary: "Hello",
+          url: null,
+          actor: { kind: "person", name: "Ada" },
+          data: {},
+          dataTruncated: false,
+          gapBefore: false,
+        },
+      ],
+      match: (candidate, trigger) => trigger.eventTypes.includes(candidate.type),
+      settleMs: 0,
+    });
+  };
+  // Bob isn't opted in: his mail starts nothing. A shared sync never hears a subscriber.
+  expect((await deliver(bobMail.id)).matchedTaskIds).toEqual([]);
+  const fromAlice = await deliver(aliceMail.id);
+  expect(fromAlice.matchedTaskIds).toEqual([personal]);
+  expect(fromAlice.matchedTaskIds).not.toContain(sharedSync);
+
+  const dispatch = await claimEventTriggerDispatch(f.deps.db, f.workspace.id, personal);
+  expect(dispatch.start).toHaveLength(1);
+  const run = await createScheduledTaskRun(f.deps.db, {
+    workspaceId: f.workspace.id,
+    taskId: personal,
+    triggerType: "event",
+    producerKey: eventOccurrenceProducerKey(dispatch.start[0]!.id),
+  });
+  await enqueueAppSyncRun(f.deps.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    taskId: personal,
+    runId: run.id,
+  });
+  const fake = fakeTool((subject) => [{ id: subject.slice(-6) }]);
+  await drainAppSyncRuns(f.deps, { limit: 50, callTool: fake.callTool });
+  // The run is only for Alice, on her own account, although the owner's trigger fired it.
+  expect(fake.calls.map((call) => call.subjectId)).toEqual([f.alice.subjectId]);
+
+  // Opted out, her mail no longer starts it.
+  expect(
+    (await f.request(f.alice, "DELETE", `/${f.siteId}/syncs/${personal}/subscription`)).status,
+  ).toBe(200);
+  expect((await deliver(aliceMail.id)).matchedTaskIds).toEqual([]);
+});
+
+test("subscriber events stay private on the run, every batched event counts, and a lost source runs for nobody", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.owner.subjectId]: [{ serverId: "account-owner" }],
+    [f.alice.subjectId]: [{ serverId: "account-alice" }],
+    [f.bob.subjectId]: [{ serverId: "account-bob" }],
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+  });
+  const gmail = async (who: Who) =>
+    (
+      await createEventSource(f.deps.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        createdBySubjectId: who.subjectId,
+        kind: "gmail",
+        name: "Gmail",
+        ownerSubjectId: who.subjectId,
+        visibility: "private",
+        externalKey: `email:${who.subjectId}@example.test`,
+      })
+    ).source;
+  const [ownerMail, aliceMail, bobMail] = [
+    await gmail(f.owner),
+    await gmail(f.alice),
+    await gmail(f.bob),
+  ];
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Mail",
+    collection: "mine",
+    mode: "personal",
+    tool: { serverId: "orders", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "manual" },
+    events: { triggers: [{ sourceId: ownerMail.id, eventTypes: ["message.received"] }] },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const sync = String(created.json.id);
+  for (const who of [f.alice, f.bob])
+    expect((await f.request(who, "PUT", `/${f.siteId}/syncs/${sync}/subscription`)).status).toBe(
+      200,
+    );
+
+  const deliver = async (sourceId: string, count: number, subject: string, ago = 0) => {
+    const payload = new TextEncoder().encode(crypto.randomUUID());
+    await recordEventDelivery(f.deps.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      sourceId,
+      status: "accepted",
+      reason: null,
+      dedupeKey: `gmail:${crypto.randomUUID()}`,
+      body: payload,
+      bodyBytes: payload.byteLength,
+      bodySha256: createHash("sha256").update(payload).digest("hex"),
+      headers: {},
+      events: Array.from({ length: count }, (_, index) => ({
+        externalId: crypto.randomUUID(),
+        streamKey: "",
+        type: "message.received",
+        occurredAt: new Date(Date.now() - ago + index),
+        subject,
+        summary: `${subject} body`,
+        url: "https://mail.example.test/message",
+        actor: { kind: "person" as const, name: "Doctor" },
+        data: {},
+        dataTruncated: false,
+        gapBefore: false,
+      })),
+      match: (candidate, trigger) => trigger.eventTypes.includes(candidate.type),
+      settleMs: 0,
+    });
+  };
+  const runOnce = async () => {
+    const dispatch = await claimEventTriggerDispatch(f.deps.db, f.workspace.id, sync);
+    expect(dispatch.start).toHaveLength(1);
+    const run = await createScheduledTaskRun(f.deps.db, {
+      workspaceId: f.workspace.id,
+      taskId: sync,
+      triggerType: "event",
+      producerKey: eventOccurrenceProducerKey(dispatch.start[0]!.id),
+    });
+    await markEventOccurrenceStarted(f.deps.db, f.workspace.id, dispatch.start[0]!.id);
+    await enqueueAppSyncRun(f.deps.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      taskId: sync,
+      runId: run.id,
+    });
+    const fake = fakeTool((subject) => [{ id: subject.slice(-6) }]);
+    await drainAppSyncRuns(f.deps, { limit: 50, callTool: fake.callTool });
+    return fake.calls.map((call) => call.subjectId).sort();
+  };
+
+  // 1. The owner's event keeps its text on the run; Alice's keeps only which event it was.
+  await deliver(ownerMail.id, 1, "Owner note", 60_000);
+  await deliver(aliceMail.id, 1, "Your test results");
+  expect(await runOnce()).toEqual([f.alice.subjectId]);
+  const runs = await f.app.request(
+    `/v1/workspaces/${f.workspace.id}/scheduled-tasks/${sync}/runs`,
+    { headers: f.teammate.headers },
+  );
+  expect(runs.status).toBe(200);
+  const history = await runs.text();
+  expect(history).toContain("Owner note");
+  expect(history).not.toContain("Your test results");
+  expect(history).toContain(aliceMail.id);
+  const kept = (
+    JSON.parse(history) as Array<{
+      eventOccurrence: { events: Array<Record<string, unknown>> };
+    }>
+  ).flatMap((entry) => entry.eventOccurrence.events);
+  expect(kept.find((event) => event.sourceId === aliceMail.id)).toMatchObject({
+    subject: null,
+    summary: "",
+    url: null,
+    actor: { kind: "unknown", name: null },
+  });
+
+  // 2. Past the 50 events a run keeps, Alice's and Bob's events still run for them.
+  await deliver(ownerMail.id, 50, "Owner note", 60_000);
+  await deliver(aliceMail.id, 1, "Alice");
+  await deliver(bobMail.id, 1, "Bob");
+  expect(await runOnce()).toEqual([f.alice.subjectId, f.bob.subjectId].sort());
+
+  // 3. A source gone before the run starts it for nobody, never for every subscriber.
+  await deliver(aliceMail.id, 1, "Alice again");
+  const dispatch = await claimEventTriggerDispatch(f.deps.db, f.workspace.id, sync);
+  expect(dispatch.start).toHaveLength(1);
+  expect((await deleteEventSource(f.deps.db, f.workspace.id, aliceMail.id)).kind).toBe("deleted");
+  const run = await createScheduledTaskRun(f.deps.db, {
+    workspaceId: f.workspace.id,
+    taskId: sync,
+    triggerType: "event",
+    producerKey: eventOccurrenceProducerKey(dispatch.start[0]!.id),
+  });
+  await enqueueAppSyncRun(f.deps.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    taskId: sync,
+    runId: run.id,
+  });
+  const fake = fakeTool((subject) => [{ id: subject.slice(-6) }]);
+  await drainAppSyncRuns(f.deps, { limit: 50, callTool: fake.callTool });
+  expect(fake.calls).toEqual([]);
 });

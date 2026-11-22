@@ -36,6 +36,8 @@ function contents(exported: AppPackageExportResponse) {
   const pkg = exported.package;
   return {
     title: pkg.app.title,
+    packageId: pkg.packageId ?? null,
+    assetFiles: pkg.app.assets?.files.length ?? 0,
     tools: pkg.tools.length,
     collections: pkg.data.collections.map((collection) => collection.name),
     migrations: pkg.sql.migrations.map((migration) => migration.name),

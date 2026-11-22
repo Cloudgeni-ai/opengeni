@@ -65,8 +65,21 @@ export async function storeSiteAssetBundle(
       `App assets must be JSON {files: [{path, base64}]} with 1 to ${SITE_ASSET_MAX_FILES} files. Correct it and prepare a new upload.`,
     );
   }
+  return await storeSiteAssetFiles(storage, workspaceId, bundle);
+}
+
+/** A bundle's files, checked and decoded. */
+export type DecodedSiteAssets = {
+  decoded: Array<{ path: string; bytes: Buffer; sha256: string }>;
+};
+
+/**
+ * A bundle's files checked and decoded, nothing stored (paths, no HTML, no
+ * repeats, base64, sizes). Throws the same refusals as an upload.
+ */
+export function decodeSiteAssetFiles(bundle: SiteAssetBundle): DecodedSiteAssets {
   const seen = new Set<string>();
-  const decoded: Array<{ path: string; bytes: Buffer; sha256: string }> = [];
+  const decoded: DecodedSiteAssets["decoded"] = [];
   let total = 0;
   for (const file of bundle.files) {
     if (/\.html?$/iu.test(file.path))
@@ -95,6 +108,20 @@ export async function storeSiteAssetBundle(
       sha256: createHash("sha256").update(content).digest("hex"),
     });
   }
+  return { decoded };
+}
+
+/**
+ * Validate a parsed bundle (or take checked files) and store its files (an
+ * upload, or the asset files an app package carries). The manifest gets a
+ * fresh token.
+ */
+export async function storeSiteAssetFiles(
+  storage: Storage,
+  workspaceId: string,
+  bundle: SiteAssetBundle | DecodedSiteAssets,
+): Promise<SiteAssetManifest> {
+  const { decoded } = "decoded" in bundle ? bundle : decodeSiteAssetFiles(bundle);
   // Store each distinct content once; a file already there is the same bytes.
   const unique = new Map(decoded.map((file) => [file.sha256, file]));
   const pending = [...unique.values()];
@@ -123,6 +150,28 @@ export async function storeSiteAssetBundle(
       )
       .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
   });
+}
+
+/** A version's asset files as a bundle again (for an app package), sorted by path. */
+export async function readSiteAssetBundle(
+  storage: Storage,
+  workspaceId: string,
+  manifest: SiteAssetManifest,
+): Promise<SiteAssetBundle> {
+  const files: SiteAssetBundle["files"] = new Array(manifest.files.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(8, manifest.files.length) }, async () => {
+    for (let index = next++; index < manifest.files.length; index = next++) {
+      const file = manifest.files[index]!;
+      const object = await retryWhileMissing(() =>
+        storage.getObjectBytes(siteAssetObjectKey(workspaceId, file.sha256)),
+      );
+      if (!object) throw new Error(`App asset ${file.path} is unavailable`);
+      files[index] = { path: file.path, base64: Buffer.from(object.bytes).toString("base64") };
+    }
+  });
+  await Promise.all(workers);
+  return { files };
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   type AppSyncRunSummary as AppSyncRunSummaryType,
 } from "@opengeni/contracts";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { PERSONAL_SYNC_SUBSCRIBER_SOURCE_KINDS } from "./event-trigger-listening";
 
 /**
  * App data sync persistence (docs/app-sync.md). A sync is an ordinary
@@ -375,13 +376,33 @@ export async function setAppSyncSubscription(
   },
 ): Promise<boolean> {
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
-    if (input.optedIn)
+    if (input.optedIn) {
       await tx.execute(sql`insert into app_sync_subscriptions (account_id, workspace_id, task_id, subject_id, account_server_id)
         values (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid, ${input.subjectId}, ${input.account ?? null})
         on conflict (workspace_id, task_id, subject_id) do update
           set account_server_id = case when ${input.account === undefined} then app_sync_subscriptions.account_server_id
             else excluded.account_server_id end`);
-    else
+      // The person's own sources of a kind the sync's triggers listen to now
+      // fire it for them (triggerHearsSource): read them now, not at their
+      // next idle check.
+      await tx.execute(sql`update event_source_feeds feed
+        set next_action_at = now(), updated_at = now()
+        from event_sources mine
+        where feed.workspace_id = ${input.workspaceId}::uuid and feed.source_id = mine.id
+          and mine.workspace_id = feed.workspace_id and mine.owner_subject_id = ${input.subjectId}
+          and mine.visibility = 'private' and mine.status = 'active'
+          and feed.next_action_at > now()
+          and mine.kind in (
+            select heard.kind from event_triggers trigger
+            join event_sources heard
+              on heard.workspace_id = trigger.workspace_id and heard.id = trigger.source_id
+            where trigger.workspace_id = ${input.workspaceId}::uuid
+              and trigger.task_id = ${input.taskId}::uuid
+              and heard.kind in (${sql.join(
+                PERSONAL_SYNC_SUBSCRIBER_SOURCE_KINDS.map((kind) => sql`${kind}`),
+                sql`, `,
+              )}))`);
+    } else
       await tx.execute(sql`delete from app_sync_subscriptions
         where workspace_id = ${input.workspaceId}::uuid and task_id = ${input.taskId}::uuid
           and subject_id = ${input.subjectId}`);
@@ -599,7 +620,8 @@ export async function clearAppSyncKeys(
 /**
  * For an event run: whose event sources fired it. `workspaceWide` when any
  * of its triggers is on a workspace source; otherwise `owners` are the
- * people whose own (private) sources fired it. Null for any other run.
+ * people whose own (private) sources fired it, none when they no longer
+ * exist. Null for any other run.
  */
 export async function appSyncRunEventSources(
   db: Database,
@@ -607,24 +629,61 @@ export async function appSyncRunEventSources(
   runId: string,
 ): Promise<{ workspaceWide: boolean; owners: string[] } | null> {
   return await withWorkspaceRls(db, workspaceId, async (tx) => {
-    const rows = await rawRows<{ visibility: string; owner_subject_id: string | null }>(
+    // The sources the run's events came from: every event batched into its
+    // occurrence (the occurrence carries at most 50), since a personal sync's
+    // trigger also hears its subscribers' own sources and the triggers'
+    // sources can name the wrong person. An occurrence without any falls
+    // back to its triggers' sources.
+    const rows = await rawRows<{
+      kind: "occurrence" | "source";
+      visibility: string | null;
+      owner_subject_id: string | null;
+    }>(
       tx,
-      sql`select source.visibility, source.owner_subject_id
-          from scheduled_task_runs run
-          join scheduled_task_event_occurrences occurrence
-            on occurrence.workspace_id = run.workspace_id and occurrence.task_id = run.task_id
-            and run.producer_key = 'scheduled-task-event:' || occurrence.id::text
-          join event_triggers trigger
-            on trigger.workspace_id = run.workspace_id and trigger.id = any(occurrence.trigger_ids)
+      sql`with occurrence as (
+            select occurrence.id, occurrence.workspace_id, occurrence.task_id, occurrence.events,
+              occurrence.trigger_ids
+            from scheduled_task_runs run
+            join scheduled_task_event_occurrences occurrence
+              on occurrence.workspace_id = run.workspace_id and occurrence.task_id = run.task_id
+              and run.producer_key = 'scheduled-task-event:' || occurrence.id::text
+            where run.workspace_id = ${workspaceId}::uuid and run.id = ${runId}::uuid
+              and run.trigger_type = 'event'
+          ), fired as (
+            select inbound.source_id
+            from occurrence
+            join scheduled_task_event_inbox inbox
+              on inbox.workspace_id = occurrence.workspace_id and inbox.task_id = occurrence.task_id
+              and inbox.occurrence_id = occurrence.id
+            join inbound_events inbound
+              on inbound.workspace_id = inbox.workspace_id and inbound.id = inbox.event_id
+            union
+            select (summary ->> 'sourceId')::uuid
+            from occurrence, jsonb_array_elements(
+              case when jsonb_typeof(occurrence.events) = 'array' then occurrence.events
+                else '[]'::jsonb end) summary
+            where summary ->> 'sourceId' ~ '^[0-9a-f-]{36}$'
+          ), heard as (
+            select source_id from fired
+            union
+            select trigger.source_id from occurrence
+            join event_triggers trigger
+              on trigger.workspace_id = occurrence.workspace_id
+              and trigger.id = any(occurrence.trigger_ids)
+            where not exists (select 1 from fired)
+          )
+          select 'occurrence' as kind, null as visibility, null as owner_subject_id from occurrence
+          union all
+          select 'source', source.visibility, source.owner_subject_id
+          from heard
           join event_sources source
-            on source.workspace_id = trigger.workspace_id and source.id = trigger.source_id
-          where run.workspace_id = ${workspaceId}::uuid and run.id = ${runId}::uuid
-            and run.trigger_type = 'event'`,
+            on source.workspace_id = ${workspaceId}::uuid and source.id = heard.source_id`,
     );
-    if (rows.length === 0) return null;
+    if (!rows.some((row) => row.kind === "occurrence")) return null;
     const owners = new Set<string>();
     let workspaceWide = false;
     for (const row of rows) {
+      if (row.kind !== "source") continue;
       if (row.visibility === "workspace" || row.owner_subject_id === null) workspaceWide = true;
       else owners.add(row.owner_subject_id);
     }

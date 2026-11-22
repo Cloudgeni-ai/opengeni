@@ -46,10 +46,25 @@ in the automation's run history with its status, error and a `syncSummary`
   reads the owner from the action. Saving checks the triggers against the
   saver, who becomes the owner; a manager taking over a sync whose triggers
   use the previous owner's private source must choose other triggers.
+- A personal sync's trigger on its owner's own Gmail or GitHub (your
+  connection) source also hears the same kind of source of every person
+  opted in to that sync, so each subscriber's own mail or pull requests start
+  it for them (`triggerHearsSource` in `event-trigger-listening.ts`). Their
+  source's feed is read while they are opted in (opting in wakes it); it stops
+  when they opt out. A shared sync never hears a subscriber's source. The
+  owner's trigger conditions decide which of their events start it. It keeps
+  doing so while the owner's own source is disabled: that only stops the
+  owner's events.
 - A personal sync's run started only by private sources runs only for those
-  sources' owners (who must be opted in); a run any workspace source started
-  runs for everyone opted in. Chain limit, storm guard and usage limits apply
-  as for any event-triggered automation.
+  sources' owners (who must be opted in), read from every event batched into
+  its occurrence. When none of those sources exists any more, it runs for
+  nobody. A run any workspace source started runs for everyone opted in.
+- A subscriber's event is stored on the run with only its id, source, type
+  and time: the run history, which the sync's managers see, never shows
+  another person's mail or pull requests.
+- Chain limit, storm guard and usage limits apply as for any event-triggered
+  automation, per sync: every subscriber shares its runs per hour, so one
+  busy mailbox can delay the others' runs.
 
 ### Shared and personal syncs
 
@@ -290,9 +305,10 @@ collection syncs work as before.
 - No sync UI in the automation form; agents, the SDK and the HTTP API manage
   syncs (people join personal syncs from the app's page or the join card).
 - Personal syncs into SQL tables (SQL tables have no per-person rows).
-- Other subscribers' own event sources as triggers of a personal sync: a task
-  has one owner, so only the owner's private sources (and workspace sources)
-  start it.
+- Subscribers' own sources of other kinds (custom webhooks, MCP sources):
+  only the owner's (and workspace sources) start a personal sync. A webhook
+  source is one sender's own address, and an MCP source's event
+  subscriptions exist only for sources a trigger names.
 - More than 10,000 records or 50 pages per run, or 200 people per personal
   sync.
 
@@ -304,7 +320,9 @@ collection syncs work as before.
   export and paused install, cursor and page paging with their bounds,
   `removeMissing` (shared and personal; never after a truncated or failed
   run), a run that loses its lease, account choice, the opt-in review and a
-  refused framed opt-in, and owner event sources.
+  refused framed opt-in, owner event sources, and a subscriber's own Gmail
+  starting a personal sync only for them (not for someone not opted in, and
+  never a shared sync).
 - `apps/api/test/app-sync-sql-postgres.test.ts`: a sync filling a Site SQL
   table in the real gateway Durable Object (Miniflare), upsert by key,
   `removeMissing`, and the refusals.

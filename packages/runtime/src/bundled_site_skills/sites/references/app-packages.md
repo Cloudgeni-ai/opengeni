@@ -1,7 +1,7 @@
 # Move an app to another workspace
 
 `app_export { appId }` writes one package file of the app's current version:
-its HTML and editable source, requested tools, Site Data collection
+its HTML, asset files and editable source, requested tools, Site Data collection
 definitions, Site SQL migrations and named queries, syncs and its sidebar
 links. It holds no data
 unless you pass `demoData` (`true`, or `{ collections, tables }`), which adds a
@@ -25,4 +25,6 @@ Call it with `dryRun: true` first and tell the user the plan: the new version,
 new collections, migrations, query and sync changes. It never deletes data;
 collections and syncs the package lacks are kept. Pass `allowDestructive: true`
 only after the user explicitly agrees to the changes listed as `destructive`.
-`conflicts` stop the upgrade; explain them instead of retrying.
+A package of a different app (its `packageId` differs from the one the app
+came from) is listed as destructive. `conflicts` stop the upgrade; explain
+them instead of retrying.

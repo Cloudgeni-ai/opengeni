@@ -23,7 +23,7 @@ import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
-import { AUTOMATION_HEARS_SOURCE } from "./event-trigger-listening";
+import { triggerHearsSource } from "./event-trigger-listening";
 import * as schema from "./schema";
 
 // Migration 0929. Event sources deliver into a workspace; each raw delivery is
@@ -926,8 +926,11 @@ async function deliveryEvents(
 /**
  * Evaluate the source's active triggers on runnable automations and queue
  * each matching event once per automation. A trigger only sees a private
- * source when its automation belongs to the source's owner, and an event only
- * fires the triggers of the stream it arrived on (an MCP subscription).
+ * source when its automation belongs to the source's owner (or, for a
+ * personal app sync, the source is an opted-in person's own Gmail or GitHub
+ * like the owner's one its trigger names; see triggerHearsSource), and an
+ * event only fires the triggers of the stream it arrived on (an MCP
+ * subscription).
  */
 async function queueMatchingEvents(
   tx: Database,
@@ -954,10 +957,10 @@ async function queueMatchingEvents(
         on settings.task_id = trigger.task_id and settings.workspace_id = trigger.workspace_id
       join event_sources source
         on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
-      where trigger.workspace_id = ${input.workspaceId} and trigger.source_id = ${input.sourceId}
+      where trigger.workspace_id = ${input.workspaceId}
         and trigger.status = 'active' and task.status = 'active' and task.deleted_at is null
         and settings.completed_at is null
-        and ${AUTOMATION_HEARS_SOURCE}
+        and ${triggerHearsSource(sql`${input.sourceId}::uuid`)}
       order by trigger.task_id, trigger.position`,
   );
   const queued = new Map<string, Map<string, { triggerIds: string[]; occurredAt: Date }>>();
@@ -1686,6 +1689,8 @@ type DispatchFacts = {
   consumed_since_armed: boolean;
   recent_occurrences: number;
   oldest_recent_occurrence_at: Date | string | null;
+  task_owner: string | null;
+  sync_owner: string | null;
 };
 
 function byteLength(value: unknown): number {
@@ -1727,6 +1732,7 @@ export async function claimEventTriggerDispatch(
         sql`select task.account_id, task.status as task_status,
             task.deleted_at is not null as task_deleted, task.name as task_name,
             task.authority_revision, task.execution_digest,
+            task.owner_subject_id as task_owner, task.action ->> 'ownerSubjectId' as sync_owner,
             coalesce((select run.error = 'chain_limit' and run.admission_refusal is not null
               from scheduled_task_runs run
               where run.workspace_id = task.workspace_id and run.task_id = task.id
@@ -1825,6 +1831,8 @@ export async function claimEventTriggerDispatch(
             chainDepth: schema.inboundEvents.chainDepth,
           },
           sourceKind: schema.eventSources.kind,
+          sourceVisibility: schema.eventSources.visibility,
+          sourceOwner: schema.eventSources.ownerSubjectId,
         })
         .from(schema.scheduledTaskEventInbox)
         .innerJoin(
@@ -1914,16 +1922,28 @@ export async function claimEventTriggerDispatch(
       let summaryBytes = 2;
       for (const entry of pending) {
         if (carried.length >= EVENT_OCCURRENCE_CARRIED_EVENTS_MAX) break;
+        // Another person's private source (a personal sync's subscriber):
+        // the run history, which the automation's readers see, keeps only
+        // which event it was, never its content.
+        const othersPrivate =
+          entry.sourceVisibility === "private" &&
+          entry.sourceOwner !== null &&
+          entry.sourceOwner !== facts.task_owner &&
+          entry.sourceOwner !== facts.sync_owner;
         const summary = InboundEventSummary.parse({
           id: entry.event.id,
           sourceId: entry.event.sourceId,
           sourceKind: entry.sourceKind,
           type: entry.event.type,
           occurredAt: entry.event.occurredAt.toISOString(),
-          subject: entry.event.subject,
-          summary: entry.event.summary,
-          url: entry.event.url,
-          actor: { kind: entry.event.actorKind, name: entry.event.actorName },
+          ...(othersPrivate
+            ? { subject: null, summary: "", url: null, actor: { kind: "unknown", name: null } }
+            : {
+                subject: entry.event.subject,
+                summary: entry.event.summary,
+                url: entry.event.url,
+                actor: { kind: entry.event.actorKind, name: entry.event.actorName },
+              }),
         });
         const size = byteLength(summary) + 1;
         if (summaryBytes + size > EVENT_OCCURRENCE_SUMMARIES_MAX_BYTES) break;

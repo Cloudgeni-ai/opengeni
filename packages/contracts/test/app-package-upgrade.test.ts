@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { APP_PACKAGE_FORMAT, parseAppPackage, siteSqlDestructiveChanges } from "../src";
+import {
+  APP_PACKAGE_FORMAT,
+  AppPackageFormatError,
+  parseAppPackage,
+  siteSqlDestructiveChanges,
+} from "../src";
 
 describe("destructive SQL in a new migration", () => {
   test("finds statements that delete, overwrite or rename existing data", () => {
@@ -71,5 +76,33 @@ describe("app package demo files and blob values", () => {
     });
     expect(pkg.demoData?.files).toBeUndefined();
     expect(pkg.demoData?.sqlRows.items).toEqual([{ id: 1, name: "Bolts" }]);
+  });
+});
+
+describe("app package asset files and package id", () => {
+  const base = {
+    format: APP_PACKAGE_FORMAT,
+    version: 1,
+    app: { title: "Board", html: "<h1>Board</h1>" },
+  };
+  const PACKAGE_ID = "3f1c2b9a-8d4e-8f21-9a6b-5c7d0e1f2a3b";
+
+  test("reads a multi-file build's files and the package id", () => {
+    const assets = { files: [{ path: "assets/index-1.js", base64: "eA==" }] };
+    const { package: pkg, problems } = parseAppPackage({
+      ...base,
+      packageId: PACKAGE_ID,
+      app: { ...base.app, assets },
+    });
+    expect(pkg.packageId).toBe(PACKAGE_ID);
+    expect(pkg.app.assets).toEqual(assets);
+    expect(problems).toEqual([]);
+  });
+
+  test("ignores an invalid package id and refuses invalid asset files", () => {
+    expect(parseAppPackage({ ...base, packageId: "nope" }).package.packageId).toBeUndefined();
+    expect(() => parseAppPackage({ ...base, app: { ...base.app, assets: { files: [] } } })).toThrow(
+      AppPackageFormatError,
+    );
   });
 });
