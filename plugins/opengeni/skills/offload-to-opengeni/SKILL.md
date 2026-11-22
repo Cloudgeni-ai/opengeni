@@ -30,6 +30,7 @@ suffix.
 | `session_send`, `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Follow up on, find and control chats. |
 | `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; set the default workspace of this connection. |
 | `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change data in the workspace's apps. |
+| `app_save`, `app_publish`, `file_save` | Share what you built: save an app (new or a new version), choose who can open it, share a file. |
 | `tools_search`, `tool_call` | Use the workspace's connected tools. |
 | `skills_sync`, `skills_list`, `knowledge_search`, `knowledge_get`, `knowledge_save` | Share Skills and Knowledge with the workspace. |
 

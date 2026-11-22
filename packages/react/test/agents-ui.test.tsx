@@ -1483,11 +1483,11 @@ test("Linear's webhook is made in place and takes its secret in one field, never
   expect(request).toEqual(expect.objectContaining({ kind: "webhook", adapter: "custom" }));
   expect(request).not.toHaveProperty("signingSecret");
   // The URL to paste into Linear, and one field for the secret it shows.
-  const step = dialog.querySelector<HTMLElement>("[data-agent-trigger-secret]")!;
-  expect(step).not.toBeNull();
-  const url = step.querySelector<HTMLTextAreaElement | HTMLInputElement>("textarea, input");
+  const secretStep = dialog.querySelector<HTMLElement>("[data-agent-trigger-secret]")!;
+  expect(secretStep).not.toBeNull();
+  const url = secretStep.querySelector<HTMLTextAreaElement | HTMLInputElement>("textarea, input");
   expect(url?.value).toContain("https://hooks.example.com/");
-  const field = step.querySelector<HTMLInputElement>("input[type='password']")!;
+  const field = secretStep.querySelector<HTMLInputElement>("input[type='password']")!;
   expect(field).not.toBeNull();
   expect(dialog.querySelector("textarea")).toBeNull();
   // Too short: refused here, nothing sent.

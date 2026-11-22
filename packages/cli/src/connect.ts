@@ -49,6 +49,8 @@ this conversation or this computer: give it a self-contained brief.
   Stopping your wait doesn't stop the chat; \`session_pause\` does.
 - **Follow up**: \`session_send\`, then \`wait_for\` with its cursor and turnId.
 - **Apps**: \`apps_list\`, \`app_describe\`, \`app_query\`, \`app_write\`.
+- **Share**: \`app_save\` (an app or a new version), \`app_publish\` (who can
+  open it), \`file_save\` (a file and its link).
 - **Tools**: \`tools_search\`, then \`tool_call\`. If it returns
   \`needsApproval\`, show the user \`approvalUrl\`; after they approve, call again
   with the same \`operationId\`.

@@ -245,7 +245,7 @@ export function buildOrganizationMcpServer(input: OrganizationActionContext): Se
     {
       capabilities: { tools: {} },
       instructions:
-        "Opengeni runs agents in the cloud. Hand work over with delegate and follow it with wait_for (done means the chat's turn finished with a final answer); session_send adds a follow-up. Use the workspace's apps (apps_list, app_query, app_write), tools (tools_search, tool_call; approval-gated calls return a link for the person), Skills (skills_sync) and Knowledge (knowledge_search, knowledge_save). Tools use this connection's default workspace (workspace_use) when you leave workspaceId out. For anything else: opengeni_actions_search, opengeni_action_describe, then opengeni_action_call.",
+        "Opengeni runs agents in the cloud. Hand work over with delegate and follow it with wait_for (done means the chat's turn finished with a final answer); session_send adds a follow-up. Use the workspace's apps (apps_list, app_query, app_write), share what you built (app_save, app_publish, file_save), tools (tools_search, tool_call; approval-gated calls return a link for the person), Skills (skills_sync) and Knowledge (knowledge_search, knowledge_save). Tools use this connection's default workspace (workspace_use) when you leave workspaceId out. For anything else: opengeni_actions_search, opengeni_action_describe, then opengeni_action_call.",
     },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
