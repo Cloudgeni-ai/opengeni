@@ -263,7 +263,9 @@ html[data-desktop="macos"] [data-window-bar-row] > [data-titlebar] {
   position: fixed;
   top: 0;
   left: max(var(--og-window-bar-row-left, 0px), var(--og-window-bar-row-start));
-  right: var(--og-window-panel-gap);
+  /* Stops short of a page's own controls at the bar's right end
+     (`WindowBarEndControls`), so a long title truncates before them. */
+  right: max(var(--og-window-panel-gap), var(--og-window-bar-title-reserve, 0px));
   z-index: 46;
   /* Centred on the traffic lights' line, or from the top when taller. */
   height: calc(2 * var(--og-window-controls-center));

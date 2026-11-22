@@ -1,25 +1,30 @@
 // A Site's settings: where it is published, who in the workspace can see it,
-// and archiving. One panel, shown in the Site page's Settings tab and in the
-// session workbench, so a Site is managed the same way from either place.
+// and the rarer actions (duplicate, export, allowed actions, archive). One
+// panel, shown in the Site page's Settings tab and in the session workbench,
+// so a Site is managed the same way from either place.
 import type { WorkspaceArtifact } from "@opengeni/sdk";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  CircleArrowUpIcon,
   CopyIcon,
+  DownloadIcon,
   LockKeyholeIcon,
+  RotateCcwIcon,
   UsersIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { toast } from "../../lib/toast";
 
 import { useSiteAudience } from "./site-audience";
 import { sitePublishFormProps } from "./site-publish-form-props";
-import { SitePublishPage, useSitePublication } from "./site-publishing";
+import { PublishMore, SitePublishPage, useSitePublication } from "./site-publishing";
 import { Button } from "../../../ui/button";
 import { ConfirmDialog } from "../../../ui/confirm-dialog";
-import { Notice } from "../../../ui/notice";
-import { Section, SectionStack } from "../../../ui/section";
-import { SettingRow, SettingRowGroup } from "../../../ui/setting-row";
+import { SettingRow } from "../../../ui/setting-row";
+import { useAppApi } from "../../lib/app-api";
+import { notifySiteToolReadinessChanged } from "../../lib/console-site";
+import { useExportApp, useUpgradeApp } from "./app-package";
 import { useAppContext } from "../../app-context";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
@@ -129,14 +134,51 @@ export function useSiteManagement({
 
 export type SiteManagement = ReturnType<typeof useSiteManagement>;
 
-/** Whether a Site has anything in Settings for this person. */
-export function hasSiteSettings(management: SiteManagement): boolean {
-  return management.canPublish;
+/**
+ * Forget this person's "Always allow" choices on this Site: its next actions
+ * ask again. Open frames hear it as a readiness change.
+ */
+function useResetSiteToolAllowances(
+  workspaceId: string,
+  siteId: string,
+  versionId: string | null,
+): { busy: boolean; run: () => void } | null {
+  const api = useAppApi();
+  const [busy, setBusy] = useState(false);
+  const run = useCallback(() => {
+    if (!versionId) return;
+    setBusy(true);
+    api
+      .request<{ version: 1; removed: number }>(
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/tools/site-allowances/reset`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            siteArtifactId: siteId,
+            siteVersionId: versionId,
+          }),
+        },
+      )
+      .then(
+        () => {
+          notifySiteToolReadinessChanged(siteId);
+          toast.success("Allowed actions reset");
+        },
+        (error: unknown) =>
+          toast.error("Couldn't reset allowed actions", {
+            description: userErrorText(error),
+          }),
+      )
+      .finally(() => setBusy(false));
+  }, [api, siteId, versionId, workspaceId]);
+  return versionId ? { busy, run } : null;
 }
 
 /**
- * The Site's settings: Publish to web (its address, who can open it, its
- * agent and limits), who in the workspace can see it, and archiving.
+ * The Site's settings, one row style: its web address (the publish form, on
+ * the page without a box of its own), who in the workspace can see it, and
+ * a collapsed More with the rare and the dangerous ones (search engines,
+ * reports and takedown, duplicate, export, allowed actions, archive).
  * The audience dialog is the caller's, as it is shared with the page header.
  */
 export function SiteSettings({
@@ -154,6 +196,13 @@ export function SiteSettings({
   const { client, clientConfig, accessContext } = useAppContext();
   const [archiveOpen, setArchiveOpen] = useState(false);
   const copies = useDuplicateSite(workspaceId);
+  const exportApp = useExportApp(workspaceId);
+  const upgradeApp = useUpgradeApp(workspaceId, artifact.id);
+  const resetAllowed = useResetSiteToolAllowances(
+    workspaceId,
+    artifact.id,
+    artifact.currentVersion?.id ?? null,
+  );
   const { publication, audience } = management;
   const archived = artifact.status === "archived";
   const owner = Boolean(
@@ -164,120 +213,176 @@ export function SiteSettings({
     publication.load.state !== "unavailable" &&
     publication.load.state !== "forbidden";
   const onlyMe = artifact.visibility === "private";
-  return (
-    <SectionStack divided={false}>
-      {publishing ? (
-        archived ? (
-          <Section title="Publish to web">
-            <Notice
-              icon={<ArchiveIcon className="size-4" />}
-              title="Archived apps aren't on the web"
+  const hasVersion = Boolean(artifact.currentVersion);
+  const restoreButton = (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      disabled={management.statusBusy}
+      onClick={() => void management.setSiteStatus("active")}
+    >
+      <ArchiveRestoreIcon aria-hidden="true" />
+      {management.statusBusy ? "Restoring…" : "Restore"}
+    </Button>
+  );
+  const canDuplicate = management.canPublish && hasVersion;
+  const canExport = canDuplicate && exportApp !== null;
+  const canUpgrade = canDuplicate && upgradeApp !== null && !archived;
+  const canReset = resetAllowed !== null && !archived;
+  // Rarely used, so collapsed under More; a lone row shows as it is.
+  const moreCount = [
+    canDuplicate,
+    canExport,
+    canUpgrade,
+    canReset,
+    management.canPublish && !archived,
+  ].filter(Boolean).length;
+  const moreRows = (
+    <>
+      {canDuplicate ? (
+        <SettingRow
+          label="Duplicate"
+          description="A new app from this version, owned by you. Its address, data and history aren't copied."
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={copies.busy}
+              onClick={() => void copies.duplicate(artifact, { open: openCopy })}
             >
-              Restore the app to publish it again.
-            </Notice>
-          </Section>
-        ) : (
-          <SitePublishPage
-            {...sitePublishFormProps(management, {
-              client,
-              workspaceId,
-              site: artifact,
-              sites: sitesClientConfig(clientConfig),
-            })}
-            layout="panel"
-            onPublication={publication.setPublication}
-            onBack={() => undefined}
-            canManage
-          />
-        )
+              <CopyIcon aria-hidden="true" />
+              {copies.busy ? "Duplicating…" : "Duplicate"}
+            </Button>
+          }
+        />
       ) : null}
-      <Section title="Workspace access" variant="group">
-        <SettingRowGroup>
-          <SettingRow
-            label={onlyMe ? "Only me" : "Workspace"}
-            description={
-              onlyMe
-                ? "Only you can see and open this app."
-                : `Everyone in ${management.workspaceName} can see and open this app.`
-            }
-            hint={owner ? undefined : "Only its owner can change this."}
-            control={
-              audience.share ? (
-                <Button type="button" size="sm" variant="outline" onClick={audience.share}>
-                  <UsersIcon aria-hidden="true" />
-                  Share with workspace
-                </Button>
-              ) : audience.limit ? (
-                <Button type="button" size="sm" variant="outline" onClick={audience.limit}>
-                  <LockKeyholeIcon aria-hidden="true" />
-                  Limit to me
-                </Button>
-              ) : undefined
-            }
-          />
-        </SettingRowGroup>
-      </Section>
-      {management.canPublish && artifact.currentVersion ? (
-        <Section title="Duplicate" variant="group">
-          <SettingRowGroup>
-            <SettingRow
-              label="Duplicate app"
-              description="Makes a new app from this version, owned by you. Its web address, data and history aren't copied."
-              control={
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={copies.busy}
-                  onClick={() => void copies.duplicate(artifact, { open: openCopy })}
-                >
-                  <CopyIcon aria-hidden="true" />
-                  {copies.busy ? "Duplicating…" : "Duplicate"}
-                </Button>
-              }
-            />
-          </SettingRowGroup>
-        </Section>
+      {canExport && exportApp ? (
+        <SettingRow
+          label="Export"
+          description="Download the app as a package."
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={exportApp.busy}
+              onClick={() => void exportApp.run(artifact.id)}
+            >
+              <DownloadIcon aria-hidden="true" />
+              Export
+            </Button>
+          }
+        />
       ) : null}
-      {management.canPublish ? (
-        <Section title="Archive" variant="group">
-          <SettingRowGroup>
-            <SettingRow
-              label={archived ? "Restore app" : "Archive app"}
-              description={
-                archived
-                  ? "Bring the app back to edit it or restore an earlier version."
-                  : "Unpublishes the app. Its source and versions are kept, and you can restore it."
-              }
-              control={
-                archived ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={management.statusBusy}
-                    onClick={() => void management.setSiteStatus("active")}
-                  >
-                    <ArchiveRestoreIcon aria-hidden="true" />
-                    {management.statusBusy ? "Restoring…" : "Restore"}
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={management.statusBusy || !artifact.currentVersion}
-                    onClick={() => setArchiveOpen(true)}
-                  >
-                    <ArchiveIcon aria-hidden="true" />
-                    Archive
-                  </Button>
-                )
-              }
-            />
-          </SettingRowGroup>
-        </Section>
+      {canUpgrade && upgradeApp ? (
+        <SettingRow
+          label="Upgrade"
+          description="Update it from a newer package."
+          control={
+            <Button type="button" size="sm" variant="outline" onClick={upgradeApp.open}>
+              <CircleArrowUpIcon aria-hidden="true" />
+              Upgrade
+            </Button>
+          }
+        />
       ) : null}
+      {canReset && resetAllowed ? (
+        <SettingRow
+          label="Allowed actions"
+          description="Actions you always allowed ask again."
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={resetAllowed.busy}
+              onClick={resetAllowed.run}
+            >
+              <RotateCcwIcon aria-hidden="true" />
+              Reset
+            </Button>
+          }
+        />
+      ) : null}
+      {management.canPublish && !archived ? (
+        <SettingRow
+          label="Archive"
+          description="Unpublishes it. You can restore it."
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={management.statusBusy || !hasVersion}
+              onClick={() => setArchiveOpen(true)}
+            >
+              <ArchiveIcon aria-hidden="true" />
+              Archive
+            </Button>
+          }
+        />
+      ) : null}
+    </>
+  );
+  const workspaceAccess = (
+    <SettingRow
+      label="Workspace access"
+      description={
+        onlyMe ? "Only you can open it." : `Everyone in ${management.workspaceName} can open it.`
+      }
+      hint={
+        !owner
+          ? "Only its owner can change this."
+          : management.canPublish
+            ? undefined
+            : "You need permission to publish to change this."
+      }
+      control={
+        audience.share ? (
+          <Button type="button" size="sm" variant="outline" onClick={audience.share}>
+            <UsersIcon aria-hidden="true" />
+            Share with workspace
+          </Button>
+        ) : audience.limit ? (
+          <Button type="button" size="sm" variant="outline" onClick={audience.limit}>
+            <LockKeyholeIcon aria-hidden="true" />
+            Limit to me
+          </Button>
+        ) : undefined
+      }
+    />
+  );
+  // The publish form (with its own Save), then the app's rows, which act at
+  // once.
+  const formShown = publishing && !archived;
+  return (
+    <div className="flex min-w-0 max-w-[560px] flex-col gap-6" data-site-settings="">
+      {management.canPublish && archived ? (
+        <SettingRow
+          label="Restore"
+          description="Bring it back to edit or publish it."
+          control={restoreButton}
+        />
+      ) : null}
+      {formShown ? (
+        <SitePublishPage
+          {...sitePublishFormProps(management, {
+            client,
+            workspaceId,
+            site: artifact,
+            sites: sitesClientConfig(clientConfig),
+          })}
+          layout="panel"
+          onPublication={publication.setPublication}
+          onBack={() => undefined}
+          canManage
+        />
+      ) : null}
+      {workspaceAccess}
+      {moreCount > 1 ? <PublishMore>{moreRows}</PublishMore> : moreRows}
+      {upgradeApp?.element}
       <ConfirmDialog
         open={archiveOpen}
         onOpenChange={setArchiveOpen}
@@ -287,6 +392,6 @@ export function SiteSettings({
         cancelAutoFocus
         onConfirm={() => management.setSiteStatus("archived")}
       />
-    </SectionStack>
+    </div>
   );
 }

@@ -130,6 +130,7 @@ function MainArea() {
           siteId={siteId}
           conversation={siteViewSearch(location.search).conversation}
           startNew={siteViewSearch(location.search).new === true}
+          publishing={siteViewSearch(location.search).publishing === true}
         />
       </section>
     );

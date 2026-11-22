@@ -119,7 +119,11 @@ export interface FormFrameProps {
   showClose?: boolean | undefined;
   /** Back link above the title (page only). */
   back?:
-    | { label: ReactNode; href?: string | undefined; onClick?: (() => void) | undefined }
+    | {
+        label: ReactNode;
+        href?: string | undefined;
+        onClick?: (() => void) | undefined;
+      }
     | undefined;
   /** What gets focus when an overlay opens: the first field (default) or Cancel. */
   initialFocus?: "field" | "cancel" | undefined;
@@ -129,6 +133,11 @@ export interface FormFrameProps {
   loadingFields?: number | undefined;
   className?: string | undefined;
   bodyClassName?: string | undefined;
+  /**
+   * Inline only: the form sits on the page without its own box, aligned
+   * with the page's other sections (a settings tab with one row style).
+   */
+  plain?: boolean | undefined;
 }
 
 /** What went wrong and what to do; an API error's status and reference go behind Technical details. */
@@ -188,7 +197,9 @@ export function FormFrame({
   loadingFields = 3,
   className,
   bodyClassName,
+  plain = false,
 }: FormFrameProps) {
+  const framed = variant === "inline" && !plain;
   const msg = useOpenGeniText();
   const cancelText = cancelLabel === undefined ? msg("formDialog.cancel") : cancelLabel;
   const chrome = useContext(FormChromeContext);
@@ -372,7 +383,7 @@ export function FormFrame({
           "rounded-2xl border border-border bg-surface shadow-[var(--og-shadow-lg)]",
         variant === "sheet" && "h-full bg-surface",
         variant === "page" && "bg-bg",
-        variant === "inline" && "rounded-lg border border-border bg-surface",
+        framed && "rounded-lg border border-border bg-surface",
         className,
       )}
     >
@@ -434,7 +445,7 @@ export function FormFrame({
               "flex min-w-0 shrink-0 items-start gap-3",
               variant === "dialog" && "px-6 pt-5 pb-4 @max-[26rem]/form:px-5",
               variant === "sheet" && "border-b border-border px-6 py-5 @max-[26rem]/form:px-5",
-              variant === "inline" && "px-5 pt-4 pb-5",
+              variant === "inline" && (plain ? "pb-4" : "px-5 pt-4 pb-5"),
             )}
           >
             {leading && variant !== "inline" ? <div className="shrink-0">{leading}</div> : null}
@@ -473,7 +484,7 @@ export function FormFrame({
             variant === "dialog" && "flex-1 overflow-y-auto px-6 pt-1 pb-6 @max-[26rem]/form:px-5",
             variant === "sheet" && "flex-1 overflow-y-auto px-6 py-6 @max-[26rem]/form:px-5",
             variant === "page" && cn(PAGE_FRAME, "flex-1 py-6 [&>*]:max-w-[640px]"),
-            variant === "inline" && "px-5 pb-5",
+            variant === "inline" && (plain ? "pb-4" : "px-5 pb-5"),
             bodyClassName,
           )}
         >
@@ -492,7 +503,7 @@ export function FormFrame({
               // On a phone the stacked buttons would cover a fifth of the
               // screen and the fields under them; there they follow the form.
               variant === "page" && "sticky bottom-0 z-10 bg-bg max-sm:static",
-              variant === "inline" && "px-5 py-3",
+              variant === "inline" && (plain ? "py-3" : "px-5 py-3"),
             )}
           >
             {variant === "page" ? (
