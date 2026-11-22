@@ -300,7 +300,9 @@ export function advancedSourceSummary(t: OpenGeniText, model: ClientModel): stri
   if (source.kind === "deployment") {
     return source.mechanism === "azure_ad_bearer"
       ? t("modelPolicy.deploymentAzureIdentity")
-      : t("modelPolicy.deploymentApiKey");
+      : source.mechanism === "aws_iam"
+        ? t("modelPolicy.deploymentAwsIdentity")
+        : t("modelPolicy.deploymentApiKey");
   }
   return null;
 }

@@ -816,6 +816,9 @@ provider/model rotations without weakening the application's configured-model
 allow-list; keep the Secret and non-secret Helm defaults intentionally aligned
 for the next ordinary deployment.
 
+To run Claude on Amazon Bedrock with the pods' AWS identity (IRSA or EKS Pod
+Identity on the chart's service account), see [Amazon Bedrock](./amazon-bedrock.md).
+
 ```bash
 terraform -chdir=deploy/terraform/gcp output -json \
   > .agent/generated/gcp-managed/terraform-output.json

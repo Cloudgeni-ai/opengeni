@@ -140,6 +140,7 @@ import {
 } from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 export { AnthropicRequestError } from "./anthropic-request-error";
+export { startBedrockModelDiscovery, withBedrockCaller } from "./bedrock";
 export * from "./anthropic-request-size";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {

@@ -3533,6 +3533,7 @@ export const englishMessages = {
   "modelPolicy.credentialsRequired": "Credentials required",
   "modelPolicy.deploymentApiKey": "Deployment API key",
   "modelPolicy.deploymentAzureIdentity": "Deployment Azure identity",
+  "modelPolicy.deploymentAwsIdentity": "Deployment AWS identity",
   "modelPolicy.deploymentProvidedConnection": "Deployment-provided connection",
   "modelPolicy.external": "External",
   "modelPolicy.externalProviderNoOpengeniCredits": "External provider · no {product} credits",
