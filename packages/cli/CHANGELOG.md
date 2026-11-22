@@ -1,5 +1,34 @@
 # opengeni
 
+## 6.36.0
+
+### Patch Changes
+
+- 837e58f: `opengeni connect --client all` sets up only the coding agents installed on this computer, like running it without `--client`, and lists the others as skipped. Naming a client (`--client codex`) still sets it up when it isn't detected; to set up every client regardless, name them all (`--client claude,codex,cursor,vscode`). Mixing `all` with names is rejected.
+- 53320fa: `opengeni connect` lists the new Opengeni MCP tools for sharing what an agent built: `app_save` (create an app, save a version or roll back), `app_publish` (who can open it) and `file_save` (share a file and get its link).
+- f2c07c2: The ready-made Triage agent suggests a Slack trigger (a new message in a channel), and Triage and Bug fixer start with what they can reach and hand off by name instead of asking for setup first. `scheduled_tasks_create` takes `agentConfig.agentName` (an agent's name or id), and the apps Skill tells agents to start work on new app records with an automation on app change events, not page code. Adding a GitHub event source without a GitHub connection offers Connect GitHub. The coding-agent setup guide shows how to add the Opengeni MCP server by hand when the `opengeni` npm package isn't available.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes

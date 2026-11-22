@@ -1,5 +1,70 @@
 # @opengeni/core
 
+## 6.36.0
+
+### Minor Changes
+
+- f2c07c2: An agent's automation can now keep one chat (`reusable_session`) or post into an existing chat (`existing_session`), not only start a new chat each run. Its own chat is started with the agent; when the automation's agent changes, the chat is cleared so the next run starts a new one with the new agent, the task records the previous chat under `SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY` with the audit event `scheduled_task.agent_chat_changed`, and the automation form says so. An existing chat must be bound to the same agent and usable by the owner; otherwise saving returns 422 "That chat isn't with this agent", and the form marks other chats "Not a chat with this agent". Agent access checks and event limits are unchanged.
+- b1abd39: Ready-made content names the team it is for: `AgentTemplate` has an optional `team`, and new `AppTemplate` content (an app package with a name, a line and a team) is listed by `GET /v1/workspaces/:workspaceId/app-templates` (SDK `listAppTemplates`); add one with `installAppPackage` and its `package`. `GET /v1/workspaces/:workspaceId/skills/library` (SDK `listLibrarySkills`) lists every reviewed library skill to add, `enabled` once added.
+
+  `ConnectionInstalled` lists what you have in the same rows as the catalog: logo, name and one status line ("Installed · Workspace"), two columns where there is room. `CapabilityCatalogRow` takes an optional `statusLine` that replaces the description and drops the glyph unless the row needs attention. `ConnectionInstalledItem.showStatus` is deprecated: the status line always shows. The `.og-connection-installed-status` and `.capability-search-section` classes are removed. Embedding products that style these rows see a visible change; the row buttons no longer carry an `aria-label`, so their visible text is their name. Catalog rows carry `data-row-status` for styling; `data-status` is on the row only when it shows no indicator.
+
+- b1abd39: The sidebar is edited in place: drag rows to reorder (or drop an app from the Sessions list), **+** on a group adds an app, and row menus rename, set an icon, set how many apps a list shows, and remove. A project app's menu has **Add to sidebar**. Apps, links and groups take an optional `icon` from a curated set of lucide names (`SIDEBAR_ITEM_ICONS`); outside links without one show the site's icon through `GET /v1/workspaces/:workspaceId/sidebar-layout/link-icon` (`client.getSidebarLinkIcon`). The phone app shows item icons and site icons, and leaves out hidden built-in entries (Automations in the side menu; Artifacts, Meetings or Inbox in the tab bar). Layouts gain `options` (the `options` change): `sessionsShowApps`, `hiddenNavEntries` and `settingsMore`, set as the workspace default or per person; unset keeps today's behaviour. While a deploy rolls out, a write from an older API replica can drop saved `options`; set them again afterwards. Recent apps now count opens and the last 90 days of edits (read through a new index on app versions by author), and no longer come back empty: the read ran without the person's identity, so row-level security hid every open.
+
+### Patch Changes
+
+- f2c07c2: **Add an agent** now also offers three ready-made agents: **CVE scanner** (checks dependencies and container images for known vulnerabilities, fixes safe upgrades in one pull request for PR reviewer and reports the rest; suggested weekly and on new pull requests), **Incident responder** (investigates an alert or a Slack report, posts the likely cause and hands a fix to Bug fixer) and **Dependency updater** (one pull request of routine upgrades a week for PR reviewer). The Agents list no longer shows a Slack badge on every shared agent, since every shared agent is in Slack; only Only me agents are marked.
+- 837e58f: Connecting a coding agent starts in the organization you last worked in, with everyday work selected (chats, files, knowledge, apps and their data, automations, and using secrets, GitHub and sandbox environments; it never manages people, keys, billing, connections, capabilities, machines or terminals, controls live screens, and never reads secret values), shown as Custom so every permission stays visible. The permission list has an Apps and artifacts group, and read only connections can query app data. App data a connected agent writes is recorded as that connected agent (`agent:connection:<id>`) instead of as the person; the records still belong to the person, and app change events for those writes now show writer `agent` instead of `user`.
+- 53320fa: The **PR reviewer** template labels each finding Blocker, Bug or Nit and posts them at a review level set in its Instructions (`Review level: Bugs` by default; also `Blockers only` or `Everything`). At Bugs, nits come last in one collapsed section.
+- 55539f1: Show where recordings spend time between Stop and the transcript. The SDK measures storage uploads and finalize, React measures transcript delivery and composer insertion, and the API and worker emit recording stage timings with a shared recording key. Transcript long polling reports its intentional wait separately from active API work.
+- f2c07c2: The ready-made Triage agent suggests a Slack trigger (a new message in a channel), and Triage and Bug fixer start with what they can reach and hand off by name instead of asking for setup first. `scheduled_tasks_create` takes `agentConfig.agentName` (an agent's name or id), and the apps Skill tells agents to start work on new app records with an automation on app change events, not page code. Adding a GitHub event source without a GitHub connection offers Connect GitHub. The coding-agent setup guide shows how to add the Opengeni MCP server by hand when the `opengeni` npm package isn't available.
+- f2c07c2: A workspace that its organization shares an Opengeni Slack bot with can now add Slack as an automation event source, and the bot's channel events reach that workspace's automations as well as the home workspace's. Delivery follows the live sharing setting: turning sharing off or leaving the workspace out stops new events there. Migration 1538 adds the one lookup each Slack callback makes for this; the shared workspaces' deliveries never delay Slack's acknowledgement. A workspace's Slack source whose bot is no longer shared with it reads as blocked with "The Slack bot isn't shared with this workspace anymore" until the bot is shared again.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [9cfc4b7]
+- Updated dependencies [837e58f]
+- Updated dependencies [26b0190]
+- Updated dependencies [e765d11]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [b419673]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [23e52db]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [53320fa]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [0b36a4b]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/runtime@6.36.0
+  - @opengeni/db@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/documents@6.36.0
+  - @opengeni/events@6.36.0
+  - @opengeni/storage@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes
