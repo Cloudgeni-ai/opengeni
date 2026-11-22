@@ -772,9 +772,9 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
   const groups = items
     .filter((item) => item.type === "group")
     .map((item) => ({ value: item.id, label: item.label }));
-  const change = async (changes: SidebarLayoutChange[]) => {
+  const change = async (changes: SidebarLayoutChange[], target: Scope = effectiveScope) => {
     try {
-      await update({ scope: effectiveScope, changes });
+      await update({ scope: target, changes });
     } catch (error) {
       toast.error("Couldn't change the sidebar", {
         description: userErrorText(error),
@@ -906,7 +906,8 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
         confirmLabel="Reset"
         cancelAutoFocus
         onConfirm={() =>
-          change([{ op: "reset" }]).then(
+          // Reset only ever clears your own changes, never the workspace default.
+          change([{ op: "reset" }], "personal").then(
             () => true,
             () => false,
           )

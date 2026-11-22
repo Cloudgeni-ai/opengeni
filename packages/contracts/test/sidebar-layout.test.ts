@@ -213,6 +213,18 @@ describe("sidebar layout", () => {
     expect(() => apply(member, [{ op: "move", itemId: "releases", groupId: null }])).toThrow(
       SidebarLayoutChangeError,
     );
+    // An item an older version stored beside its group goes with the group too.
+    const older: StoredSidebarPersonalChanges = {
+      ...EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      added: [
+        { parentId: null, item: { id: "my-g", type: "group", label: "G", items: [] } },
+        { parentId: "my-g", item: { id: "my-a", type: "app", appId: APP_C } },
+      ],
+    };
+    const removed = apply(older, [{ op: "remove", itemId: "my-g" }]);
+    expect(mergeSidebarLayout(workspace, removed).items.map((item) => item.id)).toEqual([
+      "engineering",
+    ]);
   });
 
   test("a deleted workspace group keeps a person's items visible", () => {
