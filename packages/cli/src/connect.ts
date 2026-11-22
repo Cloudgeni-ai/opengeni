@@ -28,8 +28,9 @@ name: opengeni
 description: >-
   Hand work to Opengeni agents in the cloud and use the Opengeni workspace's
   apps, tools, Skills and Knowledge. Use when the user asks to run something
-  in the cloud, in the background or in parallel, "on Opengeni", or to check
-  on, follow up or get the result of an Opengeni chat.
+  in the cloud, in the background or in parallel, "on Opengeni", to check on
+  or follow up an Opengeni chat, to share Skills, Knowledge, apps or files
+  with the workspace, or to change its schedules or agents.
 ---
 
 # Opengeni
@@ -49,11 +50,20 @@ this conversation or this computer: give it a self-contained brief.
   Stopping your wait doesn't stop the chat; \`session_pause\` does.
 - **Follow up**: \`session_send\`, then \`wait_for\` with its cursor and turnId.
 - **Apps**: \`apps_list\`, \`app_describe\`, \`app_query\`, \`app_write\`.
+- **Share**: \`app_save\` (an app or a new version), \`app_publish\` (who can
+  open it), \`file_save\` (a file and its link).
 - **Tools**: \`tools_search\`, then \`tool_call\`. If it returns
   \`needsApproval\`, show the user \`approvalUrl\`; after they approve, call again
   with the same \`operationId\`.
-- **Skills and Knowledge**: \`skills_sync\` (upload local Skill folders or pull
-  the workspace's), \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
+- **Skills and Knowledge**: \`skills_sync\` uploads local Skill folders as
+  Personal unless \`scope\` is \`workspace\` or \`organization\` (which may wait
+  for review, per the workspace's Agent learning setting);
+  \`direction: "pull"\` gets the workspace's Skills; \`direction: "repository"\`
+  syncs a public GitHub repository's Skill folders. Knowledge:
+  \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
+- **Schedules, agents and workspace instructions**: change them with
+  \`opengeni_actions_search\`, \`opengeni_action_describe\`, then
+  \`opengeni_action_call\`.
 - Several workspaces: pass \`workspaceId\`, or \`workspace_use\` once.
 
 Retrying a call with the same input doesn't start the work twice. Never put

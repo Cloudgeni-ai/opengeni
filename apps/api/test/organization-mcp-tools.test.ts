@@ -516,6 +516,514 @@ describe("organization MCP named tools", () => {
   });
 });
 
+describe("organization MCP app and file saving", () => {
+  const appId = "88888888-8888-4888-8888-888888888888";
+  const v1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const v2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+  const base = `/v1/workspaces/${workspaceId}/published-artifacts`;
+  const receipt = (revision: number, versionId: string, replayed = false) =>
+    Response.json({
+      artifact: { id: appId, title: "Board", visibility: "private" },
+      version: { id: versionId, revision },
+      replayed,
+    });
+  const detail = (current: { id: string; revision: number }) =>
+    Response.json({
+      artifact: { id: appId, currentVersion: current },
+      versions: [
+        { id: v2, revision: 2 },
+        { id: v1, revision: 1 },
+      ],
+    });
+
+  test("app_save creates a private app, and a retry reuses the same key", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const { call } = await connect({
+      [`POST ${base}`]: (_request, body) => {
+        bodies.push(body as Record<string, unknown>);
+        return receipt(1, v1, bodies.length > 1);
+      },
+    });
+    const first = await call("app_save", { name: "Board", html: "<h1>Board</h1>" });
+    expect(first.isError).toBe(false);
+    expect(first.value).toMatchObject({
+      appId,
+      version: 1,
+      link: `https://app.example.test/workspaces/${workspaceId}/sites/${appId}`,
+      replayed: false,
+    });
+    expect(bodies[0]).toMatchObject({
+      title: "Board",
+      html: "<h1>Board</h1>",
+      visibility: "private",
+    });
+    const again = await call("app_save", { name: "Board", html: "<h1>Board</h1>" });
+    expect(again.value.replayed).toBe(true);
+    expect(bodies[1]!.idempotencyKey).toBe(bodies[0]!.idempotencyKey);
+  });
+
+  test("app_save saves a new version on the current one and defines collections", async () => {
+    const published: Array<Record<string, unknown>> = [];
+    const defined: string[] = [];
+    const { call } = await connect({
+      [`GET ${base}/${appId}`]: () => detail({ id: v1, revision: 1 }),
+      [`POST ${base}/${appId}/versions`]: (_request, body) => {
+        published.push(body as Record<string, unknown>);
+        return receipt(2, v2);
+      },
+      [`PUT ${base}/${appId}/data/collections/tasks`]: (request) => {
+        defined.push(new URL(request.url).pathname);
+        return Response.json({ name: "tasks" });
+      },
+    });
+    const saved = await call("app_save", {
+      appId,
+      html: "<h1>v2</h1>",
+      collections: { tasks: { accessMode: "shared" } },
+    });
+    expect(saved.isError).toBe(false);
+    expect(saved.value).toMatchObject({
+      appId,
+      version: 2,
+      collections: [{ name: "tasks", ok: true }],
+    });
+    expect(published[0]).toMatchObject({ html: "<h1>v2</h1>", expectedCurrentVersionId: v1 });
+    expect(defined).toHaveLength(1);
+  });
+
+  test("app_save says nothing was saved when the caller's own key was already used", async () => {
+    const { call } = await connect({
+      [`GET ${base}/${appId}`]: () => detail({ id: v2, revision: 2 }),
+      [`POST ${base}/${appId}/versions`]: () =>
+        Response.json(
+          {
+            code: "WORKSPACE_ARTIFACT_CONFLICT",
+            message: "Idempotency key was already used for a different operation",
+          },
+          { status: 409 },
+        ),
+    });
+    const retried = await call("app_save", {
+      appId,
+      html: "<h1>v2</h1>",
+      idempotencyKey: "save-1",
+    });
+    expect(retried.isError).toBe(true);
+    expect(retried.value.error).toContain("nothing was saved");
+  });
+
+  test("app_save recognises a retry whose first try already saved the version", async () => {
+    const html = "<h1>v2</h1>";
+    const posted: Array<Record<string, unknown>> = [];
+    const { call } = await connect({
+      [`GET ${base}/${appId}`]: () =>
+        Response.json({
+          artifact: {
+            id: appId,
+            currentVersion: {
+              id: v2,
+              revision: 2,
+              sizeBytes: new TextEncoder().encode(html).byteLength,
+              createdBySubjectId: subjectId,
+              createdAt: new Date().toISOString(),
+            },
+          },
+          versions: [
+            { id: v2, revision: 2 },
+            { id: v1, revision: 1 },
+          ],
+        }),
+      [`POST ${base}/${appId}/versions`]: (_request, body) => {
+        posted.push(body as Record<string, unknown>);
+        return receipt(2, v2, true);
+      },
+    });
+    const retried = await call("app_save", { appId, html });
+    expect(retried.value).toMatchObject({ appId, version: 2, replayed: true });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ expectedCurrentVersionId: v1 });
+  });
+
+  test("app_save rolls back to a version by its number", async () => {
+    const rolled: Array<Record<string, unknown>> = [];
+    const { call } = await connect({
+      [`GET ${base}/${appId}`]: () => detail({ id: v2, revision: 2 }),
+      [`POST ${base}/${appId}/rollback`]: (_request, body) => {
+        rolled.push(body as Record<string, unknown>);
+        return receipt(3, v1);
+      },
+    });
+    const result = await call("app_save", { appId, rollbackTo: 1 });
+    expect(result.isError).toBe(false);
+    expect(rolled[0]).toMatchObject({ versionId: v1, expectedCurrentVersionId: v2 });
+    expect((await call("app_save", { appId, rollbackTo: 9 })).isError).toBe(true);
+  });
+
+  test("app_save passes on the refusal when the person can't manage the app", async () => {
+    const { call } = await connect({
+      [`GET ${base}/${appId}`]: () => detail({ id: v1, revision: 1 }),
+      [`POST ${base}/${appId}/versions`]: () =>
+        Response.json(
+          {
+            code: "WORKSPACE_ARTIFACT_OWNER_REQUIRED",
+            message: "Only the app's owner can change it",
+          },
+          { status: 403 },
+        ),
+    });
+    const refused = await call("app_save", { appId, html: "<p>x</p>" });
+    expect(refused.isError).toBe(true);
+    expect(refused.value.error).toBe("Only the app's owner can change it");
+  });
+
+  test("app_save uploads a multi-file build and creates the app from it", async () => {
+    const uploadId = "99999999-9999-4999-8999-999999999990";
+    const put: Array<{ url: string; body: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      put.push({ url: String(input), body: new TextDecoder().decode(init?.body as Uint8Array) });
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    try {
+      const created: Array<Record<string, unknown>> = [];
+      const { call } = await connect({
+        [`POST ${base}/uploads`]: () =>
+          Response.json({
+            uploadId,
+            html: { putUrl: "https://storage.example.test/html", requiredHeaders: {} },
+            source: { putUrl: "https://storage.example.test/source", requiredHeaders: {} },
+            assets: { putUrl: "https://storage.example.test/assets", requiredHeaders: {} },
+          }),
+        [`POST ${base}`]: (_request, body) => {
+          created.push(body as Record<string, unknown>);
+          return receipt(1, v1);
+        },
+      });
+      const saved = await call("app_save", {
+        name: "Board",
+        files: [
+          { path: "index.html", content: '<script src="app.js"></script>' },
+          { path: "app.js", content: "console.log(1)" },
+        ],
+      });
+      expect(saved.isError).toBe(false);
+      expect(created[0]).toMatchObject({ uploadId });
+      expect(created[0]!.html).toBeUndefined();
+      expect(put.map((entry) => entry.url)).toEqual([
+        "https://storage.example.test/html",
+        "https://storage.example.test/assets",
+        "https://storage.example.test/source",
+      ]);
+      expect(JSON.parse(put[2]!.body)).toEqual({
+        entrypoint: "index.html",
+        files: [
+          { path: "index.html", content: '<script src="app.js"></script>' },
+          { path: "app.js", content: "console.log(1)" },
+        ],
+      });
+      expect(JSON.parse(put[1]!.body).files[0]).toEqual({
+        path: "app.js",
+        base64: Buffer.from("console.log(1)").toString("base64"),
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("app_save finds the app a multi-file retry's first try created", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+    try {
+      let uploads = 0;
+      const created: string[] = [];
+      const { call } = await connect({
+        [`POST ${base}/uploads`]: () => {
+          uploads += 1;
+          return Response.json({
+            uploadId: `99999999-9999-4999-8999-99999999999${uploads}`,
+            html: { putUrl: "https://storage.example.test/html" },
+            assets: { putUrl: "https://storage.example.test/assets" },
+          });
+        },
+        [`POST ${base}`]: (_request, body) => {
+          created.push((body as { idempotencyKey: string }).idempotencyKey);
+          return created.length === 1
+            ? receipt(1, v1)
+            : Response.json(
+                {
+                  code: "WORKSPACE_ARTIFACT_CONFLICT",
+                  message: "Idempotency key was already used for different publication input",
+                },
+                { status: 409 },
+              );
+        },
+        [`GET /v1/workspaces/${workspaceId}/artifact-catalog`]: () =>
+          Response.json({
+            items: [
+              {
+                id: appId,
+                kind: "site",
+                title: "Board",
+                ownedByViewer: true,
+                createdAt: new Date().toISOString(),
+              },
+            ],
+            nextCursor: null,
+          }),
+      });
+      const files = [
+        { path: "index.html", content: "<p>x</p>" },
+        { path: "app.css", content: "p{}" },
+      ];
+      await call("app_save", { name: "Board", files });
+      const retried = await call("app_save", { name: "Board", files });
+      expect(retried.isError).toBe(false);
+      expect(retried.value).toMatchObject({ appId, replayed: true });
+      expect(created[1]).toBe(created[0]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  /** An app the tests share: who can see it changes with each visibility call. */
+  const sharedApp = (visibility: "private" | "workspace", calls: string[]) => {
+    const state = { visibility };
+    return {
+      [`GET ${base}/${appId}`]: () =>
+        Response.json({ artifact: { id: appId, visibility: state.visibility }, versions: [] }),
+      [`PUT ${base}/${appId}/visibility`]: (_request: Request, body: unknown) => {
+        state.visibility = (body as { visibility: "private" | "workspace" }).visibility;
+        calls.push(`visibility ${state.visibility}`);
+        return Response.json({ artifact: { id: appId } });
+      },
+    };
+  };
+
+  test("app_publish shares with the workspace and publishes publicly with fixes", async () => {
+    const calls: string[] = [];
+    const { call } = await connect({
+      ...sharedApp("private", calls),
+      [`GET ${base}/${appId}/publication`]: () =>
+        Response.json(
+          { error: { code: "not_found", message: "This app is not published" } },
+          { status: 404 },
+        ),
+      [`PUT ${base}/${appId}/publication`]: (_request, body) => {
+        calls.push(`publication ${(body as { access: string }).access}`);
+        return Response.json({
+          url: "https://board.apps.example.test/",
+          hostname: "board.apps.example.test",
+          access: "public",
+          status: "active",
+          warnings: [
+            {
+              code: "site_data_guest_read",
+              message: "Visitors can't read tasks",
+              suggestion: "Let guests read tasks",
+              fix: { kind: "site_data_guest_access", collection: "tasks", guestAccess: "read" },
+            },
+          ],
+        });
+      },
+      [`POST ${base}/${appId}/publication/fixes`]: () => {
+        calls.push("fix");
+        return Response.json({
+          url: "https://board.apps.example.test/",
+          status: "active",
+          warnings: [],
+        });
+      },
+    });
+    const shared = await call("app_publish", { appId, access: "workspace" });
+    expect(shared.isError).toBe(false);
+    expect(shared.value.publication).toBeUndefined();
+    const open = await call("app_publish", { appId, access: "public", hostname: "board" });
+    expect(open.value.publication.warnings).toHaveLength(1);
+    expect(open.value.nextStep).toContain("fixes");
+    const fixed = await call("app_publish", {
+      appId,
+      access: "public",
+      fixes: [{ kind: "site_data_guest_access", collection: "tasks", guestAccess: "read" }],
+    });
+    expect(fixed.value.publication.warnings).toHaveLength(0);
+    expect(calls).toEqual([
+      "visibility workspace",
+      "publication public",
+      "publication public",
+      "fix",
+    ]);
+    const ignored = await call("app_publish", {
+      appId,
+      access: "workspace",
+      fixes: [{ kind: "site_data_guest_access", collection: "tasks", guestAccess: "read" }],
+    });
+    expect(ignored.value.fixesIgnored).toContain("isn't published");
+  });
+
+  test("app_publish only_me narrows who can see it, then takes it off the web", async () => {
+    const calls: string[] = [];
+    const { call } = await connect({
+      ...sharedApp("workspace", calls),
+      [`GET ${base}/${appId}/publication`]: () =>
+        Response.json({ access: "public", status: "active", warnings: [] }),
+      [`PUT ${base}/${appId}/publication`]: (_request, body) => {
+        calls.push(`publication ${(body as { status: string }).status}`);
+        return Response.json({ status: "unpublished" });
+      },
+    });
+    const result = await call("app_publish", { appId, access: "only_me" });
+    expect(result.value).toMatchObject({ access: "only_me" });
+    expect(calls).toEqual(["visibility private", "publication unpublished"]);
+  });
+
+  test("app_publish changes nothing when it can't read the publication or isn't the owner", async () => {
+    const calls: string[] = [];
+    let publicationRead = 500;
+    const { call } = await connect({
+      ...sharedApp("workspace", calls),
+      [`GET ${base}/${appId}/publication`]: () =>
+        publicationRead === 500
+          ? Response.json({ error: { message: "Database unavailable" } }, { status: 500 })
+          : Response.json({ access: "public", status: "active", warnings: [] }),
+      [`PUT ${base}/${appId}/publication`]: () => {
+        calls.push("publication");
+        return Response.json({ status: "unpublished" });
+      },
+    });
+    const unread = await call("app_publish", { appId, access: "only_me" });
+    expect(unread.isError).toBe(true);
+    expect(calls).toEqual([]);
+    publicationRead = 200;
+    const notOwner = await connect({
+      [`GET ${base}/${appId}`]: () =>
+        Response.json({ artifact: { id: appId, visibility: "workspace" }, versions: [] }),
+      [`GET ${base}/${appId}/publication`]: () =>
+        Response.json({ access: "public", status: "active", warnings: [] }),
+      [`PUT ${base}/${appId}/visibility`]: () =>
+        Response.json(
+          { code: "WORKSPACE_ARTIFACT_OWNER_REQUIRED", message: "Only the owner can do this" },
+          { status: 403 },
+        ),
+      [`PUT ${base}/${appId}/publication`]: () => {
+        calls.push("publication");
+        return Response.json({ status: "unpublished" });
+      },
+    });
+    const refused = await notOwner.call("app_publish", { appId, access: "only_me" });
+    expect(refused.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  test("app_publish puts visibility back when the public publication fails", async () => {
+    const calls: string[] = [];
+    const { call } = await connect({
+      ...sharedApp("private", calls),
+      [`GET ${base}/${appId}/publication`]: () =>
+        Response.json({ error: { message: "not published" } }, { status: 404 }),
+      [`PUT ${base}/${appId}/publication`]: () =>
+        Response.json({ error: { message: "That hostname is taken." } }, { status: 409 }),
+    });
+    const result = await call("app_publish", { appId, access: "public", hostname: "board" });
+    expect(result.isError).toBe(true);
+    expect(result.value.error).toBe("That hostname is taken. Nothing changed.");
+    expect(calls).toEqual(["visibility workspace", "visibility private"]);
+  });
+
+  test("file_save uploads a private file once and a retry returns it", async () => {
+    const fileId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const uploadId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const sha256 = new Bun.CryptoHasher("sha256").update("# Report").digest("hex");
+    const stored: Array<Record<string, unknown>> = [];
+    const begun: Array<Record<string, unknown>> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+    try {
+      const { call } = await connect({
+        [`GET /v1/workspaces/${workspaceId}/files`]: () =>
+          Response.json({ files: stored, nextCursor: null }),
+        [`POST /v1/workspaces/${workspaceId}/files/uploads`]: (_request, body) => {
+          begun.push(body as Record<string, unknown>);
+          return Response.json({
+            fileId,
+            uploadId,
+            putUrl: "https://storage.example.test/file",
+            requiredHeaders: {},
+            expiresAt: new Date().toISOString(),
+            maxSizeBytes: 1000,
+          });
+        },
+        [`POST /v1/workspaces/${workspaceId}/files/uploads/${uploadId}/complete`]: () => {
+          const file = {
+            id: fileId,
+            filename: "report.md",
+            sizeBytes: 8,
+            sha256,
+            status: "ready",
+            ownerSubjectId: subjectId,
+            createdAt: new Date().toISOString(),
+          };
+          stored.push(file);
+          return Response.json({ file });
+        },
+      });
+      const first = await call("file_save", { name: "report.md", content: "# Report" });
+      expect(first.isError).toBe(false);
+      expect(first.value).toMatchObject({
+        fileId,
+        link: `https://app.example.test/workspaces/${workspaceId}/artifacts/files/${fileId}`,
+        replayed: false,
+      });
+      expect(begun[0]).toMatchObject({ scope: "personal", contentType: "text/markdown", sha256 });
+      const again = await call("file_save", { name: "report.md", content: "# Report" });
+      expect(again.value).toMatchObject({ fileId, replayed: true });
+      expect(begun).toHaveLength(1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("file_save hands out an upload URL for a large file", async () => {
+    const { call } = await connect({
+      [`POST /v1/workspaces/${workspaceId}/files/uploads`]: () =>
+        Response.json({
+          fileId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          uploadId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          putUrl: "https://storage.example.test/file",
+          requiredHeaders: { "x-goog-meta-a": "b" },
+          expiresAt: new Date().toISOString(),
+          maxSizeBytes: 100_000_000,
+        }),
+    });
+    const result = await call("file_save", { name: "video.mp4", sizeBytes: 50_000_000 });
+    expect(result.value).toMatchObject({
+      uploadId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      putUrl: "https://storage.example.test/file",
+    });
+    expect(result.value.nextStep).toContain("uploadId");
+  });
+
+  test("a read-only connection can't save an app", async () => {
+    const { call, seen } = await connect(
+      {},
+      {
+        caller: {
+          kind: "person",
+          accountId: organizationId,
+          subjectId,
+          access: {
+            preset: "read_only",
+            permissions: organizationAccessPresetPermissions("read_only"),
+            workspaceScope: { kind: "all" },
+          },
+        },
+      },
+    );
+    const refused = await call("app_save", { name: "Board", html: "<p>x</p>" });
+    expect(refused.isError).toBe(true);
+    expect(seen.some((entry) => entry.method === "POST")).toBe(false);
+  });
+});
+
 describe("organization MCP named tool helpers", () => {
   test("waitState reads completion events", () => {
     expect(waitState([]).state).toBe("running");
