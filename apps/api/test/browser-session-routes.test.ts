@@ -2517,6 +2517,39 @@ test("working copy routes carry the browser record's exact authority, and only a
           "This browser was lost without a working copy that its controller still keeps, so there is nothing to inspect or adopt. Resume it to restore its last saved state.",
         provisioned: 0,
       },
+      // The chat that opened the browser moved to another machine. An agent
+      // chat working on the browser's machine (a child given its parent's
+      // browser) reaches it by its own route, authorized as itself; one
+      // working anywhere else is refused as before.
+      {
+        scenario: "child-on-machine",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+        routedThroughChild: true,
+      },
+      {
+        scenario: "child-elsewhere",
+        status: 409,
+        calls: [],
+        exactAuthority: true,
+        audits: [],
+        routedThroughChild: false,
+      },
+      {
+        scenario: "lost-child-on-machine",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+        provisioned: 1,
+        routedThroughChild: true,
+      },
     ]);
   } finally {
     if (child.exitCode === null) child.kill();
@@ -2547,22 +2580,29 @@ async function workingCopyRoutesFixture() {
     workspaceId = randomUUID(),
     browserSessionId = randomUUID(),
     sourceSessionId = randomUUID(),
+    childSessionId = randomUUID(),
     machineId = randomUUID(),
     instanceId = randomUUID(),
     controllerGeneration = randomUUID(),
     operationId = randomUUID(),
     rootSecret = "synthetic-controller-authority",
     digest = "d".repeat(64);
-  const grant = {
+  const personGrant = {
     accountId,
     workspaceId,
     subjectId: "synthetic-user",
     permissions: ["sessions:control"],
   };
+  const agentGrant = {
+    ...personGrant,
+    principalKind: "agent_attempt",
+    metadata: { sessionId: childSessionId },
+  };
   const placement = { kind: "connected_machine", sandboxId: machineId };
   let scenario = "inspect";
   let calls: string[] = [];
   let audits: string[] = [];
+  let authorized: string[] = [];
   let exactAuthority = true;
   let provisioned = 0;
   const tokenGeneration = () => (scenario === "adopt-token-rotated" ? 2 : 1);
@@ -2595,11 +2635,19 @@ async function workingCopyRoutesFixture() {
         associations: [],
       },
     }),
-    getSession: async () => ({
-      id: sourceSessionId,
-      workspaceId,
-      activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
-    }),
+    getSession: async (_db: unknown, _workspaceId: string, sessionId: string) =>
+      sessionId === childSessionId
+        ? {
+            id: childSessionId,
+            workspaceId,
+            activeSandboxId: scenario === "child-elsewhere" ? randomUUID() : machineId,
+          }
+        : {
+            id: sourceSessionId,
+            workspaceId,
+            activeSandboxId:
+              scenario === "machine-moved" || scenario.includes("child") ? randomUUID() : machineId,
+          },
     touchBrowserSessionController: async () => scenario !== "holder-lost",
     getExpiredBrowserSessionResume: async () =>
       scenario === "lost-no-copy" ? null : { controllerGeneration, settleable: false },
@@ -2611,14 +2659,15 @@ async function workingCopyRoutesFixture() {
   }));
   mock.module(resolveFromApi("@opengeni/core"), () => ({
     ...core,
-    requireAccessGrant: async () => grant,
+    requireAccessGrant: async () => (scenario.includes("child") ? agentGrant : personGrant),
     requireSessionAuthorization: async (
       _deps: unknown,
       _grant: unknown,
-      input: { operation: string },
+      input: { operation: string; sessionId: string },
     ) => {
       if (input.operation !== "session.control") throw new Error("synthetic operation mismatch");
       if (scenario === "access-revoked") throw new core.SessionAuthorizationDeniedError("revoked");
+      authorized.push(input.sessionId);
       return {};
     },
   }));
@@ -2790,32 +2839,40 @@ async function workingCopyRoutesFixture() {
       "lost-inspect",
       "lost-adopt",
       "lost-no-copy",
+      "child-on-machine",
+      "child-elsewhere",
+      "lost-child-on-machine",
     ]) {
       scenario = next;
       calls = [];
       audits = [];
+      authorized = [];
       exactAuthority = true;
       provisioned = 0;
-      const response =
-        next === "inspect" || next === "lost-inspect" || next === "lost-no-copy"
-          ? await app.request(`${base}/inspection`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: "{}",
-            })
-          : next === "status"
-            ? await app.request(`${base}/adoptions/${operationId}`)
-            : next === "revert"
-              ? await app.request(`${base}/adoptions/${operationId}/revert`, {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: "{}",
-                })
-              : await app.request(`${base}/adoptions`, {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ operationId, manifestDigest: digest }),
-                });
+      const inspection =
+        next === "inspect" ||
+        next === "lost-inspect" ||
+        next === "lost-no-copy" ||
+        next.includes("child");
+      const response = inspection
+        ? await app.request(`${base}/inspection`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          })
+        : next === "status"
+          ? await app.request(`${base}/adoptions/${operationId}`)
+          : next === "revert"
+            ? await app.request(`${base}/adoptions/${operationId}/revert`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: "{}",
+              })
+            : await app.request(`${base}/adoptions`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ operationId, manifestDigest: digest }),
+              });
       const body = (await response.json()) as Record<string, any>;
       const result: Record<string, unknown> = {
         scenario: next,
@@ -2830,7 +2887,7 @@ async function workingCopyRoutesFixture() {
             next === "lost-adopt",
         ),
       };
-      if (response.status === 200 && (next === "inspect" || next === "lost-inspect")) {
+      if (response.status === 200 && inspection) {
         result.adoptable = body.adoptable;
         result.explainsExclusions = String(body.explanation).includes(
           "chrome-launch, working-runtime.sqlite-shm",
@@ -2840,8 +2897,9 @@ async function workingCopyRoutesFixture() {
       }
       if (next.startsWith("lost")) {
         result.provisioned = provisioned;
-        if (response.status !== 200) result.message = body.message;
+        if (response.status !== 200 && !next.includes("child")) result.message = body.message;
       }
+      if (next.includes("child")) result.routedThroughChild = authorized.includes(childSessionId);
       results.push(result);
     }
     console.log(JSON.stringify(results));
