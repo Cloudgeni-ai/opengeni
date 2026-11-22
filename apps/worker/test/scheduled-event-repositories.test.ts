@@ -157,7 +157,7 @@ test("a run asks GitHub at most SCHEDULED_EVENT_REPOSITORY_LOOKUPS times", async
   }));
   const resources = await confirmedEventRepositoryResources(
     repositories,
-    new Map(repositories.map((repository) => [repository.id, 3])),
+    new Map(repositories.map((entry) => [entry.id, 3])),
     async () => {
       asked += 1;
       return null;
