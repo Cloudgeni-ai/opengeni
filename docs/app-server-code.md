@@ -150,8 +150,8 @@ run of code with tools or secrets, writes a collection (or, for a sync, the
 app's SQL database), the API marks the target in `site_tool_data_sources`
 with the connector and account route the data came from (`vault` for
 secrets). Marks only grow, and apps can't change them. A live shared sync
-also counts from its definition, so syncs saved by earlier releases are
-covered before their next run, with no backfill.
+(or deleted) shared sync also counts from its definition, so syncs saved by
+earlier releases are covered before their next run, with no backfill.
 
 Every read of a marked target needs a signed-in, live member of the
 workspace. A route that is a workspace-shared account needs that same route
@@ -160,7 +160,9 @@ same connector (or the account-less server); `vault` needs `secrets:use`.
 This covers Site Data query, get and export, Site SQL queries, statements
 and export (the whole database: SQL can join any table), the published app's
 agent tools, and server code's own data reads, which are checked against the
-run's viewer. Guests, invited people and other users get a refusal naming
+run's viewer. Writes need the same reader, since they answer with the stored
+records. App packages leave marked collections and a marked database out of
+their demo data. Guests, invited people and other users get a refusal naming
 the connector, whatever the collection's guest access or the app's sharing
 setting says. A member's inventory is kept for 30 seconds per API process.
 App webhooks store payloads that outside services push in, not
