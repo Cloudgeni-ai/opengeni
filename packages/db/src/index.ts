@@ -37136,7 +37136,7 @@ async function sessionIdsWithHandledFailure(
 
 /**
  * Whether a session waits only on questions still with the agent that
- * started it (`held_for_agent`, see migration 1550): their notice is on its
+ * started it (`held_for_agent`, see migration 1553): their notice is on its
  * way, queued, or in a turn that has not ended, and that agent can act.
  * Person-facing attention leaves such a session out.
  */
@@ -95335,7 +95335,7 @@ async function enqueueChildRequiresActionOutboxTx(
     );
   if (hold && input.newHumanInputRequestIds.length > 0) {
     // Before the pause's request events: the inbox and push triggers skip a
-    // held question, and release it when the agent no longer has it (1550).
+    // held question, and release it when the agent no longer has it (1553).
     await tx
       .update(schema.sessionHumanInputRequests)
       .set({ heldForAgent: true })

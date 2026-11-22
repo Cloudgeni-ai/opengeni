@@ -7,7 +7,7 @@
 -- The push and inbox triggers skip a held question; the inbox trigger
 -- releases it to the person (inbox item, push, list hint) when the agent no
 -- longer has it. Bodies are the latest definitions (push 1289, inbox 1547)
--- plus the 1550 hunks; same signatures, so owners and grants stay. Rolling: a
+-- plus the 1553 hunks; same signatures, so owners and grants stay. Rolling: a
 -- constant-default column rewrites nothing, and the previous release never
 -- sets it.
 SET LOCAL lock_timeout = '5s';
@@ -68,7 +68,7 @@ BEGIN
     ) THEN
       v_rule := NULL;
     END IF;
-    -- 1550: a sub-agent's question held for the agent that started it alerts
+    -- 1553: a sub-agent's question held for the agent that started it alerts
     -- no phone yet; the inbox trigger alerts it if that agent leaves it open.
     IF NEW.type = 'session.humanInput.requested' AND EXISTS (
       SELECT 1 FROM session_human_input_requests request
@@ -152,7 +152,7 @@ DECLARE
   v_held_recipient text;
   v_held_sequence integer;
 BEGIN
-  -- 1550: a sub-agent's question goes first to the agent that started it
+  -- 1553: a sub-agent's question goes first to the agent that started it
   -- (held_for_agent). It reaches the person (inbox item and phone push) when
   -- the agent's turn that received it ends with it still open, when an agent
   -- turn fails or is cancelled before seeing it, or when the same sub-agent's
@@ -312,7 +312,7 @@ BEGIN
 
     CASE NEW.type
     WHEN 'session.humanInput.requested' THEN
-      -- 1550: held for the agent that started this sub-agent; see above.
+      -- 1553: held for the agent that started this sub-agent; see above.
       IF EXISTS (
         SELECT 1 FROM session_human_input_requests request
         WHERE request.workspace_id = NEW.workspace_id

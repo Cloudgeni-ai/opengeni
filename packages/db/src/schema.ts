@@ -10488,7 +10488,7 @@ export const sessionHumanInputRequests = pgTable(
     response: jsonb("response").$type<HumanInputResponse>(),
     respondedBy: text("responded_by"),
     skillReviewHumanAuthorized: boolean("skill_review_human_authorized").notNull().default(false),
-    /** With the agent that started this sub-agent, not yet the person (1550). */
+    /** With the agent that started this sub-agent, not yet the person (1553). */
     heldForAgent: boolean("held_for_agent").notNull().default(false),
     respondedAt: timestamp("responded_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
