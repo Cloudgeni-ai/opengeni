@@ -3075,6 +3075,8 @@ export type SessionHumanInputRequest = {
    */
   origin?: "tool_call" | "secret_use_approval" | undefined;
   questions: HumanInputQuestion[];
+  /** Allowed destinations for a pending secret answer under this reader's authority. */
+  secretSaveTargets?: HumanInputSecretSaveTo[] | undefined;
   allowSkip: boolean;
   response: HumanInputResponse | null;
   respondedBy: string | null;

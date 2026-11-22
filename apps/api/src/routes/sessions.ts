@@ -61,7 +61,6 @@ import {
 } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
-  isVerifiedDelegatedHumanAuthorization,
   scheduledTaskViewerSubjectForGrant,
   withSiteSessionOrigin,
 } from "@opengeni/core";
@@ -464,7 +463,9 @@ import {
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
   humanSecretWriteContext,
+  isSignedInSecretAnswerer,
   prepareSecretAnswers,
+  projectSecretAnswerTargets,
   splitSecretAnswers,
 } from "../secret-answers";
 import { browserSseDeliveryOptions, sseSessionStream } from "../http/sse";
@@ -4996,10 +4997,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               }
             : {}),
           respondedBy: grant.subjectId,
-          canonicalHumanSession:
-            authorization.canonicalManagedHumanSession ||
-            authorization.canonicalLocalHumanSession ||
-            isVerifiedDelegatedHumanAuthorization(authorization),
+          canonicalHumanSession: isSignedInSecretAnswerer(authorization),
           // An agent or personal key acting as the person is not the person
           // for a secret approval card.
           personSignedIn:
@@ -5070,7 +5068,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
     const sessionId = c.req.param("sessionId");
     const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const rawStatus = c.req.query("status");
@@ -5084,14 +5087,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...(status?.success ? { status: status.data } : {}),
     });
     c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
-    return c.json({ requests });
+    return c.json({ requests: await projectSecretAnswerTargets(db, authorization, requests) });
   });
 
   app.get(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests/:requestId",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "sessions:read",
+      );
       const sessionId = c.req.param("sessionId");
       const request = await getSessionHumanInputRequest(
         db,
@@ -5103,7 +5111,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(404, {
           message: "human-input request not found",
         });
-      return c.json(request);
+      const [projected] = await projectSecretAnswerTargets(db, authorization, [request]);
+      return c.json(projected!);
     },
   );
 
