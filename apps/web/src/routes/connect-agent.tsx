@@ -10,8 +10,6 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   readLastWorkspaceId,
-  readLastWorkspaceIdsByOrganization,
-  organizationWorkspacePreferenceStorageId,
   workspaceNavigationPreferenceStorageId,
 } from "@opengeni/react/app/lib/workspace-navigation-preference";
 
@@ -37,20 +35,19 @@ export function continueAuthorizeUrl(authorize: string, origin: string): string 
 
 /**
  * The organization the person last worked in, from this browser's navigation
- * memory: the workspace they last opened, else the organization they last
- * switched to. Only a hint; the page keeps it only when it's offered.
+ * memory (the workspace they last opened). Only a hint; the page keeps it only
+ * when it's offered, else the server's default stands.
  */
 export function lastUsedOrganizationId(
   request: Pick<McpConnectionRequest, "organizations">,
-  remembered: { workspaceId: string | null; byOrganization: Record<string, string> },
+  lastWorkspaceId: string | null,
 ): string | null {
-  const byWorkspace = request.organizations.find((organization) =>
-    organization.workspaces.some((workspace) => workspace.id === remembered.workspaceId),
+  if (!lastWorkspaceId) return null;
+  return (
+    request.organizations.find((organization) =>
+      organization.workspaces.some((workspace) => workspace.id === lastWorkspaceId),
+    )?.id ?? null
   );
-  if (byWorkspace) return byWorkspace.id;
-  // Most recent last.
-  const recent = Object.keys(remembered.byOrganization).reverse();
-  return recent.find((id) => request.organizations.some((each) => each.id === id)) ?? null;
 }
 
 export function ConnectAgentRoute({
@@ -113,14 +110,10 @@ export function ConnectAgentRoute({
     return (
       <McpConsentPage
         request={state.request}
-        lastUsedOrganizationId={lastUsedOrganizationId(state.request, {
-          workspaceId: readLastWorkspaceId(
-            workspaceNavigationPreferenceStorageId(accessContext.subjectId),
-          ),
-          byOrganization: readLastWorkspaceIdsByOrganization(
-            organizationWorkspacePreferenceStorageId(accessContext.subjectId),
-          ),
-        })}
+        lastUsedOrganizationId={lastUsedOrganizationId(
+          state.request,
+          readLastWorkspaceId(workspaceNavigationPreferenceStorageId(accessContext.subjectId)),
+        )}
         onAnswer={async (decision) => {
           const { redirectTo } = await client.answerMcpConnectionRequest(requestToken!, decision);
           setState({ kind: "leaving" });

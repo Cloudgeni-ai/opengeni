@@ -1,25 +1,50 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeOrganizationAccessPolicy, type Permission } from "@opengeni/contracts";
+import {
+  normalizeOrganizationAccessPolicy,
+  organizationAccessPresetPermissions,
+  type Permission,
+} from "@opengeni/contracts";
 
 import { lastUsedOrganizationId } from "@/routes/connect-agent";
 import { ORGANIZATION_PERMISSION_GROUPS, connectedAgentDefaultPolicy } from "./organization-access";
 
 describe("connected agent sign-in defaults", () => {
-  test("starts with everyday work, never administration, billing or secret values", () => {
+  test("starts with Read only plus exactly the everyday-work set", () => {
     const policy = connectedAgentDefaultPolicy();
     expect(policy.preset).toBe("custom");
     expect(policy.workspaceScope).toEqual({ kind: "all" });
-    for (const permission of [
-      "sessions:create",
-      "files:write",
-      "artifacts:read",
-      "artifacts:publish",
-      "scheduled_tasks:manage",
-      "secrets:use",
-    ])
-      expect(policy.permissions).toContain(permission as Permission);
+    const readOnly = new Set<string>(organizationAccessPresetPermissions("read_only"));
+    expect(
+      (policy.permissions as string[]).filter((permission) => !readOnly.has(permission)).sort(),
+    ).toEqual(
+      [
+        "artifacts:publish",
+        "documents:manage",
+        "files:upload",
+        "files:write",
+        "github:use",
+        "goals:manage",
+        "rigs:use",
+        "scheduled_tasks:manage",
+        "scheduled_tasks:run",
+        "secrets:use",
+        "sessions:control",
+        "sessions:create",
+        "stream:acknowledge",
+        "stream:control",
+      ].filter((permission) => !readOnly.has(permission)),
+    );
     for (const permission of [
       "secrets:read",
+      "secrets:write",
+      "connections:write",
+      "capabilities:manage",
+      "github:manage",
+      "enrollments:manage",
+      "rigs:manage",
+      "terminal:attach",
+      "codemode:call",
+      "mcp_servers:attach",
       "workspace:admin",
       "members:manage",
       "api_keys:manage",
@@ -47,22 +72,15 @@ describe("connected agent sign-in defaults", () => {
     expect(apps?.permissions).toEqual(["artifacts:read", "artifacts:publish"]);
   });
 
-  test("picks the organization of the workspace last used, else the last one switched to", () => {
+  test("picks the organization of the workspace last used, else none", () => {
     const request = {
       organizations: [
         { id: "personal", workspaces: [{ id: "w-personal" }] },
         { id: "team", workspaces: [{ id: "w-team" }] },
       ],
     } as unknown as Parameters<typeof lastUsedOrganizationId>[0];
-    expect(lastUsedOrganizationId(request, { workspaceId: "w-team", byOrganization: {} })).toBe(
-      "team",
-    );
-    expect(
-      lastUsedOrganizationId(request, {
-        workspaceId: "gone",
-        byOrganization: { personal: "w-personal", team: "w-team", other: "x" },
-      }),
-    ).toBe("team");
-    expect(lastUsedOrganizationId(request, { workspaceId: null, byOrganization: {} })).toBeNull();
+    expect(lastUsedOrganizationId(request, "w-team")).toBe("team");
+    expect(lastUsedOrganizationId(request, "gone")).toBeNull();
+    expect(lastUsedOrganizationId(request, null)).toBeNull();
   });
 });

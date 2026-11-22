@@ -134,8 +134,8 @@ const PERMISSION_LABELS: Record<string, string> = {
   "files:write": "Change files",
   "documents:search": "Search knowledge",
   "documents:manage": "Manage knowledge",
-  "artifacts:read": "Open apps and artifacts, use app data",
-  "artifacts:publish": "Change app data, save and publish apps",
+  "artifacts:read": "Open apps and artifacts, use app data as a viewer",
+  "artifacts:publish": "Save and publish apps, manage app data",
   "scheduled_tasks:run": "Run automations",
   "scheduled_tasks:manage": "Manage automations",
   // Legacy names on existing keys, shown as what they now grant.

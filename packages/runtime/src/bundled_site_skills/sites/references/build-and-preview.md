@@ -357,9 +357,11 @@ the reply (see "Single-file app" in SKILL.md).
   Do not build a synthetic parent-frame harness in the sandbox. After local
   validation and publication, use the returned app link for the hosted check.
 - In that hosted check, click through the app's main flows in the browser
-  with its real data (add, edit, delete, filter, each view): every change
-  shows without a reload or a Refresh click. A build, a parse check or a
-  screenshot is not this check; report any flow you couldn't exercise.
+  (add, edit, delete, filter, each view) on one record clearly marked as a
+  test, then delete it; never edit or delete records you didn't create.
+  Every change shows without a reload or a Refresh click. A build, a parse
+  check or a screenshot is not this check; report any flow you couldn't
+  exercise.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.

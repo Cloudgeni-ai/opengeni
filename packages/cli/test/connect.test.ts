@@ -126,7 +126,10 @@ describe("opengeni connect", () => {
   });
 
   test("helpers keep existing configuration", () => {
-    expect(parseClients("copilot,all")).toBe("all");
+    expect(parseClients("all")).toBe("all");
+    expect(parseClients("copilot,all")).toEqual({
+      error: "use --client all on its own, or name the clients to set up.",
+    });
     expect(parseClients(undefined)).toBe("all");
     expect(parseClients("copilot,claude-code")).toEqual(["vscode", "claude"]);
     expect(

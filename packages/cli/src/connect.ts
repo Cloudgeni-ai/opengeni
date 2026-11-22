@@ -398,7 +398,10 @@ export function parseClients(
           ? "claude"
           : each,
     );
-  if (wanted.includes("all")) return "all";
+  if (wanted.includes("all"))
+    return wanted.every((each) => each === "all")
+      ? "all"
+      : { error: "use --client all on its own, or name the clients to set up." };
   const unknown = wanted.filter((each) => !(CONNECT_CLIENTS as readonly string[]).includes(each));
   if (unknown.length > 0)
     return {

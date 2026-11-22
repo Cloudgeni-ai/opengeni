@@ -163,6 +163,30 @@ export const McpConnectionDecision = /* @__PURE__ */ defineSchema(() =>
    Up to admin, never owner.
    -------------------------------------------------------------------------- */
 
+/**
+ * Everyday work a coding agent connecting as a person starts with, on top of
+ * Read only: chats, files, knowledge, apps and their data, automations, and
+ * using (never reading or changing) secrets and GitHub. Never people, keys,
+ * billing, connections, capabilities, machines, terminals or secret values.
+ */
+export const CONNECTED_AGENT_EVERYDAY_PERMISSIONS: readonly Permission[] = [
+  "sessions:create",
+  "sessions:control",
+  "stream:control",
+  "stream:acknowledge",
+  "goals:manage",
+  "files:upload",
+  "files:write",
+  "documents:manage",
+  "artifacts:read",
+  "artifacts:publish",
+  "scheduled_tasks:run",
+  "scheduled_tasks:manage",
+  "secrets:use",
+  "github:use",
+  "rigs:use",
+];
+
 export const OrganizationServiceAccountRole = /* @__PURE__ */ defineSchema(() =>
   z.enum(["admin", "member"]),
 );

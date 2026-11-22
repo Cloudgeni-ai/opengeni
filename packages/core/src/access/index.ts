@@ -302,7 +302,8 @@ export const OUTSIDE_AGENT_GRANT_METADATA_KEY = "outsideAgent";
 
 /**
  * The outside-agent reach a grant was resolved with, or null for every other
- * caller. Only narrows: a grant that claims it is treated as an outside agent.
+ * caller. Set only by the server from a verified OAuth connection; it narrows
+ * access, and its `connectionId` names the connected agent as the writer.
  */
 export function outsideAgentReach(
   grant: { metadata?: Record<string, unknown> | undefined } | null | undefined,

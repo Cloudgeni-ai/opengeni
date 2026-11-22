@@ -70,8 +70,8 @@ tool calls.
   id, the same collection name and `accessMode`: `per_viewer` for each
   person's own entries (add `privateRecords: true` for health or other
   personal data), `append_only` for a form that collects answers. Skip
-  `jsonSchema`; check values in the page. Then add one in the saved app in a
-  browser: it must show without a reload.
+  `jsonSchema`; check values in the page. Then add a test entry in the saved
+  app in a browser: it must show without a reload; delete it.
 6. Reply with the link as soon as it is saved, in the person's words: what
    it does and how to use it. The link opens for workspace members only.
    When the person wants others to open it (family, customers, "on their
