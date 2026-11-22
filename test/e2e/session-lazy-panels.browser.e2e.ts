@@ -5,6 +5,7 @@ import { freePort } from "@opengeni/testing/compose";
 import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
+import { hideWorkspace, openDockTab } from "./dock";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -160,7 +161,7 @@ describe("production session conditional loading", () => {
         // must not suspend the already usable chat or change that dock lifetime.
         expect(await transcript.isVisible()).toBe(true);
         await page.getByRole("button", { name: "Open workspace", exact: true }).click();
-        await page.getByRole("tab", { name: "Files", exact: true }).click();
+        await openDockTab(page, "Files");
         await page.getByText("Opening Files", { exact: true }).waitFor();
         expect(requests).toBe(1);
         expect(await originalMessage!.evaluate((node) => node.isConnected)).toBe(true);
@@ -169,10 +170,7 @@ describe("production session conditional loading", () => {
         const files = page.getByRole("tabpanel", { name: "Files", exact: true });
         await files.getByText("Files unavailable", { exact: true }).waitFor();
         await page.screenshot({ path: `${evidenceDir}/workspace-files-${width}-loaded.png` });
-        await page
-          .locator("[data-dock-chrome]")
-          .getByRole("button", { name: "Hide workspace", exact: true })
-          .click();
+        await hideWorkspace(page);
         expect(await transcript.isVisible()).toBe(true);
         await page.getByRole("button", { name: "Open workspace", exact: true }).click();
         await files.getByText("Files unavailable", { exact: true }).waitFor();

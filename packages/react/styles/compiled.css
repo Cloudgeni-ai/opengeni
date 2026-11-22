@@ -9906,6 +9906,11 @@
       transition-duration: 0ms;
     }
   }
+:where(.og-root).max-\[1023px\]\:inset-y-0\.5,:where(.og-root) .max-\[1023px\]\:inset-y-0\.5 {
+    @media (width < 1023px) {
+      inset-block: calc(var(--spacing) * 0.5);
+    }
+  }
 :where(.og-root).max-\[1023px\]\:-mx-\[19px\],:where(.og-root) .max-\[1023px\]\:-mx-\[19px\] {
     @media (width < 1023px) {
       margin-inline: calc(19px * -1);
@@ -9941,6 +9946,11 @@
 :where(.og-root).max-\[1023px\]\:min-w-11,:where(.og-root) .max-\[1023px\]\:min-w-11 {
     @media (width < 1023px) {
       min-width: calc(var(--spacing) * 11);
+    }
+  }
+:where(.og-root).max-\[1023px\]\:py-0\.5,:where(.og-root) .max-\[1023px\]\:py-0\.5 {
+    @media (width < 1023px) {
+      padding-block: calc(var(--spacing) * 0.5);
     }
   }
 :where(.og-root).max-\[480px\]\:px-3\.5,:where(.og-root) .max-\[480px\]\:px-3\.5 {
@@ -11838,6 +11848,11 @@
       position: static;
     }
   }
+:where(.og-root).pointer-coarse\:inset-y-0\.5,:where(.og-root) .pointer-coarse\:inset-y-0\.5 {
+    @media (pointer: coarse) {
+      inset-block: calc(var(--spacing) * 0.5);
+    }
+  }
 :where(.og-root).pointer-coarse\:top-2\.5,:where(.og-root) .pointer-coarse\:top-2\.5 {
     @media (pointer: coarse) {
       top: calc(var(--spacing) * 2.5);
@@ -12105,6 +12120,11 @@
 :where(.og-root).pointer-coarse\:py-0,:where(.og-root) .pointer-coarse\:py-0 {
     @media (pointer: coarse) {
       padding-block: calc(var(--spacing) * 0);
+    }
+  }
+:where(.og-root).pointer-coarse\:py-0\.5,:where(.og-root) .pointer-coarse\:py-0\.5 {
+    @media (pointer: coarse) {
+      padding-block: calc(var(--spacing) * 0.5);
     }
   }
 :where(.og-root).pointer-coarse\:py-1,:where(.og-root) .pointer-coarse\:py-1 {

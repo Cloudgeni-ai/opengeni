@@ -557,7 +557,7 @@ describe("workbench browser acceptance", () => {
     }
   }, 30_000);
 
-  test("Unicode paths and long host tabs remain bounded in the vertical activity rail", async () => {
+  test("Unicode paths and long host tabs remain bounded in the tab strip", async () => {
     const context = await browser.newContext({
       viewport: { width: 320, height: 720 },
       isMobile: true,
@@ -570,10 +570,11 @@ describe("workbench browser acceptance", () => {
       });
       await waitForWorkbenchVisualReady(page);
       const tablist = page.getByRole("tablist");
-      expect(await tablist.getAttribute("aria-orientation")).toBe("vertical");
-      expect(await tablist.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
-        true,
-      );
+      // Long tabs scroll within the strip; the selected one is kept in view.
+      expect(await tablist.getAttribute("aria-orientation")).toBe("horizontal");
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+      ).toBeLessThanOrEqual(1);
 
       const changes = page.getByRole("tab", { name: /Changes/ });
       await changes.focus();
@@ -582,12 +583,12 @@ describe("workbench browser acceptance", () => {
         name: "Regression diagnostics and verification evidence",
       });
       expect(await trailing.getAttribute("aria-selected")).toBe("true");
-      expect(await tabIsFullyVisible(trailing)).toBe(true);
+      await expectEventually(async () => ((await tabIsFullyVisible(trailing)) ? 1 : 0));
 
       await page.keyboard.press("Home");
       const leading = page.getByRole("tab", { name: "Deployments and observability" });
       expect(await leading.getAttribute("aria-selected")).toBe("true");
-      expect(await tabIsFullyVisible(leading)).toBe(true);
+      await expectEventually(async () => ((await tabIsFullyVisible(leading)) ? 1 : 0));
 
       await changes.click();
       await waitForWorkbenchVisualReady(page);
@@ -633,7 +634,11 @@ describe("workbench browser acceptance", () => {
       }
       expect(
         await machineStatus.evaluate((element) => {
-          const source = document.querySelector<HTMLElement>('[data-og-theme="light"]');
+          // The dock paints the canvas and redefines the page background to
+          // it (like the app's content pane); portals copy its tokens.
+          const source = [...document.querySelectorAll<HTMLElement>("[data-dock-chrome]")].find(
+            (chrome) => chrome.getClientRects().length > 0,
+          );
           const sourceStyle = source ? getComputedStyle(source) : null;
           const statusStyle = getComputedStyle(element);
           const sourceBackground = sourceStyle?.getPropertyValue("--og-color-bg") ?? "";
@@ -809,7 +814,7 @@ describe("workbench browser acceptance", () => {
     const tabs = page.getByRole("tablist").getByRole("tab");
     expect(await tabs.nth(0).evaluate((tab) => tab === document.activeElement)).toBe(true);
     await tabs.nth(0).focus();
-    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowRight");
     expect(await tabs.nth(1).getAttribute("aria-selected")).toBe("true");
     expect(await tabs.nth(1).getAttribute("tabindex")).toBe("0");
     const panelId = await tabs.nth(1).getAttribute("aria-controls");
@@ -820,7 +825,7 @@ describe("workbench browser acceptance", () => {
 
     await page.keyboard.press("End");
     expect(await tabs.last().getAttribute("aria-selected")).toBe("true");
-    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowRight");
     expect(await tabs.nth(0).getAttribute("aria-selected")).toBe("true");
 
     const dialog = page.locator('[role="dialog"][aria-label="Workspace"]');
@@ -863,16 +868,16 @@ describe("workbench browser acceptance", () => {
         surface.style.maxWidth = "380px";
       });
 
-      const chrome = page.locator("[data-dock-chrome]");
-      await expectEventually(async () => (await chrome.getAttribute("data-compact")) === "true");
+      // The strip scrolls; arrow keys reach every tab and keep it in view.
       const tabs = page.getByRole("tablist").getByRole("tab");
       await tabs.first().focus();
-      await page.keyboard.press("ArrowDown");
-      await page.keyboard.press("ArrowDown");
-      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("ArrowRight");
+      await page.keyboard.press("ArrowRight");
+      await page.keyboard.press("ArrowRight");
       const browserTab = page.getByRole("tab", { name: "Browser" });
       expect(await browserTab.isVisible()).toBe(true);
       expect(await browserTab.getAttribute("aria-selected")).toBe("true");
+      await expectEventually(async () => ((await tabIsFullyVisible(browserTab)) ? 1 : 0));
     } finally {
       await context.close();
     }
@@ -1120,7 +1125,11 @@ describe("workbench browser acceptance", () => {
       expect(await page.getByRole("dialog", { name: "Workspace" }).count()).toBe(0);
       expect(
         await dialog.evaluate((element) => {
-          const source = document.querySelector<HTMLElement>('[data-og-theme="light"]');
+          // The dock paints the canvas and redefines the page background to
+          // it (like the app's content pane); portals copy its tokens.
+          const source = [...document.querySelectorAll<HTMLElement>("[data-dock-chrome]")].find(
+            (chrome) => chrome.getClientRects().length > 0,
+          );
           const sourceStyle = source ? getComputedStyle(source) : null;
           const dialogStyle = getComputedStyle(element);
           return {

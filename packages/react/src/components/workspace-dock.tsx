@@ -951,7 +951,7 @@ function DockChrome({
         {shownTabs.length > 0 ? (
           <div
             ref={stripRef}
-            className="relative flex min-w-0 items-center gap-0.5 overflow-x-auto py-1.5 [scrollbar-width:none] data-[overflow]:[mask-image:linear-gradient(to_right,black_calc(100%-24px),transparent)]"
+            className="relative flex min-w-0 items-center gap-0.5 overflow-x-auto py-1.5 [scrollbar-width:none] max-[1023px]:py-0.5 pointer-coarse:py-0.5 data-[overflow]:[mask-image:linear-gradient(to_right,black_calc(100%-24px),transparent)]"
             role="tablist"
             aria-label={msg("workspaceDock.workspacePanels")}
             aria-orientation="horizontal"
@@ -960,7 +960,7 @@ function DockChrome({
               ref={pillRef}
               aria-hidden
               data-dock-tab-pill=""
-              className="pointer-events-none absolute inset-y-1.5 left-0 w-0 rounded-full bg-og-surface-2 opacity-0 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_8%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_6px_18px_-8px_color-mix(in_oklch,var(--og-color-accent)_45%,transparent)] transition-[transform,width] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none"
+              className="pointer-events-none absolute inset-y-1.5 left-0 max-[1023px]:inset-y-0.5 pointer-coarse:inset-y-0.5 w-0 rounded-full bg-og-surface-2 opacity-0 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_8%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_6px_18px_-8px_color-mix(in_oklch,var(--og-color-accent)_45%,transparent)] transition-[transform,width] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none"
             />
             {shownTabs.map((tab, index) => {
               const selected = tab.id === current;

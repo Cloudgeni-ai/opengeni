@@ -1464,7 +1464,9 @@ function MachineStateChip({ chip }: { chip: MachineChip }) {
         className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
         aria-hidden
       />
-      <span className="min-w-0 max-w-[11rem] truncate">{chip.label}</span>
+      <span data-contrast-audited className="min-w-0 max-w-[11rem] truncate">
+        {chip.label}
+      </span>
     </div>
   );
 }
