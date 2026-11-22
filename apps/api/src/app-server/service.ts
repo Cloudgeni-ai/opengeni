@@ -1453,6 +1453,9 @@ export async function handleAppServerHostCall(
         const write = parseWith(SiteDataWriteRequest, call.input);
         const names = new Set(write.operations.map((operation) => operation.collection));
         for (const name of names) await requireSharedCollection(authority.access, name);
+        // The write answers with the stored records: the run's viewer must
+        // be a reader of each collection (the deployer's access writes).
+        for (const name of names) await requireRunViewerReads(name);
         // Code that reaches shared accounts marks what it writes before writing it.
         if (appServerReachesSharedAccounts(deployment.manifest)) {
           const sources = await serverToolDataSources();
@@ -1468,9 +1471,6 @@ export async function handleAppServerHostCall(
             ),
           );
         }
-        // The write answers with the stored records: the run's viewer must
-        // be a reader of each collection (the deployer's access writes).
-        for (const name of names) await requireRunViewerReads(name);
         return {
           result: await writeSiteDataWithAccess(
             deps,

@@ -44,9 +44,9 @@ export async function markSiteToolData(
 }
 
 /**
- * The app's marked targets, plus each live shared sync's target (from its
+ * The app's marked targets, plus each shared sync's target (from its
  * definition, so a sync saved by an earlier release counts before its next
- * run marks it).
+ * run marks it; deleted ones too, since their data stays).
  */
 export async function listSiteToolDataSources(
   db: Database,
@@ -58,7 +58,7 @@ export async function listSiteToolDataSources(
       tx,
       sql`select target, connector, route, shared from site_tool_data_sources
         where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
-        limit 500`,
+        limit 2000`,
     ),
   );
   // Read like the app's own sync list (listAppSyncTaskIds).
@@ -68,11 +68,10 @@ export async function listSiteToolDataSources(
       sql`select action from scheduled_tasks
         where workspace_id = ${scope.workspaceId}::uuid
           and account_id = ${scope.accountId}::uuid
-          and deleted_at is null
           and action ->> 'kind' = 'app_sync'
           and action ->> 'siteId' = ${siteId}
           and action ->> 'mode' = 'shared'
-        limit 200`,
+        limit 2000`,
     ),
   );
   return {
