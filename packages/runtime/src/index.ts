@@ -17,6 +17,7 @@ export {
 } from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
 import type { NangoIntegrationDefinition, NangoProxyTransport } from "@opengeni/contracts/nango";
+import type { DestinationPolicyReason } from "@opengeni/network";
 import { NANGO_TOOLS_MCP_BRIDGE_ADAPTER, type NangoToolsMcpBridgeContext } from "./nango-tools-mcp";
 import {
   NANGO_PROXY_TRANSPORTS as NANGO_PREFLIGHT_TRANSPORTS,
@@ -313,9 +314,11 @@ import {
   guardedMcpFetch,
   isMcpPayloadTooLargeError,
   isMcpRequestNotSentMark,
+  mcpDestinationRefusal,
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
+  mcpTransportRequestFailureDiagnostic,
   undiciFetch,
   type McpToolListDrop,
   type McpRequestReplayInfo,
@@ -759,7 +762,7 @@ import {
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import { APPLY_PATCH_THEN_PARAMETER, linkApplyPatchThen } from "./apply-patch-then";
 import { linkApplyPatchRobust } from "./apply-patch-robust";
-import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
+import type { McpLifecycleOutcome, McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
 import {
   MultiProviderModelProvider,
@@ -1324,6 +1327,8 @@ export type ResolveConnectionCredentialResult =
       connectionId: string;
       authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
+      /** Record a destination refusal against the exact native credential used for setup. */
+      reportMcpDestinationRefusal?: (reason: "blocked" | "unresolvable") => Promise<boolean>;
       /** Metadata-only immutable authority binding supplied by the trusted worker resolver. */
       operationAuthorityDigest?: string;
       expiresAt?: Date | null;
@@ -7260,6 +7265,9 @@ export async function prepareAgentTools(
         // The SDK can replace a size refusal's error (a later page, an SSE
         // disconnect); this record lets the server still recognise it.
         const listSizeRefusal = { refused: false };
+        // Protocol negotiation can replace the original fetch error. Keep the
+        // bounded reason beside this physical server, like list size refusals.
+        const destinationPolicyFailure: McpDestinationPolicyFailure = {};
         const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
@@ -7298,7 +7306,13 @@ export async function prepareAgentTools(
           let response: Response;
           try {
             response = await guardedTransport(input, requestInit);
+            delete destinationPolicyFailure.reason;
+            delete destinationPolicyFailure.report;
           } catch (error) {
+            const reason = mcpTransportRequestFailureDiagnostic(error)?.destinationPolicyReason;
+            if (reason) destinationPolicyFailure.reason = reason;
+            else delete destinationPolicyFailure.reason;
+            delete destinationPolicyFailure.report;
             if (!options.runMcpCredentials?.has(config.id)) throw error;
             // Transport failures may echo request headers in their message or
             // cause chain. This exception can reach required-tool history.
@@ -7335,6 +7349,7 @@ export async function prepareAgentTools(
                 resolvedMcpToolConnectionIds,
                 optional,
                 setupAuthNeededReasons,
+                destinationPolicyFailure,
               )
             : firstParty
               ? firstPartyAuthFetch(guardedFetch, settings, options)
@@ -7473,7 +7488,10 @@ export async function prepareAgentTools(
           url,
           Boolean(config.connectionRef) && !bridge && !isCodexAppsMcpServer(config),
         );
-        if (!bridge) server.listSizeRefusal = listSizeRefusal;
+        if (!bridge) {
+          server.listSizeRefusal = listSizeRefusal;
+          server.destinationPolicyFailure = destinationPolicyFailure;
+        }
         return {
           server,
           bestEffort,
@@ -7569,11 +7587,15 @@ export async function prepareAgentTools(
         continue;
       }
       const error = connected.errors.get(failed);
+      const destinationPolicyReason = failed.destinationPolicyFailure?.reason;
       console.warn(
         failed.registryId === CODEX_APPS_MCP_SERVER_ID
           ? "[mcp] Codex Apps setup failed; reconnect or retry before relying on its tools"
           : "[mcp] optional server failed to connect/list tools; skipping it for this turn",
-        mcpErrorFields(error, "mcp_connect_failed", failed.registryId),
+        {
+          ...mcpErrorFields(error, "mcp_connect_failed", failed.registryId),
+          ...(destinationPolicyReason ? { destinationPolicyReason } : {}),
+        },
       );
     }
   };
@@ -8722,6 +8744,11 @@ function attemptToolApproval(
   return config.connectionRef ? "policy" : "none";
 }
 
+type McpDestinationPolicyFailure = {
+  reason?: DestinationPolicyReason;
+  report?: () => Promise<boolean>;
+};
+
 function connectionBrokerFetch(
   baseFetch: FetchLike,
   config: Settings["mcpServers"][number],
@@ -8729,7 +8756,8 @@ function connectionBrokerFetch(
   resolvedMcpConnectionIds: Map<string, string>,
   resolvedMcpToolConnectionIds: Map<string, string>,
   suppressSetupAuthNeeded: boolean,
-  setupAuthNeededReasons?: Map<string, ToolAuthNeededPayload["reason"]>,
+  setupAuthNeededReasons: Map<string, ToolAuthNeededPayload["reason"]>,
+  destinationPolicyFailure: McpDestinationPolicyFailure,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
@@ -8740,7 +8768,7 @@ function connectionBrokerFetch(
     auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   ): Promise<Response> => {
     // A setup request (connect or tools/list) has no tool name.
-    if (!request.toolName) setupAuthNeededReasons?.set(config.id, auth.reason);
+    if (!request.toolName) setupAuthNeededReasons.set(config.id, auth.reason);
     return await authNeededFetchResponse(
       options,
       config.id,
@@ -8764,7 +8792,7 @@ function connectionBrokerFetch(
     if (first.status === "auth_needed") {
       return await authNeeded(request, first);
     }
-    if (!request.toolName) setupAuthNeededReasons?.delete(config.id);
+    if (!request.toolName) setupAuthNeededReasons.delete(config.id);
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     recordResolvedMcpToolConnectionId(
       resolvedMcpToolConnectionIds,
@@ -8775,6 +8803,29 @@ function connectionBrokerFetch(
     if (!(await authorizeResolvedProviderRequest(first))) {
       return await authNeeded(request, providerRequestAuthorizationDenied(connectionRef, first));
     }
+    const send = async (credential: typeof first) => {
+      try {
+        return await baseFetch(
+          fetchInputForAttempt(input),
+          withConnectionHeaders(input, init, credential.headers),
+        );
+      } catch (error) {
+        if (
+          request.method === "server/discover" ||
+          request.method === "initialize" ||
+          request.method === "tools/list"
+        ) {
+          const refusal = mcpDestinationRefusal(
+            mcpTransportRequestFailureDiagnostic(error)?.destinationPolicyReason,
+          );
+          const report = credential.reportMcpDestinationRefusal;
+          if (refusal && report) {
+            destinationPolicyFailure.report = () => report(refusal);
+          }
+        }
+        throw error;
+      }
+    };
     if (request.method === "tools/call") {
       assertMcpOperationObservationAuthority({
         serverId: config.id,
@@ -8804,10 +8855,7 @@ function connectionBrokerFetch(
         authorityDigest: first.operationAuthorityDigest ?? "",
       });
     }
-    const response = await baseFetch(
-      fetchInputForAttempt(input),
-      withConnectionHeaders(input, init, first.headers),
-    );
+    const response = await send(first);
     if (response.status === 401) {
       const providerFailure = request.replaySafeAfter401
         ? null
@@ -8851,10 +8899,7 @@ function connectionBrokerFetch(
           providerRequestAuthorizationDenied(connectionRef, refreshed),
         );
       }
-      const retry = await baseFetch(
-        fetchInputForAttempt(input),
-        withConnectionHeaders(input, init, refreshed.headers),
-      );
+      const retry = await send(refreshed);
       if (retry.status === 403) {
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed);
         if (auth) {
@@ -10935,6 +10980,7 @@ export class PrefixedMcpServer implements MCPServer {
   setupAuthNeededReasons: ReadonlyMap<string, ToolAuthNeededPayload["reason"]> | undefined;
   /** Set by this server's transport when a tools/list response is refused for size. */
   listSizeRefusal: { refused: boolean } | undefined;
+  destinationPolicyFailure: McpDestinationPolicyFailure | undefined;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
   private readonly eagerToolNames: ReadonlySet<string>;
@@ -11066,7 +11112,11 @@ export class PrefixedMcpServer implements MCPServer {
 
   private async connectWithLifecycleMetric(recordMetric: boolean): Promise<void> {
     const startedAt = recordMetric ? performance.now() : 0;
-    let outcome: "completed" | "failed" = "completed";
+    let outcome: McpLifecycleOutcome = "completed";
+    if (this.destinationPolicyFailure) {
+      delete this.destinationPolicyFailure.reason;
+      delete this.destinationPolicyFailure.report;
+    }
     try {
       if (this.inner instanceof PrefixedMcpServer) {
         await this.inner.connectWithLifecycleMetric(false);
@@ -11075,7 +11125,10 @@ export class PrefixedMcpServer implements MCPServer {
       }
       delete this.lifecycleFailures.connect;
     } catch (error) {
-      outcome = "failed";
+      outcome = mcpDestinationRefusal(this.destinationPolicyFailure?.reason)
+        ? "refused_by_policy"
+        : "failed";
+      await this.reportDestinationPolicyFailure();
       // The SDK logs its rejected Error directly. Keep exact internal truth
       // out-of-band and reject only a structural public lifecycle error.
       const exactError = exactMcpLifecycleError(error, {
@@ -11105,6 +11158,19 @@ export class PrefixedMcpServer implements MCPServer {
 
   async close(): Promise<void> {
     await this.closeWithLifecycleMetric(true);
+  }
+
+  private async reportDestinationPolicyFailure(): Promise<void> {
+    const failure = this.destinationPolicyFailure;
+    if (!failure?.report) return;
+    const report = failure.report;
+    delete failure.report;
+    try {
+      // The broker guards this write against an earlier refusal or a reconnect.
+      await report();
+    } catch {
+      // A status-write failure must not replace the setup outcome.
+    }
   }
 
   private async closeWithLifecycleMetric(recordMetric: boolean): Promise<void> {
@@ -11442,6 +11508,7 @@ export class PrefixedMcpServer implements MCPServer {
       // tools here; it was reached, and the model is told why its tools are
       // missing. Any other required-server failure still fails loudly.
       const tooLarge = isMcpPayloadTooLargeError(error) || this.listSizeRefusal?.refused === true;
+      await this.reportDestinationPolicyFailure();
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort && !tooLarge) {
@@ -11471,6 +11538,9 @@ export class PrefixedMcpServer implements MCPServer {
             : "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
           {
             ...mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
+            ...(this.destinationPolicyFailure?.reason
+              ? { destinationPolicyReason: this.destinationPolicyFailure.reason }
+              : {}),
             ...(tooLarge ? { event: "tool_catalog_degraded", required: !this.bestEffort } : {}),
           },
         );

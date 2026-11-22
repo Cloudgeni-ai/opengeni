@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { MCP_DESTINATION_CONNECTION_ERRORS } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -205,6 +206,86 @@ afterAll(async () => {
 }, 180_000);
 
 describe("connections table and helpers", () => {
+  test("an MCP destination refusal changes only the exact active connection version once", async () => {
+    if (!available) return;
+    const { workspaceId, accountId } = await freshWorkspace();
+    const makeConnection = async (providerDomain: string) =>
+      await createConnection(db, {
+        workspaceId,
+        accountId,
+        providerDomain,
+        kind: "api_key",
+        credentialEncrypted: enc({ headers: { Authorization: "Bearer test-only" } }),
+      });
+    const blocked = await makeConnection("blocked.example.test");
+    const unaffected = await makeConnection("other.example.test");
+    const resolver = buildConnectionTokenResolver(db, settings, {
+      ...resolverDeps().deps,
+      keyBytes: environmentsEncryptionKeyBytes,
+      loadCredential: loadConnectionCredentialForBroker,
+      setStatus: setConnectionStatus,
+      recordUsed: recordConnectionUsed,
+      authorizeAcceptedUse: async () => ({
+        status: "authorized",
+        connectionKind: "api_key",
+        originWorkspaceId: workspaceId,
+        attribution: {
+          organizationId: accountId,
+          workspaceId,
+          sessionId: authorityIds.sessionId,
+          connectionId: blocked.id,
+          connectionGeneration: blocked.connectionAuthorityGeneration!,
+          scope: "workspace",
+          ownerSubjectId: null,
+          authorityId: null,
+          grantId: null,
+        },
+      }),
+    });
+    const request = {
+      workspaceId,
+      serverId: "blocked",
+      destinationUrl: "https://blocked.example.test/mcp",
+      connectionRef: {
+        providerDomain: "blocked.example.test",
+        connectionId: blocked.id,
+        kind: "api_key" as const,
+      },
+      connectionUseContext: { ...acceptedConnectionUseContext(), accountId, workspaceId },
+    };
+    const [first, second] = await Promise.all([resolver(request), resolver(request)]);
+    expect(first).toMatchObject({ status: "ok" });
+    expect(second).toMatchObject({ status: "ok" });
+    if (first.status !== "ok" || second.status !== "ok")
+      throw new Error("Expected live credentials");
+    const outcomes = await Promise.all([
+      first.reportMcpDestinationRefusal!("unresolvable"),
+      second.reportMcpDestinationRefusal!("unresolvable"),
+    ]);
+    expect(outcomes.sort()).toEqual([false, true]);
+    const needsAttention = await getConnectionMetadata(db, workspaceId, blocked.id);
+    expect(needsAttention).toMatchObject({
+      status: "error",
+      lastError: MCP_DESTINATION_CONNECTION_ERRORS.unresolvable,
+      version: blocked.version + 1,
+    });
+    expect(await getConnectionMetadata(db, workspaceId, unaffected.id)).toMatchObject({
+      status: "active",
+    });
+    expect(await resolver(request)).toMatchObject({ status: "auth_needed" });
+    expect(
+      await setConnectionStatus(db, workspaceId, "active", null, {
+        id: blocked.id,
+        version: needsAttention!.version,
+      }),
+    ).toBe(true);
+    expect(await first.reportMcpDestinationRefusal!("blocked")).toBe(false);
+    expect(await getConnectionMetadata(db, workspaceId, blocked.id)).toMatchObject({
+      status: "active",
+      lastError: null,
+    });
+  });
+
   test("provider OAuth persistence locks effective connections:write authority", async () => {
     if (!available) return;
     const userId = `oauth-owner-${crypto.randomUUID()}`;

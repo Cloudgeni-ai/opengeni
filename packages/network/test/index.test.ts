@@ -27,6 +27,22 @@ const testEscape: OutboundNetworkSettings = {
 
 describe("DNS-pinned outbound transport", () => {
   test.each([
+    ["ENOTFOUND", "dns_not_found"],
+    ["EAI_AGAIN", "dns_failed"],
+  ] as const)(
+    "separates DNS lookup result %s without leaking its message",
+    async (code, reason) => {
+      await expect(
+        resolvePinnedDestination("https://example.test/mcp", production, {
+          dnsLookup: async () => {
+            throw Object.assign(new Error("private resolver diagnostic"), { code });
+          },
+        }),
+      ).rejects.toMatchObject({ reason });
+    },
+  );
+
+  test.each([
     ["IPv4 marked as IPv6", { address: "1.1.1.1", family: 6 }],
     ["IPv6 marked as IPv4", { address: "2606:4700:4700::1111", family: 4 }],
     ["malformed address", { address: "not-an-ip", family: 4 }],
