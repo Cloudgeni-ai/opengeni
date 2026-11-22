@@ -373,6 +373,22 @@ export function decodeSubscriptionQuota(row: {
   // Block evidence is optional and fails closed: a malformed claim is
   // dropped (its block runs to its own deadline), never the quota.
   const claims = raw.modelCooldownClaims;
+  const causes = raw.modelCooldownCauses;
+  if (causes !== null && typeof causes === "object" && !Array.isArray(causes)) {
+    const parsed: Record<string, NonNullable<SubscriptionQuota["modelCooldownCauses"]>[string]> =
+      {};
+    for (const [modelId, evidence] of Object.entries(causes)) {
+      if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) continue;
+      const { until, cause } = evidence as Record<string, unknown>;
+      if (
+        typeof until === "number" &&
+        until === modelCooldowns[modelId] &&
+        (cause === "entitlement" || cause === "rate_limit" || cause === "quota")
+      )
+        parsed[modelId] = { until, cause };
+    }
+    if (Object.keys(parsed).length > 0) quota.modelCooldownCauses = parsed;
+  }
   if (claims !== null && typeof claims === "object" && !Array.isArray(claims)) {
     const parsed: Record<string, QuotaBlockClaim> = {};
     for (const [modelId, claim] of Object.entries(claims)) {

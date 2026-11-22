@@ -74,8 +74,11 @@ No eligible capacity parks the same turn on `subscription_capacity_waiters`.
 Waits distinguish a sign-in that needs reconnecting, a plan that does not offer
 the model, and a rate limit with a known retry time. The same reason reaches
 the chat and its inbox notification or parent agent. A plan-refusal retry is
-a new entitlement probe, not a quota reset. A missing usage reading alone
-does not exclude an account.
+a new entitlement probe, not a quota reset. New model cooldowns retain the
+refusal cause alongside the deadline so a model-specific rate limit keeps its
+reset time. An older cooldown without a recorded cause keeps its deadline but
+does not claim a plan restriction. A missing usage reading alone does not
+exclude an account.
 Workflow activity and signal names (`getCodexCapacityWait`,
 `reconcileCodexCapacityWait`, `codexCapacityChanged`) remain stable. The reference
 carries waiter id, generation, next check and wake revision, so pre-cutover

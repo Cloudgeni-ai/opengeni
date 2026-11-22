@@ -119,6 +119,7 @@ import { listSubscriptionCoreServingConnections } from "../../src/subscription-c
 import { subscriptionCoreRequests } from "../../src/subscription-core/requests";
 import { subscriptionCoreSettlement } from "../../src/subscription-core/settlement";
 import { wakeSubscriptionCoreCapacityWaiters } from "../../src/subscription-core/waiters";
+import { projectSubscriptionCoreWait } from "../../src/subscription-core/wait-reason";
 import {
   subscriptionCoreConnectionKind,
   type SubscriptionCoreProvider,
@@ -1018,20 +1019,20 @@ export function describeSubscriptionCoreConformance<Credential>(
    * The pure decision on the core's own world, checked against the
    * independent reference model; the caller compares it with the core's.
    */
-  async function referenceDecision(
-    turn: Turn,
-    now: Date,
-    upstreamModelId: string | null = null,
-  ): Promise<PlacementDecision> {
+  async function referencePlacement(turn: Turn, now: Date, upstreamModelId: string | null = null) {
     const input = await strictWorld(turn, now, upstreamModelId);
     const decision = decidePlacement(input);
     expect(checkPlacementDecision(input, decision)).toEqual([]);
-    return decision;
+    return { input, decision };
+  }
+
+  async function referenceDecision(turn: Turn, now: Date): Promise<PlacementDecision> {
+    return (await referencePlacement(turn, now)).decision;
   }
 
   /** Place, and require the core to agree with the pure policy and the reference model. */
   async function placeChecked(turn: Turn, now = new Date(), upstreamModelId: string | null = null) {
-    const expected = await referenceDecision(turn, now, upstreamModelId);
+    const { input, decision: expected } = await referencePlacement(turn, now, upstreamModelId);
     const placed = await place(turn, { now });
     if (expected.kind === "run") {
       expect(placed).toMatchObject({
@@ -1041,14 +1042,16 @@ export function describeSubscriptionCoreConformance<Credential>(
         personal: expected.personal,
       });
     } else {
-      expect(placed).toMatchObject({ kind: "wait", reason: expected.reason });
-      expect(instantOf(placed, "earliestResetAt")).toBe(expected.earliestResetAt);
+      expect(placed).toMatchObject({
+        kind: "wait",
+        ...projectSubscriptionCoreWait(input, expected, provider),
+      });
     }
     return placed;
   }
 
   async function evaluateChecked(turn: Turn, now: Date) {
-    const expected = await referenceDecision(turn, now);
+    const { input, decision: expected } = await referencePlacement(turn, now);
     const evaluated = await runtime().evaluateSubscriptionCorePlacement(db(), {
       identity: turn.identity,
       productModelId: turn.productModelId,
@@ -1058,8 +1061,10 @@ export function describeSubscriptionCoreConformance<Credential>(
     if (expected.kind === "run")
       expect(evaluated).toMatchObject({ kind: "run", connectionId: expected.connectionId });
     else {
-      expect(evaluated).toMatchObject({ kind: "wait", reason: expected.reason });
-      expect(instantOf(evaluated, "earliestResetAt")).toBe(expected.earliestResetAt);
+      expect(evaluated).toMatchObject({
+        kind: "wait",
+        ...projectSubscriptionCoreWait(input, expected, provider),
+      });
     }
     return evaluated;
   }
@@ -4732,7 +4737,8 @@ export function describeSubscriptionCoreConformance<Credential>(
         ),
       ).toEqual({ kind: "rate_limited", retryAfterMs: 600_000, modelId: m0.productModelId });
       // The limited model waits for its own end; another model still runs here.
-      expect(await placeChecked(limited, new Date(now))).toMatchObject({ kind: "wait" });
+      const waiting = await placeChecked(limited, new Date(now));
+      expect(waiting).toMatchObject({ kind: "wait", earliestResetAt: new Date(now + 600_000) });
       expect(
         await placeChecked(await runningTurn(org, { model: m1 }), new Date(now)),
       ).toMatchObject({ kind: "run", connectionId });

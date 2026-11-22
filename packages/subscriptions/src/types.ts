@@ -149,10 +149,14 @@ export type QuotaJsonValue =
   | readonly QuotaJsonValue[]
   | { readonly [key: string]: QuotaJsonValue };
 
+export type ModelCooldownCause = "entitlement" | "rate_limit" | "quota";
+
 export type SubscriptionQuota = {
   windows: readonly QuotaWindow[];
   /** Per-model cooldowns (model-specific limits some providers report). */
   modelCooldowns: Readonly<Record<ModelId, number>>;
+  /** Refusal cause, only while it explains the exact stored deadline. */
+  modelCooldownCauses?: Readonly<Record<ModelId, { until: number; cause: ModelCooldownCause }>>;
   /** Optional evidence per model cooldown (see `QuotaBlockClaim`); absent: none. */
   modelCooldownClaims?: Readonly<Record<ModelId, QuotaBlockClaim>>;
   exhaustedUntil: number | null;

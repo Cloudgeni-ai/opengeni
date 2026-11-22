@@ -803,7 +803,12 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         client!.db,
         probe.identity,
         leaseOf(probe, free),
-        { modelId: MODEL, until: new Date(Date.now() + 86_400_000), refreshGeneration: 1 },
+        {
+          modelId: MODEL,
+          until: new Date(Date.now() + 86_400_000),
+          refreshGeneration: 1,
+          cause: "entitlement",
+        },
       ),
     ).toBe(true);
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -1627,6 +1632,47 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     );
   });
 
+  test("a model rate limit keeps its reset; an older untyped cooldown keeps its reset without guessing a cause", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "model limit");
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+    const ref = leaseOf(turn, connectionId);
+    const limit = new Date(Date.now() + 600_000);
+    expect(
+      await recordSubscriptionCoreCodexModelCooldown(client!.db, turn.identity, ref, {
+        modelId: MODEL,
+        until: limit,
+        refreshGeneration: 1,
+        cause: "rate_limit",
+      }),
+    ).toBe(true);
+    const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(next)).toMatchObject({
+      kind: "wait",
+      reason: "codex_rate_limited",
+      earliestResetAt: limit,
+    });
+    expect(await evaluate(next)).toMatchObject({
+      kind: "wait",
+      reason: "codex_rate_limited",
+      earliestResetAt: limit,
+    });
+    const later = new Date(limit.getTime() + 10_000);
+    expect(
+      await recordSubscriptionCoreCodexModelCooldown(client!.db, turn.identity, ref, {
+        modelId: MODEL,
+        until: later,
+        refreshGeneration: 1,
+      }),
+    ).toBe(true);
+    expect(await evaluate(next)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: later,
+    });
+  });
+
   test("a plan-entitlement refusal cools the model down; a rotated id_token with a new plan clears it", async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, "plan");
@@ -1639,6 +1685,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         modelId: MODEL,
         until,
         refreshGeneration: 2,
+        cause: "entitlement",
       }),
     ).toBe(false);
     expect(
@@ -1646,6 +1693,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         modelId: MODEL,
         until,
         refreshGeneration: 1,
+        cause: "entitlement",
       }),
     ).toBe(true);
     const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -1711,7 +1759,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         client!.db,
         turn.identity,
         leaseOf(turn, connectionId),
-        { modelId: MODEL, until, refreshGeneration: 1 },
+        { modelId: MODEL, until, refreshGeneration: 1, cause: "entitlement" },
       ),
     ).toBe(true);
     const [stored] = await shared!.admin<{ generation: number | null; catalog: string[] }[]>`

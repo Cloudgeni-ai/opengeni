@@ -38,12 +38,12 @@ export function projectCodexSubscriptionWait(
       const reasons = connectionIneligibility(input, connection, model);
       if (reasons.length === 0) continue;
       const codex = connection.provider === SUBSCRIPTION_CORE_CODEX_PROVIDER;
-      // In Codex a model cooldown records a proven plan refusal; expiry
-      // permits another probe, not a quota refill. A Free plan without an
-      // included window also needs evidence that this model is not entitled.
+      const cooldown = connection.quota?.modelCooldownCauses?.[model];
+      // Only a proven plan refusal is a plan block. Older cooldowns did
+      // not record a cause; keep their timing without guessing why.
       if (
         codex &&
-        (reasons.includes("model_cooling_down") ||
+        ((reasons.includes("model_cooling_down") && cooldown?.cause === "entitlement") ||
           (codexPlanKey(connection.planType) === "free" &&
             !connection.quota?.windows.length &&
             reasons.includes("model_not_entitled"))) &&
@@ -58,9 +58,10 @@ export function projectCodexSubscriptionWait(
       if (at !== undefined) {
         const rateLimited =
           codex &&
-          connection.quota?.exhaustedKind === "rate_limit" &&
           at !== null &&
-          at === connection.quota.exhaustedUntil;
+          ((connection.quota?.exhaustedKind === "rate_limit" &&
+            at === connection.quota.exhaustedUntil) ||
+            (cooldown?.cause === "rate_limit" && at === cooldown.until));
         if (
           !timed ||
           (at !== null && (timed.at === null || at < timed.at)) ||
