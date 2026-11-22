@@ -4,9 +4,9 @@ description: >-
   Run work in the cloud on an Opengeni workspace instead of locally. Use when
   the user asks to run something in the cloud, in the background, in parallel,
   "on Opengeni", or to hand off a long-running task; or asks about the status,
-  result, or a follow-up for an Opengeni session. Creates a session with a
-  self-contained brief, reports its link, checks status, fetches results, and
-  sends follow-ups through the Opengeni MCP server.
+  result, or a follow-up for an Opengeni session; or to share Skills,
+  Knowledge, apps or files with the workspace, or change its schedules or
+  agents. Uses the Opengeni MCP server.
 ---
 
 # Offload work to Opengeni
@@ -34,6 +34,13 @@ suffix.
 | `tools_search`, `tool_call` | Use the workspace's connected tools. |
 | `skills_sync`, `skills_list`, `knowledge_search`, `knowledge_get`, `knowledge_save` | Share Skills and Knowledge with the workspace. |
 
+`skills_sync` uploads local Skill folders as Personal unless `scope` is
+`workspace` (which may wait for review, per the workspace's Agent learning
+setting); `pull` gets the workspace's Skills; `repository` syncs a GitHub
+repository's Skill folders. Schedules, agents (their instructions) and
+workspace instructions change through `opengeni_actions_search`, then
+`opengeni_action_call`.
+
 For anything else, `opengeni_actions_search`, `opengeni_action_describe` and
 `opengeni_action_call` reach every Opengeni API action.
 
@@ -54,23 +61,19 @@ questions, and work that depends on local-only state (uncommitted changes,
 local services, files outside the repository) here, unless the user insists;
 then explain what the remote agent will not be able to see.
 
-Each session consumes the workspace's Opengeni credits or connected model
-subscription. Ask before starting more than one session for a single request.
+Each session uses the workspace's Opengeni credits or connected model
+subscription.
 
 ## 2. Make the code reachable
 
 The remote agent clones from the Git host, not from this machine.
 
-1. Check `git status`, the current branch, and whether it is pushed
-   (`git rev-parse --abbrev-ref @{upstream}` and `git log @{upstream}..`).
-2. If the work needs unpushed commits or uncommitted changes, ask the user
-   before committing or pushing anything. Pushing is their decision.
-3. If the user has several workspaces, `delegate` lists them; ask once and
-   pass `workspaceId`, or call `workspace_use` so later calls use it. Pass
-   the repository as `owner/name` and the branch to work on.
-4. If `delegate` reports the repository is missing, give the user the GitHub
-   connect link it returns (or `opengeni_actions_search` "github connect"), and wait for them to connect it. Do not start a session that silently
-   lacks the repository.
+Unpushed commits and uncommitted changes aren't visible to it. Pass the
+repository as `owner/name` and the branch to work on. With several
+workspaces, `delegate` lists them: pass `workspaceId`, or call
+`workspace_use` once. If `delegate` reports the repository is missing, give
+the user the GitHub connect link it returns (or `opengeni_actions_search`
+"github connect").
 
 ## 3. Write a self-contained brief
 
@@ -82,10 +85,9 @@ The remote agent clones from the Git host, not from this machine.
   repository's agent instructions that matter here.
 - **Acceptance criteria**: the checks that prove it is done, such as tests,
   type checks, or a reproduction that must pass.
-- **Delivery**: exactly what the user authorized, for example "push branch
+- **Delivery**: what the user authorized, for example "push branch
   `fix/flaky-retry` and open a draft pull request" or "do not push; report the
-  diff". Pushing, merging, deploying, and messaging people require the user's
-  explicit permission.
+  diff".
 - **Report**: what to include in the final answer (summary, branch or PR link,
   test results, open questions).
 
@@ -97,12 +99,11 @@ it by name.
 ## 4. Delegate
 
 Call `delegate` with the brief as `message`, a short `title`, and the
-`repository` and `branch` from step 2. Add `agent` or `sandboxEnvironment`
-only when the user named one. Retrying `delegate` with the same input doesn't
-starts a second chat; errors say whether a retry is safe.
+`repository` and `branch`. `agent` and `sandboxEnvironment` are optional; the
+workspace defaults apply otherwise. Retrying `delegate` with the same input
+doesn't start a second chat; errors say whether a retry is safe.
 
-Do not ask for a model or reasoning effort unless the user asked for a
-specific choice; the workspace default and billing path is the user's choice.
+Pushing, merging and deploying need the user's permission.
 
 Report the returned `url`, then tell the user what you delegated and how you
 will follow up.
@@ -117,9 +118,6 @@ will follow up.
   report the error.
 - Stopping your wait stops only your tracking; the chat keeps running. Use
   `session_pause` to stop it.
-- Verify claims before relaying them as done: fetch the branch, check the pull
-  request or CI status, and run the acceptance checks locally when practical.
-  Do not merge or deploy without the user's approval.
 
 ## 6. Follow up
 

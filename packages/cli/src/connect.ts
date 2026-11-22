@@ -28,8 +28,9 @@ name: opengeni
 description: >-
   Hand work to Opengeni agents in the cloud and use the Opengeni workspace's
   apps, tools, Skills and Knowledge. Use when the user asks to run something
-  in the cloud, in the background or in parallel, "on Opengeni", or to check
-  on, follow up or get the result of an Opengeni chat.
+  in the cloud, in the background or in parallel, "on Opengeni", to check on
+  or follow up an Opengeni chat, to share Skills, Knowledge, apps or files
+  with the workspace, or to change its schedules or agents.
 ---
 
 # Opengeni
@@ -54,8 +55,13 @@ this conversation or this computer: give it a self-contained brief.
 - **Tools**: \`tools_search\`, then \`tool_call\`. If it returns
   \`needsApproval\`, show the user \`approvalUrl\`; after they approve, call again
   with the same \`operationId\`.
-- **Skills and Knowledge**: \`skills_sync\` (upload local Skill folders or pull
-  the workspace's), \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
+- **Skills and Knowledge**: \`skills_sync\` uploads local Skill folders as
+  Personal unless \`scope\` is \`workspace\` (which may wait for review, per the
+  workspace's Agent learning setting); \`pull\` gets the workspace's Skills;
+  \`repository\` syncs a GitHub repository's Skill folders. Knowledge:
+  \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
+- **Schedules, agents and workspace instructions**: change them with
+  \`opengeni_actions_search\`, then \`opengeni_action_call\`.
 - Several workspaces: pass \`workspaceId\`, or \`workspace_use\` once.
 
 Retrying a call with the same input doesn't start the work twice. Never put
