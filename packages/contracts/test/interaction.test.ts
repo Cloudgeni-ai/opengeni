@@ -775,6 +775,32 @@ describe("interaction contracts", () => {
         files: [{ ...authority, safeFilename: "../secret" }],
       }).success,
     ).toBe(false);
+    // A file keeps its own name in any script; anything that is not one
+    // portable path segment is refused.
+    for (const safeFilename of ["Rørføring etg. 2 – rev A (SIM).pdf", "見積書.xlsx", "report."]) {
+      expect(
+        BrowserWorkspaceFileStageRequest.safeParse({
+          operationId,
+          files: [{ ...authority, safeFilename }],
+        }).success,
+      ).toBe(true);
+    }
+    for (const safeFilename of [
+      "..",
+      "a\\b.txt",
+      "a:b.txt",
+      'a"b.txt',
+      "a\u0000b.txt",
+      "a\nb.txt",
+      "ø".repeat(121),
+    ]) {
+      expect(
+        BrowserWorkspaceFileStageRequest.safeParse({
+          operationId,
+          files: [{ ...authority, safeFilename }],
+        }).success,
+      ).toBe(false);
+    }
 
     const fileIds = Array.from({ length: 101 }, () => randomUUID());
     expect(

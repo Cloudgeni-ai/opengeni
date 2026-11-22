@@ -21,10 +21,90 @@ import {
   browserCreateInput,
   agentBrowserClosingNotice,
   withInitialView,
+  browserUploadFilename,
+  stageBrowserUploadFiles,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
+
+describe("browser upload file names", () => {
+  const original = "Rørføring etg. 2 – rev A (SIM).pdf";
+  const ascii = "R_rf_ring etg. 2 _ rev A _SIM_.pdf";
+  const upload = {
+    filename: original,
+    safeFilename: ascii,
+    authority: {
+      fileId: "8a6428f0-a94f-4c4a-ae12-c1b158cb888f",
+      sizeBytes: 7,
+      sha256: null,
+      download: { url: "https://objects.example.test/f", expiresAt: "2026-11-22T21:00:00.000Z" },
+    },
+  };
+
+  test("keeps the file's own name, in any script, as one portable segment", () => {
+    expect(browserUploadFilename(original, ascii)).toBe(original);
+    expect(browserUploadFilename("見積書 v2.xlsx", "_ v2.xlsx")).toBe("見積書 v2.xlsx");
+    expect(browserUploadFilename("plan/a:b?.pdf", "plan_a_b_.pdf")).toBe("plan_a_b_.pdf");
+    expect(browserUploadFilename("notes. ", "notes.")).toBe("notes");
+    expect(browserUploadFilename("..", "..")).toBe("file");
+    const long = browserUploadFilename("ø".repeat(300), "_");
+    expect(new TextEncoder().encode(long).byteLength).toBeLessThanOrEqual(240);
+  });
+
+  test("stages own names, and the ASCII names for a controller that refuses them", async () => {
+    const staged: string[][] = [];
+    await stageBrowserUploadFiles(
+      async (files) => {
+        staged.push(files.map((file) => file.safeFilename));
+      },
+      [upload],
+    );
+    expect(staged).toEqual([[original]]);
+
+    staged.length = 0;
+    const refusing = async (files: { safeFilename: string }[]) => {
+      staged.push(files.map((file) => file.safeFilename));
+      if (files.some((file) => file.safeFilename === original)) {
+        throw new BrowserControlRequestError(400, {
+          code: "invalid_action",
+          message: "workspace-file staging authority is invalid",
+          retryable: false,
+        });
+      }
+    };
+    await stageBrowserUploadFiles(refusing, [upload]);
+    expect(staged).toEqual([[original], [ascii]]);
+
+    // Any other failure, or a refusal of names that are already ASCII, is
+    // not retried.
+    staged.length = 0;
+    const unavailable = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "workspace file download was truncated",
+      retryable: true,
+    });
+    await expect(
+      stageBrowserUploadFiles(
+        async (files) => {
+          staged.push(files.map((file) => file.safeFilename));
+          throw unavailable;
+        },
+        [upload],
+      ),
+    ).rejects.toBe(unavailable);
+    await expect(
+      stageBrowserUploadFiles(async () => {
+        throw new BrowserControlRequestError(400, {
+          code: "invalid_action",
+          message: "workspace-file staging authority is invalid",
+          retryable: false,
+        });
+      }, [{ ...upload, filename: "report.pdf", safeFilename: "report.pdf" }]),
+    ).rejects.toBeInstanceOf(BrowserControlRequestError);
+    expect(staged).toEqual([[original]]);
+  });
+});
 
 const FILE_ID = "33333333-3333-4333-8333-333333333333";
 
