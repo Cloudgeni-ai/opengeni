@@ -75,6 +75,8 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         limit: z.coerce.number().int().min(1).max(250).default(100),
         cursor: z.string().max(2048).optional(),
         sessionId: z.uuid().optional(),
+        scope: z.enum(["workspace", "organization", "user"]).optional(),
+        installed: z.enum(["true", "false"]).optional(),
       }),
       c.req.query(),
       { status: 422, message: "Invalid Skill list query" },
@@ -109,6 +111,8 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         ...everywhere,
         ...(after ? { after } : {}),
         ...(query.sessionId ? { sessionId: query.sessionId } : {}),
+        ...(query.scope ? { scope: query.scope } : {}),
+        ...(query.installed === "true" ? { installed: true } : {}),
       },
     );
     const page = rows.slice(0, query.limit);

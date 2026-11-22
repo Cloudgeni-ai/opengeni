@@ -323,6 +323,48 @@ describe("portable Skill routes", () => {
     }
     expect(await request("/skills/content").then((response) => response.json())).toEqual(before);
   });
+
+  test("the Skills list filters by scope and by installed, server-side", async () => {
+    if (!available) return;
+    const save = async (scope: "workspace" | "user") => {
+      const skillId = crypto.randomUUID();
+      const response = await request("/skills/content/save", {
+        method: "POST",
+        body: JSON.stringify({
+          skillId,
+          operationId: crypto.randomUUID(),
+          expectedRevisionId: null,
+          expectedScopeVersion: 1,
+          scope,
+          stableKey: `filter-${scope}-${skillId}`,
+          files: [{ path: "SKILL.md", content: skillMarkdown }],
+          reason: "Filter fixture",
+        }),
+      });
+      expect(response.status).toBe(200);
+      return skillId;
+    };
+    const team = await save("workspace");
+    const mine = await save("user");
+    const list = async (query: string) =>
+      (
+        (await (await request(`/skills/content?limit=250&${query}`)).json()) as {
+          skills: { id: string; scope: string; source: unknown }[];
+        }
+      ).skills;
+    const user = await list("scope=user");
+    expect(user.map((skill) => skill.id)).toContain(mine);
+    expect(user.map((skill) => skill.id)).not.toContain(team);
+    expect(user.every((skill) => skill.scope === "user")).toBe(true);
+    const workspace = await list("scope=workspace");
+    expect(workspace.map((skill) => skill.id)).toContain(team);
+    expect(workspace.every((skill) => skill.scope === "workspace")).toBe(true);
+    const installed = await list("installed=true");
+    expect(installed.every((skill) => skill.source !== null)).toBe(true);
+    expect(installed.map((skill) => skill.id)).not.toContain(team);
+    expect((await request("/skills/content?scope=everyone")).status).toBe(422);
+  });
+
   test("an invalid save names the fields it is missing", async () => {
     if (!available) return;
     const response = await request("/skills/content/save", {
