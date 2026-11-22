@@ -571,7 +571,7 @@ whole.
   installation, to resolve the event's `owner/name` and attaches it only when
   GitHub's id is the allowlisted one, with GitHub's name and default branch
   (event data can come from a test event), as the scheduler, so a repository
-  someone removed from the chat stays removed. Migration 1553 gave agents' GitHub
+  someone removed from the chat stays removed. Migration 1555 gave agents' GitHub
   triggers saved with one repository (before they named it in a condition, so
   they fired for every repository) an `equals` condition for it; other
   automations were left as they are. The **Note** is
