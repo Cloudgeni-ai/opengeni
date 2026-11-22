@@ -9,7 +9,7 @@ import { rawRows, withRlsContext, withWorkspaceRls, type Database } from "./data
 import * as schema from "./schema";
 
 /**
- * App server code (migration 1550, docs/app-server-code.md): the runs log
+ * App server code (migration 1553, docs/app-server-code.md): the runs log
  * and a version's server manifest. Every read and write runs under the
  * workspace's row-level security.
  */

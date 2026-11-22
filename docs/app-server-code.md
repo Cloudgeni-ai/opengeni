@@ -21,7 +21,7 @@ Code: `packages/contracts/src/app-server.ts` (schemas, limits),
 token), `apps/api/src/routes/app-server.ts`, the `server.fetch` operation and
 host route in `apps/api/src/routes/site-runtime.ts`,
 `apps/api/src/mcp/app-server-tools.ts`, `apps/site-gateway/src/app-server.ts`,
-`packages/sdk/src/site-server.ts`, migration `1550_app_server_code.sql`.
+`packages/sdk/src/site-server.ts`, migration `1553_app_server_code.sql`.
 
 ## Setup
 
