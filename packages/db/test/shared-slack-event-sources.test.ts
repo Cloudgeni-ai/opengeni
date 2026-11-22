@@ -274,7 +274,10 @@ postgresTest(
 
       // The definer's own statement uses 1551's index: this transaction's scan
       // counters show index scans and no sequential scan of event_sources.
+      // Earlier calls on this connection may have cached a generic plan made
+      // with sequential scans allowed, so the function plans afresh here.
       const scans = await withRlsContext(grantedClient.db, home, async (tx) => {
+        await tx.execute(sql`discard plans`);
         await tx.execute(sql`set local enable_seqscan = off`);
         const listed = await rawRows<{ workspace_id: string }>(
           tx,
