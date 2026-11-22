@@ -23802,7 +23802,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("deployment"),
-          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+          mechanism: z.enum(["api_key", "azure_ad_bearer", "aws_iam"]),
         })
         .strict(),
       z

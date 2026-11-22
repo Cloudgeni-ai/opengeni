@@ -386,6 +386,10 @@ export type SessionProxyHandlerOptions = {
   toolServer?: SessionProxyToolServer | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
   basePath?: string | undefined;
+  /** Exact origin hosting the browser/computer viewers, e.g. `https://app.example.com`.
+   * Attachment requests must come from this origin, which the Opengeni API
+   * must also list in `OPENGENI_INTERACTION_VIEWER_ORIGINS`. */
+  interactionViewerOrigin?: string | undefined;
   /** Maximum JSON body for the requests the relay reads (create and messages). Defaults to 1 MiB. */
   maxBodyBytes?: number | undefined;
   /**
@@ -560,6 +564,10 @@ export function createSessionProxyHandler(
   // One rejected-key notice per handler (each handler holds one server key).
   const rejectedKeyNotice = { sent: false };
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const viewerOrigin = options.interactionViewerOrigin;
+  if (viewerOrigin !== undefined && !isExactHttpOrigin(viewerOrigin)) {
+    throw new TypeError("interactionViewerOrigin must be an exact http(s) origin without a path.");
+  }
   // Null when the relay client has no absolute API URL and none is given:
   // the artifact viewer is then off.
   const editableLiveUrl = optionalLiveSocketUrl(
@@ -795,14 +803,27 @@ export function createSessionProxyHandler(
         if (refused) return notAllowed();
       }
 
+      const attachmentOrigin =
+        method === "POST" &&
+        route.length === 3 &&
+        (route[0] === "browser-sessions" || route[0] === "computer-sessions") &&
+        route[2] === "attachments"
+          ? viewerOrigin
+          : undefined;
+      if (attachmentOrigin && request.headers.get("origin") !== attachmentOrigin) {
+        return errorJson(403, "mutation_denied", "Interaction viewer origin is not allowed.");
+      }
+
       const path = `/v1/workspaces/${encodeURIComponent(workspaceId)}${
         route.length > 0 ? `/${route.map(encodeURIComponent).join("/")}` : ""
       }`;
       const forward = async (body?: Record<string, unknown>): Promise<Response> => {
+        const headers = forwardedHeaders(request, body !== undefined);
+        if (attachmentOrigin) headers.set("x-opengeni-interaction-viewer-origin", attachmentOrigin);
         const send = async () =>
           await client.fetchApi(client.apiUrl(`${path}${url.search}`), {
             method,
-            headers: forwardedHeaders(request, body !== undefined),
+            headers,
             ...(body !== undefined
               ? { body: JSON.stringify(body) }
               : reading || request.body === null
@@ -1276,6 +1297,19 @@ function defaultMutationPolicy(request: Request): boolean {
 
 function isChatCompletions(route: readonly string[]): boolean {
   return route.length === 2 && route[0] === "chat" && route[1] === "completions";
+}
+
+function isExactHttpOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      !url.hostname.includes("*") &&
+      url.origin === value
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** The browser's neutral request headers. */

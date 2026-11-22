@@ -5000,7 +5000,7 @@ export type ModelCapabilitiesV1 = {
 };
 
 export type ModelCredentialSourceV1 =
-  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "aws_iam" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" | "claude" }
   | { kind: "workspace_connection"; mechanism: "api_key" }
   | { kind: "organization_connection"; mechanism: "api_key" };

@@ -1270,6 +1270,7 @@ const GITHUB_SOURCE = {
   status: string;
   statusReason?: string | null;
   statusReasonCode?: string | null;
+  [field: string]: unknown;
 };
 
 async function openAgentTrigger(
@@ -1279,6 +1280,7 @@ async function openAgentTrigger(
     eventSources?: (typeof GITHUB_SOURCE)[];
     createTaskError?: unknown;
     createSourceError?: unknown;
+    updateSourceError?: unknown;
     chatsError?: unknown;
     chatsPageSize?: number;
     suggestion?: string;
@@ -1293,6 +1295,7 @@ async function openAgentTrigger(
     eventSources: options.eventSources ?? [],
     createTaskError: options.createTaskError,
     createSourceError: options.createSourceError,
+    updateSourceError: options.updateSourceError,
     chatsError: options.chatsError,
     chatsPageSize: options.chatsPageSize,
     sessions: options.sessions?.(agent.id),
@@ -1470,6 +1473,128 @@ test("Create a webhook makes its URL right there, then its events start the agen
   expect(shown).toEqual([expect.stringContaining("https://hooks.example.com/"), "whsec_test"]);
   expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
   expect(button(dialog, "Add trigger")).toBeTruthy();
+});
+
+test("Linear's webhook is made in place and takes its secret in one field, never shown again", async () => {
+  const { client, dialog } = await openAgentTrigger({});
+  await pickTrigger(dialog, "new:linear");
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-setup='create_pasted']")).not.toBeNull();
+  await act(async () => button(dialog, "Add Linear").click());
+  await flush();
+  const request = client.calls.find((call) => call[0] === "createEventSource")?.[2];
+  expect(request).toEqual(expect.objectContaining({ kind: "webhook", adapter: "custom" }));
+  expect(request).not.toHaveProperty("signingSecret");
+  // The URL to paste into Linear, and one field for the secret it shows.
+  const secretStep = dialog.querySelector<HTMLElement>("[data-agent-trigger-secret]")!;
+  expect(secretStep).not.toBeNull();
+  const url = secretStep.querySelector<HTMLTextAreaElement | HTMLInputElement>("textarea, input");
+  expect(url?.value).toContain("https://hooks.example.com/");
+  const field = secretStep.querySelector<HTMLInputElement>("input[type='password']")!;
+  expect(field).not.toBeNull();
+  expect(dialog.querySelector("textarea")).toBeNull();
+  // Too short: refused here, nothing sent.
+  await act(async () => setValue(field, "short"));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  expect(client.calls.some((call) => call[0] === "updateEventSource")).toBe(false);
+  expect(dialog.textContent).toContain("Paste the signing secret Linear shows.");
+  await act(async () => setValue(field, "  lin_wh_secret_value_123  "));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  const update = client.calls.find((call) => call[0] === "updateEventSource");
+  expect(update?.[3]).toEqual({ signingSecret: "lin_wh_secret_value_123" });
+  // Saved: the value is gone from the dialog; it only says the secret is set.
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).toBeNull();
+  expect(dialog.innerHTML).not.toContain("lin_wh_secret_value_123");
+  expect(dialog.querySelector("[data-agent-trigger-secret-set]")?.textContent).toContain(
+    "Signing secret set.",
+  );
+  expect(button(dialog, "Add trigger")).toBeTruthy();
+  // Replace opens an empty field again, and Keep current goes back.
+  await act(async () => button(dialog, "Replace").click());
+  await flush();
+  const again = dialog.querySelector<HTMLInputElement>(
+    "[data-agent-trigger-secret] input[type='password']",
+  );
+  expect(again?.value).toBe("");
+  await act(async () => button(dialog, "Keep current signing secret").click());
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).toBeNull();
+});
+
+/** A Linear webhook made earlier, still waiting for the secret Linear shows. */
+function waitingLinearSource(viewerAccess: "manage" | "use") {
+  return {
+    id: "source-linear",
+    name: "Team Linear",
+    kind: "webhook",
+    adapter: "custom",
+    format: { preset: "linear", signature: { scheme: "hmac_sha256" } },
+    status: "blocked",
+    statusReasonCode: "awaiting_secret",
+    statusReason: "Paste the signing secret Linear shows for this webhook.",
+    awaitingSigningSecret: true,
+    webhookUrl: "https://hooks.example.com/source-linear",
+    mcp: null,
+    viewerAccess,
+  };
+}
+
+test("a waiting webhook can be picked to paste its secret, then added as a trigger", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [waitingLinearSource("manage")],
+  });
+  await pickTrigger(dialog, "source:source-linear");
+  await flush();
+  const field = dialog.querySelector<HTMLInputElement>(
+    "[data-agent-trigger-secret] input[type='password']",
+  )!;
+  expect(field).not.toBeNull();
+  await act(async () => setValue(field, "lin_wh_secret_value_123"));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  expect(client.calls.find((call) => call[0] === "updateEventSource")?.[2]).toBe("source-linear");
+  expect(dialog.querySelector("[data-agent-trigger-secret-set] [role='status']")?.textContent).toBe(
+    "Signing secret set.",
+  );
+  expect(button(dialog, "Add trigger")).toBeTruthy();
+});
+
+test("someone who may only use a waiting webhook can't pick it to paste its secret", async () => {
+  const { dialog } = await openAgentTrigger({ eventSources: [waitingLinearSource("use")] });
+  await flush();
+  const option = dialog.querySelector<HTMLElement>(
+    "[data-agent-trigger-option='source:source-linear']",
+  );
+  expect(option?.textContent ?? dialog.textContent).toContain("Its owner pastes the secret.");
+});
+
+test("a refused secret stays on the field and nothing is kept on the page", async () => {
+  const refused = Object.assign(new Error("Opengeni API 422: signing secret is too short"), {
+    status: 422,
+  });
+  const { dialog } = await openAgentTrigger({
+    eventSources: [waitingLinearSource("manage")],
+    updateSourceError: refused,
+  });
+  await pickTrigger(dialog, "source:source-linear");
+  await flush();
+  const field = dialog.querySelector<HTMLInputElement>(
+    "[data-agent-trigger-secret] input[type='password']",
+  )!;
+  await act(async () => setValue(field, "lin_wh_secret_value_123"));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  // Still on the field, which says what went wrong; the value is never an attribute.
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).not.toBeNull();
+  expect(dialog.querySelector("[data-agent-trigger-secret-set]")).toBeNull();
+  expect(
+    dialog
+      .querySelector("[data-agent-trigger-secret] input[type='password']")
+      ?.getAttribute("aria-invalid"),
+  ).toBe("true");
+  expect(dialog.innerHTML).not.toContain("lin_wh_secret_value_123");
 });
 
 async function chooseFrom(dialog: HTMLElement, current: string, option: string) {

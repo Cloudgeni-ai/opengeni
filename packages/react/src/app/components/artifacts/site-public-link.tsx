@@ -6,9 +6,9 @@ import {
   ArrowUpRightIcon,
   CheckIcon,
   ChevronDownIcon,
-  GlobeIcon,
   LinkIcon,
   Settings2Icon,
+  Share2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 
@@ -97,11 +97,32 @@ export function useSitePublicationLink({
       hostname,
       url,
       status,
-    }: Pick<SitePublication, "siteId" | "hostname" | "url" | "status">) => {
+      agent,
+    }: Pick<SitePublication, "siteId" | "hostname" | "url" | "status"> & {
+      agent?: Pick<SitePublication["agent"], "model"> | undefined;
+    }) => {
       request.current?.abort();
-      setAnswer({
-        key,
-        load: { state: "ready", link: { siteId: publishedSiteId, hostname, url, status } },
+      // The publication's own model wins; without it, keep what the link read
+      // knew.
+      setAnswer((previous) => {
+        const agentModel = agent
+          ? agent.model
+          : previous?.key === key && previous.load.state === "ready"
+            ? previous.load.link.agentModel
+            : undefined;
+        return {
+          key,
+          load: {
+            state: "ready",
+            link: {
+              siteId: publishedSiteId,
+              hostname,
+              url,
+              status,
+              ...(agentModel !== undefined ? { agentModel } : {}),
+            },
+          },
+        };
       });
     },
     [key],
@@ -193,8 +214,8 @@ export function SitePublicationControl({
         data-site-publication="unpublished"
         className={cn(CONTROL, "text-fg")}
       >
-        <GlobeIcon aria-hidden="true" className="size-3.5" />
-        Publish
+        <Share2Icon aria-hidden="true" className="size-3.5" />
+        Share
       </button>
     ) : null;
   if (load.state === "ready" && load.link.status === "suspended") {
@@ -266,7 +287,7 @@ function PublishedMenu({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            aria-label={`Published at ${hostname}`}
+            aria-label={`Share, published at ${hostname}`}
             data-site-publication="published"
             className={cn(CONTROL, "gap-1 data-[state=open]:bg-hover data-[state=open]:text-fg")}
           >
@@ -274,7 +295,7 @@ function PublishedMenu({
               aria-hidden="true"
               className="mr-0.5 size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10"
             />
-            Published
+            Share
             <ChevronDownIcon aria-hidden="true" className="size-3" />
           </button>
         </DropdownMenuTrigger>

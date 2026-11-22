@@ -8379,6 +8379,7 @@ export const SITE_BROWSER_RUNTIME: string = [
   "if(options.cursor!==void 0)query.set(\"cursor\",options.cursor);",
   "if(options.limit!==void 0)query.set(\"limit\",String(options.limit));",
   "if(options.sessionId!==void 0)query.set(\"sessionId\",options.sessionId);",
+  "if(options.scope!==void 0)query.set(\"scope\",options.scope);",
   "let suffix=query.size?`?${",
   "query.toString()}",
   "`:\"\";",

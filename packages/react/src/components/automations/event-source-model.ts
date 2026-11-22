@@ -172,7 +172,7 @@ export function isEventSourceChoice(value: unknown): value is EventSourceChoice 
 const APP_WEBHOOK_CHOICES = ["linear", "sentry", "tailscale"] as const;
 type AppWebhookChoice = (typeof APP_WEBHOOK_CHOICES)[number];
 
-function isAppWebhookChoice(value: unknown): value is AppWebhookChoice {
+export function isAppWebhookChoice(value: unknown): value is AppWebhookChoice {
   return APP_WEBHOOK_CHOICES.includes(value as AppWebhookChoice);
 }
 

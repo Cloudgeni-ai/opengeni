@@ -48,7 +48,12 @@ Principals are abstract strings: `user:<subjectId>` for people and
 `service:<subjectId>` for personless keys. Agents are recorded as
 `agent:session:<sessionId>` (their own session) in `createdBy`/`updatedBy`;
 records they write belong to the person they act for (a chat's person or a
-schedule's owner). An agent without a person owns its records as
+schedule's owner). A connected agent (a coding agent signed in to the
+organization MCP server) is recorded as `agent:connection:<connectionId>`, the
+connection shown under Connected agents; its records belong to the person who
+connected it. A person's principal is `user:` plus their subject id, which is
+itself `user:<id>`, so `user:user:<id>` is the documented form; compare it
+whole. An agent without a person owns its records as
 `schedule:<taskId>` when a scheduled task's run created its session (found from
 the server-written run row, so it is stable across runs and cannot be claimed
 through session metadata), and as `agent:session:<sessionId>` otherwise, so

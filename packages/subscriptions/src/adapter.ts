@@ -216,8 +216,8 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
   readonly cacheFacts: DeclaredCacheFacts;
   /** Health policy applied to this provider's connections. */
   readonly health: {
-    /** How long a connection the provider refused (forbidden) stays quarantined. */
-    readonly forbiddenQuarantineMs: number;
+    /** How long a forbidden connection stays quarantined; null means until reconnect. */
+    readonly forbiddenQuarantineMs: number | null;
     /** How long a model the plan is not entitled to stays cooled down. */
     readonly entitlementCooldownMs: number;
     /** How long a rate-limited connection rests when the provider gave no retry time. */

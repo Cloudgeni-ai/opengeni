@@ -54,7 +54,9 @@
   `SessionUiFeaturesOff`), narrower, titled in its header: the same composer,
   messages and status row as on the chat's own page, so paste and drop of
   files, the attach button, dictation, voice, the model chip and the queue
-  and steer row all work there. Files dragged over the page cover the Site
+  and steer row all work there. A new conversation there starts on the
+  Site's configured model (`agentModel` on `getSitePublicationLink`) when
+  the workspace allows it, else the workspace's default. Files dragged over the page cover the Site
   (`ChatFileDropCover`), so a drop on the Site attaches to the chat rather
   than going to the Site's frame; the cover shows only while files are
   dragged and the chat is shown and takes files. A Site with its own file
@@ -134,10 +136,11 @@
     so "live" never reads as "on the web".
   - The header's one publication control (`SitePublicationControl`, read
     with the viewer's own `getSitePublicationLink`) says whether the Site is
-    on the web. **Published** opens a menu with the address (the primary URL
+    on the web, labelled **Share** so sharing is one visible click.
+    **Share** on a published Site opens a menu with the address (the primary URL
     the API reports), **Open**, **Copy link** and, for people with
     `artifacts:publish`, **Publishing settings**. An unpublished Site shows
-    **Publish** to those people and nothing to anyone else; a taken-down
+    **Share** (opening the publish form) to those people and nothing to anyone else; a taken-down
     Site says **Taken down**. Publish and Publishing settings open the
     Site's own publish form (`SitePublishPage` with `useSiteManagement`,
     exactly as its Settings tab) as a page in place of the Site, which stays
@@ -165,11 +168,12 @@
     Site's column. The chat panel's header moves the chat to the other
     side, opens the conversation as a full chat, or hides the chat, in one
     click. A hidden chat leaves no strip: the Site takes the whole width
-    and **Show chat** sits in the header on the chat's side. Whether the
-    chat is open is remembered per person and Site
-    (`og.site-view.chat-open`); until they choose, it opens for a Site
-    they have conversations with or reach from a chat (`?conversation`,
-    Edit with Opengeni) and stays closed otherwise. Settings opened from
+    and a labelled **Chat** button sits in the header on the chat's side.
+    Whether the chat is open is remembered per person and Site
+    (`og.site-view.chat-open`); until they choose, it opens beside every
+    Site in a window wide enough for both, and in a narrower one (where it
+    stacks under the Site) for a Site they have conversations with or reach
+    from a chat (`?conversation`, Edit with Opengeni). Settings opened from
     the "…" goes back to the Site. Settings has one row style: the publish
     form (search engines and reports collapsed in it, open while a report
     waits), then workspace access, then the rarer actions (duplicate,

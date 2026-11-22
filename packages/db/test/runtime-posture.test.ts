@@ -4275,6 +4275,8 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "organization_memberships",
     "workspace_memberships",
     "app_notifications",
+    "event_sources",
+    "connections",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4283,6 +4285,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "session_content_collections",
     "modal_inventory_read_capabilities",
     "inbox_items",
+    "organization_tenancy_inventory_capabilities",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -4373,6 +4376,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "discard_refused_session_create_v1(uuid, uuid)",
       "sync_subscription_relogin_notice_v1(uuid)",
       "deliver_app_notification_v1(uuid)",
+      "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4387,6 +4391,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "discard_refused_session_create_v1(uuid, uuid)",
       "sync_subscription_relogin_notice_v1(uuid)",
       "deliver_app_notification_v1(uuid)",
+      "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

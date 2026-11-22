@@ -31,6 +31,7 @@ import {
   type EventOccurrenceToStart,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
+import { startBedrockModelDiscovery } from "@opengeni/runtime/bedrock";
 import {
   createObservability,
   errorCauseAttributes,
@@ -549,6 +550,13 @@ export async function startApi(options: StartApiOptions = {}) {
   const settings = options.settings ?? getSettings();
   const observability =
     options.observability ?? createObservability(settings, { component: "api" });
+  // Amazon Bedrock: list the Claude models the account offers before serving.
+  await startBedrockModelDiscovery(settings, {
+    onError: (error) =>
+      observability.warn("Amazon Bedrock model discovery failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+  });
   // Step I: standalone → dbSchema unset → searchPath undefined → today's plain
   // handle (public). Embedded → scoped to the dedicated schema + the host's RLS
   // strategy.

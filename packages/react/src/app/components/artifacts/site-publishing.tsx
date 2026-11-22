@@ -630,6 +630,7 @@ function SitePublishForm({
           <div className="flex min-w-0 flex-col gap-4">
             <CheckboxField
               label="Let people chat with the app's agent"
+              description="The app's own chat uses it. Ask the agent to add one if the app has none."
               checked={draft.agentEnabled}
               onCheckedChange={(agentEnabled) => update({ agentEnabled })}
             />

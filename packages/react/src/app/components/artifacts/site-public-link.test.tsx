@@ -163,9 +163,9 @@ const row = (host: HTMLElement, text: string) =>
 
 test("a published Site says Published, and its menu names the address and opens it", async () => {
   const host = await render(ready(), { openExternal: () => false });
-  expect(trigger(host)!.textContent).toBe("Published");
+  expect(trigger(host)!.textContent).toBe("Share");
   expect(trigger(host)!.getAttribute("aria-label")).toBe(
-    "Published at newsletter-4k9x.sites.example",
+    "Share, published at newsletter-4k9x.sites.example",
   );
   // Never the old "Live", which reads as the live preview.
   expect(host.textContent).not.toContain("Live");
@@ -242,7 +242,7 @@ test("Publishing settings opens the publish form, only for people who can publis
     onOpenPublishing: () => (opened += 1),
   });
   // Someone who can open the Site but not publish still opens and copies it.
-  expect(trigger(viewer)!.textContent).toBe("Published");
+  expect(trigger(viewer)!.textContent).toBe("Share");
   expect(openRow(viewer)!.getAttribute("href")).toBe("https://newsletter-4k9x.sites.example/");
   expect(row(viewer, "Copy link")).not.toBeNull();
   expect(row(viewer, "Publishing settings")).toBeNull();
@@ -261,7 +261,7 @@ test("a custom hostname uses the primary URL the publication API reports", async
   const host = await render(load);
   expect(openRow(host)!.getAttribute("href")).toBe("https://news.acme.example/");
   expect(host.querySelector("[data-menu-label]")!.textContent).toBe("news.acme.example");
-  expect(trigger(host)!.getAttribute("aria-label")).toBe("Published at news.acme.example");
+  expect(trigger(host)!.getAttribute("aria-label")).toBe("Share, published at news.acme.example");
 });
 
 test("an unpublished Site offers Publish to people who can, and nothing to anyone else", async () => {
@@ -271,8 +271,8 @@ test("an unpublished Site offers Publish to people who can, and nothing to anyon
     expect(trigger(host)).toBeNull();
     expect(host.querySelector("a[href]")).toBeNull();
     const publish = host.querySelector<HTMLButtonElement>('[data-site-publication="unpublished"]')!;
-    // One word, no "Not published" beside it: Publish says it isn't.
-    expect(host.textContent).toBe("Publish");
+    // One word, no "Not published" beside it: Share opens publishing.
+    expect(host.textContent).toBe("Share");
     await act(async () => publish.click());
     expect(opened).toBe(1);
     await unmount();

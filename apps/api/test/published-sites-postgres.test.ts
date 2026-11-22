@@ -1044,7 +1044,7 @@ test("anyone who can open a Site reads where it is published; its settings stay 
 
   const created = await f.publication(f.owner, site.id, "PUT", { access: "invited" });
   expect(created.status, JSON.stringify(created.json)).toBe(201);
-  // A viewer without artifacts:publish gets the primary address and status only.
+  // A viewer without artifacts:publish gets the primary address, status and chat model only.
   const published = await link(viewer);
   expect(published.status, JSON.stringify(published.json)).toBe(200);
   expect(published.json).toEqual({
@@ -1052,6 +1052,8 @@ test("anyone who can open a Site reads where it is published; its settings stay 
     hostname: created.json.hostname,
     url: created.json.url,
     status: "active",
+    // The model the app's chat starts with (none set here).
+    agentModel: null,
   });
   // The publication's settings (access, invitations, moderation) stay with managers.
   const settings = await f.publication(viewer, site.id, "GET");

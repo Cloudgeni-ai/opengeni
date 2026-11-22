@@ -7214,6 +7214,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "query": [
       "cursor",
       "limit",
+      "scope",
       "sessionId"
     ],
     "response": [],

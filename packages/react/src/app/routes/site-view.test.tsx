@@ -812,22 +812,51 @@ test("the chat can be hidden and shown again, and stays as it was left", async (
   expect(panel(again.container).hidden).toBe(true);
 });
 
-test("the chat starts closed on an app no one has chatted with, open on one they have", async () => {
+test("every app offers its chat beside it in a wide window, until the person closes it", async () => {
   conversations = [];
   const { container } = await render();
-  expect(panel(container).hidden).toBe(true);
-  expect(container.querySelector("button[aria-label='Show chat']")).not.toBeNull();
+  expect(panel(container).hidden).toBe(false);
+  expect(container.querySelector("button[aria-label='Show chat']")).toBeNull();
   // Nothing is remembered until the person chooses.
   expect(localStorage.getItem(openKey)).toBeNull();
-  act(() => root?.unmount());
-  conversations = [conversation(1, "Time filters across all graphs", 2)];
-  const chatted = await render();
-  expect(panel(chatted.container).hidden).toBe(false);
-  expect(localStorage.getItem(openKey)).toBeNull();
-  // The default is kept, so the next visit starts open instead of opening late.
-  expect(JSON.parse(localStorage.getItem("og.site-view.chat-default:v1:me")!)).toEqual({
-    [siteId]: true,
-  });
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  expect(panel(container).hidden).toBe(true);
+  // Closed, one labelled button in the app's header brings it back.
+  const show = container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!;
+  expect(show.textContent).toBe("Chat");
+  expect(show.closest("[data-site-header]")).not.toBeNull();
+  expect(openChoices()).toEqual({ [siteId]: false });
+});
+
+test("in a narrow window the chat starts closed on an app no one has chatted with, open on one they have", async () => {
+  const matchMedia = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+  try {
+    conversations = [];
+    const { container } = await render();
+    expect(panel(container).hidden).toBe(true);
+    expect(container.querySelector("button[aria-label='Show chat']")).not.toBeNull();
+    // Nothing is remembered until the person chooses.
+    expect(localStorage.getItem(openKey)).toBeNull();
+    act(() => root?.unmount());
+    conversations = [conversation(1, "Time filters across all graphs", 2)];
+    const chatted = await render();
+    expect(panel(chatted.container).hidden).toBe(false);
+    expect(localStorage.getItem(openKey)).toBeNull();
+    // The default is kept, so the next visit starts open instead of opening late.
+    expect(JSON.parse(localStorage.getItem("og.site-view.chat-default:v1:me")!)).toEqual({
+      [siteId]: true,
+    });
+  } finally {
+    window.matchMedia = matchMedia;
+  }
 });
 
 test("arriving from a chat, or choosing one, shows a hidden chat", async () => {
@@ -1079,10 +1108,10 @@ test("an unpublished app offers Publish, which opens its publish form beside the
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = notPublished;
   const { container, follow } = await render(id(1));
-  expect(publicationText(container)).toBe("Publish");
+  expect(publicationText(container)).toBe("Share");
   expect(container.querySelector("[data-publish-page]")).toBeNull();
 
-  await act(async () => button(container, "Publish")!.click());
+  await act(async () => button(container, "Share")!.click());
   // The form is in the address, so Back closes it.
   expect(navigations.at(-1)).toEqual({
     to: "/workspaces/$workspaceId/sites/$siteId",
@@ -1120,7 +1149,7 @@ test("an unpublished app offers Publish, which opens its publish form beside the
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(siteHidden(container)).toBe(false);
   expect(publications).toHaveLength(1);
-  expect(publicationText(container)).toContain("Published");
+  expect(publicationText(container)).toContain("Share");
   expect(publicationText(container)).toContain("usage-4k9x.sites.example");
   // Focus goes back to the control that opened the form.
   expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
@@ -1154,7 +1183,7 @@ test("in the macOS app the publish form names the window bar, and the app takes 
   expect(container.contains(header())).toBe(false);
   expect(header()?.textContent).not.toContain("Opengeni usage");
 
-  await act(async () => button(document.body, "Publish")!.click());
+  await act(async () => button(document.body, "Share")!.click());
   expect((navigations.at(-1) as { search: object }).search).toEqual({ publishing: true });
   await draw(true);
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
@@ -1175,7 +1204,7 @@ test("a published app's settings open the same form; its back link returns to th
   publicationLink = async () => published;
   const { container, follow } = await render();
   const slot = publicationSlot(container)!;
-  expect(slot.textContent).toContain("Published");
+  expect(slot.textContent).toContain("Share");
   expect(slot.querySelector("a")?.getAttribute("href")).toBe("https://usage-4k9x.sites.example/");
   // Copy link has one place, the Published menu: no separate link button.
   expect(container.querySelector("[data-artifact-copy-link]")).toBeNull();
@@ -1266,7 +1295,7 @@ test("people who can't publish see Published and its address, with no Publish or
   conversations = [];
   publicationLink = async () => published;
   const { container } = await render();
-  expect(publicationText(container)).toContain("Published");
+  expect(publicationText(container)).toContain("Share");
   expect(button(container, "Publishing settings")).toBeUndefined();
   act(() => root?.unmount());
   publicationLink = notPublished;

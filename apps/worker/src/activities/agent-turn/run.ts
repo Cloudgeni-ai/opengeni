@@ -60,6 +60,7 @@ import {
 import { codexUpstreamModelSlugs } from "@opengeni/config";
 import {
   withAnthropicApiKeyRefusals,
+  withBedrockCaller,
   withClaudeUsageObserver,
   withInferenceResidency,
 } from "@opengeni/runtime";
@@ -1362,13 +1363,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }),
             );
           };
+          // Amazon Bedrock bills the person who started the turn when the
+          // deployment configured per-user attribution (docs/amazon-bedrock.md).
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
-              claudeCore ? withClaudeCoreLane("requests")(fn) : fn(),
+            withBedrockCaller(turn.initiatingHumanSubjectId, () =>
+              withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
+                claudeCore ? withClaudeCoreLane("requests")(fn) : fn(),
+              ),
             );
           const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
-              claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn(),
+            withBedrockCaller(turn.initiatingHumanSubjectId, () =>
+              withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
+                claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn(),
+              ),
             );
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();

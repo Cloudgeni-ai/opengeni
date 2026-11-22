@@ -216,7 +216,12 @@ function LinkShell({
   );
 }
 
-/** A rail row, with its quiet menu when the person can move it under More or back. */
+/**
+ * A rail row, with its one quiet button when the person can move it under
+ * More or back. With a mouse the button names what it does ("Move to More")
+ * when the row is hovered or focused; on touch, where it always shows, it
+ * stays a small arrow so every row isn't crowded with words.
+ */
 function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active: boolean }) {
   const Icon = item.icon;
   const row = (
@@ -226,7 +231,7 @@ function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active
       icon={<Icon />}
       active={active}
       attention={item.attention}
-      className={item.place ? "pr-8" : undefined}
+      className={item.place ? "pr-8 pointer-fine:group-hover/row:pr-24" : undefined}
     >
       {item.link}
     </NavItem>
@@ -239,14 +244,16 @@ function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active
       <button
         type="button"
         aria-label={`${place.label}: ${item.label}`}
-        title={place.label}
         onClick={place.run}
-        className="absolute top-1/2 right-1 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100"
+        className="absolute top-1/2 right-1 flex h-6 min-w-6 -translate-y-1/2 items-center justify-center rounded-md text-xs text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:bg-surface-3 focus-visible:opacity-100 group-hover/row:opacity-100 pointer-fine:px-1.5 pointer-coarse:opacity-100"
       >
+        <span aria-hidden="true" className="whitespace-nowrap not-pointer-fine:hidden">
+          {place.label}
+        </span>
         {place.toMore ? (
-          <ChevronDownIcon className="size-3.5" />
+          <ChevronDownIcon aria-hidden="true" className="size-3.5 pointer-fine:hidden" />
         ) : (
-          <ChevronUpIcon className="size-3.5" />
+          <ChevronUpIcon aria-hidden="true" className="size-3.5 pointer-fine:hidden" />
         )}
       </button>
     </div>

@@ -3878,13 +3878,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ),
       ],
     });
+    // A frame waiting for its debugger answers the withdrawal only once it
+    // runs (see withdrawAutofill), so it is sent now and not awaited.
+    if (frame) void this.passkeys?.withdrawAutofill(connection, sessionId);
     await Promise.all([
       presented
         ? connection
             .send("Emulation.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
             .catch(() => undefined)
         : undefined,
-      frame ? this.passkeys?.withdrawAutofill(connection, sessionId) : undefined,
       connection
         .send(
           "Target.setAutoAttach",

@@ -69,11 +69,6 @@ export const SUBSCRIPTION_CORE_CLAUDE_SETUP_TOKEN_FORMAT = "claude_setup_token_v
 export const SUBSCRIPTION_CORE_CLAUDE_REFRESH_WINDOW_MS = 60 * 1000;
 /** An OAuth credential always records its expiry; this bounds one that somehow does not. */
 export const SUBSCRIPTION_CORE_CLAUDE_REFRESH_FALLBACK_MS = 60 * 60 * 1000;
-/**
- * Claude's 403 is not an account refusal (decision 7: it never rotates
- * accounts), so this only bounds a forbidden outcome another path reports.
- */
-export const SUBSCRIPTION_CORE_CLAUDE_FORBIDDEN_QUARANTINE_MS = 60 * 60 * 1000;
 /** Claude has no plan entitlements; kept equal to the other providers. */
 export const SUBSCRIPTION_CORE_CLAUDE_ENTITLEMENT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 /** A 429 without a retry time rests as long as the legacy backpressure delay. */
@@ -177,7 +172,9 @@ export function subscriptionCoreClaudeAdapter(
       isClaudeSubscriptionModelId(modelId) ? claudeSubscriptionModelIdForms(modelId) : null,
     cacheFacts: { kind: "exact_ttl", ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS },
     health: {
-      forbiddenQuarantineMs: SUBSCRIPTION_CORE_CLAUDE_FORBIDDEN_QUARANTINE_MS,
+      // Refresh proves token renewal, not permission to make model requests.
+      // Do not return a refused account to rotation until it is reconnected.
+      forbiddenQuarantineMs: null,
       entitlementCooldownMs: SUBSCRIPTION_CORE_CLAUDE_ENTITLEMENT_COOLDOWN_MS,
       rateLimitFallbackMs: SUBSCRIPTION_CORE_CLAUDE_RATE_LIMIT_FALLBACK_MS,
       exhaustedFallbackMs: SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS,
