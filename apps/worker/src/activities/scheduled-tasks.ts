@@ -155,6 +155,7 @@ import {
 } from "@opengeni/core";
 import {
   scheduledEventRepositoryResources,
+  attachesEventRepositories,
   sessionResourcesMatchEventRun,
   githubEventRepositories,
 } from "../scheduled-event-repositories";
@@ -1915,11 +1916,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 );
               }
             }
-            // A GitHub event's run checks out the repositories its events are
-            // about, offered by the workspace's GitHub App allowlist now. The
-            // chat was admitted with exactly the task's resources; these join
-            // it before its first turn starts, as an attach does.
-            if (task.runMode === "new_session_per_run" && run.triggerType === "event") {
+            // An agent's GitHub event run checks out the repositories its
+            // events are about, offered by the workspace's GitHub App
+            // allowlist now. The chat was admitted with exactly the task's
+            // resources; these join it before its first turn starts, as an
+            // attach does.
+            if (attachesEventRepositories(task, run)) {
               const eventRepositories = await scheduledEventRepositoryResources(dispatchDb, {
                 workspaceId: task.workspaceId,
                 runId: run.id,
@@ -3012,9 +3014,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
       );
     }
   }
-  // A GitHub event run's chat may also hold the repositories its events are about.
-  const recoversEventRun =
-    task.runMode === "new_session_per_run" && input.run.triggerType === "event";
+  // An agent's GitHub event run's chat may also hold the repositories its events are about.
+  const recoversEventRun = attachesEventRepositories(task, input.run);
   const recoveredEventRepositoryIds = new Set<number>(
     recoversEventRun
       ? githubEventRepositories(

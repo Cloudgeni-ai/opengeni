@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   SCHEDULED_EVENT_REPOSITORY_LIMIT,
+  attachesEventRepositories,
   githubEventRepositories,
   githubEventRepositoryResource,
   sessionResourcesMatchEventRun,
@@ -66,4 +67,22 @@ test("a recovered event run's chat may add only its events' repositories to the 
   expect(match([...task, { ...attached, githubRepositoryId: 43 }])).toBe(false);
   expect(match([...task, { kind: "file", fileId: "f-2" }])).toBe(false);
   expect(match([])).toBe(false);
+});
+
+test("only an agent's event runs in a new chat take their events' repositories", () => {
+  const agentTask = { runMode: "new_session_per_run", agentConfig: { agentId: "agent-1" } };
+  expect(attachesEventRepositories(agentTask, { triggerType: "event" })).toBe(true);
+  expect(attachesEventRepositories(agentTask, { triggerType: "schedule" })).toBe(false);
+  expect(
+    attachesEventRepositories(
+      { ...agentTask, runMode: "existing_session" },
+      { triggerType: "event" },
+    ),
+  ).toBe(false);
+  expect(
+    attachesEventRepositories(
+      { runMode: "new_session_per_run", agentConfig: {} },
+      { triggerType: "event" },
+    ),
+  ).toBe(false);
 });

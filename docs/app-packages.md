@@ -254,8 +254,11 @@ keeps its records in Site Data, so it works right after it is added (Feedback
 board's votes are a `per_viewer` collection). Capabilities **Ready-made** and
 the Artifacts page (its **Apps** tab, and its empty state) offer them; both add
 one by installing its `package` through the ordinary install above, keyed
-`ready-made:<key>` so adding it again opens the same app (an archived one is
-added fresh), then open the app, which asks to connect any tool it uses.
+`ready-made:<key>`. Install keys belong to the person and the package, so the
+same person adding the same template version again gets the app they added
+(an archived one is added fresh); a teammate, or a newer template version,
+adds a separate copy with its own data. Then the app opens, and asks to
+connect any tool it uses.
 Ready-made apps built on a connected tool (a Linear or GitHub board) come
 later, with app server code.
 

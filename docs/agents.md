@@ -557,14 +557,18 @@ whole.
   trigger's **Repositories** (`agent-trigger-repositories.tsx`) are all the
   GitHub connection reaches (the default) or the ones chosen, saved as a
   `data.repository.full_name` condition (`equals` or `in`, at most 50) on
-  each GitHub trigger; the automation keeps no repository. Each new-chat run
+  each GitHub trigger; the automation keeps no repository. The condition
+  names the repository, so it stops matching once the repository is renamed
+  or transferred (choose it again then). Each new-chat run of an agent's trigger
   checks out the repositories its GitHub events are about (at most 5): the
   worker attaches each, after the chat is admitted and before its first turn,
   only when one of the workspace's own GitHub App installations offers it in
   the allowlist, through the ordinary attach (`attachSessionRepositoryResource`),
-  which checks the allowlist again. Migration 1553 gave GitHub triggers saved
-  with one repository (before they named it in a condition, so they fired for
-  every repository) an `equals` condition for it. The **Note** is
+  which checks the allowlist again. Other automations keep only the
+  repositories they were saved with. Migration 1553 gave agents' GitHub
+  triggers saved with one repository (before they named it in a condition, so
+  they fired for every repository) an `equals` condition for it; other
+  automations were left as they are. The **Note** is
   optional: each run gets the event and the agent's Instructions do the
   rest (an empty note sends "Handle this event." or "Do your scheduled
   work."). **Chat** (`agent-trigger-chat-field.tsx`) says where runs go:

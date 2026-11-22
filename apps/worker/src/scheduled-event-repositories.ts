@@ -9,6 +9,9 @@
  * offers it now, through one of the workspace's own installations: the same
  * check as the repository picker and every other attach. One GitHub refuses
  * is left out; the run goes ahead without it.
+ *
+ * Only an agent's triggers (Add trigger on an agent's page) work this way.
+ * Other automations keep exactly the repositories they were saved with.
  */
 import {
   defaultRepositoryMountPath,
@@ -30,6 +33,21 @@ const FULL_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const BRANCH = /^[^\s~^:?*[\\]{1,255}$/u;
 
 export type GitHubEventRepository = { id: number; fullName: string; defaultBranch: string };
+
+/**
+ * Whether a run's chat takes the repositories its events are about: a new
+ * chat per run, started by an event, for an agent's trigger.
+ */
+export function attachesEventRepositories(
+  task: { runMode: string; agentConfig: { agentId?: string | null | undefined } },
+  run: { triggerType: string },
+): boolean {
+  return (
+    task.runMode === "new_session_per_run" &&
+    run.triggerType === "event" &&
+    Boolean(task.agentConfig.agentId)
+  );
+}
 
 /** The distinct repositories a run's GitHub events are about, in event order. */
 export function githubEventRepositories(

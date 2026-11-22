@@ -12,7 +12,7 @@ import { userErrorText } from "../../../ui/api-error";
 import { DetailSection } from "../../../ui/detail-sheet";
 import { useAppContext } from "../../app-context";
 import { useNavigate } from "../../lib/navigation";
-import { installReadyMadeApp, readyMadeAppNeedsTools } from "../../lib/ready-made-apps";
+import { installReadyMadeApp } from "../../lib/ready-made-apps";
 import { toast } from "../../lib/toast";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { ArtifactKindTile } from "./artifact-page-chrome";
@@ -37,6 +37,7 @@ export function ReadyMadeApps({ workspaceId }: { workspaceId: string }) {
   if (!templates || templates.length === 0) return null;
 
   const add = async (template: AppTemplate) => {
+    if (adding !== null) return;
     setAdding(template.key);
     try {
       const installed = await installReadyMadeApp(client, workspaceId, template);
@@ -46,12 +47,7 @@ export function ReadyMadeApps({ workspaceId }: { workspaceId: string }) {
           description: installed.notInstalled.map((problem) => problem.reason).join(" "),
         });
       } else if (!installed.replayed) {
-        toast.success(
-          `Added ${template.name}`,
-          readyMadeAppNeedsTools(template)
-            ? { description: "Connect its tools to start using it." }
-            : undefined,
-        );
+        toast.success(`Added ${template.name}`);
       }
       // The app itself asks for any tool it uses that isn't connected yet.
       void navigate({

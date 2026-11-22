@@ -12,9 +12,11 @@ type Installer = {
 };
 
 /**
- * Adds a ready-made app: installs its package with one key per ready-made app,
- * so adding it again returns the same app, unless that app was archived, then
- * it's added fresh (each archived copy keys the next one). Used by the
+ * Adds a ready-made app: installs its package with one key per ready-made app.
+ * Install keys belong to the person and the package, so the same person adding
+ * the same version again gets the app they added, unless they archived it,
+ * then it's added fresh (each archived copy keys the next one). Someone else,
+ * or a newer version of the template, adds a new copy. Used by the
  * Capabilities Ready-made tab and the Artifacts Apps tab.
  */
 export async function installReadyMadeApp(
@@ -37,10 +39,4 @@ export async function installReadyMadeApp(
     });
   }
   return installed;
-}
-
-/** Whether the app asks for tools, so whoever adds it connects them first. */
-export function readyMadeAppNeedsTools(template: Pick<AppTemplate, "package">): boolean {
-  const tools = (template.package as { tools?: unknown } | null)?.tools;
-  return Array.isArray(tools) && tools.length > 0;
 }

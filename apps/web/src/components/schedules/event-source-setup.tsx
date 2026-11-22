@@ -4,10 +4,7 @@
  * pasted secret uses the shared `PastedWebhookSteps` (also in Add trigger).
  */
 import { t } from "@opengeni/react/app/lib/console-text";
-import {
-  PastedWebhookSteps as SharedPastedWebhookSteps,
-  pastedWebhookSetup,
-} from "@opengeni/react/automations";
+import { PastedWebhookSteps, pastedWebhookSetup } from "@opengeni/react/automations";
 import { CopyField } from "@opengeni/react/ui/copy-field";
 import { Field } from "@opengeni/react/ui/field";
 import { InlineHelp } from "@opengeni/react/ui/inline-help";
@@ -39,7 +36,7 @@ export function StandardWebhookHelp() {
 }
 
 /** The two steps in Linear, Sentry or another app, with the field for the secret it shows. */
-export function PastedWebhookSteps({
+export function SourcePastedWebhookSteps({
   source,
   secret,
   error,
@@ -53,7 +50,7 @@ export function PastedWebhookSteps({
   const setup = pastedWebhookSetup(t, source);
   if (!setup) return null;
   return (
-    <SharedPastedWebhookSteps
+    <PastedWebhookSteps
       className="gap-6"
       url={source.webhookUrl}
       setup={setup}

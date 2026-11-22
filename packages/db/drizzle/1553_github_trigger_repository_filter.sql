@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- online-safety-exception: unbatched-data: adds one repository condition to the GitHub triggers of tasks that keep exactly one GitHub repository, once; few rows.
+-- online-safety-exception: unbatched-data: adds one repository condition to the GitHub triggers of agent tasks that keep exactly one GitHub repository, once; few rows.
 -- GitHub triggers filter on their repository (docs/agents.md, "Starts when").
 -- Until now the repository picked for an agent's GitHub trigger was only
 -- checked out: no condition named it, so the trigger fired for every
@@ -8,13 +8,16 @@
 -- condition instead (all repositories, or the chosen ones), and each run
 -- checks out the repository its event is about.
 --
--- Existing triggers keep their one repository and now fire only for it: each
--- trigger on a GitHub source, whose task keeps exactly one
+-- Existing agent triggers keep their one repository and now fire only for it:
+-- each trigger on a GitHub source, whose task belongs to an agent
+-- (agent_config.agentId, what Add trigger saves), keeps exactly one
 -- repository resource on github.com and whose conditions name no
 -- data.repository field yet, gets
 -- {"field":"data.repository.full_name","op":"equals","value":"owner/name"}.
 -- A task with no repository keeps firing for every repository; a task with
--- several keeps its conditions (none was saved by Add trigger).
+-- several keeps its conditions (none was saved by Add trigger). Other
+-- automations are left as they are: watching every repository while working
+-- in one can be deliberate there.
 --
 -- Rolling: the previous release reads the same condition model and applies
 -- the condition as it would one a person added. event_triggers,
@@ -42,7 +45,8 @@ BEGIN
       CASE WHEN jsonb_typeof(task.agent_config -> 'resources') = 'array'
         THEN task.agent_config -> 'resources' ELSE '[]'::jsonb END
     ) resource
-    WHERE resource ->> 'kind' = 'repository'
+    WHERE task.agent_config ->> 'agentId' IS NOT NULL
+      AND resource ->> 'kind' = 'repository'
       AND resource ->> 'uri' ~ '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
       AND (
         SELECT count(*) FROM jsonb_array_elements(task.agent_config -> 'resources') other

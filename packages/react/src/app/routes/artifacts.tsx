@@ -244,6 +244,8 @@ function ArtifactListRoute({
     canPin &&
     filters.q.trim() === "" &&
     filters.status === "active" &&
+    // Below the list's last page, so it doesn't move as more pages load.
+    !catalog.nextCursor &&
     (filters.kind === "site" || (filters.kind === "all" && empty));
   return (
     <ContentPage width="standard" className="pt-6" {...position}>

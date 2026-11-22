@@ -92,11 +92,15 @@ export function AgentsPage({
     });
   const create = () =>
     void navigate({ to: "/workspaces/$workspaceId/agents/new", params: { workspaceId } });
-  const readyMade = useReadyMadeAgents(workspaceId, agents, (agent) => {
+  const readyMade = useReadyMadeAgents(workspaceId, agents, filter === "all", (agent) => {
     state.replace((current) => [agent, ...current]);
     open(agent);
   });
   const canAdd = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
+  // Ready-made agents show in one place: their own section when it's there,
+  // otherwise the Add agent menu.
+  const readyMadeSection =
+    state.supported && canAdd && agents !== undefined && readyMade.offered.length > 0;
 
   const importFile = async (file: File) => {
     const parsed = parseAgentFile(await file.text());
@@ -146,6 +150,7 @@ export function AgentsPage({
       <AddAgentMenu
         workspaceId={workspaceId}
         readyMade={readyMade}
+        showReadyMade={!readyMadeSection}
         onBlank={create}
         onImport={() => fileInput.current?.click()}
       />
@@ -265,7 +270,7 @@ export function AgentsPage({
           )}
         </DetailSection>
       )}
-      {state.supported && canAdd && agents !== undefined && readyMade.offered.length > 0 ? (
+      {readyMadeSection ? (
         <ReadyMadeAgents workspaceId={workspaceId} readyMade={readyMade} />
       ) : null}
       {after}
@@ -287,23 +292,28 @@ type ReadyMadeAgentsState = {
 function useReadyMadeAgents(
   workspaceId: string,
   agents: readonly AgentSummary[] | undefined,
+  /** Whether `agents` is every agent here (the All filter), not only some. */
+  listedIsAll: boolean,
   onAdded: (agent: Agent) => void,
 ): ReadyMadeAgentsState {
   const { client } = useAppContext();
   const [templates, setTemplates] = useState<AgentTemplate[] | null>(null);
   // Ready-made agents anyone here already added, whatever the list's filter.
-  const [addedHere, setAddedHere] = useState<ReadonlySet<string>>(new Set());
+  // null when that can't be read: then only the All list can tell.
+  const [addedHere, setAddedHere] = useState<ReadonlySet<string> | null>(new Set());
   const [adding, setAdding] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     Promise.all([
       client.listAgentTemplates(workspaceId),
-      client.listAgents(workspaceId).catch(() => []),
+      client.listAgents(workspaceId).catch(() => null),
     ]).then(
       ([list, all]) => {
         if (!live) return;
         setAddedHere(
-          new Set(all.flatMap((agent) => (agent.templateKey ? [agent.templateKey] : []))),
+          all
+            ? new Set(all.flatMap((agent) => (agent.templateKey ? [agent.templateKey] : [])))
+            : null,
         );
         setTemplates(list);
       },
@@ -316,14 +326,18 @@ function useReadyMadeAgents(
   const listed = new Set(
     (agents ?? []).flatMap((agent) => (agent.templateKey ? [agent.templateKey] : [])),
   );
-  const offered = (templates ?? []).filter(
-    (template) => !listed.has(template.key) && !addedHere.has(template.key),
-  );
+  const offered =
+    addedHere === null && !listedIsAll
+      ? []
+      : (templates ?? []).filter(
+          (template) => !listed.has(template.key) && !addedHere?.has(template.key),
+        );
   const add = async (template: AgentTemplate) => {
+    if (adding !== null) return;
     setAdding(template.key);
     try {
       const agent = await client.createAgentFromTemplate(workspaceId, template.key);
-      setAddedHere((current) => new Set(current).add(template.key));
+      setAddedHere((current) => (current ? new Set(current).add(template.key) : current));
       toast.success(`Added ${agent.name}`);
       onAdded(agent);
     } catch (error) {
@@ -385,11 +399,14 @@ function ReadyMadeAgents({
 function AddAgentMenu({
   workspaceId,
   readyMade,
+  showReadyMade,
   onBlank,
   onImport,
 }: {
   workspaceId: string;
   readyMade: ReadyMadeAgentsState;
+  /** False while the page's own Ready-made section lists them. */
+  showReadyMade: boolean;
   onBlank: () => void;
   onImport: () => void;
 }) {
@@ -410,7 +427,7 @@ function AddAgentMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">
-        {offered.length > 0 ? (
+        {showReadyMade && offered.length > 0 ? (
           <>
             <DropdownMenuLabel>Ready-made</DropdownMenuLabel>
             {offered.map((template) => (

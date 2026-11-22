@@ -51,7 +51,11 @@ import {
   connectGitHubHref,
   useGitHubConnected,
 } from "./event-source-connect-first";
-import { PastedWebhookSteps, StandardWebhookHelp, WebhookUrlField } from "./event-source-setup";
+import {
+  SourcePastedWebhookSteps,
+  StandardWebhookHelp,
+  WebhookUrlField,
+} from "./event-source-setup";
 import { useEventSourceLogo, useEventTriggersEnabled } from "./use-event-sources";
 
 const NAME_MAX_LENGTH = 120;
@@ -401,7 +405,7 @@ function PastedWebhookConnect({
         return true;
       }}
     >
-      <PastedWebhookSteps
+      <SourcePastedWebhookSteps
         source={source}
         secret={secret}
         error={error}

@@ -32,8 +32,8 @@ export function AgentTriggerRepositories({
     <Field
       label="Repositories"
       hint={
-        value.length === 0
-          ? "Every repository. Each run opens the one its event is about."
+        full
+          ? `Up to ${AGENT_TRIGGER_REPOSITORIES_MAX} repositories. For more, choose all.`
           : "Each run opens the one its event is about."
       }
     >
