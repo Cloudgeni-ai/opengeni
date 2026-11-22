@@ -488,8 +488,10 @@ export function SessionList() {
   // root workstreams and preserve their expandable descendant hierarchy.
   const hierarchyMode = search.length === 0;
   // Apps as rows of their own (their chats under them), unless the person's
-  // sidebar options list apps' chats as ordinary chats.
+  // sidebar options list apps' chats as ordinary chats. Until that's known
+  // the list waits, so it never draws app rows only to redraw without them.
   const shellSlots = useContext(SessionShellSlotsContext);
+  const appRowsPending = shellSlots.sessionsShowApps === null;
   const appRows = shellSlots.sessionsShowApps !== false;
   const sidebarApps = shellSlots.sidebarApps;
   const channelMode = browseGroupBy === "project";
@@ -4069,10 +4071,12 @@ export function SessionList() {
               {announcement}
             </p>
             {(loading && allSessions.length === 0) ||
-            (channelMode && channelsQuery.loading && channels.length === 0) ? (
+            (channelMode && channelsQuery.loading && channels.length === 0) ||
+            appRowsPending ? (
               // The second clause holds the skeleton until the initial channels
               // read resolves, so the rail paints Recents/workstreams directly
-              // instead of flashing the old recency layout first.
+              // instead of flashing the old recency layout first. The third
+              // holds it until the person's choice of app rows is known.
               <SessionListSkeleton />
             ) : error && allSessions.length === 0 ? (
               <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">

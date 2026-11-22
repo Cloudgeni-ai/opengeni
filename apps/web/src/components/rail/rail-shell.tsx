@@ -12,7 +12,6 @@ import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
-import { readResolvedSidebarOptions } from "@opengeni/contracts/sidebar-layout";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { toast } from "sonner";
 import { AppPages } from "@opengeni/react/app/routes/app-page";
@@ -30,12 +29,12 @@ import {
 
 /**
  * The person's sidebar (docs/sidebar-layout.md) as the Sessions list uses it:
- * whether apps are rows of their own there, and "Add to sidebar" in an app
- * row's menu.
+ * whether apps are rows of their own there (null until known, so the list
+ * draws the right rows first), and "Add to sidebar" in an app row's menu.
  */
 function useSessionsSidebarOptions(workspaceId: string) {
-  const { layout, update } = useSidebarLayout(workspaceId);
-  const sessionsShowApps = readResolvedSidebarOptions(layout?.options).sessionsShowApps;
+  const { layout, options, update } = useSidebarLayout(workspaceId);
+  const sessionsShowApps = options ? options.sessionsShowApps : null;
   const sidebarApps = useMemo(() => {
     if (!layout?.personal.available) return undefined;
     const linked = new Set<string>();

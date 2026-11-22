@@ -1008,6 +1008,35 @@ async function expectEachConversationOnce(titles: string[]) {
   expect(await counts()).toEqual(titles.map(() => 1));
 }
 
+test("with apps not grouped, the list waits for that choice instead of drawing app rows first", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light&appRows=pending`, { timeout: 60_000 });
+  await sidebar().locator(".animate-pulse").first().waitFor();
+  // Record every Site row the list ever draws from here on.
+  await page.evaluate(() => {
+    const seen = { siteRows: 0 };
+    Object.assign(window, { appRowsSeen: seen });
+    new MutationObserver(() => {
+      seen.siteRows = Math.max(seen.siteRows, document.querySelectorAll("[data-site-row]").length);
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  // The list reads meanwhile but draws nothing until the choice is known.
+  await page.waitForTimeout(500);
+  expect(await sidebar().locator("[data-site-row], a[data-session-row]").count()).toBe(0);
+  await page.evaluate(() =>
+    (
+      window as unknown as { sessionSidebarAppRows: (value: boolean) => void }
+    ).sessionSidebarAppRows(false),
+  );
+  // An app's chats are ordinary chats; no app row was ever drawn.
+  await railConversation("Time filters across all graphs").waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(0);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { appRowsSeen: { siteRows: number } }).appRowsSeen.siteRows,
+    ),
+  ).toBe(0);
+});
+
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteRow("Opengeni usage").waitFor();

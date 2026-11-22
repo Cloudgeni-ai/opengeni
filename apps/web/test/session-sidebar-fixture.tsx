@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { OpenGeniProvider } from "@opengeni/react";
 import {
   createRootRoute,
@@ -12,6 +12,7 @@ import { SiteViewRoute } from "@opengeni/react/app/routes/site-view";
 import { siteViewSearch } from "@opengeni/react/app/lib/routes";
 import { Toaster } from "sonner";
 import { SessionList } from "@opengeni/react/app/components/rail/session-list";
+import { SessionShellSlotsContext } from "../../../packages/react/src/app/components/rail/session-shell-slots";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   sessionBrowsePreferenceStorageId,
@@ -24,6 +25,27 @@ import {
   workspaceId,
 } from "./session-sidebar-context";
 import "../src/styles.css";
+
+// `?appRows=pending`: the person's "Group chats under their app" choice isn't
+// known yet, as before the sidebar layout arrives; `sessionSidebarAppRows(value)`
+// settles it.
+const pendingAppRows = new URLSearchParams(window.location.search).get("appRows") === "pending";
+let settleAppRows: (value: boolean) => void = () => {};
+Object.assign(window, { sessionSidebarAppRows: (value: boolean) => settleAppRows(value) });
+
+function RailSessionList() {
+  const [sessionsShowApps, setSessionsShowApps] = useState<boolean | null>(
+    pendingAppRows ? null : true,
+  );
+  settleAppRows = setSessionsShowApps;
+  const slots = useMemo(() => ({ sessionsShowApps }), [sessionsShowApps]);
+  if (!pendingAppRows) return <SessionList />;
+  return (
+    <SessionShellSlotsContext.Provider value={slots}>
+      <SessionList />
+    </SessionShellSlotsContext.Provider>
+  );
+}
 
 function RequestProfile() {
   const [snapshot, setSnapshot] = useState("");
@@ -102,7 +124,7 @@ const root = createRootRoute({
                 <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
               </header>
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
-                <SessionList />
+                <RailSessionList />
               </div>
               <footer className="shrink-0 border-t border-border px-6 py-4 text-xs text-fg-muted">
                 Alex Morgan

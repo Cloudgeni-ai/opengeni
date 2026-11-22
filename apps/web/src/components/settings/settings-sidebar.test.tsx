@@ -426,3 +426,65 @@ test("search finds settings by name and keeps the keyboard in the rail", async (
     container.remove();
   }
 });
+
+test("a row's More button says what it does, with an arrow kept for touch", async () => {
+  narrow = false;
+  const moved: string[] = [];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <main>
+          <SettingsShell
+            label="Settings"
+            back={{ label: "Back to sessions", link: <a href="#back" /> }}
+            home={settingsHomeLink("workspace")}
+            sections={[
+              {
+                id: "workspace",
+                label: "Workspace",
+                groups: [
+                  {
+                    items: [
+                      {
+                        id: "workspace:general",
+                        label: "General",
+                        icon: SlidersHorizontalIcon,
+                        link: <a href="#general" />,
+                        place: {
+                          label: "Move to More",
+                          toMore: true,
+                          run: () => moved.push("workspace:general"),
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ]}
+            activeId="workspace:general"
+            currentPage="General"
+            currentScope="Workspace"
+            page={{ title: "General" }}
+          >
+            <p>Page body</p>
+          </SettingsShell>
+        </main>,
+      ),
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Move to More: General"]',
+    );
+    expect(button).not.toBeNull();
+    // Its words show with a mouse; touch keeps the arrow. No tooltip is needed.
+    expect(button!.textContent).toBe("Move to More");
+    expect(button!.querySelector("span")?.className).toContain("not-pointer-fine:hidden");
+    expect(button!.querySelector("svg")?.getAttribute("class")).toContain("pointer-fine:hidden");
+    expect(button!.hasAttribute("title")).toBe(false);
+    await act(async () => button!.click());
+    expect(moved).toEqual(["workspace:general"]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

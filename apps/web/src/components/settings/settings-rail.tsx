@@ -27,7 +27,6 @@ import {
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 import { toast } from "sonner";
-import { readResolvedSidebarOptions } from "@opengeni/contracts/sidebar-layout";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import {
@@ -570,15 +569,15 @@ export function useSettingsRail(input: {
     : { label: `Back to ${productName}`, link: <Link to="/" /> };
 
   // The person's own choice of which entries stay at the top; the rest fold
-  // under More (docs/sidebar-layout.md). Unset keeps everything at the top.
+  // under More (docs/sidebar-layout.md). Unset keeps everything at the top;
+  // the last known choice draws at once on a reload (see useSidebarLayout).
   const sidebarLayout = useSidebarLayout(workspace?.id ?? "", !!workspace);
-  const personalLayout = sidebarLayout.layout?.personal.available ? sidebarLayout.layout : null;
+  const ownSidebar = sidebarLayout.layout
+    ? sidebarLayout.layout.personal.available
+    : !!workspace && !!sidebarLayout.options?.settingsMore;
   const updateLayout = sidebarLayout.update;
-  const moreSettings = personalLayout
-    ? readResolvedSidebarOptions(personalLayout.options).settingsMore
-    : null;
-  const railSections = personalLayout
-    ? foldSettingsRail(sections, moreSettings, (settingsMore) => {
+  const railSections = ownSidebar
+    ? foldSettingsRail(sections, sidebarLayout.options?.settingsMore ?? null, (settingsMore) => {
         updateLayout({
           scope: "personal",
           changes: [{ op: "options", settingsMore }],

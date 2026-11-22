@@ -7,6 +7,7 @@ import {
   createWorkspaceArtifact,
   deleteAgent,
   readSidebarLayouts,
+  writeSidebarLayout,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -448,4 +449,67 @@ test("agent links show the agent's name and avatar, only to people who can see i
     items: [{ id: "team", type: "group", label: "Crew", items: [] }],
   });
   expect(shape((await readSidebarLayoutForGrant(deps, ada)).items)).toEqual([["team", ["my-me"]]]);
+});
+
+test("during a rolling deploy, this version's writes keep what a newer replica stored", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  const a = await app(ws, null);
+  const scope = { accountId: ws.accountId, workspaceId: ws.workspaceId };
+  // A newer replica stored an option, a field and a version this one doesn't know.
+  const newer = { railDensity: "compact" };
+  await writeSidebarLayout(client.db, scope, {
+    subjectId: null,
+    expectedRevision: 0,
+    layout: { version: 2, items: [], options: { ...newer, sessionsShowApps: false }, sections: [] },
+    updatedBy: "user:admin",
+  });
+  await writeSidebarLayout(client.db, scope, {
+    subjectId: "user:ada",
+    expectedRevision: 0,
+    layout: {
+      version: 2,
+      hidden: [],
+      added: [],
+      order: {},
+      options: { ...newer, settingsMore: ["workspace:usage"] },
+      sections: [],
+    },
+    updatedBy: "user:ada",
+  });
+  // This version changes something else in each.
+  await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    changes: [{ op: "add", item: { id: "a", type: "app", appId: a } }],
+  });
+  const answer = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [{ op: "options", sessionsShowApps: true }],
+  });
+  const rows = await readSidebarLayouts(client.db, scope, "user:ada");
+  expect(rows.workspace?.layout).toEqual({
+    version: 2,
+    items: [{ id: "a", type: "app", appId: a }],
+    options: { ...newer, sessionsShowApps: false },
+    sections: [],
+  });
+  expect(rows.personal?.layout).toEqual({
+    version: 2,
+    hidden: [],
+    added: [],
+    order: {},
+    options: { ...newer, settingsMore: ["workspace:usage"], sessionsShowApps: true },
+    sections: [],
+  });
+  // Answers carry only the options this version knows.
+  expect(answer.personal.options).toEqual({
+    sessionsShowApps: true,
+    settingsMore: ["workspace:usage"],
+  });
+  expect(answer.options).toEqual({
+    sessionsShowApps: true,
+    hiddenNavEntries: [],
+    settingsMore: ["workspace:usage"],
+  });
 });

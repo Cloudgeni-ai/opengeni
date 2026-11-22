@@ -171,7 +171,17 @@ export const DEFAULT_SIDEBAR_LAYOUT_OPTIONS: ResolvedSidebarLayoutOptions = {
   settingsMore: null,
 };
 
-/** Stored options, read leniently: wrong values drop, entries a newer version added stay. */
+/** The option keys this version knows, from its schema. */
+function sidebarOptionKeys(): readonly string[] {
+  return Object.keys(SidebarLayoutOptions.shape);
+}
+
+/**
+ * Stored options, read leniently. Values this version reads are tidied
+ * (duplicates and malformed entries drop); everything else stays as it is,
+ * options a newer version added and values a newer version widened alike, so
+ * this version's writes keep them. Read them with knownSidebarOptions.
+ */
 export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
   if (!isRecord(value)) return {};
   const strings = (list: unknown, max: number) =>
@@ -188,12 +198,10 @@ export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
   const hidden = strings(value.hiddenNavEntries, 32);
   const more = strings(value.settingsMore, SIDEBAR_SETTINGS_MORE_MAX);
   return {
-    ...(typeof value.sessionsShowApps === "boolean"
-      ? { sessionsShowApps: value.sessionsShowApps }
-      : {}),
+    ...value,
     ...(hidden ? { hiddenNavEntries: hidden as SidebarNavEntry[] } : {}),
     ...(more ? { settingsMore: more } : {}),
-  };
+  } as SidebarLayoutOptions;
 }
 
 /** The options in effect: a person's own choice, else the default's, else today's behaviour. */
@@ -201,13 +209,15 @@ export function mergeSidebarOptions(
   workspace: SidebarLayoutOptions | undefined,
   personal: SidebarLayoutOptions | undefined,
 ): ResolvedSidebarLayoutOptions {
+  const own = knownSidebarOptions(personal);
+  const shared = knownSidebarOptions(workspace);
   return {
     sessionsShowApps:
-      personal?.sessionsShowApps ??
-      workspace?.sessionsShowApps ??
+      own?.sessionsShowApps ??
+      shared?.sessionsShowApps ??
       DEFAULT_SIDEBAR_LAYOUT_OPTIONS.sessionsShowApps,
-    hiddenNavEntries: [...(personal?.hiddenNavEntries ?? workspace?.hiddenNavEntries ?? [])],
-    settingsMore: personal?.settingsMore ?? workspace?.settingsMore ?? null,
+    hiddenNavEntries: [...(own?.hiddenNavEntries ?? shared?.hiddenNavEntries ?? [])],
+    settingsMore: own?.settingsMore ?? shared?.settingsMore ?? null,
   };
 }
 
@@ -216,22 +226,26 @@ export function readResolvedSidebarOptions(value: unknown): ResolvedSidebarLayou
   return mergeSidebarOptions(readStoredSidebarOptions(value), undefined);
 }
 
-/** Stored options as this version knows them: rail entries a newer version added are left out. */
+/**
+ * Stored options as this version reads them, for answers: options a newer
+ * version added, values it widened and rail entries it added are left out
+ * (storage keeps them).
+ */
 export function knownSidebarOptions(
   options: SidebarLayoutOptions | undefined,
 ): SidebarLayoutOptions | undefined {
   if (!options) return undefined;
-  const { hiddenNavEntries, ...rest } = options;
-  return {
-    ...rest,
-    ...(hiddenNavEntries
-      ? {
-          hiddenNavEntries: hiddenNavEntries.filter((entry) =>
-            (SIDEBAR_NAV_ENTRIES as readonly string[]).includes(entry),
-          ),
-        }
-      : {}),
-  };
+  const known: SidebarLayoutOptions = {};
+  const { sessionsShowApps, hiddenNavEntries, settingsMore } = options as Record<string, unknown>;
+  if (typeof sessionsShowApps === "boolean") known.sessionsShowApps = sessionsShowApps;
+  if (Array.isArray(hiddenNavEntries))
+    known.hiddenNavEntries = hiddenNavEntries.filter((entry): entry is SidebarNavEntry =>
+      (SIDEBAR_NAV_ENTRIES as readonly unknown[]).includes(entry),
+    );
+  if (Array.isArray(settingsMore))
+    known.settingsMore = settingsMore.filter((entry): entry is string => typeof entry === "string");
+  // Every option the schema has is read above.
+  return known;
 }
 
 export const SidebarItemId = /* @__PURE__ */ defineSchema(() =>
@@ -397,15 +411,21 @@ export const SIDEBAR_ITEM_TYPES: readonly SidebarItemType[] = [
  */
 export type StoredSidebarItem = { id: string; type: string; [key: string]: unknown };
 
-/** The workspace default, as stored. */
+/**
+ * The workspace default, as stored. Fields a newer version added (here and
+ * in `options`) are kept as they are when this version writes, so API
+ * replicas of different versions never drop each other's settings during a
+ * rolling deploy.
+ */
 export type StoredSidebarLayout = {
   version: number;
   items: StoredSidebarItem[];
   /** Navigation options for everyone; unset keeps today's behaviour. */
   options?: SidebarLayoutOptions;
+  [field: string]: unknown;
 };
 
-/** A person's own changes on top of the workspace default, as stored. */
+/** A person's own changes on top of the workspace default, as stored; newer fields are kept too. */
 export type StoredSidebarPersonalChanges = {
   version: number;
   /** Workspace items this person hid. */
@@ -416,6 +436,7 @@ export type StoredSidebarPersonalChanges = {
   order: Record<string, string[]>;
   /** This person's own navigation options, over the default's. */
   options?: SidebarLayoutOptions;
+  [field: string]: unknown;
 };
 
 export const EMPTY_SIDEBAR_LAYOUT: StoredSidebarLayout = {
@@ -459,6 +480,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const SIDEBAR_LAYOUT_KEYS: ReadonlySet<string> = new Set(["version", "items", "options"]);
+const SIDEBAR_PERSONAL_KEYS: ReadonlySet<string> = new Set([
+  "version",
+  "hidden",
+  "added",
+  "order",
+  "options",
+]);
+
+/** The fields of `value` this version doesn't know (a newer version wrote them), as they are. */
+function fieldsBeyond(
+  value: Record<string, unknown>,
+  known: ReadonlySet<string>,
+): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !known.has(key)));
+}
+
+/**
+ * The stored version: a newer version's number stays, so its own fields stay
+ * meaningful. So a version bump must keep layouts readable and writable by
+ * older versions (new fields and values only, never a changed meaning).
+ */
+function storedVersion(value: unknown): number {
+  return typeof value === "number" && value > SIDEBAR_LAYOUT_VERSION
+    ? value
+    : SIDEBAR_LAYOUT_VERSION;
+}
+
 function storedItem(value: unknown): StoredSidebarItem | null {
   if (!isRecord(value)) return null;
   const { id, type } = value;
@@ -476,18 +525,19 @@ function storedItem(value: unknown): StoredSidebarItem | null {
   return { ...value, id, type };
 }
 
-/** Read a stored workspace layout leniently: malformed entries drop, unknown types stay. */
+/** Read a stored workspace layout leniently: malformed entries drop, unknown types and fields stay. */
 export function readStoredSidebarLayout(value: unknown): StoredSidebarLayout {
   if (!isRecord(value) || !Array.isArray(value.items)) return EMPTY_SIDEBAR_LAYOUT;
   const options = readStoredSidebarOptions(value.options);
   return {
-    version: typeof value.version === "number" ? value.version : SIDEBAR_LAYOUT_VERSION,
+    ...fieldsBeyond(value, SIDEBAR_LAYOUT_KEYS),
+    version: storedVersion(value.version),
     items: value.items.map(storedItem).filter((item): item is StoredSidebarItem => item !== null),
     ...(Object.keys(options).length ? { options } : {}),
   };
 }
 
-/** Read stored personal changes leniently. */
+/** Read stored personal changes leniently; fields a newer version added stay. */
 export function readStoredSidebarPersonalChanges(value: unknown): StoredSidebarPersonalChanges {
   if (!isRecord(value)) return EMPTY_SIDEBAR_PERSONAL_CHANGES;
   const ids = (list: unknown) =>
@@ -500,7 +550,8 @@ export function readStoredSidebarPersonalChanges(value: unknown): StoredSidebarP
         const item = storedItem(entry.item);
         if (!item) return [];
         const parentId = typeof entry.parentId === "string" ? entry.parentId : null;
-        return [{ parentId, item }];
+        // Fields a newer version added to the entry stay.
+        return [{ ...entry, parentId, item }];
       })
     : [];
   const order: Record<string, string[]> = {};
@@ -508,7 +559,8 @@ export function readStoredSidebarPersonalChanges(value: unknown): StoredSidebarP
     for (const [key, list] of Object.entries(value.order)) order[key] = ids(list);
   const options = readStoredSidebarOptions(value.options);
   return {
-    version: typeof value.version === "number" ? value.version : SIDEBAR_LAYOUT_VERSION,
+    ...fieldsBeyond(value, SIDEBAR_PERSONAL_KEYS),
+    version: storedVersion(value.version),
     hidden: ids(value.hidden),
     added,
     order,
@@ -1049,12 +1101,24 @@ function applyOptions(
   change: Extract<SidebarLayoutChange, { op: "options" }>,
 ): SidebarLayoutOptions | undefined {
   const next: Record<string, unknown> = { ...options };
-  for (const key of ["sessionsShowApps", "hiddenNavEntries", "settingsMore"] as const) {
-    const value = change[key];
+  for (const key of sidebarOptionKeys()) {
+    const value = (change as Record<string, unknown>)[key];
     if (value === null) delete next[key];
-    else if (value !== undefined) next[key] = Array.isArray(value) ? [...new Set(value)] : value;
+    else if (value !== undefined)
+      next[key] = Array.isArray(value)
+        ? [...new Set([...value, ...unknownEntries(key, next[key])])]
+        : value;
   }
   return Object.keys(next).length ? (next as SidebarLayoutOptions) : undefined;
+}
+
+/**
+ * Hidden rail entries a newer version added: answers leave them out, so a
+ * client's list never names them; keep them when it replaces the list.
+ */
+function unknownEntries(key: string, stored: unknown): unknown[] {
+  if (key !== "hiddenNavEntries" || !Array.isArray(stored)) return [];
+  return stored.filter((entry) => !(SIDEBAR_NAV_ENTRIES as readonly unknown[]).includes(entry));
 }
 
 function withOptions<T extends { options?: SidebarLayoutOptions }>(
@@ -1072,11 +1136,16 @@ export function applyWorkspaceSidebarChanges(
 ): StoredSidebarLayout {
   let items = cloneItems(layout.items);
   let options = layout.options ? structuredClone(layout.options) : undefined;
+  // Fields a newer version added stay unless the default is reset.
+  let beyond = structuredClone(fieldsBeyond(layout, SIDEBAR_LAYOUT_KEYS));
+  let version = storedVersion(layout.version);
   for (const change of changes) {
     switch (change.op) {
       case "reset":
         items = [];
         options = undefined;
+        beyond = {};
+        version = SIDEBAR_LAYOUT_VERSION;
         break;
       case "options":
         options = applyOptions(options, change);
@@ -1131,7 +1200,7 @@ export function applyWorkspaceSidebarChanges(
     }
   }
   checkLimits(items);
-  return withOptions<StoredSidebarLayout>({ version: SIDEBAR_LAYOUT_VERSION, items }, options);
+  return withOptions<StoredSidebarLayout>({ ...beyond, version, items }, options);
 }
 
 /**
@@ -1293,7 +1362,8 @@ export function applyPersonalSidebarChanges(
     const kept = level ? ids.filter((id) => level.has(id)) : [];
     if (kept.length) order[key] = kept;
   }
-  return { ...next, version: SIDEBAR_LAYOUT_VERSION, order };
+  // `next` keeps fields a newer version added (a reset clears them).
+  return { ...next, version: storedVersion(next.version), order };
 }
 
 // ---------------------------------------------------------------------------

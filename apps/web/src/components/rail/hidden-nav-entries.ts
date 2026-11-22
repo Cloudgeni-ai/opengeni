@@ -1,7 +1,6 @@
 // Built-in rail entries a person (or the workspace default) hides
 // (docs/sidebar-layout.md, `hiddenNavEntries`). The page you are on, and an
 // entry with something waiting for you, still shows.
-import { readResolvedSidebarOptions } from "@opengeni/contracts/sidebar-layout";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import type { WorkspaceConfigTarget } from "./workspace-nav-data";
 
@@ -26,6 +25,7 @@ export function hiddenNavEntries(hidden: readonly string[]): {
 }
 
 export function useHiddenNavEntries(workspaceId: string) {
-  const { layout } = useSidebarLayout(workspaceId);
-  return hiddenNavEntries(readResolvedSidebarOptions(layout?.options).hiddenNavEntries);
+  // The last known choice draws at once on a reload (see useSidebarLayout).
+  const { options } = useSidebarLayout(workspaceId);
+  return hiddenNavEntries(options?.hiddenNavEntries ?? []);
 }
