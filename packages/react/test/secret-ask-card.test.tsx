@@ -782,7 +782,7 @@ describe("secret ask card: answered history", () => {
 });
 
 describe("secret ask card in SessionConversation", () => {
-  test("secretAnswers reach the client unchanged; a failed send keeps the value", async () => {
+  test("uses the server's task-only choices and keeps the answer on a failed send", async () => {
     const sent: SubmitHumanInputResponseRequest[] = [];
     let failNext = true;
     const client = fakeClient({
@@ -800,7 +800,8 @@ describe("secret ask card in SessionConversation", () => {
           creationAttemptId: "attempt-1",
           toolCallId: "call-1",
           status: "pending",
-          questions: [secretQuestion({ item: "GitHub", saveTo: "task" })],
+          questions: [secretQuestion({ item: "GitHub", saveTo: "workspace" })],
+          secretSaveTargets: ["task"],
           allowSkip: false,
           response: null,
           respondedBy: null,
@@ -834,6 +835,7 @@ describe("secret ask card in SessionConversation", () => {
         workspaceId={WORKSPACE_ID}
         sessionId={SESSION_ID}
         modelPicker={false}
+        humanInputProps={{ allowedSaveTo: ["user", "task", "workspace"] }}
       />,
     );
     const deadline = Date.now() + 3_000;
@@ -842,6 +844,8 @@ describe("secret ask card in SessionConversation", () => {
       await flush(10);
     }
     const input = secretInput(mounted.container);
+    expect(input.form!.querySelector("select")).toBeNull();
+    expect(input.form!.textContent).toContain("Save to: This task");
     await typeSecret(input, SECRET);
     const form = input.form!;
     const send = async () => {

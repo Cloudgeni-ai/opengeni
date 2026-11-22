@@ -71,7 +71,11 @@ export function SecretQuestionField({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
   const saveToChoice = resolveSecretSaveTo(spec, allowedSaveTo);
-  const [saveTo, setSaveTo] = useState<HumanInputSecretSaveTo>(saveToChoice.initial);
+  const [chosenSaveTo, setSaveTo] = useState<HumanInputSecretSaveTo | null>(null);
+  const saveTo =
+    chosenSaveTo && saveToChoice.options.includes(chosenSaveTo)
+      ? chosenSaveTo
+      : saveToChoice.initial;
   const saveToRef = useRef(saveTo);
   saveToRef.current = saveTo;
   const [revealed, setRevealed] = useState(false);
@@ -290,38 +294,44 @@ export function SecretQuestionField({
         ) : null}
       </div>
 
-      <div className="flex min-w-0 flex-col gap-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
-          <label htmlFor={saveToId} className="text-og-sm font-medium text-og-fg">
-            {messages.secretSaveTo}
-          </label>
-          <select
-            id={saveToId}
-            value={saveTo}
-            onChange={(event) => setSaveTo(event.target.value as HumanInputSecretSaveTo)}
-            aria-describedby={
-              [vaultHintId, saveToChoice.downgraded ? downgradeId : null]
-                .filter(Boolean)
-                .join(" ") || undefined
-            }
-            className="h-10 min-w-[10rem] cursor-pointer rounded-og-md border border-og-border bg-og-surface-1 px-2.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50 pointer-coarse:h-11"
-          >
-            {saveToChoice.options.map((option) => (
-              <option key={option} value={option}>
-                {messages.secretSaveToOptions[option]}
-              </option>
-            ))}
-          </select>
-          <span id={vaultHintId} className="min-w-0 text-og-xs text-og-fg-muted">
-            {messages.secretVaultHint(saveTo, vault)}
-          </span>
+      {saveToChoice.options.length === 1 && saveTo === "task" && !vault ? (
+        <p className="m-0 text-og-sm text-og-fg-muted">
+          {messages.secretSaveTo}: {messages.secretSaveToOptions.task}
+        </p>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+            <label htmlFor={saveToId} className="text-og-sm font-medium text-og-fg">
+              {messages.secretSaveTo}
+            </label>
+            <select
+              id={saveToId}
+              value={saveTo}
+              onChange={(event) => setSaveTo(event.target.value as HumanInputSecretSaveTo)}
+              aria-describedby={
+                [vaultHintId, saveToChoice.downgraded ? downgradeId : null]
+                  .filter(Boolean)
+                  .join(" ") || undefined
+              }
+              className="h-10 min-w-[10rem] cursor-pointer rounded-og-md border border-og-border bg-og-surface-1 px-2.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50 pointer-coarse:h-11"
+            >
+              {saveToChoice.options.map((option) => (
+                <option key={option} value={option}>
+                  {messages.secretSaveToOptions[option]}
+                </option>
+              ))}
+            </select>
+            <span id={vaultHintId} className="min-w-0 text-og-xs text-og-fg-muted">
+              {messages.secretVaultHint(saveTo, vault)}
+            </span>
+          </div>
+          {saveToChoice.downgraded ? (
+            <p id={downgradeId} className="text-og-xs text-og-fg-muted">
+              {messages.secretSaveToDowngraded(saveToChoice.requested, saveToChoice.initial)}
+            </p>
+          ) : null}
         </div>
-        {saveToChoice.downgraded ? (
-          <p id={downgradeId} className="text-og-xs text-og-fg-muted">
-            {messages.secretSaveToDowngraded(saveToChoice.requested, saveToChoice.initial)}
-          </p>
-        ) : null}
-      </div>
+      )}
     </div>
   );
 }

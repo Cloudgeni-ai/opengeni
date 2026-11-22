@@ -30969,6 +30969,8 @@
         "$.respondedAt": "string! null",
         "$.respondedBy": "string! null",
         "$.response": "ref(HumanInputResponse)! null",
+        "$.secretSaveTargets": "array?",
+        "$.secretSaveTargets[]": "ref(SECRET_SAVE_TO)",
         "$.sessionId": "string!",
         "$.status": "ref(HumanInputRequestStatus)!",
         "$.toolCallId": "string!",
