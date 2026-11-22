@@ -41,6 +41,7 @@ const testFiles =
         "./test/e2e/secrets-fake-login.browser.e2e.ts",
         "./test/e2e/chat-media-entry.browser.e2e.ts",
         "./test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+        "./test/e2e/embedded-interaction-viewer.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-loading-startup.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",

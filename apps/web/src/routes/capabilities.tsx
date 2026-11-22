@@ -95,7 +95,8 @@ import type {
 import { ReadyMadeSection } from "@/components/capabilities/ready-made-section";
 import { SetupTabs, setupTabLabel } from "@/components/capabilities/setup-tabs";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { SkillsPanel } from "./skills-panel";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SKILL_OWNER_FILTER_OPTIONS, SkillsPanel, type SkillOwnerFilter } from "./skills-panel";
 import { partitionSimplifiedInterfaceServices } from "@/components/capabilities/simplified-interface-services";
 import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
@@ -365,6 +366,7 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
   // Its own apps come first; the rest of the catalog waits behind one button.
   const [moreAppsShown, setMoreAppsShown] = useState(false);
   const [query, setQuery] = useState("");
+  const [skillOwner, setSkillOwner] = useState<SkillOwnerFilter>("all");
   const hasQuery = query.trim().length > 0;
 
   // Detail/connect sheet. We store the id (+ registry flag + a snapshot for
@@ -2209,6 +2211,14 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
                 onValueChange={setQuery}
                 placeholder={focused ? "Search apps" : `Search ${activeTab}`}
               />
+              {activeTab === "skills" ? (
+                <SegmentedControl
+                  aria-label="Whose skills"
+                  options={SKILL_OWNER_FILTER_OPTIONS}
+                  value={skillOwner}
+                  onValueChange={setSkillOwner}
+                />
+              ) : null}
             </Toolbar>
             <CatalogActionContext.Provider value={catalogToolbar}>
               <div className="min-w-0">
@@ -2441,6 +2451,7 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
                       key={workspaceId}
                       workspaceId={workspaceId}
                       query={query}
+                      owner={skillOwner}
                       onImportSkill={() => importSkillRef.current?.()}
                       onFindSkill={() => {
                         const search =

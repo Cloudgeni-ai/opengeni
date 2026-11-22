@@ -135,6 +135,7 @@ export const SECTION_KEYS = [
   "page-access",
   "page-api-keys",
   "page-connected-agents",
+  "page-skills",
   "page-service-accounts",
   "page-models",
   "page-models-cache",
@@ -1019,6 +1020,14 @@ export const SECTIONS: readonly SectionMeta[] = [
       "How to add the Opengeni MCP server to a coding agent, then the outside agents working in the organization over MCP: whose they are, what they can do and where.",
     usedOn: "Organization settings > Connected agents, agent sign-in",
     load: () => import("./page-connected-agents"),
+  },
+  {
+    key: "page-skills",
+    group: "Pages",
+    title: "Skills",
+    purpose: "The workspace's skills, filtered by whose they are next to the search.",
+    usedOn: "Capabilities > Skills",
+    load: () => import("./page-skills"),
   },
   {
     key: "page-service-accounts",

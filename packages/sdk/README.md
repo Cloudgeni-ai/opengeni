@@ -1170,6 +1170,13 @@ Use the flat `OpenGeniClient` interaction methods when implementing a proxy or
 custom transport. Use `client.interaction` for application logic. Both are the
 same API and authority boundary.
 
+If `BrowserViewer` or `ComputerViewer` runs on your product's origin, set
+`interactionViewerOrigin` on the same-origin session proxy and include that
+exact origin in `OPENGENI_INTERACTION_VIEWER_ORIGINS` on the Opengeni API.
+This does not change credentialed console CORS. The user's `stream:view` and
+`sessions:control` grants still decide whether they can view frames and send
+input. The browser connects to the attachment's frame endpoint directly.
+
 ## Workspace artifacts
 
 Workspace artifacts are generic, immutable HTML publications. The SDK does not

@@ -9,7 +9,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
-  defaultPolicy,
+  connectedAgentDefaultPolicy,
   policyBlockedReason,
   type OrganizationAccessPolicy,
 } from "@/lib/organization-access";
@@ -17,24 +17,38 @@ import {
 /* ----------------------------------------------------------------------------
    The page an agent's sign-in opens: "Connect Claude Code to Opengeni". The
    agent acts as the person signing in, never with more than they can do; the
-   person picks the organization, what it can do and where. Read only in every
-   workspace is the default. Allow returns to the agent.
+   person picks the organization, what it can do and where. It starts in the
+   organization they last worked in, with the everyday-work set (Custom, every
+   box visible: never managing people, keys, billing or connections, never
+   reading secret values) in every workspace. Allow returns to the agent.
    -------------------------------------------------------------------------- */
 
 export function McpConsentPage({
   request,
+  lastUsedOrganizationId = null,
   onAnswer,
 }: {
   request: McpConnectionRequest;
+  /** The organization of the workspace the person last used here, when known. */
+  lastUsedOrganizationId?: string | null;
   /** Resolves once the browser is on its way back to the agent. */
   onAnswer: (decision: McpConnectionDecision) => Promise<void>;
 }) {
-  const [organizationId, setOrganizationId] = useState(
-    request.defaultOrganizationId ?? request.organizations[0]?.id ?? "",
+  const [organizationId, setOrganizationId] = useState(() =>
+    lastUsedOrganizationId &&
+    request.organizations.some((each) => each.id === lastUsedOrganizationId)
+      ? lastUsedOrganizationId
+      : (request.defaultOrganizationId ?? request.organizations[0]?.id ?? ""),
   );
   const organization =
     request.organizations.find((each) => each.id === organizationId) ?? request.organizations[0];
-  const [policy, setPolicy] = useState<OrganizationAccessPolicy>(defaultPolicy);
+  const startingPolicy = (id: string) =>
+    connectedAgentDefaultPolicy(
+      new Set(request.organizations.find((each) => each.id === id)?.grantable ?? []),
+    );
+  const [policy, setPolicy] = useState<OrganizationAccessPolicy>(() =>
+    startingPolicy(organization?.id ?? ""),
+  );
   const [errors, setErrors] = useState<{ permissions?: string; workspaces?: string }>({});
   const ceiling = useMemo(
     () => new Set<string>(organization?.grantable ?? []),
@@ -109,7 +123,7 @@ export function McpConsentPage({
                 value={organization.id}
                 onValueChange={(next) => {
                   setOrganizationId(next);
-                  setPolicy(defaultPolicy());
+                  setPolicy(startingPolicy(next));
                   setErrors({});
                 }}
                 className="w-full"

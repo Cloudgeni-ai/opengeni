@@ -338,8 +338,9 @@ access limitation. Missing publishing access itself still blocks publication.
 
 ## Completion gate (full apps)
 
-This gate applies to full apps. A single-file app is done when its saved link is in
-the reply (see "Single-file app" in SKILL.md).
+This gate applies to full apps. A single-file app is done when it passes its
+browser check and its saved link is in the reply (see "Single-file app" in
+SKILL.md).
 
 - Tests and the production browser build pass.
 - The compiled runtime is one self-contained HTML document within the published
@@ -354,6 +355,12 @@ the reply (see "Single-file app" in SKILL.md).
 - The authenticated parent-frame wrapper exists only in the hosted product.
   Do not build a synthetic parent-frame harness in the sandbox. After local
   validation and publication, use the returned app link for the hosted check.
+- In that hosted check, click through the app's main flows in the browser
+  (add, edit, delete, filter, each view) on one record clearly marked as a
+  test, then delete it; never edit or delete records you didn't create.
+  Every change shows without a reload or a Refresh click. A build, a parse
+  check or a screenshot is not this check; report any flow you couldn't
+  exercise.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.

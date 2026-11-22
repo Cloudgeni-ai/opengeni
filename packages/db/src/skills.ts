@@ -357,6 +357,8 @@ export async function listSkillRecords(
      * that from anywhere. Agents' reads leave this off and never see them.
      */
     includeOrganizationElsewhere?: boolean;
+    /** Only Skills of this scope (`user` is the person's own). */
+    scope?: "workspace" | "organization" | "user";
   } = {},
 ): Promise<SkillRecord[]> {
   const run = async (tx: Database) => {
@@ -409,6 +411,7 @@ export async function listSkillRecords(
         AND (h.scope='organization' OR (h.scope='workspace' AND h.scope_workspace_id=${context.workspaceId}::uuid)
           OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
         AND (${options.includeOrganizationElsewhere === true} OR ${organizationSkillWorksHere(context)})
+        AND (${options.scope ?? null}::text IS NULL OR h.scope::text=${options.scope ?? null}::text)
         AND (${options.skillId ?? null}::uuid IS NULL OR h.id=${options.skillId ?? null}::uuid)
         AND (${options.revisionId ?? null}::uuid IS NULL OR r.id IS NOT NULL)
         AND (${options.sessionId ?? null}::uuid IS NULL OR EXISTS (

@@ -873,6 +873,7 @@ export const englishMessages = {
   "browserViewer.nameHiddenFromNewBrowsers":
     "{name} hidden from new browsers. Existing browsers are unchanged.",
   "browserViewer.nameOpensByDefault": "{name} will open by default in future browsers.",
+  "browserViewer.nameReason": "{name}. {reason}",
   "browserViewer.nameReasonOpenANew": "{name}. {reason} Open a new browser to continue.",
   "browserViewer.nameVersionOpensByDefault":
     "{name} version {ordinal} will open by default in future browsers.",
@@ -2056,6 +2057,7 @@ export const englishMessages = {
     "This doesn't match the expected format. You can still send it.",
   "humanInputModel.thisQuestionIsRequired": "This question is required.",
   "humanInputModel.thisTask": "this task",
+  "humanInputModel.taskVaultName": "Task",
   "humanInputModel.thisTask2": "This task",
   "humanInputModel.thisWorkspace": "this workspace",
   "humanInputModel.thisWorkspace2": "This workspace",

@@ -315,6 +315,7 @@ import {
 import type {
   OrganizationSkillReach,
   SkillRecord,
+  SkillScope,
   SkillSummary,
   SkillWriteReceipt,
   SaveWorkspaceSkillRequest,
@@ -11840,12 +11841,19 @@ export class OpenGeniClient {
   /** Shared authored/installed catalog metadata. File bodies are read on demand. */
   async listWorkspaceSkills(
     workspaceId: string,
-    options: { cursor?: string; limit?: number; sessionId?: string } = {},
+    options: {
+      cursor?: string;
+      limit?: number;
+      sessionId?: string;
+      /** Only Skills of this scope; `user` is the caller's own. */
+      scope?: SkillScope;
+    } = {},
   ): Promise<{ skills: SkillSummary[]; nextCursor: string | null }> {
     const query = new URLSearchParams();
     if (options.cursor !== undefined) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.sessionId !== undefined) query.set("sessionId", options.sessionId);
+    if (options.scope !== undefined) query.set("scope", options.scope);
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/skills/content${suffix}`);
   }

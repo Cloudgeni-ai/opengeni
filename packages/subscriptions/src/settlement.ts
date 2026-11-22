@@ -20,7 +20,7 @@ export type SubscriptionCoreRefusalHealth =
   | { kind: "quota"; observation: SubscriptionQuota }
   /** One model rests on the connection until `until`. */
   | { kind: "model_cooldown"; modelId: ModelId; until: number }
-  /** `sign_in`: needs a new sign-in or key; `forbidden`: a time-bound quarantine. */
+  /** `sign_in`: needs a new sign-in or key; `forbidden`: quarantine per the adapter's health policy. */
   | { kind: "quarantine"; reason: "sign_in" | "forbidden" };
 
 /**
