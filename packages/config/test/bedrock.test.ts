@@ -33,11 +33,15 @@ describe("Bedrock model ids", () => {
   ])("%s serves %s", (id, base) => {
     expect(bedrockClaudeBaseModelId(id)).toBe(base);
     expect(claudeNativeModelProfile(id)).toBe(claudeNativeModelProfile(base));
-    if (claudeNativeModelProfile(base)) expect(claudeNativeModelProfile(id)).toBeDefined();
   });
 
-  test("Opus and Sonnet 5.5 profiles resolve to their native Claude profile", () => {
-    for (const id of ["eu.anthropic.claude-opus-5-5", "global.anthropic.claude-sonnet-5-5"])
+  test("Bedrock ids resolve to their native Claude profile", () => {
+    for (const id of [
+      "eu.anthropic.claude-opus-5-5",
+      "global.anthropic.claude-sonnet-5-5",
+      "arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-5-5",
+      "jp.anthropic.claude-sonnet-5-5",
+    ])
       expect(claudeNativeModelProfile(id)).toBeDefined();
   });
 
@@ -193,6 +197,25 @@ describe("Bedrock provider", () => {
       residency: { geography: "global" },
     });
     expect(configured[0]!.pricing?.default.inputMicrosPerMillionTokens).toBe(4_000_000);
+    // Only application profile ARNs take a base, and only a profile or model id.
+    expect(
+      bedrockModels(
+        settings({
+          bedrockModels: `eu.anthropic.claude-opus-5-5=global.anthropic.claude-opus-5-5,${APP}=${APP}`,
+        }),
+      ).map((model) => model.upstreamModelId),
+    ).toEqual(["eu.anthropic.claude-opus-5-5"]);
+    // A default application profile without its base is a clear startup error.
+    expect(() =>
+      validateModelCatalogSettings(
+        settings({
+          bedrockModels: APP,
+          openaiModel: "bedrock/application-inference-profile/a1b2c3",
+          openaiAllowedModels: "bedrock/application-inference-profile/a1b2c3",
+        }),
+        {},
+      ),
+    ).toThrow(`${APP}=<profile id>`);
   });
 
   test("a Bedrock-only deployment validates without an OpenAI key", () => {

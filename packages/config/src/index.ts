@@ -14749,6 +14749,23 @@ export function validateModelCatalogSettings(
   const notes = parseModelNotesJson(settings.modelNotesJson);
   const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
   const builtinId = builtinProviderId(settings);
+  // A Bedrock application profile chosen as a default or allowed model must
+  // name its base, so it is offered even before (or without) discovery.
+  const chosen = new Set([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]);
+  for (const entry of splitCsv(settings.bedrockModels ?? "")) {
+    const id = entry.startsWith(BEDROCK_MODEL_ID_PREFIX)
+      ? entry.slice(BEDROCK_MODEL_ID_PREFIX.length)
+      : entry;
+    if (
+      settings.bedrockRegion &&
+      !id.includes("=") &&
+      bedrockRouteScope(id) === "application" &&
+      chosen.has(bedrockProductModelId(id))
+    )
+      throw new Error(
+        `OPENGENI_BEDROCK_MODELS: ${id} is a default or allowed model; name the model it copies as ${id}=<profile id> (docs/amazon-bedrock.md)`,
+      );
+  }
   const opperKeyProblem =
     settings.opperApiKey === undefined ? null : opperCredentialProblem(settings.opperApiKey);
   if (opperKeyProblem) {

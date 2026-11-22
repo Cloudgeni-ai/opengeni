@@ -32,7 +32,8 @@ for; `OPENGENI_BEDROCK_MODELS` adds others. A listed model can still be refused
 if IAM or model access does not allow it.
 
 For a Bedrock-only deployment, set the default and the allowed list to Bedrock
-models. No OpenAI key is needed:
+models. No OpenAI key is needed then; with any other allowed model (or no
+allowed list, which means the built-in OpenAI models) it still is:
 
 ```sh
 OPENGENI_BEDROCK_REGION=eu-west-1
@@ -91,7 +92,8 @@ Without the `ListModels` statement, discovery fails (logged as a warning) and
 only `OPENGENI_BEDROCK_MODELS` and a `bedrock/` default are offered. An
 application profile is offered only once its base model is known, from
 discovery or from `<ARN>=<profile id>` in `OPENGENI_BEDROCK_MODELS`, so it is
-always priced. Anthropic models also need model access for the account (the
+always priced. An application profile used as the default or an allowed model
+must name its base this way, so it is offered even when discovery fails. Anthropic models also need model access for the account (the
 Anthropic use-case form and model agreement in the Bedrock console).
 
 ## Private networking

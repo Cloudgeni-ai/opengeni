@@ -52,7 +52,10 @@ export function bedrockDiscoveredModels(): readonly BedrockDiscoveredModel[] {
  * (`<arn>=<profile id>`), for when discovery is off or cannot read them.
  */
 export function setBedrockConfiguredApplicationProfiles(bases: ReadonlyMap<string, string>): void {
-  for (const [arn, base] of bases) configuredApplicationProfileBases.set(arn, base);
+  configuredApplicationProfileBases.clear();
+  for (const [arn, base] of bases)
+    if (arnParts(arn)?.type === "application-inference-profile" && !arnParts(base))
+      configuredApplicationProfileBases.set(arn, base);
 }
 
 /** The system profile or model id an application profile copies, when known. */

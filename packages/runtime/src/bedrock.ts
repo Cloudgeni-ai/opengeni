@@ -84,10 +84,14 @@ export function withBedrockCaller<T>(subjectId: string | null | undefined, fn: (
  * long or looks like an email address. Never an email address.
  */
 export function bedrockSessionName(subjectId: string): string {
-  const readable = subjectId.replace(/[^\w+=,.-]/gu, "-");
+  const digest = createHash("sha256").update(subjectId).digest("hex");
+  // Distinct ids must not share a name once characters are replaced.
+  const readable =
+    subjectId.replace(/[^\w+=,.-]/gu, "-") +
+    (/^[\w+=,.-]+$/u.test(subjectId) ? "" : `-${digest.slice(0, 8)}`);
   return readable.length <= 61 && !subjectId.includes("@")
     ? `og-${readable}`
-    : `og-${createHash("sha256").update(subjectId).digest("hex").slice(0, 40)}`;
+    : `og-${digest.slice(0, 40)}`;
 }
 
 const SESSION_LIMIT = 2_000;
@@ -437,7 +441,11 @@ export function bedrockApplicationProfileBaseId(
   const geos = new Set(
     [...regions].map((value) => GEOS.find(([pattern]) => pattern.test(value))?.[1] ?? value),
   );
-  return geos.size === 1 ? `${[...geos][0]}.${modelId}` : undefined;
+  if (geos.size === 1) return `${[...geos][0]}.${modelId}`;
+  // An APAC profile spans Japan, Australia and the rest of Asia Pacific.
+  return [...geos].every((geo) => geo === "jp" || geo === "au" || geo === "apac")
+    ? `apac.${modelId}`
+    : undefined;
 }
 
 async function controlPlaneGet(
@@ -482,7 +490,7 @@ async function* pages(
   fetchImpl: typeof globalThis.fetch,
 ): AsyncGenerator<Json> {
   let nextToken: string | undefined;
-  for (let page = 0; page < 50; page += 1) {
+  for (let page = 0; page < 1000; page += 1) {
     const result = await controlPlaneGet(
       settings,
       path,
@@ -494,7 +502,7 @@ async function* pages(
     if (!nextToken) return;
   }
   throw new Error(
-    `Amazon Bedrock ${path} returned more than 50 pages; the model list is incomplete`,
+    `Amazon Bedrock ${path} returned more than 1000 pages; the model list is incomplete`,
   );
 }
 
@@ -572,18 +580,19 @@ export async function startBedrockModelDiscovery(
   settings: Pick<Settings, "bedrockRegion" | "bedrockModelDiscovery">,
   options: { onError?: (error: unknown) => void; startupTimeoutMs?: number } = {},
 ): Promise<() => void> {
-  const stop = () => {
-    clearInterval(discoveryTimer);
-    discoveryTimer = undefined;
-  };
   if (!settings.bedrockRegion || settings.bedrockModelDiscovery === false || discoveryTimer)
-    return stop;
+    return () => {};
   const refresh = () =>
     discoverBedrockModels(settings).then(setBedrockDiscoveredModels, (error: unknown) =>
       options.onError?.(error),
     );
-  discoveryTimer = setInterval(refresh, 15 * 60_000);
-  discoveryTimer.unref?.();
+  const timer = setInterval(refresh, 15 * 60_000);
+  timer.unref?.();
+  discoveryTimer = timer;
+  const stop = () => {
+    clearInterval(timer);
+    if (discoveryTimer === timer) discoveryTimer = undefined;
+  };
   let timeout: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     refresh(),

@@ -1896,6 +1896,7 @@ describe("deployment contract", () => {
       OPENGENI_BEDROCK_REGION: "eu-west-1",
       OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN: "arn:aws:iam::123456789012:role/opengeni-users",
       OPENGENI_OPENAI_MODEL: "bedrock/eu.anthropic.claude-opus-5-5",
+      OPENGENI_OPENAI_ALLOWED_MODELS: "bedrock/eu.anthropic.claude-opus-5-5",
     });
     expect(bedrock.runtimeEnv).toContain("OPENGENI_BEDROCK_REGION=eu-west-1");
     expect(bedrock.runtimeEnv).toContain(

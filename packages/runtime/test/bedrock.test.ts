@@ -409,17 +409,21 @@ describe("per-user cost attribution", () => {
       fetch,
     );
     await Promise.all([
-      withBedrockCaller("user-a", () => model.getResponse(request())),
-      withBedrockCaller("user-b", () => model.getResponse(request())),
+      withBedrockCaller("user-a", () => model.getResponse(request({ input: "from a" }))),
+      withBedrockCaller("user-b", () => model.getResponse(request({ input: "from b" }))),
     ]);
     await withBedrockCaller("user-a", () =>
-      withBedrockCaller(null, () => model.getResponse(request())),
+      withBedrockCaller(null, () => model.getResponse(request({ input: "from no one" }))),
     );
-    const signedWith = calls
-      .filter((call) => call.url.includes("bedrock-runtime"))
-      .map((call) => /Credential=(\w+)\//u.exec(call.headers.get("authorization")!)![1]);
-    expect(signedWith.slice(0, 2).sort()).toEqual(["AKIDA", "AKIDB"]);
-    expect(signedWith[2]).toBe("AKIDPOD");
+    const signedWith = (input: string) => {
+      const call = calls.find(
+        (candidate) => candidate.url.includes("bedrock-runtime") && candidate.body!.includes(input),
+      )!;
+      return /Credential=(\w+)\//u.exec(call.headers.get("authorization")!)![1];
+    };
+    expect(signedWith("from a")).toBe("AKIDA");
+    expect(signedWith("from b")).toBe("AKIDB");
+    expect(signedWith("from no one")).toBe("AKIDPOD");
   });
 
   test("session names use the stable user id and never an email address", () => {
@@ -427,9 +431,12 @@ describe("per-user cost attribution", () => {
     expect(bedrockSessionName("3f1c2e4a-1234-4abc-9def-0123456789ab")).toBe(
       "og-3f1c2e4a-1234-4abc-9def-0123456789ab",
     );
-    expect(bedrockSessionName("user:3f1c2e4a-1234-4abc-9def-0123456789ab")).toBe(
-      "og-user-3f1c2e4a-1234-4abc-9def-0123456789ab",
+    expect(bedrockSessionName("user:3f1c2e4a-1234-4abc-9def-0123456789ab")).toMatch(
+      /^og-user-3f1c2e4a-1234-4abc-9def-0123456789ab-[0-9a-f]{8}$/u,
     );
+    // Ids that differ only in replaced characters keep distinct names.
+    expect(bedrockSessionName("user:x")).not.toBe(bedrockSessionName("user/x"));
+    expect(bedrockSessionName("user:x")).not.toBe(bedrockSessionName("user-x"));
     for (const id of ["harry@example.com", "x".repeat(80)]) {
       const name = bedrockSessionName(id);
       expect(name).toMatch(/^og-[0-9a-f]{40}$/u);
@@ -522,6 +529,18 @@ describe("model discovery", () => {
         "ap-northeast-1",
       ),
     ).toBe("jp.anthropic.claude-opus-5-5");
+    expect(
+      bedrockApplicationProfileBaseId(
+        [arn("ap-northeast-1"), arn("ap-southeast-2"), arn("ap-south-1")],
+        "ap-northeast-1",
+      ),
+    ).toBe("apac.anthropic.claude-opus-5-5");
+    expect(
+      bedrockApplicationProfileBaseId(
+        [arn("ap-southeast-2"), arn("ap-southeast-4")],
+        "ap-southeast-2",
+      ),
+    ).toBe("au.anthropic.claude-opus-5-5");
     // Regions in several geographies, without a global model ARN, are unknown.
     expect(
       bedrockApplicationProfileBaseId([arn("us-east-1"), arn("eu-west-1")], "us-east-1"),

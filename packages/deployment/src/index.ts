@@ -369,6 +369,8 @@ export const BEDROCK_PASSTHROUGH_ENV: readonly string[] = [
 /** A Bedrock-only deployment needs no OpenAI key; one that sets it still passes it. */
 function openAiKeyRequired(env: Record<string, string | undefined>): boolean {
   if (env.OPENGENI_OPENAI_API_KEY || !env.OPENGENI_BEDROCK_REGION) return true;
+  // Unset, the allowed list is the built-in OpenAI models.
+  if (!env.OPENGENI_OPENAI_ALLOWED_MODELS) return true;
   // A Bedrock-only deployment: its default and every allowed model are on Bedrock.
   const models = [
     env.OPENGENI_OPENAI_MODEL ?? "",
