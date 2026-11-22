@@ -300,7 +300,7 @@ export const workspaceArtifacts = pgTable(
       .notNull()
       .default("workspace_shared"),
     ownerSubjectId: text("owner_subject_id"),
-    // Migration 1546: the app package it was installed or last upgraded from.
+    // Migration 1548: the app package it was installed or last upgraded from.
     packageId: uuid("package_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
