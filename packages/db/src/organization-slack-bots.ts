@@ -170,8 +170,11 @@ export async function sharedSlackEventSources(
       rows = await read(true);
     } catch (error) {
       // EXECUTE revoked or the routine gone: back to v1 until the next check.
+      // v2's own scope refusal (also 42501) is v1's answer too, so it stands.
       const state = nestedPostgresSqlState(error);
-      if (state !== "42501" && state !== "42883") throw error;
+      const cause = error instanceof Error ? error.cause : undefined;
+      const refusedScope = /scope mismatch/iu.test(`${String(error)} ${String(cause ?? "")}`);
+      if ((state !== "42501" && state !== "42883") || refusedScope) throw error;
       v2Granted.set(db, { value: false, at: Date.now() });
       rows = await read(false);
     }

@@ -710,8 +710,8 @@ function SecretSet({
 }) {
   const label = name.charAt(0).toUpperCase() + name.slice(1);
   return (
-    <p role="status" data-agent-trigger-secret-set="" className="m-0 text-sm text-fg-muted">
-      {`${label} set.`}
+    <p data-agent-trigger-secret-set="" className="m-0 text-sm text-fg-muted">
+      <span role="status">{`${label} set.`}</span>
       {onReplace ? (
         <>
           {" "}

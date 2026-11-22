@@ -59,10 +59,11 @@ this conversation or this computer: give it a self-contained brief.
   Personal unless \`scope\` is \`workspace\` or \`organization\` (which may wait
   for review, per the workspace's Agent learning setting);
   \`direction: "pull"\` gets the workspace's Skills; \`direction: "repository"\`
-  syncs a GitHub repository's Skill folders. Knowledge:
+  syncs a public GitHub repository's Skill folders. Knowledge:
   \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
 - **Schedules, agents and workspace instructions**: change them with
-  \`opengeni_actions_search\`, then \`opengeni_action_call\`.
+  \`opengeni_actions_search\`, \`opengeni_action_describe\`, then
+  \`opengeni_action_call\`.
 - Several workspaces: pass \`workspaceId\`, or \`workspace_use\` once.
 
 Retrying a call with the same input doesn't start the work twice. Never put

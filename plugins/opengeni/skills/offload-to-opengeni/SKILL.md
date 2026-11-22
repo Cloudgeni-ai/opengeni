@@ -37,9 +37,9 @@ suffix.
 `skills_sync` uploads local Skill folders as Personal unless `scope` is
 `workspace` or `organization` (which may wait for review, per the workspace's
 Agent learning setting); `direction: "pull"` gets the workspace's Skills;
-`direction: "repository"` syncs a GitHub repository's Skill folders. Schedules, agents (their instructions) and
-workspace instructions change through `opengeni_actions_search`, then
-`opengeni_action_call`.
+`direction: "repository"` syncs a public GitHub repository's Skill folders. Schedules, agents (their instructions) and
+workspace instructions change through `opengeni_actions_search`,
+`opengeni_action_describe`, then `opengeni_action_call`.
 
 For anything else, `opengeni_actions_search`, `opengeni_action_describe` and
 `opengeni_action_call` reach every Opengeni API action.

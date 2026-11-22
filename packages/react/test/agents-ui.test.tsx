@@ -1555,8 +1555,8 @@ test("a waiting webhook can be picked to paste its secret, then added as a trigg
   await act(async () => button(dialog, "Save signing secret").click());
   await flush();
   expect(client.calls.find((call) => call[0] === "updateEventSource")?.[2]).toBe("source-linear");
-  expect(dialog.querySelector("[data-agent-trigger-secret-set]")?.getAttribute("role")).toBe(
-    "status",
+  expect(dialog.querySelector("[data-agent-trigger-secret-set] [role='status']")?.textContent).toBe(
+    "Signing secret set.",
   );
   expect(button(dialog, "Add trigger")).toBeTruthy();
 });
