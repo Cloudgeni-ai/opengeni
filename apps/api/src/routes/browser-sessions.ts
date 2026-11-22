@@ -288,6 +288,7 @@ import {
   observeAuthMutation,
   observeBrowserActionResult,
   observeBrowserRevisionPublication,
+  observeLifecycleControllerFailure,
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
@@ -762,6 +763,7 @@ export function registerBrowserSessionRoutes(
                     placement.controllerHostSandboxGroupId,
                   ).catch(() => undefined);
                 }
+                observeLifecycleControllerFailure(deps.observability, "browser.create", error);
                 return failed;
               }
               // Once the controller has accepted the exact binding, a persistence

@@ -15,6 +15,7 @@ import {
   parseInteractionFailureReason,
 } from "@opengeni/contracts";
 import {
+  errorCauseAttributes,
   interactionAuthMetricObserver,
   interactionInterventionMetricObserver,
   interactionOperationMetricObserver,
@@ -132,6 +133,32 @@ export function observeBrowserRevisionPublication(
     durationMs: elapsedMs(startedAtMs),
     replayed: response.replayed,
   });
+}
+
+/**
+ * A create the controller refused is settled as a failed receipt and answered
+ * 200, so no HTTP failure log carries its cause, and the controller's
+ * operator-only diagnostic (driver error class and code frame) would only be
+ * on the machine. Log the reviewed, content-free cause instead.
+ */
+export function observeLifecycleControllerFailure(
+  observability: Observability | null | undefined,
+  op: "browser.create" | "computer.create",
+  error: unknown,
+): void {
+  if (!observability) return;
+  try {
+    observability.warn("Interaction controller refused a create", {
+      errorClass: "InteractionControllerOperationError",
+      errorCode: "interaction_controller_create_refused",
+      origin: "api",
+      op,
+      outcome: "failed",
+      ...errorCauseAttributes(error),
+    });
+  } catch {
+    // Observability cannot alter the create's settled receipt.
+  }
 }
 
 export function observeAuthMutation(
