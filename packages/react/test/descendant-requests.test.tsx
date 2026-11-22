@@ -301,6 +301,27 @@ describe("descendant request model", () => {
     );
   });
 
+  test("lists an idle sub-session whose agent waits on a connection card", () => {
+    const nodes = [
+      node(summary("a", { requiresActionSince: "2026-10-23T06:05:00.000Z" })),
+      node(
+        summary("b", {
+          status: "idle",
+          requiresActionSince: null,
+          awaitingConnectionSince: "2026-10-23T06:02:00.000Z",
+        }),
+      ),
+      node(
+        summary("c", {
+          status: "running",
+          requiresActionSince: null,
+          awaitingConnectionSince: "2026-10-23T06:01:00.000Z",
+        }),
+      ),
+    ];
+    expect(waitingDescendants(nodes).map((session) => session.id)).toEqual(["b", "a"]);
+  });
+
   test("keeps a sub-session resuming from a decision made here, until its turn ends", () => {
     const nodes = [
       node(summary("resuming", { status: "running" })),
@@ -582,6 +603,21 @@ describe("DescendantRequests", () => {
     await render({ client, waiting: [child] });
     expect(container().textContent).toContain("Sign-in worker needs you");
     expect(link("Open sub-session: Sign-in worker")?.getAttribute("href")).toBe(
+      `/workspaces/${WORKSPACE}/sessions/child`,
+    );
+  });
+
+  test("says an idle sub-session waiting on a connection card needs you", async () => {
+    const child = summary("child", {
+      title: "Gmail worker",
+      status: "idle",
+      requiresActionSince: null,
+      awaitingConnectionSince: "2026-10-23T06:02:00.000Z",
+    });
+    const { client } = fakeClient({});
+    await render({ client, waiting: [child] });
+    expect(container().textContent).toContain("Gmail worker needs you");
+    expect(link("Open sub-session: Gmail worker")?.getAttribute("href")).toBe(
       `/workspaces/${WORKSPACE}/sessions/child`,
     );
   });

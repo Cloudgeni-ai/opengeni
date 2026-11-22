@@ -21,6 +21,7 @@ export * from "./claude-cite-tags";
 export * from "./provider-citation-handles";
 export * from "./machine-access";
 export * from "./no-reply";
+export * from "./connection-card-notice";
 import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
 import {
@@ -17716,6 +17717,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * null otherwise and omitted by older servers or detail reads.
      */
     requiresActionSince: z.string().nullable().optional(),
+    /**
+     * When the agent started waiting on a connection card (connect, reconnect
+     * or more access) in this chat that is still open; null when none is.
+     * While the session is idle it needs the person, as an approval does.
+     * Omitted by older servers.
+     */
+    awaitingConnectionSince: z.string().nullable().optional(),
     createdAt: primitives.string,
     updatedAt: primitives.string,
   }),
@@ -17893,6 +17901,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
+    awaitingConnectionSince: true,
     admissionBlock: true,
     createdAt: true,
     updatedAt: true,

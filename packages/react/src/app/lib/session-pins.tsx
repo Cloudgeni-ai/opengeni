@@ -660,6 +660,12 @@ export function mergeSessionDetailReadProjection(
  * read, which never carries it, so selecting a row does not erase how long it
  * has been waiting.
  */
+function withAwaitingConnectionSince<T extends Session>(session: T, since: string | null): T {
+  if (since !== null) return { ...session, awaitingConnectionSince: since };
+  const { awaitingConnectionSince: _cleared, ...rest } = session;
+  return rest as T;
+}
+
 export function applySessionRailProjection<T extends Session>(
   current: T,
   projected: Session,
@@ -678,7 +684,14 @@ export function applySessionRailProjection<T extends Session>(
     projected.lastSequence >= timed.lastSequence
       ? { ...timed, requiresActionSince: projected.requiresActionSince }
       : timed;
-  const pinned = applySessionPinProjection(activity, projected) ?? activity;
+  // Whether the agent waits on a connection card is kept on the list row only
+  // (no event carries it): a list row at least as fresh sets or clears it.
+  const awaiting =
+    projected.lastSequence >= activity.lastSequence &&
+    (activity.awaitingConnectionSince ?? null) !== (projected.awaitingConnectionSince ?? null)
+      ? withAwaitingConnectionSince(activity, projected.awaitingConnectionSince ?? null)
+      : activity;
+  const pinned = applySessionPinProjection(awaiting, projected) ?? awaiting;
   const merged =
     options.channelOwned === false
       ? pinned

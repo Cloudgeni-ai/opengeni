@@ -32,11 +32,13 @@ import {
   HumanInputSurface,
   type ToolReviewDetailsLoader,
 } from "../../../session-ui";
+import type { ApprovalSurfaceProps } from "../../../components/approval-surface";
 import { buttonVariants } from "../../../ui/button";
 import { userErrorText } from "../../../ui/api-error";
 import {
   DESCENDANT_REQUEST_EVENT_LIMIT,
   DESCENDANT_REQUEST_EVENT_TYPES,
+  awaitsConnection,
   descendantRequestActivity,
   subSessionsNeedYouLabel,
 } from "../../lib/descendant-requests";
@@ -85,6 +87,8 @@ export type DescendantRequestsProps = {
   allowedSaveTo?: HumanInputFormProps["allowedSaveTo"];
   /** Safety-net re-read of questions while shown (live hints drive the rest). */
   pollIntervalMs?: number | undefined;
+  /** Asks a provider for access an action's account lacks, before approving it. */
+  onAllowAccess?: ApprovalSurfaceProps["onAllowAccess"];
 };
 
 // The shared-feed mode with an empty feed: no live stream per sub-session.
@@ -192,6 +196,7 @@ function DescendantRequestItem({
   loadSkillReview,
   allowedSaveTo,
   pollIntervalMs = DEFAULT_POLL_MS,
+  onAllowAccess,
 }: DescendantRequestsProps & {
   session: SessionSummary;
   compact: boolean;
@@ -245,7 +250,10 @@ function DescendantRequestItem({
   // settling (here, on the sub-session's page or by an agent). The tree still
   // shows the sub-session waiting until it is re-read, so say nothing for the
   // rest of that wait; a new wait has a new start time.
-  const waitKey = session.requiresActionSince ?? `sequence:${session.lastSequence}`;
+  const waitKey =
+    session.requiresActionSince ??
+    session.awaitingConnectionSince ??
+    `sequence:${session.lastSequence}`;
   const [handledWait, setHandledWait] = useState<string | null>(null);
   useEffect(() => {
     if (hasRequest) setHandledWait(waitKey);
@@ -389,17 +397,23 @@ function DescendantRequestItem({
               loadDetails={loadDetails}
               onApprove={(approval, answer) => decide(approval, "approve", answer)}
               onReject={(approval) => decide(approval, "reject")}
+              onAllowAccess={onAllowAccess}
             />
           </div>
         ) : null}
       </div>
     );
   }
-  // Waiting on something only its own page can take (a reconnect, a sign-in):
-  // say so once both reads are in, and point there.
+  // Waiting on something only its own page can take (a connection card, a
+  // sign-in): say so once both reads are in, and point there.
   const loaded = !humanInput.loading && (activity.data !== null || activity.error !== null);
   // A sub-session kept up while it resumes waits on nobody once it has no request.
-  if (!loaded || handledWait === waitKey || session.status !== "requires_action") return null;
+  if (
+    !loaded ||
+    handledWait === waitKey ||
+    (session.status !== "requires_action" && !awaitsConnection(session))
+  )
+    return null;
   return (
     <div
       data-descendant-request={sessionId}

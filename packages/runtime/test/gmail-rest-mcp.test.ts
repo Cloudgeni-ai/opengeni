@@ -536,7 +536,12 @@ describe("Gmail REST MCP adapter", () => {
         requests.push(new URL(input.toString()).pathname);
         return input.toString().includes("/messages/send")
           ? Response.json({ id: "sent-1", threadId: "thread-1" })
-          : Response.json({ labels: [] });
+          : input.toString().includes("/messages/m-1")
+            ? Response.json({
+                id: "m-1",
+                payload: { headers: [{ name: "Subject", value: "Lunch" }] },
+              })
+            : Response.json({ labels: [] });
       },
     });
     // Every tool stays listed, so the model's tool list never changes with grants.
@@ -551,7 +556,7 @@ describe("Gmail REST MCP adapter", () => {
     })) as { isError?: boolean; content: Array<{ text: string }>; structuredContent: unknown };
     expect(send.isError).toBe(true);
     expect(send.content[0]!.text).toBe(
-      "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; try again after they do.",
+      "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; until they do, calling it again fails the same way.",
     );
     expect(send.structuredContent).toEqual({
       error: {
@@ -561,11 +566,41 @@ describe("Gmail REST MCP adapter", () => {
         retryable: false,
       },
     });
-    // An approval is never asked for an action that cannot run yet.
-    await expect(gmail.reviewContext("trash_message", { messageId: "m-1" })).rejects.toThrow(
-      "Gmail has not been given access for this action yet.",
-    );
-    expect(requests).toEqual([]);
+    // An "Ask first" action's review carries the access it lacks instead of
+    // refusing: approving asks Google for it first, so the person makes one
+    // decision and gets no separate card before it.
+    const modify = "https://www.googleapis.com/auth/gmail.modify";
+    const review = await gmail.reviewContext("batch_modify_messages", {
+      messageIds: ["m-1"],
+      removeLabelIds: ["UNREAD"],
+    });
+    expect(review.accessNeeded).toEqual({
+      providerDomain: "gmailmcp.googleapis.com",
+      connectionId: "conn_1",
+      scopes: [modify],
+    });
+    expect(review.samples).toEqual([
+      { id: "m-1", title: "Lunch", provenance: "provider_metadata" },
+    ]);
+    // The email being approved is still shown: its preview is built with the
+    // account's read access, so content is never approved unseen.
+    const sendReview = await gmail.reviewContext("send_message", {
+      to: ["user@example.com"],
+      subject: "Hello",
+      body: "Hi",
+    });
+    expect(sendReview.accessNeeded).toEqual({
+      providerDomain: "gmailmcp.googleapis.com",
+      connectionId: "conn_1",
+      scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+    });
+    expect(sendReview.email).toMatchObject({
+      to: "user@example.com",
+      subject: "Hello",
+      textBody: expect.stringContaining("Hi"),
+    });
+    expect(requests).toEqual(["/gmail/v1/users/me/messages/m-1"]);
+    requests.length = 0;
     expect(events).toEqual([
       {
         serverId: "gmail",
@@ -574,15 +609,6 @@ describe("Gmail REST MCP adapter", () => {
         reason: "insufficient_scope",
         connectionId: "conn_1",
         scopes: ["https://www.googleapis.com/auth/gmail.compose"],
-        subjectId: "subject-a",
-      },
-      {
-        serverId: "gmail",
-        toolName: "trash_message",
-        providerDomain: "gmailmcp.googleapis.com",
-        reason: "insufficient_scope",
-        connectionId: "conn_1",
-        scopes: ["https://www.googleapis.com/auth/gmail.modify"],
         subjectId: "subject-a",
       },
     ]);
@@ -596,6 +622,17 @@ describe("Gmail REST MCP adapter", () => {
     });
     expect(sent.isError).toBeUndefined();
     expect(requests).toEqual(["/gmail/v1/users/me/messages/send"]);
+    // Allowing the access is not an approval: the next "Ask first" call is
+    // still reviewed as its own action, now with nothing left to ask Google.
+    expect(
+      (
+        await gmail.reviewContext("send_message", {
+          to: ["a@example.com"],
+          subject: "S",
+          body: "B",
+        })
+      ).accessNeeded,
+    ).toBeUndefined();
   });
 
   test("a fixed-access (proxy) account says the action is not available for it, never a step-up", async () => {
@@ -642,6 +679,61 @@ describe("Gmail REST MCP adapter", () => {
       },
     ]);
     expect(ToolAuthNeededPayload.safeParse(events[0]).success).toBe(true);
+    // Its access can't be added, so an approval never offers to ask for it.
+    await expect(gmail.reviewContext("trash_message", { messageId: "m-1" })).rejects.toThrow(
+      "This Gmail action is not available for the connected account.",
+    );
+  });
+
+  test("a host-owned account's review refuses missing access instead of offering a step-up", async () => {
+    const events: unknown[] = [];
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "ok",
+        headers: { authorization: "Bearer host-token" },
+        connectionId: "conn_host",
+        authoritySource: "host",
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      }),
+      onAuthNeeded: (payload) => {
+        events.push(payload);
+      },
+      fetchImpl: async () => Response.json({}),
+    });
+    await expect(gmail.reviewContext("trash_message", { messageId: "m-1" })).rejects.toThrow(
+      "Gmail has not been given access for this action yet.",
+    );
+    expect(events).toMatchObject([{ toolName: "trash_message", authoritySource: "host" }]);
+  });
+
+  test("an email's review is refused, not approved unseen, when the account can't read it", async () => {
+    const requests: string[] = [];
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "ok",
+        headers: { authorization: "Bearer gmail-token" },
+        connectionId: "conn_1",
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.labels"],
+      }),
+      onAuthNeeded: () => {},
+      fetchImpl: async (input) => {
+        requests.push(new URL(input.toString()).pathname);
+        return Response.json({});
+      },
+    });
+    await expect(
+      gmail.reviewContext("send_draft", { draftId: "draft-1", expectedContentSha256: "0" }),
+    ).rejects.toThrow("Gmail has not been given access for this action yet.");
+    expect(requests).toEqual([]);
+    // Organizing mail only labels the selection with read access: without
+    // it the review still offers the step-up, listing the messages by id.
+    const review = await gmail.reviewContext("batch_modify_messages", {
+      messageIds: ["m-1"],
+      removeLabelIds: ["UNREAD"],
+    });
+    expect(review.accessNeeded?.scopes).toEqual(["https://www.googleapis.com/auth/gmail.modify"]);
+    expect(review.samples).toBeUndefined();
+    expect(requests).toEqual([]);
   });
 
   test("never replays send_message or send_draft after a provider 401", async () => {
