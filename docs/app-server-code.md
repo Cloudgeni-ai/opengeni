@@ -69,7 +69,7 @@ stored once per workspace by content
   version lists secrets (`deployer_cannot_use_secrets`).
 - Code that declares `tools` and lists egress hosts could send tool data
   out of the workspace, so it needs the same admin to publish, and its
-  deployer must stay one for it to run.
+  deployer must stay one for it to run (`deployer_cannot_send_tool_data_out`).
 - Every publish goes live for all viewers; there is no draft run. Managers
   try a version with `app_server_run` and roll back if needed.
 

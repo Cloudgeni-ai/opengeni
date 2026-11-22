@@ -16,7 +16,12 @@ import {
   type AppServerDeps,
 } from "../src/app-server/service";
 import { mintAppServerRunToken, verifyAppServerRunToken } from "../src/app-server/token";
-import { memberMayUseSource, sourceOfSyncAction } from "../src/site-tool-data";
+import {
+  asAppAutomation,
+  memberMayUseSource,
+  sourceOfSyncAction,
+  toolDataReaderOf,
+} from "../src/site-tool-data";
 import type { SiteToolAccountInventory } from "../src/site-tool-routing";
 
 const SECRET = ["{", "{secret:Shared/Weather/api key}}"].join("");
@@ -364,5 +369,12 @@ describe("stored tool data", () => {
         declaredTools: [],
       })?.target,
     ).toBe("sql");
+  });
+  test("only accesses the API built for the app's automation read as the system", () => {
+    // A scheduled agent session's principal looks like a sync's; it still reads as its person.
+    const scheduled = { caller: { principal: "schedule:abc" }, subjectId: "user:1" };
+    expect(toolDataReaderOf(scheduled)).toEqual({ subjectId: "user:1" });
+    expect(toolDataReaderOf({ ...scheduled, subjectId: null })).toEqual({ subjectId: null });
+    expect(toolDataReaderOf(asAppAutomation({ ...scheduled }))).toBe("system");
   });
 });

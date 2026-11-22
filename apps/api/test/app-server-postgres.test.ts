@@ -790,6 +790,15 @@ test("stored shared-account data is shown only to members who may use its connec
   );
   expect(guest.status, JSON.stringify(guest.json)).toBe(403);
   expect(JSON.stringify(guest.json)).not.toContain("Shared");
+  // Nor through a write, which answers with the stored record.
+  const guestWrite = await f.runtime(
+    hostname,
+    "/published-artifacts/current/data/write",
+    { operations: [{ op: "patch", collection: "issues", key: "ENG-1", data: {} }] },
+    visitor,
+  );
+  expect(guestWrite.status, JSON.stringify(guestWrite.json)).toBe(403);
+  expect(JSON.stringify(guestWrite.json)).not.toContain("Shared");
 
   // A member who reaches the shared account reads it.
   const member = await f.request(f.member, "POST", `/${f.siteId}/data/query`, {
@@ -814,6 +823,12 @@ test("stored shared-account data is shown only to members who may use its connec
   });
   expect(refused.status, JSON.stringify(refused.json)).toBe(403);
   expect(JSON.stringify(refused.json)).toContain("Linear");
+  const refusedWrite = await f.request(other, "POST", `/${f.siteId}/data/write`, {
+    operations: [{ op: "patch", collection: "issues", key: "ENG-1", data: {} }],
+  });
+  expect(refusedWrite.status, JSON.stringify(refusedWrite.json)).toBe(403);
+  expect(JSON.stringify(refusedWrite.json)).not.toContain("Shared");
+  expect(JSON.stringify(refusedWrite.json)).toContain("Linear");
 
   // Server code without tools can't hand it to a visitor either.
   expect((await f.publish(PLAIN_CODE)).status).toBe(200);

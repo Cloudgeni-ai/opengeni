@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { markToolData, siteToolDataTarget } from "../site-tool-data";
+import { asAppAutomation, markToolData, siteToolDataTarget } from "../site-tool-data";
 import {
   APP_SYNC_DEFAULT_PAGES,
   APP_SYNC_MAX_RECORDS,
@@ -733,7 +733,7 @@ async function syncAccess(
   } else if (!action.target || action.mode !== "shared")
     throw invalid("This sync has nowhere to write. Save it again with a collection or a table.");
   const principal = action.mode === "shared" ? `schedule:${task.id}` : access.caller.principal;
-  return {
+  return asAppAutomation({
     ...access,
     // Sync writes are the server's own trusted writes: they count in the
     // App's manager window, and a personal one stays in the person's records.
@@ -748,7 +748,7 @@ async function syncAccess(
       // its writes aren't Opengeni's own and triggers hear them by default.
       chainDepth: context.chainDepth,
     },
-  };
+  });
 }
 
 async function syncWriter(

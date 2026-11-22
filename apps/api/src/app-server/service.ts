@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  asAppAutomation,
   liveMemberGrant,
   markToolData,
   memberMayUseSource,
@@ -317,12 +318,12 @@ export async function freezeAppServerBundle(
   return winner.frozen;
 }
 
-/** Whether a grant may bind workspace vault secrets (an integration admin with secrets:use). */
 /** Code that calls tools and may also reach outside hosts can send tool data out of the workspace. */
 function sendsToolDataOut(manifest: AppServerManifest): boolean {
   return (manifest.tools?.length ?? 0) > 0 && manifest.egress.length > 0;
 }
 
+/** Whether a grant may bind workspace vault secrets (an integration admin with secrets:use). */
 function mayUseWorkspaceSecrets(grant: AccessGrant): boolean {
   return (
     hasIntegrationAdminPermission(grant) &&
@@ -513,7 +514,7 @@ async function serverAuthority(
     !mayUseWorkspaceSecrets(grant)
   )
     throw forbidden(DEPLOYER_CANNOT_SEND_TOOL_DATA_OUT, {
-      reason: "deployer_cannot_use_secrets",
+      reason: "deployer_cannot_send_tool_data_out",
     });
   const scope = { accountId: deployment.accountId, workspaceId: deployment.workspaceId };
   const principal = `server:${deployment.siteId}`;
@@ -1467,10 +1468,13 @@ export async function handleAppServerHostCall(
             ),
           );
         }
+        // The write answers with the stored records: the run's viewer must
+        // be a reader of each collection (the deployer's access writes).
+        for (const name of names) await requireRunViewerReads(name);
         return {
           result: await writeSiteDataWithAccess(
             deps,
-            authority.access,
+            asAppAutomation({ ...authority.access }),
             write.operations as SiteDataWriteOp[],
           ),
         };

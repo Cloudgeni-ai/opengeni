@@ -217,12 +217,23 @@ export async function requireToolDataReader(
     if (!memberMayUseSource(grant, inventory, source)) throw refuse(source, inventory);
 }
 
+/**
+ * Accesses the app's own automation built server-side (its syncs, webhook
+ * deliveries, and server code, which checks its run's viewer itself). Held
+ * by identity, so no caller can claim it through a principal name.
+ */
+const automationAccesses = new WeakSet<object>();
+
+/** Mark an access the API built for the app's own automation. */
+export function asAppAutomation<T extends object>(access: T): T {
+  automationAccesses.add(access);
+  return access;
+}
+
 /** The reader of a Site Data access: the app's own automation, or the person (null for a guest). */
 export function toolDataReaderOf(access: {
-  caller: { principal: string };
   subjectId: string | null;
 }): { subjectId: string | null } | "system" {
-  const principal = access.caller.principal;
-  if (principal.startsWith("schedule:")) return "system";
+  if (automationAccesses.has(access)) return "system";
   return { subjectId: access.subjectId };
 }

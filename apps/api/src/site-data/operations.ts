@@ -375,6 +375,17 @@ export async function writeSiteDataWithAccess(
   access: SiteDataAccess,
   operations: SiteDataWriteOperation[],
 ) {
+  // A write answers with the stored records, so it needs a reader of each collection.
+  for (const collection of new Set(
+    (operations as unknown[]).flatMap((op) =>
+      op !== null &&
+      typeof op === "object" &&
+      typeof (op as { collection?: unknown }).collection === "string"
+        ? [(op as { collection: string }).collection]
+        : [],
+    ),
+  ))
+    await requireCollectionReader(deps, access, collection);
   await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),
