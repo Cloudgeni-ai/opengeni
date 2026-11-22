@@ -359,8 +359,6 @@ export async function listSkillRecords(
     includeOrganizationElsewhere?: boolean;
     /** Only Skills of this scope (`user` is the person's own). */
     scope?: "workspace" | "organization" | "user";
-    /** Only Skills installed from a source (a plugin) in this workspace. */
-    installed?: boolean;
   } = {},
 ): Promise<SkillRecord[]> {
   const run = async (tx: Database) => {
@@ -414,7 +412,6 @@ export async function listSkillRecords(
           OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
         AND (${options.includeOrganizationElsewhere === true} OR ${organizationSkillWorksHere(context)})
         AND (${options.scope ?? null}::text IS NULL OR h.scope::text=${options.scope ?? null}::text)
-        AND (NOT ${options.installed === true} OR b.preference_id IS NOT NULL)
         AND (${options.skillId ?? null}::uuid IS NULL OR h.id=${options.skillId ?? null}::uuid)
         AND (${options.revisionId ?? null}::uuid IS NULL OR r.id IS NOT NULL)
         AND (${options.sessionId ?? null}::uuid IS NULL OR EXISTS (

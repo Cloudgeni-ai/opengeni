@@ -1,16 +1,19 @@
 import type { SkillSummary } from "@opengeni/sdk";
-import type { AppContextValue } from "@opengeni/react/app/app-context";
-import { SelectMenu } from "@opengeni/react/ui/select-menu";
-import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { useMemo, useState } from "react";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { useState } from "react";
 
-import {
-  SKILL_OWNER_FILTER_OPTIONS,
-  SkillsPanelContent,
-  type SkillOwnerFilter,
-} from "@/routes/skills-panel";
+import { CapabilitiesRoute } from "@/routes/capabilities";
 
+import { currentWorkspace } from "../fixtures";
 import { KitBlock, KitSection, PagePreview } from "../kit";
+
+/* ----------------------------------------------------------------------------
+   The production Capabilities page on its Skills tab, with a long list of
+   skills of every owner. Only the SDK transport is replaced: the Skills list
+   filters by scope like the server does; everything else answers empty.
+   -------------------------------------------------------------------------- */
+
+const WORKSPACE_ID = currentWorkspace.id;
 
 const base: Omit<SkillSummary, "id" | "stableKey" | "title" | "scope"> = {
   description: null,
@@ -24,89 +27,114 @@ const base: Omit<SkillSummary, "id" | "stableKey" | "title" | "scope"> = {
   source: null,
 };
 
-const SKILLS: SkillSummary[] = [
-  {
-    ...base,
-    id: "s1",
-    stableKey: "release-checklist",
-    title: "Release checklist",
-    scope: "workspace",
+const TITLES: Record<SkillSummary["scope"], string[]> = {
+  user: [
+    "My writing style",
+    "Standup notes",
+    "Shorter replies",
+    "Weekly review",
+    "Travel planning",
+    "Reading list",
+    "Email triage",
+    "Meeting prep",
+  ],
+  workspace: [
+    "Release checklist",
+    "Incident response",
+    "Customer onboarding",
+    "Changelog writing",
+    "Support macros",
+    "Pricing questions",
+    "Sales call notes",
+    "Bug triage",
+    "Design review",
+    "Data exports",
+    "Grant applications",
+    "Hiring loop",
+    "Invoice follow-up",
+  ],
+  organization: [
+    "Security review",
+    "Brand voice",
+    "Legal review",
+    "Accessibility check",
+    "Privacy requests",
+    "Vendor review",
+    "Expense policy",
+    "Travel policy",
+    "Code style",
+    "PDF tools",
+  ],
+};
+
+const SKILLS: SkillSummary[] = (Object.keys(TITLES) as SkillSummary["scope"][]).flatMap((scope) =>
+  TITLES[scope].map((title) => {
+    const stableKey = title.toLowerCase().replaceAll(" ", "-");
+    return {
+      ...base,
+      id: `${scope}-${stableKey}`,
+      stableKey,
+      title,
+      scope,
+      ...(scope === "organization"
+        ? { reach: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true } }
+        : {}),
+    };
+  }),
+);
+
+/** Any value a list call might read: lists are empty, everything else is unset. */
+const EMPTY: unknown = new Proxy([], {
+  get(target, key, receiver) {
+    if (key in target || typeof key === "symbol") return Reflect.get(target, key, receiver);
+    return /s$/.test(key) ? EMPTY : undefined;
   },
-  { ...base, id: "s2", stableKey: "my-writing-style", title: "My writing style", scope: "user" },
-  {
-    ...base,
-    id: "s3",
-    stableKey: "security-review",
-    title: "Security review",
-    scope: "organization",
-    reach: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
-  },
-  {
-    ...base,
-    id: "s4",
-    stableKey: "pdf-tools",
-    title: "PDF tools",
-    scope: "workspace",
-    source: { pluginId: "plugin", facetKey: "pdf", skillFacetId: "facet" },
-  },
-  { ...base, id: "s5", stableKey: "standup-notes", title: "Standup notes", scope: "user" },
-];
+});
 
 function previewContext(): AppContextValue {
+  const client = new Proxy(
+    {
+      listWorkspaceSkills: async (_workspaceId: string, options: { scope?: string } = {}) => ({
+        skills: SKILLS.filter((skill) => !options.scope || skill.scope === options.scope),
+        nextCursor: null,
+      }),
+    } as Record<string, unknown>,
+    {
+      get: (target, key) =>
+        typeof key === "string" && !(key in target) ? async () => EMPTY : target[key as string],
+    },
+  );
   return {
+    client,
     authSession: null,
     clientConfig: {},
+    workspaces: [currentWorkspace],
     accessContext: {
+      subjectId: "user:preview",
       accountGrants: [{ accountId: "account", permissions: [] }],
       workspaceGrants: [
         {
           accountId: "account",
-          workspaceId: "workspace",
+          workspaceId: WORKSPACE_ID,
           subjectId: "user:preview",
           principalKind: "human_session",
-          permissions: ["workspace:read", "documents:manage"],
+          permissions: ["workspace:read", "documents:manage", "connections:read"],
         },
       ],
     },
-    client: {
-      // The server filters; the preview does the same with the same options.
-      listWorkspaceSkills: async (
-        _workspaceId: string,
-        options: { scope?: string; installed?: boolean } = {},
-      ) => ({
-        skills: SKILLS.filter(
-          (skill) =>
-            (!options.scope || skill.scope === options.scope) &&
-            (!options.installed || skill.source !== null),
-        ),
-        nextCursor: null,
-      }),
-    },
+    refreshWorkspaceMcpServers: async () => undefined,
+    githubStatus: null,
+    githubStatusFailed: false,
+    repoBusy: false,
   } as unknown as AppContextValue;
 }
 
-function SkillsPreview({ initial = "all" }: { initial?: SkillOwnerFilter }) {
-  const context = useMemo(previewContext, []);
-  const [query, setQuery] = useState("");
-  const [owner, setOwner] = useState<SkillOwnerFilter>(initial);
+function CapabilitiesSkillsPreview() {
+  const [context] = useState(previewContext);
   return (
-    <div className="p-6">
-      <Toolbar>
-        <ToolbarSearch value={query} onValueChange={setQuery} placeholder="Search skills" />
-        <SelectMenu
-          aria-label="Whose skills"
-          size="md"
-          className="w-40"
-          align="end"
-          options={SKILL_OWNER_FILTER_OPTIONS}
-          value={owner}
-          onValueChange={setOwner}
-        />
-      </Toolbar>
-      <div className="pt-6">
-        <SkillsPanelContent context={context} workspaceId="workspace" query={query} owner={owner} />
-      </div>
-    </div>
+    <AppContext.Provider value={context}>
+      <CapabilitiesRoute workspaceId={WORKSPACE_ID} initialSection="skills" />
+    </AppContext.Provider>
   );
 }
 
@@ -114,16 +142,11 @@ export default function PageSkillsSection() {
   return (
     <KitSection sectionKey="page-skills">
       <KitBlock
-        title="Skills: whose"
-        description="Capabilities > Skills. One filter next to the search: All, Mine, Workspace, Organization or From plugins. The list is paged, so the server filters."
+        title="Capabilities: Skills, by whose"
+        description="The Skills tab of Capabilities with a long list. Next to the search: All, Yours, Workspace or Organization. The list is paged, so the server filters."
       >
-        <PagePreview label="Skills, all" height={560}>
-          <SkillsPreview />
-        </PagePreview>
-      </KitBlock>
-      <KitBlock title="Skills: Mine" description="Only the person's own skills.">
-        <PagePreview label="Skills, mine" height={420}>
-          <SkillsPreview initial="mine" />
+        <PagePreview label="Capabilities, Skills" height={820}>
+          <CapabilitiesSkillsPreview />
         </PagePreview>
       </KitBlock>
     </KitSection>

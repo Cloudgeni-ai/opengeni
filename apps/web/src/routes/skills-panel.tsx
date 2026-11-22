@@ -53,35 +53,28 @@ const SKILL_SCOPE_LABEL: Record<SkillScope, string> = {
 };
 
 /** Whose Skills the list shows, picked next to the Capabilities search. */
-export type SkillOwnerFilter = "all" | "mine" | "workspace" | "organization" | "installed";
+export type SkillOwnerFilter = "all" | "mine" | "workspace" | "organization";
 
 export const SKILL_OWNER_FILTER_OPTIONS: ReadonlyArray<{
   value: SkillOwnerFilter;
   label: string;
 }> = [
   { value: "all", label: "All" },
-  { value: "mine", label: "Mine" },
-  { value: "workspace", label: "Workspace" },
-  { value: "organization", label: "Organization" },
-  { value: "installed", label: "From plugins" },
+  { value: "mine", label: SKILL_SCOPE_LABEL.user },
+  { value: "workspace", label: SKILL_SCOPE_LABEL.workspace },
+  { value: "organization", label: SKILL_SCOPE_LABEL.organization },
 ];
 
 /** The server-side list filter for a choice; the list is paged, so the server filters. */
-export function skillOwnerListFilter(owner: SkillOwnerFilter): {
-  scope?: SkillScope;
-  installed?: boolean;
-} {
+export function skillOwnerListFilter(owner: SkillOwnerFilter): { scope?: SkillScope } {
   if (owner === "mine") return { scope: "user" };
   if (owner === "workspace" || owner === "organization") return { scope: owner };
-  if (owner === "installed") return { installed: true };
   return {};
 }
 
 function matchesOwner(skill: SkillSummary, owner: SkillOwnerFilter): boolean {
-  const filter = skillOwnerListFilter(owner);
-  return (
-    (!filter.scope || skill.scope === filter.scope) && (!filter.installed || skill.source !== null)
-  );
+  const { scope } = skillOwnerListFilter(owner);
+  return !scope || skill.scope === scope;
 }
 
 export function SkillsPanel({
@@ -146,6 +139,9 @@ export function SkillsPanelContent({
 }) {
   const { client } = context;
   const listFilter = useMemo(() => skillOwnerListFilter(owner), [owner]);
+  // The refresh below reads the current filter without re-running on a filter change.
+  const listFilterRef = useRef(listFilter);
+  listFilterRef.current = listFilter;
   // Inside Capabilities a skill opens as its own page in the route's page slot
   // (`?open=skill:<id>`); elsewhere the page replaces the list in place.
   const slot = useCapabilityPageSlot();
@@ -265,7 +261,7 @@ export function SkillsPanelContent({
     let live = true;
     const current = ++inventoryGeneration.current;
     void client
-      .listWorkspaceSkills(workspaceId, listFilter)
+      .listWorkspaceSkills(workspaceId, listFilterRef.current)
       .then((result) => {
         if (live && current === inventoryGeneration.current) {
           setLoading(false);
@@ -283,7 +279,7 @@ export function SkillsPanelContent({
     return () => {
       live = false;
     };
-  }, [client, workspaceId, refreshRevision, listFilter]);
+  }, [client, workspaceId, refreshRevision]);
   useEffect(() => {
     if (!openSkillRef) return;
     openSkillRef.current = (id) => navigate(() => void open(id));

@@ -33,6 +33,7 @@ import {
   SidebarLayoutOptions,
   type SidebarLayoutChange,
   type MergedSidebarGroup,
+  type StoredSidebarPersonalChanges,
 } from "../src/sidebar-layout";
 
 const APP_A = "11111111-1111-4111-8111-111111111111";
@@ -172,6 +173,46 @@ describe("sidebar layout", () => {
         ids(),
       ),
     ).toThrow(SidebarLayoutChangeError);
+  });
+
+  test("an app added on its own moves into a person's group, which stays editable", () => {
+    const workspace = engineering();
+    const apply = (member: StoredSidebarPersonalChanges, changes: unknown[]) =>
+      applyPersonalSidebarChanges(workspace, member, parseChanges(changes), ids());
+    let member = apply(EMPTY_SIDEBAR_PERSONAL_CHANGES, [
+      { op: "add", item: { id: "favorites", type: "group", label: "Favorites", items: [] } },
+      { op: "add", item: { id: "tracker", type: "app", appId: APP_C } },
+    ]);
+    member = apply(member, [{ op: "move", itemId: "my-tracker", groupId: "my-favorites" }]);
+    const groupOf = (id: string) =>
+      mergeSidebarLayout(workspace, member).items.find(
+        (item) => item.type === "group" && item.items.some((child) => child.id === id),
+      )?.id ?? null;
+    expect(groupOf("my-tracker")).toBe("my-favorites");
+    // Stored inside the group, as Add puts it.
+    expect(member.added.map((entry) => entry.item.id)).toEqual(["my-favorites"]);
+    member = apply(member, [
+      { op: "update", itemId: "my-favorites", label: "Daily", icon: "star" },
+      { op: "update", itemId: "my-tracker", label: "Tracker" },
+    ]);
+    const group = mergeSidebarLayout(workspace, member).items.find(
+      (item) => item.id === "my-favorites",
+    ) as MergedSidebarGroup;
+    expect(group.label).toBe("Daily");
+    expect(group.items.map((child) => child.label)).toEqual(["Tracker"]);
+    // Into a workspace group and back out to the top level.
+    member = apply(member, [{ op: "move", itemId: "my-tracker", groupId: "engineering" }]);
+    expect(groupOf("my-tracker")).toBe("engineering");
+    member = apply(member, [{ op: "move", itemId: "my-tracker", groupId: null }]);
+    expect(groupOf("my-tracker")).toBeNull();
+    member = apply(member, [{ op: "move", itemId: "my-tracker", groupId: "my-favorites" }]);
+    member = apply(member, [{ op: "remove", itemId: "my-favorites" }]);
+    expect(mergeSidebarLayout(workspace, member).items.map((item) => item.id)).toEqual([
+      "engineering",
+    ]);
+    expect(() => apply(member, [{ op: "move", itemId: "releases", groupId: null }])).toThrow(
+      SidebarLayoutChangeError,
+    );
   });
 
   test("a deleted workspace group keeps a person's items visible", () => {

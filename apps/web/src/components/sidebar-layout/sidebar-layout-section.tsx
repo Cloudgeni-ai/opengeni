@@ -44,6 +44,7 @@ import {
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 import { appPageLocation, appPagePathname } from "./app-page-location";
+import { MoveToGroupMenu, type SidebarGroupChoice } from "./group-menu";
 import { inAppLinkPath } from "./in-app-link";
 import { IconMenu, SidebarIcon, useLinkIcon } from "./sidebar-icons";
 import { useSidebarLayout } from "./use-sidebar-layout";
@@ -81,6 +82,10 @@ type RowActions = {
   setRenaming: (id: string | null) => void;
   /** The rows just before and after an item at its level, for Move up and Move down. */
   neighbors?: (id: string) => { previous?: string; next?: string };
+  /** The groups shown, for Move to group. */
+  groups?: readonly SidebarGroupChoice[];
+  /** An item's group, or null at the top level. */
+  parentOf?: (id: string) => string | null;
 };
 
 /** Whether this person edits the item itself (their own), rather than hiding it. */
@@ -139,6 +144,13 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
               ))}
             </DropdownMenuSubContent>
           </DropdownMenuSub>
+        ) : null}
+        {own && item.type !== "group" && actions.groups && actions.parentOf ? (
+          <MoveToGroupMenu
+            groups={actions.groups}
+            current={actions.parentOf(item.id)}
+            onSelect={(groupId) => actions.change([{ op: "move", itemId: item.id, groupId }])}
+          />
         ) : null}
         {actions.canChange && near?.previous ? (
           <DropdownMenuItem
@@ -801,7 +813,21 @@ export function SidebarLayoutSection() {
     }
     return {};
   };
-  const actions: RowActions = { change, canChange, renaming, setRenaming, neighbors };
+  const groups = shownItems.flatMap((each) =>
+    each.type === "group" ? [{ id: each.id, label: each.label }] : [],
+  );
+  const parentOf = (id: string) =>
+    shownItems.find((each) => each.type === "group" && each.items.some((child) => child.id === id))
+      ?.id ?? null;
+  const actions: RowActions = {
+    change,
+    canChange,
+    renaming,
+    setRenaming,
+    neighbors,
+    groups,
+    parentOf,
+  };
   return (
     <nav
       aria-label="Workspace links"

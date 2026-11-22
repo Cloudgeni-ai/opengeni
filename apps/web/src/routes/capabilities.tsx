@@ -95,7 +95,7 @@ import type {
 import { ReadyMadeSection } from "@/components/capabilities/ready-made-section";
 import { SetupTabs, setupTabLabel } from "@/components/capabilities/setup-tabs";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SKILL_OWNER_FILTER_OPTIONS, SkillsPanel, type SkillOwnerFilter } from "./skills-panel";
 import { partitionSimplifiedInterfaceServices } from "@/components/capabilities/simplified-interface-services";
 import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
@@ -2212,11 +2212,8 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
                 placeholder={focused ? "Search apps" : `Search ${activeTab}`}
               />
               {activeTab === "skills" ? (
-                <SelectMenu
+                <SegmentedControl
                   aria-label="Whose skills"
-                  size="md"
-                  className="w-40"
-                  align="end"
                   options={SKILL_OWNER_FILTER_OPTIONS}
                   value={skillOwner}
                   onValueChange={setSkillOwner}

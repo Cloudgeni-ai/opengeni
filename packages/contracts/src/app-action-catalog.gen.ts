@@ -7213,7 +7213,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "query": [
       "cursor",
-      "installed",
       "limit",
       "scope",
       "sessionId"
