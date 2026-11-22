@@ -67,6 +67,9 @@ stored once per workspace by content
   Since a rollback or a duplicate makes its actor the deployer without a
   publish, a run also requires the deployer to be such an admin while the
   version lists secrets (`deployer_cannot_use_secrets`).
+- Code that declares `tools` and lists egress hosts could send tool data
+  out of the workspace, so it needs the same admin to publish, and its
+  deployer must stay one for it to run.
 - Every publish goes live for all viewers; there is no draft run. Managers
   try a version with `app_server_run` and roll back if needed.
 

@@ -715,6 +715,15 @@ test("a member who can't use the shared connection themselves is refused the too
   expect(f.toolCalls).toEqual([]);
 });
 
+test("only a workspace admin publishes code that calls tools and lists outside hosts", async () => {
+  const f = await fixture();
+  // Tools plus outside hosts could send tool data out: only an admin may publish that.
+  const refused = await f.publish({ ...SERVER_CODE, egress: ["api.example.com"] });
+  expect(refused.status, JSON.stringify(refused.json)).toBe(422);
+  expect(JSON.stringify(refused.json)).toContain("outside hosts");
+  expect((await f.publish({ ...SERVER_CODE, egress: [] })).status).toBe(200);
+});
+
 test("a manager who can't use the code's tools doesn't see its run logs or errors", async () => {
   const f = await fixture();
   expect((await f.publish(SERVER_CODE)).status).toBe(200);

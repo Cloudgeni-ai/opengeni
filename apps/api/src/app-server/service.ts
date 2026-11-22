@@ -318,6 +318,11 @@ export async function freezeAppServerBundle(
 }
 
 /** Whether a grant may bind workspace vault secrets (an integration admin with secrets:use). */
+/** Code that calls tools and may also reach outside hosts can send tool data out of the workspace. */
+function sendsToolDataOut(manifest: AppServerManifest): boolean {
+  return (manifest.tools?.length ?? 0) > 0 && manifest.egress.length > 0;
+}
+
 function mayUseWorkspaceSecrets(grant: AccessGrant): boolean {
   return (
     hasIntegrationAdminPermission(grant) &&
@@ -342,6 +347,10 @@ export async function requireAppServerPublishable(
   if (!appServerAvailable(deps.settings))
     throw new WorkspaceArtifactOperationError(
       "App server code is not enabled on this deployment, so this version can't carry server code. Publish without the server upload.",
+    );
+  if (sendsToolDataOut(manifest) && !mayUseWorkspaceSecrets(grant))
+    throw new WorkspaceArtifactOperationError(
+      "Only a workspace admin can publish server code that both calls tools and lists outside hosts, since it can send tool data out of the workspace. Ask an admin to publish it, or remove the tools or the hosts.",
     );
   if (manifest.secrets.length === 0) return;
   if (!mayUseWorkspaceSecrets(grant))
@@ -426,6 +435,8 @@ async function resolveSecretHeaders(
 
 const DEPLOYER_CANNOT_MANAGE =
   "The person who published this version can no longer manage the app, so its server code is paused. Someone who manages the app should publish it again.";
+const DEPLOYER_CANNOT_SEND_TOOL_DATA_OUT =
+  "This version's server code calls tools and lists outside hosts, and the person who made it current isn't a workspace admin, so it is paused. A workspace admin should publish it again.";
 const DEPLOYER_CANNOT_USE_SECRETS =
   "This version's server code uses vault secrets, and the person who made it current isn't a workspace admin who may use them, so it is paused. A workspace admin should publish it again.";
 
@@ -496,6 +507,14 @@ async function serverAuthority(
   // publish check, so secrets are checked against the deployer on every run.
   if ((deployment.manifest?.secrets.length ?? 0) > 0 && !mayUseWorkspaceSecrets(grant))
     throw forbidden(DEPLOYER_CANNOT_USE_SECRETS, { reason: "deployer_cannot_use_secrets" });
+  if (
+    deployment.manifest &&
+    sendsToolDataOut(deployment.manifest) &&
+    !mayUseWorkspaceSecrets(grant)
+  )
+    throw forbidden(DEPLOYER_CANNOT_SEND_TOOL_DATA_OUT, {
+      reason: "deployer_cannot_use_secrets",
+    });
   const scope = { accountId: deployment.accountId, workspaceId: deployment.workspaceId };
   const principal = `server:${deployment.siteId}`;
   const caller: SiteDataCaller = {

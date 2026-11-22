@@ -127,6 +127,7 @@ back if they fail.
    must list the hosts they are sent to. Each secret must exist when you
    publish. The code pauses if whoever makes a version current later (a
    rollback, a duplicate) can't use workspace secrets.
+   Code with both `tools` and `egress` hosts also needs such an admin.
 
 To edit existing code, `artifacts_get_source` returns the version's `server`
 files as download URLs. App packages don't carry server code yet: after
