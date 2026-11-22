@@ -1456,7 +1456,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const eventRepositoryResources = attachesEventRepositories(task, input)
         ? await scheduledEventRepositoryResources(
             db,
-            { workspaceId: task.workspaceId, producerKey: stableProducerKey },
+            { workspaceId: task.workspaceId, taskId: task.id, producerKey: stableProducerKey },
             eventRepositoryLookup(settings),
           )
         : [];

@@ -140,8 +140,8 @@ export function eventRepositoryLookup(
  */
 export async function scheduledEventRepositoryResources(
   db: Database,
-  /** The run's producer key (before the run exists), or the run's id. */
-  input: { workspaceId: string } & ({ producerKey: string } | { runId: string }),
+  /** The run's task and producer key (before the run exists), or the run's id. */
+  input: { workspaceId: string } & ({ taskId: string; producerKey: string } | { runId: string }),
   lookup: GitHubAppInstallationRepositoryLookup | null,
 ): Promise<RepositoryResourceRef[]> {
   if (!lookup) return [];
@@ -151,6 +151,7 @@ export async function scheduledEventRepositoryResources(
     occurrence = occurrenceId
       ? await getEventOccurrenceForRun(db, input.workspaceId, occurrenceId)
       : null;
+    if (occurrence && occurrence.taskId !== input.taskId) return [];
   } else {
     occurrence = await getEventOccurrenceForScheduledTaskRun(db, input.workspaceId, input.runId);
   }

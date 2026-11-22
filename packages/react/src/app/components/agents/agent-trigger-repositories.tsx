@@ -35,9 +35,12 @@ export function AgentTriggerRepositories({
     }));
   const max = newChatPerRun ? AGENT_TRIGGER_REPOSITORIES_MAX : AGENT_TRIGGER_CHAT_REPOSITORIES_MAX;
   const full = value.length >= max;
+  // Choosing a continued chat after more were chosen: the save waits for fewer.
+  const over = value.length > max;
   return (
     <Field
       label="Repositories"
+      error={over ? `A chat opens at most ${max}. Remove ${value.length - max}.` : undefined}
       hint={
         full
           ? `Up to ${max}.${newChatPerRun ? " Remove them all to cover every repository." : ""}`

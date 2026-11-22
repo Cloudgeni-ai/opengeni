@@ -1675,6 +1675,32 @@ test("a GitHub trigger that continues one chat keeps its chosen repositories ope
   ]);
 });
 
+test("a continued chat opens at most 5 repositories; more chosen wait for some to go", async () => {
+  const repo = (id: number) => ({
+    id,
+    installationId: 9,
+    fullName: `acme/r${id}`,
+    cloneUrl: `https://github.com/acme/r${id}.git`,
+    defaultBranch: "main",
+  });
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    githubRepos: [1, 2, 3, 4, 5, 6].map(repo),
+  });
+  await chooseFrom(dialog, "All repositories", "acme/r1");
+  for (const id of [2, 3, 4, 5, 6]) await chooseFrom(dialog, "Add a repository", `acme/r${id}`);
+  await chooseFrom(dialog, "New chat each run", "One chat for this trigger");
+  expect(dialog.textContent).toContain("A chat opens at most 5. Remove 1.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  await act(async () => button(dialog, "Remove acme/r6").click());
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)!.agentConfig.resources).toHaveLength(5);
+});
+
 test("a trigger's runs start a new chat by default, or continue one of this agent's chats", async () => {
   const { agent, client, dialog } = await openAgentTrigger({
     eventSources: [GITHUB_SOURCE],

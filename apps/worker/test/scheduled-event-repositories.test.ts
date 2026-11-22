@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   SCHEDULED_EVENT_REPOSITORY_LIMIT,
+  SCHEDULED_EVENT_REPOSITORY_LOOKUPS,
   attachesEventRepositories,
   confirmedEventRepositoryResources,
   githubEventRepositories,
@@ -145,4 +146,24 @@ test("an event's repository is attached only as GitHub names the allowlisted id"
     ["https://github.com/acme/new-name.git", "trunk", 7, 4],
   ]);
   expect(asked.filter((each) => each.endsWith("other/public"))).toEqual(["3:other/public"]);
+});
+
+test("a run asks GitHub at most SCHEDULED_EVENT_REPOSITORY_LOOKUPS times", async () => {
+  let asked = 0;
+  const repositories = Array.from({ length: 12 }, (_, index) => ({
+    id: index + 1,
+    fullName: `acme/repo-${index + 1}`,
+    defaultBranch: "main",
+  }));
+  const resources = await confirmedEventRepositoryResources(
+    repositories,
+    new Map(repositories.map((repository) => [repository.id, 3])),
+    async () => {
+      asked += 1;
+      return null;
+    },
+    "run-1",
+  );
+  expect(resources).toEqual([]);
+  expect(asked).toBe(SCHEDULED_EVENT_REPOSITORY_LOOKUPS);
 });

@@ -343,7 +343,12 @@ function AgentTriggerDialogBody({
     const found = agentTriggerIssues(t, draft, formSources ?? [], now);
     const noChat = chat.mode === "existing_session" && !chat.sessionId;
     if (noChat) setChatIssue("Choose a chat.");
-    if (Object.values(found).some(Boolean) || noChat) {
+    // The Repositories field says so: a continued chat opens at most 5.
+    const tooManyRepositories =
+      listensOnGitHub &&
+      chat.mode !== "new_session_per_run" &&
+      chosenRepositories.length > AGENT_TRIGGER_CHAT_REPOSITORIES_MAX;
+    if (Object.values(found).some(Boolean) || noChat || tooManyRepositories) {
       setIssues(found);
       if (found.events) setShowEvents(true);
       return false;
@@ -382,7 +387,6 @@ function AgentTriggerDialogBody({
             listensOnGitHub && chat.mode !== "new_session_per_run"
               ? repositories
                   .filter((repo) => chosenRepositories.includes(repo.fullName))
-                  .slice(0, AGENT_TRIGGER_CHAT_REPOSITORIES_MAX)
                   .map((repo) => gitHubRepositoryResource(repo, ""))
               : [],
           sources: formSources ?? [],
