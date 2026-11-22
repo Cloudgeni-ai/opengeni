@@ -1,7 +1,7 @@
 import type { RuntimePostureMigration } from "../runtime-posture-migrations";
 
 /** App server code runs: one FORCE-RLS table with full DML (inserts, prune deletes);
- * stored tool data sources: FORCE RLS, read and insert (full DML since 1555). */
+ * stored tool data sources: FORCE RLS, read and insert (full DML since 1557). */
 export default {
   migration: "1554_app_server_code",
   forceRls: { fullDml: 2 },
