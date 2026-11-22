@@ -174,7 +174,9 @@ export function SandboxFiles({
       setTreeRevealRequest(null);
       return;
     }
-    if (isNodeVisible && files.loading && files.tree.length === 0) return;
+    // Wait for the tree when a filter (the host's, or the default hiding)
+    // needs it to judge the path.
+    if ((isNodeVisible || hideToolFolders) && files.loading && files.tree.length === 0) return;
     if (isNodeVisible && !files.loading && files.tree.length === 0) {
       handledRequestRef.current = requestKey;
       pendingRequestRef.current = null;
@@ -209,6 +211,7 @@ export function SandboxFiles({
   }, [
     files.loading,
     files.tree,
+    hideToolFolders,
     visibleByDefault,
     isNodeVisible,
     onSelectedPathChange,
