@@ -177,6 +177,30 @@ e2e.each(["device-bound", "backed-up", "bitwarden", "legacy-missing-flags"] as c
       signCounts.push(await assertedSignCount(second, itemId));
       expect((await second.sync(null)).authenticators).toBeGreaterThanOrEqual(2);
 
+      // A tab the page itself opens (a link to a new tab) gets one too: such a
+      // tab answers its page commands only once it runs.
+      let links = await act(tab, { type: "navigate", url: `${site.url}/passkey/new-tab` });
+      links = await act(links, clickByRef(links, "link", "Open passkey sign-in in a new tab"));
+      const openedDeadline = Date.now() + 15_000;
+      let openedId: string | null = null;
+      while (!openedId && Date.now() < openedDeadline) {
+        openedId =
+          (await second.driver.listTargets()).find(
+            (target) => target.kind === "popup" && target.url.endsWith("/passkey/login"),
+          )?.id ?? null;
+        if (!openedId) await Bun.sleep(100);
+      }
+      expect(openedId).not.toBeNull();
+      let opened = await until(second.driver, openedId!, (o) =>
+        nodes(o).some((node) => node.role === "button" && node.name === "Sign in with a passkey"),
+      );
+      opened = await act(opened, clickByRef(opened, "button", "Sign in with a passkey"));
+      opened = await until(second.driver, opened.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
+      signCounts.push(await assertedSignCount(second, itemId));
+      expect((await second.sync(null)).authenticators).toBeGreaterThanOrEqual(3);
+
       // Back in the first tab, whose copy must have received the newer counter.
       page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
       page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));

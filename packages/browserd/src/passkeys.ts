@@ -162,6 +162,9 @@ export class BrowserPasskeyManager {
    * Install an authenticator holding every desired credential into one page
    * target. Call it before the target runs script (auto-attach paused).
    * Returns false when the target already has one or WebAuthn is unavailable.
+   * It returns without waiting for the page itself: a tab the page opened
+   * (a link to a new tab, `window.open`) answers its page commands only once
+   * it runs, which is after this returns and the caller resumes it.
    */
   async attachTarget(
     connection: PasskeyCdpConnection,
@@ -173,10 +176,15 @@ export class BrowserPasskeyManager {
           return false;
       }
       const { sessionId } = target;
+      // Sent before the authenticator, and before the target runs, so no page
+      // script ever sees passkey autofill a tab with an authenticator would
+      // answer unasked. The answer is not awaited here (see above); a tab that
+      // cannot take the withdrawal loses its authenticator again.
+      const withdrawn = this.withdrawAutofill(connection, sessionId, true).then(
+        () => true,
+        () => false,
+      );
       try {
-        // Before the authenticator, so no page script ever sees passkey
-        // autofill a tab with an authenticator would answer unasked.
-        await this.withdrawAutofill(connection, sessionId, true);
         await this.send(connection, "WebAuthn.enable", { enableUI: false }, sessionId);
         const added = await this.send<{ authenticatorId?: unknown }>(
           connection,
@@ -219,6 +227,9 @@ export class BrowserPasskeyManager {
         for (const [key, credential] of this.desired) {
           await this.install(authenticator, key, credential);
         }
+        void withdrawn.then(async (ok) => {
+          if (!ok) await this.serial(async () => await this.remove(authenticator));
+        });
         return true;
       } catch {
         // A target without the WebAuthn domain (or one that closed during
@@ -229,13 +240,27 @@ export class BrowserPasskeyManager {
     });
   }
 
+  /** Take one authenticator out of its tab and stop tracking it. */
+  private async remove(authenticator: Authenticator): Promise<void> {
+    if (this.authenticators.get(authenticator.sessionId) !== authenticator) return;
+    this.forget(authenticator.sessionId);
+    await this.send(
+      authenticator.connection,
+      "WebAuthn.removeVirtualAuthenticator",
+      { authenticatorId: authenticator.authenticatorId },
+      authenticator.sessionId,
+    ).catch(() => undefined);
+  }
+
   /**
    * Install {@link PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT} on a page session, or on
    * a cross-origin frame's own session (such a frame shares its page's
    * authenticator), while the target still waits for its debugger. Chromium
    * runs a session's new-document scripts only while its Page domain is
-   * enabled, so it stays enabled. A frame that closed meanwhile simply needs
-   * nothing; a page that cannot take it gets no authenticator.
+   * enabled, so it stays enabled. Both commands go out at once: a target
+   * waiting for its debugger answers them only after it resumes, and runs
+   * them, in order, before its first script. A frame that closed meanwhile
+   * simply needs nothing; a page that cannot take it gets no authenticator.
    */
   async withdrawAutofill(
     connection: PasskeyCdpConnection,
@@ -243,13 +268,15 @@ export class BrowserPasskeyManager {
     required = false,
   ): Promise<void> {
     try {
-      await this.send(connection, "Page.enable", {}, sessionId);
-      await this.send(
-        connection,
-        "Page.addScriptToEvaluateOnNewDocument",
-        { source: PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT, runImmediately: true },
-        sessionId,
-      );
+      await Promise.all([
+        this.send(connection, "Page.enable", {}, sessionId),
+        this.send(
+          connection,
+          "Page.addScriptToEvaluateOnNewDocument",
+          { source: PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT, runImmediately: true },
+          sessionId,
+        ),
+      ]);
     } catch (error) {
       if (required) throw error;
     }
