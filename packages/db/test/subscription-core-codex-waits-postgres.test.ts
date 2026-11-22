@@ -1721,8 +1721,8 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     expect(await place(next)).toMatchObject({
       kind: "wait",
-      reason: "no_eligible_capacity",
-      earliestResetAt: until,
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
     });
   });
 
