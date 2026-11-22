@@ -13,7 +13,9 @@ import {
   createSession,
   encryptEnvironmentValue,
   ensureDefaultVault,
+  ensureTaskVault,
   getSession,
+  getVaultItem,
   submitHumanPromptInTransaction,
   updateWorkspaceSettings,
   upsertVaultItem,
@@ -108,6 +110,7 @@ async function frozenFixture(
     optionalText?: boolean;
     skillReview?: boolean;
     secretQuestion?: "saved-logins-on" | "saved-logins-off";
+    asChild?: boolean;
     allowSkip?: boolean;
     expiresAt?: Date | null;
   } = {},
@@ -133,16 +136,21 @@ async function frozenFixture(
       values (${grant.accountId}::uuid, ${subjectId}, 'active', 'member', ${personal!.id}::uuid)
       on conflict do nothing`;
   }
-  const session = await createSession(client.db, {
+  const sessionInput = {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     initialMessage: "Ask first",
     resources: [],
     metadata: {},
     model: "scripted-model",
-    reasoningEffort: "medium",
-    latencyMode: "standard",
-    sandboxBackend: "none",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none" as const,
+  };
+  const parent = options.asChild ? await createSession(client.db, sessionInput) : null;
+  const session = await createSession(client.db, {
+    ...sessionInput,
+    ...(parent ? { parentSessionId: parent.id } : {}),
     ...(options.secretQuestion === "saved-logins-off"
       ? { firstPartyMcpPermissions: ["sessions:read", "sessions:control"] }
       : {}),
@@ -260,6 +268,7 @@ async function frozenFixture(
     subjectId,
     workspaceId: grant.workspaceId!,
     sessionId: session.id,
+    rootSessionId: parent?.id ?? session.id,
     requestId,
     authorization: `Bearer ${token}`,
     questions,
@@ -267,115 +276,213 @@ async function frozenFixture(
 }
 
 describe("structured human-input HTTP surface (real PostgreSQL)", () => {
-  test("the asking chat's delegated scope controls save choices and the resumed turn can resolve a Task answer", async () => {
-    const fixture = await frozenFixture({ secretQuestion: "saved-logins-off" });
-    const { accountId, workspaceId, sessionId, subjectId, requestId } = fixture;
-    const writer = { kind: "subject" as const, accountId, workspaceId, subjectId };
-    const sharedVault = await ensureDefaultVault(client.db, writer, {
-      workspaceId,
-      ownerKind: "workspace",
-    });
-    const savedValue = "example-existing-saved-login";
-    await upsertVaultItem(client.db, writer, {
-      vaultId: sharedVault.id,
-      name: "Example login",
-      type: "login",
-      fields: [
-        {
-          name: "password",
-          kind: "concealed",
-          valueSize: savedValue.length,
-          valueEncrypted: encryptEnvironmentValue(ENCRYPTION_KEY, savedValue),
-        },
-      ],
-    });
-    const base = `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
-    const headers = { authorization: fixture.authorization, "content-type": "application/json" };
-    const list = await app.request(`${base}/human-input-requests?status=pending`, { headers });
-    expect(list.status).toBe(200);
-    expect(await list.json()).toMatchObject({
-      requests: [
-        {
-          id: requestId,
-          questions: [{ secret: { saveTo: "workspace" } }],
-          secretSaveTargets: ["task"],
-        },
-      ],
-    });
-    const detail = await app.request(`${base}/human-input-requests/${requestId}`, { headers });
-    expect(detail.status).toBe(200);
-    expect(await detail.json()).toMatchObject({ id: requestId, secretSaveTargets: ["task"] });
-
-    const value = "test-value-only-for-this-task";
-    const answer = (saveTo: "workspace" | "task", vaultId?: string) =>
-      app.request(`${base}/events`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          type: "user.humanInputResponse",
-          clientEventId: crypto.randomUUID(),
-          payload: {
-            requestId,
-            response: {
-              outcome: "answered",
-              answers: [],
-              secretAnswers: [{ questionId: SECRET_QUESTION.id, value, saveTo, vaultId }],
-            },
-          },
-        }),
-      });
-    expect((await answer("workspace")).status).toBe(403);
-    expect((await answer("task", sharedVault.id)).status).toBe(403);
-    const accepted = await answer("task");
-    expect(accepted.status).toBe(202);
-    const event = await accepted.json();
-    const reference = formatSecretReference({
-      vault: "Task",
-      item: "Example login",
-      field: "password",
-    });
-    expect(event.payload.response.answers).toMatchObject([
-      { secret: { reference, saveTo: "task" }, values: [reference] },
-    ]);
-    expect(JSON.stringify(event)).not.toContain(value);
-
-    const attemptId = crypto.randomUUID();
-    const resumed = await claimSessionWorkForAttempt(client.db, workspaceId, {
-      sessionId,
-      workflowId: `session-${sessionId}`,
-      workflowRunId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      attemptId,
-      trigger: { kind: "approval", triggerEventId: event.id },
-    });
-    if (resumed.action !== "claimed") throw new Error(`question did not resume: ${resumed.reason}`);
-    const resolver = createSecretResolver(
-      { db: client.db, encryptionKey: ENCRYPTION_KEY },
-      {
-        kind: "attempt",
-        accountId,
+  test.each([false, true])(
+    "a restricted chat (child: %s) can use its secure answer, not other Task or workspace items",
+    async (asChild) => {
+      const fixture = await frozenFixture({ secretQuestion: "saved-logins-off", asChild });
+      const { accountId, workspaceId, sessionId, subjectId, requestId } = fixture;
+      const writer = { kind: "subject" as const, accountId, workspaceId, subjectId };
+      const sharedVault = await ensureDefaultVault(client.db, writer, {
         workspaceId,
+        ownerKind: "workspace",
+      });
+      const savedValue = "example-existing-saved-login";
+      const sharedItem = {
+        name: "Example login",
+        type: "login",
+        fields: [
+          {
+            name: "password",
+            kind: "concealed" as const,
+            valueSize: savedValue.length,
+            valueEncrypted: encryptEnvironmentValue(ENCRYPTION_KEY, savedValue),
+          },
+        ],
+      } as const;
+      await upsertVaultItem(client.db, writer, {
+        ...sharedItem,
+        fields: [...sharedItem.fields],
+        vaultId: sharedVault.id,
+      });
+      const taskVault = await ensureTaskVault(client.db, writer, {
+        workspaceId,
+        sessionId: fixture.rootSessionId,
+      });
+      const existingTask = await upsertVaultItem(client.db, writer, {
+        ...sharedItem,
+        fields: [...sharedItem.fields],
+        vaultId: taskVault.id,
+      });
+      const base = `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+      const headers = { authorization: fixture.authorization, "content-type": "application/json" };
+      const list = await app.request(`${base}/human-input-requests?status=pending`, { headers });
+      expect(list.status).toBe(200);
+      expect(await list.json()).toMatchObject({
+        requests: [
+          {
+            id: requestId,
+            questions: [{ secret: { saveTo: "workspace" } }],
+            secretSaveTargets: ["task"],
+          },
+        ],
+      });
+      const detail = await app.request(`${base}/human-input-requests/${requestId}`, { headers });
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toMatchObject({ id: requestId, secretSaveTargets: ["task"] });
+
+      const value = "test-value-only-for-this-task";
+      const answer = (saveTo: "workspace" | "user" | "task", vaultId?: string) =>
+        app.request(`${base}/events`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            type: "user.humanInputResponse",
+            clientEventId: crypto.randomUUID(),
+            payload: {
+              requestId,
+              response: {
+                outcome: "answered",
+                answers: [],
+                secretAnswers: [{ questionId: SECRET_QUESTION.id, value, saveTo, vaultId }],
+              },
+            },
+          }),
+        });
+      expect((await answer("workspace")).status).toBe(403);
+      expect((await answer("user")).status).toBe(403);
+      expect((await answer("task", sharedVault.id)).status).toBe(403);
+      const accepted = await answer("task");
+      expect(accepted.status).toBe(202);
+      const event = await accepted.json();
+      const itemName = event.payload.response.answers[0].secret.itemName as string;
+      expect(itemName).not.toBe(existingTask.name);
+      const reference = formatSecretReference({
+        vault: "Task",
+        item: itemName,
+        field: "password",
+      });
+      expect(event.payload.response.answers).toMatchObject([
+        { secret: { reference, saveTo: "task" }, values: [reference] },
+      ]);
+      expect(JSON.stringify(event)).not.toContain(value);
+
+      const attemptId = crypto.randomUUID();
+      const resumed = await claimSessionWorkForAttempt(client.db, workspaceId, {
         sessionId,
+        workflowId: `session-${sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
         attemptId,
-        turnId: resumed.turn.id,
-        executionGeneration: resumed.turn.executionGeneration,
-      },
-      { capabilityEnabled: true },
-    );
-    const use = { surface: "mcp", toolName: "example_login" } as const;
-    const resolved = await resolver.resolve([parseSecretReference(reference)], use);
-    expect([...resolved.values()].map((entry) => entry.material)).toEqual([
-      { type: "text", value },
-    ]);
-    const savedReference = formatSecretReference({
-      vault: "Shared",
-      item: "Example login",
-      field: "password",
-    });
-    await expect(
-      resolver.resolve([parseSecretReference(savedReference)], use),
-    ).rejects.toMatchObject({ failures: [{ code: "denied" }] });
-  });
+        trigger: { kind: "approval", triggerEventId: event.id },
+      });
+      if (resumed.action !== "claimed")
+        throw new Error(`question did not resume: ${resumed.reason}`);
+      const resolver = createSecretResolver(
+        { db: client.db, encryptionKey: ENCRYPTION_KEY },
+        {
+          kind: "attempt",
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          turnId: resumed.turn.id,
+          executionGeneration: resumed.turn.executionGeneration,
+        },
+        { capabilityEnabled: true },
+      );
+      const use = { surface: "mcp", toolName: "example_login" } as const;
+      const resolved = await resolver.resolve([parseSecretReference(reference)], use);
+      expect([...resolved.values()].map((entry) => entry.material)).toEqual([
+        { type: "text", value },
+      ]);
+      expect((await getVaultItem(client.db, writer, { itemId: existingTask.id })).generation).toBe(
+        existingTask.generation,
+      );
+      for (const inaccessible of [
+        formatSecretReference({ vault: "Shared", item: existingTask.name, field: "password" }),
+        formatSecretReference({ vault: "Task", item: existingTask.name, field: "password" }),
+        formatSecretReference({ itemId: existingTask.id, field: "password" }),
+        formatSecretReference({ vault: "Task", item: itemName, field: "password", previous: true }),
+      ]) {
+        await expect(
+          resolver.resolve([parseSecretReference(inaccessible)], use),
+        ).rejects.toMatchObject({
+          failures: [{ code: "denied" }],
+        });
+      }
+      const [written] = await shared.admin<Array<{ id: string }>>`
+      select id::text from vault_items where vault_id = ${taskVault.id}::uuid and name = ${itemName}`;
+      expect(
+        (await getVaultItem(client.db, writer, { itemId: written!.id })).lastUsedAt,
+      ).not.toBeNull();
+      if (asChild) {
+        const sibling = await createSession(client.db, {
+          accountId,
+          workspaceId,
+          parentSessionId: fixture.rootSessionId,
+          initialMessage: "Continue with the task",
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          firstPartyMcpPermissions: ["sessions:read", "sessions:control"],
+        });
+        await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, subjectId, (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId,
+            workspaceId,
+            sessionId: sibling.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Continue",
+            resources: [],
+            tools: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        );
+        const siblingAttemptId = crypto.randomUUID();
+        const siblingWork = await claimSessionWorkForAttempt(client.db, workspaceId, {
+          sessionId: sibling.id,
+          workflowId: `session-${sibling.id}`,
+          workflowRunId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          attemptId: siblingAttemptId,
+          trigger: { kind: "next" },
+        });
+        if (siblingWork.action !== "claimed") throw new Error("sibling did not claim the turn");
+        const siblingResolver = createSecretResolver(
+          { db: client.db, encryptionKey: ENCRYPTION_KEY },
+          {
+            kind: "attempt",
+            accountId,
+            workspaceId,
+            sessionId: sibling.id,
+            attemptId: siblingAttemptId,
+            turnId: siblingWork.turn.id,
+            executionGeneration: siblingWork.turn.executionGeneration,
+          },
+          { capabilityEnabled: true },
+        );
+        await expect(
+          siblingResolver.resolve([parseSecretReference(reference)], use),
+        ).rejects.toMatchObject({
+          failures: [{ code: "denied" }],
+        });
+      }
+      await upsertVaultItem(client.db, writer, {
+        itemId: written!.id,
+        fields: [...sharedItem.fields],
+      });
+      await expect(resolver.resolve([parseSecretReference(reference)], use)).rejects.toMatchObject({
+        failures: [{ code: "denied" }],
+      });
+    },
+  );
 
   test("a chat with saved-logins access still offers its workspace vault", async () => {
     const fixture = await frozenFixture({ secretQuestion: "saved-logins-on" });

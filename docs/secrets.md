@@ -73,8 +73,10 @@ resolve are:
 - the root session's task vault.
 
 A turn with no acting human (a service turn) gets the same set without Only me
-vaults. If the acting human (for example a viewer) or the chat's delegated
-permissions lack `secrets:use`, the turn reaches only its task vault.
+vaults. A turn whose acting human lacks `secrets:use` (for example a viewer)
+reaches only the task vault. If the chat's delegated permissions disable saved
+logins, it can resolve only the Task answers to its own secure questions, not
+other items in its root task vault or answers supplied to another session.
 
 **Policy.** Sessions and scheduled tasks carry an optional vault policy,
 `{"mode":"all"}` (the default) or `{"mode":"selected","vaultIds":[…]}`. The

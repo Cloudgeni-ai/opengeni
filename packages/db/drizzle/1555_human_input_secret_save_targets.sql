@@ -5,6 +5,12 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
 
+-- Only the asking session can use these answers without saved-login access.
+-- Bind to the written generation, not later edits or moves of the item.
+ALTER TABLE vault_items
+  ADD COLUMN secure_answer_session_id uuid,
+  ADD COLUMN secure_answer_generation bigint;
+
 CREATE FUNCTION opengeni_private.vault_turn_context(
   p_account uuid, p_workspace uuid, p_session uuid, p_turn uuid
 ) RETURNS jsonb
@@ -88,8 +94,9 @@ BEGIN
     'agentAllowed', agent_allowed,
     'includeUser', agent_allowed AND human_valid AND has_use,
     'includeShared', agent_allowed AND has_use AND (NOT human_expected OR human_valid),
-    -- The delegated grant controls saved logins, not the current task's input.
-    'taskMode', 'root',
+    -- Keep full task-vault reach gated. The resolver can use only this
+    -- session's secure answers in the restricted mode.
+    'taskMode', CASE WHEN agent_allowed THEN 'root' ELSE 'answer' END,
     'taskRoot', coalesce(session_row.root_session_id, p_session),
     'personalWorkspace', opengeni_private.vault_workspace_is_personal(p_account, p_workspace),
     'policyVaultIds', policy_ids,
@@ -241,9 +248,11 @@ CREATE FUNCTION opengeni_private.human_input_secret_target_reachable(
     AS $$
   SELECT CASE p_target
     WHEN 'task' THEN p_vault_id IS NULL OR EXISTS (
-      SELECT 1 FROM opengeni_private.vault_reach(p_asking) reach
-      JOIN vaults vault ON vault.id = reach.vault_id AND vault.owner_kind = 'task'
-      WHERE reach.vault_id = p_vault_id
+      SELECT 1 FROM vaults vault
+      WHERE vault.id = p_vault_id AND vault.owner_kind = 'task'
+        AND vault.account_id = (p_asking ->> 'accountId')::uuid
+        AND vault.workspace_id = (p_asking ->> 'workspaceId')::uuid
+        AND vault.root_session_id = (p_asking ->> 'taskRoot')::uuid
     )
     WHEN 'user' THEN (p_asking ->> 'includeUser')::boolean
       AND (p_answering ->> 'membershipId') IS NOT DISTINCT FROM (p_asking ->> 'membershipId')
@@ -253,8 +262,9 @@ CREATE FUNCTION opengeni_private.human_input_secret_target_reachable(
     WHEN p_vault_id IS NULL THEN pg_catalog.jsonb_typeof(p_asking -> 'policyVaultIds') IS DISTINCT FROM 'array'
     ELSE EXISTS (
       SELECT 1 FROM opengeni_private.vault_reach(p_asking) reach
-      JOIN vaults vault ON vault.id = reach.vault_id AND vault.owner_kind = p_target
+      JOIN vaults vault ON vault.id = reach.vault_id
       WHERE reach.vault_id = p_vault_id AND vault.source = 'opengeni' AND vault.mode = 'read_write'
+        AND (vault.owner_kind = p_target OR (p_target = 'workspace' AND vault.owner_kind = 'organization'))
     )
   END)
 $$;
@@ -319,7 +329,9 @@ DECLARE
   context jsonb;
   asking jsonb;
   answer jsonb;
+  item_input jsonb;
   target text;
+  restricted boolean;
   vault_row vaults;
   existing vault_items;
   item_row vault_items;
@@ -329,6 +341,7 @@ BEGIN
   context := opengeni_private.vault_context(p_principal);
   asking := opengeni_private.vault_turn_context((context ->> 'accountId')::uuid,
     (context ->> 'workspaceId')::uuid, p_session, p_turn);
+  restricted := asking ->> 'taskMode' = 'answer';
   FOR answer IN SELECT element FROM pg_catalog.jsonb_array_elements(coalesce(p_answers, '[]'::jsonb)) element LOOP
     target := coalesce(answer ->> 'saveTo', 'user');
     IF target = 'user' AND (asking ->> 'subjectId') IS DISTINCT FROM (context ->> 'subjectId') THEN
@@ -347,13 +360,24 @@ BEGIN
       PERFORM opengeni_private.vault_raise('vault_permission_denied', 'this task cannot use the chosen vault');
     END IF;
     PERFORM opengeni_private.vault_assert_writable(context, vault_row);
+    item_input := (answer -> 'item') - 'expectedGeneration'
+      || pg_catalog.jsonb_build_object('createdByKind', 'human');
     existing := NULL;
     SELECT item.* INTO existing FROM vault_items item
     WHERE item.vault_id = vault_row.id AND item.archived_at IS NULL
-      AND item.name_key = vault_name_key(answer #>> '{item,name}');
-    item_row := opengeni_private.vault_write_item(context, vault_row, existing,
-      (answer -> 'item') - 'expectedGeneration'
-        || pg_catalog.jsonb_build_object('createdByKind', 'human'));
+      AND item.name_key = vault_name_key(item_input ->> 'name');
+    IF restricted AND existing.id IS NOT NULL THEN
+      -- Never turn a pre-existing Task item (including its other fields or
+      -- older versions) into an answer for a restricted session.
+      item_input := item_input || pg_catalog.jsonb_build_object('name',
+        pg_catalog.left(item_input ->> 'name', 83) || ' ' || pg_catalog.gen_random_uuid()::text);
+      existing := NULL;
+    END IF;
+    item_row := opengeni_private.vault_write_item(context, vault_row, existing, item_input);
+    IF restricted THEN
+      UPDATE vault_items SET secure_answer_session_id = p_session,
+        secure_answer_generation = item_row.generation WHERE id = item_row.id;
+    END IF;
     results := results || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
       'questionId', answer ->> 'questionId',
       'created', existing.id IS NULL,
@@ -364,9 +388,204 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION opengeni_private.vault_secure_answer_matches(p_context jsonb, p_item vault_items) RETURNS boolean
+    LANGUAGE sql STABLE
+    SET search_path FROM CURRENT
+    AS $$
+  SELECT p_context ->> 'taskMode' = 'answer'
+    AND p_item.account_id = (p_context ->> 'accountId')::uuid
+    AND p_item.secure_answer_session_id = (p_context ->> 'sessionId')::uuid
+    AND p_item.secure_answer_generation = p_item.generation
+    AND EXISTS (
+      SELECT 1 FROM vaults vault
+      WHERE vault.id = p_item.vault_id AND vault.owner_kind = 'task'
+        AND vault.workspace_id = (p_context ->> 'workspaceId')::uuid
+        AND vault.root_session_id = (p_context ->> 'taskRoot')::uuid
+    )
+$$;
+
+-- Same resolver and reference forms; only the matching answer generations
+-- enter the candidate set for an attempt without saved-login access.
+CREATE OR REPLACE FUNCTION resolve_secret_reference_candidates(p_principal jsonb, p_refs jsonb) RETURNS SETOF jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path FROM CURRENT
+    AS $$
+DECLARE
+  context jsonb;
+  reach_ids uuid[];
+  answers_only boolean;
+BEGIN
+  PERFORM opengeni_private.vault_capability_open('read');
+  context := opengeni_private.vault_context(p_principal);
+  IF pg_catalog.jsonb_typeof(p_refs) IS DISTINCT FROM 'array' OR pg_catalog.jsonb_array_length(p_refs) > 500 THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'p_refs must be an array of at most 500 references');
+  END IF;
+  answers_only := context ->> 'taskMode' = 'answer';
+  SELECT coalesce(pg_catalog.array_agg(reach.vault_id), '{}') INTO reach_ids
+  FROM opengeni_private.vault_reach(CASE WHEN answers_only THEN
+    context || '{"taskMode":"root"}'::jsonb ELSE context END) reach;
+  RETURN NEXT pg_catalog.jsonb_build_object(
+    'meta', true,
+    'kind', context ->> 'kind',
+    'subjectId', context ->> 'subjectId',
+    'humanExpected', (context ->> 'humanExpected')::boolean,
+    'humanValid', (context ->> 'humanValid')::boolean,
+    'hasSecretsUse', (context ->> 'hasSecretsUse')::boolean,
+    'agentAllowed', (context ->> 'agentAllowed')::boolean,
+    'includeUser', (context ->> 'includeUser')::boolean,
+    'includeShared', (context ->> 'includeShared')::boolean,
+    'policyVaultIds', context -> 'policyVaultIds',
+    'reachableVaultCount', CASE WHEN answers_only THEN 0 ELSE pg_catalog.cardinality(reach_ids) END
+  );
+  RETURN QUERY
+  WITH refs AS (
+    SELECT (ref ->> 'index')::integer AS ref_index,
+      ref ->> 'form' AS form,
+      CASE WHEN ref ->> 'form' = 'id' THEN (ref ->> 'itemId')::uuid END AS item_id,
+      CASE WHEN pg_catalog.jsonb_typeof(ref -> 'segments') = 'array' THEN ref -> 'segments'
+        ELSE '[]'::jsonb END AS segments,
+      nullif(ref ->> 'field', '') AS field,
+      coalesce((ref ->> 'otp')::boolean, false) AS otp,
+      coalesce((ref ->> 'previous')::boolean, false) AS previous
+    FROM pg_catalog.jsonb_array_elements(p_refs) ref
+  ), shaped AS (
+    SELECT refs.*, pg_catalog.jsonb_array_length(refs.segments) AS segment_count FROM refs
+  ), base AS (
+    SELECT shaped.ref_index, 'item'::text AS interpretation, match.vault_id, match.item_id,
+      match.matched_by, NULL::text AS field_name, false AS require_field, shaped.otp, shaped.previous
+    FROM shaped
+    CROSS JOIN LATERAL opengeni_private.vault_items_by_key(reach_ids, vault_name_key(shaped.segments ->> 0)) match
+    WHERE shaped.form = 'path' AND shaped.segment_count = 1
+    UNION ALL
+    SELECT shaped.ref_index, 'item_field', match.vault_id, match.item_id, match.matched_by,
+      shaped.segments ->> 1, true, shaped.otp, shaped.previous
+    FROM shaped
+    CROSS JOIN LATERAL opengeni_private.vault_items_by_key(reach_ids, vault_name_key(shaped.segments ->> 0)) match
+    WHERE shaped.form = 'path' AND shaped.segment_count = 2
+    UNION ALL
+    SELECT shaped.ref_index, 'vault_item', vault_match.vault_id, match.item_id,
+      CASE WHEN vault_match.matched_by = 'name' AND match.matched_by = 'name' THEN 'name' ELSE 'alias' END,
+      NULL::text, false, shaped.otp, shaped.previous
+    FROM shaped
+    CROSS JOIN LATERAL opengeni_private.vault_vaults_by_key(reach_ids, vault_name_key(shaped.segments ->> 0)) vault_match
+    CROSS JOIN LATERAL opengeni_private.vault_items_by_key(ARRAY[vault_match.vault_id], vault_name_key(shaped.segments ->> 1)) match
+    WHERE shaped.form = 'path' AND shaped.segment_count = 2
+    UNION ALL
+    SELECT shaped.ref_index, 'vault_item_field', vault_match.vault_id, match.item_id,
+      CASE WHEN vault_match.matched_by = 'name' AND match.matched_by = 'name' THEN 'name' ELSE 'alias' END,
+      shaped.segments ->> 2, true, shaped.otp, shaped.previous
+    FROM shaped
+    CROSS JOIN LATERAL opengeni_private.vault_vaults_by_key(reach_ids, vault_name_key(shaped.segments ->> 0)) vault_match
+    CROSS JOIN LATERAL opengeni_private.vault_items_by_key(ARRAY[vault_match.vault_id], vault_name_key(shaped.segments ->> 1)) match
+    WHERE shaped.form = 'path' AND shaped.segment_count = 3
+    UNION ALL
+    SELECT shaped.ref_index, 'id', item.vault_id, item.id, 'id', shaped.field, shaped.field IS NOT NULL,
+      shaped.otp, shaped.previous
+    FROM shaped
+    JOIN vault_items item ON item.id = shaped.item_id AND item.vault_id = ANY (reach_ids)
+    WHERE shaped.form = 'id'
+  )
+  SELECT pg_catalog.jsonb_build_object(
+    'refIndex', base.ref_index,
+    'interpretation', base.interpretation,
+    'tier', CASE vault.owner_kind WHEN 'task' THEN 0 WHEN 'user' THEN 1 WHEN 'workspace' THEN 2 ELSE 3 END,
+    'matchedBy', base.matched_by,
+    'vaultId', vault.id,
+    'vaultName', vault.name,
+    'vaultOwnerKind', vault.owner_kind,
+    'source', vault.source,
+    'providerConnectionId', vault.provider_connection_id,
+    'providerVaultRef', vault.provider_vault_ref,
+    'providerCacheEpoch', vault.provider_cache_epoch::text,
+    'itemId', item.id,
+    'itemName', item.name,
+    'itemType', item.type,
+    'archived', item.archived_at IS NOT NULL,
+    'providerItemRef', item.provider_item_ref,
+    'fieldId', field.id,
+    'fieldName', field.name,
+    'fieldKind', field.kind,
+    'fileName', field.file_name,
+    'providerFieldRef', field.provider_field_ref,
+    'currentVersion', field.current_version,
+    'version', version.version,
+    'valueEncrypted', version.value_encrypted,
+    'missing', CASE
+      WHEN field.id IS NULL THEN CASE
+        WHEN base.field_name IS NOT NULL THEN 'field'
+        WHEN base.otp THEN 'totp_field'
+        ELSE 'primary_field' END
+      WHEN field.current_version IS NOT NULL AND version.version IS NULL THEN
+        CASE WHEN base.previous THEN 'previous_version' ELSE 'value' END
+    END
+  )
+  FROM base
+  JOIN vault_items item ON item.id = base.item_id
+  JOIN vaults vault ON vault.id = base.vault_id
+  LEFT JOIN LATERAL (
+    SELECT candidate_field.* FROM vault_item_fields candidate_field
+    WHERE candidate_field.item_id = item.id AND (
+      (base.field_name IS NOT NULL AND candidate_field.name_key = vault_name_key(base.field_name))
+      OR (base.field_name IS NULL AND base.otp AND candidate_field.kind = 'totp')
+      OR (base.field_name IS NULL AND NOT base.otp AND candidate_field.id = item.primary_field_id)
+    )
+    ORDER BY candidate_field.position, candidate_field.name_key
+    LIMIT 1
+  ) field ON true
+  LEFT JOIN LATERAL (
+    SELECT candidate_version.version, candidate_version.value_encrypted
+    FROM vault_field_versions candidate_version
+    WHERE candidate_version.field_id = field.id
+      AND CASE WHEN base.previous THEN candidate_version.version < field.current_version
+        ELSE candidate_version.version = field.current_version END
+    ORDER BY candidate_version.version DESC
+    LIMIT 1
+  ) version ON true
+  WHERE (NOT base.require_field OR field.id IS NOT NULL)
+    AND (NOT answers_only OR (NOT base.previous AND opengeni_private.vault_secure_answer_matches(context, item)))
+  ORDER BY base.ref_index, base.interpretation, vault.id, item.id;
+  PERFORM opengeni_private.vault_capability_close();
+END
+$$;
+
+CREATE OR REPLACE FUNCTION record_vault_secret_use(p_principal jsonb, p_use jsonb, p_items jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path FROM CURRENT
+    AS $$
+DECLARE
+  context jsonb;
+  touched integer;
+BEGIN
+  PERFORM opengeni_private.vault_capability_open('write');
+  context := opengeni_private.vault_context(p_principal);
+  UPDATE vault_items item SET last_used_at = pg_catalog.now()
+  WHERE item.id IN (
+      SELECT (element ->> 'itemId')::uuid FROM pg_catalog.jsonb_array_elements(coalesce(p_items, '[]'::jsonb)) element
+    )
+    AND item.account_id = (context ->> 'accountId')::uuid
+    AND (item.vault_id IN (SELECT reach.vault_id FROM opengeni_private.vault_reach(context) reach)
+      OR opengeni_private.vault_secure_answer_matches(context, item));
+  GET DIAGNOSTICS touched = ROW_COUNT;
+  PERFORM opengeni_private.vault_audit((context ->> 'accountId')::uuid, (context ->> 'workspaceId')::uuid,
+    context ->> 'subjectId', 'vault.secret.used', 'vault_item', NULL,
+    coalesce(p_use, '{}'::jsonb) || pg_catalog.jsonb_build_object(
+      'principalKind', context ->> 'kind',
+      'sessionId', coalesce(context ->> 'sessionId', p_principal ->> 'sessionId'),
+      'turnId', p_principal ->> 'turnId',
+      'attemptId', p_principal ->> 'attemptId',
+      'siteId', p_principal ->> 'siteId',
+      'connectionId', p_principal ->> 'connectionId',
+      'count', pg_catalog.jsonb_array_length(coalesce(p_items, '[]'::jsonb)),
+      'itemsTouched', touched,
+      'items', coalesce(p_items, '[]'::jsonb)));
+  PERFORM opengeni_private.vault_capability_close();
+END
+$$;
+
 REVOKE ALL ON FUNCTION opengeni_private.vault_turn_context(uuid, uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.human_input_secret_target_reachable(jsonb, jsonb, text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.human_input_secret_save_targets(jsonb, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.vault_secure_answer_matches(jsonb, vault_items) FROM PUBLIC;
 
 DO $search_paths$
 DECLARE
@@ -377,8 +596,11 @@ BEGIN
     'opengeni_private.vault_principal_context(jsonb)',
     'opengeni_private.human_input_secret_target_reachable(jsonb, jsonb, text, uuid)',
     'opengeni_private.human_input_secret_save_targets(jsonb, uuid, uuid)',
+    'opengeni_private.vault_secure_answer_matches(jsonb, vault_items)',
     'session_secrets_view(uuid, jsonb)',
-    'apply_secret_answers(uuid, uuid, jsonb, jsonb)'
+    'apply_secret_answers(uuid, uuid, jsonb, jsonb)',
+    'resolve_secret_reference_candidates(jsonb, jsonb)',
+    'record_vault_secret_use(jsonb, jsonb, jsonb)'
   ] LOOP
     EXECUTE format('ALTER FUNCTION %s SET search_path = pg_catalog, %I, opengeni_private, pg_temp',
       signature, current_schema());
