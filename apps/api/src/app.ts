@@ -439,6 +439,7 @@ import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSessionShareLinkRoutes } from "./routes/session-share-links";
 import { registerSessionLinkRoutes } from "./routes/session-links";
+import { registerSessionLinkPullRequestRoutes } from "./routes/session-link-pull-request";
 import {
   archivedSessionImportErrorResponse,
   isSessionHistoryImportRequest,
@@ -467,6 +468,7 @@ import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerSiteSqlRoutes } from "./routes/site-sql";
 import { registerAppPackageRoutes } from "./routes/app-packages";
+import { registerAppTemplateRoutes } from "./routes/app-templates";
 import { setAppSyncHooks } from "./app-packages/syncs";
 import { APP_PACKAGE_SYNC_HOOKS } from "./app-sync/package-hooks";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
@@ -2903,6 +2905,7 @@ export function createAppComposition(
   registerSiteSqlRoutes(app, routeDeps);
   setAppSyncHooks(APP_PACKAGE_SYNC_HOOKS);
   registerAppPackageRoutes(app, routeDeps);
+  registerAppTemplateRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
@@ -2940,6 +2943,7 @@ export function createAppComposition(
   registerSessionShareLinkRoutes(app, routeDeps);
   // The Linked panel, after the session module for the same reason.
   registerSessionLinkRoutes(app, routeDeps);
+  registerSessionLinkPullRequestRoutes(app, routeDeps);
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);

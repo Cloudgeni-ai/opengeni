@@ -21,6 +21,7 @@ export * from "./claude-cite-tags";
 export * from "./provider-citation-handles";
 export * from "./machine-access";
 export * from "./no-reply";
+export * from "./connection-card-notice";
 import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
 import {
@@ -83,6 +84,7 @@ export * from "./site-publishing";
 export * from "./app-assets";
 export * from "./site-sql";
 export * from "./app-package";
+export * from "./app-templates";
 export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
@@ -15078,10 +15080,12 @@ export const UpdateScheduledTaskRequest =
             prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
             model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
             reasoningEffort: ReasoningEffort.optional(),
+            /** The agent each run's chat is with; null runs without one. */
+            agentId: primitives.uuid.nullable().optional(),
           })
           .strict()
           .refine((patch) => Object.keys(patch).length > 0, {
-            message: "agentConfigPatch requires prompt, model or reasoningEffort",
+            message: "agentConfigPatch requires prompt, model, reasoningEffort or agentId",
           })
           .optional(),
         status: ScheduledTaskStatus.optional(),
@@ -16358,6 +16362,12 @@ export const ListInstalledSkillsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ skills: z.array(InstalledSkillSummary).max(1000) }).strict(),
 );
 export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
+
+/** GET /v1/workspaces/:workspaceId/skills/library: reviewed library skills, `enabled` once added. */
+export const ListLibrarySkillsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ skills: z.array(CapabilityCatalogItem).max(1000) }).strict(),
+);
+export type ListLibrarySkillsResponse = z.infer<typeof ListLibrarySkillsResponse>;
 
 export const SkillUninstallPreview = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -17716,6 +17726,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * null otherwise and omitted by older servers or detail reads.
      */
     requiresActionSince: z.string().nullable().optional(),
+    /**
+     * When the agent started waiting on a connection card (connect, reconnect
+     * or more access) in this chat that is still open; null when none is.
+     * While the session is idle it needs the person, as an approval does.
+     * Omitted by older servers.
+     */
+    awaitingConnectionSince: z.string().nullable().optional(),
     createdAt: primitives.string,
     updatedAt: primitives.string,
   }),
@@ -17894,6 +17911,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
+    awaitingConnectionSince: true,
     admissionBlock: true,
     createdAt: true,
     updatedAt: true,

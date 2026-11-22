@@ -62,7 +62,7 @@ describe("agents in the browser", () => {
     await page.getByText("Bot templates are now agents.").waitFor();
     await page.getByText("Slack agents are now agents. Manage them here.").waitFor();
     await page.getByText(/More than one agent is called/).waitFor();
-    await page.getByRole("button", { name: "New agent" }).waitFor();
+    await page.getByRole("button", { name: "Add agent" }).waitFor();
     expect(await page.getByText("Release manager", { exact: true }).count()).toBe(1);
     // A dismissed banner stays dismissed.
     await page.getByRole("button", { name: "Dismiss" }).first().click();

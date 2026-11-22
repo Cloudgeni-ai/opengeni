@@ -38,6 +38,12 @@ import {
 } from "../lib/session-composer-readiness";
 import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
+import { reserveBrowserConnectNavigation } from "@opengeni/connect/browser-navigation";
+import type {
+  AuthNeededRecoveryHandler,
+  AuthNeededRecoveryOptions,
+  AuthNeededRecoveryResult,
+} from "../../components/auth-needed-row";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
 import { useMessageSenderRenderer } from "../components/session/message-senders";
 import {
@@ -106,6 +112,7 @@ import {
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
+import { initialWorkspaceTab, WORKBENCH_TAB_CHANGES } from "../../components/sandbox-workspace";
 import {
   SessionSecretsMenuBody,
   sessionSecretsSummary,
@@ -165,6 +172,7 @@ import { sessionAgentsSignal } from "../../session-agents-model";
 import { useNavigate, usePage, useRouterState } from "../lib/navigation";
 import {
   BugIcon,
+  GitPullRequestIcon,
   LinkIcon,
   Loader2Icon,
   MenuIcon,
@@ -254,6 +262,13 @@ import {
   SessionLinkedPanel,
   useSessionLinks,
 } from "../components/session/linked-panel";
+import {
+  mergePullRequestMessage,
+  pullRequestLinkFromLinks,
+  pullRequestNumber,
+  SessionPullRequestPanel,
+} from "../components/session/pull-request-panel";
+
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
 import {
@@ -341,6 +356,11 @@ import {
 import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
 import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
 import { findConnectRecoveryTarget } from "../lib/connect-recovery-account";
+import type { CardStepUpOutcome } from "../lib/connection-step-up";
+import type {
+  ApprovalSurfaceProps,
+  ToolReviewAccessNeeded,
+} from "../../components/approval-surface";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -371,6 +391,12 @@ import { useUiEventTarget } from "../lib/ui-events";
 import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
 import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
+import { pendingConnectionCard } from "../../timeline/pending-connection-card";
+import { authNeededPresentation } from "../../auth-needed-presentation";
+import { AuthNeededRow } from "../../components/auth-needed-row";
+
+/** The dock tab for the chat's pull request. */
+const PULL_REQUEST_TAB = "pull-request";
 
 const InlineChatArtifact = lazy(() =>
   import("../components/artifacts/retained-file-preview").then((module) => ({
@@ -1186,7 +1212,7 @@ export function SessionRoute({
     personalGitHubConnection !== null &&
     personalGitHubConnection.status !== "active" &&
     personalGitHubConnection.status !== "revoked";
-  const onReconnect = useCallback(
+  const reconnectViaSetup = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
         if (!item.authorizationUrl) {
@@ -1234,6 +1260,9 @@ export function SessionRoute({
               : {}),
             displayName: account.label,
             returnUrl: page.href(),
+            // Sign-in runs in a popup: it ends on a page that closes it,
+            // never on a second copy of this chat.
+            finishInPopup: true,
             idempotencyKey: crypto.randomUUID(),
           };
           reconnectCardConnections.current.set(request, item.connectionId);
@@ -1352,6 +1381,128 @@ export function SessionRoute({
       workspaceId,
       reconnectTransport,
     ],
+  );
+  // A connected account that needs more access (an OAuth step-up) goes
+  // straight from its card to the provider's consent page: no setup dialog
+  // in between, and the card follows it until the account is updated.
+  // Anything the card can't finish in one step falls back to the dialog.
+  // Ask a connected account's provider for more access in the window the
+  // person's click opens. Not async before the window: it must open in the
+  // click itself, or the browser blocks it. Null when no window can open.
+  const stepUpConnection = useCallback(
+    (
+      connectionId: string,
+      scopes: readonly string[],
+      options: { signal?: AbortSignal | undefined; continueAfterSetup?: () => Promise<unknown> },
+    ): Promise<CardStepUpOutcome> | null => {
+      let reserved: ReturnType<typeof reserveBrowserConnectNavigation>;
+      try {
+        if (typeof window === "undefined") return null;
+        reserved = reserveBrowserConnectNavigation(window);
+      } catch {
+        return null;
+      }
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        reserved.close();
+      };
+      return (async () => {
+        try {
+          const [{ findConnectRecoveryAccount }, { stepUpFromCard }] = await Promise.all([
+            import("@opengeni/connect"),
+            import("../lib/connection-step-up"),
+          ]);
+          return await stepUpFromCard({
+            connectionId,
+            scopes,
+            window: { navigation: reserved.navigation, close },
+            transport: reconnectTransport,
+            findTarget: () =>
+              findConnectRecoveryTarget({
+                workspaceId,
+                connectionId,
+                accounts: (id) => reconnectTransport.accounts(id),
+                ownAccounts: () =>
+                  context.client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
+                find: findConnectRecoveryAccount,
+              }),
+            returnUrl: page.href(),
+            ...(options.continueAfterSetup
+              ? { continueAfterSetup: options.continueAfterSetup }
+              : {}),
+            signal: options.signal,
+          });
+        } finally {
+          close();
+        }
+      })();
+    },
+    [context.client, page, reconnectTransport, workspaceId],
+  );
+  const onReconnect = useCallback(
+    async (
+      item: AuthNeededItem,
+      options?: AuthNeededRecoveryOptions,
+    ): Promise<AuthNeededRecoveryResult | undefined> => {
+      const connectionId = item.connectionId;
+      const running =
+        item.authoritySource !== "host" &&
+        item.reason === "insufficient_scope" &&
+        connectionId &&
+        item.scopes.length > 0 &&
+        !item.capability &&
+        !item.setupRequest
+          ? stepUpConnection(connectionId, item.scopes, {
+              signal: options?.signal,
+              continueAfterSetup: () =>
+                context.client.continueAfterCapabilitySetup(workspaceId, sessionId, {
+                  connectionId,
+                }),
+            })
+          : null;
+      const outcome = running ? await running : null;
+      if (outcome?.status === "allowed") return { outcome: "done" };
+      if (outcome?.status === "resume_in_dialog" && connectionId) {
+        // The dialog resumes this same attempt (same account and access).
+        reconnectCardConnections.current.set(outcome.request, connectionId);
+        setReconnectRequest(outcome.request);
+        return undefined;
+      }
+      await reconnectViaSetup(item);
+      return undefined;
+    },
+    [context.client, reconnectViaSetup, sessionId, stepUpConnection, workspaceId],
+  );
+  // Approving an action whose account lacks access asks the provider for it
+  // first, in the same click; the approval then covers only that one call.
+  // When no consent ran, the action stays waiting and says why: approving a
+  // call that is sure to fail would use up the decision.
+  const allowAccessForApproval = useCallback(
+    async (
+      access: ToolReviewAccessNeeded,
+      _approval?: unknown,
+      signal?: AbortSignal,
+    ): Promise<boolean> => {
+      const running = stepUpConnection(access.connectionId, access.scopes, { signal });
+      if (!running) {
+        toast.error(t("connectWindowHost.allowPopups"));
+        return false;
+      }
+      const outcome = await running;
+      if (outcome.status === "resume_in_dialog") {
+        // The person finishes it there, then approves.
+        setReconnectRequest(outcome.request);
+        return false;
+      }
+      if (outcome.status === "not_handled") {
+        toast.error(t("connectSetup.setupCouldNotContinueTryAgain"));
+        return false;
+      }
+      return true;
+    },
+    [stepUpConnection],
   );
 
   // The workspace shell already needs the capability catalog for session tool
@@ -1624,6 +1775,7 @@ export function SessionRoute({
       onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
+      onAllowAccess={allowAccessForApproval}
       onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
@@ -1810,6 +1962,7 @@ function SessionDockPanel(props: SessionDockProps) {
     sessionId: string;
     tab: string;
     requestId: number;
+    expand?: boolean;
   } | null>(null);
   const agentSettingsRequestId = props.openAgentSettingsRequest?.requestId ?? null;
   const agentSettingsTarget = props.openAgentSettingsRequest?.target ?? "learning";
@@ -1946,23 +2099,106 @@ function SessionDockPanel(props: SessionDockProps) {
       });
   }, [context.client, props.workspaceId, props.sessionId]);
   const sessionArchived = props.session ? sessionReadOnlyArchive(props.session) !== null : false;
-  const trailingTabs: WorkspaceTab[] = [
-    {
+  const canAskAgent = canControlSession && Boolean(props.session) && !sessionArchived;
+  // The PR tab shows the chat's pull request; Linked keeps everything else
+  // (issues, threads, records, other pull requests), in the dock's menu, and
+  // only when there is something.
+  const pullRequestLink = useMemo(
+    () => pullRequestLinkFromLinks(linkState.links),
+    [linkState.links],
+  );
+  const otherLinks = useMemo(
+    () => ({
+      ...linkState,
+      links: linkState.links.filter((link) => link.id !== pullRequestLink?.id),
+    }),
+    [linkState, pullRequestLink],
+  );
+  const mergePullRequest = useCallback(
+    async (url: string) => {
+      try {
+        await context.client.sendMessage(props.workspaceId, props.sessionId, {
+          text: mergePullRequestMessage(url),
+          clientEventId: crypto.randomUUID(),
+        });
+      } catch (failure) {
+        toast.error(userErrorText(failure, "Try again."));
+        throw failure;
+      }
+    },
+    [context.client, props.workspaceId, props.sessionId],
+  );
+  // A chat that already has a pull request opens on it the first time.
+  const pullRequestTabOpened = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pullRequestLink || pullRequestTabOpened.current === props.sessionId) return;
+    pullRequestTabOpened.current = props.sessionId;
+    // The person's latest tab choice wins, read now rather than at mount.
+    if (readSessionDockNavigation(dockLayoutStorageId).activeTab) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: PULL_REQUEST_TAB,
+      requestId: ++tabRequestSeq.current,
+      // Select it, but don't open a closed panel in the middle of reading.
+      expand: false,
+    });
+  }, [pullRequestLink, props.sessionId, dockLayoutStorageId]);
+  // Something new in a closed panel (the first change, a pull request or the
+  // first artifact) puts a small dot on the header toggle until it's opened.
+  const hasChanges = useMemo(
+    () => initialWorkspaceTab(props.events) === WORKBENCH_TAB_CHANGES,
+    [props.events],
+  );
+  const contentBits =
+    (hasChanges ? 1 : 0) | (pullRequestLink ? 2 : 0) | (artifactSummaries.length > 0 ? 4 : 0);
+  // Links and artifacts load after the chat opens; what they bring then isn't new.
+  const contentLoaded = linkState.status !== "loading" && artifactState.status !== "loading";
+  const seenContent = useRef<{ sessionId: string; bits: number } | null>(null);
+  const setInspectorHint = context.setInspectorHint;
+  useEffect(() => {
+    if (!setInspectorHint) return;
+    const seen = seenContent.current;
+    if (!seen || seen.sessionId !== props.sessionId || !props.dockCollapsed || !contentLoaded) {
+      seenContent.current = { sessionId: props.sessionId, bits: contentBits };
+      setInspectorHint(false);
+      return;
+    }
+    if ((contentBits & ~seen.bits) !== 0) setInspectorHint(true);
+  }, [contentBits, contentLoaded, props.dockCollapsed, props.sessionId, setInspectorHint]);
+  useEffect(() => () => setInspectorHint?.(false), [setInspectorHint]);
+  const pullRequestNumberLabel = pullRequestLink ? pullRequestNumber(pullRequestLink) : null;
+  const leadingTabs: WorkspaceTab[] = pullRequestLink
+    ? [
+        {
+          id: PULL_REQUEST_TAB,
+          label: pullRequestNumberLabel ? `PR #${pullRequestNumberLabel}` : "PR",
+          icon: <GitPullRequestIcon />,
+          content: (
+            <SessionPullRequestPanel
+              // A different chat or pull request starts fresh (view, Merge).
+              key={`${props.sessionId}:${pullRequestLink.id}`}
+              workspaceId={props.workspaceId}
+              sessionId={props.sessionId}
+              link={pullRequestLink}
+              {...(canAskAgent ? { onMerge: () => mergePullRequest(pullRequestLink.url) } : {})}
+              {...(canControlSession && !sessionArchived
+                ? { onRemove: () => void linkState.remove(pullRequestLink.id) }
+                : {})}
+            />
+          ),
+        },
+      ]
+    : [];
+  const trailingTabs: WorkspaceTab[] = [];
+  if (otherLinks.links.length > 0) {
+    trailingTabs.push({
       id: "linked",
       label: "Linked",
       icon: <LinkIcon />,
-      ...(linkState.links.length > 0
-        ? {
-            badge: (
-              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
-                {linkState.links.length}
-              </span>
-            ),
-          }
-        : {}),
+      optional: true,
       content: (
         <SessionLinkedPanel
-          state={linkState}
+          state={otherLinks}
           canEdit={canControlSession && !sessionArchived}
           connectHref={(connect) =>
             connect.capabilityId
@@ -1971,57 +2207,51 @@ function SessionDockPanel(props: SessionDockProps) {
           }
         />
       ),
-    },
-    {
-      id: "artifacts",
-      label: "Artifacts",
-      icon: <PanelsTopLeftIcon />,
-      ...(artifactSummaries.length > 0
-        ? {
-            badge: (
-              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
-                {artifactSummaries.length}
-              </span>
-            ),
+    });
+  }
+  trailingTabs.push({
+    id: "artifacts",
+    label: "Artifacts",
+    icon: <PanelsTopLeftIcon />,
+    // On the strip once the chat has artifacts; until then, in the "+" menu.
+    ...(artifactSummaries.length === 0 ? { optional: true } : {}),
+    content: (
+      <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
+        <LazySessionEditableArtifactsWorkspace
+          key={props.sessionId}
+          workspaceId={props.workspaceId}
+          sessionId={props.sessionId}
+          artifacts={artifactSummaries}
+          status={artifactState.status}
+          onRetry={artifactState.retry}
+          initialSelectedArtifactId={dockNavigation.artifactId}
+          openArtifactRequest={currentArtifactRequest}
+          onSelectedArtifactIdChange={rememberArtifact}
+          onPin={
+            hasWorkspacePermission(context.accessContext, props.workspaceId, "artifacts:publish")
+              ? async (item, pinned) => {
+                  await context.client.updateArtifactPin(
+                    props.workspaceId,
+                    item.kind,
+                    item.id,
+                    pinned,
+                  );
+                  artifactState.applyPin(item.kind, item.id, pinned);
+                  expireAfterArtifactMutation();
+                  artifactState.retry();
+                }
+              : undefined
           }
-        : {}),
-      content: (
-        <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
-          <LazySessionEditableArtifactsWorkspace
-            key={props.sessionId}
-            workspaceId={props.workspaceId}
-            sessionId={props.sessionId}
-            artifacts={artifactSummaries}
-            status={artifactState.status}
-            onRetry={artifactState.retry}
-            initialSelectedArtifactId={dockNavigation.artifactId}
-            openArtifactRequest={currentArtifactRequest}
-            onSelectedArtifactIdChange={rememberArtifact}
-            onPin={
-              hasWorkspacePermission(context.accessContext, props.workspaceId, "artifacts:publish")
-                ? async (item, pinned) => {
-                    await context.client.updateArtifactPin(
-                      props.workspaceId,
-                      item.kind,
-                      item.id,
-                      pinned,
-                    );
-                    artifactState.applyPin(item.kind, item.id, pinned);
-                    expireAfterArtifactMutation();
-                    artifactState.retry();
-                  }
-                : undefined
-            }
-          />
-        </LazyPart>
-      ),
-    },
-  ];
+        />
+      </LazyPart>
+    ),
+  });
   if (props.session) {
     trailingTabs.push({
       id: "agent",
       label: "Settings",
       icon: <SettingsIcon />,
+      optional: true,
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening settings" />}>
           <LazyAgentConfigurationPanel
@@ -2042,6 +2272,7 @@ function SessionDockPanel(props: SessionDockProps) {
       id: "debug",
       label: "Debug",
       icon: <BugIcon />,
+      optional: true,
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
@@ -2099,11 +2330,10 @@ function SessionDockPanel(props: SessionDockProps) {
         </ArtifactLinkBoundary>
       }
       openTabRequest={currentTabRequest}
+      leadingTabs={leadingTabs}
       trailingTabs={trailingTabs}
       pullRequest={linkedPullRequest}
-      {...(canControlSession && props.session && !sessionArchived
-        ? { onOpenPullRequest: openPullRequest }
-        : {})}
+      {...(canAskAgent ? { onOpenPullRequest: openPullRequest } : {})}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
       {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
@@ -2330,7 +2560,9 @@ function SessionChatPane(props: {
   onRestoreArchived?: (() => Promise<boolean>) | undefined;
   onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
-  onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  onReconnect: AuthNeededRecoveryHandler;
+  /** Asks a provider for access an action's account lacks, before approving it. */
+  onAllowAccess: NonNullable<ApprovalSurfaceProps["onAllowAccess"]>;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
   onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
@@ -3648,6 +3880,27 @@ function SessionChatPane(props: {
     hasNewer: props.hasNewer,
     queue: props.queue.snapshot,
   });
+  // The connection card the agent ended waiting on stays in view above the
+  // composer, where approvals are, until it is done or the person writes.
+  const pinnedConnectionCard = useMemo(
+    () =>
+      props.session.status === "idle" && !props.hasNewer
+        ? pendingConnectionCard(
+            timelineWithStartup,
+            (item) =>
+              !authNeededPresentation(t, item).unavailable &&
+              (item.authoritySource !== "host" || Boolean(item.authorizationUrl)),
+          )
+        : null,
+    [props.hasNewer, props.session.status, timelineWithStartup],
+  );
+  const timelineItems = useMemo(
+    () =>
+      pinnedConnectionCard
+        ? timelineWithStartup.filter((item) => item !== pinnedConnectionCard)
+        : timelineWithStartup,
+    [pinnedConnectionCard, timelineWithStartup],
+  );
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     sessionDisplayStatus(props.session),
     readOnlyArchive === null &&
@@ -4399,6 +4652,17 @@ function SessionChatPane(props: {
                               {failureRecovery}
                               {/* The pause's other approvals stay up while a decision
                         resumes the turn: deciding them never waits for it. */}
+                              {pinnedConnectionCard ? (
+                                <div className="pb-1" data-pinned-connection-card="">
+                                  {renderAuthNeeded(pinnedConnectionCard) ?? (
+                                    <AuthNeededRow
+                                      item={pinnedConnectionCard}
+                                      onReconnect={props.onReconnect}
+                                      resolveProviderLogo={props.resolveProviderLogo}
+                                    />
+                                  )}
+                                </div>
+                              ) : null}
                               {props.approvals.length > 0 &&
                                 approvalsDecidable(props.session.status) && (
                                   <ApprovalSurface
@@ -4407,6 +4671,7 @@ function SessionChatPane(props: {
                                     onSelectedApprovalChange={setSelectedApprovalId}
                                     loadReview={loadToolReview}
                                     onViewDetails={viewToolReviewDetails}
+                                    onAllowAccess={props.onAllowAccess}
                                     onApprove={(approval, answer) =>
                                       decideApproval(approval.id, "approve", answer)
                                     }
@@ -4453,7 +4718,7 @@ function SessionChatPane(props: {
                           turnSummary={{ rolling: true }}
                           key={props.session.id}
                           className="h-full"
-                          items={timelineWithStartup}
+                          items={timelineItems}
                           searchTarget={activeSearchTarget}
                           focusSequence={momentSequence}
                           events={props.events}
@@ -4674,6 +4939,7 @@ function SessionChatPane(props: {
                       onResolved={props.onDescendantResolved}
                       onResumingChange={onSubSessionResumingChange}
                       refreshSignal={props.descendantRefreshSignal}
+                      onAllowAccess={props.onAllowAccess}
                       loadSkillReview={loadSkillReview}
                       allowedSaveTo={secretSaveTargets(
                         context.accessContext,

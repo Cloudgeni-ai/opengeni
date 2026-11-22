@@ -4733,6 +4733,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionPullRequest",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links/:linkId/pull-request",
+    "request": [],
+    "query": [
+      "fresh"
+    ],
+    "response": [],
+    "permission": "sessions:read"
+  },
+  {
     "id": "getSessionRetainedArtifact",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId",
@@ -4785,6 +4796,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SidebarLayoutResponse"
     ],
+    "permission": "workspace:read"
+  },
+  {
+    "id": "getSidebarLinkIcon",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout/link-icon",
+    "request": [],
+    "query": [
+      "url"
+    ],
+    "response": [],
     "permission": "workspace:read"
   },
   {
@@ -5527,6 +5549,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "query": [
       "cursor",
+      "direct",
       "filter",
       "limit"
     ],
@@ -5657,6 +5680,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AppSyncListResponse"
     ]
+  },
+  {
+    "id": "listAppTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/app-templates",
+    "request": [],
+    "response": [
+      "AppTemplate",
+      "ListAppTemplatesResponse"
+    ],
+    "permission": "artifacts:read"
   },
   {
     "id": "listAppWebhooks",
@@ -6309,6 +6343,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "KnowledgeReviewBatchListResponse"
     ]
+  },
+  {
+    "id": "listLibrarySkills",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/skills/library",
+    "request": [],
+    "response": [
+      "CapabilityCatalogItem",
+      "ListLibrarySkillsResponse"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listMachines",

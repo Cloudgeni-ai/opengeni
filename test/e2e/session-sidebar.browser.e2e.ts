@@ -1202,8 +1202,12 @@ test("the Site view starts below the desktop window bar", async () => {
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
     // Only the Site's own column: previews in its chat keep their spacing.
     expect(await page.locator("[data-site-column] [aria-label='Chat']").count()).toBe(0);
-    const toolbar = page.locator("[data-site-column] [data-artifact-toolbar]");
-    const first = await toolbar.locator(":scope > div > *").first().boundingBox();
+    // The Site's header row starts its column (this page has no window-bar
+    // row to lift it into).
+    const first = await page
+      .locator("[data-site-column] [data-site-header] > *")
+      .first()
+      .boundingBox();
     expect(first).not.toBeNull();
     await expectWindowTop(page, desktop);
     return first!;
@@ -1221,7 +1225,8 @@ test("the Site view starts below the desktop window bar", async () => {
     if (desktop === "macos" && rail === "collapsed") {
       await capture("site-view-macos-collapsed-rail");
       // Full screen starts below the bar too, with its usual spacing.
-      await page.getByRole("button", { name: "Open app full screen" }).click();
+      await page.getByRole("button", { name: "More app actions" }).click();
+      await page.getByRole("menuitem", { name: "Open app full screen" }).click();
       const back = await page.getByRole("button", { name: "Back", exact: true }).boundingBox();
       expect(back!.x).toBeLessThan(30);
       expect(back!.y).toBeGreaterThanOrEqual(WINDOW_BAR_HEIGHT);
@@ -1242,11 +1247,19 @@ test("the Site publish form starts below the desktop window bar in a narrow Site
         "og.site-view.chat:v1:sidebar-preview",
         JSON.stringify({ width: 720, collapsed: false }),
       );
+      // The chat is open for this person and Site.
+      localStorage.setItem(
+        "og.site-view.chat-open:v1:sidebar-preview",
+        JSON.stringify({ [path.split("/").pop()!]: true }),
+      );
       history.pushState(null, "", path);
       dispatchEvent(new PopStateEvent("popstate"));
     }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
-    await page.locator("[data-site-column]").getByRole("button", { name: "Publish" }).click();
+    await page
+      .locator("[data-site-column] [data-site-header]")
+      .getByRole("button", { name: "Publish" })
+      .click();
     const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
     const header = form.locator(":scope > header");
     const back = header.getByRole("button").first();

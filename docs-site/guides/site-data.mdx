@@ -49,7 +49,7 @@ Another service can send data into an app: ask the agent to add a webhook to a c
 
 A data sync refills a collection, or one of the app's SQL tables, from a connected tool on a schedule or event, with no model run. Ask Opengeni to set one up (agents use the `app_sync_*` tools). A sync can page through results, and with `removeMissing` it deletes records it wrote that the tool no longer returns.
 
-A personal sync fills each person's own records from their own account. People join from the app: Opengeni lists the personal syncs they haven't joined next to the app, and app code can ask with `site.data.syncs.optIn(id)`. Either way Opengeni shows its own confirmation naming the tool, the account and the collection, and joins only after the person confirms. People with several accounts of the tool choose one.
+A personal sync fills each person's own records from their own account. People join from the app: Opengeni lists the personal syncs they haven't joined next to the app, and app code can ask with `site.data.syncs.optIn(id)`. Either way Opengeni shows its own confirmation naming the tool, the account and the collection, and joins only after the person confirms. People with several accounts of the tool choose one. When a personal sync runs on new mail or GitHub activity, each person's own Gmail or GitHub starts it for them.
 
 ```ts
 const { optedIn } = await site.data.syncs.optIn(syncId); // false if they cancel

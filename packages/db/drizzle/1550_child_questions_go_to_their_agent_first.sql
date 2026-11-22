@@ -6,9 +6,10 @@
 -- in the pause needs the person (packages/db enqueueChildRequiresActionOutboxTx).
 -- The push and inbox triggers skip a held question; the inbox trigger
 -- releases it to the person (inbox item, push, list hint) when the agent no
--- longer has it. Bodies are 1289's plus the 1545 hunks; same signatures, so
--- owners and grants stay. Rolling: a constant-default column rewrites
--- nothing, and the previous release never sets it.
+-- longer has it. Bodies are the latest definitions (push 1289, inbox 1547)
+-- plus the 1550 hunks; same signatures, so owners and grants stay. Rolling: a
+-- constant-default column rewrites nothing, and the previous release never
+-- sets it.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
 
@@ -67,7 +68,7 @@ BEGIN
     ) THEN
       v_rule := NULL;
     END IF;
-    -- 1545: a sub-agent's question held for the agent that started it alerts
+    -- 1550: a sub-agent's question held for the agent that started it alerts
     -- no phone yet; the inbox trigger alerts it if that agent leaves it open.
     IF NEW.type = 'session.humanInput.requested' AND EXISTS (
       SELECT 1 FROM session_human_input_requests request
@@ -151,7 +152,7 @@ DECLARE
   v_held_recipient text;
   v_held_sequence integer;
 BEGIN
-  -- 1545: a sub-agent's question goes first to the agent that started it
+  -- 1550: a sub-agent's question goes first to the agent that started it
   -- (held_for_agent). It reaches the person (inbox item and phone push) when
   -- the agent's turn that received it ends with it still open, when an agent
   -- turn fails or is cancelled before seeing it, or when the same sub-agent's
@@ -273,6 +274,24 @@ BEGIN
     END;
   END IF;
   BEGIN
+    IF NEW.type = 'turn.started' THEN
+      -- Only a turn's first start: a resume after an approval or an answer
+      -- continues the same turn, whose cards are not posted again.
+      IF NEW.turn_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM session_events earlier
+        WHERE earlier.workspace_id = NEW.workspace_id AND earlier.turn_id = NEW.turn_id
+          AND earlier.type = 'turn.started' AND earlier.id <> NEW.id) THEN
+        RETURN NULL;
+      END IF;
+      -- The agent works again: it no longer waits on the chat's connection
+      -- cards, and one it still needs is posted again by this turn.
+      UPDATE opengeni_private.inbox_items item
+      SET status = 'withdrawn', resolved_at = now(), updated_at = now()
+      WHERE item.session_id = NEW.session_id AND item.kind = 'notification'
+        AND starts_with(item.source_key, 'connection-card:')
+        AND item.status IN ('open', 'dismissed');
+      RETURN NULL;
+    END IF;
     SELECT opengeni_private.session_person_v1(session.workspace_id, session.id,
         session.owner_subject_id, session.created_by_subject_id),
       session.parent_session_id IS NOT NULL,
@@ -293,7 +312,7 @@ BEGIN
 
     CASE NEW.type
     WHEN 'session.humanInput.requested' THEN
-      -- 1545: held for the agent that started this sub-agent; see above.
+      -- 1550: held for the agent that started this sub-agent; see above.
       IF EXISTS (
         SELECT 1 FROM session_human_input_requests request
         WHERE request.workspace_id = NEW.workspace_id

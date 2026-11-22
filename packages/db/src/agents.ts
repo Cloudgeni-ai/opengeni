@@ -888,13 +888,19 @@ export async function listAgentChats(
     viewerSubjectId: string | null;
     filter: "yours" | "everyone";
     sharedOnly?: boolean;
+    /**
+     * Only open chats that are with the agent itself (what an automation can
+     * post into): no Slack threads that only mentioned it, no cancelled chats.
+     */
+    direct?: boolean;
     excludeSessionId?: string | null;
     /** Keyset cursor: chats created before this one (`cursorAt` of the last chat read). */
     before?: { createdAt: string; sessionId: string } | null;
     limit: number;
   },
 ): Promise<AgentChatRecord[]> {
-  const limit = Math.max(1, Math.min(100, Math.trunc(input.limit)));
+  // A page is at most 100; callers ask for one more to tell whether more follow.
+  const limit = Math.max(1, Math.min(101, Math.trunc(input.limit)));
   if (input.filter === "yours" && input.viewerSubjectId === null) return [];
   const viewer = input.viewerSubjectId;
   return await withRlsContext(db, home, async (tx) => {
@@ -917,13 +923,17 @@ export async function listAgentChats(
       sql`with bound as (
           select s.id from sessions s
           where s.workspace_id = ${home.workspaceId}::uuid and s.agent_id = ${input.agentId}::uuid
-          union
+          ${
+            input.direct
+              ? sql``
+              : sql`union
           select i.session_id from slack_interactions i
           join sessions s on s.id = i.session_id and s.workspace_id = i.workspace_id
           where i.workspace_id = ${home.workspaceId}::uuid
             and i.slack_agent_id = ${input.agentId}::uuid
             and i.session_id is not null
-            and s.agent_id is null
+            and s.agent_id is null`
+          }
         )
         select s.id::text as id, s.title, s.visibility, s.created_by_subject_id,
           s.owner_subject_id, s.created_at, s.updated_at,
@@ -952,6 +962,7 @@ export async function listAgentChats(
         ) dm on true
         where s.archived_at is null
           and s.parent_session_id is null
+          ${input.direct ? sql`and s.status <> 'cancelled'` : sql``}
           -- A Site viewer's chat belongs to the Site's audience, not the workspace.
           and s.site_access_root_id is null
           and ${

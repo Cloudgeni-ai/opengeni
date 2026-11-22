@@ -676,6 +676,8 @@ A project has a chat's two audiences (migration 1161). Shared projects are seen 
 
 For lossless scheduled-task model edits, use
 `scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
+The same patch changes the agent each run's chat is with (`agentName` or
+`agentId`; `agentId: null` removes it).
 The read tool's bounded projection is not full replacement input. Existing
 sessions keep their own model; see [scheduled-task update semantics](scheduled-task-access.md).
 

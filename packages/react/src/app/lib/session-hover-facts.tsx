@@ -201,8 +201,14 @@ export function sessionHoverFacts(
       : lifecycle;
 
   const context: string[] = [];
-  if (session.status === "requires_action" && session.requiresActionSince) {
-    const waited = formatWaitDuration(session.requiresActionSince, now);
+  const waitingSince =
+    session.status === "requires_action"
+      ? session.requiresActionSince
+      : sessionDisplayStatus(session) === "requires_action"
+        ? session.awaitingConnectionSince
+        : null;
+  if (waitingSince) {
+    const waited = formatWaitDuration(waitingSince, now);
     if (waited) {
       context.push(
         sessionAdmissionBlocked(session)

@@ -535,6 +535,7 @@ test("a login-only deployment's sign-in notice shows on its own, not as somethin
   });
   expect(alone.host.textContent).toContain(notice.message);
   expect(alone.host.textContent).toContain(notice.suggestion);
+  // Who can open it is one select; the chosen one's description is its hint.
   expect(alone.host.textContent).toContain(
     "Anyone who signs in to Opengeni. On this deployment, every app asks visitors to sign in.",
   );

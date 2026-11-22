@@ -115,6 +115,7 @@ import {
   listConnectionsNeedingReconnect,
   nangoBackendsFor,
   postConnectionNeedsReauthNotice,
+  connectionNeedsReauthNoticeKey,
   connectedCommandOutputLook,
   addSessionLink,
   agentToolPermissionSetsForEnforcement,
@@ -136,6 +137,7 @@ import { turnToolRouterExpected } from "./tool-router-expectation";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { decisionModelProcessingResidency, videoGenerationRoute } from "./side-feature-gates";
 import {
+  connectionCardNotice,
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
@@ -147,7 +149,11 @@ import {
   sessionSlackAgent,
 } from "@opengeni/contracts";
 
-import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
+import {
+  createToolAuthNeededCardLedger,
+  rollingSafeToolAuthNeededPayload,
+  shouldPublishToolAuthNeededForTurn,
+} from "./admission";
 import {
   unavailableMcpConnectorReasonText,
   unavailableMcpOperationalContext,
@@ -643,6 +649,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   throwIfTurnCancelled();
   // Connection credentials and the optional Apps credential are resolved
   // independently. Inference auth is never an Apps fallback.
+  // Accounts this turn told the person stopped working (see below).
+  const reauthNoticed = new Set<string>();
   const rawResolveCredential = connectionTokenResolverForTurn({
     db,
     settings: runSettings,
@@ -655,8 +663,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     attemptId: input.attemptId,
     turn,
     // The owner hears once, on their inbox and phone, that it stopped working.
-    onConnectionNeedsReauth: (broken) =>
-      postConnectionNeedsReauthNotice({ db, bus, observability }, broken),
+    onConnectionNeedsReauth: (broken) => {
+      if (broken.use?.sessionId === input.sessionId) reauthNoticed.add(broken.connectionId);
+      return postConnectionNeedsReauthNotice({ db, bus, observability }, broken);
+    },
     // A shared service connection's key resolves with the connection's own
     // vault reach, never the turn's or its person's.
     resolveCredentialReferences: (() => {
@@ -705,21 +715,35 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       subjectId: turn.initiator.subjectId,
     },
   } as const;
+  // One card per missing access in a turn: repeats reuse the posted card.
+  const authNeededCards = createToolAuthNeededCardLedger();
   const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
     if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
       return;
     }
-    await eventing.publish!(
-      [
-        {
-          type: "tool.auth_needed",
-          payload: rollingSafeToolAuthNeededPayload(
-            accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
-          ),
-        },
-      ],
-      true,
-    );
+    await authNeededCards.post(payload, async () => {
+      const card = rollingSafeToolAuthNeededPayload(
+        accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
+      );
+      // The person is needed, as for an approval: inbox, phone and chat list.
+      const notice = connectionCardNotice(card);
+      // The card's notice stands in for this chat's "needs reconnecting" one
+      // about the same account, so the person has one item to act on.
+      const superseded =
+        notice && card.connectionId && reauthNoticed.has(card.connectionId)
+          ? connectionNeedsReauthNoticeKey(card.connectionId)
+          : null;
+      await eventing.publish!(
+        [
+          { type: "tool.auth_needed", payload: card },
+          ...(notice ? [{ type: "session.notification.posted" as const, payload: notice }] : []),
+          ...(superseded
+            ? [{ type: "session.notification.withdrawn" as const, payload: { key: superseded } }]
+            : []),
+        ],
+        true,
+      );
+    });
   };
   const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,

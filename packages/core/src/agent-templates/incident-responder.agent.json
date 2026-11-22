@@ -2,6 +2,7 @@
   "key": "incident-responder",
   "name": "Incident responder",
   "description": "Investigates alerts and reported outages, finds the likely cause, and hands a fix to Bug fixer.",
+  "team": "Engineering",
   "avatar": {
     "kind": "icon",
     "icon": "megaphone",

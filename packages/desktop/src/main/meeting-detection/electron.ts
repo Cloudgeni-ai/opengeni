@@ -5,7 +5,7 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { nativeImage } from "electron";
+import { nativeImage, Notification } from "electron";
 
 import { systemAudioUsable } from "../system-audio";
 import { MeetingPromptCard } from "./card";
@@ -14,6 +14,8 @@ import {
   MeetingDetectionStore,
   ownAppRoot,
   type MeetingDetectionOptions,
+  type MeetingNotice,
+  type ShownPrompt,
 } from "./index";
 import type { MeetingWords } from "./words";
 
@@ -43,6 +45,18 @@ export function meetingDetectionFileLog(dir: string): (message: string, error?: 
   };
 }
 
+/**
+ * A notification in the system's list, or null where the system has none.
+ * Kept until withdrawn, so its click still comes back to the app.
+ */
+export function postMeetingNotice(notice: MeetingNotice): ShownPrompt | null {
+  if (!Notification.isSupported()) return null;
+  const notification = new Notification({ title: notice.title, body: notice.body });
+  notification.on("click", () => notice.click());
+  notification.show();
+  return { close: () => notification.close() };
+}
+
 export interface CreateMeetingDetectionOptions {
   /**
    * The bundled audio helper (named by `systemAudioHelperName()`), the same
@@ -59,6 +73,11 @@ export interface CreateMeetingDetectionOptions {
   iconPath?: string;
   /** The card's words, in the app's language; read each time a card shows. English by default. */
   words?: () => MeetingWords;
+  /**
+   * System notifications beside the card when the meeting seems over, and
+   * when its recording stopped by itself. On by default.
+   */
+  notify?: boolean;
   /** The person chose to record or stop: bring the app's window up, opening it if it is closed. */
   reveal(): void;
   /**
@@ -105,6 +124,8 @@ export function createMeetingDetection(options: CreateMeetingDetectionOptions): 
       platform: process.platform,
     },
     store: new MeetingDetectionStore(options.dataDir),
+    ...(options.notify === false ? {} : { notify: postMeetingNotice }),
+    ...(options.words ? { words: options.words } : {}),
     view: new MeetingPromptCard({
       platform: process.platform,
       log,

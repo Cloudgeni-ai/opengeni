@@ -1015,6 +1015,19 @@ describe("session pin reconciliation", () => {
     expect(applySessionRailProjection(unchanged, listed)).toBe(unchanged);
   });
 
+  test("the open chat takes whether its agent waits on a connection card from the list, both ways", () => {
+    const since = "2026-07-10T00:05:00.000Z";
+    const detail = { ...session, status: "idle", lastSequence: 10 } as Session;
+    const waiting = { ...detail, awaitingConnectionSince: since } as Session;
+    expect(applySessionRailProjection(detail, waiting).awaitingConnectionSince).toBe(since);
+    // Done with the card: the list clears it on the open chat too.
+    const done = applySessionRailProjection(waiting, detail);
+    expect("awaitingConnectionSince" in done).toBe(false);
+    // A list page older than the detail doesn't bring an earlier wait back.
+    const newer = { ...detail, lastSequence: 20 } as Session;
+    expect(applySessionRailProjection(newer, waiting).awaitingConnectionSince).toBeUndefined();
+  });
+
   test("retains display-only list fields without copying an expired channel projection", () => {
     const current = { ...session, channelId: "channel-new" } as Session;
     const retained = {

@@ -9,6 +9,7 @@ import { freePort } from "@opengeni/testing/compose";
 import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION, type BrowserSession } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
+import { hideWorkspace, openDockTab } from "./dock";
 
 const repo = new URL("../..", import.meta.url).pathname;
 const output =
@@ -1518,16 +1519,12 @@ for (const width of [1280, 390]) {
     const openFiles = async () => {
       const open = page.getByRole("button", { name: "Open workspace", exact: true });
       if (await open.isVisible()) await open.click();
-      await page.getByRole("tab", { name: "Files", exact: true }).click();
+      await openDockTab(page, "Files");
     };
     const showChat = async () => {
       // A phone restores the dock as an overlay; close it before editing chat.
       // Its inert/aria-hidden primary pane is deliberately absent from role queries.
-      if (width < 1024)
-        await page
-          .locator("[data-dock-chrome]")
-          .getByRole("button", { name: "Hide workspace", exact: true })
-          .click();
+      if (width < 1024) await hideWorkspace(page);
       await input.waitFor();
     };
     try {
@@ -1556,10 +1553,7 @@ for (const width of [1280, 390]) {
         );
         await page.screenshot({ path: `${output}/${width}-files-load-error-${theme}.png` });
       }
-      await page
-        .locator("[data-dock-chrome]")
-        .getByRole("button", { name: "Hide workspace", exact: true })
-        .click();
+      await hideWorkspace(page);
       assert.equal(await input.inputValue(), "Draft survives optional Files failure");
       await input.fill("Still editable after Files failed");
       assert.equal(await input.inputValue(), "Still editable after Files failed");
@@ -1793,7 +1787,7 @@ test("a mounted tab refreshes a changed deployment while retaining its URL, draf
     const input = page.getByRole("textbox", { name: "Message the agent" });
     await input.waitFor();
     await page.getByRole("button", { name: "Open workspace", exact: true }).click();
-    await page.getByRole("tab", { name: "Browser", exact: true }).click();
+    await openDockTab(page, "Browser");
     await page.getByText("Retained browser", { exact: true }).first().waitFor();
     assert.equal(documents, 1);
     assert(browserReads > 0);

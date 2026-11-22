@@ -2034,6 +2034,59 @@ export type SessionLinkWithStatus = SessionLink & {
 
 export type SessionLinksResponse = { links: SessionLinkWithStatus[] };
 
+/** A person on a pull request (GitHub login). */
+export type SessionPullRequestPerson = { login: string; avatarUrl: string | null };
+
+/**
+ * A linked pull request in full, for a chat's PR panel: header facts, its
+ * description, changed files as structured hunks, commits, discussion and
+ * checks. Lists hold at most one GitHub page (100) each.
+ */
+export type SessionPullRequestDetail = {
+  url: string;
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  state: "open" | "draft" | "merged" | "closed";
+  author: SessionPullRequestPerson | null;
+  base: string;
+  head: string;
+  createdAt: string | null;
+  mergedAt: string | null;
+  body: string | null;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  commitCount: number;
+  commentCount: number;
+  /** GitHub's mergeability; null while GitHub computes it. */
+  mergeable: boolean | null;
+  checks: SessionLinkLiveStatus["checks"];
+  review: SessionLinkLiveStatus["review"];
+  files: GitFileDiff[];
+  /** More files changed than are listed. */
+  filesTruncated: boolean;
+  commits: { sha: string; message: string; author: string | null; date: string | null }[];
+  comments: {
+    id: string;
+    kind: "comment" | "review";
+    author: SessionPullRequestPerson | null;
+    body: string;
+    reviewState: "approved" | "changes_requested" | "commented" | null;
+    createdAt: string | null;
+    url: string | null;
+  }[];
+  checkRuns: {
+    name: string;
+    state: "passing" | "failing" | "pending" | "skipped";
+    url: string | null;
+  }[];
+};
+
+/** `pullRequest` is null when the workspace cannot read the pull request. */
+export type SessionPullRequestResponse = { pullRequest: SessionPullRequestDetail | null };
+
 export type AddSessionLinkRequest = { url: string; title?: string; kind?: SessionLinkKind };
 
 /** Whether the person can share a chat here, and their live link. */
@@ -2370,6 +2423,12 @@ export type Session = {
    */
   requiresActionSince?: string | null | undefined;
   /**
+   * When the agent started waiting on a still-open connection card (connect,
+   * reconnect or more access) in this chat; null or absent when none is open.
+   * While the session is idle it needs the person, as an approval does.
+   */
+  awaitingConnectionSince?: string | null | undefined;
+  /**
    * Set while the runtime refuses to start this session's next turn (status
    * `requires_action`, but nothing is asked of a person). Accepted work is
    * kept; Resume or a new Send/Steer rechecks admission. Absent on older servers.
@@ -2436,6 +2495,7 @@ export type SessionListEntry = Pick<
   | "archiveVersion"
   | "treeStats"
   | "requiresActionSince"
+  | "awaitingConnectionSince"
   | "admissionBlock"
   | "createdAt"
   | "updatedAt"
@@ -9010,6 +9070,8 @@ export type UpdateScheduledTaskRequest = {
         prompt?: string | undefined;
         model?: string | undefined;
         reasoningEffort?: ReasoningEffort | undefined;
+        /** The agent each run's chat is with; null runs without one. */
+        agentId?: string | null | undefined;
       }
     | undefined;
   status?: ScheduledTaskStatus | undefined;
@@ -10584,6 +10646,11 @@ export type InstalledSkillSummary = {
 
 export type ListInstalledSkillsResponse = {
   skills: InstalledSkillSummary[];
+};
+
+/** Reviewed library skills to add, `enabled` once added. */
+export type ListLibrarySkillsResponse = {
+  skills: CapabilityCatalogItem[];
 };
 
 export type SkillUninstallPreview = {

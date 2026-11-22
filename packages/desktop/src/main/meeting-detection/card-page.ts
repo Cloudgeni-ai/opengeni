@@ -73,6 +73,7 @@ button:hover { background: var(--quiet-hover); }
 button.primary { background: var(--strong); color: var(--strong-text); }
 button.primary:hover { background: var(--strong-hover); }
 button:active { transform: translateY(0.5px); }
+button[hidden] { display: none; }
 @keyframes enter { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { #card.in { animation: none; } }
 </style>
@@ -154,7 +155,9 @@ function render(state) {
   hovering = false;
   document.getElementById("question").textContent = state.question;
   document.getElementById("reason").textContent = state.reason;
+  // A note with nothing to do has only the button that closes it.
   document.getElementById("act").textContent = state.action;
+  document.getElementById("act").hidden = !state.action;
   document.getElementById("dismiss").textContent = state.dismiss;
   document.title = state.title;
   if (state.icon) {

@@ -11,6 +11,8 @@ import type {
   AppPackageInstallResponse,
   AppPackageUpgradeRequest,
   AppPackageUpgradeResponse,
+  AppTemplate,
+  ListAppTemplatesResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -622,6 +624,7 @@ import type {
   InstallLibrarySkillRequest,
   InstalledSkill,
   ListInstalledSkillsResponse,
+  ListLibrarySkillsResponse,
   CreateBillingPortalRequest,
   BillingSubscriptionCatalog,
   BillingAutoTopUpSettings,
@@ -809,6 +812,7 @@ import type {
   SessionShareLinkState,
   SessionLink,
   SessionLinksResponse,
+  SessionPullRequestResponse,
   AddSessionLinkRequest,
   SharedSession,
   SessionVisibilityChangePreview,
@@ -2067,6 +2071,22 @@ export class OpenGeniClient {
     return await this.requestJson<SessionLinksResponse>(
       "GET",
       `${sessionPath(workspaceId, sessionId)}/links${options.fresh ? "?fresh=true" : ""}`,
+    );
+  }
+
+  /**
+   * A linked pull request's details (files, commits, discussion, checks), read
+   * like its Linked status. `fresh` skips the short cache.
+   */
+  async getSessionPullRequest(
+    workspaceId: string,
+    sessionId: string,
+    linkId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<SessionPullRequestResponse> {
+    return await this.requestJson<SessionPullRequestResponse>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/links/${encodeURIComponent(linkId)}/pull-request${options.fresh ? "?fresh=true" : ""}`,
     );
   }
 
@@ -8899,10 +8919,17 @@ export class OpenGeniClient {
   async listAgentChats(
     workspaceId: string,
     agentId: string,
-    options: { filter?: AgentChatsFilter; cursor?: string; limit?: number } = {},
+    options: {
+      filter?: AgentChatsFilter;
+      /** Only open chats that are with the agent itself: no Slack threads that only mentioned it, no cancelled chats. */
+      direct?: boolean;
+      cursor?: string;
+      limit?: number;
+    } = {},
   ): Promise<ListAgentChatsResponse> {
     const query = new URLSearchParams();
     if (options.filter) query.set("filter", options.filter);
+    if (options.direct) query.set("direct", "true");
     if (options.cursor) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
@@ -10289,6 +10316,34 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * The site icon of an outside link in this person's sidebar (an image),
+   * or null when the site has none to show. Only links in their sidebar.
+   */
+  async getSidebarLinkIcon(
+    workspaceId: string,
+    url: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Blob | null> {
+    const correlationId = crypto.randomUUID();
+    const response = await this.fetchImpl(
+      this.url(
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout/link-icon?url=${encodeURIComponent(url)}`,
+      ),
+      {
+        method: "GET",
+        headers: { ...this.headers(correlationId), Accept: "image/*" },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    if (response.status === 404) {
+      await cancelResponseBody(response, "sidebar link has no icon");
+      return null;
+    }
+    if (!response.ok) throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    return await response.blob();
+  }
+
   async listWorkspaceArtifacts(
     workspaceId: string,
     options: WorkspaceArtifactListOptions & { signal?: AbortSignal } = {},
@@ -10454,6 +10509,21 @@ export class OpenGeniClient {
       undefined,
       options,
     );
+  }
+
+  /** Ready-made apps; add one with `installAppPackage` and its `package`. */
+  async listAppTemplates(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppTemplate[]> {
+    const response = await this.requestJson<ListAppTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-templates`,
+      undefined,
+      undefined,
+      options,
+    );
+    return response.templates;
   }
 
   async setWorkspaceArtifactStatus(
@@ -11750,6 +11820,21 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/skills`,
     );
+  }
+
+  /** Reviewed library skills to add with `installLibrarySkill`; `enabled` once added. */
+  async listLibrarySkills(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<CapabilityCatalogItem[]> {
+    const response = await this.requestJson<ListLibrarySkillsResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/skills/library`,
+      undefined,
+      undefined,
+      options,
+    );
+    return response.skills;
   }
 
   /** Shared authored/installed catalog metadata. File bodies are read on demand. */

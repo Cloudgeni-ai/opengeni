@@ -164,7 +164,7 @@ async function renderDetail(initialEntry = "/?tab=versions") {
 }
 
 // Archive lives in the Site's Settings tab.
-function hasArchive(container: HTMLElement) {
+function hasSettingsTab(container: HTMLElement) {
   return [...container.querySelectorAll('[role="tab"]')].some(
     (tab) => tab.textContent?.trim() === "Settings",
   );
@@ -182,12 +182,58 @@ test("loaded app keeps Archive and Edit with Opengeni behind permission checks",
   loadError = null;
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(true);
+    expect(hasSettingsTab(container)).toBe(true);
     expect(hasAction(container, "Edit with Opengeni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
     // Its owner sees that it is Only me and can share it.
     expect(container.textContent).toContain("Only me");
     expect(hasAction(container, "Share with workspace")).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Settings opened from the app goes back to the app, also after switching tabs", async () => {
+  loadError = null;
+  withoutContent = false;
+  // The app view, then its "…" Settings.
+  const { container, root, router } = await renderDetail(sitePath());
+  try {
+    await act(async () => {
+      await router.navigate({
+        to: "/",
+        search: { tab: "settings" },
+        state: { artifactDetailFromSite: siteId } as never,
+      });
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    // Named after the app, and it is the browser's Back.
+    const back = [...container.querySelectorAll<HTMLAnchorElement>("a")].find((link) =>
+      link.textContent?.includes("Café menu"),
+    );
+    expect(back?.getAttribute("href")).toBe(sitePath());
+    const backBefore = window.history.back;
+    let backs = 0;
+    window.history.back = () => void (backs += 1);
+    try {
+      await act(async () => back!.click());
+    } finally {
+      window.history.back = backBefore;
+    }
+    expect(backs).toBe(1);
+    // A tab switch keeps where the page was opened from.
+    const versions = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((tab) =>
+      tab.textContent?.trim().startsWith("Versions"),
+    )!;
+    await act(async () => {
+      versions.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      versions.click();
+    });
+    expect(router.state.location.search).toMatchObject({ tab: "versions" });
+    expect(
+      (router.state.location.state as { artifactDetailFromSite?: string }).artifactDetailFromSite,
+    ).toBe(siteId);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -261,7 +307,7 @@ test("missing app hides Archive and Edit with Opengeni", async () => {
   loadError = new OpenGeniApiError(404, "", { correlationId: "corr-missing-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    expect(hasSettingsTab(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This app isn't available");
     // The reference sits behind a quiet Copy details, not in the text.
@@ -280,9 +326,12 @@ test("read-only app hides mutation actions but keeps its details", async () => {
   accessContext.workspaceGrants[0]!.permissions = [];
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    // Settings shows for everyone (workspace access, their own allowed
+    // actions), but nothing in it changes the app.
+    expect(hasSettingsTab(container)).toBe(true);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Share with workspace")).toBe(false);
+    expect(hasAction(container, "Archive")).toBe(false);
     expect(container.textContent).toContain("Café menu");
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;
@@ -295,7 +344,7 @@ test("malformed app id hides mutation actions", async () => {
   loadError = new OpenGeniApiError(422, "", { correlationId: "corr-malformed-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    expect(hasSettingsTab(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This app link isn't valid");
   } finally {
@@ -308,7 +357,7 @@ test("transient app load failure offers retry without mutation actions", async (
   loadError = new OpenGeniApiError(503, "", { correlationId: "corr-transient-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    expect(hasSettingsTab(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Retry")).toBe(true);
     expect(container.textContent).toContain("Couldn't load this app");
@@ -336,7 +385,7 @@ test("App read refusal explains missing artifact access instead of removal", asy
       );
       expect(container.textContent).not.toContain("may have been removed");
       expect(hasAction(container, "Retry")).toBe(false);
-      expect(hasArchive(container)).toBe(false);
+      expect(hasSettingsTab(container)).toBe(false);
     } finally {
       accessContext.workspaceGrants[0]!.permissions = permissions;
       await act(async () => root.unmount());
@@ -367,6 +416,12 @@ test("Duplicate in Settings copies the app and opens the copy in the app view", 
   siteClient.duplicateWorkspaceArtifact.mockClear();
   const { container, root, router } = await renderDetail("/?tab=settings");
   try {
+    // Duplicate is one of the rarer actions, in Settings' collapsed More.
+    const more = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.trim().startsWith("More"),
+    );
+    expect(more).toBeDefined();
+    await act(async () => more!.click());
     const duplicate = [...container.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === "Duplicate",
     );

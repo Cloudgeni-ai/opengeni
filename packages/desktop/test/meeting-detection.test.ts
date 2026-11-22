@@ -17,6 +17,7 @@ import {
   MeetingDetection,
   MeetingDetectionStore,
   MeetingPrompter,
+  type MeetingDetectionOptions,
   ownAppRoot,
   parseWatchLine,
   PROMPT_AFTER_MS,
@@ -24,6 +25,8 @@ import {
   promptText,
   recordedMilliseconds,
   recordingMeeting,
+  REQUEST_WAIT_MS,
+  STOP_UNANSWERED_MS,
   type MeetingPage,
   type MeetingPrompt,
   type MeetingPromptOutcome,
@@ -35,7 +38,7 @@ import { handleMeetingDetectionIpc } from "../src/main/meeting-detection/ipc";
 import { ENGLISH_MEETING_WORDS } from "../src/main/meeting-detection/words";
 
 // These import Electron, which the stub stands in for.
-const { cardAnswer, cardBounds, MeetingPromptCard } =
+const { cardAnswer, cardBounds, MeetingPromptCard, MEETING_CARD_TIMEOUT_MS } =
   await import("../src/main/meeting-detection/card");
 const { meetingDetectionFileLog } = await import("../src/main/meeting-detection/electron");
 const { meetingDetectionBridge } = await import("../src/preload/meeting-detection");
@@ -397,6 +400,8 @@ function detection(
     describePage?: (page: MeetingPage) => string | null;
     recordingChanged?: () => void;
     stopConfirmMs?: number;
+    /** Posts notifications; by default the test keeps them. */
+    notify?: MeetingDetectionOptions["notify"];
   } = {},
 ) {
   let now = 0;
@@ -418,6 +423,7 @@ function detection(
   }> = [];
   const log: string[] = [];
   let revealed = 0;
+  const notices: Array<{ title: string; body: string; click(): void; closed: boolean }> = [];
   const subject = new MeetingDetection({
     helperPath: "/fake/helper",
     available: true,
@@ -446,6 +452,13 @@ function detection(
     reveal: () => {
       revealed += 1;
     },
+    notify:
+      options.notify ??
+      ((notice) => {
+        const posted = { ...notice, closed: false };
+        notices.push(posted);
+        return { close: () => (posted.closed = true) };
+      }),
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
     ...(options.revealPage ? { revealPage: options.revealPage } : {}),
     ...(options.describePage ? { describePage: options.describePage } : {}),
@@ -466,6 +479,12 @@ function detection(
   return {
     subject,
     cards,
+    notices,
+    helper,
+    /** The clock moves, and nothing is reported. */
+    setNow: (at: number) => {
+      now = at;
+    },
     log,
     microphone,
     revealed: () => revealed,
@@ -865,6 +884,212 @@ describe("MeetingDetection", () => {
   });
 });
 
+describe("when the meeting seems over", () => {
+  /** A Zoom call recorded by hand that just ended: the stop card is up at the time returned. */
+  function ended(options: { describe?: boolean } = {}) {
+    const run = detection();
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    run.call();
+    run.subject.setRecording(
+      page,
+      true,
+      options.describe ? { title: null, elapsedMilliseconds: 0, paused: false } : null,
+    );
+    run.microphone([], 10_000);
+    const askedAt = 10_000 + ENDED_AFTER_MS;
+    run.microphone([], askedAt);
+    const stop = run.cards.at(-1)!;
+    expect(stop.prompt.kind).toBe("stop");
+    return { ...run, page, stop, askedAt };
+  }
+
+  test("the question stays until answered, with a notification beside it that Keep recording withdraws", () => {
+    const { subject, stop, notices, page, microphone, askedAt } = ended();
+    expect(notices).toEqual([
+      expect.objectContaining({
+        title: "Meeting over?",
+        body: "Zoom stopped using your microphone. Still recording.",
+        closed: false,
+      }),
+    ]);
+    microphone([], askedAt + STOP_UNANSWERED_MS - 1);
+    expect(stop.closed).toBe(false);
+    expect(notices[0]!.closed).toBe(false);
+    expect(page.sent).toEqual([]);
+
+    stop.done("dismissed");
+    expect(notices[0]!.closed).toBe(true);
+    // Keep recording: it never stops by itself after that.
+    microphone([], askedAt + 3 * STOP_UNANSWERED_MS);
+    expect(page.sent).toEqual([]);
+    expect(subject.isRecording(page)).toBe(true);
+    subject.stop();
+  });
+
+  test("unanswered for 10 minutes, the recording stops by itself, and the card and a notification say so", () => {
+    const { subject, stop, notices, page, microphone, askedAt, cards, log } = ended();
+    microphone([], askedAt + STOP_UNANSWERED_MS);
+    expect(stop.closed).toBe(true);
+    expect(notices[0]!.closed).toBe(true);
+    expect(page.sent).toEqual([{ kind: "stop", app: "Zoom" }]);
+    expect(log).toContain(
+      "Meeting detection: nobody answered whether the meeting is over; stopping its recording (zoom).",
+    );
+    // Nothing says it stopped until the page has.
+    expect(cards.at(-1)).toBe(stop);
+    expect(notices).toHaveLength(1);
+
+    subject.setRecording(page, false);
+    const stopped = cards.at(-1)!;
+    expect(stopped.prompt.kind).toBe("stopped");
+    expect(promptText(stopped.prompt)).toEqual({
+      question: "Recording stopped",
+      reason: "The meeting seemed over, with no answer for 10 minutes.",
+      action: "",
+      dismiss: "OK",
+    });
+    expect(notices.at(-1)).toMatchObject({
+      title: "Recording stopped",
+      body: "The meeting seemed over, with no answer for 10 minutes.",
+      closed: false,
+    });
+    // Its OK doesn't stop anything else.
+    stopped.done("dismissed");
+    expect(page.sent).toHaveLength(1);
+    // The next recording takes the notification away.
+    subject.setRecording(page, true);
+    expect(notices.at(-1)!.closed).toBe(true);
+    subject.stop();
+  });
+
+  test("the notification goes when the recording stops otherwise; clicking it shows the recording", () => {
+    const { subject, stop, notices, page, revealed, cards } = ended({ describe: true });
+    notices[0]!.click();
+    expect(revealed()).toBe(1);
+    expect(page.sent).toEqual([{ kind: "open" }]);
+    // Stopped in the app: the card and the notification go, and nothing says it stopped by itself.
+    subject.setRecording(page, false);
+    expect(stop.closed).toBe(true);
+    expect(notices[0]!.closed).toBe(true);
+    expect(notices).toHaveLength(1);
+    expect(cards.at(-1)).toBe(stop);
+    subject.stop();
+  });
+
+  test("a call back on the microphone takes the question back, not a blip; when it ends again it asks again", () => {
+    const { subject, stop, notices, page, microphone, askedAt, cards } = ended();
+    // A blip: the question stays, and so does its notification.
+    microphone([zoom], askedAt + 30_000);
+    microphone([], askedAt + 31_000);
+    microphone([], askedAt + 31_000 + ENDED_AFTER_MS);
+    expect(stop.closed).toBe(false);
+    expect(notices[0]!.closed).toBe(false);
+    expect(cards.at(-1)).toBe(stop);
+    // A rejoin: back for a few seconds.
+    microphone([zoom], askedAt + 60_000);
+    expect(stop.closed).toBe(false);
+    microphone([zoom], askedAt + 60_000 + PROMPT_AFTER_MS);
+    expect(stop.closed).toBe(true);
+    expect(notices[0]!.closed).toBe(true);
+    microphone([zoom], askedAt + 2 * STOP_UNANSWERED_MS);
+    expect(page.sent).toEqual([]);
+    microphone([], askedAt + 2 * STOP_UNANSWERED_MS + 1);
+    microphone([], askedAt + 2 * STOP_UNANSWERED_MS + 1 + ENDED_AFTER_MS);
+    expect(cards.at(-1)!.prompt.kind).toBe("stop");
+    expect(cards.at(-1)).not.toBe(stop);
+    expect(notices.filter((notice) => !notice.closed)).toHaveLength(1);
+    subject.stop();
+  });
+
+  test("while the microphone can't be watched, an unanswered question doesn't stop the recording", async () => {
+    const { subject, stop, page, microphone, askedAt, helper, setNow } = ended();
+    // The helper stops, and is started again: until it reports, the call may still be on.
+    helper.emit("exit", 1, null);
+    setNow(askedAt + 2 * STOP_UNANSWERED_MS);
+    // The once-a-second check, and the helper's restart, run meanwhile.
+    await Bun.sleep(1_300);
+    expect(page.sent).toEqual([]);
+    expect(stop.closed).toBe(false);
+    // Its first report says no call is on: now it stops.
+    microphone([], askedAt + 2 * STOP_UNANSWERED_MS + 2_000);
+    expect(page.sent).toEqual([{ kind: "stop", app: "Zoom" }]);
+    subject.stop();
+  });
+
+  test("two blips in a row don't count as a rejoin", () => {
+    const { subject, stop, notices, microphone, askedAt } = ended();
+    microphone([zoom], askedAt + 30_000);
+    microphone([], askedAt + 31_000);
+    // Back within the grace period, more than a few seconds after the first blip began.
+    microphone([zoom], askedAt + 34_000);
+    microphone([], askedAt + 35_000);
+    expect(stop.closed).toBe(false);
+    expect(notices[0]!.closed).toBe(false);
+    subject.stop();
+  });
+
+  test("a stop that didn't take, then a stop by hand much later, doesn't say it stopped by itself", () => {
+    const { subject, page, microphone, askedAt, cards, notices } = ended();
+    microphone([], askedAt + STOP_UNANSWERED_MS);
+    expect(page.sent).toEqual([{ kind: "stop", app: "Zoom" }]);
+    microphone([], askedAt + STOP_UNANSWERED_MS + REQUEST_WAIT_MS);
+    subject.setRecording(page, false);
+    expect(cards.map((card) => card.prompt.kind)).not.toContain("stopped");
+    expect(notices.map((notice) => notice.title)).not.toContain("Recording stopped");
+    subject.stop();
+  });
+
+  test("a notification that fails to post leaves the card", () => {
+    const run = detection({
+      notify: () => {
+        throw new Error("no notification service");
+      },
+    });
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    run.call();
+    run.subject.setRecording(page, true);
+    run.microphone([], 10_000);
+    run.microphone([], 10_000 + ENDED_AFTER_MS);
+    expect(run.cards.at(-1)!.prompt.kind).toBe("stop");
+    expect(run.log).toContain("Meeting detection: couldn't post a notification.");
+    run.subject.stop();
+  });
+
+  test("OK on the stopped card takes its notification away; a new recording takes the card away", () => {
+    const first = ended();
+    first.microphone([], first.askedAt + STOP_UNANSWERED_MS);
+    first.subject.setRecording(first.page, false);
+    first.cards.at(-1)!.done("dismissed");
+    expect(first.notices.at(-1)).toMatchObject({ title: "Recording stopped", closed: true });
+    first.subject.stop();
+
+    const second = ended();
+    second.microphone([], second.askedAt + STOP_UNANSWERED_MS);
+    second.subject.setRecording(second.page, false);
+    const stopped = second.cards.at(-1)!;
+    second.subject.setRecording(second.page, true);
+    expect(stopped.closed).toBe(true);
+    expect(second.notices.at(-1)!.closed).toBe(true);
+    second.subject.stop();
+  });
+
+  test("a recording started without asking still stops when its call ends, with no question", () => {
+    const { subject, cards, notices, microphone, call } = detection({ autoRecord: true });
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    call();
+    subject.setRecording(page, true);
+    microphone([], 10_000);
+    microphone([], 10_000 + ENDED_AFTER_MS);
+    expect(page.sent.at(-1)).toEqual({ kind: "stop", app: "Zoom" });
+    expect(cards.map((card) => card.prompt.kind)).not.toContain("stop");
+    expect(notices).toEqual([]);
+    subject.stop();
+  });
+});
+
 describe("the meeting being recorded, for the menu", () => {
   test("a page that describes its recording shows in the menu, opens and stops it", () => {
     const { subject, microphone } = detection();
@@ -1205,6 +1430,29 @@ describe("the card outlives its page", () => {
   const unanswered = (code: string) =>
     code === "answer()" ? new Promise<unknown>(() => undefined) : Promise.resolve(120);
 
+  test("a question to stop never times out; the other cards keep their time", async () => {
+    const c = card(unanswered);
+    const app = call.app;
+    for (const prompt of [
+      call,
+      { kind: "stop", app },
+      { kind: "stopped", app },
+    ] satisfies MeetingPrompt[]) {
+      c.view.show(prompt, () => undefined);
+      await settle();
+    }
+    const rendered = FakeBrowserWindow.made
+      .flatMap((window) => window.webContents.scripts)
+      .filter((script) => script.startsWith("render("))
+      .map((script) => JSON.parse(script.slice("render(".length, -1)) as Record<string, unknown>);
+    expect(rendered.map((state) => [state.question, state.timeoutMs])).toEqual([
+      ["Record this meeting?", MEETING_CARD_TIMEOUT_MS],
+      ["Meeting over?", 0],
+      ["Recording stopped", MEETING_CARD_TIMEOUT_MS],
+    ]);
+    c.view.destroy();
+  });
+
   test("a page that died while hidden: the next question shows in a fresh window", async () => {
     const c = card(unanswered);
     c.view.show(call, () => undefined).close();
@@ -1348,6 +1596,12 @@ function cardPage(options: { afterHoverMs?: number } = {}) {
   };
   return {
     ask,
+    /** Show a card of the test's own. */
+    show: (state: Record<string, unknown>) => {
+      page.render({ token: 1, title: "Opengeni", icon: null, ...state });
+      return page.answer();
+    },
+    element: (id: string) => document.getElementById(id),
     hold: (on: boolean) => page.hold(on),
     press: (id: "act" | "dismiss") => document.getElementById(id).dispatchEvent(new Event("click")),
     /** What Chromium replays when the window shows again: the pointer where it last was. */
@@ -1368,6 +1622,32 @@ async function after(answer: Promise<string | null>, ms: number) {
 }
 
 describe("the card's page", () => {
+  test("a question to stop stays, however long; a note with nothing to do shows only its OK", async () => {
+    const page = cardPage();
+    const stop = page.show({
+      question: "Meeting over?",
+      reason: "Zoom stopped using your microphone. Still recording.",
+      action: "Stop recording",
+      dismiss: "Keep recording",
+      timeoutMs: 0,
+    });
+    page.leave();
+    expect(await after(stop, 80)).toBe("pending");
+    expect(page.element("act").hidden).toBe(false);
+    page.press("dismiss");
+    expect(await stop).toBe("dismiss/1");
+
+    const stopped = page.show({
+      question: "Recording stopped",
+      reason: "The meeting seemed over, with no answer for 10 minutes.",
+      action: "",
+      dismiss: "OK",
+      timeoutMs: 20,
+    });
+    expect(page.element("act").hidden).toBe(true);
+    expect(await after(stopped, 80)).toBe("expire/1");
+  });
+
   test("Not now under the pointer doesn't hold the next card: it still times out", async () => {
     const page = cardPage();
     const first = page.ask(1);

@@ -1653,6 +1653,23 @@ function withScheduledTaskAccountChoiceAudit(
   };
 }
 
+/** The config with a patched agent: an id sets it, null removes it. */
+function withPatchedAgent(
+  config: ScheduledTaskAgentConfig,
+  agentId: string | null | undefined,
+): ScheduledTaskAgentConfig {
+  if (agentId === undefined) return config;
+  const { agentId: _previous, ...rest } = config;
+  return agentId === null ? rest : { ...rest, agentId };
+}
+
+function withoutPatchedAgent<T extends { agentId?: unknown }>(
+  patch: T | undefined,
+): Omit<T, "agentId"> {
+  const { agentId: _agent, ...rest } = patch ?? ({} as T);
+  return rest;
+}
+
 async function validatedScheduledTaskUpdateWithoutAudience(input: {
   settings: Settings;
   db: Database;
@@ -1706,8 +1723,12 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       payload: { ...input.payload, runMode: "existing_session" },
     };
   const requestedMode = input.payload.runMode ?? input.existing.runMode;
+  const patchedAgentId = input.payload.agentConfigPatch?.agentId;
   if (requestedMode === "existing_session") {
-    const config = input.payload.agentConfig ?? input.existing.agentConfig;
+    const config = withPatchedAgent(
+      input.payload.agentConfig ?? input.existing.agentConfig,
+      patchedAgentId,
+    );
     const target = await validateScheduledTaskTarget({
       ...input,
       runMode: "existing_session",
@@ -1767,7 +1788,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
           ? {
               agentConfig: scheduledSessionMessageConfig({
                 ...config,
-                ...input.payload.agentConfigPatch,
+                ...withoutPatchedAgent(input.payload.agentConfigPatch),
                 prompt: input.payload.agentConfigPatch?.prompt ?? config.prompt,
               }),
               agentConfigPatch: undefined,
@@ -1804,7 +1825,9 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   const nextRunMode = input.payload.runMode ?? input.existing.runMode;
   // A chat's agent never changes, so a change of agent on an automation with
   // its own chat starts a new one with the new agent at the next run.
-  const nextAgentId = (input.payload.agentConfig ?? input.existing.agentConfig).agentId ?? null;
+  const nextAgentId =
+    withPatchedAgent(input.payload.agentConfig ?? input.existing.agentConfig, patchedAgentId)
+      .agentId ?? null;
   const replacesAgentChat =
     input.existing.runMode === "reusable_session" &&
     nextRunMode === "reusable_session" &&
@@ -1890,7 +1913,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     // Validate only the newly supplied model settings, not a reconstructed
     // bounded input. Legacy stored text, resources and selections stay exact.
     update.agentConfig = {
-      ...input.existing.agentConfig,
+      ...withPatchedAgent(input.existing.agentConfig, patch.agentId),
       ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
       ...(model !== undefined && model !== null ? { model } : {}),
       ...(patch.reasoningEffort !== undefined ? { reasoningEffort: patch.reasoningEffort } : {}),

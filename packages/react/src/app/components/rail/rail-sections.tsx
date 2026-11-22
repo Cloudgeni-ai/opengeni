@@ -2,13 +2,13 @@
 // switcher slot, and the primary navigation with "New session" plus the
 // surface's own entries. `SessionShell` composes them.
 import { SquarePenIcon, XIcon } from "lucide-react";
-import { createContext, useContext, type ReactNode } from "react";
+import { useContext, type ReactNode } from "react";
 
 import { useRail } from "./rail-context";
 import { RAIL_BRAND_LINK_CLASS, RailBrandMark, RailBrandRow } from "./rail-surface";
 import { NewSessionLink } from "./session-list";
+import { SessionShellSlotsContext, type SessionShellSlots } from "./session-shell-slots";
 import { Button } from "../../../ui/button";
-import type { WindowBarCrumb } from "../../../ui/window-bar-title";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
 import {
   SIDEBAR_TOGGLE_IN_WINDOW_BAR,
@@ -20,40 +20,9 @@ import { cn } from "../../lib/utils";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { useSimplifiedInterface } from "../../lib/simplified-interface";
 
-/**
- * The surface-owned sections of the session shell. Every slot is optional: a
- * surface without a workspace switcher, workspace navigation or footer simply
- * leaves them out and the shell keeps its layout.
- */
-export type SessionShellSlots = Readonly<{
-  /** The workspace switcher under the brand row (or under the window controls). */
-  switcher?: ReactNode;
-  /** Primary navigation after "New session" (inbox, workspace shortcuts). */
-  primaryNav?: ReactNode;
-  /**
-   * The workspace's customizable links and groups (docs/sidebar-layout.md),
-   * under the primary navigation and above the sessions.
-   */
-  layout?: ReactNode;
-  /**
-   * The phone drawer's "Workspace" tab. Without it, phones show the sessions
-   * list alone, with no tabs.
-   */
-  mobileWorkspacePanel?: ReactNode;
-  /** Pinned under the rail's scroll viewport: account menu, offers. */
-  railFooter?: ReactNode;
-  /** Notices across the top of the canvas, under the top strip. */
-  canvasBanners?: ReactNode;
-  /**
-   * The rail section a page is in ("Agents"), first in the macOS window bar's
-   * trail. Null where the page is the section itself or in none.
-   */
-  windowBarSection?: ((pathname: string) => WindowBarCrumb | null) | undefined;
-}>;
-
-export const SessionShellSlotsContext = createContext<SessionShellSlots>({});
-
 /** Supplies the slots to a rail rendered outside `SessionShell` (previews, fixtures). */
+export { SessionShellSlotsContext, type SessionShellSlots };
+
 export function SessionShellSlotsProvider({
   slots,
   children,

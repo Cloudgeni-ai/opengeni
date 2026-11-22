@@ -180,8 +180,8 @@ describe("public React demo mobile product acceptance", () => {
     const workspace = visibleWorkspaceDialog(page);
     await workspace.waitFor();
     expect(await page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("tab");
-    // The workspace panel tabs are a vertical tablist.
-    await page.keyboard.press("ArrowDown");
+    // The workspace panel tabs run across the top.
+    await page.keyboard.press("ArrowRight");
     expect(
       await page.getByRole("tab", { name: "Terminal", exact: true }).getAttribute("aria-selected"),
     ).toBe("true");

@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
-import { automationsListenTo } from "./event-trigger-listening";
+import { automationsListenTo, triggerHearsSource } from "./event-trigger-listening";
 import {
   recordEventDeliveryInTransaction,
   type RecordEventDeliveryInput,
@@ -130,12 +130,10 @@ export async function listListeningEventTriggers(
           on settings.task_id = trigger.task_id and settings.workspace_id = trigger.workspace_id
         join event_sources source
           on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
-        where trigger.workspace_id = ${workspaceId} and trigger.source_id = ${sourceId}::uuid
+        where trigger.workspace_id = ${workspaceId}
           and trigger.status in ('active', 'blocked')
           and task.status = 'active' and task.deleted_at is null and settings.completed_at is null
-          and source.status = 'active'
-          and (source.visibility = 'workspace' or source.owner_subject_id is null
-            or source.owner_subject_id = task.owner_subject_id)
+          and ${triggerHearsSource(sql`${sourceId}::uuid`, { activeOnly: true })}
         order by trigger.created_at
         limit 500`,
     );

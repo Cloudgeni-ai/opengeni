@@ -6,6 +6,7 @@ import {
   scheduledTaskAgentNameRefusal,
   scheduledTaskCreateToolInput,
   scheduledTaskCreateToolValidation,
+  scheduledTaskUpdateToolValidation,
   withResolvedScheduledTaskAgent,
 } from "../src/mcp/scheduled-task-input";
 
@@ -18,6 +19,27 @@ const message = {
 } as const;
 
 describe("conversational scheduling input", () => {
+  test("an update can change the agent by name; the tool sends agentConfigPatch.agentId", async () => {
+    const agentId = "00000000-0000-4000-8000-0000000000aa";
+    const validation = scheduledTaskUpdateToolValidation();
+    const call = { agentConfigPatch: { agentName: "Triage" } };
+    expect(validation.safeParse(call).success).toBe(true);
+    expect(validation.safeParse({ agentConfigPatch: { agentId: null } }).success).toBe(true);
+    expect(
+      validation.safeParse({ agentConfigPatch: { agentName: "Triage", agentId } }).success,
+    ).toBe(false);
+    expect(validation.safeParse({ agentConfigPatch: { agentName: " " } }).success).toBe(false);
+    const resolved = await withResolvedScheduledTaskAgent(
+      call,
+      async () => ({ ok: true, agentId }),
+      "agentConfigPatch",
+    );
+    expect(UpdateScheduledTaskRequest.parse(resolved).agentConfigPatch).toEqual({ agentId });
+    expect(
+      scheduledTaskAgentNameRefusal("Nobody", { code: "agent_not_found" }, "agentConfigPatch"),
+    ).toContain("agentConfigPatch.agentId");
+  });
+
   test("a separate agent's chat can name its agent; the tool sends the contract's agentId", async () => {
     const agentId = "00000000-0000-4000-8000-0000000000aa";
     const { prompt, ...base } = message;

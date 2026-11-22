@@ -111,10 +111,18 @@ export function WindowBarTitleBoundary({
 export function useWindowBarTitle(
   title: ReactNode,
   fallback = false,
-  { copyable = false }: { copyable?: boolean } = {},
+  {
+    copyable = false,
+    place: ownPlace,
+  }: {
+    copyable?: boolean;
+    /** Where the page sits, when no `DetailPage` provides it (keep it stable). */
+    place?: WindowBarPlace | null | undefined;
+  } = {},
 ): boolean {
   const windowBar = useContext(PageHeaderWindowBarContext);
-  const place = useContext(WindowBarPlaceContext);
+  const contextPlace = useContext(WindowBarPlaceContext);
+  const place = ownPlace ?? contextPlace;
   const id = useId();
   const text = typeof title === "string" ? title : null;
   const set = windowBar?.set;
@@ -132,6 +140,13 @@ export function useWindowBarTitle(
     return () => report(false);
   }, [report, carriesBack]);
   return owns;
+}
+
+/** Whether the window bar's trail carries the page's way back (its parent
+ *  crumb), so the page can drop its own back link. */
+export function useWindowBarCarriesBack(owns: boolean): boolean {
+  const windowBar = useContext(PageHeaderWindowBarContext);
+  return owns && windowBar?.parentInTrail === true;
 }
 
 const useIsomorphicLayoutEffect =

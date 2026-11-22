@@ -377,6 +377,9 @@ export function UpgradeAppDialog({
   const plan = state?.phase === "ready" ? state.plan : null;
   const lines = plan ? upgradePlanLines(plan) : [];
   const destructive = plan?.destructive ?? [];
+  // Another app's package is confirmed with the same switch, under its own note.
+  const otherApp = destructive.find((entry) => entry.part === "package");
+  const risky = destructive.filter((entry) => entry.part !== "package");
   const conflicts = plan?.conflicts ?? [];
   const nothing = plan !== null && lines.length === 0;
   let body: ReactNode = null;
@@ -405,13 +408,16 @@ export function UpgradeAppDialog({
         ) : null}
         {conflicts.length === 0 && destructive.length > 0 ? (
           <>
-            <Notice tone="waiting" title="Could hide or delete existing data">
-              <ul className="flex flex-col gap-1">
-                {destructive.map((entry) => (
-                  <li key={problemText(entry)}>{problemText(entry)}</li>
-                ))}
-              </ul>
-            </Notice>
+            {otherApp ? <Notice tone="waiting">{otherApp.reason}</Notice> : null}
+            {risky.length > 0 ? (
+              <Notice tone="waiting" title="Could hide or delete existing data">
+                <ul className="flex flex-col gap-1">
+                  {risky.map((entry) => (
+                    <li key={problemText(entry)}>{problemText(entry)}</li>
+                  ))}
+                </ul>
+              </Notice>
+            ) : null}
             <SettingRow
               label="Apply these changes"
               control={

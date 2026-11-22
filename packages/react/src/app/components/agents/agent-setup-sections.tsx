@@ -24,6 +24,7 @@ import { toast } from "../../lib/toast";
 import { AgentCanUse as AgentCanUseSection } from "./agent-can-use";
 import { AgentSkills as AgentSkillsSection } from "./agent-skills";
 import { AgentTriggerDialog } from "./agent-trigger-dialog";
+import type { AgentTriggerChat } from "./agent-trigger-model";
 
 const VERSION_CONFLICT =
   "Someone else changed this agent. Reload to see their change, then try again.";
@@ -79,16 +80,27 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
     };
   }, [agent.id, agent.templateKey, client, workspaceId]);
   // The full form starts at the suggestion, or at the source picked in the dialog.
-  const openFullForm = (agentTrigger?: number, sourceId?: string) =>
+  const openFullForm = (
+    agentTrigger?: number,
+    start: {
+      sourceId?: string | undefined;
+      note?: string | undefined;
+      chat?: AgentTriggerChat | undefined;
+    } = {},
+  ) =>
     void navigate({
       to: "/workspaces/$workspaceId/automations/new",
       params: { workspaceId },
       search: {
         agent: agent.id,
         ...(agentTrigger !== undefined ? { agentTrigger } : {}),
-        ...(sourceId ? { source: sourceId } : {}),
+        ...(start.sourceId ? { source: start.sourceId } : {}),
         returnTo: "agent",
       },
+      // The note stays out of the address, so links and analytics never carry it.
+      ...(start.note || start.chat
+        ? { state: { agentTriggerStart: { note: start.note, chat: start.chat } } }
+        : {}),
     });
   const addSource = (kind?: string) =>
     void navigate({
@@ -200,7 +212,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
             setAdding(null);
             toast.success("Trigger added", { description: task.name });
           }}
-          onOpenFullForm={(start) => openFullForm(adding?.suggestion, start.sourceId)}
+          onOpenFullForm={(start) => openFullForm(adding?.suggestion, start)}
           onAddSource={addSource}
         />
       ) : null}

@@ -32,7 +32,7 @@ export type ViewerReaderFactory = (
 ) => { read: (link: SessionLink) => Promise<ViewerLinkRead>; close: () => Promise<void> };
 
 /** The caller's grant for using their own connections, or null (keys, services, agents). */
-function viewerToolGrant(
+export function viewerToolGrant(
   authorization: Parameters<typeof requireWorkspaceToolGatewayAuthorization>[0],
 ): AccessGrant | null {
   try {

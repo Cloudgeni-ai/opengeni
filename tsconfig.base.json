@@ -78,6 +78,7 @@
       "@opengeni/react/clipboard": ["./packages/react/src/clipboard.ts"],
       "@opengeni/sdk": ["./packages/sdk/src/index.ts"],
       "@opengeni/connect": ["./packages/connect/src/index.ts"],
+      "@opengeni/connect/browser-navigation": ["./packages/connect/src/browser-navigation.ts"],
       "@opengeni/sdk/editable-artifacts": ["./packages/sdk/src/editable-artifacts.ts"],
       "@opengeni/sdk/editable-artifacts/worker": [
         "./packages/sdk/src/editable-artifacts-worker.ts"

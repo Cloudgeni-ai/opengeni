@@ -6,17 +6,36 @@ import type { RailSession as Session } from "./session-list-entry";
 import { failureHandledByAgent } from "./session-failure";
 
 /**
- * `requires_action` that a person can act on. A session the runtime could not
- * start (it carries an admission block) reads as Stuck with its own Retry, so
- * it is not counted as waiting on the person, nor is a sub-agent whose
+ * An idle session whose agent waits on a connection card (connect, reconnect
+ * or more access). It needs the person as an approval does, though nothing
+ * runs and its status stays idle.
+ */
+export function awaitsConnection(
+  session: Pick<Session, "status" | "awaitingConnectionSince">,
+): boolean {
+  return session.status === "idle" && session.awaitingConnectionSince != null;
+}
+
+/**
+ * Waits on something a person can act on: `requires_action` (an approval or a
+ * question), or a connection card (`awaitsConnection`). A session the runtime
+ * could not start (it carries an admission block) reads as Stuck with its own
+ * Retry, so it is not counted as waiting on the person, nor is a sub-agent whose
  * questions are still with the agent that started it (`questionWithAgent`).
  */
 export function awaitsPerson(session: Session): boolean {
   return (
-    session.status === "requires_action" &&
-    !session.questionWithAgent &&
-    (session.admissionBlock === undefined || session.admissionBlock === null)
+    (session.status === "requires_action" &&
+      !session.questionWithAgent &&
+      (session.admissionBlock === undefined || session.admissionBlock === null)) ||
+    awaitsConnection(session)
   );
+}
+
+/** When the session began waiting on the person, when known. */
+export function awaitingPersonSince(session: Session): string | null {
+  if (session.status === "requires_action") return session.requiresActionSince ?? null;
+  return awaitsConnection(session) ? (session.awaitingConnectionSince ?? null) : null;
 }
 
 /**

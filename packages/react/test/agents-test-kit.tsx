@@ -105,6 +105,10 @@ export function fakeAgentsClient(
     sessionsPageSize?: number | undefined;
     /** Makes reading the session list fail with this error. */
     sessionsError?: unknown;
+    /** Agent chats per page (default 100). */
+    chatsPageSize?: number | undefined;
+    /** Makes reading an agent's chats fail with this error. */
+    chatsError?: unknown;
     /** Makes createEventSource fail with this error. */
     createSourceError?: unknown;
   } = {},
@@ -325,7 +329,31 @@ export function fakeAgentsClient(
     },
     async listAgentChats(workspaceId: string, id: string, request: Record<string, unknown>) {
       calls.push(["listAgentChats", workspaceId, id, request]);
-      return { chats: options.chats ?? [], nextCursor: null as string | null };
+      if (options.chatsError) throw options.chatsError;
+      if (options.chats || !options.sessions)
+        return { chats: options.chats ?? [], nextCursor: null as string | null };
+      // Chats in the workspace with this agent, filtered as the server does.
+      const all = options.sessions
+        .filter((session) => session.agentId === id)
+        .map(
+          (session): AgentChat => ({
+            sessionId: session.id,
+            title: session.title,
+            visibility: "workspace",
+            createdBySubjectId: null,
+            source: "app",
+            slack: null,
+            createdAt: "2026-11-21T00:00:00.000Z",
+            updatedAt: "2026-11-21T00:00:00.000Z",
+          }),
+        );
+      const size = Math.min(options.chatsPageSize ?? 100, Number(request.limit ?? 100));
+      const start = Number(request.cursor ?? 0);
+      const end = start + size;
+      return {
+        chats: all.slice(start, end),
+        nextCursor: end < all.length ? String(end) : null,
+      };
     },
     async listAgentSlackInstalls(workspaceId: string, id: string) {
       calls.push(["listAgentSlackInstalls", workspaceId, id]);

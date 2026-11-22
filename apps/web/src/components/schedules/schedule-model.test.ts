@@ -309,6 +309,43 @@ describe("schedule requests", () => {
     expect(moved.overlapPolicy).toBeUndefined();
   });
 
+  test("a change of agent is sent: with the config, or as a patch for an existing chat", () => {
+    const agentId = "00000000-0000-4000-8000-0000000000c1";
+    const nextAgentId = "00000000-0000-4000-8000-0000000000c2";
+    const chat: ScheduleDraft = {
+      ...base(),
+      agentId,
+      runMode: "existing_session",
+      targetSessionId: "chat",
+    };
+    const inChat = updateRequestFromDraft(
+      task({ runMode: "existing_session", targetSessionId: "chat" }),
+      chat,
+      { ...chat, agentId: nextAgentId },
+      { now: NOW },
+    );
+    expect(inChat.agentConfigPatch).toEqual({ agentId: nextAgentId });
+    expect(inChat.agentConfig).toBeUndefined();
+    const { agentId: _removed, ...withoutAgent } = chat;
+    expect(
+      updateRequestFromDraft(
+        task({ runMode: "existing_session", targetSessionId: "chat" }),
+        chat,
+        withoutAgent,
+        { now: NOW },
+      ).agentConfigPatch,
+    ).toEqual({ agentId: null });
+    const own: ScheduleDraft = { ...base(), agentId };
+    const separate = updateRequestFromDraft(
+      task({ agentConfig: { ...task().agentConfig, agentId } }),
+      own,
+      { ...own, agentId: nextAgentId },
+      { now: NOW },
+    );
+    expect(separate.agentConfig?.agentId).toBe(nextAgentId);
+    expect(separate.agentConfigPatch).toBeUndefined();
+  });
+
   test("Secrets narrowing is sent only when vaults are picked, and cleared back to all", () => {
     const vaultIds = ["00000000-0000-4000-8000-0000000000a1"];
     const all = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });

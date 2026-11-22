@@ -844,6 +844,8 @@ import {
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   SessionNotificationPostedPayload,
+  ToolAuthNeededPayload,
+  connectionCardNotice,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -37134,7 +37136,7 @@ async function sessionIdsWithHandledFailure(
 
 /**
  * Whether a session waits only on questions still with the agent that
- * started it (`held_for_agent`, see migration 1545): their notice is on its
+ * started it (`held_for_agent`, see migration 1550): their notice is on its
  * way, queued, or in a turn that has not ended, and that agent can act.
  * Person-facing attention leaves such a session out.
  */
@@ -37397,6 +37399,7 @@ export async function sessionTreeStatsForSessions(
           active_turn_id,
           input_wait_until,
           input_wait_turn_id,
+          awaiting_connection_since,
           last_sequence,
           effective_pause_revision,
           depth
@@ -37408,6 +37411,7 @@ export async function sessionTreeStatsForSessions(
             root.active_turn_id,
             root.input_wait_until,
             root.input_wait_turn_id,
+            root.awaiting_connection_since,
             root_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -37437,6 +37441,7 @@ export async function sessionTreeStatsForSessions(
             child.active_turn_id,
             child.input_wait_until,
             child.input_wait_turn_id,
+            child.awaiting_connection_since,
             child_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -37471,7 +37476,8 @@ export async function sessionTreeStatsForSessions(
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
           select id, parent_session_id, status, active_turn_id, input_wait_until,
-            input_wait_turn_id, last_sequence, effective_pause_revision, depth
+            input_wait_turn_id, awaiting_connection_since, last_sequence,
+            effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
@@ -37551,7 +37557,10 @@ export async function sessionTreeStatsForSessions(
                 order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
               )
           )::int as "waitingDescendants",
-          count(*) filter (where awaits_person)::int as "attentionDescendants",
+          count(*) filter (
+            where awaits_person
+              or ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
+          )::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
           count(*) filter (
             where effective_pause_revision is not null
@@ -37570,17 +37579,22 @@ export async function sessionTreeStatsForSessions(
           )::int as "unreadFailedDescendants",
           count(*) filter (where unread and not failure_handled)::int as "unreadDescendants",
           count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
-          -- Oldest still-open requires_action turn among the counted attention
-          -- descendants. The correlated lookup runs only for rows passing the
-          -- FILTER and walks session_turns_workspace_queue_idx
-          -- (workspace_id, session_id, status, position).
-          min((
-            select min(waiting_turn.updated_at)
-            from ${schema.sessionTurns} waiting_turn
-            where waiting_turn.workspace_id = ${workspaceId}
-              and waiting_turn.session_id = counted.id
-              and waiting_turn.status = 'requires_action'
-          )) filter (where awaits_person) as "attentionSince",
+          -- Oldest still-open requires_action turn, or connection card wait,
+          -- among the counted attention descendants. The correlated lookup
+          -- runs only for rows passing the FILTER and walks
+          -- session_turns_workspace_queue_idx (workspace_id, session_id, status, position).
+          least(
+            min((
+              select min(waiting_turn.updated_at)
+              from ${schema.sessionTurns} waiting_turn
+              where waiting_turn.workspace_id = ${workspaceId}
+                and waiting_turn.session_id = counted.id
+                and waiting_turn.status = 'requires_action'
+            )) filter (where awaits_person),
+            min(awaiting_connection_since) filter (
+              where ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
+            )
+          ) as "attentionSince",
           (
             -- The lookahead row proves more descendants than the budget.
             exists (
@@ -37764,25 +37778,37 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
       ${schema.sessions.status} = 'requires_action'
       and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`${schema.sessions.id}`)}
     )
+    or ${sessionAwaitsConnectionSql(schema.sessions.status, schema.sessions.awaitingConnectionSince)}
     or (
       ${schema.sessions.parentSessionId} is null
       and ${sessionRelatedListScope(scope)}
       and exists (
-        with recursive attention_tree(id, status) as (
-          select child.id, child.status from ${schema.sessions} child
+        with recursive attention_tree(id, status, awaiting_connection_since) as (
+          select child.id, child.status, child.awaiting_connection_since
+          from ${schema.sessions} child
           where child.workspace_id = ${schema.sessions.workspaceId}
             and child.parent_session_id = ${schema.sessions.id}
           union
-          select child.id, child.status from attention_tree parent
+          select child.id, child.status, child.awaiting_connection_since from attention_tree parent
           join ${schema.sessions} child on child.parent_session_id = parent.id
           where child.workspace_id = ${schema.sessions.workspaceId}
         )
         select 1 from attention_tree
-        where status = 'requires_action'
-          and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`attention_tree.id`)}
+        where (status = 'requires_action'
+            and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`attention_tree.id`)})
+          or ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
       )
     )
   )`;
+}
+
+/**
+ * An idle session whose agent waits on a connection card (connect, reconnect
+ * or more access) needs the person, as an approval does. Its status stays
+ * idle: nothing runs and new messages are admitted as usual.
+ */
+function sessionAwaitsConnectionSql(status: SQLWrapper, awaitingSince: SQLWrapper): SQL {
+  return sql`(${status} = 'idle' and ${awaitingSince} is not null)`;
 }
 
 /**
@@ -37911,6 +37937,7 @@ async function sessionListTotalsInScope(
         ${schema.sessions.activeTurnId} as active_turn_id,
         ${schema.sessions.inputWaitUntil} as input_wait_until,
         ${schema.sessions.inputWaitTurnId} as input_wait_turn_id,
+        ${schema.sessions.awaitingConnectionSince} as awaiting_connection_since,
         ${schema.sessions.siteId} as site_id,
         ${schema.sessions.siteAccessRootId} is not null as site_conversation,
         ${schema.sessions.updatedAt} as updated_at,
@@ -37932,7 +37959,8 @@ async function sessionListTotalsInScope(
       -- Retain each child's RLS check and materialize once, so depth cannot
       -- multiply base-table or personal-state scans.
       select child.id, child.parent_session_id, child.account_id, child.status, child.active_turn_id,
-        child.input_wait_until, child.input_wait_turn_id, child.subtree_run_override_revision,
+        child.input_wait_until, child.input_wait_turn_id, child.awaiting_connection_since,
+        child.subtree_run_override_revision,
         child.direct_control_state, child.direct_pause_revision,
         coalesce(personal.pinned, false) as pinned,
         coalesce(case when personal.manually_unread_through is not null then -1
@@ -37945,10 +37973,11 @@ async function sessionListTotalsInScope(
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, parent_session_id, account_id, status, active_turn_id,
-        input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
-        acknowledged_sequence, actively_working) as (
+        input_wait_until, input_wait_turn_id, awaiting_connection_since, pause_revision,
+        pinned_path, related, acknowledged_sequence, actively_working) as (
       select root.id, root.channel_id, root.id, null::uuid, root.account_id, root.status,
         root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
+        root.awaiting_connection_since,
         greatest(
           case when control.workspace_state = 'paused' and
             (root.subtree_run_override_revision is null or
@@ -37963,6 +37992,7 @@ async function sessionListTotalsInScope(
       select parent.root_id, parent.channel_id, child.id, child.parent_session_id,
         child.account_id, child.status,
         child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
+        child.awaiting_connection_since,
         greatest(
           case when child.subtree_run_override_revision is null or
               child.subtree_run_override_revision <= parent.pause_revision
@@ -37976,11 +38006,14 @@ async function sessionListTotalsInScope(
       where parent.related
     ), attention_roots as (
       select root_id, bool_or(case when status = 'requires_action'
-        then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)} else false end) as attention
+        then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
+        else ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)} end) as attention
       from nodes group by root_id
     ), root_attention as materialized (
       select root.id, not root.archived and (
-        root.status in ('requires_action', 'failed') or coalesce(attention.attention, false)
+        root.status in ('requires_action', 'failed')
+        or ${sessionAwaitsConnectionSql(sql`root.status`, sql`root.awaiting_connection_since`)}
+        or coalesce(attention.attention, false)
       ) as needs_you
       from roots root left join attention_roots attention on attention.root_id = root.id
     ), measured as (
@@ -37998,14 +38031,16 @@ async function sessionListTotalsInScope(
           sql`nodes.parent_session_id`,
         )} else false end as failure_handled,
         nodes.actively_working as active_work,
-        case when nodes.status = 'requires_action'
-          then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
-          else false end as awaits_person,
         case when nodes.status = 'requires_action' then (
           select min(turn.updated_at) from ${schema.sessionTurns} turn
           where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
             and turn.status = 'requires_action'
-        ) end as attention_since,
+        ) when ${sessionAwaitsConnectionSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
+          then nodes.awaiting_connection_since end as attention_since,
+        case when nodes.status = 'requires_action'
+          then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
+          else ${sessionAwaitsConnectionSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
+          end as needs_person,
         nodes.status = 'idle' and nodes.active_turn_id is null
           and nodes.input_wait_until is not null
           and nodes.input_wait_turn_id = (
@@ -38044,8 +38079,8 @@ async function sessionListTotalsInScope(
         }
     ), grouped as (
       select channel_id as "channelId", count(*)::int as total,
-        count(*) filter (where awaits_person)::int as attention,
-        min(attention_since) filter (where awaits_person) as "attentionSince",
+        count(*) filter (where needs_person)::int as attention,
+        min(attention_since) filter (where needs_person) as "attentionSince",
         count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
           (status in ('running', 'recovering') or input_wait))::int as active,
@@ -38178,8 +38213,8 @@ async function sessionListTotalsInScope(
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
-        count(*) filter (where node.awaits_person)::int as attention,
-        min(node.attention_since) filter (where node.awaits_person) as "attentionSince",
+        count(*) filter (where node.needs_person)::int as attention,
+        min(node.attention_since) filter (where node.needs_person) as "attentionSince",
         count(*) filter (where node.status = 'failed' and node.unread
           and not node.failure_handled)::int as failed,
         count(*) filter (where node.pause_revision is null and
@@ -57705,6 +57740,55 @@ export async function claimModalProviderCreateRecovery(
   });
 }
 
+/** Modal ends every sandbox within 24 hours, its maximum lifetime (and the
+ * most `modalTimeoutSeconds` allows). An unresolved create that started longer
+ * ago than that plus an hour for dispatch and scheduling can own no running
+ * box. The database guard enforces the same horizon (migration 1549). */
+export const MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS = 25 * 60 * 60 * 1000;
+
+export function modalProviderCreateOutlivedProvider(
+  attempt: Pick<SandboxProviderCreateAttempt, "startedAt">,
+  nowMs: number = Date.now(),
+): boolean {
+  const startedAtMs = Date.parse(attempt.startedAt);
+  return (
+    Number.isFinite(startedAtMs) && nowMs - startedAtMs > MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS
+  );
+}
+
+/** Clear an unresolved create that no receipt attributed within the provider's
+ * maximum sandbox lifetime. Only the exact attempt on its own expired warming
+ * epoch is cleared; the ordinary expired-warming reset then moves the lease to
+ * cold with a new epoch, keeping its archive, so the next turn creates afresh. */
+export async function settleExpiredModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    attempt: SandboxProviderCreateAttempt;
+  },
+): Promise<boolean> {
+  if (input.attempt.instanceId !== null || !modalProviderCreateOutlivedProvider(input.attempt))
+    return false;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ id: string }>(sql`
+      update sandbox_leases set provider_create_attempt = null,
+        provider_create_recovery_after = null,
+        updated_at = now()
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and lease_epoch = ${input.attempt.leaseEpoch}
+        and provider_create_attempt = ${JSON.stringify(input.attempt)}::jsonb
+        and expires_at < now()
+        and (provider_create_attempt->>'startedAt')::timestamptz
+          <= now() - (${String(MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS)} || ' milliseconds')::interval
+      returning id
+    `);
+    return rows.length > 0;
+  });
+}
+
 /** Attribute a positively identified late receipt, preserving expiry and every
  * checkpoint. Ordinary holder/epoch-fenced draining owns all physical cleanup. */
 export async function recordRecoveredModalProviderCreate(
@@ -61992,7 +62076,9 @@ export async function reapStaleLeaseHolders(
         let warmingReset = 0;
         for (const row of expiredWarming) {
           // A lost reply can still name a live provider. Keep the same epoch
-          // available for late attribution; time is not termination proof.
+          // available for late attribution; expiry alone is not termination
+          // proof. Only the provider's maximum sandbox lifetime is, and
+          // settleExpiredModalProviderCreate clears the attempt once it passes.
           if (row.provider_create_attempt?.instanceId === null) continue;
           const resetResumeState = warmingResetResumeState(row, new Date().toISOString());
           const reset = await tx.execute<{ id: string }>(sql`
@@ -95249,7 +95335,7 @@ async function enqueueChildRequiresActionOutboxTx(
     );
   if (hold && input.newHumanInputRequestIds.length > 0) {
     // Before the pause's request events: the inbox and push triggers skip a
-    // held question, and release it when the agent no longer has it (1545).
+    // held question, and release it when the agent no longer has it (1550).
     await tx
       .update(schema.sessionHumanInputRequests)
       .set({ heldForAgent: true })
@@ -99578,6 +99664,23 @@ export async function appendSessionEventsForTurnAttempt(
 }
 
 /**
+ * A connection card's events with the notice that tells the person they are
+ * needed (`connectionCardNotice`), after the card so the card stays first.
+ */
+export function withConnectionCardNotice<T extends { type: string; payload?: unknown }>(
+  events: readonly T[],
+): Array<T | { type: "session.notification.posted"; payload: SessionNotificationPostedPayload }> {
+  return events.flatMap((event) => {
+    if (event.type !== "tool.auth_needed") return [event];
+    const parsed = ToolAuthNeededPayload.safeParse(event.payload);
+    const notice = parsed.success ? connectionCardNotice(parsed.data) : null;
+    return notice
+      ? [event, { type: "session.notification.posted" as const, payload: notice }]
+      : [event];
+  });
+}
+
+/**
  * Append a capability card for the calling turn unless that turn already shows
  * a current card for the same capability (and, for a card that names the
  * machine it asks for, the same machine, and for a card with a purpose such as
@@ -99625,7 +99728,8 @@ export async function appendTurnCapabilityCardOnce(
     turnId,
     executionGeneration,
     attemptId,
-    [input],
+    // The card needs the person: its notice reaches the inbox and the phone.
+    withConnectionCardNotice([input]),
     {
       rowProjection: "event",
       mutate: async (tx) => {
@@ -101290,6 +101394,10 @@ function mapSessionFields(
     ...attention,
     ...sessionRowArchive(row),
     ...archive,
+    // Only while a connection card waits, so other sessions keep their bytes.
+    ...(row.awaitingConnectionSince
+      ? { awaitingConnectionSince: new Date(row.awaitingConnectionSince).toISOString() }
+      : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

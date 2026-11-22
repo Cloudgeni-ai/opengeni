@@ -625,6 +625,7 @@ function SessionRouteHeader({
       keyAuthRequired={context.keyAuthRequired}
       onForgetAccessKey={context.forgetAccessKey}
       inspectorOpen={context.inspectorOpen}
+      inspectorHint={context.inspectorHint === true}
       onToggleInspector={
         dock
           ? () => {

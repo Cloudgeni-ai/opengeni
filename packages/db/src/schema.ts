@@ -300,6 +300,8 @@ export const workspaceArtifacts = pgTable(
       .notNull()
       .default("workspace_shared"),
     ownerSubjectId: text("owner_subject_id"),
+    // Migration 1548: the app package it was installed or last upgraded from.
+    packageId: uuid("package_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -5548,6 +5550,11 @@ export const sessions = pgTable(
     inputWaitUntil: timestamp("input_wait_until", { withTimezone: true }),
     inputWaitReason: text("input_wait_reason"),
     inputWaitSetAt: timestamp("input_wait_set_at", { withTimezone: true }),
+    // Open connection-card notices the agent waits on (migration 1546): their
+    // keys and when the oldest was posted. Both null when none is open.
+    // Maintained only by the session_events trigger.
+    awaitingConnectionSince: timestamp("awaiting_connection_since", { withTimezone: true }),
+    awaitingConnectionKeys: text("awaiting_connection_keys").array(),
     // Actual input tokens reported for the latest authoritative ordinary model
     // call. Compaction/context clearing invalidates it to null; local history
     // estimates must never be stored here.
@@ -10481,7 +10488,7 @@ export const sessionHumanInputRequests = pgTable(
     response: jsonb("response").$type<HumanInputResponse>(),
     respondedBy: text("responded_by"),
     skillReviewHumanAuthorized: boolean("skill_review_human_authorized").notNull().default(false),
-    /** With the agent that started this sub-agent, not yet the person (1545). */
+    /** With the agent that started this sub-agent, not yet the person (1550). */
     heldForAgent: boolean("held_for_agent").notNull().default(false),
     respondedAt: timestamp("responded_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
