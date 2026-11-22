@@ -8,6 +8,10 @@ import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import {
+  readLastWorkspaceId,
+  workspaceNavigationPreferenceStorageId,
+} from "@opengeni/react/app/lib/workspace-navigation-preference";
 
 /* ----------------------------------------------------------------------------
    /connect-agent: where an agent's sign-in to the organization MCP server
@@ -29,6 +33,23 @@ export function continueAuthorizeUrl(authorize: string, origin: string): string 
   return url.origin === origin && url.pathname === "/oauth/authorize" ? url.toString() : null;
 }
 
+/**
+ * The organization the person last worked in, from this browser's navigation
+ * memory (the workspace they last opened). Only a hint; the page keeps it only
+ * when it's offered, else the server's default stands.
+ */
+export function lastUsedOrganizationId(
+  request: Pick<McpConnectionRequest, "organizations">,
+  lastWorkspaceId: string | null,
+): string | null {
+  if (!lastWorkspaceId) return null;
+  return (
+    request.organizations.find((organization) =>
+      organization.workspaces.some((workspace) => workspace.id === lastWorkspaceId),
+    )?.id ?? null
+  );
+}
+
 export function ConnectAgentRoute({
   request: requestToken,
   authorize,
@@ -36,7 +57,7 @@ export function ConnectAgentRoute({
   request?: string | undefined;
   authorize?: string | undefined;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const [state, setState] = useState<
     | { kind: "loading" }
     | { kind: "ready"; request: McpConnectionRequest }
@@ -89,6 +110,10 @@ export function ConnectAgentRoute({
     return (
       <McpConsentPage
         request={state.request}
+        lastUsedOrganizationId={lastUsedOrganizationId(
+          state.request,
+          readLastWorkspaceId(workspaceNavigationPreferenceStorageId(accessContext.subjectId)),
+        )}
         onAnswer={async (decision) => {
           const { redirectTo } = await client.answerMcpConnectionRequest(requestToken!, decision);
           setState({ kind: "leaving" });

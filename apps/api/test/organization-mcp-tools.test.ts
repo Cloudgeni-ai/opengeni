@@ -4,6 +4,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   ToolGatewayInvokeResponse,
   organizationAccessPresetPermissions,
+  type AccessGrant,
   type OrganizationAccessPolicy,
 } from "@opengeni/contracts";
 import { outsideAgentReach, OUTSIDE_AGENT_GRANT_METADATA_KEY } from "@opengeni/core";
@@ -1092,6 +1093,41 @@ describe("organization MCP named tool helpers", () => {
         },
       }),
     ).toEqual({ appData: "manager" });
+    const connectionId = crypto.randomUUID();
+    expect(
+      outsideAgentReach({
+        metadata: {
+          [OUTSIDE_AGENT_GRANT_METADATA_KEY]: { appData: "viewer", connectionId },
+        },
+      }),
+    ).toEqual({ appData: "viewer", connectionId });
+    // Anything but a connection id is dropped, never recorded as a writer.
+    expect(
+      outsideAgentReach({
+        metadata: {
+          [OUTSIDE_AGENT_GRANT_METADATA_KEY]: { appData: "viewer", connectionId: "user:x" },
+        },
+      }),
+    ).toEqual({ appData: "viewer" });
+  });
+
+  test("a connected agent's app data writes are recorded as its connection", async () => {
+    const { siteDataActor, siteDataPrincipal } = await import("../src/site-data/service");
+    const connectionId = crypto.randomUUID();
+    const person = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      subjectId: "user:person",
+      permissions: [],
+    } as unknown as AccessGrant;
+    const connected = {
+      ...person,
+      metadata: { [OUTSIDE_AGENT_GRANT_METADATA_KEY]: { appData: "viewer", connectionId } },
+    } as AccessGrant;
+    expect(siteDataActor(connected, "user:person")).toBe(`agent:connection:${connectionId}`);
+    // The record stays the person's.
+    expect(siteDataPrincipal(connected, "user:person")).toBe("user:user:person");
+    expect(siteDataActor(person, "user:person")).toBe("user:user:person");
   });
 
   test("the connection rate limiter refills and bounds its keys", () => {

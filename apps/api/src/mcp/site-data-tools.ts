@@ -105,7 +105,7 @@ export function registerSiteDataTools(
     "app_data_define_collection",
     {
       description:
-        'Create, update or delete a collection of JSON records for an app. Pages read and write it with site.data. Access modes: shared (viewers read and write every record), shared_read (viewers read; only managers write, e.g. a dashboard fed by a schedule), per_viewer (each viewer sees only their own records; managers see all unless privateRecords), append_only (viewers add and read their own, e.g. a form). Change the access mode only while the collection is empty. Set action to "delete" with confirm: true to delete the collection and its records.',
+        'Create, update or delete a collection of JSON records for an app. Pages read and write it with site.data. Access modes: shared (viewers read and write every record), shared_read (viewers read; only managers write, e.g. a dashboard fed by a schedule), per_viewer (each viewer sees only their own records; managers see all unless privateRecords), append_only (viewers add and read their own, e.g. a form). Change the access mode only while the collection is empty. Set action to "delete" with confirm: true to delete the collection and its records. To fill a collection from a connected tool for everyone (no viewer needs their own connection), save a data sync with app_sync_save; to take in another service\'s events, save an app webhook with app_webhook_save.',
       inputSchema: contractToolInput(
         z4.object({
           siteId: SiteIdInput,
