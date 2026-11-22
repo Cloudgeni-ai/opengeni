@@ -445,5 +445,7 @@ export function secretAnswerLabel(
   messageOverrides: Partial<HumanInputFormMessages> = {},
 ): string {
   const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
-  return messages.secretSaved(result.vaultName, result.itemName);
+  const vaultName =
+    result.saveTo === "task" ? t("humanInputModel.taskVaultName") : result.vaultName;
+  return messages.secretSaved(vaultName, result.itemName);
 }

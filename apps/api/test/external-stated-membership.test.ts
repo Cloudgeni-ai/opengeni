@@ -39,6 +39,7 @@ import {
 import { normalizeOrganizationAccessPolicy, type Permission } from "@opengeni/contracts";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
+import { requireInteractionAttachmentAccess } from "../src/http/interaction-attachment";
 
 const CHAT = [
   "workspace:read",
@@ -108,11 +109,20 @@ function registerRoutes() {
   if (routesRegistered) return;
   const deps = {
     db: db.db,
-    settings: testSettings({ productAccessMode: "configured", sandboxBackend: "none" }),
+    settings: testSettings({
+      productAccessMode: "configured",
+      sandboxBackend: "none",
+      interactionViewerOrigins: "https://product.example.test",
+      corsAllowOriginRegex: String.raw`https://console\.example\.test`,
+    }),
     bus: new MemoryEventBus(),
   } as unknown as ApiRouteDeps;
   registerWorkspaceRoutes(app, deps);
   registerOrganizationMembershipRoutes(app, deps);
+  app.post("/test/attachment/:workspaceId", async (c) => {
+    const { origin, grant } = await requireInteractionAttachmentAccess(c, deps);
+    return c.json({ origin, subjectId: grant.subjectId });
+  });
   app.get("/test/grant/:workspaceId/:permission", async (c) =>
     c.json(
       await requireAccessGrant(
@@ -231,6 +241,44 @@ async function errorOf(promise: Promise<unknown>): Promise<{ status: number; mes
 }
 
 const sorted = (permissions: readonly string[]) => [...permissions].sort();
+
+test("only an authorized external actor may assert an allowlisted interaction viewer origin", async () => {
+  const org = await organization([...KEY, "stream:view"]);
+  const externalId = crypto.randomUUID();
+  const external = {
+    "x-opengeni-external-actor": org.header(externalId, [...CHAT, "stream:view"]),
+  };
+  const origin = "https://product.example.test";
+  const asserted = { "x-opengeni-interaction-viewer-origin": origin };
+  const request = (headers: Record<string, string>) =>
+    app.request(`/test/attachment/${org.workspace.id}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${org.token}`, ...headers },
+    });
+
+  const accepted = await request({ ...external, ...asserted });
+  expect(accepted.status).toBe(200);
+  expect(await accepted.json()).toEqual({
+    origin,
+    subjectId: (await org.identity(externalId)).subjectId,
+  });
+  expect((await request(asserted)).status).toBe(403);
+  expect((await request({ ...external, ...asserted, origin })).status).toBe(403);
+  expect(
+    (await request({ ...external, "x-opengeni-interaction-viewer-origin": `${origin}.evil.test` }))
+      .status,
+  ).toBe(403);
+  expect((await request({ ...external, origin })).status).toBe(403);
+  expect((await request({ ...external, origin: "https://console.example.test" })).status).toBe(200);
+  expect(
+    (
+      await request({
+        ...asserted,
+        "x-opengeni-external-actor": org.header(externalId, READ_ONLY),
+      })
+    ).status,
+  ).toBe(403);
+});
 
 describe("stated membership", () => {
   test("the first request creates the member with exactly the stated permissions", async () => {
