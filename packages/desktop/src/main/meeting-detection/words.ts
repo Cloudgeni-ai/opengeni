@@ -30,6 +30,16 @@ export interface MeetingWords {
   /** Closes the question and keeps recording. */
   keepRecording: string;
   /**
+   * Why it asks when the call still holds the microphone but the calendar
+   * meeting has ended. Added later, so an app's own words may lack it and the
+   * English is shown.
+   */
+  calendarEnded?: string;
+  /** Said when nobody answered whether the meeting was over, so its recording stopped. */
+  autoStopped?: string;
+  /** Why it stopped. `{minutes}`: how long nobody answered. */
+  autoStoppedReason?: string;
+  /**
    * Said when a call started recording without asking. Added later, so an
    * app's own words may lack it and the English is shown.
    */
@@ -68,6 +78,9 @@ export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
   callEndedIn: "{app} stopped using your microphone. Still recording in {where}.",
   stop: "Stop recording",
   keepRecording: "Keep recording",
+  calendarEnded: "The meeting on your calendar has ended. Still recording.",
+  autoStopped: "Recording stopped",
+  autoStoppedReason: "The meeting seemed over, with no answer for {minutes} minutes.",
   recordingStarted: "Recording this call",
   callRecording: "A call in {app} started, so it's being recorded.",
   ok: "OK",

@@ -10,6 +10,7 @@ mock.module("electron", () => electronStub);
 
 import { DESKTOP_IPC, type DesktopMeetingRequest } from "../src/contract";
 import {
+  CALENDAR_OVERRUN_MS,
   ENDED_AFTER_MS,
   joinPrompt,
   MeetingDetection,
@@ -17,6 +18,7 @@ import {
   PROMPT_AFTER_MS,
   promptRequest,
   promptText,
+  STOP_UNANSWERED_MS,
   type MeetingPage,
   type MeetingPrompt,
   type MeetingPromptOutcome,
@@ -692,6 +694,176 @@ describe("reminders before calendar meetings", () => {
     run.cards[0]!.done("dismissed");
     await run.at(START - REMIND_BEFORE_MS);
     expect(run.shown()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+});
+
+const meet: MicrophoneUser = {
+  pid: 300,
+  name: "Google Chrome Helper",
+  path: null,
+  bundleId: "com.google.Chrome.helper",
+  owners: [],
+};
+
+describe("a meeting tab left on the microphone", () => {
+  /** The reminder's meeting joined and recorded, its call in Chrome until `until`. */
+  async function joined(until: number) {
+    const run = reminders();
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    await run.at(START - REMIND_BEFORE_MS);
+    run.shown()[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    for (let time = START; time <= until; time += MINUTE) run.microphone([meet], time);
+    const stops = () => run.cards.filter((card) => card.prompt.kind === "stop");
+    return { ...run, page, stops };
+  }
+  const end = START + 30 * MINUTE;
+
+  test("a while after the calendar meeting ends, the card asks whether it's over; it doesn't stop by itself", async () => {
+    const run = await joined(end + CALENDAR_OVERRUN_MS - MINUTE);
+    expect(run.stops()).toHaveLength(0);
+    run.microphone([meet], end + CALENDAR_OVERRUN_MS);
+    expect(run.stops()).toHaveLength(1);
+    const card = run.stops()[0]!;
+    expect(promptText(card.prompt)).toEqual({
+      question: "Meeting over?",
+      reason: "The meeting on your calendar has ended. Still recording.",
+      action: "Stop recording",
+      dismiss: "Keep recording",
+    });
+    expect(run.log).toContain("Meeting detection: the calendar meeting being recorded ended.");
+    // The call still holds the microphone: the meeting may be running over.
+    run.microphone([meet], end + CALENDAR_OVERRUN_MS + 2 * STOP_UNANSWERED_MS);
+    expect(card.closed).toBe(false);
+    expect(run.page.sent.filter((request) => request.kind === "stop")).toEqual([]);
+    // Ignored that long, a short release of the microphone (a mute) still stops nothing.
+    run.microphone([], end + CALENDAR_OVERRUN_MS + 2 * STOP_UNANSWERED_MS + 1_000);
+    run.microphone([meet], end + CALENDAR_OVERRUN_MS + 2 * STOP_UNANSWERED_MS + 2_000);
+    expect(run.page.sent.filter((request) => request.kind === "stop")).toEqual([]);
+    expect(card.closed).toBe(false);
+    // Keep recording: not asked again while the tab stays.
+    card.done("dismissed");
+    run.microphone([meet], end + 2 * 60 * MINUTE);
+    expect(run.stops()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("the call letting go asks as it always did, and that question stops by itself", async () => {
+    const run = await joined(end - MINUTE);
+    run.microphone([], end);
+    run.microphone([], end + ENDED_AFTER_MS);
+    expect(run.stops()).toHaveLength(1);
+    expect(promptText(run.stops()[0]!.prompt).reason).toBe(
+      "Google Chrome stopped using your microphone. Still recording.",
+    );
+    // Already asked: the calendar's end asks nothing more.
+    run.microphone([], end + CALENDAR_OVERRUN_MS);
+    expect(run.stops()).toHaveLength(1);
+    run.microphone([], end + ENDED_AFTER_MS + STOP_UNANSWERED_MS);
+    expect(run.page.sent.at(-1)).toEqual({ kind: "stop", app: "Google Chrome" });
+    run.subject.shutdown();
+  });
+
+  test("the call dropped and rejoined, then the tab left open: the calendar still asks", async () => {
+    const run = await joined(end - 10 * MINUTE);
+    run.microphone([], end - 9 * MINUTE);
+    run.microphone([], end - 9 * MINUTE + ENDED_AFTER_MS);
+    const dropped = run.stops()[0]!;
+    expect(promptText(dropped.prompt).reason).toContain("stopped using your microphone");
+    // Rejoined: the question goes.
+    run.microphone([meet], end - 8 * MINUTE);
+    run.microphone([meet], end - 8 * MINUTE + PROMPT_AFTER_MS);
+    expect(dropped.closed).toBe(true);
+    for (let time = end - 7 * MINUTE; time <= end + CALENDAR_OVERRUN_MS; time += MINUTE) {
+      run.microphone([meet], time);
+    }
+    expect(run.stops()).toHaveLength(2);
+    expect(run.stops()[1]!.prompt).toMatchObject({ kind: "stop", calendar: true });
+    run.subject.shutdown();
+  });
+
+  test("joined from the next meeting's reminder while the one before runs: asked after the joined one ends", async () => {
+    const next = {
+      id: "evt-next",
+      title: "Next",
+      startsAt: new Date(end).toISOString(),
+      endsAt: new Date(end + 30 * MINUTE).toISOString(),
+    };
+    const run = reminders({ meetings: [wire(), wire(next)] });
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    // The first meeting's reminder goes by.
+    await run.at(START - REMIND_BEFORE_MS);
+    run.shown()[0]!.done("dismissed");
+    // The next one's: joined a minute early, while the first still runs.
+    await run.at(end - REMIND_BEFORE_MS);
+    expect(promptText(run.shown()[0]!.prompt).question).toBe("Next");
+    run.shown()[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    const stops = () => run.cards.filter((card) => card.prompt.kind === "stop");
+    for (let time = end; time < end + 30 * MINUTE + CALENDAR_OVERRUN_MS; time += MINUTE) {
+      run.microphone([meet], time);
+    }
+    expect(stops()).toHaveLength(0);
+    run.microphone([meet], end + 30 * MINUTE + CALENDAR_OVERRUN_MS);
+    expect(stops()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("switching from one meeting's recording to the next one's: asked after the next one ends", async () => {
+    const next = {
+      id: "evt-next",
+      title: "Next",
+      startsAt: new Date(end).toISOString(),
+      endsAt: new Date(end + 30 * MINUTE).toISOString(),
+    };
+    const run = reminders({ meetings: [wire(), wire(next)] });
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    await run.at(START - REMIND_BEFORE_MS);
+    run.shown()[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    await run.at(end - REMIND_BEFORE_MS);
+    expect(run.shown()[0]!.prompt).toMatchObject({ kind: "join", reminder: { replace: true } });
+    run.shown()[0]!.done("chosen");
+    // The page stops the first recording, then starts the next one's.
+    run.subject.setRecording(page, false);
+    run.subject.setRecording(page, true);
+    const stops = () => run.cards.filter((card) => card.prompt.kind === "stop");
+    for (let time = end; time < end + 30 * MINUTE + CALENDAR_OVERRUN_MS; time += MINUTE) {
+      run.microphone([meet], time);
+    }
+    expect(stops()).toHaveLength(0);
+    run.microphone([meet], end + 30 * MINUTE + CALENDAR_OVERRUN_MS);
+    expect(stops()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("the calendar's question gives way to the next meeting's reminder", async () => {
+    const next = {
+      id: "evt-next",
+      title: "Next",
+      startsAt: new Date(end + CALENDAR_OVERRUN_MS + 2 * MINUTE).toISOString(),
+      endsAt: new Date(end + 60 * MINUTE).toISOString(),
+    };
+    const run = reminders({ meetings: [wire(), wire(next)] });
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    await run.at(START - REMIND_BEFORE_MS);
+    run.shown()[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    for (let time = START; time <= end + CALENDAR_OVERRUN_MS; time += MINUTE) {
+      run.microphone([meet], time);
+    }
+    const asked = run.cards.at(-1)!;
+    expect(asked.prompt).toMatchObject({ kind: "stop", calendar: true });
+    await run.at(end + CALENDAR_OVERRUN_MS + MINUTE);
+    // The reminder takes the card's place.
+    expect(run.log.at(-1)).toBe("Meeting detection: the question timed out (chrome).");
+    expect(run.cards.at(-1)!.prompt.kind).toBe("join");
+    expect(run.shown().map((card) => promptText(card.prompt).question)).toEqual(["Next"]);
     run.subject.shutdown();
   });
 });
