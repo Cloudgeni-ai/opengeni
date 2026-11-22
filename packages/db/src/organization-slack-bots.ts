@@ -2,6 +2,7 @@ import type { EventSourceStatus } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { getConnectionMetadata, listConnectionsMetadata } from "./connection-metadata";
+import { nestedPostgresSqlState } from "./persistence-errors";
 
 export type SlackBotAccess = {
   connectionId: string;
@@ -140,29 +141,43 @@ export async function sharedSlackEventSources(
     externalKey: string;
   },
 ): Promise<SharedSlackEventSource[]> {
-  const v2 = await sharedSlackLookupV2Granted(db, Date.now());
-  const rows = await withRlsContext(
-    db,
-    { accountId: scope.accountId, workspaceId: scope.homeWorkspaceId },
-    async (tx) =>
-      rawRows<{
-        workspace_id: string;
-        source_id: string;
-        status: EventSourceStatus;
-        status_reason: string | null;
-      }>(
-        tx,
-        v2
-          ? sql`select workspace_id, source_id, status, status_reason
+  const read = (v2: boolean) =>
+    withRlsContext(
+      db,
+      { accountId: scope.accountId, workspaceId: scope.homeWorkspaceId },
+      async (tx) =>
+        rawRows<{
+          workspace_id: string;
+          source_id: string;
+          status: EventSourceStatus;
+          status_reason: string | null;
+        }>(
+          tx,
+          v2
+            ? sql`select workspace_id, source_id, status, status_reason
             from opengeni_private.list_shared_slack_event_sources_v2(
               ${scope.accountId}::uuid, ${scope.homeWorkspaceId}::uuid, ${scope.connectionId}::uuid,
               ${scope.externalKey}::text)`
-          : sql`select workspace_id, source_id, status, status_reason
+            : sql`select workspace_id, source_id, status, status_reason
             from opengeni_private.list_shared_slack_event_sources_v1(
               ${scope.accountId}::uuid, ${scope.homeWorkspaceId}::uuid, ${scope.connectionId}::uuid,
               ${scope.externalKey}::text)`,
-      ),
-  );
+        ),
+    );
+  let rows: Awaited<ReturnType<typeof read>>;
+  if (await sharedSlackLookupV2Granted(db, Date.now())) {
+    try {
+      rows = await read(true);
+    } catch (error) {
+      // EXECUTE revoked or the routine gone: back to v1 until the next check.
+      const state = nestedPostgresSqlState(error);
+      if (state !== "42501" && state !== "42883") throw error;
+      v2Granted.set(db, { value: false, at: Date.now() });
+      rows = await read(false);
+    }
+  } else {
+    rows = await read(false);
+  }
   return rows.map((row) => ({
     workspaceId: row.workspace_id,
     sourceId: row.source_id,

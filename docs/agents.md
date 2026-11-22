@@ -543,12 +543,14 @@ whole.
   optional conditions; picking a kind not added yet shows its setup step in
   place: Opengeni adds GitHub, Slack or This workspace right there, a
   webhook is created right there and shows its URL and signing secret, a
-  Linear, Sentry or Tailscale webhook is created right there and then shows
-  its URL with one field for the secret that app shows and **Save secret**
-  (sent once with `updateEventSource`, stored encrypted on the source like
-  the Add a source page does, never returned or shown again; afterwards the
-  dialog says only "<secret> set." with **Replace**; a webhook still waiting
-  for its secret can be picked to paste it), GitHub not yet connected to the
+  webhook from an app (Linear, Sentry, Tailscale or another app) is created
+  right there and then shows its URL with one field for the secret that app
+  shows and **Save <secret>** (sent once with `updateEventSource`, stored
+  encrypted on the source like the Add a source page does, never returned or
+  shown again; afterwards the dialog says only "<secret> set." with
+  **Replace**, which only the source's owner or an admin sees; a webhook
+  still blocked waiting for its secret can be picked by them to paste it),
+  GitHub not yet connected to the
   workspace makes **Connect GitHub** the one action (Connected tools), and
   any other kind (Gmail's mailbox to connect or pick, an MCP server to pick)
   makes **Add <source>** the one action (the Add a source page). A GitHub event can add one repository. The **Note** is

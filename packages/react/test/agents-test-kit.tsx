@@ -96,7 +96,13 @@ export function fakeAgentsClient(
     /** Workspace Skills by stable key. */
     skills?: string[];
     /** Event sources automations listen to. */
-    eventSources?: { id: string; name: string; kind?: string; status?: string }[];
+    eventSources?: {
+      id: string;
+      name: string;
+      kind?: string;
+      status?: string;
+      [field: string]: unknown;
+    }[];
     /** Makes createScheduledTask fail with this error. */
     createTaskError?: unknown;
     /** Chats in the workspace, with the agent each was started with. */
@@ -291,7 +297,9 @@ export function fakeAgentsClient(
     ) {
       calls.push(["updateEventSource", workspaceId, sourceId, request]);
       if (options.updateSourceError) throw options.updateSourceError;
-      const current = createdSources.get(sourceId);
+      const current =
+        createdSources.get(sourceId) ??
+        (options.eventSources ?? []).find((source) => source.id === sourceId);
       if (!current) throw new Error(`no source ${sourceId}`);
       const updated =
         request.signingSecret !== undefined

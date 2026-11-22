@@ -25,8 +25,10 @@
 -- event_sources is FORCE RLS, so the definer opens the owner inventory window
 -- (organization_tenancy_inventory_capabilities, as 1406 does) for its own
 -- statement only. The new shared_slack_event_source_read policy is for the
--- tables' owner alone and covers only Slack rows while that window is open;
--- the runtime role gains no read.
+-- tables' owner alone and covers only the current organization's Slack rows
+-- while that window is open; the runtime role gains no read. Opening the
+-- window writes one row and takes a transaction id on each shared callback
+-- (only when sharing is on): the price of a window the runtime can't forge.
 --
 -- As 0937, 0978, 1492 and 1503 explain, the previous release rejects a
 -- runtime EXECUTE grant on a definer it doesn't know, so this migration grants
@@ -44,7 +46,8 @@ DECLARE
 BEGIN
   EXECUTE pg_catalog.format(
     'CREATE POLICY shared_slack_event_source_read ON %1$I.event_sources FOR SELECT TO %2$I '
-    'USING (kind = ''slack'' AND (SELECT opengeni_private.organization_tenancy_inventory_capability_active()))',
+    'USING (kind = ''slack'' AND account_id = (SELECT opengeni_private.current_account_id()) '
+    'AND (SELECT opengeni_private.organization_tenancy_inventory_capability_active()))',
     data_schema, owner_name
   );
 

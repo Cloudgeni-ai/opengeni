@@ -4,8 +4,8 @@
  * catalog (`agentTriggerOptions`): a schedule, the person's sources and every
  * kind they can still add. A kind not added yet shows its setup step right
  * here: Opengeni adds GitHub, Slack or This workspace in place, a webhook is
- * created in place and shows its URL, a Linear, Sentry or Tailscale webhook
- * is created in place and takes the secret that app shows (one field, kept
+ * created in place and shows its URL, an app's webhook (Linear, Sentry,
+ * Tailscale or another app) is created in place and takes the secret that app shows (one field, kept
  * only on the server and never shown again), GitHub not yet connected makes
  * Connect GitHub the one action, and any other kind (Gmail's mailbox, an MCP
  * server) opens Add a source. A suggested
@@ -17,7 +17,7 @@
  * source picked, with the note and chat choice. Its Cancel and Save come
  * back here.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { GitBranchIcon } from "lucide-react";
 import type {
   Agent,
@@ -51,7 +51,7 @@ import { Field, FieldStack, TextArea, TextInput } from "../../../ui/field";
 import { FormDialog } from "../../../ui/form-dialog";
 import { Notice } from "../../../ui/notice";
 import { SelectMenu, type SelectOption } from "../../../ui/select-menu";
-import { userErrorText } from "../../../ui/api-error";
+import { apiErrorFacts, isApiError, userErrorText } from "../../../ui/api-error";
 import { useAppContext } from "../../app-context";
 import { t } from "../../lib/console-text";
 import { githubConnectedOf, githubConnectHref } from "../../lib/github-connect";
@@ -138,7 +138,8 @@ function AgentTriggerDialogBody({
   const [added, setAdded] = useState<EventSource[]>([]);
   const mine = useMemo(() => {
     if (!eventTriggers) return NO_SOURCES;
-    if (!loaded.sources) return undefined;
+    // A source added before the list arrives is shown at once.
+    if (!loaded.sources) return added.length > 0 ? added : undefined;
     if (added.length === 0) return loaded.sources;
     // A source changed here (its secret set) replaces the one read on opening.
     const current = loaded.sources.map(
@@ -199,8 +200,12 @@ function AgentTriggerDialogBody({
   const [chat, setChat] = useState<AgentTriggerChat>(AGENT_TRIGGER_NEW_CHAT);
   const [chatIssue, setChatIssue] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
-  // A pasted webhook's secret: typed here, sent once, never kept or shown again.
-  const [secret, setSecret] = useState("");
+  // A pasted webhook's secret: typed here, read once on save, never kept in
+  // state or shown again. The field is uncontrolled, so the value isn't
+  // mirrored into the page's HTML.
+  const secretField = useRef<HTMLInputElement>(null);
+  // Where focus goes after the field closes: back to Replace.
+  const [focusReplace, setFocusReplace] = useState(false);
   const [secretIssue, setSecretIssue] = useState<string | undefined>(undefined);
   const [replacingSecret, setReplacingSecret] = useState<string | null>(null);
   const update = (patch: Partial<AutomationDraft>) => {
@@ -212,9 +217,9 @@ function AgentTriggerDialogBody({
     setPick(next);
     setIssues({});
     setError(null);
-    setSecret("");
     setSecretIssue(undefined);
     setReplacingSecret(null);
+    setFocusReplace(false);
     setDraft((current) => agentTriggerDraftForPick(next, { note: current.instructions, timeZone }));
   };
 
@@ -317,6 +322,7 @@ function AgentTriggerDialogBody({
       return false;
     }
     if (awaitingSecret && pickedSource && pasted) {
+      const secret = secretField.current?.value ?? "";
       const issue = agentTriggerSecretIssue(secret, pasted);
       if (issue) {
         setSecretIssue(issue);
@@ -326,11 +332,15 @@ function AgentTriggerDialogBody({
         const saved = await client.updateEventSource(workspaceId, pickedSource.id, {
           signingSecret: secret.trim(),
         });
+        if (secretField.current) secretField.current.value = "";
         setAdded((current) => [...current.filter((source) => source.id !== saved.id), saved]);
-        setSecret("");
         setReplacingSecret(null);
+        setFocusReplace(true);
       } catch (caught) {
-        setError(userErrorText(caught));
+        // A refused value belongs on the field; anything else above it.
+        if (isApiError(caught) && apiErrorFacts(caught).status === 422)
+          setSecretIssue(userErrorText(caught));
+        else setError(userErrorText(caught));
       }
       return false;
     }
@@ -403,8 +413,8 @@ function AgentTriggerDialogBody({
         : setupChoice
           ? eventSourceAddLabel(t, setupChoice)
           : "Add a source"
-    : awaitingSecret
-      ? "Save secret"
+    : awaitingSecret && pasted
+      ? `Save ${pasted.secretName}`
       : "Add trigger";
   const shownWebhook =
     webhook && pick?.kind === "source" && pick.sourceId === webhook.sourceId ? webhook : null;
@@ -460,22 +470,23 @@ function AgentTriggerDialogBody({
           <SetupStep setup={setup} name={setupName} />
         ) : awaitingSecret && pickedSource && pasted ? (
           <PastedSecretStep
+            key={`${pickedSource.id}:${replacingSecret ?? ""}`}
             url={pickedSource.webhookUrl}
             setup={pasted}
-            value={secret}
-            onChange={(value) => {
-              setSecret(value);
+            inputRef={secretField}
+            onChange={() => {
               setSecretIssue(undefined);
               setError(null);
             }}
             error={secretIssue}
+            autoFocus={replacingSecret === pickedSource.id}
             onKeep={
               agentTriggerAwaitsSecret(pickedSource)
                 ? undefined
                 : () => {
                     setReplacingSecret(null);
-                    setSecret("");
                     setSecretIssue(undefined);
+                    setFocusReplace(true);
                   }
             }
           />
@@ -505,10 +516,17 @@ function AgentTriggerDialogBody({
             {pasted && pickedSource ? (
               <SecretSet
                 name={pasted.secretName}
-                onReplace={() => {
-                  setReplacingSecret(pickedSource.id);
-                  setError(null);
-                }}
+                autoFocus={focusReplace}
+                onReplace={
+                  // Only whoever may change the source replaces its secret.
+                  pickedSource.viewerAccess === "use"
+                    ? undefined
+                    : () => {
+                        setReplacingSecret(pickedSource.id);
+                        setFocusReplace(false);
+                        setError(null);
+                      }
+                }
               />
             ) : null}
             <EventTriggersField
@@ -624,16 +642,18 @@ function WebhookCreated({ url, secret }: { url: string; secret?: string | undefi
 function PastedSecretStep({
   url,
   setup,
-  value,
+  inputRef,
   onChange,
   error,
+  autoFocus,
   onKeep,
 }: {
   url: string | null;
   setup: { app: string; secretName: string; urlStep: string; secretStep: string };
-  value: string;
-  onChange: (value: string) => void;
+  inputRef: RefObject<HTMLInputElement | null>;
+  onChange: () => void;
   error?: string | undefined;
+  autoFocus?: boolean | undefined;
   /** While replacing a secret that is set: keep it instead. */
   onKeep?: (() => void) | undefined;
 }) {
@@ -645,12 +665,13 @@ function PastedSecretStep({
       </Field>
       <Field label={label} hint={setup.secretStep} error={error}>
         <TextInput
+          ref={inputRef}
           type="password"
           mono
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
+          defaultValue=""
+          onChange={onChange}
           suppressAutofill
-          aria-invalid={error ? true : undefined}
+          autoFocus={autoFocus}
         />
       </Field>
       {onKeep ? (
@@ -665,14 +686,28 @@ function PastedSecretStep({
 }
 
 /** A pasted webhook's secret is set; it is never shown, only replaced. */
-function SecretSet({ name, onReplace }: { name: string; onReplace: () => void }) {
+function SecretSet({
+  name,
+  onReplace,
+  autoFocus,
+}: {
+  name: string;
+  /** Absent for someone who may only use the source. */
+  onReplace?: (() => void) | undefined;
+  autoFocus?: boolean | undefined;
+}) {
   const label = name.charAt(0).toUpperCase() + name.slice(1);
   return (
-    <p data-agent-trigger-secret-set="" className="m-0 text-sm text-fg-muted">
-      {`${label} set. `}
-      <button type="button" className="og-link" onClick={onReplace}>
-        Replace
-      </button>
+    <p role="status" data-agent-trigger-secret-set="" className="m-0 text-sm text-fg-muted">
+      {`${label} set.`}
+      {onReplace ? (
+        <>
+          {" "}
+          <button type="button" className="og-link" onClick={onReplace} autoFocus={autoFocus}>
+            Replace
+          </button>
+        </>
+      ) : null}
     </p>
   );
 }

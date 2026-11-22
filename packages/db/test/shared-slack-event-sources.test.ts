@@ -22,6 +22,7 @@ postgresTest(
     if (!owned) throw new Error("PostgreSQL required");
     let client: ReturnType<typeof createDb> | undefined;
     let grantedClient: ReturnType<typeof createDb> | undefined;
+    let ownerClient: ReturnType<typeof createDb> | undefined;
     try {
       await migrate(owned.ownerUrl);
       await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
@@ -271,6 +272,43 @@ postgresTest(
       expect(afterCall.visible).toEqual([{ id: sources[home.workspaceId]! }]);
       expect(afterCall.open).toBe(false);
 
+      // Even for the tables' owner, the window covers only the current
+      // organization's Slack rows, and a window it already holds stays open.
+      ownerClient = createDb(owned.ownerUrl);
+      const asOwner = await withRlsContext(ownerClient.db, home, async (tx) => {
+        await tx.execute(sql`insert into opengeni_private.organization_tenancy_inventory_capabilities
+          (backend_pid, transaction_id) values (pg_backend_pid(), pg_current_xact_id())`);
+        const visible = await rawRows<{ account_id: string }>(
+          tx,
+          sql`select distinct account_id from event_sources where kind = 'slack'`,
+        );
+        await rawRows(
+          tx,
+          sql`select * from opengeni_private.list_shared_slack_event_sources_v2(
+            ${accountId}::uuid, ${home.workspaceId}::uuid, ${bot.id}::uuid, ${externalKey}::text)`,
+        );
+        const [open] = await rawRows<{ open: boolean }>(
+          tx,
+          sql`select opengeni_private.organization_tenancy_inventory_capability_active() as open`,
+        );
+        return { visible, open: open?.open };
+      });
+      expect(asOwner.visible).toEqual([{ account_id: accountId }]);
+      expect(asOwner.open).toBe(true);
+
+      // EXECUTE revoked after the runtime saw it granted: back to v1, same rows.
+      const lookup = {
+        accountId,
+        homeWorkspaceId: home.workspaceId,
+        connectionId: bot.id,
+        externalKey,
+      };
+      expect(await sharedSlackEventSources(grantedClient.db, lookup)).toEqual(shareTarget);
+      await owned.admin.unsafe(
+        `revoke execute on function opengeni_private.${signatureV2} from opengeni_app`,
+      );
+      expect(await sharedSlackEventSources(grantedClient.db, lookup)).toEqual(shareTarget);
+
       const [privileges] = await owned.admin`
         select has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as execute,
           p.prosecdef as definer,
@@ -287,6 +325,7 @@ postgresTest(
     } finally {
       await client?.close();
       await grantedClient?.close();
+      await ownerClient?.close();
       await owned.release();
     }
   },

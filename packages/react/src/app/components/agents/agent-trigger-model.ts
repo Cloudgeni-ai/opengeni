@@ -155,9 +155,12 @@ export function agentTriggerOptions(
         label: source.name,
         subject: source,
       };
-      // A webhook waiting for its app's secret can be picked: the secret is pasted here.
-      if (source.status === "active" || agentTriggerAwaitsSecret(source)) return option;
+      // A webhook waiting for its app's secret can be picked by whoever may
+      // set it: the secret is pasted here.
+      if (source.status === "active" || agentTriggerCanPasteSecret(source)) return option;
       const badge = eventSourceStatusBadge(t, source);
+      if (agentTriggerAwaitsSecret(source) && source.viewerAccess === "use")
+        return { ...option, unavailable: "Its owner pastes the secret." };
       return { ...option, unavailable: badge?.reason ?? badge?.label ?? "Unavailable" };
     });
   const fresh = input.choices
@@ -266,6 +269,28 @@ export function agentTriggerAwaitsSecret(
   source: Pick<EventSource, "kind" | "awaitingSigningSecret"> | undefined,
 ): boolean {
   return source?.kind === "webhook" && source.awaitingSigningSecret === true;
+}
+
+/**
+ * Whether this person can paste the secret of a webhook that waits for it:
+ * only while it is blocked for that reason (not turned off), and only for
+ * whoever may change the source (its owner or an admin; a source they just
+ * made has no access level yet and is theirs).
+ */
+export function agentTriggerCanPasteSecret(
+  source:
+    | Pick<
+        EventSource,
+        "kind" | "awaitingSigningSecret" | "status" | "statusReasonCode" | "viewerAccess"
+      >
+    | undefined,
+): boolean {
+  return (
+    agentTriggerAwaitsSecret(source) &&
+    source?.status === "blocked" &&
+    source.statusReasonCode === "awaiting_secret" &&
+    source.viewerAccess !== "use"
+  );
 }
 
 /** Why a pasted secret can't be saved, or undefined when it can. */
