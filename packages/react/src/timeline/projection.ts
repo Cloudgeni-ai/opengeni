@@ -4879,6 +4879,8 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
   "pinned_account_disabled",
   "pinned_account_ineligible",
   "model_not_allowed",
+  "codex_relogin_required",
+  "codex_plan_no_capacity",
   // Only sending the work again ends it (design 5.3 decision 4).
   "accepted_authority_unavailable",
 ]);
@@ -4895,8 +4897,8 @@ const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|accou
  * line: the message is answered as soon as there is room (the waiting turn
  * stays queued and resumes by itself when an account can serve it), or
  * sooner on another model. It names no time: the timeline cannot keep a
- * time current. Only a wait that a person must resolve (reconnect,
- * re-enable, choose another account) keeps its recorded, actionable reason.
+ * time current. Named rate limits and waits that a person must resolve
+ * keep their recorded explanation.
  */
 function capacityWaitPresentation(
   t: OpenGeniText,
@@ -4906,6 +4908,7 @@ function capacityWaitPresentation(
 ): { turnId: string | null; label: string; detail: string; text: string } {
   if (
     ACTION_CAPACITY_WAIT_REASONS.has(stringValue(payload.waitReason)) ||
+    payload.waitReason === "codex_rate_limited" ||
     ACTION_CAPACITY_WAIT_CODE.test(stringValue(payload.code))
   ) {
     // Claude/SuperGrok waits record the readable sentence as `error` and an

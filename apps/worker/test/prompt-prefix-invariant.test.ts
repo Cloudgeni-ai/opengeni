@@ -222,6 +222,28 @@ for (const wire of WIRES) {
         60_000,
       );
     }
+    test("a new child capacity explanation appends without changing a delivered notice", async () => {
+      const chat = prefixChat(wire);
+      const before =
+        "Worker is blocked: no Codex subscription has capacity and no reset time is known.";
+      const after = "The Codex account “Primary” needs a new sign-in. An admin must reconnect it.";
+      await chat.turn(INITIAL_STATE, { kind: "message", text: "Check on the worker." });
+      await chat.turn(INITIAL_STATE, {
+        kind: "child_capacity_wait",
+        noticeId: "old-wait",
+        summary: before,
+      });
+      await chat.turn(INITIAL_STATE, {
+        kind: "child_capacity_wait",
+        noticeId: "new-wait",
+        summary: after,
+      });
+      const previous = chat.requests.at(-2)!;
+      const next = chat.requests.at(-1)!;
+      expect(prefixBreaks(previous, next)).toEqual([]);
+      expect(next.prefix.items.join("\n")).toContain(before);
+      expect(next.prefix.items.join("\n")).toContain(after);
+    }, 60_000);
   });
 }
 

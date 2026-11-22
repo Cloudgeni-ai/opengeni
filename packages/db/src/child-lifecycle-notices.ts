@@ -99,11 +99,15 @@ export function childWaitingCapacityDedupeKey(input: {
    * waiter has no suffix.
    */
   restatedResetsAt?: string | null;
+  /** Sequence of the child's new waiting event when the explanation changes. */
+  restatedReasonSequence?: number;
 }): string {
   const base = `${CHILD_LIFECYCLE_DEDUPE_PREFIX.waitingCapacity}:${input.childSessionId}:${input.waiterId}`;
-  return input.restatedResetsAt === undefined
-    ? base
-    : `${base}:${input.restatedResetsAt ?? "unknown"}`;
+  return input.restatedReasonSequence !== undefined
+    ? `${base}:reason:${input.restatedReasonSequence}`
+    : input.restatedResetsAt === undefined
+      ? base
+      : `${base}:${input.restatedResetsAt ?? "unknown"}`;
 }
 
 export function childProgressDedupeKey(input: {
@@ -288,6 +292,7 @@ export function childPausedSummary(childSessionId: string, payload: ChildPausedP
 export function childWaitingCapacitySummary(
   childSessionId: string,
   payload: ChildWaitingCapacityPayload,
+  explanation?: string,
 ): string {
   const name = capacityWaitProviderName(payload.provider);
   // Rows from before `resetsAt` existed keep their original wording.
@@ -295,6 +300,9 @@ export function childWaitingCapacitySummary(
     return `Worker ${childSessionId} is waiting for ${payload.provider === "codex" ? "Codex" : "xAI"} provider capacity${payload.nextCheckAt ? ` (next check ${payload.nextCheckAt})` : ""}; its turn resumes automatically.`;
   }
   const reset = capacityWaitResetText(payload.resetsAt);
+  if (explanation) {
+    return `Worker ${childSessionId} is blocked. ${explanation}${reset ? ` Expected around ${reset}.` : ""} To continue on a different model, use session_set_model; its waiting turn then continues on that model.`;
+  }
   return `Worker ${childSessionId} is blocked: no ${name} subscription has capacity ${reset ? `until about ${reset}` : "and no reset time is known"}. Its turn resumes by itself then. To continue sooner, switch the worker to a model with capacity with session_set_model; its waiting turn then continues on that model.`;
 }
 

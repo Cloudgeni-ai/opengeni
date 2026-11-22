@@ -63,6 +63,9 @@ export type SubscriptionConnection = {
   kind: ConnectionKind;
   ownership: ConnectionOwnership;
   health: ConnectionHealth;
+  /** Display facts only; never used to grant or change placement eligibility. */
+  label?: string | null;
+  planType?: string | null;
   /**
    * Explicit consent to spend credits after the included allowance. Set only
    * for a provider whose adapter declares the `extraCredits` capability (the
@@ -382,6 +385,15 @@ export type WaitReason =
    * the work again.
    */
   | "accepted_authority_unavailable";
+
+/** Wait explanations projected by a provider from the allocator's decision. */
+export type SubscriptionCapacityWaitReason =
+  | WaitReason
+  | "codex_relogin_required"
+  | "codex_plan_no_capacity"
+  | "codex_rate_limited";
+
+export type SubscriptionReconnectAccount = { label: string; personal: boolean };
 
 export type PlacementDecision =
   | {

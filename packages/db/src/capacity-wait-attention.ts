@@ -1,6 +1,8 @@
 import {
+  codexCapacityWaitReason,
   subscriptionCapacityWaitNeedsAction,
   subscriptionCapacityWaitReasonText,
+  type SubscriptionReconnectAccount,
 } from "@opengeni/subscriptions";
 
 /**
@@ -41,7 +43,9 @@ export function capacityWaitAttention(input: {
   healthRetryAt: Date | null;
   now: Date;
 }): CapacityWaitAttention | null {
-  const resetsAt = input.earliestResetAt ?? input.healthRetryAt ?? null;
+  const resetsAt = codexCapacityWaitReason(input.waitReason)
+    ? input.earliestResetAt
+    : (input.earliestResetAt ?? input.healthRetryAt ?? null);
   const long =
     subscriptionCapacityWaitNeedsAction(input.waitReason) ||
     resetsAt === null ||
@@ -80,17 +84,18 @@ export function capacityWaitNotificationPayload(input: {
   provider: string;
   resetsAt: Date | null;
   waitReason?: string;
+  reconnectAccount?: SubscriptionReconnectAccount;
 }) {
   const name = capacityWaitProviderName(input.provider);
   const reset = capacityWaitResetText(input.resetsAt);
   const reason = input.waitReason ?? "no_eligible_capacity";
   const explained =
-    reason === "no_eligible_capacity" ? null : subscriptionCapacityWaitReasonText(reason, name);
+    reason === "no_eligible_capacity"
+      ? null
+      : subscriptionCapacityWaitReasonText(reason, name, input.reconnectAccount);
   const status = explained
     ? `${explained}${reset ? ` Expected around ${reset}.` : ""}`
-    : `All ${name} subscriptions are busy. Your message will be answered as soon as one has room${
-        reset ? `, expected around ${reset}` : ""
-      }.`;
+    : `${input.provider === "codex" ? "No Codex subscription can serve this turn right now." : `All ${name} subscriptions are busy.`} Your message will be answered as soon as one has room${reset ? `, expected around ${reset}` : ""}.`;
   const sooner = subscriptionCapacityWaitNeedsAction(reason)
     ? ""
     : " To continue sooner, switch the chat to another model; its waiting turn continues on that model.";
@@ -108,7 +113,11 @@ export function capacityWaitNotificationPayload(input: {
  * the person (ISO, or null for "no reset time is known"). `resetsAt` is
  * undefined for a marker written before the notice recorded it.
  */
-export type CapacityWaitNoticeMarker = { key: string; resetsAt?: string | null };
+export type CapacityWaitNoticeMarker = {
+  key: string;
+  resetsAt?: string | null;
+  explanation?: string;
+};
 
 export function readCapacityWaitNotice(
   metadata: Record<string, unknown> | null | undefined,
@@ -116,17 +125,28 @@ export function readCapacityWaitNotice(
 ): CapacityWaitNoticeMarker | null {
   const value = metadata?.[metadataKey];
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { key, resetsAt } = value as { key?: unknown; resetsAt?: unknown };
+  const { key, resetsAt, explanation } = value as {
+    key?: unknown;
+    resetsAt?: unknown;
+    explanation?: unknown;
+  };
   if (typeof key !== "string" || key.length === 0) return null;
-  if (resetsAt === null) return { key, resetsAt: null };
-  return typeof resetsAt === "string" && Number.isFinite(Date.parse(resetsAt))
-    ? { key, resetsAt }
-    : { key };
+  return {
+    key,
+    ...(resetsAt === null || (typeof resetsAt === "string" && Number.isFinite(Date.parse(resetsAt)))
+      ? { resetsAt }
+      : {}),
+    ...(typeof explanation === "string" ? { explanation } : {}),
+  };
 }
 
 /** The turn metadata marker of a notification that told the person `resetsAt`. */
-export function capacityWaitNoticeMarker(key: string, resetsAt: Date | null) {
-  return { key, resetsAt: resetsAt?.toISOString() ?? null } satisfies CapacityWaitNoticeMarker;
+export function capacityWaitNoticeMarker(key: string, resetsAt: Date | null, explanation?: string) {
+  return {
+    key,
+    resetsAt: resetsAt?.toISOString() ?? null,
+    ...(explanation ? { explanation } : {}),
+  } satisfies CapacityWaitNoticeMarker;
 }
 
 /**

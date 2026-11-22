@@ -71,6 +71,11 @@ accepted running turn.
 ## Same-turn capacity recovery
 
 No eligible capacity parks the same turn on `subscription_capacity_waiters`.
+Waits distinguish a sign-in that needs reconnecting, a plan that does not offer
+the model, and a rate limit with a known retry time. The same reason reaches
+the chat and its inbox notification or parent agent. A plan-refusal retry is
+a new entitlement probe, not a quota reset. A missing usage reading alone
+does not exclude an account.
 Workflow activity and signal names (`getCodexCapacityWait`,
 `reconcileCodexCapacityWait`, `codexCapacityChanged`) remain stable. The reference
 carries waiter id, generation, next check and wake revision, so pre-cutover

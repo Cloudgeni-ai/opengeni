@@ -11706,8 +11706,12 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * waiter when a later check finds its reset later than the parent was told
  * (the time passed without capacity, or a longer limit binds) or unknown; its
  * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
+ *
+ * 5: new Codex wait notices can name an actionable cause or rate limit. If
+ * the cause changes, a new notice adds the child's waiting-event sequence to
+ * its dedupe key. Previously stored summaries keep their original text.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 5;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the

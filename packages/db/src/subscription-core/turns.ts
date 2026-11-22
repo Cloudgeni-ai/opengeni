@@ -39,7 +39,6 @@ import {
   type ReselectionPoint,
   type ReselectionReason,
   type SubscriptionQuota,
-  type WaitReason,
 } from "@opengeni/subscriptions";
 
 import { rawRows, withRlsContext, type Database } from "../database";
@@ -76,6 +75,7 @@ import {
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "./provider";
+import { projectSubscriptionCoreWait, type SubscriptionCoreWaitPresentation } from "./wait-reason";
 
 /** The exact accepted turn plus its immutable v2 authority, read once per attempt. */
 export type SubscriptionCoreTurnIdentity = SubscriptionCoreAcceptedTurnIdentity & {
@@ -226,14 +226,12 @@ export type SubscriptionCorePlacement =
    * deciding (retried like a busy lease).
    */
   | { kind: "lease_busy"; leasedUntil: Date | null; cause?: "binding_conflict" }
-  | {
+  | (SubscriptionCoreWaitPresentation & {
       kind: "wait";
-      reason: WaitReason;
-      earliestResetAt: Date | null;
       /** When a quarantined connection in this world returns, if any. */
       healthRetryAt: Date | null;
       explicitConnectionId: string | null;
-    }
+    })
   | {
       kind: "run";
       connectionId: string;
@@ -346,14 +344,12 @@ async function readLastContextReplacedAt(
 export type SubscriptionCorePlacementEvaluation =
   | { kind: "not_visible" }
   | { kind: "run"; connectionId: string; switch: PlacementSwitch }
-  | {
+  | (SubscriptionCoreWaitPresentation & {
       kind: "wait";
-      reason: WaitReason;
-      earliestResetAt: Date | null;
       /** When a quarantined connection in this world returns, if sooner than any reset. */
       healthRetryAt: Date | null;
       explicitConnectionId: string | null;
-    };
+    });
 
 async function readAttemptFence(
   tx: Database,
@@ -577,9 +573,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
             await releaseSubscriptionTurnLease(tx, { ...lease, connectionId: reuse });
           return {
             kind: "wait",
-            reason: decision.reason,
-            earliestResetAt:
-              decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+            ...projectSubscriptionCoreWait(input, decision, providerId),
             healthRetryAt: await earliestHealthRetryAt(tx, identity),
             explicitConnectionId,
           };
@@ -931,9 +925,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         const binding = input.session.binding;
         return {
           kind: "wait",
-          reason: decision.reason,
-          earliestResetAt:
-            decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+          ...projectSubscriptionCoreWait(input, decision, providerId),
           healthRetryAt: await earliestHealthRetryAt(tx, identity),
           explicitConnectionId: binding?.choice === "explicit" ? binding.connectionId : null,
         };

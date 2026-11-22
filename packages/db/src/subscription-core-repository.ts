@@ -1,4 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
+import { codexPlanKey } from "@opengeni/codex";
 import type {
   ConnectionHealth,
   ConnectionKind,
@@ -139,6 +140,8 @@ export async function listSubscriptionConnectionsForPlacement(
     ownership: "shared" | "personal";
     owner_membership_id: string | null;
     health: string;
+    label: string | null;
+    plan_type: string | null;
     extra_credits_enabled: boolean;
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
@@ -164,7 +167,8 @@ export async function listSubscriptionConnectionsForPlacement(
         input.health === "effective"
           ? subscriptionConnectionEffectiveStatus("connection", sql`${now}::timestamptz`)
           : sql`connection.status`
-      } as health, connection.allocator_enabled, connection.extra_credits_enabled,
+      } as health, connection.label, connection.plan_type,
+      connection.allocator_enabled, connection.extra_credits_enabled,
       null::text[] as entitled_model_ids, connection.excluded_models,
       case when quota.model_catalog_refresh_generation = connection.refresh_generation
         and quota.model_catalog_observed_at <= ${now}::timestamptz
@@ -251,6 +255,9 @@ export async function listSubscriptionConnectionsForPlacement(
       kind: row.kind,
       ownership,
       health,
+      ...(row.provider === "codex"
+        ? { label: row.label, planType: codexPlanKey(row.plan_type) }
+        : {}),
       extraCreditsEnabled: row.extra_credits_enabled,
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,

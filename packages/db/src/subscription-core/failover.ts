@@ -40,6 +40,7 @@ import {
   type SubscriptionCoreFailoverWorld,
   type SubscriptionCoreFailoverWorldRequest,
 } from "./failover-world";
+import { projectSubscriptionCoreWait } from "./wait-reason";
 
 export type SubscriptionCoreFailoverRequest = SubscriptionCorePlacementRequest &
   SubscriptionCoreFailoverWorldRequest;
@@ -71,6 +72,9 @@ class SubscriptionBindingConflict extends Error {}
 const BINDING_CONFLICT_RETRIES = 3;
 const FAILOVER_WAITS = new Set([
   "no_eligible_capacity",
+  "codex_relogin_required",
+  "codex_plan_no_capacity",
+  "codex_rate_limited",
   "model_not_allowed",
   "compaction_provider_locked",
 ]);
@@ -327,16 +331,17 @@ async function placeFailoverOnce(
           holderId: existing.holderId,
           generation: existing.generation,
         });
-      if (decision.kind === "wait")
+      if (decision.kind === "wait") {
+        const reason = failoverWaitReason(decision.reason, world);
         return {
           kind: "wait",
-          reason: failoverWaitReason(decision.reason, world),
-          earliestResetAt:
-            decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
+          ...projectSubscriptionCoreWait(input, decision, subscriptionCoreProviderId(home)),
+          ...(reason === "failover_no_model_mapping" ? { reason } : {}),
           healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, identity, world),
           explicitConnectionId: null,
           candidateProviders: world.candidateProviders,
         };
+      }
       const connection = input.connections.find((row) => row.id === decision.connectionId);
       if (!connection) throw new Error("Failover chose a connection outside its world");
       const acquired = await acquireSubscriptionTurnLease(tx, {
@@ -418,17 +423,17 @@ export async function evaluateSubscriptionCorePlacementWithFailover(
     false,
     async (tx, world): Promise<SubscriptionCoreFailoverEvaluation> => {
       const decision = decisionFor(world);
-      return decision.kind === "run"
-        ? { ...decision, candidateProviders: world.candidateProviders }
-        : {
-            kind: "wait",
-            reason: failoverWaitReason(decision.reason, world),
-            earliestResetAt:
-              decision.earliestResetAt === null ? null : new Date(decision.earliestResetAt),
-            healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, request.identity, world),
-            explicitConnectionId: null,
-            candidateProviders: world.candidateProviders,
-          };
+      if (decision.kind === "run")
+        return { ...decision, candidateProviders: world.candidateProviders };
+      const reason = failoverWaitReason(decision.reason, world);
+      return {
+        kind: "wait",
+        ...projectSubscriptionCoreWait(world.input, decision, subscriptionCoreProviderId(home)),
+        ...(reason === "failover_no_model_mapping" ? { reason } : {}),
+        healthRetryAt: await earliestHealthRetryAtAcrossProviders(tx, request.identity, world),
+        explicitConnectionId: null,
+        candidateProviders: world.candidateProviders,
+      };
     },
   );
   return result.status === "home_only"
