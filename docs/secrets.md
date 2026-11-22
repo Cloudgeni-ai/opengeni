@@ -74,7 +74,9 @@ resolve are:
 
 A turn with no acting human (a service turn) gets the same set without Only me
 vaults. A turn whose acting human lacks `secrets:use` (for example a viewer)
-reaches only the task vault.
+reaches only the task vault. If the chat's delegated permissions disable saved
+logins, it can resolve only the Task answers to its own secure questions, not
+other items in its root task vault or answers supplied to another session.
 
 **Policy.** Sessions and scheduled tasks carry an optional vault policy,
 `{"mode":"all"}` (the default) or `{"mode":"selected","vaultIds":[…]}`. The
@@ -498,7 +500,9 @@ transaction as the answer; the agent receives only the reference, username and
 vault name.
 
 - Only hosted vaults can be the target. Saving to Only me needs a signed-in
-  human answering.
+  human answering for their own turn. The card shows only destinations the
+  person can save to and the asking turn can read. If saved logins are off
+  for the chat, the answer stays in This task.
 - `itemType` may be `login`, `api_key`, `note`, `card`, `identity` or
   `ssh_key`. An SSH key question takes a pasted private key and saves its
   public key and fingerprint with it; it offers no Generate button (agents

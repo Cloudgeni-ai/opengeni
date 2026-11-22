@@ -12,7 +12,8 @@
    with a screenshot and a PDF; `&draft=1` also puts them in the composer's
    draft, to compare a sent message with how it looked before sending). `&legacy=1` delivers an
    automation run the way Opengeni recorded it before runs had a plain
-   description; `&ids=1` puts internal IDs in what the run's event and an
+   description (or the secure question before the server sent save targets).
+   `&ids=1` puts internal IDs in what the run's event and an
    earlier setup update say. `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
@@ -31,6 +32,7 @@ import {
   type Session,
   type SessionEvent,
   type SessionQueueSnapshot,
+  type SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import {
   OpenGeniChat,
@@ -111,7 +113,7 @@ const ORGANISATION_ID = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c";
 const selectedStatus =
   scenario === "running" || scenario === "waiting" || steering || scenario === "automation-live"
     ? "running"
-    : scenario === "approval" || scenario === "question"
+    : scenario === "approval" || scenario === "question" || scenario === "secure-question"
       ? "requires_action"
       : "idle";
 const sessions: Session[] = [
@@ -459,6 +461,30 @@ if (scenario === "approval") {
       },
     ],
   });
+} else if (scenario === "secure-question") {
+  push("session.status.changed", { status: "requires_action" }, 0);
+  humanInputRequests.push({
+    id: "5a1c0000-0000-4000-8000-0000000000f2",
+    workspaceId: WORKSPACE_ID,
+    sessionId: SELECTED,
+    turnId: TURN,
+    status: "pending",
+    allowSkip: false,
+    createdAt: minutesAgo(1),
+    expiresAt: null,
+    ...(!legacyRun ? { secretSaveTargets: ["task"] } : {}),
+    questions: [
+      {
+        id: "password",
+        kind: "secret",
+        prompt: "Enter your password for the example service.",
+        options: [],
+        required: true,
+        allowOther: false,
+        secret: { item: "Example service", saveTo: "workspace" },
+      },
+    ],
+  });
 } else if (scenario === "running") {
   investigation();
   push("agent.message.delta", { delta: "Both payments hit the same invoice. Checking the " }, 0);
@@ -595,7 +621,11 @@ const waitingItems =
     : [];
 
 const base = fakeClient({});
-const controllerFixture = { streams: 0, sent: [] as SendMessageInput[] };
+const controllerFixture = {
+  streams: 0,
+  sent: [] as SendMessageInput[],
+  secretSaveTargets: [] as string[],
+};
 if (params.get("controller") === "1") {
   Object.assign(window, { embeddedConversationHarness: controllerFixture });
 }
@@ -666,6 +696,28 @@ const client = fakeClient({
     return { url: file.url, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never;
   },
   listHumanInputRequests: async () => humanInputRequests as never,
+  submitHumanInputResponse: async (
+    _workspace,
+    sessionId,
+    requestId,
+    response: SubmitHumanInputResponseRequest,
+  ) => {
+    if (response.outcome === "answered") {
+      controllerFixture.secretSaveTargets.push(
+        ...(response.secretAnswers ?? []).map((answer) => answer.saveTo),
+      );
+    }
+    humanInputRequests.length = 0;
+    return {
+      id: crypto.randomUUID(),
+      workspaceId: WORKSPACE_ID,
+      sessionId,
+      sequence: ++sequence,
+      type: "user.humanInputResponse",
+      payload: { requestId },
+      occurredAt: new Date().toISOString(),
+    };
+  },
   listEvents: async (_workspace, id) => {
     if (scenario === "error") throw new Error("Network request failed");
     return id === SELECTED ? events : [];

@@ -11,10 +11,17 @@ import {
   VAULT_LIMITS,
   type HumanInputSecretAnswer,
   type SecretPrincipal,
+  type SessionHumanInputRequest,
 } from "@opengeni/contracts";
 import {
+  isVerifiedDelegatedHumanAuthorization,
+  type AccessGrantAuthorization,
+} from "@opengeni/core";
+import {
   encryptEnvironmentValue,
+  listHumanInputSecretSaveTargets,
   VaultError,
+  type Database,
   type PreparedSecretAnswer,
   type PreparedSecretValue,
   type VaultDbContext,
@@ -22,6 +29,44 @@ import {
 import { looksLikeSshPrivateKey, sshPublicKeyFromPrivateKey } from "@opengeni/vaults";
 
 export type SecretAnswerSource = "human" | "agent";
+
+export function isSignedInSecretAnswerer(authorization: AccessGrantAuthorization): boolean {
+  return (
+    authorization.canonicalManagedHumanSession ||
+    authorization.canonicalLocalHumanSession ||
+    isVerifiedDelegatedHumanAuthorization(authorization)
+  );
+}
+
+/** Project save destinations for the viewer; never rewrite the frozen question or the event. */
+export async function projectSecretAnswerTargets(
+  db: Database,
+  authorization: AccessGrantAuthorization,
+  requests: SessionHumanInputRequest[],
+): Promise<SessionHumanInputRequest[]> {
+  const signedIn = isSignedInSecretAnswerer(authorization);
+  const context = humanSecretWriteContext(authorization.grant);
+  const byTurn = new Map<string, ReturnType<typeof listHumanInputSecretSaveTargets>>();
+  return await Promise.all(
+    requests.map(async (request) => {
+      if (
+        request.status !== "pending" ||
+        !request.questions.some((question) => question.kind === "secret")
+      ) {
+        return request;
+      }
+      let read = byTurn.get(request.turnId);
+      if (!read) {
+        read = listHumanInputSecretSaveTargets(db, context, request);
+        byTurn.set(request.turnId, read);
+      }
+      return {
+        ...request,
+        secretSaveTargets: (await read).filter((target) => target !== "user" || signedIn),
+      };
+    }),
+  );
+}
 
 function encrypted(key: Uint8Array, plaintext: string): PreparedSecretValue {
   const valueSize = Buffer.byteLength(plaintext, "utf8");
@@ -97,7 +142,7 @@ export function humanSecretWriteContext(input: {
   accountId: string;
   workspaceId: string;
   subjectId: string;
-}): VaultDbContext {
+}): Extract<VaultDbContext, { kind: "subject" }> {
   return {
     kind: "subject",
     accountId: input.accountId,

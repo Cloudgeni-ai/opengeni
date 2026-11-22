@@ -71,7 +71,12 @@ export type HumanInputFormProps = {
    * mounts again, e.g. after visiting Settings and coming back.
    */
   request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt"> &
-    Partial<Pick<SessionHumanInputRequest, "workspaceId" | "sessionId" | "status" | "origin">>;
+    Partial<
+      Pick<
+        SessionHumanInputRequest,
+        "workspaceId" | "sessionId" | "status" | "origin" | "secretSaveTargets"
+      >
+    >;
   /**
    * Resolve only once the response was accepted: the form then forgets the
    * unsent draft and clears secret fields. Reject when sending failed so the
@@ -108,9 +113,8 @@ export type HumanInputFormProps = {
    */
   decisionButtons?: boolean | undefined;
   /**
-   * Where this person may save an answer to a secret question. A request for
-   * a target outside this list falls back to the most private allowed one,
-   * with a note. Defaults to Only me, This task and This workspace.
+   * The host's Save to choices for secret answers. The server's request
+   * projection caps these choices when available.
    */
   allowedSaveTo?: readonly HumanInputSecretSaveTo[] | undefined;
   className?: string | undefined;
@@ -153,6 +157,13 @@ function HumanInputRequestForm({
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
   const messages = mergeHumanInputFormMessages(defaultHumanInputFormMessages(t), messageOverrides);
+  const serverSaveTargets = request.secretSaveTargets;
+  const hostSaveTargets = allowedSaveTo?.filter((target) => serverSaveTargets?.includes(target));
+  const secretSaveTargets = serverSaveTargets
+    ? hostSaveTargets?.length
+      ? hostSaveTargets
+      : serverSaveTargets
+    : allowedSaveTo;
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   // Several questions are asked one at a time; every step stays mounted (hidden)
   // so typed secrets and drafts survive moving back and forth.
@@ -786,7 +797,7 @@ function HumanInputRequestForm({
                     showPromptChrome={!headerCarriesQuestion}
                     allowSkip={request.allowSkip}
                     busy={busy}
-                    allowedSaveTo={allowedSaveTo}
+                    allowedSaveTo={secretSaveTargets}
                     registerSecret={registerSecret(question.id)}
                     onSecretEdited={() => clearValidationError(question.id)}
                     onUpdate={(apply) => update(question.id, apply)}

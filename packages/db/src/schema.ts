@@ -1784,6 +1784,8 @@ export const vaultItems = pgTable(
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    secureAnswerSessionId: uuid("secure_answer_session_id"),
+    secureAnswerGeneration: bigint("secure_answer_generation", { mode: "number" }),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
