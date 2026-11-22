@@ -231,11 +231,7 @@ function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active
       icon={<Icon />}
       active={active}
       attention={item.attention}
-      className={
-        item.place
-          ? "pr-8 pointer-fine:group-has-[button:focus-visible]/row:pr-24 pointer-fine:group-hover/row:pr-24"
-          : undefined
-      }
+      className={item.place ? "pr-8 pointer-fine:group-hover/row:pr-24" : undefined}
     >
       {item.link}
     </NavItem>
@@ -249,7 +245,7 @@ function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active
         type="button"
         aria-label={`${place.label}: ${item.label}`}
         onClick={place.run}
-        className="absolute top-1/2 right-1 flex h-6 min-w-6 -translate-y-1/2 items-center justify-center rounded-md text-xs text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 pointer-fine:px-1.5 pointer-coarse:opacity-100"
+        className="absolute top-1/2 right-1 flex h-6 min-w-6 -translate-y-1/2 items-center justify-center rounded-md text-xs text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:bg-surface-3 focus-visible:opacity-100 group-hover/row:opacity-100 pointer-fine:px-1.5 pointer-coarse:opacity-100"
       >
         <span aria-hidden="true" className="whitespace-nowrap not-pointer-fine:hidden">
           {place.label}

@@ -30,6 +30,7 @@ import {
   DEFAULT_SIDEBAR_LAYOUT_OPTIONS,
   ResolvedSidebarItem,
   SidebarLayoutResponse,
+  SidebarLayoutOptions,
   type SidebarLayoutChange,
   type MergedSidebarGroup,
 } from "../src/sidebar-layout";
@@ -762,9 +763,14 @@ describe("options", () => {
       applyPersonalSidebarChanges(workspace, member, parseChanges([{ op: "reset" }]), ids())
         .options,
     ).toBeUndefined();
-    expect(
-      readStoredSidebarOptions({ sessionsShowApps: "no", hiddenNavEntries: ["knowledge", 3] }),
-    ).toEqual({ hiddenNavEntries: ["knowledge"] });
+    // A value this version can't read stays stored, and isn't read as an option.
+    const stored = readStoredSidebarOptions({
+      sessionsShowApps: "no",
+      hiddenNavEntries: ["knowledge", 3],
+    });
+    expect(stored).toEqual({ sessionsShowApps: "no", hiddenNavEntries: ["knowledge"] } as never);
+    expect(knownSidebarOptions(stored)).toEqual({ hiddenNavEntries: ["knowledge"] });
+    expect(mergeSidebarOptions(undefined, stored).sessionsShowApps).toBe(true);
     expect(
       readStoredSidebarPersonalChanges({
         ...EMPTY_SIDEBAR_PERSONAL_CHANGES,
@@ -855,6 +861,52 @@ describe("rolling deploy: this version writing what a newer one stored", () => {
         ids(),
       ),
     ).toEqual(EMPTY_SIDEBAR_PERSONAL_CHANGES);
+  });
+
+  test("a value a newer version widened and fields on added entries stay", () => {
+    const written = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      readStoredSidebarPersonalChanges({
+        version: 2,
+        hidden: [],
+        added: [{ parentId: null, item: { id: "my-a", type: "app", appId: APP_A }, pinned: true }],
+        order: {},
+        options: { sessionsShowApps: "auto" },
+      }),
+      parseChanges([{ op: "options", settingsMore: ["workspace:usage"] }]),
+      ids(),
+    );
+    const reread = JSON.parse(JSON.stringify(written));
+    expect(reread.added).toEqual([
+      { parentId: null, item: { id: "my-a", type: "app", appId: APP_A }, pinned: true },
+    ]);
+    expect(reread.options).toEqual({ sessionsShowApps: "auto", settingsMore: ["workspace:usage"] });
+    // This version reads it as unset; the person setting it replaces it.
+    expect(mergeSidebarOptions(undefined, reread.options).sessionsShowApps).toBe(true);
+    const set = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      readStoredSidebarPersonalChanges(reread),
+      parseChanges([{ op: "options", sessionsShowApps: false }]),
+      ids(),
+    );
+    expect(set.options?.sessionsShowApps).toBe(false);
+  });
+
+  test("every option the schema has is read for answers and applied by changes", () => {
+    const every = {
+      sessionsShowApps: false,
+      hiddenNavEntries: ["meetings"],
+      settingsMore: ["workspace:usage"],
+    } satisfies Required<SidebarLayoutOptions>;
+    expect(Object.keys(every).sort()).toEqual(Object.keys(SidebarLayoutOptions.shape).sort());
+    expect(knownSidebarOptions(every)).toEqual(every);
+    expect(
+      applyWorkspaceSidebarChanges(
+        EMPTY_SIDEBAR_LAYOUT,
+        parseChanges([{ op: "options", ...every }]),
+        ids(),
+      ).options,
+    ).toEqual(every);
   });
 
   test("answers show only the options this version knows", () => {

@@ -274,12 +274,16 @@ are left out of web and phone clients from before they existed, and an older
 API replica keeps them in storage without showing them.
 
 Icons and options follow the same rule: older clients ignore them. Writers
-keep what they don't know at every level: unknown item fields (icons),
-unknown options and unknown layout fields stay in storage through an older
-replica's write, and answers carry only what the replica knows. Reset is
-the one change that clears them. API replicas from before this rule (before
-options existed) drop the layout's `options` when they write; set them
-again if a change made during such a rollout is lost.
+keep what they don't know: item fields (icons), options, option values a
+newer version widened (`sessionsShowApps: "auto"`), layout fields, fields on
+a person's added entries and a newer layout `version` stay in storage
+through an older replica's write, and answers carry only what the replica
+reads. Reset is the one change that clears them. So a newer version adds
+fields and values; it never changes what an existing one means. API
+replicas from before this rule drop what they don't know when they write:
+from before options existed, the layout's `options`; from #8030's release,
+options and fields added since. Set them again if a change made during such
+a rollout is lost.
 
 ## Storage
 

@@ -15,7 +15,8 @@ const context: { client: unknown; accessContext: { subjectId: string } } = {
 
 mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
-const { useSidebarLayout, resetSidebarLayoutCache } = await import("./use-sidebar-layout");
+const { useSidebarLayout, resetSidebarLayoutCache, SIDEBAR_OPTIONS_WAIT_MS } =
+  await import("./use-sidebar-layout");
 
 registerDom();
 afterEach(() => {
@@ -168,6 +169,33 @@ describe("options before the layout arrives", () => {
       });
     } finally {
       await hook.unmount();
+    }
+  });
+
+  test("a read that never answers draws the defaults after the wait", async () => {
+    context.client = { getSidebarLayout: mock(() => new Promise(() => undefined)) };
+    const hook = await renderHook(() => useSidebarLayout("w"), {});
+    try {
+      expect(hook.result.current.options).toBeNull();
+      await actRun(() => new Promise((done) => setTimeout(done, SIDEBAR_OPTIONS_WAIT_MS + 100)));
+      expect(hook.result.current.options?.sessionsShowApps).toBe(true);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("without a known person nothing is remembered", async () => {
+    const person = context.accessContext.subjectId;
+    context.accessContext.subjectId = "";
+    try {
+      context.client = { getSidebarLayout: mock(async () => appsOff()) };
+      const hook = await renderHook(() => useSidebarLayout("w"), {});
+      await flush();
+      expect(hook.result.current.options?.sessionsShowApps).toBe(false);
+      await hook.unmount();
+      expect(window.localStorage.length).toBe(0);
+    } finally {
+      context.accessContext.subjectId = person;
     }
   });
 });

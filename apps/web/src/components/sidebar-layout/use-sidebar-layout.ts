@@ -69,7 +69,13 @@ function set(key: string, entry: Entry) {
 const OPTIONS_STORAGE_PREFIX = "opengeni.sidebar.options:";
 const cachedOptions = new Map<string, ResolvedSidebarLayoutOptions | null>();
 
+/** Only a known person's options are remembered: a key without one could be anyone's. */
+function personalKey(key: string): boolean {
+  return !key.startsWith(":");
+}
+
 function readCachedOptions(key: string): ResolvedSidebarLayoutOptions | null {
+  if (!personalKey(key)) return null;
   if (cachedOptions.has(key)) return cachedOptions.get(key)!;
   let options: ResolvedSidebarLayoutOptions | null = null;
   try {
@@ -83,6 +89,7 @@ function readCachedOptions(key: string): ResolvedSidebarLayoutOptions | null {
 }
 
 function cacheOptions(key: string, options: ResolvedSidebarLayoutOptions) {
+  if (!personalKey(key)) return;
   cachedOptions.set(key, options);
   try {
     window.localStorage.setItem(OPTIONS_STORAGE_PREFIX + key, JSON.stringify(options));
@@ -142,7 +149,8 @@ export const SIDEBAR_OPTIONS_WAIT_MS = 2_000;
  * person. They are the layout's, else the last ones this browser saw, else
  * null while a first read is under way (for up to SIDEBAR_OPTIONS_WAIT_MS),
  * so the rail draws the right state first instead of the defaults and then a
- * redraw. The defaults when the layout can't be read.
+ * redraw. When the layout can't be read: the last ones seen, else the
+ * defaults.
  */
 export function useSidebarLayout(workspaceId: string, enabled = true) {
   const { client, accessContext } = useAppContext();
