@@ -4788,6 +4788,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "getSidebarLinkIcon",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout/link-icon",
+    "request": [],
+    "query": [
+      "url"
+    ],
+    "response": [],
+    "permission": "workspace:read"
+  },
+  {
     "id": "getSiteAuthConnection",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
@@ -5660,6 +5671,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAppTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/app-templates",
+    "request": [],
+    "response": [
+      "AppTemplate",
+      "ListAppTemplatesResponse"
+    ],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "listAppWebhooks",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks",
@@ -6310,6 +6332,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "KnowledgeReviewBatchListResponse"
     ]
+  },
+  {
+    "id": "listLibrarySkills",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/skills/library",
+    "request": [],
+    "response": [
+      "CapabilityCatalogItem",
+      "ListLibrarySkillsResponse"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listMachines",

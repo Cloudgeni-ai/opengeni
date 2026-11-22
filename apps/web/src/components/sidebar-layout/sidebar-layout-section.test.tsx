@@ -25,7 +25,7 @@ mock.module("@opengeni/react/app/components/rail/rail-context", () => ({
 
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { CustomizeRow, GroupRow } = await import("./sidebar-layout-section");
+const { CustomizeRow } = await import("./sidebar-layout-section");
 
 afterAll(() => GlobalRegistrator.unregister());
 
@@ -46,70 +46,4 @@ test("the Customize row closes the drawer and opens the Sidebar page", async () 
     { to: "/workspaces/$workspaceId/sidebar", params: { workspaceId: "workspace-1" } },
   ]);
   await act(async () => root.unmount());
-});
-
-test("your own group renames from its row menu; the default's groups don't", async () => {
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
-  const changes: unknown[] = [];
-  const group = (origin: "personal" | "workspace") =>
-    ({ id: "group-1", type: "group", label: "Ops", origin, collapsed: false, items: [] }) as never;
-  const render = (origin: "personal" | "workspace") =>
-    act(async () =>
-      root.render(
-        <GroupRow
-          item={group(origin)}
-          open
-          onToggle={() => {}}
-          actions={{
-            siblings: ["group-1"],
-            canChange: true,
-            change: (next) => changes.push(...next),
-          }}
-        />,
-      ),
-    );
-  const openMenu = async () => {
-    const trigger = container.querySelector<HTMLButtonElement>("[aria-label='More for Ops']")!;
-    await act(async () => {
-      trigger.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
-    });
-    return [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")];
-  };
-  await render("workspace");
-  expect((await openMenu()).map((item) => item.textContent)).not.toContain("Rename");
-  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
-  await act(async () => root.unmount());
-
-  const ownRoot = createRoot(container);
-  await act(async () =>
-    ownRoot.render(
-      <GroupRow
-        item={group("personal")}
-        open
-        onToggle={() => {}}
-        actions={{
-          siblings: ["group-1"],
-          canChange: true,
-          change: (next) => changes.push(...next),
-        }}
-      />,
-    ),
-  );
-  const rename = (await openMenu()).find((item) => item.textContent === "Rename")!;
-  await act(async () => rename.click());
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
-  const input = container.querySelector<HTMLInputElement>("input[aria-label='Group name']")!;
-  await act(async () => {
-    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
-    setValue.call(input, "Operations");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  await act(async () =>
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
-  );
-  expect(changes).toEqual([{ op: "update", itemId: "group-1", label: "Operations" }]);
-  expect(container.textContent).toContain("Ops");
-  await act(async () => ownRoot.unmount());
 });

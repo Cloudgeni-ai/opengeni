@@ -7,6 +7,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { INTEGRATION_DEFINITION_PRESENTATIONS } from "@opengeni/capabilities";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { openCapabilitiesTab } from "./fixtures/capabilities-tabs";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   type ConnectorToolPermissionsResponse,
@@ -553,11 +554,13 @@ describe("custom API control center browser acceptance", () => {
       await setTheme(page, "dark");
 
       const row = page
-        .getByRole("list", { name: "Connected", exact: true })
-        .getByRole("button", { name: "Outlook Mail", exact: true });
+        .getByRole("region", { name: "Connected", exact: true })
+        .locator("button.og-capability-catalog-row")
+        .filter({ has: page.locator("strong", { hasText: /^Outlook Mail$/ }) });
       await expectVisible(row);
-      // The named list conveys connection state; healthy rows have no redundant badge.
+      // The status line conveys connection state; healthy rows have no notice.
       expect(await row.count()).toBe(1);
+      expect(await row.locator(".og-capability-catalog-notice").count()).toBe(0);
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
@@ -683,17 +686,18 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  await openCapabilitiesTab(page, "Connections");
   await expectVisible(page.getByRole("heading", { name: "Custom APIs" }));
 }
 
 /** Opens the one Outlook Mail provider row's page (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
-  // These fixtures have a connected account. An unhealthy account adds its
-  // attention status to the resource row's accessible name.
+  // These fixtures have a connected account; an unhealthy one adds a notice
+  // to the same row.
   const row = page
-    .getByRole("list", { name: "Connected", exact: true })
-    .getByRole("button", { name: /^Outlook Mail(?: Needs attention)?$/ });
+    .getByRole("region", { name: "Connected", exact: true })
+    .locator("button.og-capability-catalog-row")
+    .filter({ has: page.locator("strong", { hasText: /^Outlook Mail$/ }) });
   await expectVisible(row);
   await row.click();
   const sheet = page.locator("[data-capability-page]");

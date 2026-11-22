@@ -10581,6 +10581,11 @@ export type ListInstalledSkillsResponse = {
   skills: InstalledSkillSummary[];
 };
 
+/** Reviewed library skills to add, `enabled` once added. */
+export type ListLibrarySkillsResponse = {
+  skills: CapabilityCatalogItem[];
+};
+
 export type SkillUninstallPreview = {
   capabilityId: string;
   installed: boolean;

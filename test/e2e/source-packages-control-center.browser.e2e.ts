@@ -7,6 +7,11 @@ import { chromium, type Browser, type Page } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import {
+  capabilitiesTabIsCurrent,
+  openCapabilitiesTab,
+  waitForCapabilitiesTab,
+} from "./fixtures/capabilities-tabs";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-source-packages/", import.meta.url)
@@ -132,30 +137,22 @@ describe("Bundles section browser acceptance", () => {
       });
       await page.route(`**/preferences/${id}`, (route) => route.fulfill(json({ revisions: [] })));
       await openCapabilities(page);
-      const shortcut = page
+      // The installed skill is a row under Your skills, its status on its status line.
+      const row = page
         .locator(".og-connection-installed button")
         .filter({ hasText: "Inactive example" });
       await expectVisible(
-        shortcut.locator(".og-connection-installed-status", { hasText: "Inactive" }),
+        row.locator(".og-capability-catalog-status-line", { hasText: "Inactive" }),
       );
-      await shortcut.click();
-      await expectVisible(page.getByRole("heading", { name: "Inactive example", exact: true }));
-      await leaveCapabilityPage(page);
-      expect(
-        await page.getByRole("tab", { name: "Skills", exact: true }).getAttribute("aria-selected"),
-      ).toBe("true");
-      await page.getByRole("tab", { name: "All", exact: true }).click();
-      const row = page
-        .locator("button.og-capability-catalog-row")
-        .filter({ hasText: "Inactive example" });
       await row.click();
+      await expectVisible(page.getByRole("heading", { name: "Inactive example", exact: true }));
       await expectVisible(
         page.getByRole("button", { name: "Restore as a new revision", exact: true }),
       );
       await leaveCapabilityPage(page);
-      expect(
-        await page.getByRole("tab", { name: "All", exact: true }).getAttribute("aria-selected"),
-      ).toBe("true");
+      // Leaving the page returns to the tab it was opened from.
+      expect(await capabilitiesTabIsCurrent(page, "Skills")).toBe(true);
+      expect(new URL(page.url()).searchParams.get("section")).toBe("skills");
       await row.click();
       await page.getByRole("button", { name: "Remove skill", exact: true }).click();
       const confirmation = page.getByRole("dialog", { name: "Remove “Inactive example”?" });
@@ -165,10 +162,8 @@ describe("Bundles section browser acceptance", () => {
       await page.getByRole("button", { name: "Remove skill", exact: true }).click();
       await confirmation.getByRole("button", { name: "Remove skill", exact: true }).click();
       await expectHidden(confirmation);
-      await expectVisible(page.getByRole("tab", { name: "All", exact: true }));
-      expect(
-        await page.getByRole("tab", { name: "All", exact: true }).getAttribute("aria-selected"),
-      ).toBe("true");
+      await waitForCapabilitiesTab(page, "Skills");
+      expect(new URL(page.url()).searchParams.get("section")).toBe("skills");
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({ expectedRevisionId: null, expectedScopeVersion: 1 });
       expect(await row.count()).toBe(0);
@@ -217,7 +212,8 @@ describe("Bundles section browser acceptance", () => {
         expectedContentSha256: "b".repeat(64),
       });
 
-      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      // Plugins live on Ready-made, below the ready-made agents, apps and skills.
+      await openCapabilitiesTab(page, "Ready-made");
       await page.getByRole("button", { name: "Import plugin", exact: true }).click();
       dialog = page.getByRole("dialog");
       await dialog.getByLabel("Plugin manifest URL").fill(pluginUrl);
@@ -239,7 +235,10 @@ describe("Bundles section browser acceptance", () => {
       const pluginRow = page.getByRole("button", { name: /Research suite.*Installed/ });
       await expectVisible(pluginRow);
       await expectText(pluginRow, "Research suite");
-      expect(await pluginRow.getAttribute("aria-label")).toContain("Installed");
+      // The row's visible text is its name: the plugin and its status line.
+      expect(await pluginRow.locator(".og-capability-catalog-status-line").textContent()).toBe(
+        "Installed · Workspace",
+      );
       expect(state.pluginPreviewRequests).toHaveLength(2);
       expect(state.pluginInstallRequests).toHaveLength(1);
       expect(state.pluginInstallRequests[0]).toMatchObject({
@@ -247,14 +246,14 @@ describe("Bundles section browser acceptance", () => {
         bindings: { linear: { connectionId: financeConnectionId } },
       });
       // The shared search still filters the selected category without a second input.
-      await expectVisible(page.getByRole("tab", { name: "Plugins", exact: true, selected: true }));
-      const search = page.getByRole("searchbox", { name: "Search plugins", exact: true });
+      expect(await capabilitiesTabIsCurrent(page, "Ready-made")).toBe(true);
+      const search = page.getByRole("searchbox", { name: "Search ready-made", exact: true });
       await search.fill("research");
-      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      await openCapabilitiesTab(page, "Ready-made");
       await expectVisible(pluginRow);
       await expectHidden(skillRow);
       await search.fill("");
-      await page.getByRole("tab", { name: "Skills", exact: true }).click();
+      await openCapabilitiesTab(page, "Skills");
       await expectVisible(skillRow);
       await assertAccessibleAndBounded(page, 'section[aria-label="Skills and plugins"]');
       await page.screenshot({
@@ -319,7 +318,7 @@ describe("Bundles section browser acceptance", () => {
       await leaveCapabilityPage(page);
       await pluginRow.waitFor({ state: "detached", timeout: 15_000 });
 
-      await page.getByRole("tab", { name: "Skills", exact: true }).click();
+      await openCapabilitiesTab(page, "Skills");
       await openInstalledPackages(page);
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       const skillPage = await openImportedSkillPage(page);
@@ -365,7 +364,7 @@ describe("Bundles section browser acceptance", () => {
         "Ask a workspace admin to install or update these items.",
       );
       expect(await page.getByRole("button", { name: "New skill", exact: true }).count()).toBe(0);
-      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      await openCapabilitiesTab(page, "Ready-made");
       expect(
         await page.getByRole("button", { name: "Import plugin", exact: true }).isDisabled(),
       ).toBe(true);
@@ -432,8 +431,7 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
-  await expectVisible(page.getByRole("tab", { name: "Skills", exact: true }));
-  await page.getByRole("tab", { name: "Skills", exact: true }).click();
+  await openCapabilitiesTab(page, "Skills");
 }
 
 async function openInstalledPackages(page: Page): Promise<void> {
@@ -444,7 +442,7 @@ async function openInstalledPackages(page: Page): Promise<void> {
 
 /** Opens the installed plugin's page; update and removal live on that page. */
 async function openPluginPage(page: Page) {
-  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+  await openCapabilitiesTab(page, "Ready-made");
   const canManage = await page
     .getByRole("button", { name: "Import plugin", exact: true })
     .isEnabled();
@@ -513,6 +511,14 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       });
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
       return json({ items: [], total: 0, nextOffset: null });
+    // Ready-made lists what can be added; this fixture has none.
+    if (url.pathname === `/v1/workspaces/${workspaceId}/agent-templates`)
+      return json({ templates: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/agents`) return json({ agents: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/app-templates`)
+      return json({ templates: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/library`)
+      return json({ skills: [] });
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json(capabilityCatalog(state));
     }

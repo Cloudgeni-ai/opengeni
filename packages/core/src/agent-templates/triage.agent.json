@@ -2,6 +2,7 @@
   "key": "triage",
   "name": "Triage",
   "description": "Sorts new issues and reports, and hands real bugs to Bug fixer.",
+  "team": "Engineering",
   "avatar": {
     "kind": "icon",
     "icon": "search",

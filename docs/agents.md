@@ -674,7 +674,8 @@ conditions, note and name) so the person only picks the source and, for
 GitHub, a repository, then saves; a GitHub, Slack or This workspace source
 it lacks is added on save. Its **Open full form** opens the automation form
 at the suggestion (`?agent=<id>&agentTrigger=<n>&returnTo=agent`). Ready-made agents
-name no internal Skills.
+name no internal Skills. Each names the `team` it is for ("Engineering"); Capabilities
+**Ready-made** groups by it.
 
 ### Delegation by name
 

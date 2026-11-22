@@ -10,6 +10,7 @@ import {
   InfoIcon,
   LinkIcon,
   PanelsTopLeftIcon,
+  PanelLeftIcon,
   PinIcon,
 } from "lucide-react";
 import { OpenPublishedSiteItem, useSiteActions, type SiteActions } from "../artifacts/site-actions";
@@ -56,6 +57,8 @@ export type SiteRowActions = {
   move?:
     | ((origin: SessionSiteOrigin, fromChannelId: string | null, channelId: string | null) => void)
     | undefined;
+  /** Add the app to the person's sidebar; `has` leaves the item out once it's there. */
+  sidebar?: { has: (appId: string) => boolean; add: (appId: string) => void } | undefined;
 };
 export const SiteRowActionsContext = createContext<SiteRowActions | null>(null);
 
@@ -316,6 +319,15 @@ function SiteRowMenuItems({
         <PinIcon className={pinned ? "size-4 fill-current" : "size-4"} />
         {pinned ? "Unpin" : "Pin"}
       </Item>
+      {actions.sidebar && !actions.sidebar.has(origin.siteId) ? (
+        <Item
+          data-site-action="add-to-sidebar"
+          onSelect={() => actions.sidebar?.add(origin.siteId)}
+        >
+          <PanelLeftIcon className="size-4" />
+          Add to sidebar
+        </Item>
+      ) : null}
       {site.duplicate ? (
         <Item
           data-site-action="duplicate"

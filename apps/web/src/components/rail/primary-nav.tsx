@@ -2,6 +2,7 @@ import { useRouterState } from "@tanstack/react-router";
 import { ChevronDownIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { useHiddenNavEntries } from "./hidden-nav-entries";
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
 import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
 import { useMeetingRecorderState } from "@opengeni/react/meetings";
@@ -63,8 +64,9 @@ export function WorkspaceShortcutLinks({
   const recording = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { simplified } = useSimplifiedInterface();
+  const hiddenEntries = useHiddenNavEntries(rail.workspaceId);
   const listed = new Set(primaryWorkspaceItems(simplified).map((item) => item.to));
-  const advanced = advancedWorkspaceItems(simplified);
+  const allAdvanced = advancedWorkspaceItems(simplified);
   const [advancedExpanded, setAdvancedExpandedState] = useState(initialAdvancedExpanded);
   const setAdvancedExpanded = (next: boolean) => {
     setAdvancedExpandedState(next);
@@ -78,6 +80,15 @@ export function WorkspaceShortcutLinks({
     item.to === "/workspaces/$workspaceId/state" && pendingKnowledge;
   const needsAttention = (item: WorkspaceConfigItem) =>
     item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention;
+  // An entry this person hid still shows while it's the page they're on or
+  // something waits for them there.
+  const shown = (item: WorkspaceConfigItem) =>
+    !hiddenEntries.targets.has(item.to) ||
+    isConfigItemActive(pathname, rail.workspaceId, item.to) ||
+    needsReview(item) ||
+    needsAttention(item) ||
+    (recording && item.to === "/workspaces/$workspaceId/meetings");
+  const advanced = allAdvanced.filter(shown);
   const link = (item: WorkspaceConfigItem) => (
     <WorkspaceConfigLink
       key={item.to}
@@ -108,7 +119,8 @@ export function WorkspaceShortcutLinks({
           Meetings out, so the recording can always be reached and stopped. */}
       {PRIMARY_WORKSPACE_ITEMS.filter(
         (item) =>
-          listed.has(item.to) || (recording && item.to === "/workspaces/$workspaceId/meetings"),
+          (listed.has(item.to) && shown(item)) ||
+          (recording && item.to === "/workspaces/$workspaceId/meetings"),
       ).map(link)}
       {advanced.length === 0 ? null : rail.collapsed ? (
         // The icon rail has no room for a group: its pages keep their icons.
@@ -177,9 +189,10 @@ export function PrimaryNavExtras() {
     }
   };
 
+  const hiddenEntries = useHiddenNavEntries(rail.workspaceId);
   return (
     <>
-      <InboxLink />
+      <InboxLink hiddenUnlessNeeded={hiddenEntries.inbox} />
 
       {rail.isMobile ? null : rail.collapsed ? (
         <WorkspaceShortcutLinks

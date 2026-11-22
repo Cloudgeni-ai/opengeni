@@ -6,19 +6,25 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasInbox, inboxAttentionCount, useInbox } from "@opengeni/react/app/lib/inbox";
 import { cn } from "@opengeni/react/app/lib/utils";
 
-/** The Inbox entry: always visible to a signed-in person, with how many things wait on them. */
-export function InboxLink() {
+/**
+ * The Inbox entry: visible to a signed-in person, with how many things wait on them. When the
+ * person's layout hides it, it still shows while something waits or the Inbox is open.
+ */
+export function InboxLink({ hiddenUnlessNeeded = false }: { hiddenUnlessNeeded?: boolean }) {
   const { accessContext } = useAppContext();
-  return hasInbox(accessContext) ? <PersonInboxLink /> : null;
+  return hasInbox(accessContext) ? (
+    <PersonInboxLink hiddenUnlessNeeded={hiddenUnlessNeeded} />
+  ) : null;
 }
 
-function PersonInboxLink() {
+function PersonInboxLink({ hiddenUnlessNeeded }: { hiddenUnlessNeeded: boolean }) {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const active = pathname === `/workspaces/${rail.workspaceId}/inbox`;
   const { data } = useInbox({ workspaceId: rail.workspaceId });
   const count = inboxAttentionCount(data);
   const countLabel = count > 99 ? "99+" : String(count);
+  if (hiddenUnlessNeeded && count === 0 && !active) return null;
   return (
     <Link
       to="/workspaces/$workspaceId/inbox"
