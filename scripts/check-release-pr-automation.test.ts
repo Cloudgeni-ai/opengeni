@@ -3016,6 +3016,7 @@ describe("release approval provenance", () => {
       const derivedTreeSha = "d2".repeat(20);
       const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
       const blob = (sha: string) => [{ path: "package.json", mode: "100644", type: "blob", sha }];
+      const bot = { id: 41898282, type: "Bot" };
       const run = (
         options: {
           releasedBlob?: string;
@@ -3024,6 +3025,9 @@ describe("release approval provenance", () => {
           receipt?: boolean;
           releasedOnProduction?: boolean;
           releasedIsHotfixBuild?: boolean;
+          receiptAuthor?: { id: number; type: string };
+          linkHeadRef?: string;
+          linkPatchBlob?: string;
         } = {},
       ) => {
         const fixture = hotfixFixture({
@@ -3055,7 +3059,60 @@ describe("release approval provenance", () => {
               });
             }
             if (url.pathname === `${prefix}/releases/tags/opengeni-candidate-${"c3".repeat(20)}`) {
-              return response({ id: 2 });
+              return response({ id: 2, author: options.receiptAuthor ?? bot });
+            }
+            // The earlier hotfix build c1 is exactly Hotfix-PR #8001's reviewed patch.
+            if (url.pathname === `${prefix}/pulls/8001`) {
+              return response({
+                number: 8001,
+                merged: true,
+                merge_commit_sha: "e5".repeat(20),
+                base: { ref: "production", sha: "e1".repeat(20) },
+                head: {
+                  ref: options.linkHeadRef ?? "hotfix/earlier",
+                  sha: "e2".repeat(20),
+                  repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+                },
+              });
+            }
+            if (url.pathname === `${prefix}/compare/${"e1".repeat(20)}...${"e2".repeat(20)}`) {
+              return response({
+                base_commit: { sha: "e1".repeat(20) },
+                merge_base_commit: { sha: "e1".repeat(20) },
+                commits: [{ sha: "e2".repeat(20) }],
+              });
+            }
+            if (url.pathname === `${prefix}/compare/${"e5".repeat(20)}...${mergeSha}`) {
+              return response({
+                status: "ahead",
+                base_commit: { sha: "e5".repeat(20) },
+                merge_base_commit: { sha: "e5".repeat(20) },
+                ahead_by: 2,
+                behind_by: 0,
+                total_commits: 2,
+              });
+            }
+            for (const [sha, treeSha] of [
+              ["e1", "e3"],
+              ["e2", "e4"],
+              ["c3", "c4"],
+            ]) {
+              if (url.pathname === `${prefix}/git/commits/${sha.repeat(20)}`) {
+                return response({
+                  sha: sha.repeat(20),
+                  tree: { sha: treeSha.repeat(20) },
+                  parents: [{ sha: "f0".repeat(20) }],
+                });
+              }
+            }
+            for (const [treeSha, blobSha] of [
+              ["e3", "7".repeat(40)],
+              ["e4", options.linkPatchBlob ?? options.releasedBlob ?? "1".repeat(40)],
+              ["c4", "7".repeat(40)],
+            ]) {
+              if (url.pathname === `${prefix}/git/trees/${treeSha.repeat(20)}`) {
+                return response({ sha: treeSha.repeat(20), truncated: false, tree: blob(blobSha) });
+              }
             }
             if (url.pathname === `${prefix}/git/trees/${releasedTreeSha}`) {
               return response({
@@ -3095,7 +3152,11 @@ describe("release approval provenance", () => {
             if (url.pathname === `${prefix}/releases/tags/opengeni-candidate-${releasedSha}`) {
               return options.receipt === false
                 ? response({ message: "Not Found" }, 404)
-                : response({ id: 1, tag_name: `opengeni-candidate-${releasedSha}` });
+                : response({
+                    id: 1,
+                    tag_name: `opengeni-candidate-${releasedSha}`,
+                    author: options.receiptAuthor ?? bot,
+                  });
             }
           }
           return fixture.fetchImpl(input, init);
@@ -3128,6 +3189,19 @@ describe("release approval provenance", () => {
         [{ parents: [releasedSha, mergeSha] }, "exactly one parent"],
         [{ receipt: false }, "has no release candidate receipt"],
         [{ releasedOnProduction: false }, "is not in protected production ancestry"],
+        [{ receiptAuthor: { id: 7002, type: "User" } }, "not created by the release-candidate"],
+        [
+          { releasedOnProduction: false, releasedIsHotfixBuild: true, linkHeadRef: "feature/x" },
+          "which is not a merged hotfix/* PR",
+        ],
+        [
+          {
+            releasedOnProduction: false,
+            releasedIsHotfixBuild: true,
+            linkPatchBlob: "9".repeat(40),
+          },
+          "is not exactly the reviewed patch of Hotfix-PR #8001",
+        ],
       ] as const) {
         await expect(run(options)).rejects.toThrow(message);
       }

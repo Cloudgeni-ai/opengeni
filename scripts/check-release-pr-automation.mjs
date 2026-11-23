@@ -4028,16 +4028,121 @@ async function verifyHotfixRelease({ options, logger, context, api }) {
 // source, so undeployed production commits don't ship with it. The source must
 // be one commit on a candidate-built source in production ancestry whose
 // canonical tree change is exactly the reviewed patch.
+
+// Candidate receipts are created only by the release-candidate workflow with
+// its GITHUB_TOKEN; a hand-made release must never vouch for a source.
+async function assertCandidateReceipt(api, sha) {
+  const receipt = await api.getOptional(repositoryPath(`/releases/tags/opengeni-candidate-${sha}`));
+  invariant(receipt !== null, `released source ${sha} has no release candidate receipt`);
+  const author = RELEASE_AUTOMATION_CONTRACT.versionAuthor;
+  invariant(
+    receipt?.author?.id === author.id && receipt?.author?.type === author.type,
+    `release candidate receipt for ${sha} was not created by the release-candidate workflow`,
+  );
+}
+
+// The canonical tree change a reviewed PR makes: its merge base to its head.
+async function reviewedPatchManifest(api, baseSha, headSha, knownCommits = []) {
+  const comparison = await api.get(repositoryPath(`/compare/${baseSha}...${headSha}`));
+  invariant(
+    comparison?.base_commit?.sha === baseSha && comparison?.commits?.at(-1)?.sha === headSha,
+    "reviewed hotfix patch comparison identity changed",
+  );
+  const patchBaseSha = assertSha(comparison?.merge_base_commit?.sha, "reviewed patch-base SHA");
+  const commit = async (sha, label) =>
+    knownCommits.find((known) => known.sha === sha) ??
+    assertCommit(await api.get(repositoryPath(`/git/commits/${sha}`)), sha, label);
+  const [patchBase, head] = await Promise.all([
+    commit(patchBaseSha, "reviewed patch-base commit"),
+    commit(headSha, "reviewed head commit"),
+  ]);
+  const [baseTree, headTree] = await Promise.all([
+    api.get(repositoryPath(`/git/trees/${patchBase.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
+  ]);
+  const manifest = directTreeManifest(
+    canonicalReleaseLeafMap(baseTree, patchBase.treeSha, "reviewed patch-base tree"),
+    canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed head tree"),
+  );
+  invariant(manifest.length > 0, "reviewed hotfix patch is empty");
+  return manifest;
+}
+
+// The canonical tree change one single-parent build commit makes on its parent.
+async function builtPatchManifest(api, source) {
+  invariant(
+    source.parents.length === 1,
+    "a hotfix built onto a release must have exactly one parent",
+  );
+  const releasedSourceSha = source.parents[0];
+  const released = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${releasedSourceSha}`)),
+    releasedSourceSha,
+    "released source commit",
+  );
+  const [releasedTree, sourceTree] = await Promise.all([
+    api.get(repositoryPath(`/git/trees/${released.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
+  ]);
+  return {
+    released,
+    manifest: directTreeManifest(
+      canonicalReleaseLeafMap(releasedTree, released.treeSha, "released source tree"),
+      canonicalReleaseLeafMap(sourceTree, source.treeSha, "hotfix-onto-release source tree"),
+    ),
+  };
+}
+
+// An earlier hotfix build is trusted only as the exact reviewed patch of the
+// merged hotfix/* PR into production that its Hotfix-PR trailer names.
+async function assertHotfixBuildLink(api, link, message, productionSha) {
+  const production = RELEASE_AUTOMATION_CONTRACT.productionBranch;
+  const match = /^Hotfix-PR: ([1-9][0-9]*)$/m.exec(message);
+  invariant(
+    link.parents.length === 1 && match !== null,
+    `released source ${link.sha} is not in protected production ancestry`,
+  );
+  const pullNumber = Number(match[1]);
+  const pull = await api.get(repositoryPath(`/pulls/${pullNumber}`));
+  const headRef = String(pull?.head?.ref ?? "");
+  invariant(
+    pull?.merged === true &&
+      pull?.base?.ref === production &&
+      pull?.head?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+      headRef.startsWith(RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix) &&
+      headRef.length > RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix.length,
+    `released source ${link.sha} names Hotfix-PR #${pullNumber}, which is not a merged hotfix/* PR into ${production}`,
+  );
+  const mergeSha = assertSha(pull.merge_commit_sha, `Hotfix-PR #${pullNumber} merge SHA`);
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    mergeSha,
+    productionSha,
+    "production",
+    `Hotfix-PR #${pullNumber} merge`,
+  );
+  const [reviewed, built] = await Promise.all([
+    reviewedPatchManifest(
+      api,
+      assertSha(pull?.base?.sha, `Hotfix-PR #${pullNumber} base SHA`),
+      assertSha(pull?.head?.sha, `Hotfix-PR #${pullNumber} head SHA`),
+    ),
+    builtPatchManifest(api, link),
+  ]);
+  invariant(
+    manifestsMatch(reviewed, built.manifest),
+    `released source ${link.sha} is not exactly the reviewed patch of Hotfix-PR #${pullNumber}`,
+  );
+}
+
 // A released source is a candidate-built commit in protected production
 // ancestry, or an earlier hotfix built the same way onto one (a second hotfix
-// on top of a live one). Every link must carry its own candidate receipt.
+// on top of a live one). Every link must carry its own workflow-made candidate
+// receipt and be exactly its own reviewed patch.
 async function assertReleasedSource(api, releasedSourceSha, productionSha) {
   let current = releasedSourceSha;
   for (let depth = 0; depth < 10; depth += 1) {
-    const receipt = await api.getOptional(
-      repositoryPath(`/releases/tags/opengeni-candidate-${current}`),
-    );
-    invariant(receipt !== null, `released source ${current} has no release candidate receipt`);
+    await assertCandidateReceipt(api, current);
     if (current === productionSha) return;
     const comparison = await api.get(repositoryPath(`/compare/${current}...${productionSha}`));
     if (
@@ -4048,12 +4153,9 @@ async function assertReleasedSource(api, releasedSourceSha, productionSha) {
       return;
     }
     const value = await api.get(repositoryPath(`/git/commits/${current}`));
-    const commit = assertCommit(value, current, "released source commit");
-    invariant(
-      commit.parents.length === 1 && /^Hotfix-PR: [1-9][0-9]*$/m.test(String(value?.message ?? "")),
-      `released source ${current} is not in protected production ancestry`,
-    );
-    current = commit.parents[0];
+    const link = assertCommit(value, current, "released source commit");
+    await assertHotfixBuildLink(api, link, String(value?.message ?? ""), productionSha);
+    current = link.parents[0];
   }
   invariant(
     false,
@@ -4080,48 +4182,18 @@ async function verifyHotfixOntoReleaseSource(
   );
   const releasedSourceSha = source.parents[0];
   await assertReleasedSource(api, releasedSourceSha, productionSha);
-  const comparison = await api.get(
-    repositoryPath(`/compare/${pullIdentity.baseSha}...${pullIdentity.headSha}`),
-  );
-  invariant(
-    comparison?.base_commit?.sha === pullIdentity.baseSha &&
-      comparison?.commits?.at(-1)?.sha === pullIdentity.headSha,
-    "reviewed hotfix patch comparison identity changed",
-  );
-  const patchBaseSha = assertSha(comparison?.merge_base_commit?.sha, "reviewed patch-base SHA");
-  const [patchBase, released] = await Promise.all([
-    patchBaseSha === base.sha
-      ? base
-      : api
-          .get(repositoryPath(`/git/commits/${patchBaseSha}`))
-          .then((value) => assertCommit(value, patchBaseSha, "reviewed patch-base commit")),
-    api
-      .get(repositoryPath(`/git/commits/${releasedSourceSha}`))
-      .then((value) => assertCommit(value, releasedSourceSha, "released source commit")),
+  const [reviewedManifest, built] = await Promise.all([
+    reviewedPatchManifest(api, pullIdentity.baseSha, pullIdentity.headSha, [base, head]),
+    builtPatchManifest(api, source),
   ]);
-  const [baseTree, headTree, releasedTree, sourceTree] = await Promise.all([
-    api.get(repositoryPath(`/git/trees/${patchBase.treeSha}?recursive=1`)),
-    api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
-    api.get(repositoryPath(`/git/trees/${released.treeSha}?recursive=1`)),
-    api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
-  ]);
-  const reviewedManifest = directTreeManifest(
-    canonicalReleaseLeafMap(baseTree, patchBase.treeSha, "reviewed patch-base tree"),
-    canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed head tree"),
-  );
-  const builtManifest = directTreeManifest(
-    canonicalReleaseLeafMap(releasedTree, released.treeSha, "released source tree"),
-    canonicalReleaseLeafMap(sourceTree, source.treeSha, "hotfix-onto-release source tree"),
-  );
-  invariant(reviewedManifest.length > 0, "reviewed hotfix patch is empty");
   invariant(
-    manifestsMatch(reviewedManifest, builtManifest),
+    manifestsMatch(reviewedManifest, built.manifest),
     "hotfix source is not exactly the reviewed hotfix patch applied onto the released source",
   );
   return {
     source,
     releasedSourceSha,
-    releasedSourceTreeSha: released.treeSha,
+    releasedSourceTreeSha: built.released.treeSha,
     patchManifestSha256: treeManifestSha256(reviewedManifest),
   };
 }
