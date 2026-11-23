@@ -146,7 +146,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "c03063a124f6be7b164606b0529119567f43937058c8a5478e930ea6ddb2aedd"
+      "sha256": "a5c23267b883333a378d085119e9227fa6bffec819fd90aeced2639a35017ea7"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -2057,7 +2057,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Validate exact retained versioned main source",
-      "sha256": "c76ab05af1e83ef5add16b23455a341835e2c914f0b32e1aba824bd20488a318"
+      "sha256": "c44c6c1e19a509fd20ec4ee74ae1c2e8ba4680b206d6d4b78176d7790e3ee5ac"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",

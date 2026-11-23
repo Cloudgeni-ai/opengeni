@@ -213,7 +213,8 @@ jobs:
           git fetch --no-tags origin production
           if [ "$RELEASE_LANE" = hotfix ] && [ -n "$PROVENANCE_SHA" ] && [ "$PROVENANCE_SHA" != "$SOURCE_SHA" ]; then
             # Hotfix onto release: one commit on the live released source. The
-            # admission proves it is exactly the reviewed PR patch.
+            # admission proves the released source and that the commit is
+            # exactly the reviewed PR patch.
             [[ "$PROVENANCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
               echo "provenance_sha must be a 40-character lowercase git SHA" >&2
               exit 1
@@ -223,12 +224,10 @@ jobs:
               echo "a hotfix built onto a release must have exactly one parent" >&2
               exit 1
             }
-            for sha in "${source_parents[0]}" "$PROVENANCE_SHA"; do
-              git merge-base --is-ancestor "$sha" origin/production || {
-                echo "hotfix provenance ${sha} is not in current production ancestry" >&2
-                exit 1
-              }
-            done
+            git merge-base --is-ancestor "$PROVENANCE_SHA" origin/production || {
+              echo "hotfix PR merge ${PROVENANCE_SHA} is not in current production ancestry" >&2
+              exit 1
+            }
           else
             git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
               echo "release candidate source must remain in current production ancestry; promote main first" >&2

@@ -3023,6 +3023,7 @@ describe("release approval provenance", () => {
           parents?: string[];
           receipt?: boolean;
           releasedOnProduction?: boolean;
+          releasedIsHotfixBuild?: boolean;
         } = {},
       ) => {
         const fixture = hotfixFixture({
@@ -3043,7 +3044,18 @@ describe("release approval provenance", () => {
                 sha: releasedSha,
                 tree: { sha: releasedTreeSha },
                 parents: [{ sha: "c3".repeat(20) }],
+                message: options.releasedIsHotfixBuild ? "Hotfix\n\nHotfix-PR: 8001\n" : "Release",
               });
+            }
+            if (url.pathname === `${prefix}/compare/${"c3".repeat(20)}...${mergeSha}`) {
+              return response({
+                status: "ahead",
+                base_commit: { sha: "c3".repeat(20) },
+                merge_base_commit: { sha: "c3".repeat(20) },
+              });
+            }
+            if (url.pathname === `${prefix}/releases/tags/opengeni-candidate-${"c3".repeat(20)}`) {
+              return response({ id: 2 });
             }
             if (url.pathname === `${prefix}/git/trees/${releasedTreeSha}`) {
               return response({
@@ -3096,6 +3108,10 @@ describe("release approval provenance", () => {
       };
 
       const result = await run();
+      // A second hotfix onto a live hotfix build: the chain reaches production.
+      await expect(
+        run({ releasedOnProduction: false, releasedIsHotfixBuild: true }),
+      ).resolves.toEqual(expect.objectContaining({ sourceSha: derivedSha }));
       expect(result).toEqual(
         expect.objectContaining({
           lane: "hotfix",
@@ -3111,7 +3127,7 @@ describe("release approval provenance", () => {
         [{ releasedBlob: "4".repeat(40) }, "not exactly the reviewed hotfix patch"],
         [{ parents: [releasedSha, mergeSha] }, "exactly one parent"],
         [{ receipt: false }, "has no release candidate receipt"],
-        [{ releasedOnProduction: false }, "initial production is not ahead of the released source"],
+        [{ releasedOnProduction: false }, "is not in protected production ancestry"],
       ] as const) {
         await expect(run(options)).rejects.toThrow(message);
       }

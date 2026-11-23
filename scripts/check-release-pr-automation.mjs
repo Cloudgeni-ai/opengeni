@@ -3971,15 +3971,6 @@ async function verifyHotfixRelease({ options, logger, context, api }) {
     "terminal production",
     "hotfix source",
   );
-  if (ontoRelease) {
-    await assertSourceAncestorOfCurrentMain(
-      api,
-      ontoRelease.releasedSourceSha,
-      terminalProductionSha,
-      "terminal production",
-      "released source",
-    );
-  }
   const provenance = {
     version: 2,
     lane: "hotfix",
@@ -4037,6 +4028,39 @@ async function verifyHotfixRelease({ options, logger, context, api }) {
 // source, so undeployed production commits don't ship with it. The source must
 // be one commit on a candidate-built source in production ancestry whose
 // canonical tree change is exactly the reviewed patch.
+// A released source is a candidate-built commit in protected production
+// ancestry, or an earlier hotfix built the same way onto one (a second hotfix
+// on top of a live one). Every link must carry its own candidate receipt.
+async function assertReleasedSource(api, releasedSourceSha, productionSha) {
+  let current = releasedSourceSha;
+  for (let depth = 0; depth < 10; depth += 1) {
+    const receipt = await api.getOptional(
+      repositoryPath(`/releases/tags/opengeni-candidate-${current}`),
+    );
+    invariant(receipt !== null, `released source ${current} has no release candidate receipt`);
+    if (current === productionSha) return;
+    const comparison = await api.get(repositoryPath(`/compare/${current}...${productionSha}`));
+    if (
+      comparison?.status === "ahead" &&
+      comparison?.base_commit?.sha === current &&
+      comparison?.merge_base_commit?.sha === current
+    ) {
+      return;
+    }
+    const value = await api.get(repositoryPath(`/git/commits/${current}`));
+    const commit = assertCommit(value, current, "released source commit");
+    invariant(
+      commit.parents.length === 1 && /^Hotfix-PR: [1-9][0-9]*$/m.test(String(value?.message ?? "")),
+      `released source ${current} is not in protected production ancestry`,
+    );
+    current = commit.parents[0];
+  }
+  invariant(
+    false,
+    `released source ${releasedSourceSha} is too many hotfixes away from production`,
+  );
+}
+
 async function verifyHotfixOntoReleaseSource(
   api,
   sourceSha,
@@ -4055,20 +4079,7 @@ async function verifyHotfixOntoReleaseSource(
     "a hotfix built onto a release must have exactly one parent",
   );
   const releasedSourceSha = source.parents[0];
-  await assertSourceAncestorOfCurrentMain(
-    api,
-    releasedSourceSha,
-    productionSha,
-    "initial production",
-    "released source",
-  );
-  const receipt = await api.getOptional(
-    repositoryPath(`/releases/tags/opengeni-candidate-${releasedSourceSha}`),
-  );
-  invariant(
-    receipt !== null,
-    `released source ${releasedSourceSha} has no release candidate receipt`,
-  );
+  await assertReleasedSource(api, releasedSourceSha, productionSha);
   const comparison = await api.get(
     repositoryPath(`/compare/${pullIdentity.baseSha}...${pullIdentity.headSha}`),
   );
