@@ -553,6 +553,7 @@ export const englishMessages = {
     "The access it was saved with has changed. Its owner can save it again to approve it with their current access. If they've left, it can't run as them again.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
+  "automations.run.error.agentUnavailable": "Its agent was deleted or is no longer shared.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
   "automations.run.error.automationInactive":
     "The automation was paused or deleted before the run started.",

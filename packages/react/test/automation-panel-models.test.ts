@@ -195,6 +195,7 @@ describe("automation words", () => {
       "scheduled_session_paused",
       "session_cancelled",
       "scheduled_target_session_unavailable",
+      "scheduled_agent_unavailable",
       "scheduled_target_execution_changed",
       "scheduled_workspace_paused",
       "scheduled_task_paused_before_claim",

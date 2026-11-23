@@ -153,6 +153,13 @@ export function scheduledRunHardBlocker(
       };
     case "scheduled_model_unavailable":
       return { reason: run.error, text: NON_RETRYABLE_REFUSAL_TEXT.scheduled_model_unavailable! };
+    // Its chat can't be started with an agent that is gone, or that became
+    // Only me where the run isn't its owner's Only me chat; no later run can.
+    case "scheduled_agent_unavailable":
+      return {
+        reason: run.error,
+        text: `Its agent was deleted or is no longer shared. Choose another agent, ${RESUME}`,
+      };
     // The database admission and claim fences refuse every run of a task
     // revision whose saved owner authority no longer holds. That stays true
     // for every later run until a person saves the schedule again.

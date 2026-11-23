@@ -62,7 +62,10 @@ runs from before the last edit or resume do not count):
   (`admissionDiagnostic`), any non-retryable refusal above, a paused chat
   (`scheduled_session_paused`), a chat that ended or no longer exists
   (`session_cancelled` outside new-chat-per-run mode,
-  `scheduled_target_session_unavailable`), an unavailable model, and an owner
+  `scheduled_target_session_unavailable`), an unavailable model, an agent
+  that was deleted or became Only me where the run isn't its owner's Only me
+  chat (`scheduled_agent_unavailable`, on a fresh start or a recovered run),
+  and an owner
   whose saved access no longer holds: the database admission or claim fence
   refused the run because the organization membership revision the task
   revision was saved under changed (`scheduled_run_authority_proof_rejected`,
