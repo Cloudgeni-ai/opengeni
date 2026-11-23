@@ -19,6 +19,7 @@ const testFiles =
         "./test/e2e/codex-account.browser.e2e.ts",
         "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
+        "./test/e2e/browser-viewer-fit.browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
         "./test/e2e/crypto-random-uuid.browser.e2e.ts",
         "./test/e2e/developer-settings.browser.e2e.ts",
