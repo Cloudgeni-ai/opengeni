@@ -98,6 +98,8 @@ describe("app server bundle", () => {
     expect(one.manifest.toolResults).toBe("value");
     const { toolResults: _dropped, ...stored } = one.manifest;
     expect(AppServerManifest.parse(stored).toolResults).toBe("raw");
+    // A bundle downloaded with "raw" keeps it on the way back up.
+    expect(appServerManifestOf({ ...base, toolResults: "raw" })!.manifest.toolResults).toBe("raw");
     expect(() =>
       appServerManifestOf({
         main: "index.js",

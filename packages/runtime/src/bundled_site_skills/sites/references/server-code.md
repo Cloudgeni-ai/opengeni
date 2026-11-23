@@ -61,9 +61,9 @@ export default {
 | `env.data` | App data in shared, shared_read or append_only collections: `query(collection, {where, sort, limit, cursor})` (as in `references/site-data.md`), `get(collection, id)` or `get(collection, {key})`, `put(collection, key, value)`, `insert(collection, value)`, `delete(collection, id)`, `write(operations)`. Writes are the app's, not the viewer's. |
 | `fetch(url, init)` | HTTPS to hosts the bundle lists in `egress`. Put a listed vault secret in a header value: `Authorization: "Bearer \{{secret:Shared/Weather/api key}}"`. |
 
-When you edit older server code that unwraps `result.structuredContent` or
-`result.content`, remove that unwrapping (or pass `{ raw: true }`) before
-uploading it again.
+Older code may read the MCP result: its source has `toolResults: "raw"`.
+Upload it with that field unchanged, or remove its unwrapping of
+`result.structuredContent` / `result.content` and drop the field.
 
 A refused call throws an `Error` whose `code` says why, for example
 `shared_account_required`, `tool_not_declared`, `egress_not_listed`,
@@ -139,7 +139,7 @@ back if they fail.
    Code with both `tools` and `egress` hosts also needs such an admin.
 
 To edit existing code, `artifacts_get_source` returns the version's `server`
-files as download URLs. App packages don't carry server code yet: after
+files as download URLs, with its `toolResults`. App packages don't carry server code yet: after
 installing one, publish the code again.
 
 ## Check it

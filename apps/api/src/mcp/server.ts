@@ -4639,13 +4639,15 @@ function registerWorkspaceArtifactTools(
         getAppServerManifest(deps.db, grant.workspaceId, artifactId, ref.version.id),
       ]);
       // The version's server code: download each file to edit it, then upload
-      // the whole bundle again ({main, files, tools, egress, secrets}).
+      // the whole bundle again ({main, files, tools, egress, secrets,
+      // toolResults}); keeping toolResults keeps what env.tools.call returns.
       const serverCode = serverManifest
         ? {
             main: serverManifest.main,
             tools: serverManifest.tools ?? [],
             egress: serverManifest.egress,
             secrets: serverManifest.secrets,
+            toolResults: serverManifest.toolResults ?? "raw",
             files: await Promise.all(
               serverManifest.files.map(async (file) => {
                 const signed = await storage.createGetUrl({

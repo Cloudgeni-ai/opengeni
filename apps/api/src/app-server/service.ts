@@ -79,7 +79,12 @@ import {
   ResponseBodyLimitError,
 } from "@opengeni/network";
 import { retryWhileMissing } from "@opengeni/storage";
-import { callAppSyncToolThroughGateway, type AppSyncToolCaller } from "../app-sync/service";
+import {
+  callAppSyncToolThroughGateway,
+  readToolResultJson,
+  toolResultTexts,
+  type AppSyncToolCaller,
+} from "../app-sync/service";
 import { writeSiteDataWithAccess } from "../site-data/operations";
 import {
   meterSiteData,
@@ -136,7 +141,9 @@ export type AppServerErrorCode =
   | "forbidden"
   | "rate_limited"
   | "unavailable"
-  | "conflict";
+  | "conflict"
+  /** The tool itself reported an error. */
+  | "tool_failed";
 
 export class AppServerError extends Error {
   constructor(
@@ -223,7 +230,7 @@ export function appServerManifestOf(bundle: AppServerBundle): {
   return {
     manifest: AppServerManifest.parse({
       ...base,
-      toolResults: "value",
+      toolResults: bundle.toolResults ?? "value",
       digest: appServerDigest(base),
     }),
     files: files.map((file) => ({ sha256: file.sha256, bytes: file.bytes })),
@@ -231,37 +238,23 @@ export function appServerManifestOf(bundle: AppServerBundle): {
 }
 
 /**
- * A tool result as server code reads it: the structured content, else the
- * first text part that parses as JSON, else the text itself. A tool error
- * throws with the tool's message.
+ * A tool result as server code reads it: JSON as app syncs read it
+ * (`readToolResultJson`), else the text itself. A tool error throws with the
+ * tool's message. A result that isn't MCP-shaped passes through.
  */
 export function appServerToolValue(result: unknown): unknown {
   if (!result || typeof result !== "object" || Array.isArray(result)) return result;
   const raw = result as { structuredContent?: unknown; content?: unknown; isError?: unknown };
-  const texts = Array.isArray(raw.content)
-    ? raw.content.flatMap((part) =>
-        part &&
-        typeof part === "object" &&
-        (part as { type?: unknown }).type === "text" &&
-        typeof (part as { text?: unknown }).text === "string"
-          ? [(part as { text: string }).text]
-          : [],
-      )
-    : [];
+  const texts = toolResultTexts(result);
   if (raw.isError === true)
-    throw invalid(texts.join("\n").slice(0, 1000) || "The tool returned an error.", {
-      reason: "tool_error",
-    });
-  if (raw.structuredContent !== undefined && raw.structuredContent !== null)
-    return raw.structuredContent;
+    throw new AppServerError(
+      "tool_failed",
+      texts.join("\n").slice(0, 1000) || "The tool returned an error.",
+      { reason: "tool_error" },
+    );
+  const read = readToolResultJson(result);
+  if (read.found) return read.value;
   if (!Array.isArray(raw.content)) return result;
-  for (const text of texts) {
-    try {
-      return JSON.parse(text);
-    } catch {
-      continue;
-    }
-  }
   return texts.length > 0 ? texts.join("\n") : null;
 }
 

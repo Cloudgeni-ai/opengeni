@@ -160,6 +160,12 @@ export const AppServerBundle = z
      * accounts. Separate from the page's `requestedTools`, which run as the viewer.
      */
     tools: z.array(ToolReference).max(APP_SERVER_MAX_TOOLS).optional(),
+    /**
+     * What `env.tools.call` returns: `"value"` (default) or `"raw"`, the MCP
+     * result that code uploaded before values existed reads. The app's source
+     * reports it, so downloading and uploading code again keeps it.
+     */
+    toolResults: z.enum(["raw", "value"]).optional(),
   })
   .strict()
   .superRefine((bundle, context) => {
