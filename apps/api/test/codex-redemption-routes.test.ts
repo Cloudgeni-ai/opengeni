@@ -32,6 +32,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createApp } from "../src/app";
+import { signCodexRedemptionConfirmation } from "../src/codex-redemption-security";
 
 let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
@@ -1975,7 +1976,7 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     60_000,
   );
 
-  test("an agent acting as the owner redeems as them, bound to its own confirmation", async () => {
+  test("an agent acting as the owner redeems as them in one call, however late the person approved it", async () => {
     if (!available) return;
     const api = app();
     const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
@@ -2028,31 +2029,60 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     };
 
     const consumedBefore = provider.consumeBodies.length;
-    // A confirmation issued to the person's browser doesn't work for the agent.
-    const inBrowser = await prepare(api, workspaceId, connected.id, "credit-reset");
-    expect(inBrowser.response.status).toBe(200);
-    const borrowed = await agentRequest("redeem", {
-      attemptId: inBrowser.attemptId,
-      creditId: "credit-reset",
-      confirmationToken: inBrowser.body.confirmationToken,
-      confirmation: "REDEEM_USAGE_LIMIT_RESET",
-    });
-    expect(borrowed.status).toBe(403);
+    // The connection's access bounds the one-call redeem too.
+    const unauthorized = await agentRequest(
+      "redeem",
+      { attemptId: crypto.randomUUID(), creditId: "credit-reset" },
+      ["workspace:read"],
+    );
+    expect(unauthorized.status).toBe(403);
     expect(provider.consumeBodies.length).toBe(consumedBefore);
 
-    // Its own: prepared and redeemed as the owner, exactly once.
+    // A chat's approval card can wait any time: the redeem it approves needs
+    // no earlier step, and a token an older agent still sends from a prepare
+    // long ago (here twenty minutes) is ignored rather than failing as expired.
     const attemptId = crypto.randomUUID();
-    const prepared = await agentRequest("prepare", { attemptId, creditId: "credit-reset" });
-    expect(prepared.status).toBe(200);
-    const { confirmationToken } = (await prepared.json()) as { confirmationToken: string };
+    const staleToken = await signCodexRedemptionConfirmation(settings.betterAuthSecret!, {
+      version: 1,
+      attemptId,
+      workspaceId,
+      credentialId: connected.id,
+      creditId: "credit-reset",
+      subjectId: `user:${OWNER_USER_ID}`,
+      browserSessionHash: "stale",
+      expiresAt: Math.floor(Date.now() / 1000) - 15 * 60,
+    });
     const redeemed = await agentRequest("redeem", {
       attemptId,
       creditId: "credit-reset",
-      confirmationToken,
+      confirmationToken: staleToken,
       confirmation: "REDEEM_USAGE_LIMIT_RESET",
     });
     expect(redeemed.status).toBe(200);
     expect(await redeemed.json()).toMatchObject({ status: "completed", outcome: "reset" });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+
+    // Calling again with the same attemptId (an unknown outcome, or a retried
+    // call) replays the durable outcome without another provider redemption.
+    const replayed = await agentRequest("redeem", { attemptId, creditId: "credit-reset" });
+    expect(replayed.status).toBe(200);
+    expect(await replayed.json()).toMatchObject({ status: "completed", outcome: "reset" });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+
+    // The person's own browser still needs its prepared, session-bound token.
+    const tokenless = await api.request(
+      `/v1/workspaces/${workspaceId}/codex/accounts/${connected.id}/reset-credits/redeem`,
+      {
+        method: "POST",
+        headers: browserHeaders(),
+        body: JSON.stringify({
+          attemptId: crypto.randomUUID(),
+          creditId: "credit-reset",
+          confirmation: "REDEEM_USAGE_LIMIT_RESET",
+        }),
+      },
+    );
+    expect(tokenless.status).toBe(400);
     expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
 
     // The connection's access still bounds it: no connections:write, no redemption.
@@ -2372,6 +2402,13 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
       resetCredits: { availableCount: 2 },
     });
     expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+    // It redeems another reset from the organization page in one call, with
+    // no token (the fake answers this credit at once).
+    provider.ambiguousFailures = 1;
+    const agentRedeem = await agent("/reset-credits/redeem", "POST");
+    expect(agentRedeem.status).toBe(200);
+    expect((await agentRedeem.json()) as any).toMatchObject({ status: "completed" });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 2);
 
     // A workspace-managed account is not reachable through the organization route.
     const missing = await api.request(

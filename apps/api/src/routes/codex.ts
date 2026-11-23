@@ -290,9 +290,14 @@ const redemptionPrepareBody = z.object({
   attemptId: z.string().uuid(),
   creditId: z.string().min(1).max(1024),
 });
+/**
+ * The browser sends the token its prepare step minted and the typed
+ * confirmation; an agent sends neither (see coreCodexResetRedeem), and one it
+ * still sends is ignored.
+ */
 const redemptionBody = redemptionPrepareBody.extend({
-  confirmationToken: z.string().min(1).max(8192),
-  confirmation: z.literal(CODEX_REDEMPTION_CONFIRMATION),
+  confirmationToken: z.string().min(1).max(8192).optional(),
+  confirmation: z.string().max(256).optional(),
 });
 
 type ManagedCookieHuman = {
@@ -303,15 +308,21 @@ type ManagedCookieHuman = {
    * membership to read people, gateways or defaults through).
    */
   accountAdministrator?: true;
+  /** An agent acting as this person, on its stand-in session (agentHuman). */
+  agent?: true;
 };
 
 /**
- * The stand-in browser session for an agent acting as a person: stable per
- * person, so the agent can confirm a usage limit reset it prepared, and never
+ * An agent acting as a person, on a stand-in browser session: stable per
+ * person, so a sign-in or reset attempt it started stays its own, and never
  * equal to a real browser session's hash.
  */
-async function agentSessionHash(subjectId: string): Promise<string> {
-  return await hashCodexBrowserSession(`agent:${subjectId}`);
+async function agentHuman(subjectId: string): Promise<ManagedCookieHuman> {
+  return {
+    subjectId,
+    browserSessionHash: await hashCodexBrowserSession(`agent:${subjectId}`),
+    agent: true,
+  };
 }
 
 export async function managedCookieHuman(
@@ -351,12 +362,7 @@ export async function managedHumanOrAgent(
   const human = await managedCookieHuman(c, deps);
   if (human) return human;
   const agent = agentActingAsPersonBeforeGrantCheck(c);
-  return agent
-    ? {
-        subjectId: agent.subjectId,
-        browserSessionHash: await agentSessionHash(agent.subjectId),
-      }
-    : null;
+  return agent ? await agentHuman(agent.subjectId) : null;
 }
 
 export async function requireOrganizationCodexHuman(
@@ -382,12 +388,7 @@ export async function requireOrganizationCodexHuman(
   if (!human) {
     const agent = agentActingAsPerson(c, parsed.data, organizationSettingsPermission(c));
     // An agent has no browser session, so it never matches a sign-in started in one.
-    if (agent) {
-      human = {
-        subjectId: agent.subjectId,
-        browserSessionHash: await agentSessionHash(agent.subjectId),
-      };
-    }
+    if (agent) human = await agentHuman(agent.subjectId);
   }
   if (
     !human &&
@@ -487,9 +488,9 @@ async function requireRedemptionHuman(
     });
   }
   // An agent the person signed in (organization MCP) acts as that person and
-  // may redeem, within the same exact-person grant check below. Its
-  // confirmation binds to a stable per-person agent hash, which can never equal
-  // a browser session hash.
+  // may redeem in one request (coreCodexResetRedeem), within the same
+  // exact-person grant check below. Its attempts bind to a stable per-person
+  // agent hash, which can never equal a browser session hash.
   const agent = isAgentActingAsPerson(c) ? agentActingAsPersonBeforeGrantCheck(c) : null;
   if (!agent) {
     // Normal managed auth prefers a bearer over a cookie. This irreversible
@@ -504,10 +505,7 @@ async function requireRedemptionHuman(
     requireSameOriginBrowserMutation(c, deps);
   }
   const human: ManagedCookieHuman | null = agent
-    ? {
-        subjectId: agent.subjectId,
-        browserSessionHash: await agentSessionHash(agent.subjectId),
-      }
+    ? await agentHuman(agent.subjectId)
     : await managedCookieHuman(c, deps);
   if (!human) {
     throw new HTTPException(401, {
@@ -1693,7 +1691,7 @@ function organizationManagedRedemption(): never {
  * An organization administrator redeeming from the organization's Models
  * page: the person in their own managed browser, or an agent acting as them
  * (never an API key or a delegated bearer), and the workspace whose ledger
- * files the attempt. An agent's confirmation binds to its stable per-person
+ * files the attempt. An agent's attempts bind to its stable per-person
  * stand-in session, which never equals a browser session.
  */
 async function requireOrganizationRedemptionHuman(
@@ -1873,8 +1871,50 @@ async function coreCodexResetPrepare(
     status: 400,
     message: "attemptId and creditId are required",
   });
+  const { human, workspaceId } = input;
+  const target = await resolveTarget();
+  const existing = await prepareCodexRedemption(deps, input, target, parsed);
+  const secret = deps.settings.betterAuthSecret;
+  if (!secret) {
+    throw new HTTPException(503, { message: "managed browser confirmation is unavailable" });
+  }
+  const expiresAt = Math.floor(Date.now() / 1000) + CODEX_REDEMPTION_CONFIRMATION_SECONDS;
+  const confirmationToken = await signCodexRedemptionConfirmation(secret, {
+    version: 1,
+    attemptId: parsed.attemptId,
+    workspaceId,
+    credentialId: target.credentialId,
+    creditId: parsed.creditId,
+    subjectId: human.subjectId,
+    browserSessionHash: human.browserSessionHash,
+    expiresAt,
+  });
+  return c.json({
+    attemptId: parsed.attemptId,
+    confirmationToken,
+    expiresAt: new Date(expiresAt * 1000).toISOString(),
+    resumable: existing?.status === "provider_started" || existing?.status === "completed",
+    recoveryStatus:
+      existing?.status === "provider_started" || existing?.status === "completed"
+        ? existing.status
+        : null,
+  });
+}
+
+/**
+ * Everything a redemption checks and settles before it is confirmed: the
+ * person's authority over the account, one logical attempt per reset across
+ * workspaces, and this caller taking over an earlier attempt of the same
+ * reset so it is recovered on its one upstream key. Returns that attempt.
+ */
+async function prepareCodexRedemption(
+  deps: ApiRouteDeps,
+  input: CoreRedemptionInput,
+  target: RedemptionTarget,
+  parsed: { attemptId: string; creditId: string },
+) {
   const { human, accountId, workspaceId } = input;
-  const { credentialId, organizationManaged } = await resolveTarget();
+  const { credentialId, organizationManaged } = target;
   return await asRedemptionHuman(human, async () => {
     const authority = await readSubscriptionCoreCodexResetAuthority(deps.db, {
       accountId,
@@ -1955,34 +1995,23 @@ async function coreCodexResetPrepare(
     if (authority.status !== "active" && existing?.status !== "completed") {
       throw new HTTPException(403, { message: "redemption credential is unavailable" });
     }
-    const secret = deps.settings.betterAuthSecret;
-    if (!secret) {
-      throw new HTTPException(503, { message: "managed browser confirmation is unavailable" });
-    }
-    const expiresAt = Math.floor(Date.now() / 1000) + CODEX_REDEMPTION_CONFIRMATION_SECONDS;
-    const confirmationToken = await signCodexRedemptionConfirmation(secret, {
-      version: 1,
-      attemptId: parsed.attemptId,
-      workspaceId,
-      credentialId,
-      creditId: parsed.creditId,
-      subjectId: human.subjectId,
-      browserSessionHash: human.browserSessionHash,
-      expiresAt,
-    });
-    return c.json({
-      attemptId: parsed.attemptId,
-      confirmationToken,
-      expiresAt: new Date(expiresAt * 1000).toISOString(),
-      resumable: existing?.status === "provider_started" || existing?.status === "completed",
-      recoveryStatus:
-        existing?.status === "provider_started" || existing?.status === "completed"
-          ? existing.status
-          : null,
-    });
+    return existing;
   });
 }
 
+/**
+ * Redeem one reset. The person in the browser confirms twice: the Redeem
+ * dialog prepares and returns a short-lived token bound to their browser
+ * session, which this request must carry with the typed confirmation.
+ *
+ * An agent acting as the person (a chat's app action, or a connected agent)
+ * redeems in this one request: it prepares here and confirms now. Its token
+ * would prove nothing more, since its stand-in session is the same for every
+ * request it makes as that person; in a chat, the person's approval of this
+ * exact call is the explicit decision, and it holds however long they took to
+ * give it. The ledger's DB-time confirmation fence and the one upstream key
+ * per attempt apply on both paths.
+ */
 async function coreCodexResetRedeem(
   c: Context,
   deps: ApiRouteDeps,
@@ -1990,28 +2019,44 @@ async function coreCodexResetRedeem(
   resolveTarget: () => Promise<RedemptionTarget> = () => workspaceRedemptionTarget(deps, input),
 ) {
   c.header("cache-control", "no-store");
-  const parsed = parseRequestBody(redemptionBody, await c.req.json().catch(() => null), {
-    status: 400,
-    message: "explicit redemption confirmation is required",
-  });
+  const { human, accountId, workspaceId } = input;
+  const body = await c.req.json().catch(() => null);
+  const parsed = human.agent
+    ? parseRequestBody(redemptionBody, body, {
+        status: 400,
+        message: "attemptId and creditId are required",
+      })
+    : parseRequestBody(redemptionBody.required(), body, {
+        status: 400,
+        message: "explicit redemption confirmation is required",
+      });
+  if (!human.agent && parsed.confirmation !== CODEX_REDEMPTION_CONFIRMATION) {
+    throw new HTTPException(400, { message: "explicit redemption confirmation is required" });
+  }
   const secret = deps.settings.betterAuthSecret;
-  if (!secret) {
+  if (!human.agent && !secret) {
     throw new HTTPException(503, { message: "managed browser confirmation is unavailable" });
   }
-  const { human, accountId, workspaceId } = input;
   const target = await resolveTarget();
   const { credentialId } = target;
-  const claims = await verifyCodexRedemptionConfirmation(secret, parsed.confirmationToken);
-  if (
-    !claims ||
-    claims.attemptId !== parsed.attemptId ||
-    claims.workspaceId !== workspaceId ||
-    claims.credentialId !== credentialId ||
-    claims.creditId !== parsed.creditId ||
-    claims.subjectId !== human.subjectId ||
-    claims.browserSessionHash !== human.browserSessionHash
-  ) {
-    throw new HTTPException(403, { message: "redemption confirmation is invalid or expired" });
+  let confirmationExpiresAt: number;
+  if (human.agent) {
+    await prepareCodexRedemption(deps, input, target, parsed);
+    confirmationExpiresAt = Math.floor(Date.now() / 1000) + CODEX_REDEMPTION_CONFIRMATION_SECONDS;
+  } else {
+    const claims = await verifyCodexRedemptionConfirmation(secret!, parsed.confirmationToken!);
+    if (
+      !claims ||
+      claims.attemptId !== parsed.attemptId ||
+      claims.workspaceId !== workspaceId ||
+      claims.credentialId !== credentialId ||
+      claims.creditId !== parsed.creditId ||
+      claims.subjectId !== human.subjectId ||
+      claims.browserSessionHash !== human.browserSessionHash
+    ) {
+      throw new HTTPException(403, { message: "redemption confirmation is invalid or expired" });
+    }
+    confirmationExpiresAt = claims.expiresAt;
   }
   const db = deps.db;
   return await asRedemptionHuman(human, async () => {
@@ -2026,7 +2071,7 @@ async function coreCodexResetRedeem(
         subjectId: human.subjectId,
         browserSessionHash: human.browserSessionHash,
         creditId: parsed.creditId,
-        confirmationExpiresAt: new Date(claims.expiresAt * 1000),
+        confirmationExpiresAt: new Date(confirmationExpiresAt * 1000),
         claimHolderId,
       },
       subscriptionCoreCodexResetAuthority,
