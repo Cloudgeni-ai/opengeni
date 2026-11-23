@@ -51,6 +51,9 @@ class FakeChrome {
   readonly groups = new Map<number, { title: string; color: string }>();
   /** Each closed tab, and whether it was still in a group then. */
   readonly closedGrouped: [number, boolean][] = [];
+  /** Optional permissions the person allowed. Chrome exposes an optional
+   * permission's API only while it is allowed. */
+  readonly granted = new Set(["tabGroups"]);
   current: ReturnType<FakeChrome["startWorker"]> | null = null;
 
   /** Chrome stops the extension's worker (keeping everything above) and,
@@ -72,6 +75,7 @@ class FakeChrome {
     const ports: any[] = [];
     const debuggerEvents = { onEvent: event(), onDetach: event() };
     const navigation = { onCommitted: event() };
+    const permissionEvents = { onAdded: event(), onRemoved: event() };
     const profile = this;
     const chrome: any = {
       runtime: {
@@ -101,6 +105,11 @@ class FakeChrome {
         },
       },
       alarms: { onAlarm: event(), create: async () => {} },
+      permissions: {
+        ...permissionEvents,
+        contains: async ({ permissions = [] }: { permissions?: string[] }) =>
+          permissions.every((permission) => profile.granted.has(permission)),
+      },
       webNavigation: navigation,
       scripting: {
         executeScript: async ({
@@ -204,18 +213,21 @@ class FakeChrome {
           profile.pruneGroups();
         },
       },
-      tabGroups: {
-        get: async (id: number) => {
-          if (!profile.groups.has(id)) throw new Error(`No group with id: ${id}.`);
-          return { id, ...profile.groups.get(id) };
-        },
-        query: async ({ title, color }: { title: string; color: string }) =>
-          [...profile.groups]
-            .filter(([, group]) => group.title === title && group.color === color)
-            .map(([id, group]) => ({ id, ...group })),
-        update: async (id: number, properties: { title: string; color: string }) =>
-          Object.assign(profile.groups.get(id)!, properties),
+      get tabGroups() {
+        return profile.granted.has("tabGroups") ? tabGroups : undefined;
       },
+    };
+    const tabGroups = {
+      get: async (id: number) => {
+        if (!profile.groups.has(id)) throw new Error(`No group with id: ${id}.`);
+        return { id, ...profile.groups.get(id) };
+      },
+      query: async ({ title, color }: { title: string; color: string }) =>
+        [...profile.groups]
+          .filter(([, group]) => group.title === title && group.color === color)
+          .map(([id, group]) => ({ id, ...group })),
+      update: async (id: number, properties: { title: string; color: string }) =>
+        Object.assign(profile.groups.get(id)!, properties),
     };
     new Function("chrome", "navigator", "setTimeout", "clearTimeout", worker)(
       chrome,
@@ -269,6 +281,15 @@ class FakeChrome {
       navigated: (tabId: number, frameId = 0, transitionQualifiers: string[] = []) =>
         navigation.onCommitted.emit({ tabId, frameId, transitionQualifiers }),
       loaded: (tabId: number) => chrome.tabs.onUpdated.emit(tabId, { status: "complete" }),
+      /** The person allows or removes an optional permission. */
+      allow: (permission: string) => {
+        profile.granted.add(permission);
+        permissionEvents.onAdded.emit({ permissions: [permission] });
+      },
+      remove: (permission: string) => {
+        profile.granted.delete(permission);
+        permissionEvents.onRemoved.emit({ permissions: [permission] });
+      },
     };
     this.current = started;
     return started;
@@ -460,6 +481,31 @@ describe("the tabs an agent controls", () => {
     expect(chrome.scripts).toEqual(["showMark 8", "removeMark 8"]);
     expect(chrome.groupTitle(8)).toBeNull();
     expect(chrome.groups.size).toBe(0);
+  });
+
+  test("stay out of tab groups until the person allows them, then join the group", async () => {
+    const chrome = new FakeChrome();
+    chrome.granted.clear();
+    const running = chrome.startWorker();
+    const command = await running.ready();
+    expect(await command({ type: "debugger.attach", tabId: "8" })).toMatchObject({ ok: true });
+    await flush();
+    // Still shown as controlled, by its icon.
+    expect(chrome.scripts).toEqual(["showMark 8"]);
+    expect(chrome.groupTitle(8)).toBeNull();
+    expect(chrome.groups.size).toBe(0);
+
+    running.allow("tabGroups");
+    await flush();
+    await flush();
+    expect(chrome.groupTitle(8)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
+
+    // Removed again: a tab controlled from now on stays where it is.
+    running.remove("tabGroups");
+    await flush();
+    expect(await command({ type: "debugger.attach", tabId: "9" })).toMatchObject({ ok: true });
+    await flush();
+    expect(chrome.groupTitle(9)).toBeNull();
   });
 
   test("a new page in a controlled tab gets the mark again", async () => {
