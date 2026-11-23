@@ -247,20 +247,7 @@ async function githubJson(
     );
     if (!response.ok) {
       await readResponseTextBounded(response, 8_192, `${label} error`).catch(() => undefined);
-      if (response.status === 404) throw new Error(`${label} was not found or is not public`);
-      if (response.status === 401 && settings.skillImportGithubToken) {
-        throw new Error(
-          "GitHub rejected this deployment's Skill import token. Ask its administrator to check OPENGENI_SKILL_IMPORT_GITHUB_TOKEN.",
-        );
-      }
-      if (response.status === 403 || response.status === 429) {
-        throw new HTTPException(429, {
-          message: settings.skillImportGithubToken
-            ? "GitHub's request limit for this deployment has been reached. Skill search is still available; try previewing again after the limit resets."
-            : "GitHub's public request limit has been reached. Skill search is still available; try previewing again after the limit resets.",
-        });
-      }
-      throw new Error(`${label} failed with HTTP ${response.status}`);
+      throw githubSkillSourceFailure(settings, response, label);
     }
     return await readResponseJsonBounded(response, maxBytes, label, {
       signal: controller.signal,
@@ -268,6 +255,41 @@ async function githubJson(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * The error for a failed GitHub read. Anonymous 403s are the shared rate limit.
+ * With a token, a 403 is a limit only when GitHub says so (no requests left or
+ * a Retry-After); otherwise GitHub refused the token itself, for example an
+ * organization's SSO or fine-grained token policy, as with a 401.
+ */
+export function githubSkillSourceFailure(
+  settings: Settings,
+  response: Pick<Response, "status" | "headers">,
+  label: string,
+): Error {
+  const { status, headers } = response;
+  const token = Boolean(settings.skillImportGithubToken);
+  if (status === 404) return new Error(`${label} was not found or is not public`);
+  const limited =
+    status === 429 ||
+    (status === 403 &&
+      (!token ||
+        headers.get("x-ratelimit-remaining") === "0" ||
+        headers.get("retry-after") !== null));
+  if (limited) {
+    return new HTTPException(429, {
+      message: token
+        ? "GitHub's request limit for this deployment has been reached. Skill search is still available; try previewing again after the limit resets."
+        : "GitHub's public request limit has been reached. Skill search is still available; try previewing again after the limit resets.",
+    });
+  }
+  if (token && (status === 401 || status === 403)) {
+    return new Error(
+      "GitHub rejected this deployment's Skill import token. Ask its administrator to check OPENGENI_SKILL_IMPORT_GITHUB_TOKEN.",
+    );
+  }
+  return new Error(`${label} failed with HTTP ${status}`);
 }
 
 function recordValue(value: unknown, label: string): Record<string, unknown> {
