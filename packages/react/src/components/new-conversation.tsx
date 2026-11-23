@@ -184,6 +184,9 @@ export function NewConversationView({
               onModelChange={composer.setModel!}
               onEffortChange={composer.setReasoningEffort!}
               onLatencyModeChange={composer.setLatencyMode!}
+              onLevelChoice={({ model, effort, latencyMode }) => {
+                creation.setModelPolicy({ model, reasoningEffort: effort, latencyMode });
+              }}
             />
           ) : undefined)
         }

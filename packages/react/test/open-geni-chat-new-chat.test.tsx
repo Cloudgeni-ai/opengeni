@@ -244,6 +244,37 @@ describe("OpenGeniChat new-chat composer", () => {
     }
   });
 
+  test("an explicit model without an effort does not inherit the level fallback's effort", async () => {
+    const { client, requests } = chatClient({ defaultModel: "codex/deep" }, LEVEL_MODELS);
+    function Host() {
+      const creation = useNewConversation({ client, workspaceId: WORKSPACE_ID, modelPicker: true });
+      return (
+        <>
+          <button type="button" onClick={() => creation.composer.setModel!("codex/deep")}>
+            Set model
+          </button>
+          <NewConversationView creation={creation} modelPickerProps={{ levels: LEVELS }} />
+        </>
+      );
+    }
+    const view = await renderComponent(<Host />);
+    try {
+      const form = view.container.querySelector<HTMLFormElement>("[data-og-new-chat-composer]")!;
+      await actRun(() => view.container.querySelector("button")!.click());
+      await actRun(() => typeInto(form.querySelector("textarea")!, "Use the model default"));
+      await actRun(() => form.requestSubmit());
+      expect(requests).toEqual([
+        {
+          initialMessage: "Use the model default",
+          idempotencyKey: expect.any(String),
+          model: "codex/deep",
+        },
+      ]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test.each(["button", "shortcut"])(
     "a host-seeded level reaches the create request on first and second New via %s",
     async (entry) => {

@@ -187,7 +187,10 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   };
   const updateChoice = (patch: Choice) => {
     if (!ownsScope()) return;
-    const next = { ...creationChoice(), ...patch };
+    // An effort-only or speed-only edit builds on the displayed model. An
+    // explicit model does not inherit the effort of an implicit level fallback.
+    const base = patch.model === undefined ? creationChoice() : choiceRef.current;
+    const next = { ...base, ...patch };
     const model = catalog.models.find((row) => row.id === (next.model ?? defaultModel));
     if (model) {
       if (next.reasoningEffort)
@@ -439,6 +442,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     available,
     showModelPicker,
     setModelLevels,
+    setModelPolicy: updateChoice,
     catalog,
     composer,
     realtimeVoiceEnabled:
