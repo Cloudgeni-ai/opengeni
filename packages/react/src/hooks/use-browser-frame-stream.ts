@@ -47,6 +47,9 @@ const RELAY_TAG_OPEN_ACK = 2;
 const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
 const MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME = 2;
+/** An open stream sends frames continuously (about ten a second, also while
+ * the page is still), so one that has sent none for this long has stopped. */
+export const BROWSER_FRAME_STALL_MS = 15_000;
 
 export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   browserSessionId: string | null;
@@ -131,6 +134,7 @@ export function useBrowserFrameStream(
     } | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
     let controllerGeneration: string | null = null;
     let activeAttachment: BrowserSessionAttachment | null = null;
@@ -142,7 +146,13 @@ export function useBrowserFrameStream(
     let decodingFrame = false;
     const attachmentAbort = new AbortController();
 
+    const clearStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = null;
+    };
+
     const clearSocket = (terminateProducer = false) => {
+      clearStallTimer();
       if (!socket) return;
       const current = socket;
       const handlers = socketHandlers;
@@ -196,8 +206,26 @@ export function useBrowserFrameStream(
       if (reconnectAutomatically) scheduleReconnect();
     };
 
+    // A socket that stays open but stops sending frames would otherwise leave
+    // the last picture on screen as if it were live. Open a new stream; after
+    // the automatic attempts, say the picture stopped.
+    const watchForFrames = (source: BrowserFrameWebSocket) => {
+      clearStallTimer();
+      stallTimer = setTimeout(() => {
+        stallTimer = null;
+        if (disposed || source !== socket) return;
+        if (failures >= MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME) {
+          fail(new Error(t("hooks.useBrowserFrameStream.browserPictureStopped")), false);
+          return;
+        }
+        clearSocket(true);
+        scheduleReconnect();
+      }, BROWSER_FRAME_STALL_MS);
+    };
+
     const onOpen = (source: BrowserFrameWebSocket) => {
       if (disposed || source !== socket) return;
+      watchForFrames(source);
       if (activeStream?.kind === "relay") {
         const body = encodeStreamOpen({
           channel: {
@@ -236,6 +264,7 @@ export function useBrowserFrameStream(
           if (!controllerGeneration || frame.controllerGeneration !== controllerGeneration) {
             throw new Error("browser frame belongs to a stale controller");
           }
+          watchForFrames(source);
           const key = `${browserSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}:${frame.documentGeneration}`;
           if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence)
             continue;
