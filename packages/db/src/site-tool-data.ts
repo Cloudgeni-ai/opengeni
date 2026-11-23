@@ -38,7 +38,8 @@ export const SITE_TOOL_DATA_RESET_GRACE_MS = 60_000;
  * A write (`restart`) restarts an existing mark's time, so the reset grace is
  * measured from the mark just before that write. Keeping a mark for data
  * already stored (a sync edit) leaves its time alone, so a reset right after
- * still lifts it.
+ * still lifts it. Either way a shared-account source raises the mark's
+ * `shared` flag; it is never lowered here.
  */
 export async function markSiteToolData(
   db: Database,
@@ -50,8 +51,10 @@ export async function markSiteToolData(
   if (sources.length === 0) return;
   const onConflict = options.restart
     ? sql`on conflict (workspace_id, site_id, target, connector, route)
-            do update set created_at = now()`
-    : sql`on conflict do nothing`;
+            do update set created_at = now(),
+              shared = site_tool_data_sources.shared or excluded.shared`
+    : sql`on conflict (workspace_id, site_id, target, connector, route)
+            do update set shared = site_tool_data_sources.shared or excluded.shared`;
   await withRlsContext(db, scope, async (tx) => {
     for (const source of sources)
       await rawRows(

@@ -29,6 +29,7 @@ import {
   getScheduledTask,
   listScheduledTaskRuns,
   markEventOccurrenceStarted,
+  markSiteToolData,
   recordEventDelivery,
   type DbClient,
 } from "@opengeni/db";
@@ -51,7 +52,7 @@ import {
   type AppSyncToolCaller,
 } from "../src/app-sync/service";
 import { readSiteSharedSyncTools } from "../src/workspace-tool-target";
-import { markToolData } from "../src/site-tool-data";
+import { keepSyncToolDataMarked, markToolData } from "../src/site-tool-data";
 
 // App data sync against PostgreSQL as the restricted application role. The
 // connected tool is a fake; everything else (automations, run history, Site
@@ -1291,6 +1292,44 @@ test("a writer's mark right before a reset stays, even when the target was marke
   });
   expect(reset.status, JSON.stringify(reset.json)).toBe(200);
   expect(await read()).toBe(403);
+});
+
+test("a shared-account mark raises the shared flag of an existing mark and nothing lowers it", async () => {
+  const f = await fixture();
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const marks = async () =>
+    await shared.admin<{ connector: string; route: string; shared: boolean }[]>`
+      select connector, route, shared from site_tool_data_sources where site_id = ${f.siteId}`;
+  // A sync edit keeps its target marked first, without knowing the route is
+  // a shared account.
+  await keepSyncToolDataMarked({ db: db.db }, scope, f.siteId, {
+    mode: "shared",
+    collection: "orders",
+    tool: { serverId: "orders-server", toolName: "list_orders" },
+  });
+  const [kept] = await marks();
+  expect(kept).toMatchObject({ route: "orders-server", shared: false });
+  const source = {
+    target: "collection:orders",
+    connector: kept!.connector,
+    route: kept!.route,
+    shared: true,
+  };
+  // A shared-account write to the same target raises the flag.
+  await markToolData({ db: db.db }, scope, f.siteId, [source]);
+  expect((await marks()).map((mark) => mark.shared)).toEqual([true]);
+  // Neither a later sync edit nor a non-shared write lowers it.
+  await keepSyncToolDataMarked({ db: db.db }, scope, f.siteId, {
+    mode: "shared",
+    collection: "orders",
+    tool: { serverId: "orders-server", toolName: "list_orders" },
+  });
+  await markToolData({ db: db.db }, scope, f.siteId, [{ ...source, shared: false }]);
+  expect((await marks()).map((mark) => mark.shared)).toEqual([true]);
+  // A sync edit after an older non-shared mark raises it too.
+  await shared.admin`update site_tool_data_sources set shared = false where site_id = ${f.siteId}`;
+  await markSiteToolData(db.db, scope, f.siteId, [source]);
+  expect((await marks()).map((mark) => mark.shared)).toEqual([true]);
 });
 
 test("editing a shared sync keeps its old target's mark time, so a reset right after lifts it", async () => {
