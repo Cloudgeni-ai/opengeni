@@ -4087,7 +4087,10 @@ closed. Normal turn finalization drains only attempt-owned yielded shells before
 workspace capture. Once a command's durable session adoption commits, normal
 completion and Steer detach from it instead of cancelling it. Session/workspace
 Pause and terminal Cancel atomically transition adopted commands to `stopping`;
-provider-specific reconciliation then proves exact exit/loss before settlement.
+provider-specific reconciliation then stops them (through the native supervisor,
+or, for an unsupervised command, by running the token/PGID-guarded TERM/KILL
+helper against the turn shell marker persisted at adoption) and proves exact
+exit/loss before settlement.
 Resume never revives a stopping command. Connected Machines and other
 non-persistable routes do not dirty the provisioned cloud-home generation.
 
