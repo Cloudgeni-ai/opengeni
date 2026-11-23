@@ -1,5 +1,7 @@
 # @opengeni/artifact-kernel-wasm-document
 
+## 6.37.3
+
 ## 6.37.2
 
 ## 6.37.1
