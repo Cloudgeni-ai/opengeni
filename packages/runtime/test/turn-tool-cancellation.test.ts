@@ -19,6 +19,7 @@ import {
   cancellableShellCommand,
   cancellableSynchronousShellCommand,
   createTurnToolCancellationController,
+  parseRetainedProcessGroupControl,
   TURN_SCOPED_STEER_GRACE_MS,
 } from "../src/sandbox/turn-tool-cancellation";
 import {
@@ -310,9 +311,16 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(116, "ready\n"));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 116,
-      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number, command?: string) => {
+      adoptRetainedProcessAsBackgroundCommand: async (
+        sessionId: number,
+        command?: string,
+        processGroupControl?: { markerPath: string; token: string },
+      ) => {
         expect(sessionId).toBe(116);
         expect(command).toBe("long-task");
+        // Pause/Stop later end this command by its wrapper's group identity.
+        expect(processGroupControl).toBeDefined();
+        expect(parseRetainedProcessGroupControl(processGroupControl)).toEqual(processGroupControl!);
         adoptions += 1;
       },
     };
@@ -343,8 +351,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
           writeStdin: async () => (++reads === 1 ? running(117, "middle\n") : exited(0, "done\n")),
         },
       }),
-      adoptProcessAsBackgroundCommand: async ({ command }) => {
+      adoptProcessAsBackgroundCommand: async ({ command, processGroupControl }) => {
         expect(command).toBe("work");
+        expect(processGroupControl).toBeDefined();
+        expect(parseRetainedProcessGroupControl(processGroupControl)).toEqual(processGroupControl!);
       },
       observeProcessTerminal: async () => {
         observations += 1;

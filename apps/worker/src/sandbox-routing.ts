@@ -101,6 +101,7 @@ import {
   type RoutingRetainedProcess,
   type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,
+  type RetainedProcessGroupControl,
   type SelfhostedOpObserver,
   type SelfhostedConnectionBinding,
   type SelfhostedRelayConfig,
@@ -914,11 +915,12 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
       backend: ResolvedActiveBackend;
       process: RoutingRetainedProcess;
       command?: string | undefined;
+      processGroupControl?: RetainedProcessGroupControl | undefined;
     }) => Promise<void>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!fence) return undefined;
-  return async ({ backend, process, command }) => {
+  return async ({ backend, process, command, processGroupControl }) => {
     const durable = await getRetainedProcess(services.db, {
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -946,6 +948,7 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
       processId: process.id,
       expected: retainedProcessSettlementIdentity(durable),
       command: command ?? "Background command",
+      ...(processGroupControl ? { processGroupControl } : {}),
     });
   };
 }

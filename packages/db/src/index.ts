@@ -45703,6 +45703,7 @@ export async function adoptManagedSessionBackgroundCommand(
     processId: string;
     expected: SandboxRetainedProcessIdentity;
     command: string;
+    processGroupControl?: { markerPath: string; token: string } | undefined;
   },
 ) {
   return await withRlsContext(
@@ -45759,6 +45760,7 @@ export async function adoptManagedSessionBackgroundCommand(
           turnId: input.turnId,
           attemptId: input.attemptId,
           executionGeneration: input.executionGeneration,
+          processGroupControl: input.processGroupControl,
         });
       }),
   );

@@ -2138,6 +2138,101 @@ describe("retained-process terminal-owner reconciliation", () => {
     },
   );
 
+  test.each(["pause", "stop"] as const)(
+    "%s hands an adopted Modal command's process-group identity to the cancelling probe",
+    async (action) => {
+      if (!available) return;
+      const fixture = await promoteTurnProcess({ routerCommand: true });
+      const token = crypto.randomUUID();
+      const processGroupControl = { markerPath: `/tmp/opengeni-turn-shell/${token}`, token };
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt!.turnId,
+        executionGeneration: fixture.attempt!.executionGeneration,
+        attemptId: fixture.attempt!.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "node server.js",
+        processGroupControl,
+      });
+      // The stored identity is reaper-only: it never reaches API readers.
+      expect(JSON.stringify(await listSessionBackgroundCommands(db, fixture))).not.toContain(token);
+      if (action === "pause")
+        await withWorkspaceSessionActivityRls(db, fixture.workspaceId, (tx) =>
+          mutateSessionControlInTransaction(tx, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sessionId: fixture.sessionId,
+            actor: { type: "human", subjectId: "user:test-owner" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+        );
+      await closeTurnOwner(
+        fixture,
+        fixture.attempt!,
+        action === "pause" ? "cancelled" : "completed",
+      );
+      if (action === "stop")
+        expect(
+          await requestSessionBackgroundCommandCancellation(db, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sessionId: fixture.sessionId,
+            commandId: fixture.process.id,
+            subjectId: "user:test-owner",
+          }),
+        ).toMatchObject({ accepted: true, command: { state: "stopping" } });
+
+      const probes: Array<{ mode: string | undefined; control: unknown }> = [];
+      await runReaper(
+        async (_settings, _lease, process, mode, _capture, _persistence, _budget, control) => {
+          expect(process.id).toBe(fixture.process.id);
+          probes.push({ mode, control });
+          return {
+            status: "proved",
+            proof: { outcome: "exited", exitCode: 137, reason: "provider_exit_banner" },
+          };
+        },
+      );
+      expect(probes).toEqual([{ mode: "cancel", control: processGroupControl }]);
+      expect(await settlementProjection(fixture)).toMatchObject({
+        processState: "exited",
+        processExitCode: 137,
+      });
+    },
+    60_000,
+  );
+
+  test("a running adopted command is observed without its process-group identity", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ routerCommand: true });
+    const token = crypto.randomUUID();
+    await adoptManagedSessionBackgroundCommand(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      turnId: fixture.attempt!.turnId,
+      executionGeneration: fixture.attempt!.executionGeneration,
+      attemptId: fixture.attempt!.attemptId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(fixture.process),
+      command: "node server.js",
+      processGroupControl: { markerPath: `/tmp/opengeni-turn-shell/${token}`, token },
+    });
+    await closeTurnOwner(fixture, fixture.attempt!, "completed");
+    const probes: Array<{ mode: string | undefined; control: unknown }> = [];
+    await runReaper(
+      async (_settings, _lease, _process, mode, _capture, _persistence, _budget, control) => {
+        probes.push({ mode, control });
+        return { status: "deferred", reason: "provider_running" };
+      },
+    );
+    expect(probes).toEqual([{ mode: "observe", control: undefined }]);
+  }, 60_000);
+
   test("session-owned cancellation is interrupted and settled with the process", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({

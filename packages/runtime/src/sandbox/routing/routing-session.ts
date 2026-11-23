@@ -50,6 +50,7 @@ import {
   type ProviderCommandOutput,
 } from "../provider-command-session";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
+import type { RetainedProcessGroupControl } from "../turn-tool-cancellation";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import { durableProcessLostResult, hasDurableShellProcesses } from "../durable-shell-process";
 import { sandboxBackendForSdkBackendId } from "../select";
@@ -365,6 +366,7 @@ export interface RoutingSandboxSessionDeps {
     backend: ResolvedActiveBackend;
     process: RoutingRetainedProcess;
     command?: string | undefined;
+    processGroupControl?: RetainedProcessGroupControl | undefined;
   }) => Promise<void>;
   /** Find the durable identity of a session background command this session
    * owns, by the provider handle an earlier turn returned to the model. Only a
@@ -3039,6 +3041,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async adoptRetainedProcessAsBackgroundCommand(
     providerSessionId: number,
     command?: string,
+    processGroupControl?: RetainedProcessGroupControl,
   ): Promise<void> {
     const record = this.retainedProcess(providerSessionId);
     if (!this.canAdoptRetainedProcessAsBackgroundCommand(providerSessionId)) {
@@ -3057,6 +3060,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       backend: record.backend,
       process: record.process,
       command,
+      ...(processGroupControl ? { processGroupControl } : {}),
     });
     try {
       await record.backgroundAdoption;

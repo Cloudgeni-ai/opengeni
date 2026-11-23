@@ -719,6 +719,7 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
     turnId?: string;
     attemptId?: string;
     executionGeneration?: number;
+    processGroupControl?: { markerPath: string; token: string } | undefined;
   },
 ): Promise<SessionBackgroundCommand> {
   const [process] = await db
@@ -761,11 +762,17 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
       launchTurnId: input.turnId ?? null,
       launchAttemptId: input.attemptId ?? null,
       launchExecutionGeneration: input.executionGeneration ?? null,
+      processGroupControl: input.processGroupControl ?? null,
     })
     .onConflictDoUpdate({
       target: schema.sessionBackgroundCommands.retainedProcessId,
       targetWhere: sql`${schema.sessionBackgroundCommands.retainedProcessId} is not null`,
-      set: { updatedAt: new Date() },
+      // A replayed adoption may carry the identity a recovered row lacked; a
+      // stored identity is never replaced.
+      set: {
+        updatedAt: new Date(),
+        processGroupControl: sql`coalesce(${schema.sessionBackgroundCommands.processGroupControl}, excluded.process_group_control)`,
+      },
     })
     .returning();
   if (!row) throw new Error("Managed background command adoption returned no row");
@@ -796,6 +803,35 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
 
 /** Stop requester recorded for an operation abandoned on an unreachable machine. */
 export const UNREACHABLE_MACHINE_STOP_REQUESTER = "system:connected-machine-unreachable";
+
+/** The stored process-group identity of a managed background command that a
+ * person or Pause asked to stop. Null unless the command is still stopping on
+ * this exact retained process; the reaper validates the shape before use. */
+export async function stoppingManagedBackgroundCommandProcessGroupControl(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; retainedProcessId: string },
+): Promise<unknown> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [row] = await tx
+        .select({ control: schema.sessionBackgroundCommands.processGroupControl })
+        .from(schema.sessionBackgroundCommands)
+        .where(
+          and(
+            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            eq(schema.sessionBackgroundCommands.retainedProcessId, input.retainedProcessId),
+            eq(schema.sessionBackgroundCommands.provider, "managed"),
+            eq(schema.sessionBackgroundCommands.state, "stopping"),
+          ),
+        )
+        .limit(1);
+      return row?.control ?? null;
+    },
+  );
+}
 
 /** @internal Caller must already hold the canonical exact-attempt fence, or for
  * an abandoned operation, proof that the exact attempt launched it. */

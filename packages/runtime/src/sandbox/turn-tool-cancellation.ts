@@ -226,6 +226,7 @@ type CommandCancellationSession = {
   adoptRetainedProcessAsBackgroundCommand?(
     providerSessionId: number,
     command?: string,
+    processGroupControl?: RetainedProcessGroupControl,
   ): Promise<void>;
   /** Rebind a session background command started by an earlier turn so this
    * turn reads and writes it through the retained-process path. False when the
@@ -970,7 +971,9 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
  * remains live, the entire token/identity guard is re-run before retrying;
  * malformed, mismatched, or unavailable identity never opens the fence.
  */
-function retainedShellCancellationCommand(state: ActiveShellSession): string {
+function retainedShellCancellationCommand(
+  state: Pick<ActiveShellSession, "markerPath" | "token">,
+): string {
   const marker = singleQuote(state.markerPath!);
   const cancellation = singleQuote(shellCancellationPath(state.markerPath!));
   const markerDir = singleQuote(posix.dirname(state.markerPath!));
@@ -1010,6 +1013,52 @@ function retainedShellCancellationCommand(state: ActiveShellSession): string {
     'command kill -0 "-$__opengeni_pgid" 2>/dev/null || { command rm -f "$__opengeni_marker"; exit 0; }',
     `exit ${RETAINED_SHELL_GROUP_LIVE_EXIT_CODE}`,
   ].join("\n");
+}
+
+/** The process-group identity of a turn-wrapped command: its randomized marker
+ * file (PID/PGID) and the token that appears in the group leader's arguments.
+ * Persisted when the command becomes a session background command, so Pause
+ * or Stop can end that exact group after the turn that started it is gone. */
+export type RetainedProcessGroupControl = { markerPath: string; token: string };
+
+const PROCESS_GROUP_TOKEN = /^[0-9A-Za-z_-]{16,128}$/;
+
+/** Validate a stored process-group identity before it is placed in a shell
+ * helper. Anything malformed yields null, never a partial identity. */
+export function parseRetainedProcessGroupControl(
+  value: unknown,
+): RetainedProcessGroupControl | null {
+  if (!value || typeof value !== "object") return null;
+  const { markerPath, token } = value as Record<string, unknown>;
+  if (typeof markerPath !== "string" || typeof token !== "string") return null;
+  if (!PROCESS_GROUP_TOKEN.test(token)) return null;
+  if (
+    markerPath.length > 1024 ||
+    !posix.isAbsolute(markerPath) ||
+    /[\0\n\r]/.test(markerPath) ||
+    posix.basename(markerPath) !== token ||
+    posix.normalize(markerPath) !== markerPath
+  )
+    return null;
+  return { markerPath, token };
+}
+
+/** The same in-box TERM-then-KILL helper a turn uses to cancel its own retained
+ * command, for a caller (the lease reaper) that only has the persisted
+ * identity. It signals only the group whose leader still carries the token. */
+export function retainedProcessGroupStopCommand(control: RetainedProcessGroupControl): string {
+  return retainedShellCancellationCommand(control);
+}
+
+/** Interpret the helper's exit code. `stopped`: the group is gone (or never
+ * published a marker and now cannot start user code); `live`: it survived
+ * KILL; anything else proves nothing. */
+export function retainedProcessGroupStopOutcome(
+  exitCode: number | null,
+): "stopped" | "live" | "inconclusive" {
+  if (exitCode === 0 || exitCode === RETAINED_SHELL_MARKER_PENDING_EXIT_CODE) return "stopped";
+  if (exitCode === RETAINED_SHELL_GROUP_LIVE_EXIT_CODE) return "live";
+  return "inconclusive";
 }
 
 function shellHelperInput(command: string): string {
@@ -2568,6 +2617,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       await state.processSession.adoptRetainedProcessAsBackgroundCommand(
         state.sessionId,
         state.command,
+        // Pause/Stop end the adopted command through this exact group identity.
+        state.markerPath && state.token
+          ? { markerPath: state.markerPath, token: state.token }
+          : undefined,
       );
       this.shellSessions.delete(state.sessionId);
     }
