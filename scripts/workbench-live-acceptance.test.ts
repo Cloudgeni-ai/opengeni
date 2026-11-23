@@ -13,6 +13,7 @@ import {
   axeManualContrastSelector,
   findUndersizedTouchTargets,
   assertFixtureCapture,
+  assertFixtureModelPatch,
   assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
   assertAcceptancePrincipalScopes,
@@ -1240,6 +1241,123 @@ describe("workbench live acceptance preflight", () => {
         marker,
       ),
     ).toThrow("acceptance fixture command did not emit its exact marker");
+  });
+
+  describe("fixture model patch proof", () => {
+    const marker = "OPENGENI_WORKBENCH_ACCEPTANCE_001";
+    const turn = { turnId: "turn-1", turnAttemptId: "attempt-1" };
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: api/server.ts",
+      "@@",
+      '-export const marker = "BASE";',
+      "-export const status = 200;",
+      `+export const marker = "${marker}";`,
+      "+export const status = 204;",
+      "*** End Patch",
+    ].join("\n");
+    const fileText = `export const marker = "${marker}";\nexport const status = 204;\n`;
+    const readOutput = `Chunk ID: abc\nWall time: 0.1 seconds\nProcess exited with code 0\nOutput:\n${fileText}`;
+    const inspection = "pwd; rg --files -g AGENTS.md -g server.ts -g '!node_modules' -g '!vendor'";
+    type Call = { name: string; arguments: Record<string, unknown>; output: string };
+    const transcript = (calls: Call[]) => {
+      let sequence = 0;
+      const event = (type: string, payload: Record<string, unknown>, owned = true) => ({
+        id: `event-${++sequence}`,
+        type,
+        sequence,
+        ...(owned ? turn : {}),
+        payload,
+      });
+      const events: any[] = [
+        event("user.message", { text: "patch it" }, false),
+        event("turn.started", { triggerEventId: "event-1" }),
+      ];
+      calls.forEach((call, index) => {
+        const id = `call-${index}`;
+        events.push(
+          event("agent.toolCall.created", {
+            id,
+            name: call.name,
+            arguments: JSON.stringify(call.arguments),
+          }),
+        );
+        events.push(event("agent.toolCall.output", { id, output: call.output }));
+      });
+      events.push(event("turn.completed", {}));
+      return () => assertFixtureModelPatch(events as never, marker, "event-1");
+    };
+    const inspect: Call = {
+      name: "exec_command",
+      arguments: { cmd: inspection },
+      output: "Chunk ID: a\nProcess exited with code 0\nOutput:\n/workspace\napi/server.ts\n",
+    };
+    const read: Call = {
+      name: "exec_command",
+      arguments: { cmd: "cat api/server.ts" },
+      output: readOutput,
+    };
+    const patchThen = (then: string, output = readOutput): Call => ({
+      name: "apply_patch",
+      arguments: { patch, then },
+      output: `Patch applied.\n\nthen:\n${output}`,
+    });
+    const plainPatch: Call = {
+      name: "apply_patch",
+      arguments: { patch },
+      output: "Patch applied.",
+    };
+
+    test("accepts a patch followed by a separate verification read", () => {
+      expect(transcript([plainPatch, read])).not.toThrow();
+      expect(transcript([inspect, plainPatch, read])).not.toThrow();
+    });
+
+    test("accepts apply_patch's then command as the verification read", () => {
+      expect(transcript([patchThen("cat api/server.ts")])).not.toThrow();
+      expect(transcript([inspect, patchThen("cat /workspace/api/server.ts")])).not.toThrow();
+      expect(transcript([inspect, patchThen("cat api/server.ts"), read])).not.toThrow();
+    });
+
+    test("rejects a then command that is not the exact verification read", () => {
+      expect(transcript([patchThen("cat api/server.ts; touch x")])).toThrow(
+        "fixture lacks successful apply_patch proof",
+      );
+      expect(
+        transcript([
+          patchThen(
+            "cat api/server.ts",
+            "Chunk ID: a\nProcess exited with code 1\nOutput:\n" + fileText,
+          ),
+        ]),
+      ).toThrow("fixture lacks successful apply_patch proof");
+      expect(
+        transcript([
+          {
+            name: "apply_patch",
+            arguments: { patch, then: "cat api/server.ts" },
+            output: "Patch applied.\n\nthen: not run because the patch did not apply.",
+          },
+        ]),
+      ).toThrow("fixture lacks successful apply_patch proof");
+      expect(
+        transcript([{ ...plainPatch, arguments: { patch, extra: "cat api/server.ts" } }, read]),
+      ).toThrow("fixture lacks successful apply_patch proof");
+    });
+
+    test("still rejects a missing read, a bad later read and extra calls", () => {
+      expect(transcript([plainPatch])).toThrow("fixture lacks successful");
+      expect(
+        transcript([patchThen("cat api/server.ts"), { ...read, arguments: { cmd: "cat x" } }]),
+      ).toThrow("fixture lacks successful read-only verification after its patch");
+      expect(transcript([plainPatch, read, read])).toThrow(
+        "fixture contains extra or unowned mutation-capable calls",
+      );
+      expect(transcript([plainPatch, plainPatch, read])).toThrow("fixture");
+      expect(
+        transcript([{ ...read, arguments: { cmd: "touch x" } }, patchThen("cat api/server.ts")]),
+      ).toThrow("invalid pre-patch inspection");
+    });
   });
 });
 
