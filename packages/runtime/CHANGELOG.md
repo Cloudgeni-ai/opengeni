@@ -1,5 +1,28 @@
 # @opengeni/runtime
 
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- 9b5daaa: Record why a browser live view stopped getting frames. The browser controller now reports the state of its frame streams and live-view sockets (states, counts and times, never page content), and the API logs `browser.frame_stream.stalled` with that report when an open view's heartbeat finds a stream or view without a frame for ten seconds, so the reason survives the controller's sandbox stopping.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/decisions@6.37.2
+  - @opengeni/interaction@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/jev@6.37.2
+  - @opengeni/agent-proto@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
 ## 6.37.1
 
 ### Patch Changes

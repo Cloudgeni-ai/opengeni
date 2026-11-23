@@ -1,5 +1,20 @@
 # @opengeni/db
 
+## 6.37.2
+
+### Patch Changes
+
+- 8ee5e81: Let verified users of an embedding host save secure-question answers to their own Only me vault when the host acts as them with `secrets:write` and their asking turn can use the vault.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/subscriptions@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
 ## 6.37.1
 
 ### Patch Changes

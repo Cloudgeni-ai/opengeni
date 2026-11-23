@@ -1,5 +1,44 @@
 # @opengeni/api-router
 
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- 9b5daaa: Record why a browser live view stopped getting frames. The browser controller now reports the state of its frame streams and live-view sockets (states, counts and times, never page content), and the API logs `browser.frame_stream.stalled` with that report when an open view's heartbeat finds a stream or view without a frame for ten seconds, so the reason survives the controller's sandbox stopping.
+- c78d62c: An agent redeems a ChatGPT usage-limit reset with one call and one approval in the chat, which works however long the person takes to approve it. The web app's prepare step is no longer offered to agents.
+- 8ee5e81: Let verified users of an embedding host save secure-question answers to their own Only me vault when the host acts as them with `secrets:write` and their asking turn can use the vault.
+- 210d4cd: Allow body-less same-origin browser mutations such as letting an organization Anthropic API key serve again or removing it. Origin and Fetch Metadata checks still apply, and payloads still require JSON.
+- Updated dependencies [3fc742f]
+- Updated dependencies [9b5daaa]
+- Updated dependencies [c78d62c]
+- Updated dependencies [8ee5e81]
+  - @opengeni/runtime@6.37.2
+  - @opengeni/contracts@6.37.2
+  - @opengeni/db@6.37.2
+  - @opengeni/core@6.37.2
+  - @opengeni/artifact-tool@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/decisions@6.37.2
+  - @opengeni/documents@6.37.2
+  - @opengeni/events@6.37.2
+  - @opengeni/github@6.37.2
+  - @opengeni/interaction@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/storage@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/vaults-bitwarden@6.37.2
+  - @opengeni/vaults-keeper@6.37.2
+  - @opengeni/vaults-onepassword@6.37.2
+  - @opengeni/vaults-protonpass@6.37.2
+  - @opengeni/agent-proto@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
 ## 6.37.1
 
 ### Patch Changes
