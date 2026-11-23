@@ -7,6 +7,7 @@
  */
 import type {
   Agent,
+  AgentTemplate,
   AgentTemplateTrigger,
   AutomationTemplateEventSource,
   CreateScheduledTaskRequest,
@@ -15,6 +16,7 @@ import type {
   ScheduledTaskEventsInput,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/sdk";
+import { slackAgentHandle } from "@opengeni/contracts";
 
 import {
   automationCreateRequest,
@@ -248,6 +250,53 @@ export function agentTriggerDraftForPick(
       triggers: pick.kind === "source" ? [newEventTriggerDraft(pick.sourceId)] : [],
     },
   };
+}
+
+/**
+ * How people call an agent in a GitHub comment: `+pr-reviewer`, the handle
+ * Slack takes after `+`. Not `@`: many short handles (`@triage`,
+ * `@pr-reviewer`) are GitHub accounts, which would be notified.
+ */
+export function agentGitHubMention(agent: Pick<Agent, "name">): string {
+  return `+${slackAgentHandle(agent.name)}`;
+}
+
+/** The event field a mention trigger reads: the comment's text. */
+export const AGENT_TRIGGER_MENTION_FIELD = "data.comment.body";
+
+/**
+ * The trigger every agent suggests, ready-made or not: someone writes its
+ * handle in a comment on an issue or pull request, or on a pull request's
+ * code. Its replies come from Opengeni's own bot, which never starts it.
+ */
+export function agentMentionSuggestion(agent: Pick<Agent, "name">): AgentTemplateTrigger {
+  const mention = agentGitHubMention(agent);
+  return {
+    name: `When someone writes ${mention} on GitHub`,
+    instructions: `Someone wrote ${mention} in a GitHub comment. Do what the comment asks for the issue or pull request it is on, and reply there.`,
+    schedule: null,
+    triggers: [
+      {
+        source: { kind: "github" },
+        eventTypes: ["issue_comment.created", "pull_request_review_comment.created"],
+        conditions: [{ field: AGENT_TRIGGER_MENTION_FIELD, op: "contains", value: mention }],
+        includeOwnEvents: false,
+      },
+    ],
+  };
+}
+
+/**
+ * The triggers an agent's page offers to set up: the GitHub mention every
+ * agent has, then its ready-made template's. The mention comes first so a
+ * suggestion's position (`?agentTrigger=<n>`) means the same whether or not
+ * the template has loaded.
+ */
+export function agentSuggestedTriggers(
+  agent: Pick<Agent, "name">,
+  template: Pick<AgentTemplate, "suggestedTriggers"> | null | undefined,
+): AgentTemplateTrigger[] {
+  return [agentMentionSuggestion(agent), ...(template?.suggestedTriggers ?? [])];
 }
 
 /** A suggested trigger's draft: its events, conditions, schedule and instructions. */

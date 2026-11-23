@@ -24,7 +24,10 @@ import { toast } from "../../lib/toast";
 import { AgentCanUse as AgentCanUseSection } from "./agent-can-use";
 import { AgentSkills as AgentSkillsSection } from "./agent-skills";
 import { AgentTriggerDialog } from "./agent-trigger-dialog";
-import type { AgentTriggerChat } from "./agent-trigger-model";
+import { agentSuggestedTriggers, type AgentTriggerChat } from "./agent-trigger-model";
+
+// The automation form starts at a suggestion by its position in this list.
+export { agentSuggestedTriggers };
 
 const VERSION_CONFLICT =
   "Someone else changed this agent. Reload to see their change, then try again.";
@@ -132,8 +135,10 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
       setBusy(null);
     }
   };
-  // A suggestion the person already set up is not offered again.
-  const suggestions = (template?.suggestedTriggers ?? [])
+  // Every agent's GitHub mention, then its template's. One the person
+  // already set up is not offered again.
+  const suggested = agentSuggestedTriggers(agent, template);
+  const suggestions = suggested
     .map((suggestion, index) => ({ suggestion, index }))
     .filter(({ suggestion }) => !tasks?.some((task) => task.name.endsWith(suggestion.name)));
   return (
@@ -198,11 +203,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
         <AgentTriggerDialog
           agent={agent}
           workspaceId={workspaceId}
-          suggestion={
-            adding?.suggestion !== undefined
-              ? template?.suggestedTriggers[adding.suggestion]
-              : undefined
-          }
+          suggestion={adding?.suggestion !== undefined ? suggested[adding.suggestion] : undefined}
           open={adding !== null}
           onOpenChange={(open) => {
             if (!open) setAdding(null);
