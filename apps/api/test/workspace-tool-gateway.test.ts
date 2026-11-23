@@ -16,6 +16,7 @@ import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@open
 import { HTTPException } from "hono/http-exception";
 import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";
 import {
+  allGatewayToolRefs,
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
@@ -24,7 +25,6 @@ import {
   requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDefinitionFilter,
   workspaceToolGatewayPreparationRefs,
-  workspaceToolGatewayPreparationScopedToCall,
   workspaceToolGatewaySettingsForGrant,
   workspaceToolGatewayDeclarations,
   type PreparedWorkspaceToolGateway,
@@ -260,10 +260,10 @@ describe("workspace tool gateway adapters", () => {
         } satisfies MCPServer,
       },
     ];
-    const prepare = (scopedToCall: boolean) =>
+    const prepare = (listing: boolean) =>
       prepareWorkspaceToolGatewayTools(
         settings,
-        workspaceToolGatewayPreparationRefs(settings, scopedToCall),
+        workspaceToolGatewayPreparationRefs(settings, listing),
         {
           accountId,
           workspaceId,
@@ -276,47 +276,28 @@ describe("workspace tool gateway adapters", () => {
         },
       );
 
-    test("is left out of the complete catalog instead of failing it", async () => {
-      const prepared = await prepare(false);
+    test("is left out of a listing instead of failing it", async () => {
+      const prepared = await prepare(true);
       try {
         expect(prepared.toolGatewayCatalog?.entries.map((entry) => entry.identity)).toEqual([
           { serverId: "opengeni", toolName: "session_get" },
         ]);
-        // It dropped out, so the API answers a call to it with "try again"
-        // (503), not a tool that isn't there (404).
-        expect([...prepared.unavailableMcpServers.keys()]).toEqual(["cap-ledger"]);
       } finally {
         await prepared.close();
       }
     });
 
-    test("still fails a preparation scoped to a call to it, and first-party servers stay required", async () => {
-      await expect(prepare(true)).rejects.toThrow();
+    test("still fails a call preparation, and first-party servers stay required in a listing", async () => {
+      await expect(prepare(false)).rejects.toThrow();
+      expect(workspaceToolGatewayPreparationRefs(settings, false)).toEqual(
+        allGatewayToolRefs(settings),
+      );
       expect(
-        workspaceToolGatewayPreparationRefs(settings, false).map((ref) => [ref.id, ref.optional]),
+        workspaceToolGatewayPreparationRefs(settings, true).map((ref) => [ref.id, ref.optional]),
       ).toEqual([
         ["opengeni", undefined],
         ["cap-ledger", true],
       ]);
-    });
-
-    test("is scoped to a call for a target or one server's identities, not a multi-server app catalog", () => {
-      const ledger = { serverId: "cap-ledger", toolName: "list_entries" };
-      expect(workspaceToolGatewayPreparationScopedToCall(undefined, undefined)).toBe(false);
-      expect(workspaceToolGatewayPreparationScopedToCall("cap-ledger", undefined)).toBe(true);
-      expect(workspaceToolGatewayPreparationScopedToCall(undefined, [ledger])).toBe(true);
-      expect(
-        workspaceToolGatewayPreparationScopedToCall(undefined, [
-          ledger,
-          { serverId: "cap-ledger", toolName: "get_entry" },
-        ]),
-      ).toBe(true);
-      expect(
-        workspaceToolGatewayPreparationScopedToCall(undefined, [
-          ledger,
-          { serverId: "opengeni", toolName: "session_get" },
-        ]),
-      ).toBe(false);
     });
   });
 

@@ -9,7 +9,7 @@ import { bootstrapWorkspace, createDb, deleteWorkspace, type DbClient } from "@o
 import { accessGrantAuthorizationFromContext, type ApiRouteDeps } from "@opengeni/core";
 import { createTargetFence } from "../src/workspace-tool-target";
 import {
-  callWorkspaceToolGateway,
+  prepareAttestedWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
   prepareWorkspaceToolGatewayForGrant,
 } from "../src/workspace-tool-gateway";
@@ -28,7 +28,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("untargeted tool gateway preparation with an unreachable MCP server on PostgreSQL", () => {
-  test("lists the live server's tools, answers a dead server's call with try again, and keeps targeted preparation strict", async () => {
+  test("the catalog lists the live server's tools without the dead one, and calls stay strict", async () => {
     if (!client || !shared) return;
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -68,32 +68,27 @@ describe("untargeted tool gateway preparation with an unreachable MCP server on 
     const deps = { db: client.db, settings } as ApiRouteDeps;
     const deadIdentity = { serverId: "dead-probe", toolName: "search_documents" };
     try {
-      // Untargeted (catalog, app tool list): the dead server is left out.
-      const prepared = await prepareWorkspaceToolGateway(deps, authorization);
+      // GET /tools/catalog and /tools/declarations: the dead server is left out.
+      const prepared = await prepareAttestedWorkspaceToolGateway(deps, authorization, undefined);
       try {
         const identities = prepared.toolGatewayCatalog.entries.map(
           (entry) => `${entry.identity.serverId}/${entry.identity.toolName}`,
         );
         expect(identities).toContain("live-probe/search_documents");
         expect(identities.some((identity) => identity.startsWith("dead-probe/"))).toBe(false);
-        // Calling the dead server's tool says "try again", not tool_not_found.
-        const failure = await callWorkspaceToolGateway(prepared, grant, {
-          identity: deadIdentity,
-          arguments: { query: "x" },
-          catalogDigest: prepared.toolGatewayCatalog.digest,
-          operationId: crypto.randomUUID(),
-        }).then(
-          () => null,
-          (error: unknown) => error,
-        );
-        expect(failure).toMatchObject({
-          status: 503,
-          retryable: true,
-          details: { code: "tool_server_unreachable" },
-        });
       } finally {
         await prepared.close();
       }
+      const fails = (promise: Promise<{ close: () => Promise<void> }>) =>
+        promise.then(
+          async (result) => {
+            await result.close();
+            return null;
+          },
+          (error: unknown) => error,
+        );
+      // A complete preparation for a call keeps every server, as before.
+      expect(await fails(prepareWorkspaceToolGateway(deps, authorization))).not.toBeNull();
       // Targeted at the dead server: its own failure is still reported.
       const fence = createTargetFence(
         deps,
@@ -118,14 +113,9 @@ describe("untargeted tool gateway preparation with an unreachable MCP server on 
         fence.close();
       }
       // One server's identities (as app sync prepares): its own failure too.
-      const single = await prepareWorkspaceToolGatewayForGrant(deps, grant, [deadIdentity]).then(
-        async (result) => {
-          await result.close();
-          return null;
-        },
-        (error: unknown) => error,
-      );
-      expect(single).not.toBeNull();
+      expect(
+        await fails(prepareWorkspaceToolGatewayForGrant(deps, grant, [deadIdentity])),
+      ).not.toBeNull();
     } finally {
       await provider.stop(true);
       await deleteWorkspace(client.db, grant.workspaceId);

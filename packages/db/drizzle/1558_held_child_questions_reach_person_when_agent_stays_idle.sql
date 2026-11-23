@@ -21,10 +21,9 @@
 -- (even with a paused goal), and 1553 releases the question when that next
 -- turn ends without an answer.
 --
--- The question rows are locked with SKIP LOCKED: whoever holds one (an
--- answer, an expiry or 1553's release) is already settling it, and waiting
--- would take child rows after the parent's session lock, out of the usual
--- order.
+-- The question rows are locked and waited for: a holder that rolls back (a
+-- failed answer) or only key-shares a row must not leave the question held.
+-- A holder that settles it leaves the row no longer pending, so it is skipped.
 --
 -- Rolling: a new trigger and a SECURITY INVOKER trigger function (like
 -- 1546's), which the previous release's posture check accepts; it reads and
@@ -81,7 +80,7 @@ BEGIN
           AND request.turn_generation = v_generation
           AND request.status = 'pending'
           AND request.held_for_agent
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE
       )
       UPDATE session_human_input_requests request
       SET held_for_agent = false, updated_at = now()
