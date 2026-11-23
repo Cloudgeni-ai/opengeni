@@ -250,7 +250,7 @@ test("a product-origin Chromium viewer fits, paints and controls a browser and p
         expect(inputs.browser[0]).toMatchObject({
           expectedFrameId: "frame-1",
           actor: { kind: "human", subjectId },
-          action: { type: "viewport", ...fitted, mobile: false },
+          action: { type: "viewport", ...fitted, mobile: false, mode: "fit" },
         });
         await page
           .waitForFunction(

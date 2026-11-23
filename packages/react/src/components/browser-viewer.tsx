@@ -121,8 +121,8 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride<ChatCl
   /** Hide workspace browser switching, browser/profile creation and diagnostics.
    * Keeps the current chat's tabs, address, live view, input and interventions. Defaults to true. */
   showAdvancedControls?: boolean | undefined;
-  /** Let this viewer resize a managed Chromium page to its panel. Changes the real
-   * page layout and agent screenshots. By default the viewer fits the existing frame. */
+  /** Fit a managed Chromium page to this panel unless the tab was explicitly resized.
+   * Changes the real layout and agent screenshots. Defaults to scaling the frame. */
   fitViewport?: boolean | undefined;
   className?: string | undefined;
   onNotify?: ((notification: BrowserViewerNotification) => void) | undefined;
@@ -525,7 +525,7 @@ export function BrowserViewer({
         expectedDocumentGeneration: frame.documentGeneration,
         expectedFrameId: frame.frameId,
         observationMode: "none",
-        action: { type: "viewport", width, height, mobile: false },
+        action: { type: "viewport", width, height, mobile: false, mode: "fit" },
       }),
   });
   const selectedChromeGenerationLoss =

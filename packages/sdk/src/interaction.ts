@@ -902,6 +902,8 @@ export type BrowserAction =
       height: number;
       mobile: boolean;
       deviceScaleFactor?: number | undefined;
+      /** Fit a viewer panel without replacing an explicitly set viewport. */
+      mode?: "fit" | undefined;
     }
   | { type: "viewport_reset" }
   | {

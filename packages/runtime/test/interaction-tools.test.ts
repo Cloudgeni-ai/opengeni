@@ -416,6 +416,19 @@ describe("interaction attempt tools", () => {
     expect(act.description).toContain("a sandbox_file_publish artifactId");
   });
 
+  test("browser_act does not expose the viewer-only viewport fit mode", () => {
+    const [act] = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({}),
+    });
+    const schema = JSON.stringify(act!.inputSchema);
+    expect(schema).toContain('"viewport"');
+    expect(schema).not.toContain('"fit"');
+  });
+
   test("browser and computer entry tools tell the model to solve CAPTCHAs itself", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,

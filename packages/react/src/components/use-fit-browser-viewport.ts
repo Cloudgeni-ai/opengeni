@@ -46,8 +46,8 @@ export function useFitBrowserViewport(options: {
           MIN_VIEWPORT_SIZE,
           Math.min(clientHeight, browserViewerFrameLimit.maxHeight),
         );
-        // React to panel sizes, not incoming frames: don't fight another
-        // viewer or an explicit resize made by the agent in the same tab.
+        // React to panel sizes, not incoming frames. The controller enforces
+        // explicit viewport precedence across callers.
         if (width === lastWidth && height === lastHeight) return;
         lastWidth = width;
         lastHeight = height;

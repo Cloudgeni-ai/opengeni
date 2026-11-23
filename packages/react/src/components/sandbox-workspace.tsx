@@ -964,7 +964,6 @@ export function useSandboxWorkspaceTabs(
               // user/agent first visits it.
               enabled={workspaceVisible}
               active={browserActive}
-              fitViewport
               onNotify={onNotify}
               initialBrowserSessionId={initialBrowserSessionId}
               onBrowserSessionIdChange={onBrowserSessionIdChange}

@@ -14438,6 +14438,7 @@
         "$|type=viewport.deviceScaleFactor": "number?",
         "$|type=viewport.height": "integer!",
         "$|type=viewport.mobile": "boolean!",
+        "$|type=viewport.mode": "const?=[\"\\\"fit\\\"\"]",
         "$|type=viewport.type": "const!=[\"\\\"viewport\\\"\"]",
         "$|type=viewport.width": "integer!",
         "$|type=viewport_reset": "object",
