@@ -227,7 +227,9 @@ export function buildPersonalGitHubToolsServer(input: {
   };
   /** The caller's authority now; it must still be the one this server was built for. */
   const current = async (): Promise<PersonalGitHubToolsAuthority> => {
-    const live = await readAuthority(input.db, input.settings, input.grant);
+    const live = await readAuthority(input.db, input.settings, input.grant).catch(() => {
+      throw new GitHubRestAuthorityError("Your GitHub can't be checked right now. Try again.");
+    });
     if (!live || !samePersonalGitHubToolsAuthority(live, authority))
       throw await unavailable("Your GitHub with All my repositories is no longer available here.");
     return live;

@@ -1,4 +1,3 @@
-import { PERSONAL_GITHUB_TOOLS_SERVER_ID } from "../personal-github-tools";
 import { createHash } from "node:crypto";
 import {
   asAppAutomation,
@@ -81,6 +80,7 @@ import {
 } from "@opengeni/network";
 import { retryWhileMissing } from "@opengeni/storage";
 import { callAppSyncToolThroughGateway, type AppSyncToolCaller } from "../app-sync/service";
+import { PERSONAL_GITHUB_TOOLS_SERVER_ID } from "../personal-github-tools";
 import { writeSiteDataWithAccess } from "../site-data/operations";
 import {
   meterSiteData,
