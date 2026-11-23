@@ -3691,9 +3691,19 @@ async function createSessionForRequestInFileScope(
         tool.id === "opengeni" || !parentSession.toolPolicy.excludedMcpServerIds?.includes(tool.id),
     );
     if (toolsProvided) {
+      // Every requested ref, a lapsed one included, must already be the
+      // parent's: a lapsed ref counts as allowed only when the parent itself
+      // keeps it chosen, so a child can't widen through a lapsed connector.
       assertToolRefsSubset(
-        runnableRequestedTools,
-        parentEffective,
+        requestedTools,
+        [
+          ...parentEffective,
+          ...parentSession.tools.filter(
+            (tool) =>
+              isLapsedToolRef(tool) &&
+              !parentSession.toolPolicy.excludedMcpServerIds?.includes(tool.id),
+          ),
+        ],
         "child tools may only narrow the parent session tool policy",
       );
       selectedTools = requestedTools;

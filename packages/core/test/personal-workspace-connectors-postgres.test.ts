@@ -653,6 +653,71 @@ test("a carried connector whose account stopped working never blocks starting or
   }
 }, 120_000);
 
+test("a child chat can't widen its parent's tools through a carried connector whose account stopped working", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const grant = {
+    accountId: f.accountId,
+    workspaceId: f.miaPersonal,
+    subjectId: f.mia,
+    permissions: ["admin", "sessions:control"],
+    principalKind: "human_session",
+    metadata: {},
+  } as unknown as Parameters<typeof createSessionForRequest>[1];
+  const deps = {
+    settings,
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient: { wakeSessionWorkflow: async () => {} },
+    objectStorage: null,
+  } as unknown as Parameters<typeof createSessionForRequest>[0];
+  const custom = { kind: "mcp" as const, id: f.custom.serverId };
+  const curated = { kind: "mcp" as const, id: f.curated.serverId };
+  const create = async (tools: { kind: "mcp"; id: string }[], parentSessionId?: string) =>
+    await createSessionForRequest(
+      deps,
+      parentSessionId
+        ? ({
+            ...grant,
+            metadata: { sessionId: parentSessionId },
+          } as unknown as Parameters<typeof createSessionForRequest>[1])
+        : grant,
+      f.miaPersonal,
+      {
+        initialMessage: "use my tools",
+        resources: [],
+        tools,
+        model: "scripted-model",
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+  const mcpIds = (session: { tools: { kind: string; id: string }[] }) =>
+    session.tools
+      .filter((tool) => tool.kind === "mcp")
+      .map((tool) => tool.id)
+      .sort();
+
+  const narrowParent = await create([curated]);
+  // With a working account, a child asking for more than its parent is refused.
+  await expect(create([curated, custom], narrowParent.id)).rejects.toMatchObject({ status: 403 });
+  await sql`update connections set status = 'needs_reauth' where id = ${f.connections.miaAcme}`;
+  try {
+    // A lapsed account doesn't change that.
+    await expect(create([curated, custom], narrowParent.id)).rejects.toMatchObject({
+      status: 403,
+    });
+    // A parent that keeps the lapsed connector chosen can pass it on.
+    const wideParent = await create([curated, custom]);
+    expect(mcpIds(wideParent)).toEqual([f.curated.serverId, f.custom.serverId].sort());
+    const child = await create([curated, custom], wideParent.id);
+    expect(mcpIds(child)).toEqual([f.curated.serverId, f.custom.serverId].sort());
+  } finally {
+    await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
+  }
+  // After reconnecting, the narrow parent's children still can't widen it.
+  await expect(create([curated, custom], narrowParent.id)).rejects.toMatchObject({ status: 403 });
+}, 120_000);
+
 test("the owner can open a carried connector's approvals in their Personal workspace", async () => {
   if (!shared) return;
   const f = fixture;
