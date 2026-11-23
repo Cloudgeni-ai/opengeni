@@ -229,11 +229,15 @@ export async function personalWorkspaceExtensionMcpServers(
     typeof input.ownServers === "function" ? await input.ownServers() : input.ownServers;
   const takenIds = new Set(ownServers.map((server) => server.id));
   const takenEndpoints = new Set(ownServers.map((server) => canonicalUrl(server.url)));
-  const carried: PersonalWorkspaceExtensionMcpServer[] = [];
+  type Candidate = {
+    origin: PersonalWorkspaceOriginConnections;
+    server: OriginMcpCapabilityServer;
+    connection: PersonalWorkspaceOriginConnections["connections"][number];
+  };
+  const candidates: Candidate[] = [];
   for (const origin of origins) {
     const servers: OriginMcpCapabilityServer[] =
       await listOriginMcpCapabilityServersForPersonalExtension(db, origin.originWorkspaceId);
-    let originWorkspaceName: string | null = null;
     for (const server of servers) {
       const matching = origin.connections.filter(
         (candidate) =>
@@ -242,40 +246,56 @@ export async function personalWorkspaceExtensionMcpServers(
       );
       // A working connection wins over one that stopped working.
       const connection = matching.find((candidate) => candidate.status === "active") ?? matching[0];
-      if (
-        !connection ||
-        !allowedByPolicy(server) ||
-        personalInstallations.has(server.capabilityId) ||
-        takenIds.has(server.id) ||
-        takenEndpoints.has(canonicalUrl(server.url))
-      )
+      if (!connection || !allowedByPolicy(server) || personalInstallations.has(server.capabilityId))
         continue;
-      originWorkspaceName ??=
-        (await getWorkspace(db, origin.originWorkspaceId))?.name ?? "another workspace";
-      const { catalogScope, ...definition } = server;
+      candidates.push({ origin, server, connection });
+    }
+  }
+  // Working origins claim a server id or endpoint first, so a lapsed origin
+  // listed earlier never shadows the one the runtime actually serves.
+  const claimed = new Set<Candidate>();
+  for (const working of [true, false]) {
+    for (const candidate of candidates) {
+      if ((candidate.connection.status === "active") !== working) continue;
+      const { server } = candidate;
+      if (takenIds.has(server.id) || takenEndpoints.has(canonicalUrl(server.url))) continue;
       takenIds.add(server.id);
       takenEndpoints.add(canonicalUrl(server.url));
-      carried.push({
-        ...definition,
-        connectionRef: personalSubjectRef(server.connectionRef, connection),
-        personalExtension: {
-          originWorkspaceId: origin.originWorkspaceId,
-          originWorkspaceName,
-          catalogScope,
-        },
-        ...(connection.status !== "active"
-          ? {
-              lapsedConnection: {
-                id: connection.id,
-                workspaceId: connection.workspaceId,
-                subjectId: connection.subjectId,
-                providerDomain: connection.providerDomain,
-                status: connection.status,
-              },
-            }
-          : {}),
-      });
+      claimed.add(candidate);
     }
+  }
+  const originNames = new Map<string, string>();
+  const carried: PersonalWorkspaceExtensionMcpServer[] = [];
+  for (const candidate of candidates) {
+    if (!claimed.has(candidate)) continue;
+    const { origin, server, connection } = candidate;
+    let originWorkspaceName = originNames.get(origin.originWorkspaceId);
+    if (originWorkspaceName === undefined) {
+      originWorkspaceName =
+        (await getWorkspace(db, origin.originWorkspaceId))?.name ?? "another workspace";
+      originNames.set(origin.originWorkspaceId, originWorkspaceName);
+    }
+    const { catalogScope, ...definition } = server;
+    carried.push({
+      ...definition,
+      connectionRef: personalSubjectRef(server.connectionRef, connection),
+      personalExtension: {
+        originWorkspaceId: origin.originWorkspaceId,
+        originWorkspaceName,
+        catalogScope,
+      },
+      ...(connection.status !== "active"
+        ? {
+            lapsedConnection: {
+              id: connection.id,
+              workspaceId: connection.workspaceId,
+              subjectId: connection.subjectId,
+              providerDomain: connection.providerDomain,
+              status: connection.status,
+            },
+          }
+        : {}),
+    });
   }
   return carried;
 }

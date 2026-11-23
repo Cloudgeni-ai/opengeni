@@ -976,6 +976,26 @@ export function validateSessionMcpCredentialUpdates(input: {
 type ConnectionAccountGap = { serverId: string; connectionId: string | null; reason: string };
 
 /** Picked accounts left out at admission, as turn gaps (never their account details). */
+/**
+ * Picks for a lapsed carried connector are left out of the turn's own
+ * resolution but stay in its saved intent, so a continuation after the
+ * account is reconnected binds only what the person picked, never every
+ * eligible account.
+ */
+function withLapsedConnectorPicks(
+  intent: ConnectionAccountIntent | null,
+  picks: readonly McpConnectionAccountSelection[] | undefined,
+  lapsed: readonly OmittedConnectionAccount[],
+): ConnectionAccountIntent | null {
+  if (!intent || !picks?.length || lapsed.length === 0) return intent;
+  const kept = picks.filter(
+    (pick) =>
+      lapsed.some((omitted) => omitted.serverId === pick.serverId) &&
+      !intent.selections.some((selection) => selection.serverId === pick.serverId),
+  );
+  return kept.length ? { ...intent, selections: [...intent.selections, ...kept] } : intent;
+}
+
 function connectionAccountGaps(
   omitted: readonly OmittedConnectionAccount[],
 ): ConnectionAccountGap[] {
@@ -4123,7 +4143,7 @@ async function createSessionForRequestInFileScope(
   const {
     personalConnectionDelegations,
     mcpAccountBindings,
-    connectionAccountIntent,
+    connectionAccountIntent: frozenConnectionAccountIntent,
     omittedSelections: omittedPicks,
   } = await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
     freezeConnectionAccounts({
@@ -4146,6 +4166,11 @@ async function createSessionForRequestInFileScope(
       // working since: start without it instead of refusing the message.
       unusableSelections: "omit",
     }),
+  );
+  const connectionAccountIntent = withLapsedConnectorPicks(
+    frozenConnectionAccountIntent,
+    payload.connectionAccounts,
+    lapsedToolOmissions,
   );
   const omittedSelections = [...lapsedToolOmissions, ...omittedPicks];
   if (effectiveGoal) {
@@ -5208,12 +5233,34 @@ async function acceptSessionUserMessageInFileScope(
         connectionWorkspace.settings,
       ),
     });
-    const {
-      personalConnectionDelegations,
-      mcpAccountBindings,
-      connectionAccountIntent,
-      omittedSelections,
-    } = await freezeConnectionAccounts({
+    // A pick for the person's own carried connector whose account stopped
+    // working (so this turn doesn't run it) is left out like the connector,
+    // not refused, and kept in the intent (see withLapsedConnectorPicks).
+    const lapsedPickOmissions =
+      input.connectionAccounts?.length && connectionDelegationSource.kind === "subject"
+        ? await lapsedPersonalCarriedConnectors(db, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            accountId: grant.accountId,
+            serverIds: [
+              ...new Set(
+                input.connectionAccounts.flatMap((pick) =>
+                  !connectionAccountTools.some(
+                    (tool) => tool.kind === "mcp" && tool.id === pick.serverId,
+                  ) &&
+                  (existingSession.toolPolicy.mode === "workspace_default" ||
+                    existingSession.tools.some(
+                      (tool) => tool.kind === "mcp" && tool.id === pick.serverId,
+                    ))
+                    ? [pick.serverId]
+                    : [],
+                ),
+              ),
+            ],
+            ownServers: runtimeSettings.mcpServers,
+          })
+        : [];
+    const frozen = await freezeConnectionAccounts({
       db,
       accountId: grant.accountId,
       workspaceId,
@@ -5222,7 +5269,16 @@ async function acceptSessionUserMessageInFileScope(
       resources: [...existingSession.resources, ...requestedResources],
       source: connectionDelegationSource,
       targetSessionId: sessionId,
-      ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
+      ...(input.connectionAccounts
+        ? {
+            authoritySelections: lapsedPickOmissions.length
+              ? input.connectionAccounts.filter(
+                  (pick) =>
+                    !lapsedPickOmissions.some((omitted) => omitted.serverId === pick.serverId),
+                )
+              : input.connectionAccounts,
+          }
+        : {}),
       autoConnect: { settings: deps.settings },
       // The composer's account list is loaded when the chat opens, so a
       // picked account may have stopped working since (its sign-in
@@ -5231,6 +5287,13 @@ async function acceptSessionUserMessageInFileScope(
       // reconnecting.
       unusableSelections: "omit",
     });
+    const { personalConnectionDelegations, mcpAccountBindings } = frozen;
+    const connectionAccountIntent = withLapsedConnectorPicks(
+      frozen.connectionAccountIntent,
+      input.connectionAccounts,
+      lapsedPickOmissions,
+    );
+    const omittedSelections = [...lapsedPickOmissions, ...frozen.omittedSelections];
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const surface = resolveTurnSurface({

@@ -6,6 +6,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   createSession,
+  getSessionTurnConnectionAccountIntent,
   getSessionTurnMcpAccountBindings,
   listEnabledMcpCapabilityServers,
   type EnabledMcpCapabilityServer,
@@ -18,7 +19,12 @@ import {
   settingsWithEnabledCapabilityMcpServersForTargets,
 } from "../src/domain/capabilities";
 import { mcpAccountRouteId } from "../src/domain/mcp-account-bindings";
-import { freezeConnectionAccounts } from "../src/domain/personal-connection-delegations";
+import {
+  freezeConnectionAccounts,
+  personalWorkspaceOwnerOriginConnections,
+} from "../src/domain/personal-connection-delegations";
+import { personalWorkspaceExtensionMcpServers } from "../src/domain/personal-workspace-connectors";
+import { resolveContinuedConnectionAccounts } from "../src/domain/session-connection-accounts";
 import { getConnectorToolPermissions } from "../src/domain/connector-tool-permissions";
 import {
   acceptSessionUserMessageWithOutcome,
@@ -717,6 +723,149 @@ test("a child chat can't widen its parent's tools through a carried connector wh
   // After reconnecting, the narrow parent's children still can't widen it.
   await expect(create([curated, custom], narrowParent.id)).rejects.toMatchObject({ status: 403 });
 }, 120_000);
+
+test("a pick for a carried connector whose account stopped working is kept, so later work binds only that account", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const grant = {
+    accountId: f.accountId,
+    workspaceId: f.miaPersonal,
+    subjectId: f.mia,
+    permissions: ["admin", "sessions:control"],
+    principalKind: "human_session",
+    metadata: {},
+  } as unknown as Parameters<typeof createSessionForRequest>[1];
+  const deps = {
+    settings,
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient: { wakeSessionWorkflow: async () => {} },
+    objectStorage: null,
+  } as unknown as Parameters<typeof createSessionForRequest>[0];
+  const custom = { kind: "mcp" as const, id: f.custom.serverId };
+  const curated = { kind: "mcp" as const, id: f.curated.serverId };
+  const pickA = [{ serverId: f.custom.serverId, connectionId: f.connections.miaAcme }];
+  const turnIds = async (sessionId: string) =>
+    (
+      await sql<{ id: string }[]>`
+        select id from session_turns where session_id = ${sessionId} order by created_at`
+    ).map((row) => row.id);
+  let accountB: string | null = null;
+  await sql`update connections set status = 'needs_reauth' where id = ${f.connections.miaAcme}`;
+  try {
+    // A new chat picking account A while it has stopped working.
+    const chat = await createSessionForRequest(deps, grant, f.miaPersonal, {
+      initialMessage: "use account A",
+      resources: [],
+      tools: [custom, curated],
+      connectionAccounts: pickA,
+      model: "scripted-model",
+      idempotencyKey: crypto.randomUUID(),
+    } as Parameters<typeof createSessionForRequest>[3]);
+    const [firstTurn] = await turnIds(chat.id);
+    const firstIntent = await getSessionTurnConnectionAccountIntent(
+      client.db,
+      f.miaPersonal,
+      chat.id,
+      firstTurn!,
+    );
+    expect(firstIntent?.selections).toEqual(pickA);
+    // A follow-up still picking it is accepted too, and keeps the pick.
+    const followUp = await acceptSessionUserMessageWithOutcome(
+      deps as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[0],
+      grant as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[1],
+      f.miaPersonal,
+      chat.id,
+      {
+        text: "again with A",
+        clientEventId: crypto.randomUUID(),
+        delivery: "send",
+        connectionAccounts: pickA,
+      },
+    );
+    const followUpIntent = await getSessionTurnConnectionAccountIntent(
+      client.db,
+      f.miaPersonal,
+      chat.id,
+      followUp.turn.id,
+    );
+    expect(followUpIntent?.selections).toEqual(pickA);
+
+    // Reconnect A and add a second account B for the same connector.
+    await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
+    accountB = await connection({
+      accountId: f.accountId,
+      workspaceId: f.team,
+      subjectId: f.mia,
+      providerDomain: f.custom.providerDomain,
+      resource: f.custom.endpoint,
+    });
+    // Work continuing either turn binds A only, never B.
+    for (const intent of [firstIntent!, followUpIntent!]) {
+      const continued = await resolveContinuedConnectionAccounts({
+        db: client.db,
+        settings,
+        accountId: f.accountId,
+        workspaceId: f.miaPersonal,
+        sessionId: chat.id,
+        intent,
+      });
+      expect(
+        (continued.mcpAccountBindings ?? [])
+          .filter((binding) => binding.canonicalServerId === f.custom.serverId)
+          .map((binding) => binding.connectionId),
+      ).toEqual([f.connections.miaAcme]);
+    }
+  } finally {
+    await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
+    if (accountB) await sql`delete from connections where id = ${accountB}`;
+  }
+}, 120_000);
+
+test("a carried connector a working origin serves is never listed as lapsed from another origin", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const [origin] = await personalWorkspaceOwnerOriginConnections(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.miaPersonal,
+    subjectId: f.mia,
+    includeLapsed: true,
+  });
+  expect(origin?.originWorkspaceId).toBe(f.team);
+  // The same connectors offered first by an origin whose accounts stopped working.
+  const lapsedFirst = {
+    ...origin!,
+    connections: origin!.connections.map((account) => ({
+      ...account,
+      status: "needs_reauth" as const,
+    })),
+  };
+  const carried = await personalWorkspaceExtensionMcpServers(client.db, {
+    workspaceId: f.miaPersonal,
+    subjectId: f.mia,
+    accountId: f.accountId,
+    ownServers: [],
+    origins: [lapsedFirst, origin!],
+    includeLapsed: true,
+  });
+  const byId = new Map(carried.map((server) => [server.id, server]));
+  for (const id of [f.custom.serverId, f.curated.serverId]) {
+    expect(byId.get(id)).toBeDefined();
+    expect(byId.get(id)?.lapsedConnection).toBeUndefined();
+  }
+  // With only the lapsed origin, it is listed as lapsed.
+  const onlyLapsed = await personalWorkspaceExtensionMcpServers(client.db, {
+    workspaceId: f.miaPersonal,
+    subjectId: f.mia,
+    accountId: f.accountId,
+    ownServers: [],
+    origins: [lapsedFirst],
+    includeLapsed: true,
+  });
+  expect(
+    onlyLapsed.find((server) => server.id === f.custom.serverId)?.lapsedConnection,
+  ).toBeDefined();
+}, 60_000);
 
 test("the owner can open a carried connector's approvals in their Personal workspace", async () => {
   if (!shared) return;
