@@ -13,6 +13,7 @@ import {
   BROWSER_DEFAULT_WAIT_MS,
   BROWSER_LOCATOR_WAIT_MS,
   BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS,
+  browserActionDeadlineMs,
   BrowserActionCommand,
   BrowserClipboard,
   BrowserDiagnosticBatch,
@@ -82,6 +83,7 @@ import {
   CdpResponseRefusedError,
   CdpSessionDetachedError,
   CdpTransportError,
+  DEFAULT_COMMAND_TIMEOUT_MS,
   type CdpDroppedMessage,
   type CdpEvent,
 } from "./cdp";
@@ -625,6 +627,77 @@ function dialogScopedConnection(
         return async (...args: Parameters<BrowserCdpConnection["send"]>) => {
           if (scope.abandoned) throw new DialogBlockedError(null);
           return await target.send(...args);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * The caller of an action stops waiting at the deadline derived from the
+ * action's declared waits (browserActionDeadlineMs). Each of those waits is
+ * bounded, but nearly every page read an action makes (finding its element,
+ * scrolling it into view, checking what is under the pointer) waits for the
+ * page's main thread. On a page that keeps it busy (a large single-page app
+ * rendering, a page under heavy script load) a single click's few dozen reads
+ * each wait seconds and together run far past that deadline, so the caller
+ * gives up without knowing whether the click happened. The action therefore
+ * keeps to the same deadline itself, leaving this much for its reply to reach
+ * the caller, and says exactly what happened when the page was too slow.
+ */
+const ACTION_REPLY_MARGIN_MS = 10_000;
+
+type ActionBudget = {
+  readonly deadlineAt: number;
+  readonly seconds: number;
+  /** False once the action returned: work it started that outlives it (a
+   * timer, a listener) is no longer bound by its deadline. */
+  active: boolean;
+};
+const actionBudget = new AsyncLocalStorage<ActionBudget>();
+
+/** An action's page reads used up its time; see ACTION_REPLY_MARGIN_MS. */
+class ActionBudgetSpentError extends InteractionControllerError {
+  constructor(readonly seconds: number) {
+    super("tab_not_responding", `the page did not answer within the action's ${seconds} seconds`);
+    this.name = "ActionBudgetSpentError";
+  }
+}
+
+function actionBudgetSpent(): boolean {
+  const budget = actionBudget.getStore();
+  return budget !== undefined && budget.active && Date.now() >= budget.deadlineAt;
+}
+
+/** A connection whose page commands end at the action's deadline. Commands to
+ * the browser itself do not wait on a page, and input keeps its own bound: a
+ * pressed button must always get its release. */
+function budgetedConnection(
+  connection: BrowserCdpConnection,
+  budget: ActionBudget,
+): BrowserCdpConnection {
+  return new Proxy(connection, {
+    get(target, property) {
+      if (property === "send") {
+        return async <T = Record<string, unknown>>(
+          ...[method, params, options]: Parameters<BrowserCdpConnection["send"]>
+        ): Promise<T> => {
+          if (!budget.active || options?.sessionId === undefined || method.startsWith("Input."))
+            return await target.send<T>(method, params, options);
+          const remaining = budget.deadlineAt - Date.now();
+          if (remaining <= 0) throw new ActionBudgetSpentError(budget.seconds);
+          try {
+            return await target.send<T>(method, params, {
+              ...options,
+              timeoutMs: Math.min(options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, remaining),
+            });
+          } catch (error) {
+            if (error instanceof CdpCommandTimeoutError && Date.now() >= budget.deadlineAt)
+              throw new ActionBudgetSpentError(budget.seconds);
+            throw error;
+          }
         };
       }
       const value: unknown = Reflect.get(target, property, target);
@@ -3384,40 +3457,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const retryBeforeInput = () =>
       effects === undefined || effects.state.actionEffectCount === effects.before;
     const actions = command.action.type === "batch" ? command.action.actions : [command.action];
-    let observation: BrowserObservationValue | null;
-    // Each resume follows an attachment Chrome ended under an action; a page
-    // that keeps ending them stops after one per action.
-    for (let resumes = 0; ; resumes += 1) {
-      try {
-        observation = await this.withTarget(targetId, act, { retryBeforeInput });
-        break;
-      } catch (error) {
-        const next =
-          effects && resumes < actions.length
-            ? await this.resumeAfterDetach(effects.state, progress, actions)
-            : null;
-        if (next !== null && next < actions.length) {
-          resumeFrom = next;
-          continue;
-        }
-        if (next !== null) {
-          // Every action ran; only the page as they left it is read on the
-          // new attachment. A page that cannot be read there leaves the
-          // outcome unknown, as before.
-          try {
-            observation =
-              command.observationMode === undefined || command.observationMode === "full"
+    const budgetMs = Math.max(0, browserActionDeadlineMs(command.action) - ACTION_REPLY_MARGIN_MS);
+    const budget: ActionBudget = {
+      deadlineAt: Date.now() + budgetMs,
+      seconds: Math.round(budgetMs / 1_000),
+      active: true,
+    };
+    const run = async (): Promise<BrowserObservationValue | null> => {
+      // Each resume follows an attachment Chrome ended under an action; a page
+      // that keeps ending them stops after one per action.
+      for (let resumes = 0; ; resumes += 1) {
+        try {
+          return await this.withTarget(targetId, act, { retryBeforeInput });
+        } catch (error) {
+          const next =
+            effects && resumes < actions.length
+              ? await this.resumeAfterDetach(effects.state, progress, actions)
+              : null;
+          if (next !== null && next < actions.length) {
+            resumeFrom = next;
+            continue;
+          }
+          if (next !== null) {
+            // Every action ran; only the page as they left it is read on the
+            // new attachment. A page that cannot be read there leaves the
+            // outcome unknown, as before.
+            try {
+              return command.observationMode === undefined || command.observationMode === "full"
                 ? await this.observe(command.targetId)
                 : null;
-            break;
-          } catch {
-            // Reported below from the original failure.
+            } catch {
+              // Reported below from the original failure.
+            }
           }
+          const failure = await this.actionFailure(error, effects);
+          if (effects) await this.observeOnNewAttachment(failure, effects.state, command);
+          throw failure;
         }
-        const failure = await this.actionFailure(error, effects);
-        if (effects) await this.observeOnNewAttachment(failure, effects.state, command);
-        throw failure;
       }
+    };
+    let observation: BrowserObservationValue | null;
+    try {
+      observation = await actionBudget.run(budget, run);
+    } finally {
+      budget.active = false;
     }
     this.refreshSubscribedFrame(targetId);
     return observation;
@@ -3497,6 +3580,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     effects: { state: TargetState; before: number } | undefined,
   ): Promise<unknown> {
     const inputSent = effects !== undefined && effects.state.actionEffectCount !== effects.before;
+    if (error instanceof ActionBudgetSpentError) {
+      return inputSent
+        ? new InteractionOutcomeUnknownDriverError(
+            "tab_not_responding",
+            `The input was sent, but this page then answered too slowly for the action to finish within ${error.seconds} seconds: it keeps its main thread busy. Check the page before continuing; do not repeat the action automatically.`,
+          )
+        : new InteractionDefiniteDriverError(
+            "tab_not_responding",
+            `This page answered too slowly to act on: it keeps its main thread busy, so the action could not be prepared within ${error.seconds} seconds and nothing was sent. Wait a few seconds and try again; reload the tab if it stays this slow.`,
+          );
+    }
     if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
       return inputSent
         ? new InteractionOutcomeUnknownDriverError(
@@ -3735,8 +3829,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async ensureConnection(): Promise<BrowserCdpConnection> {
     const connection = await this.openConnection();
+    const budget = actionBudget.getStore();
+    const budgeted = budget?.active ? budgetedConnection(connection, budget) : connection;
     const scope = dialogWork.getStore();
-    return scope ? dialogScopedConnection(connection, scope) : connection;
+    return scope ? dialogScopedConnection(budgeted, scope) : budgeted;
   }
 
   private async openConnection(): Promise<BrowserCdpConnection> {
@@ -11668,17 +11764,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           !before.open.has(requestId) &&
           requestLoad(state.requests.get(requestId), Date.now()) === "loading",
       );
-    while (pending() && Date.now() < deadline && !state.dialog && this.attached(state)) {
+    while (pending() && Date.now() < deadline && !state.dialog && this.keepsSettling(state)) {
       await delay(ACTION_REQUEST_POLL_MS);
     }
-    if (!state.dialog && this.attached(state)) await delay(ACTION_RESPONSE_APPLY_MS);
+    if (!state.dialog && this.keepsSettling(state)) await delay(ACTION_RESPONSE_APPLY_MS);
   }
 
-  /** Whether `state` is still this tab's attachment. A tab that closed (a
-   * popup its page closed, say) or lost its attachment has nothing left to
-   * settle, so the settle waits end at once instead of at their bound. */
-  private attached(state: TargetState): boolean {
-    return this.states.get(state.targetId) === state;
+  /** Whether settling may go on: `state` is still this tab's attachment and
+   * the action has time left. A tab that closed (a popup its page closed, say)
+   * or lost its attachment has nothing left to settle, and an action out of
+   * time must answer now, so the settle waits end at once instead of at their
+   * bound. */
+  private keepsSettling(state: TargetState): boolean {
+    return this.states.get(state.targetId) === state && !actionBudgetSpent();
   }
 
   /**
@@ -11695,13 +11793,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.navigationPending &&
       Date.now() < deadline &&
       !state.dialog &&
-      this.attached(state)
+      this.keepsSettling(state)
     ) {
       if (state.frame.loaderId !== loaderId) break;
       await delay(ACTION_REQUEST_POLL_MS);
     }
     if (state.dialog || state.frame.loaderId === loaderId) return;
-    while (Date.now() < deadline && !state.dialog && this.attached(state)) {
+    while (Date.now() < deadline && !state.dialog && this.keepsSettling(state)) {
       try {
         if (await this.documentReady(state)) return;
       } catch {
