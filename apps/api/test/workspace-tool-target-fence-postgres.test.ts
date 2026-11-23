@@ -9,6 +9,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { HTTPException } from "hono/http-exception";
 import postgres from "postgres";
+import { compileOpenApiRevision } from "@opengeni/capabilities";
 import {
   accessGrantAuthorizationFromContext,
   mcpAccountRouteId,
@@ -1029,6 +1030,141 @@ describe("targeted tool fence on PostgreSQL", () => {
       expect(provider.server.calls).toHaveLength(1);
     } finally {
       provider.server.close();
+    }
+  }, 120_000);
+
+  test("a Site's call to an API integration runs although the call's own credential resolve stamps the connection's last use between the fence's reads", async () => {
+    if (!shared) return;
+    // The OpenAPI provider, reachable over loopback in the test environment.
+    const received: (string | null)[] = [];
+    const providerServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        received.push(request.headers.get("x-api-key"));
+        return Response.json({ items: [{ id: "item-1" }] });
+      },
+    });
+    try {
+      const settings = testSettings({
+        productAccessMode: "local",
+        environmentsEncryptionKey: encryptionKey,
+      });
+      // The signed-in person viewing the Site in the Opengeni frame.
+      const access = await bootstrapWorkspace(seed!.db, {
+        accountExternalSource: "opengeni:local",
+        accountExternalId: "default",
+        accountName: "Local",
+        workspaceExternalSource: "opengeni:local",
+        workspaceExternalId: "default",
+        workspaceName: "Local",
+        subjectId: "dev",
+        subjectLabel: "Local dev",
+      });
+      const grant = access.workspaceGrants[0]!;
+      // A workspace connection, as for OneDrive. Every credential resolve of a
+      // real call stamps its last_used_at.
+      const connection = await createConnection(seed!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: encryptEnvironmentValue(
+          environmentsEncryptionKeyBytes(settings)!,
+          JSON.stringify({ headers: { "X-API-Key": "drive-test-key" } }),
+        ),
+        metadata: { displayName: "Shared Drive" },
+        createdBySubjectId: grant.subjectId,
+      });
+      // Installed as an HTTPS API; the compiled operations reach the loopback
+      // provider, as the test environment's destination policy allows.
+      const baseUrl = "https://127.0.0.1/v1/";
+      const providerUrl = `http://127.0.0.1:${providerServer.port}/v1/`;
+      const definitionId = `site-drive-${crypto.randomUUID().slice(0, 8)}`;
+      const revision = compileOpenApiRevision(
+        {
+          openapi: "3.0.3",
+          info: { title: "Drive", version: "1" },
+          servers: [{ url: providerUrl }],
+          components: {
+            securitySchemes: { key: { type: "apiKey", in: "header", name: "X-API-Key" } },
+          },
+          security: [{ key: [] }],
+          paths: {
+            "/items": {
+              get: {
+                operationId: "listItems",
+                summary: "List items",
+                responses: { "200": { description: "The items." } },
+              },
+            },
+          },
+        },
+        { definitionId, sourceUrl: `${providerUrl}openapi.json` },
+      );
+      const installed = await installApiIntegration(seed!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        capabilityId: `api:${definitionId}`,
+        pluginKey: `integration/${definitionId}`,
+        serverId: definitionId.replaceAll("-", "_"),
+        name: "Drive",
+        definitionId,
+        definitionProvenance: "workspace",
+        providerDomain: "127.0.0.1",
+        protocol: "openapi",
+        baseUrl,
+        authScheme: { kind: "api_key", carrier: "header", name: "X-API-Key" },
+        connectionId: connection.id,
+        revision,
+      });
+      // The workspace account's route, as an app pins it.
+      const identity = {
+        serverId: mcpAccountRouteId(installed.serverId, connection.id),
+        toolName: revision.tools[0]!.id,
+      };
+      const site = await siteFixture({ grant, identity }, 0);
+      const replica = createApp({
+        settings,
+        db,
+        bus: {} as never,
+        workflowClient: {} as never,
+        objectStorage: null,
+      });
+      const lastUsedAt = async () =>
+        (
+          await shared!.admin<{ last_used_at: Date | null }[]>`
+            select last_used_at from connections where id = ${connection.id}::uuid`
+        )[0]!.last_used_at;
+      expect(await lastUsedAt()).toBeNull();
+
+      const response = await replica.request(
+        `http://localhost/v1/workspaces/${grant.workspaceId}/tools/invoke`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            target: { identity },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+            siteArtifactId: site.siteArtifactId,
+            siteVersionId: site.siteVersionId,
+          }),
+        },
+      );
+      const body = await response.text();
+      // Before the fix: 502 tool_outcome_unknown, because the fence's second
+      // read saw the last_used_at this very call had just stamped.
+      expect({ status: response.status, body }).toMatchObject({ status: 200 });
+      expect(body).not.toContain("tool_outcome_unknown");
+      expect(body).toContain("item-1");
+      // The provider was called once, with the real resolved credential, and
+      // the resolve stamped the connection between the fence's two reads.
+      expect(received).toEqual(["drive-test-key"]);
+      expect(await lastUsedAt()).not.toBeNull();
+    } finally {
+      providerServer.stop(true);
     }
   }, 120_000);
 

@@ -508,6 +508,9 @@ enabled. Freeze-head source admission runs only for
 Promote `main` → `production` with a merge-commit PR (never squash / never
 GitHub rebase-and-merge). Hotfix PRs into `production` keep freeze-head
 admission; see `CONTRIBUTING.md` § Release / Publishing.
+A merged hotfix ships with `bun run release:hotfix -- --pr <n>` in opengeni-ops
+(runbook: [Ship an urgent fix to production](https://github.com/Cloudgeni-ai/opengeni-ops/blob/main/docs/runbooks/ship-urgent-fix.md)). Never roll back a release
+because a hotfix "can't be deployed"; roll back only when no image can be built.
 
 Acknowledged canary receipt recovery uses
 `.github/workflows/reconcile-canary-publication.yml` and
