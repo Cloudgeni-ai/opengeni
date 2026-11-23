@@ -7576,7 +7576,13 @@ export async function prepareAgentTools(
           failed.registryId,
           mcpUnavailableReason(error, "connect", setupAuthNeededReasons.get(failed.registryId)),
         );
-        if (!setupAuthNeededReasons.has(failed.registryId) && isMcpServerUnreachableError(error))
+        // A host that doesn't resolve was never sent anything either: a call
+        // to it is "try again", not a tool that isn't there.
+        if (
+          !setupAuthNeededReasons.has(failed.registryId) &&
+          (isMcpServerUnreachableError(error) ||
+            isUnresolvedDestination(failed.destinationPolicyFailure?.reason))
+        )
           unreachableMcpServers.add(failed.registryId);
       }
       if (
@@ -8748,6 +8754,10 @@ type McpDestinationPolicyFailure = {
   reason?: DestinationPolicyReason;
   report?: () => Promise<boolean>;
 };
+
+function isUnresolvedDestination(reason: DestinationPolicyReason | undefined): boolean {
+  return reason === "dns_failed" || reason === "dns_not_found" || reason === "dns_empty";
+}
 
 function connectionBrokerFetch(
   baseFetch: FetchLike,

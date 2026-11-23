@@ -35,16 +35,23 @@ export const SITE_TOOL_DATA_RESET_GRACE_MS = 60_000;
 /**
  * Mark targets before the data is stored. Marks stay until a manager resets
  * the target, which removes them; a later write marks it again.
- * Marking an already marked target restarts its time: the reset grace is
- * measured from the latest mark, the one just before this write.
+ * A write (`restart`) restarts an existing mark's time, so the reset grace is
+ * measured from the mark just before that write. Keeping a mark for data
+ * already stored (a sync edit) leaves its time alone, so a reset right after
+ * still lifts it.
  */
 export async function markSiteToolData(
   db: Database,
   scope: Scope,
   siteId: string,
   sources: readonly SiteToolDataSource[],
+  options: { restart?: boolean } = {},
 ): Promise<void> {
   if (sources.length === 0) return;
+  const onConflict = options.restart
+    ? sql`on conflict (workspace_id, site_id, target, connector, route)
+            do update set created_at = now()`
+    : sql`on conflict do nothing`;
   await withRlsContext(db, scope, async (tx) => {
     for (const source of sources)
       await rawRows(
@@ -53,8 +60,7 @@ export async function markSiteToolData(
             (account_id, workspace_id, site_id, target, connector, route, shared)
           values (${scope.accountId}, ${scope.workspaceId}, ${siteId}, ${source.target},
             ${source.connector.slice(0, 256)}, ${source.route.slice(0, 256)}, ${source.shared})
-          on conflict (workspace_id, site_id, target, connector, route)
-            do update set created_at = now()`,
+          ${onConflict}`,
       );
   });
 }

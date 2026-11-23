@@ -281,6 +281,9 @@ describe("workspace tool gateway adapters", () => {
         expect(prepared.toolGatewayCatalog?.entries.map((entry) => entry.identity)).toEqual([
           { serverId: "opengeni", toolName: "session_get" },
         ]);
+        // Its host doesn't resolve, so nothing was sent: a call to it is
+        // "try again" (503), not a tool that isn't there (404).
+        expect([...prepared.unreachableMcpServers]).toEqual(["cap-ledger"]);
       } finally {
         await prepared.close();
       }
