@@ -980,7 +980,7 @@
 
 @keyframes og-tc-fade {
   from {
-    opacity: 0;
+    background-color: transparent;
   }
 }
 @keyframes og-tc-rise {

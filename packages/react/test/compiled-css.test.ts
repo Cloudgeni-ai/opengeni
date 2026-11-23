@@ -354,7 +354,8 @@ describe("compiled CSS contract", () => {
       "utf8",
     );
     const timelineShared = await readFile(join(packageRoot, "src/timeline/shared.tsx"), "utf8");
-    expect(fileBrowser).toContain('<AlertDialog.Overlay className="og-root');
+    expect(fileBrowser).toContain("overlay={AlertDialog.Overlay}");
+    expect(fileBrowser).toContain('className="og-root fixed inset-0');
     expect(lightbox.match(/style=\{portalStyle\}/gu)?.length).toBe(2);
     expect(
       timelineShared.match(/lightbox\.open\(src, caption, event\.currentTarget/gu)?.length,

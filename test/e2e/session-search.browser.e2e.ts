@@ -362,6 +362,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       // before its close-focus callback. No focus or callback is simulated.
       await page.addStyleTag({
         content: `@keyframes retained-drawer-close { from { opacity: 1; } to { opacity: 0.99; } }
+          [data-slot="sheet-overlay"] { --og-modal-exit-duration: 5s !important; }
           [data-slot="sheet-content"][data-state="open"] { animation: none !important; }
           [data-slot="sheet-content"][data-state="closed"] { animation: retained-drawer-close 5s linear !important; }`,
       });

@@ -27,6 +27,7 @@ import { AlertDialog } from "radix-ui";
 import { usePortalContainer } from "../ui/portal-container";
 import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
+import { ModalLayer } from "../lib/modal-layer";
 import { MENU_BUTTON_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import {
   type PortalTokenStyle,
@@ -1228,72 +1229,76 @@ function DeleteDialog({
       <AlertDialog.Portal
         container={portalContainer ?? (typeof document === "undefined" ? null : document.body)}
       >
-        <AlertDialog.Overlay className="og-root fixed inset-0 z-[100] bg-black/45 backdrop-blur-[2px]" />
-        <AlertDialog.Content
-          className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-hidden"
-          style={portalTokenStyle}
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            cancelRef.current?.focus();
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            scheduleSettle();
-          }}
-          onEscapeKeyDown={(event) => {
-            event.stopPropagation();
-            if (busy) {
-              event.preventDefault();
-            } else {
-              closeIntentRef.current = "cancel";
-            }
-          }}
+        <ModalLayer
+          overlay={AlertDialog.Overlay}
+          className="og-root fixed inset-0 z-[100] bg-black/45 before:pointer-events-none before:absolute before:inset-0 before:backdrop-blur-[2px]"
         >
-          <div className="flex items-start gap-3">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-og-status-failed/12 text-og-status-failed">
-              <Trash2Icon className="size-4" aria-hidden />
-            </span>
-            <div className="min-w-0">
-              <AlertDialog.Title className="text-og-sm font-semibold">
-                {t("fileBrowser.delete")}{" "}
-                {node.kind === "dir" ? t("fileBrowser.folder") : t("fileBrowser.file")}?
-              </AlertDialog.Title>
-              <AlertDialog.Description className="mt-1 text-og-sm leading-relaxed text-og-fg-muted">
-                <span className="break-all font-og-mono text-og-fg">{node.path}</span>
-                {node.kind === "dir"
-                  ? " and everything inside it will be permanently removed."
-                  : " will be permanently removed."}
-              </AlertDialog.Description>
+          <AlertDialog.Content
+            className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-hidden"
+            style={portalTokenStyle}
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              cancelRef.current?.focus();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              scheduleSettle();
+            }}
+            onEscapeKeyDown={(event) => {
+              event.stopPropagation();
+              if (busy) {
+                event.preventDefault();
+              } else {
+                closeIntentRef.current = "cancel";
+              }
+            }}
+          >
+            <div className="flex items-start gap-3">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-og-status-failed/12 text-og-status-failed">
+                <Trash2Icon className="size-4" aria-hidden />
+              </span>
+              <div className="min-w-0">
+                <AlertDialog.Title className="text-og-sm font-semibold">
+                  {t("fileBrowser.delete")}{" "}
+                  {node.kind === "dir" ? t("fileBrowser.folder") : t("fileBrowser.file")}?
+                </AlertDialog.Title>
+                <AlertDialog.Description className="mt-1 text-og-sm leading-relaxed text-og-fg-muted">
+                  <span className="break-all font-og-mono text-og-fg">{node.path}</span>
+                  {node.kind === "dir"
+                    ? " and everything inside it will be permanently removed."
+                    : " will be permanently removed."}
+                </AlertDialog.Description>
+              </div>
             </div>
-          </div>
-          <div className="mt-4 flex justify-end gap-2">
-            <AlertDialog.Cancel asChild>
-              <button
-                ref={cancelRef}
-                type="button"
-                onClick={() => {
-                  closeIntentRef.current = "cancel";
-                }}
-                disabled={busy}
-                className="min-h-9 rounded-og-md border border-og-border px-3 text-og-sm font-medium text-og-fg hover:bg-og-surface-2 disabled:opacity-50 pointer-coarse:min-h-11"
-              >
-                {t("fileBrowser.cancel")}
-              </button>
-            </AlertDialog.Cancel>
-            <AlertDialog.Action asChild>
-              <button
-                type="button"
-                onClick={() => {
-                  closeIntentRef.current = "confirm";
-                }}
-                disabled={busy}
-                className="min-h-9 rounded-og-md bg-og-danger-fill px-3 text-og-sm font-semibold text-og-danger-fg shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
-              >
-                {t("fileBrowser.deletePermanently")}
-              </button>
-            </AlertDialog.Action>
-          </div>
-        </AlertDialog.Content>
+            <div className="mt-4 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <button
+                  ref={cancelRef}
+                  type="button"
+                  onClick={() => {
+                    closeIntentRef.current = "cancel";
+                  }}
+                  disabled={busy}
+                  className="min-h-9 rounded-og-md border border-og-border px-3 text-og-sm font-medium text-og-fg hover:bg-og-surface-2 disabled:opacity-50 pointer-coarse:min-h-11"
+                >
+                  {t("fileBrowser.cancel")}
+                </button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeIntentRef.current = "confirm";
+                  }}
+                  disabled={busy}
+                  className="min-h-9 rounded-og-md bg-og-danger-fill px-3 text-og-sm font-semibold text-og-danger-fg shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
+                >
+                  {t("fileBrowser.deletePermanently")}
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </ModalLayer>
       </AlertDialog.Portal>
     </AlertDialog.Root>
   );
