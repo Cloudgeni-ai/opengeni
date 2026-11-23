@@ -4,6 +4,8 @@ import {
   getWorkspaceGrant,
   listSiteToolDataSources,
   markSiteToolData,
+  resetSiteToolData,
+  SITE_TOOL_DATA_RESET_GRACE_MS,
   SiteDataError,
   siteToolDataTarget,
   subjectHasLiveWorkspaceAuthorityInScope,
@@ -117,14 +119,57 @@ export async function siteToolDataSources(
   scope: Scope,
   siteId: string,
 ): Promise<SiteToolDataSource[]> {
-  const { marks, sharedSyncActions } = await listSiteToolDataSources(deps.db, scope, siteId);
+  const { marks, sharedSyncActions, resets } = await listSiteToolDataSources(
+    deps.db,
+    scope,
+    siteId,
+  );
   return [
     ...marks,
-    ...sharedSyncActions.flatMap((action) => {
+    ...sharedSyncActions.flatMap(({ action, deletedAt }) => {
       const source = sourceOfSyncAction(action);
-      return source ? [source] : [];
+      if (!source) return [];
+      // A deleted sync's data is gone once its target was reset after it.
+      const reset = resets.get(source.target);
+      if (
+        deletedAt &&
+        reset &&
+        reset.getTime() - SITE_TOOL_DATA_RESET_GRACE_MS >= deletedAt.getTime()
+      )
+        return [];
+      return [source];
     }),
   ];
+}
+
+/**
+ * A manager reset a target's data (a collection reset or removed, or the
+ * SQL database reset): its earlier marks stop counting. Live shared syncs
+ * that fill it still count.
+ */
+export async function resetToolData(
+  deps: Pick<ApiRouteDeps, "db">,
+  scope: Scope,
+  siteId: string,
+  target: string,
+): Promise<void> {
+  await resetSiteToolData(deps.db, scope, siteId, target);
+}
+
+/**
+ * Keep a shared sync's target marked when the sync is changed or deleted, so
+ * data it stored stays restricted after it switches mode or target.
+ */
+export async function keepSyncToolDataMarked(
+  deps: Pick<ApiRouteDeps, "db">,
+  scope: Scope,
+  siteId: string,
+  action: unknown,
+): Promise<void> {
+  if (!action || typeof action !== "object" || (action as { mode?: unknown }).mode !== "shared")
+    return;
+  const source = sourceOfSyncAction(action);
+  if (source) await markSiteToolData(deps.db, scope, siteId, [source]);
 }
 
 /** Mark targets before shared-account tool data is stored in them. */

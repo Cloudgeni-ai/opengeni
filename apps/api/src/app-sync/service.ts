@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { asAppAutomation, markToolData, siteToolDataTarget } from "../site-tool-data";
+import {
+  asAppAutomation,
+  keepSyncToolDataMarked,
+  markToolData,
+  siteToolDataTarget,
+} from "../site-tool-data";
 import {
   APP_SYNC_DEFAULT_PAGES,
   APP_SYNC_MAX_RECORDS,
@@ -838,26 +843,30 @@ async function runForPerson(
       );
     const writer = await syncWriter(deps, grant, task, action, context);
     const identity = await toolForPerson(deps, grant, action, chosenAccount);
-    // A shared sync's target holds this account's data: mark it before
-    // writing, so reads need a member who may use the connector.
+    // A shared sync's target holds this account's data: mark it before each
+    // write, so reads need a member who may use the connector. Marking per
+    // page keeps it marked if a manager resets the data while this run is
+    // still writing (a reset removes earlier marks).
+    let markTarget = async () => {};
     if (action.mode === "shared") {
       const inventory = await readInventory(deps, grant).catch(() => null);
       const account = inventory?.accounts.find((item) => item.serverId === identity.serverId);
-      await markToolData(
-        deps,
-        { accountId: task.accountId, workspaceId: task.workspaceId },
-        action.siteId,
-        [
-          {
-            target: action.target
-              ? siteToolDataTarget("sql")
-              : siteToolDataTarget("collection", action.collection),
-            connector: account?.canonicalServerId ?? connectorToolOf(action).serverId,
-            route: identity.serverId,
-            shared: account?.shared === true,
-          },
-        ],
-      );
+      const source = {
+        target: action.target
+          ? siteToolDataTarget("sql")
+          : siteToolDataTarget("collection", action.collection),
+        connector: account?.canonicalServerId ?? connectorToolOf(action).serverId,
+        route: identity.serverId,
+        shared: account?.shared === true,
+      };
+      markTarget = () =>
+        markToolData(
+          deps,
+          { accountId: task.accountId, workspaceId: task.workspaceId },
+          action.siteId,
+          [source],
+        );
+      await markTarget();
     }
     const limit = Math.min(action.maxRecords ?? APP_SYNC_MAX_RECORDS, APP_SYNC_MAX_RUN_RECORDS);
     const paging = action.paging ?? null;
@@ -897,6 +906,7 @@ async function runForPerson(
           seen.add(record.key);
           fresh += 1;
         }
+      await markTarget();
       summary.written += await writer.write(extracted.records);
       if (action.removeMissing)
         await recordAppSyncKeys(deps.db, {
@@ -1715,6 +1725,13 @@ export async function updateAppSync(
         events: patch.events,
       })
     : null;
+  // What the sync stored stays restricted after it changes mode or target.
+  await keepSyncToolDataMarked(
+    deps,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    siteId,
+    action,
+  );
   const updated = await deps.db.transaction(async (tx) => {
     const next = await updateScheduledTask(tx, grant.workspaceId, task.id, {
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
@@ -1788,7 +1805,14 @@ export async function deleteAppSync(
   syncId: string,
 ): Promise<{ deleted: string }> {
   const access = await managerAccess(deps, grant, siteId);
-  await requireSyncTask(deps, grant, siteId, syncId);
+  const { action } = await requireSyncTask(deps, grant, siteId, syncId);
+  // Its stored data outlives the sync, so it stays restricted.
+  await keepSyncToolDataMarked(
+    deps,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    siteId,
+    action,
+  );
   await deleteScheduledTaskLifecycle({
     db: deps.db,
     workspaceId: grant.workspaceId,

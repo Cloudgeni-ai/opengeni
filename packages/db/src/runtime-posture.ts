@@ -573,7 +573,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
-  // Migration 1555: called only behind the existing vault routine grants.
+  // Migration 1557: called only behind the existing vault routine grants.
   "vault_turn_context(uuid, uuid, uuid, uuid)",
   "human_input_secret_target_reachable(jsonb, jsonb, text, uuid)",
   "human_input_secret_save_targets(jsonb, uuid, uuid)",
@@ -2513,6 +2513,7 @@ export const FORCE_RLS_TABLES = [
   "site_sql_rate_windows",
   "site_sql_usage",
   "site_tool_allowances",
+  "site_tool_data_resets",
   "site_tool_data_sources",
   "site_viewer_sessions",
   "skill_config_conversion_receipts",
@@ -2917,6 +2918,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_rate_windows",
   "site_sql_usage",
   "site_tool_allowances",
+  // 1554_app_server_code: where an app stored shared-account tool data;
+  // 1557 lets a manager's reset remove stale marks.
+  "site_tool_data_sources",
   "site_viewer_sessions",
   "slack_agent_intro_posts",
   "slack_agent_proposals",
@@ -3144,8 +3148,6 @@ export const RUNTIME_READ_INSERT_TABLES = [
   // mirror of a visible message event.
   "session_message_search_texts",
   "session_spawn_denials",
-  // 1554_app_server_code: where an app stored shared-account tool data (marks only grow).
-  "site_tool_data_sources",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
@@ -3202,6 +3204,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "session_attempt_model_context_snapshots",
   "session_turn_startup_milestones",
   "site_auth_connections",
+  // 1557_sticky_tool_data_marks: when a manager last reset a target.
+  "site_tool_data_resets",
   "slack_user_link_access_requests",
   "workspace_interaction_revisions",
 ] as const;
