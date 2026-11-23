@@ -817,6 +817,23 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             `scheduled agent configuration is not admissible: ${error.message}`,
           );
         }
+        // An agent's run gets that agent's Memory guidance in its
+        // instructions. It is part of the accepted instructions, which the
+        // database checks the run's chat against when the run binds it.
+        const runAgent = task.agentConfig.agentId
+          ? await getAgent(
+              db,
+              { accountId: task.accountId, workspaceId: task.workspaceId },
+              task.agentConfig.agentId,
+            )
+          : null;
+        if (runAgent) {
+          resolvedAgentInstructions = scheduledAgentRunInstructions(
+            runAgent,
+            resolvedAgentInstructions,
+            { private: task.visibility === "private", ownerSubjectId: task.ownerSubjectId },
+          );
+        }
       }
       // A task saved before the secret permission names were unified may still
       // hold their retired aliases. The chat a run creates stores the canonical
@@ -1501,12 +1518,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedTools: taskTools,
           resolvedFirstPartyMcpTools: firstPartyMcpTools,
           resolvedFirstPartyMcpPermissions: firstPartyMcpPermissions,
-          ...(resolvedAgentConfig
-            ? {
-                resolvedAgentConfig,
-                ...(resolvedAgentInstructions !== undefined ? { resolvedAgentInstructions } : {}),
-              }
-            : {}),
+          ...(resolvedAgentConfig ? { resolvedAgentConfig } : {}),
+          ...(resolvedAgentInstructions !== undefined ? { resolvedAgentInstructions } : {}),
           resolvedVariableSet: null,
           resolvedRig: acceptedRig?.activeVersion
             ? {
@@ -1745,20 +1758,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
             // An agent's "Starts when": the run is a chat with that agent,
             // with its Instructions, Memory and Can use, checked as the
-            // task's owner when the session binds.
-            const runAgent = task.agentConfig.agentId
-              ? await getAgent(
-                  dispatchDb,
-                  { accountId: task.accountId, workspaceId: task.workspaceId },
-                  task.agentConfig.agentId,
-                )
-              : null;
-            const runInstructions = runAgent
-              ? scheduledAgentRunInstructions(runAgent, resolvedAgentInstructions, {
-                  private: task.visibility === "private",
-                  ownerSubjectId: task.ownerSubjectId,
-                })
-              : resolvedAgentInstructions;
+            // task's owner when the session binds. Its Memory guidance is
+            // already in the accepted instructions.
+            const runInstructions = resolvedAgentInstructions;
             try {
               const sessionInput: Parameters<typeof createSession>[1] = {
                 accountId: task.accountId,

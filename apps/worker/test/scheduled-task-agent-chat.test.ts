@@ -71,7 +71,7 @@ async function fixture() {
     (account_id, subject_id, status, personal_workspace_id)
     values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
-  const agent = async (name: string) =>
+  const agent = async (name: string, options: { memoryEnabled?: boolean } = {}) =>
     (
       await createAgent(client.db, scope, {
         visibility: "workspace",
@@ -80,7 +80,7 @@ async function fixture() {
         description: "",
         avatar: { kind: "emoji", emoji: "🛠️", hue: 30 },
         instructions: `You are ${name}.`,
-        memoryEnabled: false,
+        memoryEnabled: options.memoryEnabled ?? false,
         origin: "app",
         sourceSessionId: null,
         createdBySubjectId: grant.subjectId,
@@ -115,12 +115,43 @@ async function fixture() {
       select agent_id from sessions where id = ${sessionId}`;
     return row?.agent_id ?? null;
   };
+  const chatInstructions = async (sessionId: string) => {
+    const [row] = await shared!.admin<{ instructions: string | null }[]>`
+      select instructions from sessions where id = ${sessionId}`;
+    return row?.instructions ?? null;
+  };
   const task = async (taskId: string) =>
     (await getScheduledTask(client.db, grant.workspaceId, taskId))!;
-  return { grant, agent, agentConfig, dispatch, chatAgent, task };
+  return { grant, agent, agentConfig, dispatch, chatAgent, chatInstructions, task };
 }
 
 describe("an agent's automation chat, run by the dispatch (real PostgreSQL)", () => {
+  test("an agent with Memory starts its chat with the Memory guidance", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await createScheduledTask(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+      name: "Review on mention",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-agent-chat-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: f.agentConfig(reviewer),
+      metadata: {},
+    });
+
+    // The guidance is part of the run's accepted instructions, so the
+    // database accepts the chat the run creates.
+    const run = await f.dispatch(created.id);
+    expect(run.action).toBe("start");
+    expect(await f.chatAgent(run.sessionId)).toBe(reviewer);
+    expect(await f.chatInstructions(run.sessionId)).toContain("slack_agent_chats");
+  }, 120_000);
+
   test("its own chat is started with the agent, kept, and replaced with the new agent", async () => {
     if (!available) return;
     const f = await fixture();
