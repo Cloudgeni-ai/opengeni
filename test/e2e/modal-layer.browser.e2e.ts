@@ -119,6 +119,12 @@ test("contained portals stay contained and non-modal dialogs have no backdrop", 
     expect(
       await page.locator('[data-slot="dialog-overlay"], body[data-scroll-locked]').count(),
     ).toBe(0);
+    // Radix registers outside pointer handling on a later task so the opening
+    // press cannot also dismiss the dialog. Wait for focus and that task.
+    await page.waitForFunction(() => document.activeElement?.textContent === "Copy link");
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))),
+    );
     await page.mouse.click(10, 10);
     await content.waitFor({ state: "detached" });
   } finally {
