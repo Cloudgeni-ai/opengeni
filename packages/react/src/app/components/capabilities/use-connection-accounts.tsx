@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem, ChatSession as Session } from "@opengeni/sdk";
+import type { McpConnectionAccountSelection } from "@opengeni/sdk";
 import { isConnectionAccountSubmissionError } from "../../../lib/format";
 import { userErrorText } from "../../../ui/api-error";
 import { isWorkspacePermissionDenied } from "../../lib/permissions";
@@ -20,6 +21,34 @@ import {
 
 /** How old a chat's account list may get before returning to the chat re-reads it. */
 export const CONNECTION_ACCOUNTS_STALE_AFTER_MS = 60_000;
+
+/**
+ * The accounts a refused send can go again with: its picks minus those the
+ * fresh inventory no longer offers (stopped working or no longer visible).
+ * Null when nothing would change, or when leaving a connector's last pick
+ * out would let the server use that connector's other accounts instead (a
+ * message with no pick for a connector attaches all of its accounts), so a
+ * resend never swaps in or widens to an account the person did not pick.
+ */
+export function accountsWithoutUnusablePicks(
+  sent: readonly McpConnectionAccountSelection[],
+  groups: readonly ConnectedAccountGroup[],
+): McpConnectionAccountSelection[] | null {
+  const usable = (selection: McpConnectionAccountSelection) =>
+    groups.some(
+      (group) =>
+        group.serverId === selection.serverId &&
+        group.accounts.some((account) => account.id === selection.connectionId),
+    );
+  const kept = sent.filter(usable);
+  if (kept.length === sent.length) return null;
+  for (const serverId of new Set(sent.map((selection) => selection.serverId))) {
+    if (kept.some((selection) => selection.serverId === serverId)) continue;
+    const others = groups.find((group) => group.serverId === serverId)?.accounts ?? [];
+    if (others.length > 0) return null;
+  }
+  return kept;
+}
 
 export function useConnectionAccounts(
   client: ChatClient<OpenGeniBrowserClient>,
@@ -79,10 +108,10 @@ export function useConnectionAccounts(
   /** When the last inventory read started, for re-reading a stale one on return. */
   const lastRead = useRef(0);
   const refresh = useCallback(
-    async (quietRetries = true) => {
-      if (scope.current.epoch !== epoch) return;
+    async (quietRetries = true): Promise<ConnectedAccountGroup[] | null> => {
+      if (scope.current.epoch !== epoch) return null;
       const invocation = scope.current;
-      if (invocation.canReadConnections !== true) return;
+      if (invocation.canReadConnections !== true) return null;
       const revision = ++request.current;
       lastRead.current = Date.now();
       const current = () =>
@@ -111,7 +140,9 @@ export function useConnectionAccounts(
             accessDenied: false,
             unavailable: false,
           });
+          return groups;
         }
+        return null;
       } catch (failure) {
         if (current()) {
           const accessDenied = isWorkspacePermissionDenied(failure);
@@ -126,6 +157,7 @@ export function useConnectionAccounts(
             unavailable: !accessDenied && isTransientServiceFailure(failure),
           });
         }
+        return null;
       }
     },
     // Inventory stays available when a connector is toggled off. Selection is
@@ -249,11 +281,48 @@ export function useConnectionAccounts(
     /** Opengeni was briefly unreachable; `error` is set and Send stays blocked until it returns. */
     unavailable: Boolean(hasNative && canReadConnections === true && unavailable),
     loading: hasNative && canReadConnections !== false && !matches,
-    refresh,
-    // Refresh inventory only. Explicit choices remain pinned, and the failed
-    // send keeps its original accounts until the human edits and sends again.
+    refresh: async (quietRetries?: boolean): Promise<void> => {
+      await refresh(quietRetries);
+    },
+    // Refresh inventory only. Explicit choices remain pinned; a refused send
+    // goes again only through `reviseRefusedAccounts`.
     onSelectionError: (error: unknown) => {
       if (isConnectionAccountSubmissionError(error)) void refresh();
+    },
+    /**
+     * For a send refused over its connector accounts: re-read them and give
+     * the picks to send again with, leaving out only accounts that stopped
+     * working or are no longer visible. Never adds or swaps an account; null
+     * keeps the refusal. Explicit choices narrow to the picks still usable.
+     */
+    reviseRefusedAccounts: async (
+      error: unknown,
+      sent: readonly McpConnectionAccountSelection[] | undefined,
+    ): Promise<McpConnectionAccountSelection[] | null> => {
+      if (!isConnectionAccountSubmissionError(error) || !sent?.length) return null;
+      const groups = await refresh(false);
+      if (!groups) return null;
+      const kept = accountsWithoutUnusablePicks(sent, groups);
+      if (!kept) return null;
+      if (scope.current.epoch === epoch && scope.current.canReadConnections === true) {
+        setChoices((current) => {
+          const accounts =
+            current?.client === client && current.identity === identity && current.epoch === epoch
+              ? current.accounts
+              : initialChoices;
+          const narrowed = { ...accounts };
+          for (const [serverId, ids] of Object.entries(accounts)) {
+            const still = ids.filter((id) =>
+              kept.some((pick) => pick.serverId === serverId && pick.connectionId === id),
+            );
+            // A pin with nothing left stays as it was: the next send asks to
+            // review it rather than widening to the connector's defaults.
+            if (still.length > 0) narrowed[serverId] = still;
+          }
+          return { client, identity, epoch, accounts: narrowed };
+        });
+      }
+      return kept;
     },
   };
 }

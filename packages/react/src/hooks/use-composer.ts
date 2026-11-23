@@ -80,6 +80,18 @@ export type UseComposerOptions = EmbeddedSessionClientOverride<ChatClient> &
       | ((error: Error, input: SendMessageInput, delivery: "send" | "steer") => void)
       | undefined;
     /**
+     * Asked once per send when the server refuses its connector accounts
+     * (for example one stopped working after the chat loaded). Returns the
+     * accounts to send again with, which may only leave picks out, or null to
+     * keep the refusal. The send then goes again on its own, at most once.
+     */
+    reviseRefusedAccounts?:
+      | ((
+          error: Error,
+          input: SendMessageInput,
+        ) => Promise<SendMessageInput["connectionAccounts"] | null>)
+      | undefined;
+    /**
      * Non-policy message fields merged into every send. Durable policy belongs
      * to this composer draft; attachments and credentials may remain host-owned.
      */
@@ -1061,6 +1073,8 @@ export function useComposer(
   }, []);
   const onDeliveryErrorRef = useRef(options.onDeliveryError);
   onDeliveryErrorRef.current = options.onDeliveryError;
+  const reviseRefusedAccountsRef = useRef(options.reviseRefusedAccounts);
+  reviseRefusedAccountsRef.current = options.reviseRefusedAccounts;
   useLayoutEffect(() => {
     steeringRef.current = steering;
   }, [steering]);
@@ -2551,22 +2565,55 @@ export function useComposer(
               });
           }
         };
+        const submitOrFallBack = async (): Promise<void> => {
+          try {
+            await submit();
+          } catch (cause) {
+            // Refused before anything was accepted by a server older than
+            // `steer_or_send`: send as this view chose, as before it.
+            if (!steerOrSend || !rejectsSteerOrSend(cause)) throw cause;
+            steerOrSendUnsupportedRef.current = true;
+            steerOrSend = false;
+            replaceOptimisticSends((current) =>
+              current.map((candidate) =>
+                candidate.clientEventId === operation.clientEventId
+                  ? { ...candidate, steerOrSend: false }
+                  : candidate,
+              ),
+            );
+            await submit();
+          }
+        };
         try {
-          await submit();
+          await submitOrFallBack();
         } catch (cause) {
-          // Refused before anything was accepted by a server older than
-          // `steer_or_send`: send as this view chose, as before it.
-          if (!steerOrSend || !rejectsSteerOrSend(cause)) throw cause;
-          steerOrSendUnsupportedRef.current = true;
-          steerOrSend = false;
+          // Refused over accounts that stopped working since the chat
+          // loaded: the host leaves them out and the message goes again once,
+          // on its own, with no failed bubble. A second refusal stands.
+          const revise = reviseRefusedAccountsRef.current;
+          if (!revise || isOutcomeUnknownError(cause)) throw cause;
+          let accounts: SendMessageInput["connectionAccounts"] | null = null;
+          try {
+            accounts = await revise(asError(cause), wireInput);
+          } catch {
+            accounts = null;
+          }
+          if (
+            !accounts ||
+            targetKeyRef.current !== ownedTargetKey ||
+            targetGeneration.current !== ownedGeneration
+          ) {
+            throw cause;
+          }
+          wireInput = { ...wireInput, connectionAccounts: accounts };
           replaceOptimisticSends((current) =>
             current.map((candidate) =>
               candidate.clientEventId === operation.clientEventId
-                ? { ...candidate, steerOrSend: false }
+                ? { ...candidate, input: { ...candidate.input, connectionAccounts: accounts } }
                 : candidate,
             ),
           );
-          await submit();
+          await submitOrFallBack();
         }
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -3089,7 +3136,10 @@ export function useComposer(
       };
       // Before anything is accepted, a server without `steer_or_send` names it
       // in its refusal; this composer then chooses from its own view instead.
-      const deliverOrFallBack = async (operation: PendingComposerOperation, savedFirst = false) => {
+      const deliverOrFallBackOnce = async (
+        operation: PendingComposerOperation,
+        savedFirst = false,
+      ) => {
         try {
           return await deliver(operation, savedFirst);
         } catch (cause) {
@@ -3100,6 +3150,32 @@ export function useComposer(
             steerOrSend: false,
           }));
           return await deliver(chosen, true);
+        }
+      };
+      // A refusal naming accounts that stopped working since the chat loaded
+      // is fixed by the host leaving them out; the message then goes again
+      // once, on its own, without a failed bubble. A second refusal stands.
+      const deliverOrFallBack = async (operation: PendingComposerOperation, savedFirst = false) => {
+        try {
+          return await deliverOrFallBackOnce(operation, savedFirst);
+        } catch (cause) {
+          const revise = reviseRefusedAccountsRef.current;
+          if (!revise || isOutcomeUnknownError(cause)) throw cause;
+          const kept = pendingOperationRef.current;
+          const latest =
+            kept && kept.input.clientEventId === operation.input.clientEventId ? kept : operation;
+          let accounts: SendMessageInput["connectionAccounts"] | null = null;
+          try {
+            accounts = await revise(asError(cause), latest.input);
+          } catch {
+            accounts = null;
+          }
+          if (!accounts || !owned()) throw cause;
+          const revised = updatePending(latest, (current) => ({
+            ...current,
+            input: { ...current.input, connectionAccounts: accounts },
+          }));
+          return await deliverOrFallBackOnce(revised, true);
         }
       };
       // A `steer_or_send` the server resolved to a Send is an ordinary message:
