@@ -2762,51 +2762,37 @@ describe("Steer several waiting prompts together", () => {
     ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
   });
 
-  test("an attachment in the middle splits the claim but never hands its own group over", async () => {
-    // p2 carries a file, so the worker claims p1 alone; p2 and p3 then wait
-    // for it instead of cutting it off at its first model step.
-    const value = await fixture(4);
-    const [p1, p2, p3, p4] = value.turns as [
-      SessionTurnRow,
-      SessionTurnRow,
-      SessionTurnRow,
-      SessionTurnRow,
-    ];
+  test("an attachment in the middle splits the claim, and the first part hands over before any inference", async () => {
+    // p2 carries a file, so the worker claims p1 alone. p2 and p3 already
+    // wait as Steers, so p1 hands over at its first model step, before any
+    // request leaves the worker: the agent reads them in one run.
+    const value = await fixture(3);
+    const [p1, p2, p3] = value.turns as [SessionTurnRow, SessionTurnRow, SessionTurnRow];
     await steer(value, p1, [
       { turnId: p2.id, expectedTurnVersion: p2.version },
       { turnId: p3.id, expectedTurnVersion: p3.version },
     ]);
-    const claim = async () => {
-      const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId!, {
-        sessionId: value.session.id,
-        workflowId: `session-${value.session.id}`,
-        workflowRunId: crypto.randomUUID(),
-        attemptId: crypto.randomUUID(),
-        dispatchId: crypto.randomUUID(),
-        trigger: { kind: "next" },
-      });
-      if (claimed.action !== "claimed") throw new Error(`nothing claimed: ${claimed.reason}`);
-      return claimed.turn;
-    };
-    const pending = async (turnId: string) =>
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      workflowId: `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`nothing claimed: ${claimed.reason}`);
+    expect(claimed.turn.id).toBe(p1.id);
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([p2.id, p3.id]);
+    expect(
       await hasPendingSteerForTurn(client.db, {
         accountId: value.grant.accountId,
         workspaceId: value.grant.workspaceId!,
         sessionId: value.session.id,
-        turnId,
-      });
-    const running = await claim();
-    expect(running.id).toBe(p1.id);
-    expect(
-      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
-    ).toEqual([p2.id, p3.id, p4.id]);
-    expect(await pending(p1.id)).toBe(false);
-    // A later Steer outside the group still hands the running turn over.
-    const [stored4] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
-      db.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, p4.id)),
-    );
-    await steer(value, stored4!, []);
-    expect(await pending(p1.id)).toBe(true);
+        turnId: p1.id,
+      }),
+    ).toBe(true);
   });
 
   test("a target that already started is skipped while the others are steered", async () => {

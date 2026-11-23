@@ -2163,16 +2163,12 @@ export async function steerQueuedTurnInTransaction(
   );
   const now = new Date();
   const queueVersion = session.queueVersion + 1;
-  // Prompts Steered together share this command's id, so once the first of
-  // them runs the rest wait for it instead of handing it over again.
-  const steerGroupId = steered.length > 1 ? reserved.receipt.id : null;
   for (const row of steered) {
     // A repeated Steer (for example "Send now" on a deferred one) replaces the
     // earlier deferral facts instead of accumulating them.
     const {
       deferredUntilCompaction: _previousCompactionDeferral,
       deferredUntilModelStep: _previousModelStepDeferral,
-      steerGroupId: _previousSteerGroup,
       ...rowMetadata
     } = row.metadata;
     await db
@@ -2186,7 +2182,6 @@ export async function steerQueuedTurnInTransaction(
           replacedAttemptId: supersededAttemptId,
           interruptionCount,
           ...steerDeferralFacts(supersession),
-          ...(steerGroupId ? { steerGroupId } : {}),
         },
         updatedAt: now,
       })
