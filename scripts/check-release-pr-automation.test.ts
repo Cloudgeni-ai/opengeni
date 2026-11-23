@@ -5545,7 +5545,7 @@ describe("workflow contracts", () => {
     expect(release.jobs.version.if).toBe(
       "${{ github.event_name == 'push' && vars.VERSION_PR_ON_PUSH == 'true' }}",
     );
-    expect(ci.on.push.branches).toEqual(["main", "production", "batch/**"]);
+    expect(ci.on.push.branches).toEqual(["main", "production", "batch/**", "hotfix-build/**"]);
     expect(ci.on.pull_request).not.toBeUndefined();
     expect(ci.on.schedule).toEqual([{ cron: "0 3 * * 1" }]);
     expect(ci.on.workflow_dispatch.inputs).toEqual(

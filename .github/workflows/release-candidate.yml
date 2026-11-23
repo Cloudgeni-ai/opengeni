@@ -449,7 +449,16 @@ jobs:
           }
           dir="$RUNNER_TEMP/reused-candidate"
           mkdir -p "$dir" evidence
-          git merge-base --is-ancestor "$REUSE_SOURCE_SHA" origin/production || skip "not in production ancestry"
+          # The live source is on production, or a hotfix built onto a release
+          # (single parent, Hotfix-PR trailer) whose chain leads there.
+          released="$REUSE_SOURCE_SHA"
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            git merge-base --is-ancestor "$released" origin/production && break
+            git log -1 --format=%B "$released" | grep -Eq '^Hotfix-PR: [1-9][0-9]*$' || skip "not in production ancestry"
+            [ "$(git rev-list --parents -n 1 "$released" | wc -w)" -eq 2 ] || skip "not in production ancestry"
+            released="$(git rev-parse "${released}^")"
+          done
+          git merge-base --is-ancestor "$released" origin/production || skip "not in production ancestry"
           gh release download "opengeni-candidate-${REUSE_SOURCE_SHA}" --dir "$dir" \
             --pattern release-candidate.json --pattern release-candidate.sha256 \
             --pattern release-chart.sha256 --pattern 'opengeni-*.tgz' || skip "no candidate receipt"
