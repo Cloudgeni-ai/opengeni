@@ -3717,7 +3717,11 @@ async function createSessionForRequestInFileScope(
     ),
     ownServers: runtimeSettings.mcpServers,
   });
-  assertOwnLapsedConnectorPicks(payload.connectionAccounts, lapsedToolOmissions);
+  // Only a person's own request may pick accounts for it; agent-created work
+  // passes its picks through unchanged, so they're refused as usual below.
+  const lapsedPickConnectors =
+    connectionDelegationSource.kind === "subject" ? lapsedToolOmissions : [];
+  assertOwnLapsedConnectorPicks(payload.connectionAccounts, lapsedPickConnectors);
   const lapsedToolIds = new Set(lapsedToolOmissions.map((omitted) => omitted.serverId));
   const isLapsedToolRef = (tool: ToolRef) => tool.kind === "mcp" && lapsedToolIds.has(tool.id);
   const runnableRequestedTools = validateToolRefs(
@@ -4193,10 +4197,10 @@ async function createSessionForRequestInFileScope(
       resources,
       source: connectionDelegationSource,
       // Picks for a lapsed carried connector left out above go with it.
-      authoritySelections: lapsedToolOmissions.length
+      authoritySelections: lapsedPickConnectors.length
         ? payload.connectionAccounts?.filter(
             (selection) =>
-              !lapsedToolOmissions.some((omitted) => omitted.serverId === selection.serverId),
+              !lapsedPickConnectors.some((omitted) => omitted.serverId === selection.serverId),
           )
         : payload.connectionAccounts,
       autoConnect: { settings: unresolvedDeps.settings },
@@ -4208,7 +4212,7 @@ async function createSessionForRequestInFileScope(
   const connectionAccountIntent = withLapsedConnectorPicks(
     frozenConnectionAccountIntent,
     payload.connectionAccounts,
-    lapsedToolOmissions,
+    lapsedPickConnectors,
   );
   const omittedSelections = [...lapsedAsOmitted(lapsedToolOmissions), ...omittedPicks];
   if (effectiveGoal) {

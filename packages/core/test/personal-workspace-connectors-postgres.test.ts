@@ -4,6 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   getSessionTurnConnectionAccountIntent,
@@ -895,6 +896,43 @@ test("a pick for a carried connector whose account stopped working must name the
         )
       )?.selections,
     ).toEqual(pick(f.connections.miaAcme));
+    // Work an agent starts inherits its parent's accounts: picks, even her own
+    // lapsed one, are still refused there.
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, f.miaPersonal, {
+      sessionId: chat.id,
+      workflowId: `session-${chat.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
+    await expect(
+      createSessionForRequest(
+        deps,
+        {
+          ...grant,
+          permissions: ["admin", "sessions:control", "sessions:create"],
+          principalKind: "agent_attempt",
+          metadata: {
+            sessionId: chat.id,
+            turnId: claimed.turn.id,
+            attemptId,
+            executionGeneration: claimed.turn.executionGeneration,
+          },
+        } as unknown as Parameters<typeof createSessionForRequest>[1],
+        f.miaPersonal,
+        {
+          initialMessage: "child",
+          resources: [],
+          tools,
+          connectionAccounts: pick(f.connections.miaAcme),
+          model: "scripted-model",
+          idempotencyKey: crypto.randomUUID(),
+        } as Parameters<typeof createSessionForRequest>[3],
+      ),
+    ).rejects.toMatchObject({ status: 422, diagnostic: { reason: "parent_accounts_required" } });
     // Her own account for another lapsed connector is a mismatch.
     await sql`update connections set status = 'needs_reauth' where id = ${f.connections.miaLinear}`;
     await expect(create(pick(f.connections.miaLinear))).rejects.toMatchObject({
