@@ -1146,6 +1146,12 @@ for (const width of [1280, 390]) {
           state.gates.stream.release();
         } else await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
         await transcript.getByText("History question 5000", { exact: true }).waitFor();
+        // The first paint lands at the tip without mounting older turns.
+        // The search/older-page paths below must still reach them.
+        assert.equal(
+          await transcript.getByText("History question 4900", { exact: true }).count(),
+          0,
+        );
         if (origin === "created") {
           // Ctrl/Cmd+F opens Find at every width (phones keep the button in "…").
           await page.keyboard.press("Control+f");
