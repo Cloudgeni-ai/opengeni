@@ -1916,6 +1916,8 @@ export const englishMessages = {
     "The latest question is changing queue state. Try again.",
   "hooks.latestQuestion.theLatestQuestionIsIn": "The latest question is in the prompt queue.",
   "hooks.useBrowserFrameStream.browserViewLostConnection": "Browser view lost connection.",
+  "hooks.useBrowserFrameStream.browserPictureStopped":
+    "The browser stopped sending its picture. Reconnect to see the page as it is now.",
   "hooks.useBrowserSession.noBrowserTabIsSelected": "No browser tab is selected.",
   "hooks.useBrowserSession.theBrowserPageChangedOpen":
     "The browser page changed. Open the options again.",
