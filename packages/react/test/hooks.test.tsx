@@ -1041,10 +1041,11 @@ describe("useTurnQueue", () => {
       expect(await hook.result.current.steerTurns!([third.id, first.id])).toBe(true),
     );
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.turnId).toBe(third.id);
+    // The oldest is the target, so a server without `together` keeps the order.
+    expect(calls[0]!.turnId).toBe(first.id);
     expect(calls[0]!.request).toMatchObject({
-      expectedTurnVersion: 1,
-      together: [{ turnId: first.id, expectedTurnVersion: 2 }],
+      expectedTurnVersion: 2,
+      together: [{ turnId: third.id, expectedTurnVersion: 1 }],
     });
     expect(hook.result.current.acceptedSteers?.map((steer) => [steer.turnId, steer.state])).toEqual(
       [

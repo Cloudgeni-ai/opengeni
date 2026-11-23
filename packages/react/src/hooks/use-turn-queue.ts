@@ -108,8 +108,8 @@ export type UseTurnQueueResult = {
   steerTurn: (turnId: string) => Promise<boolean>;
   /**
    * Steer several waiting prompts in one command: they keep their queue order
-   * and reach the agent in one handover. Prompts that already left the queue
-   * are skipped.
+   * and reach the agent together. Prompts that already left the queue are
+   * skipped.
    */
   steerTurns?: (turnIds: readonly string[]) => Promise<boolean>;
   removeTurn: (turnId: string) => Promise<boolean>;
@@ -626,15 +626,15 @@ export function useTurnQueue(
           }),
         ),
       ]);
-      // The newest prompt is the command's target: the agent takes the oldest
-      // first, so the newest is the last to leave the queue in a race.
+      // The oldest prompt is the command's target, so a server that ignores
+      // `together` still steers in order. One that already left is skipped.
       const result = await mutateTurns(ids, "steer", (current, queued, clientEventId) => {
-        const target = queued[queued.length - 1]!;
+        const [target, ...rest] = queued as [SessionTurn, ...SessionTurn[]];
         return client.steerQueueItem(workspaceId, sessionId!, target.id, {
           clientEventId,
           expectedTurnVersion: target.version,
           controlEtag: current.effectiveControl.controlEtag,
-          together: queued.slice(0, -1).map((turn) => ({
+          together: rest.map((turn) => ({
             turnId: turn.id,
             expectedTurnVersion: turn.version,
           })),
@@ -642,10 +642,11 @@ export function useTurnQueue(
       });
       if (targetKeyRef.current !== ownedTargetKey) return false;
       const after = snapshotRef.current?.items ?? [];
-      const steered = (turnId: string): boolean => {
+      const accepted = (turnId: string): boolean => {
         const waiting = after.find((candidate) => candidate.id === turnId);
-        // Gone: it advanced into chat, by this Steer or by the turn ending.
-        return waiting ? waiting.metadata.delivery === "steer" : true;
+        // Gone: it advanced into chat, by this Steer or by the turn ending,
+        // and the durable timeline owns it once a failed command reconciles.
+        return waiting ? waiting.metadata.delivery === "steer" : result !== null;
       };
       if (result === null && ids.every((turnId) => !after.some((item) => item.id === turnId))) {
         // Every prompt started on its own while the click was in flight.
@@ -656,11 +657,10 @@ export function useTurnQueue(
       setAcceptedSteers((current) =>
         current.flatMap((steer) => {
           if (!wanted.has(steer.turnId)) return [steer];
-          if (result === null || !steered(steer.turnId)) return [];
-          return [{ ...steer, state: "queued" as const }];
+          return accepted(steer.turnId) ? [{ ...steer, state: "queued" as const }] : [];
         }),
       );
-      return result !== null;
+      return result !== null || ids.some(accepted);
     },
     [client, mutateTurns, sessionId, steerTurn, targetKey, workspaceId],
   );

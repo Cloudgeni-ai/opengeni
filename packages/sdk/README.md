@@ -1547,10 +1547,10 @@ and the Steer runs next with the full history. The session screens show it
 only as the person's message, and the queue snapshot does not list it.
 `steerQueueItem` with `interrupt: true` on the turn that `steerMessage`
 returned stops the running attempt now instead, including tool calls in flight.
-To steer several queued messages at once, call `steerQueueItem` on one of them
+To steer several queued messages at once, call `steerQueueItem` on the oldest
 and list the others in `together` (`{ turnId, expectedTurnVersion }`). They keep
-their queue order and the agent reads them in one handover; any that already
-left the queue are skipped.
+their queue order and the agent reads them together, with no extra
+interruption; any that already left the queue are skipped.
 
 ```ts
 // Queue (default): stacks behind the running turn.

@@ -4966,7 +4966,7 @@ export const englishMessages = {
   "sessionChrome.singleSendWaitingUnavailableSentence": "Waiting messages unavailable.",
   "sessionChrome.steer": "Steer",
   "sessionChrome.steerAllQueuedMessages_one": "Steer {count} queued message",
-  "sessionChrome.steerAllQueuedMessages_other": "Steer all {count} queued messages",
+  "sessionChrome.steerAllQueuedMessages_other": "Steer {count} queued messages",
   "sessionChrome.steerAllTip":
     "The agent reads these messages together, in order, as soon as it can. Running tools aren't cut off.",
   "sessionChrome.steerCount_one": "Steer {count}",

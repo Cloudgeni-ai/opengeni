@@ -398,7 +398,7 @@ export function countOptimisticQueuedMessages(
 
 /**
  * The chip's Steer: every message waiting when it is clicked, in one command,
- * so the agent reads them together in order with one handover. Just-sent
+ * so the agent reads them together, in order, with no extra interruption. Just-sent
  * messages the server has not confirmed yet need their queued turn's id and
  * version, which arrive with the next queue read, so the click is taken at
  * once and carried out when all of them have landed. A message is dropped,
@@ -1106,7 +1106,10 @@ function SessionChromeView({
     .filter((turn) => queue.mutationFor(turn.id) === null)
     .map((turn) => turn.id);
   const steerablePending = optimisticQueued.filter((message) => message.state !== "failed");
-  const steerAllCount = steerableTurnIds.length + steerablePending.length;
+  // A host queue without `steerTurns` keeps the earlier one-message Steer.
+  const steerAllCount = queue.steerTurns
+    ? steerableTurnIds.length + steerablePending.length
+    : Math.min(1, steerableTurnIds.length + steerablePending.length);
   const queuePeekSteering =
     steerAll.pending || turns.some((turn) => queue.mutationFor(turn.id) === "steer");
 

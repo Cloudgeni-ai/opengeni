@@ -2761,4 +2761,34 @@ describe("Steer several waiting prompts together", () => {
       steer(value, p3, [{ turnId: p1.id, expectedTurnVersion: p1.version }], key),
     ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
   });
+
+  test("a target that already started is skipped while the others are steered", async () => {
+    const value = await fixture(3);
+    const [p1, p2, p3] = value.turns as [SessionTurnRow, SessionTurnRow, SessionTurnRow];
+    // The oldest is the target; it left the queue before the command landed.
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        deleteSessionQueueItemInTransaction(tx as unknown as typeof db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId!,
+          sessionId: value.session.id,
+          turnId: p1.id,
+          expectedTurnVersion: p1.version,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+        }),
+      ),
+    );
+    const started = { id: p1.id, version: p1.version };
+    const result = await steer(value, started, [
+      { turnId: p3.id, expectedTurnVersion: p3.version },
+    ]);
+    expect(result.items.map((row) => row.id)).toEqual([p3.id, p2.id]);
+    await expect(steer(value, { id: p2.id, version: p2.version + 5 }, [])).rejects.toMatchObject({
+      code: "PROMPT_CHANGED",
+    });
+    await expect(
+      steer(value, started, [{ turnId: crypto.randomUUID(), expectedTurnVersion: 1 }]),
+    ).rejects.toMatchObject({ code: "QUEUE_PROMPT_STARTED" });
+  });
 });

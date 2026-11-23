@@ -8826,8 +8826,9 @@ export type SteerSessionQueueItemRequest = {
   interrupt?: boolean;
   /**
    * Other waiting prompts to Steer with this one. All of them keep their
-   * queue order and reach the agent in one handover. Prompts that already
-   * left the queue are skipped; a changed one refuses the command.
+   * queue order and reach the agent together, with no extra interruption.
+   * Prompts that already left the queue (this one included) or wait for a
+   * personal machine's owner are skipped; a changed one refuses the command.
    */
   together?: Array<{ turnId: string; expectedTurnVersion: number }>;
 };

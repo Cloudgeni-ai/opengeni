@@ -1962,8 +1962,9 @@ export async function steerQueuedTurnInTransaction(
     interrupt?: boolean;
     /**
      * Other waiting prompts Steered in the same command. With this prompt they
-     * keep their queue order and reach the agent in one handover. Prompts that
-     * already left the queue are skipped; a changed one refuses the command.
+     * keep their queue order and reach the agent together. Prompts that already
+     * left the queue (this one included) or wait for the personal machine's
+     * owner are skipped; a changed one refuses the command.
      */
     together?: ReadonlyArray<{ turnId: string; expectedTurnVersion: number }>;
   },
@@ -1994,9 +1995,7 @@ export async function steerQueuedTurnInTransaction(
         ? [input.actor.sessionId, input.sessionId]
         : [input.sessionId],
     turnIds:
-      input.actor.type === "agent_attempt"
-        ? [input.actor.turnId, input.turnId, ...togetherIds]
-        : [input.turnId, ...togetherIds],
+      input.actor.type === "agent_attempt" ? [input.actor.turnId, input.turnId] : [input.turnId],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
   const requestHash = canonicalSessionCommandHash({
@@ -2053,8 +2052,9 @@ export async function steerQueuedTurnInTransaction(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
   });
+  const waitingForOwner = new Set<string>();
   if (machineOwner !== null) {
-    const [waiting] = await db
+    const waiting = await db
       .select({ id: schema.sessionTurns.id })
       .from(schema.sessionTurns)
       .where(
@@ -2064,9 +2064,9 @@ export async function steerQueuedTurnInTransaction(
           inArray(schema.sessionTurns.id, [input.turnId, ...togetherIds]),
           waitsForMachineOwnerSql(machineOwner),
         ),
-      )
-      .limit(1);
-    if (waiting) {
+      );
+    for (const row of waiting) waitingForOwner.add(row.id);
+    if (together.length === 0 && waitingForOwner.has(input.turnId)) {
       throw new QueueCommandConflictError(
         "WAITING_FOR_MACHINE_OWNER",
         "This message waits for the owner of the personal machine the chat runs on, so it cannot be sent now",
@@ -2094,12 +2094,12 @@ export async function steerQueuedTurnInTransaction(
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   const rows = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
   const target = rows.find((row) => row.id === input.turnId);
-  if (!target) {
+  if (!target && together.length === 0) {
     throw new QueueCommandConflictError("QUEUE_PROMPT_STARTED", "Prompt is no longer waiting", {
       queueVersion: session.queueVersion,
     });
   }
-  if (target.version !== input.expectedTurnVersion) {
+  if (target && target.version !== input.expectedTurnVersion) {
     throw new QueueCommandConflictError("PROMPT_CHANGED", "Prompt changed", {
       queueVersion: session.queueVersion,
       turnVersion: target.version,
@@ -2115,7 +2115,22 @@ export async function steerQueuedTurnInTransaction(
       });
     }
   }
-  const steered = rows.filter((row) => row.id === target.id || togetherIds.has(row.id));
+  // Prompts that already started reached the agent on their own; ones waiting
+  // for the machine's owner cannot run here.
+  const steered = rows.filter(
+    (row) => (row.id === input.turnId || togetherIds.has(row.id)) && !waitingForOwner.has(row.id),
+  );
+  if (steered.length === 0) {
+    throw waitingForOwner.size > 0
+      ? new QueueCommandConflictError(
+          "WAITING_FOR_MACHINE_OWNER",
+          "These messages wait for the owner of the personal machine the chat runs on, so they cannot be sent now",
+          { queueVersion: session.queueVersion },
+        )
+      : new QueueCommandConflictError("QUEUE_PROMPT_STARTED", "Prompts are no longer waiting", {
+          queueVersion: session.queueVersion,
+        });
+  }
   const steeredIds = new Set(steered.map((row) => row.id));
 
   const supersession = await supersedeSessionCurrentDirectionInTransaction(db, {
@@ -2277,7 +2292,7 @@ export async function steerQueuedTurnInTransaction(
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: resumed.revision,
     queueVersion,
-    turnVersion: target.version + 1,
+    turnVersion: target ? target.version + 1 : null,
     result: {
       interruptionCount,
       supersededTurnId,
