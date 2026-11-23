@@ -1,5 +1,41 @@
 # @opengeni/api-router
 
+## 6.37.3
+
+### Patch Changes
+
+- e93d6d4: Include a bounded error class, code, and reviewed source locations in API fatal logs even when protected diagnostics are disabled. Exception messages and unreviewed paths are never copied to the log. Keep an early Connected Machine replay failure attached to its caller instead of leaking an unhandled rejection while the initial attach is still in progress.
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- 556abe5: A custom MCP server that can't be reached no longer fails calls to other tools. Tool calls without a remembered catalog, approvals, the MCP endpoints, the MCP sign-in consent screen and app tool calls now leave that server out, as the tool list already does. A call to that server's own tool still reports its failure.
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/runtime@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/db@6.37.3
+  - @opengeni/core@6.37.3
+  - @opengeni/tool-gateway@6.37.3
+  - @opengeni/artifact-tool@6.37.3
+  - @opengeni/capabilities@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/decisions@6.37.3
+  - @opengeni/documents@6.37.3
+  - @opengeni/events@6.37.3
+  - @opengeni/github@6.37.3
+  - @opengeni/interaction@6.37.3
+  - @opengeni/storage@6.37.3
+  - @opengeni/vaults@6.37.3
+  - @opengeni/vaults-bitwarden@6.37.3
+  - @opengeni/vaults-keeper@6.37.3
+  - @opengeni/vaults-onepassword@6.37.3
+  - @opengeni/vaults-protonpass@6.37.3
+  - @opengeni/agent-proto@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
 ## 6.37.2
 
 ### Patch Changes

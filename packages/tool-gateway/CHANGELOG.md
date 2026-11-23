@@ -1,5 +1,14 @@
 # @opengeni/tool-gateway
 
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/contracts@6.37.3
+
 ## 6.37.2
 
 ### Patch Changes

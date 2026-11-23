@@ -1,5 +1,17 @@
 # @opengeni/react
 
+## 6.37.3
+
+### Patch Changes
+
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- d12b623: Keep formatted chat history from re-parsing and re-typesetting on unrelated interface updates while preserving live Markdown and link behavior.
+- d12b623: Open long chats at the newest messages without rendering several screens of scrollback first. Older messages remain available by scrolling or using Find in conversation.
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/sdk@6.37.3
+  - @opengeni/connect@6.37.3
+
 ## 6.37.2
 
 ### Patch Changes

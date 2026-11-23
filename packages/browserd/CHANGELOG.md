@@ -1,5 +1,13 @@
 # @opengeni/browserd
 
+## 0.4.59
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/interaction@6.37.3
+
 ## 0.4.58
 
 ### Patch Changes
