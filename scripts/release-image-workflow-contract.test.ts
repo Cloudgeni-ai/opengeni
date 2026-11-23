@@ -1000,7 +1000,7 @@ describe("release image workflow contract", () => {
         step.name === "Restore protected main history as Git data for the descendant merge audit",
     );
     expect(historyStep?.if).toBe(
-      "${{ inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}",
+      "${{ inputs.lane != 'hotfix' && inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}",
     );
     expect(historyStep?.run).toContain("--unshallow origin");
     expect(historyStep?.run).toContain("'+refs/heads/main:refs/remotes/origin/main'");

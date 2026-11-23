@@ -3009,6 +3009,114 @@ describe("release approval provenance", () => {
       ).rejects.toThrow("must be true or false");
     });
 
+    test("admits a hotfix built onto the released source only as exactly its reviewed patch", async () => {
+      const releasedSha = "c1".repeat(20);
+      const releasedTreeSha = "c2".repeat(20);
+      const derivedSha = "d1".repeat(20);
+      const derivedTreeSha = "d2".repeat(20);
+      const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+      const blob = (sha: string) => [{ path: "package.json", mode: "100644", type: "blob", sha }];
+      const run = (
+        options: {
+          releasedBlob?: string;
+          derivedBlob?: string;
+          parents?: string[];
+          receipt?: boolean;
+          releasedOnProduction?: boolean;
+        } = {},
+      ) => {
+        const fixture = hotfixFixture({
+          reviews: [reviewFrom(1, "APPROVED", reviewer)],
+        });
+        const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+          const url = new URL(String(input));
+          if ((init?.method ?? "GET") === "GET") {
+            if (url.pathname === `${prefix}/git/commits/${derivedSha}`) {
+              return response({
+                sha: derivedSha,
+                tree: { sha: derivedTreeSha },
+                parents: (options.parents ?? [releasedSha]).map((sha) => ({ sha })),
+              });
+            }
+            if (url.pathname === `${prefix}/git/commits/${releasedSha}`) {
+              return response({
+                sha: releasedSha,
+                tree: { sha: releasedTreeSha },
+                parents: [{ sha: "c3".repeat(20) }],
+              });
+            }
+            if (url.pathname === `${prefix}/git/trees/${releasedTreeSha}`) {
+              return response({
+                sha: releasedTreeSha,
+                truncated: false,
+                tree: blob(options.releasedBlob ?? "1".repeat(40)),
+              });
+            }
+            if (url.pathname === `${prefix}/git/trees/${derivedTreeSha}`) {
+              return response({
+                sha: derivedTreeSha,
+                truncated: false,
+                tree: blob(options.derivedBlob ?? "2".repeat(40)),
+              });
+            }
+            if (url.pathname === `${prefix}/compare/${releasedSha}...${mergeSha}`) {
+              return response(
+                options.releasedOnProduction === false
+                  ? {
+                      status: "diverged",
+                      base_commit: { sha: releasedSha },
+                      merge_base_commit: { sha: "6".repeat(40) },
+                      ahead_by: 1,
+                      behind_by: 1,
+                      total_commits: 1,
+                    }
+                  : {
+                      status: "ahead",
+                      base_commit: { sha: releasedSha },
+                      merge_base_commit: { sha: releasedSha },
+                      ahead_by: 3,
+                      behind_by: 0,
+                      total_commits: 3,
+                    },
+              );
+            }
+            if (url.pathname === `${prefix}/releases/tags/opengeni-candidate-${releasedSha}`) {
+              return options.receipt === false
+                ? response({ message: "Not Found" }, 404)
+                : response({ id: 1, tag_name: `opengeni-candidate-${releasedSha}` });
+            }
+          }
+          return fixture.fetchImpl(input, init);
+        };
+        return verifyApprovedMerge({
+          env: hotfixEnv({ SOURCE_SHA: derivedSha, RELEASE_PROVENANCE_SHA: mergeSha }),
+          fetchImpl,
+          logger: { log() {} },
+        });
+      };
+
+      const result = await run();
+      expect(result).toEqual(
+        expect.objectContaining({
+          lane: "hotfix",
+          sourceSha: derivedSha,
+          sourceTreeSha: derivedTreeSha,
+          sourceParents: [releasedSha],
+          pullRequestHeadRef: "hotfix/urgent-fix",
+          hotfixOntoRelease: expect.objectContaining({ mergeSha, releasedSourceSha: releasedSha }),
+        }),
+      );
+      for (const [options, message] of [
+        [{ derivedBlob: "3".repeat(40) }, "not exactly the reviewed hotfix patch"],
+        [{ releasedBlob: "4".repeat(40) }, "not exactly the reviewed hotfix patch"],
+        [{ parents: [releasedSha, mergeSha] }, "exactly one parent"],
+        [{ receipt: false }, "has no release candidate receipt"],
+        [{ releasedOnProduction: false }, "initial production is not ahead of the released source"],
+      ] as const) {
+        await expect(run(options)).rejects.toThrow(message);
+      }
+    });
+
     test("ignores a change request from someone without write access", async () => {
       const outsider = { login: "drive-by", id: 7004, type: "User" };
       const fixture = hotfixFixture({
@@ -3096,7 +3204,7 @@ describe("release approval provenance", () => {
       ).rejects.toThrow();
     });
 
-    test("rejects an unknown lane and a hotfix with a separate provenance", async () => {
+    test("rejects an unknown lane and a hotfix provenance that is not on production", async () => {
       const fixture = hotfixFixture();
       await expect(
         verifyApprovedMerge({
@@ -3111,7 +3219,7 @@ describe("release approval provenance", () => {
           fetchImpl: fixture.fetchImpl,
           logger: { log() {} },
         }),
-      ).rejects.toThrow("no separate Version provenance");
+      ).rejects.toThrow("failed with HTTP 404");
     });
   });
 

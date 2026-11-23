@@ -146,7 +146,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "630aca84434aac7a0027a5c70ca54ffba2e95c771a46c58dd3f350830ff229ac"
+      "sha256": "c03063a124f6be7b164606b0529119567f43937058c8a5478e930ea6ddb2aedd"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -158,7 +158,7 @@
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
-      "sha256": "4e8496c1f1b153aeb8dbe5e0704516fc10f5b0bc79f651d74b72c369e1744315"
+      "sha256": "0f6af1dc089547d836897b564b40dd24e7071f170458d5e17f75d173c6fd2a5d"
     },
     {
       "path": ".github/workflows/release.yml",
@@ -2057,7 +2057,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Validate exact retained versioned main source",
-      "sha256": "f22a273a20447960c8ae9d5eec19200619d79acb881deb98eb8e9819db595bc6"
+      "sha256": "c76ab05af1e83ef5add16b23455a341835e2c914f0b32e1aba824bd20488a318"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -2231,7 +2231,7 @@
       "workflow": ".github/workflows/release-source-admission.yml",
       "job": "verify",
       "step": "Restore protected main history as Git data for the descendant merge audit",
-      "sha256": "69ac3710659e143481667807b4dbe8bfafe2cc82a729f0ab8007799889b54051"
+      "sha256": "41f82d94c98840efff61735c036ef06365ba23b96437ea6c4daa7e1886ec459a"
     },
     {
       "workflow": ".github/workflows/release-source-admission.yml",

@@ -17,7 +17,7 @@ on:
         required: true
         type: string
       provenance_sha:
-        description: Optional exact Version PR merge SHA when source_sha is a later fully green main descendant of it. Empty means source_sha is the Version merge itself.
+        description: Optional exact Version PR merge SHA when source_sha is a later fully green main descendant of it. Empty means source_sha is the Version merge itself. With lane=hotfix, the hotfix PR's merge into production when source_sha is its patch built onto the live released source.
         required: false
         default: ""
         type: string
@@ -174,6 +174,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          PROVENANCE_SHA: ${{ inputs.provenance_sha }}
           RELEASE_LANE: ${{ inputs.lane }}
           REUSE_SOURCE_SHA: ${{ inputs.reuse_source_sha }}
           REUSE_IMAGES: ${{ inputs.reuse_images }}
@@ -210,10 +211,30 @@ jobs:
             exit 1
           }
           git fetch --no-tags origin production
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
-            echo "release candidate source must remain in current production ancestry; promote main first" >&2
-            exit 1
-          }
+          if [ "$RELEASE_LANE" = hotfix ] && [ -n "$PROVENANCE_SHA" ] && [ "$PROVENANCE_SHA" != "$SOURCE_SHA" ]; then
+            # Hotfix onto release: one commit on the live released source. The
+            # admission proves it is exactly the reviewed PR patch.
+            [[ "$PROVENANCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "provenance_sha must be a 40-character lowercase git SHA" >&2
+              exit 1
+            }
+            read -r -a source_parents <<<"$(git rev-list --parents -n 1 "$SOURCE_SHA" | cut -d' ' -f2-)"
+            [ "${#source_parents[@]}" -eq 1 ] || {
+              echo "a hotfix built onto a release must have exactly one parent" >&2
+              exit 1
+            }
+            for sha in "${source_parents[0]}" "$PROVENANCE_SHA"; do
+              git merge-base --is-ancestor "$sha" origin/production || {
+                echo "hotfix provenance ${sha} is not in current production ancestry" >&2
+                exit 1
+              }
+            done
+          else
+            git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
+              echo "release candidate source must remain in current production ancestry; promote main first" >&2
+              exit 1
+            }
+          fi
           case "$RELEASE_LANE" in
             release)
               [ -z "$REUSE_SOURCE_SHA" ] && [ -z "$REUSE_IMAGES" ] && [ "$REVIEW_AFTER_MERGE" != true ] || {

@@ -7,7 +7,9 @@ name: Release source admission
 # descendant of that exact Version merge; protected-main history is then fetched
 # as Git objects only so every intervening merge tree is recomputed.
 # lane=hotfix admits source_sha as the exact merge of an approved hotfix/* PR
-# into protected production, with its production push CI.
+# into protected production, with its production push CI. A distinct
+# provenance_sha with lane=hotfix is that merge, and source_sha is exactly its
+# reviewed patch built onto the live released source.
 on:
   workflow_call:
     inputs:
@@ -58,7 +60,7 @@ jobs:
           persist-credentials: false
 
       - name: Restore protected main history as Git data for the descendant merge audit
-        if: ${{ inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}
+        if: ${{ inputs.lane != 'hotfix' && inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}
         shell: bash
         env:
           RELEASE_CONTROLLER_SHA: ${{ inputs.controller_sha }}
