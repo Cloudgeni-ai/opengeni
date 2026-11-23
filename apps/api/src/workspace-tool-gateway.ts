@@ -732,6 +732,19 @@ export function withTargetFenceConnectionAuthorization(
 }
 
 /**
+ * The API integration routes a targeted fence compares between preparation
+ * and the provider request. `connectionLastUsedAt` is use tracking, not
+ * authority: the credential resolve of the call itself stamps it between those
+ * two reads, so a digest that covers it reports a changed route for every
+ * call. The connection's status and authority generation stay compared.
+ */
+export function targetFenceIntegrationRoutes(
+  routes: readonly ApiIntegrationRuntime[],
+): Omit<ApiIntegrationRuntime, "connectionLastUsedAt">[] {
+  return routes.map(({ connectionLastUsedAt: _lastUsedAt, ...route }) => route);
+}
+
+/**
  * The route part of a targeted fence. It reads only the rows that can produce
  * the selected servers (their capability installations and explicit claimants,
  * integrations with their runtime keys, the selected connections, and Codex
@@ -779,11 +792,13 @@ function workspaceToolGatewayTargetRouteCheck(input: {
     integrations: readonly ApiIntegrationRuntime[],
     bindings: typeof input.accountBindings,
   ) =>
-    expandApiIntegrationAccountRoutes({
-      integrations,
-      bindings,
-      tools: allGatewayToolRefs(gatewaySettings),
-    });
+    targetFenceIntegrationRoutes(
+      expandApiIntegrationAccountRoutes({
+        integrations,
+        bindings,
+        tools: allGatewayToolRefs(gatewaySettings),
+      }),
+    );
   const expectedServers = digestCanonicalJson(gatewaySettings.mcpServers);
   const expectedIntegrations = digestCanonicalJson(
     integrationRoutes(input.integrations, input.accountBindings),
