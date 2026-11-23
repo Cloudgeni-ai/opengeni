@@ -16,6 +16,7 @@ import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@open
 import { HTTPException } from "hono/http-exception";
 import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";
 import {
+  allGatewayToolRefs,
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
@@ -23,6 +24,7 @@ import {
   requireWorkspaceToolGatewayAuthorization,
   requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDefinitionFilter,
+  workspaceToolGatewayPreparationRefs,
   workspaceToolGatewaySettingsForGrant,
   workspaceToolGatewayDeclarations,
   type PreparedWorkspaceToolGateway,
@@ -229,6 +231,76 @@ async function policyCeilingGateway(
 }
 
 describe("workspace tool gateway adapters", () => {
+  // Production 500 on GET /tools/catalog and /tools/declarations: one custom
+  // MCP server whose host no longer resolves failed every app's tool list.
+  describe("a custom MCP server that cannot be reached", () => {
+    const settings = testSettings({
+      allowedFirstPartyMcpTools: ["session_get"],
+      mcpServers: [
+        { id: "opengeni", url: "https://opengeni.example.test/mcp", cacheToolsList: true },
+        // No connectionRef: a custom server added without a sign-in.
+        { id: "cap-ledger", url: "https://ledger.opengeni-audit.invalid/mcp", timeoutMs: 5_000 },
+      ],
+    });
+    const localMcpServers = [
+      {
+        id: "opengeni",
+        server: {
+          name: "opengeni-unreachable-test",
+          cacheToolsList: true,
+          async connect() {},
+          async close() {},
+          async listTools() {
+            return [{ name: "session_get", inputSchema: { type: "object", properties: {} } }];
+          },
+          async callTool() {
+            return [];
+          },
+          async invalidateToolsCache() {},
+        } satisfies MCPServer,
+      },
+    ];
+    const prepare = (listing: boolean) =>
+      prepareWorkspaceToolGatewayTools(
+        settings,
+        workspaceToolGatewayPreparationRefs(settings, listing),
+        {
+          accountId,
+          workspaceId,
+          subjectId,
+          localMcpServers,
+          workspaceToolGateway: {
+            createdAt: new Date("2026-11-23T00:00:00.000Z"),
+            filterDefinition: workspaceToolGatewayDefinitionFilter(settings),
+          },
+        },
+      );
+
+    test("is left out of a listing instead of failing it", async () => {
+      const prepared = await prepare(true);
+      try {
+        expect(prepared.toolGatewayCatalog?.entries.map((entry) => entry.identity)).toEqual([
+          { serverId: "opengeni", toolName: "session_get" },
+        ]);
+      } finally {
+        await prepared.close();
+      }
+    });
+
+    test("still fails a call preparation, and first-party servers stay required in a listing", async () => {
+      await expect(prepare(false)).rejects.toThrow();
+      expect(workspaceToolGatewayPreparationRefs(settings, false)).toEqual(
+        allGatewayToolRefs(settings),
+      );
+      expect(
+        workspaceToolGatewayPreparationRefs(settings, true).map((ref) => [ref.id, ref.optional]),
+      ).toEqual([
+        ["opengeni", undefined],
+        ["cap-ledger", true],
+      ]);
+    });
+  });
+
   test("enforces the first-party ceiling across the production HTTP, MCP, and consent assembly", async () => {
     const calls: Array<{ serverId: string; toolName: string }> = [];
     const prepared = await policyCeilingGateway(calls);
