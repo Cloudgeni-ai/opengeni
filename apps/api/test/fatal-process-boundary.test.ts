@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Attributes } from "@opengeni/observability";
 import { installApiFatalProcessBoundary } from "../src/fatal-process-boundary";
 
@@ -34,6 +38,69 @@ function fakeProcess() {
 }
 
 describe("API fatal process boundary", () => {
+  for (const structured of [true, false]) {
+    test(`logs a real rejection with no diagnostic exporter (structured=${structured})`, async () => {
+      const temp = mkdtempSync(join(tmpdir(), "SECRET_BUNDLE_ROOT_CANARY-"));
+      try {
+        const bundle = join(temp, "apps/api/dist/process");
+        mkdirSync(bundle, { recursive: true });
+        writeFileSync(join(bundle, "chunk-abcd1234.js"), "export const valid = true;\n");
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            "--no-env-file",
+            "-e",
+            `
+        import { createObservability } from "@opengeni/observability";
+        import { installApiFatalProcessBoundary } from "./src/fatal-process-boundary";
+        const bundle = ${JSON.stringify(bundle)};
+        process.argv[1] = bundle + "/index.js";
+        const observability = createObservability({
+          serviceName: "test", environment: "test", observabilityStructuredLogs: ${structured},
+          observabilityMetricsEnabled: true, observabilityOtlpHeaders: "",
+        }, { component: "api" });
+        const boundary = installApiFatalProcessBoundary({ observability });
+        boundary.markRunning();
+        const reason = new TypeError("Bearer SECRET_MESSAGE_CANARY");
+        reason.code = "ERR_INVALID_ARG_TYPE";
+        reason.stack = [
+          reason.toString(),
+          "    at " + bundle + "/chunk-missing0.js:1:1",
+          "    at EXTRA_PRIVATE_CONTEXT (/private/SECRET_PATH_CANARY.ts:1:1)",
+          "    at SECRET_FUNCTION_CANARY (/private/SECRET_PREFIX_CANARY/apps/api/dist/process/index.js:400:2)",
+          "    at " + bundle + "/chunk-abcd1234.js:401:3",
+          "    at /private/apps/api/dist/process/index.js:402:4",
+          "    at /private/apps/api/dist/process/index.js:403:5",
+        ].join("\\n");
+        Promise.reject(reason);
+      `,
+          ],
+          { cwd: fileURLToPath(new URL("..", import.meta.url)), stdout: "pipe", stderr: "pipe" },
+        );
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(exitCode).toBe(1);
+        expect(stdout + stderr).not.toContain("CANARY");
+        expect(stderr.trim().split("\n")).toHaveLength(1);
+        const record = structured ? JSON.parse(stderr) : { message: stderr };
+        expect(record.message).toMatch(
+          /api_unhandled_rejection; phase=running; reason_kind=error; correlation_id=[0-9a-f-]{36}\)/,
+        );
+        expect(record.message).toContain("cause_class=TypeError; cause_code=ERR_INVALID_ARG_TYPE;");
+        expect(record.message).toContain(
+          "cause_frames=apps/api/dist/process/index.js:400:2,apps/api/dist/process/chunk-abcd1234.js:401:3,apps/api/dist/process/index.js:402:4",
+        );
+        expect(record.message).not.toContain(":403:5");
+        if (structured) expect(record.message).toContain(`correlation_id=${record.correlationId}`);
+      } finally {
+        rmSync(temp, { recursive: true });
+      }
+    });
+  }
+
   test("passes the original cause to the protected diagnostic boundary before flushing and exiting", async () => {
     const runtime = fakeProcess();
     const source = new TypeError("SECRET_CANARY", { cause: new Error("nested SECRET_CANARY") });
@@ -156,6 +223,28 @@ describe("API fatal process boundary", () => {
     expect(fallbackLogs[0]).toContain("reason_kind=string");
     expect(fallbackLogs[0]).toContain("correlation_id=api-fatal.fallback");
     expect(fallbackLogs[0]).not.toContain(sentinel);
+  });
+
+  test("preserves reviewed fallback frames but never copies unknown class names or codes", async () => {
+    const runtime = fakeProcess();
+    const fallbackLogs: string[] = [];
+    const boundary = installApiFatalProcessBoundary({
+      process: runtime.process,
+      fallbackLog: (message) => fallbackLogs.push(message),
+    });
+    const reason = Object.assign(new Error("SECRET_MESSAGE_CANARY"), {
+      name: "SecretNameCanary",
+      code: "SECRET_CODE_CANARY",
+      stack: "Error: SECRET_STACK_CANARY\n    at /app/apps/api/src/index.ts:55:2",
+    });
+
+    await boundary.reportStartupFailure(reason);
+
+    expect(runtime.exits).toEqual([1]);
+    expect(fallbackLogs).toHaveLength(1);
+    expect(fallbackLogs[0]).toContain("cause_class=Error; cause_code=unknown;");
+    expect(fallbackLogs[0]).toContain("cause_frames=apps/api/src/index.ts:55:2");
+    expect(fallbackLogs[0]).not.toMatch(/canary/i);
   });
 
   test("bounds a hung telemetry flush and reports only the first fatal event", async () => {
