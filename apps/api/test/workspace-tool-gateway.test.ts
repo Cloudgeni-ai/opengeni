@@ -10,7 +10,10 @@ import {
   ToolGatewayApprovalRateLimitError,
   WorkspaceArtifactNotFoundError,
 } from "@opengeni/db";
-import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
+import {
+  mcpServerNamespace,
+  prepareWorkspaceToolGatewayTools,
+} from "@opengeni/runtime/workspace-tool-gateway";
 import { testSettings } from "@opengeni/testing/settings";
 import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
@@ -324,61 +327,61 @@ describe("workspace tool gateway adapters", () => {
       ]);
     });
 
-    test("an MCP request lists without the dead server and re-prepares strictly for its missing tool", async () => {
+    test("an MCP request keeps only a called tool's server required", async () => {
       const mcpRequest = (body: unknown) =>
         new Request("https://api.example.test/mcp", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
         });
-      const seen: boolean[] = [];
-      const prepareFor = async ({ listing }: { listing: boolean }) => {
-        seen.push(listing);
-        return await prepare({ listing });
-      };
+      const call = (name: string) => ({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name, arguments: {} },
+      });
+      const deadToolName = `${mcpServerNamespace("cap-ledger").namespace}__read`;
+      const prepareFor = (scope: { calledToolNames: readonly string[] }) => prepare(scope);
+      // A listing, a healthy tool and a misspelled name leave the dead server out.
       for (const body of [
         { jsonrpc: "2.0", id: 1, method: "tools/list" },
-        // A healthy server's tool resolves in the listing.
-        [
-          {
-            jsonrpc: "2.0",
-            id: 2,
-            method: "tools/call",
-            params: { name: "opengeni__session_get", arguments: {} },
-          },
-        ],
+        [call("opengeni__session_get")],
+        call("cap_ledger__read"),
       ]) {
-        seen.length = 0;
         const prepared = await prepareWorkspaceToolGatewayForMcpRequest(
           mcpRequest(body),
           prepareFor,
         );
-        await prepared.close();
-        expect(seen).toEqual([true]);
+        try {
+          expect(prepared.toolGatewayCatalog.entries.map((entry) => entry.identity)).toEqual([
+            { serverId: "opengeni", toolName: "session_get" },
+          ]);
+        } finally {
+          await prepared.close();
+        }
       }
-      seen.length = 0;
-      expect(
-        await mcpRequestCalledToolNames(
-          mcpRequest({
-            jsonrpc: "2.0",
-            id: 3,
-            method: "tools/call",
-            params: { name: "cap-ledger__read" },
-          }),
-        ),
-      ).toEqual(["cap-ledger__read"]);
+      expect(await mcpRequestCalledToolNames(mcpRequest([call(deadToolName)]))).toEqual([
+        deadToolName,
+      ]);
+      // A call to the dead server's own tool reports its failure.
       await expect(
         prepareWorkspaceToolGatewayForMcpRequest(
-          mcpRequest({
-            jsonrpc: "2.0",
-            id: 3,
-            method: "tools/call",
-            params: { name: "cap-ledger__read", arguments: {} },
-          }),
+          mcpRequest([call("opengeni__session_get"), call(deadToolName)]),
           prepareFor,
         ),
       ).rejects.toThrow();
-      expect(seen).toEqual([true, false]);
+      expect(
+        workspaceToolGatewayPreparationRefs(settings, {
+          calledToolNames: [deadToolName],
+        }).map((ref) => [ref.id, ref.optional]),
+      ).toEqual([
+        ["opengeni", undefined],
+        ["cap-ledger", undefined],
+      ]);
+      // A call scoped to a server that isn't configured keeps every server.
+      expect(workspaceToolGatewayPreparationRefs(settings, { callServerId: "elsewhere" })).toEqual(
+        allGatewayToolRefs(settings),
+      );
     });
   });
 

@@ -87,6 +87,7 @@ import {
   isMcpAccountParameterChoiceError,
   isMcpRequestNotSentError,
   isMcpServerUnreachableError,
+  mcpServerNamespace,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -648,8 +649,16 @@ export type WorkspaceToolGatewayPreparationOptions = {
    * preparation calls or approves. Every other remote server only shapes the
    * catalog, so one that fails is left out, as in a listing; this server stays
    * required, so a call to a server that is down still reports its failure.
+   * An id that names no configured server keeps every server required.
    */
   callServerId?: string;
+  /**
+   * Trusted: the tool names one MCP request calls (`tools/call`), as the
+   * request wrote them. A remote server whose namespace could own one of them
+   * stays required; every other one is left out when it fails, as in a
+   * listing. A misspelled name therefore answers "tool not found".
+   */
+  calledToolNames?: readonly string[];
   /** Trusted transport callback, never a request-body field. */
   reauthorize?: () => Promise<void>;
   /**
@@ -1155,6 +1164,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     workspaceToolGatewayPreparationRefs(gatewaySettings, {
       listing: options.listing === true,
       ...(options.callServerId === undefined ? {} : { callServerId: options.callServerId }),
+      ...(options.calledToolNames === undefined
+        ? {}
+        : { calledToolNames: options.calledToolNames }),
     }),
     {
       accountId: grant.accountId,
@@ -1924,21 +1936,33 @@ const FIRST_PARTY_GATEWAY_SERVER_IDS: ReadonlySet<string> = new Set(["opengeni",
  * what it can reach: a remote server that fails to connect (a custom MCP
  * server that is down or whose host no longer resolves) is left out, as a
  * turn leaves it out, instead of failing every app's tool list. A call needs
- * only its own server: the others are left out the same way, so a dead
- * server never fails calls to healthy tools. A preparation that names
- * neither keeps every server required, and first-party servers stay
- * required everywhere.
+ * only its own server (`callServerId`, or the servers whose namespace could
+ * own a called MCP tool name): the others are left out the same way, so a
+ * dead server never fails calls to healthy tools. A preparation that names
+ * none of these, or a `callServerId` that matches no server, keeps every
+ * server required, and first-party servers stay required everywhere.
  */
 export function workspaceToolGatewayPreparationRefs(
   settings: Settings,
-  scope: { listing?: boolean; callServerId?: string } = {},
+  scope: { listing?: boolean; callServerId?: string; calledToolNames?: readonly string[] } = {},
 ): ToolRef[] {
-  return allGatewayToolRefs(settings).map((ref) => {
-    if (FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id)) return ref;
-    const catalogOnly =
-      scope.listing === true || (scope.callServerId !== undefined && ref.id !== scope.callServerId);
-    return catalogOnly ? { ...ref, optional: true } : ref;
-  });
+  const refs = allGatewayToolRefs(settings);
+  const { callServerId, calledToolNames } = scope;
+  const callScoped =
+    (callServerId !== undefined && refs.some((ref) => ref.id === callServerId)) ||
+    calledToolNames !== undefined;
+  if (scope.listing !== true && !callScoped) return refs;
+  const required = (id: string) => {
+    if (scope.listing === true) return false;
+    if (id === callServerId) return true;
+    const prefix = `${mcpServerNamespace(id).namespace}__`;
+    return calledToolNames?.some((name) => name.startsWith(prefix)) === true;
+  };
+  return refs.map((ref) =>
+    FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id) || required(ref.id)
+      ? ref
+      : { ...ref, optional: true },
+  );
 }
 
 /** The tool names an MCP request calls (`tools/call`); empty when it only lists. */
@@ -1962,20 +1986,16 @@ export async function mcpRequestCalledToolNames(request: Request): Promise<strin
 /**
  * Prepares the gateway behind one MCP request. Listing tools and finding a
  * called tool only need the catalog, so a remote server that fails is left
- * out. When a called tool is then missing, the request prepares every server
- * again, so a call to a server that is down reports that server's failure
- * instead of "tool not found".
+ * out, except a server that could own a called tool's name: a call to a
+ * server that is down reports that server's failure, not "tool not found".
  */
 export async function prepareWorkspaceToolGatewayForMcpRequest(
   request: Request,
-  prepare: (options: { listing: boolean }) => Promise<PreparedWorkspaceToolGateway>,
+  prepare: (options: {
+    calledToolNames: readonly string[];
+  }) => Promise<PreparedWorkspaceToolGateway>,
 ): Promise<PreparedWorkspaceToolGateway> {
-  const called = await mcpRequestCalledToolNames(request);
-  const prepared = await prepare({ listing: true });
-  const entries = prepared.toolGatewayCatalog.entries.filter((entry) => entry.approval !== "human");
-  if (called.every((name) => workspaceToolGatewayMcpEntry(entries, name))) return prepared;
-  await prepared.close();
-  return await prepare({ listing: false });
+  return await prepare({ calledToolNames: await mcpRequestCalledToolNames(request) });
 }
 
 /** The callable catalog entry an MCP tool name (or a first-party alias) names. */
