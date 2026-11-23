@@ -154,6 +154,7 @@ async function fixture() {
   });
   const memory = memoryObjectStorage();
   const toolCalls: ToolCall[] = [];
+  let toolResult: unknown = { issues: [{ identifier: "ENG-1", title: "Shared issue" }] };
   let isolate: Isolate = async () => ({ status: 200 });
   let inventory: SiteToolAccountInventory | ((grant: AccessGrant) => SiteToolAccountInventory) = {
     canonical: new Map([["linear", { name: "Linear" } as never]]),
@@ -219,7 +220,7 @@ async function fixture() {
         subjectId: input.grant.subjectId,
         args: input.arguments,
       });
-      return { issues: [{ identifier: "ENG-1", title: "Shared issue" }] };
+      return toolResult as never;
     },
   };
   const deps = {
@@ -362,6 +363,9 @@ async function fixture() {
     setIsolate: (next: Isolate) => {
       isolate = next;
     },
+    setToolResult: (next: unknown) => {
+      toolResult = next;
+    },
     deps: deps as unknown as AppServerDeps,
     person,
     setInventory: (
@@ -456,6 +460,60 @@ test("a member without their own connection gets shared-account data from the ap
     paused: null,
     tools: ["linear/list_issues"],
   });
+});
+
+test("tool calls return the tool's value; older code and raw: true get the MCP result", async () => {
+  const f = await fixture();
+  const issues = { issues: [{ identifier: "ENG-2", title: "Shared issue" }] };
+  f.setToolResult({
+    content: [{ type: "text", text: JSON.stringify(issues) }],
+    structuredContent: issues,
+  });
+  const call = { tool: "linear/list_issues", arguments: {} };
+  const callAs = async (input: Record<string, unknown>) => {
+    let reply: HostReply | undefined;
+    f.setIsolate(async (_run, host) => {
+      reply = await host("tools.call", input);
+      return { status: 204 };
+    });
+    const ran = await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/issues" });
+    expect(ran.status, JSON.stringify(ran.json)).toBe(200);
+    return reply!;
+  };
+
+  // New uploads read values; raw: true asks for the MCP result.
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  expect((await callAs(call)).json.result).toEqual(issues);
+  expect((await callAs({ ...call, raw: true })).json.result).toMatchObject({
+    structuredContent: issues,
+  });
+
+  // A tool error reaches the code as tool_error, with the tool's message.
+  f.setToolResult({ isError: true, content: [{ type: "text", text: "Team not found" }] });
+  const failed = await callAs(call);
+  expect(failed.status).toBe(502);
+  expect(failed.json.error.message).toBe("Team not found");
+  expect(failed.json.error.details.reason).toBe("tool_error");
+  f.setToolResult({
+    content: [{ type: "text", text: JSON.stringify(issues) }],
+    structuredContent: issues,
+  });
+
+  // A bundle can keep reading the MCP result.
+  expect((await f.publish({ ...SERVER_CODE, toolResults: "raw" })).status).toBe(200);
+  expect((await callAs(call)).json.result).toMatchObject({ structuredContent: issues });
+
+  // A version stored before the field existed reads the MCP result.
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  // Version history is immutable; only a replica-role session can rewrite it.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      update workspace_artifact_versions
+      set server_manifest = server_manifest - 'toolResults'
+      where id = ${f.versionId()}`;
+  });
+  expect((await callAs(call)).json.result).toMatchObject({ structuredContent: issues });
 });
 
 test("without a shared account the tool call fails instead of using anyone's own connection", async () => {

@@ -21,6 +21,7 @@ const STATUS: Record<AppServerErrorCode, number> = {
   rate_limited: 429,
   unavailable: 503,
   conflict: 409,
+  tool_failed: 502,
 };
 const PUBLIC_CODE: Record<AppServerErrorCode, ErrorCode> = {
   validation: "validation_failed",
@@ -29,6 +30,7 @@ const PUBLIC_CODE: Record<AppServerErrorCode, ErrorCode> = {
   rate_limited: "limit_exceeded",
   unavailable: "upstream_unavailable",
   conflict: "conflict",
+  tool_failed: "upstream_unavailable",
 };
 
 /** App server code errors in the public envelope; `details.code` is the app server code. */

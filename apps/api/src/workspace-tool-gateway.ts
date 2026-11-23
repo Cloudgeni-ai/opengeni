@@ -87,6 +87,7 @@ import {
   isMcpAccountParameterChoiceError,
   isMcpRequestNotSentError,
   isMcpServerUnreachableError,
+  mcpServerNamespace,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -515,7 +516,11 @@ export async function callWorkspaceToolGatewayForCaller(
         authorization,
         // A target-only call must behave exactly like the complete call: only
         // provider construction narrows, never the settings first-party tools see.
-        allowedIdentities ? { allowedIdentities, firstPartySettings: "caller" } : {},
+        // The complete catalog only checks the digest: another server that is
+        // down is left out, and the called tool's own server stays required.
+        allowedIdentities
+          ? { allowedIdentities, firstPartySettings: "caller" }
+          : { callServerId: request.identity.serverId },
       );
     } finally {
       prepareMs += performance.now() - startedAt;
@@ -614,11 +619,12 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities: readonly { serverId: string; toolName: string }[],
+  options: WorkspaceToolGatewayPreparationOptions = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
   }
-  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
+  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities, options);
 }
 
 export async function prepareWorkspaceToolGatewayForGrant(
@@ -641,11 +647,26 @@ export type WorkspaceToolGatewayPreparationOptions = {
   signal?: AbortSignal;
   /**
    * Trusted (never a request-body field): this preparation only lists tools
-   * (GET /tools/catalog, /tools/declarations). A remote MCP server that fails
-   * to connect is left out of the list instead of failing it. Calls never
-   * set it, so a call still reports its server's own failure.
+   * (catalog, declarations, MCP tools/list, the MCP consent screen). A remote
+   * MCP server that fails to connect is left out of the list instead of
+   * failing it.
    */
   listing?: boolean;
+  /**
+   * Trusted (never a request-body field): the server of the one tool this
+   * preparation calls or approves. Every other remote server only shapes the
+   * catalog, so one that fails is left out, as in a listing; this server stays
+   * required, so a call to a server that is down still reports its failure.
+   * An id that names no configured server keeps every server required.
+   */
+  callServerId?: string;
+  /**
+   * Trusted: the tool names one MCP request calls (`tools/call`), as the
+   * request wrote them. A remote server whose namespace could own one of them
+   * stays required; every other one is left out when it fails, as in a
+   * listing. A misspelled name therefore answers "tool not found".
+   */
+  calledToolNames?: readonly string[];
   /** Trusted transport callback, never a request-body field. */
   reauthorize?: () => Promise<void>;
   /**
@@ -1206,7 +1227,13 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const authNeeded: ToolAuthNeededPayload[] = [];
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
-    workspaceToolGatewayPreparationRefs(gatewaySettings, options.listing === true),
+    workspaceToolGatewayPreparationRefs(gatewaySettings, {
+      listing: options.listing === true,
+      ...(options.callServerId === undefined ? {} : { callServerId: options.callServerId }),
+      ...(options.calledToolNames === undefined
+        ? {}
+        : { calledToolNames: options.calledToolNames }),
+    }),
     {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1539,16 +1566,7 @@ export function buildWorkspaceToolGatewayMcpServer(
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // A first-party tool's hidden alias (its former name) calls the same tool.
-    const name = request.params.name;
-    const current = currentFirstPartyToolReference(name);
-    const entry =
-      callableEntries.find((candidate) => candidate.modelName === name) ??
-      (current === undefined
-        ? undefined
-        : callableEntries.find(
-            (candidate) =>
-              candidate.modelName === current && candidate.identity.serverId === "opengeni",
-          ));
+    const entry = workspaceToolGatewayMcpEntry(callableEntries, request.params.name);
     if (!entry) throw new ToolGatewayToolNotFoundError();
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",
@@ -1983,15 +2001,82 @@ const FIRST_PARTY_GATEWAY_SERVER_IDS: ReadonlySet<string> = new Set(["opengeni",
  * The tools the gateway connects. A listing (catalog, declarations) shows
  * what it can reach: a remote server that fails to connect (a custom MCP
  * server that is down or whose host no longer resolves) is left out, as a
- * turn leaves it out, instead of failing every app's tool list. Calls keep
- * every server as before, and first-party servers stay required everywhere.
+ * turn leaves it out, instead of failing every app's tool list. A call needs
+ * only its own server (`callServerId`, or the servers whose namespace could
+ * own a called MCP tool name): the others are left out the same way, so a
+ * dead server never fails calls to healthy tools. A preparation that names
+ * none of these, or a `callServerId` that matches no server, keeps every
+ * server required, and first-party servers stay required everywhere.
  */
 export function workspaceToolGatewayPreparationRefs(
   settings: Settings,
-  listing: boolean,
+  scope: { listing?: boolean; callServerId?: string; calledToolNames?: readonly string[] } = {},
 ): ToolRef[] {
-  return allGatewayToolRefs(settings).map((ref) =>
-    !listing || FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id) ? ref : { ...ref, optional: true },
+  const refs = allGatewayToolRefs(settings);
+  const { callServerId, calledToolNames } = scope;
+  const callScoped =
+    (callServerId !== undefined && refs.some((ref) => ref.id === callServerId)) ||
+    calledToolNames !== undefined;
+  if (scope.listing !== true && !callScoped) return refs;
+  const required = (id: string) => {
+    if (scope.listing === true) return false;
+    if (id === callServerId) return true;
+    const prefix = `${mcpServerNamespace(id).namespace}__`;
+    return calledToolNames?.some((name) => name.startsWith(prefix)) === true;
+  };
+  return refs.map((ref) =>
+    FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id) || required(ref.id)
+      ? ref
+      : { ...ref, optional: true },
+  );
+}
+
+/** The tool names an MCP request calls (`tools/call`); empty when it only lists. */
+export async function mcpRequestCalledToolNames(request: Request): Promise<string[]> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself.
+    return [];
+  }
+  return (Array.isArray(body) ? body : [body]).flatMap((message) => {
+    if (!message || typeof message !== "object") return [];
+    const { method, params } = message as { method?: unknown; params?: unknown };
+    if (method !== "tools/call" || !params || typeof params !== "object") return [];
+    const name = (params as { name?: unknown }).name;
+    return typeof name === "string" ? [name] : [];
+  });
+}
+
+/**
+ * Prepares the gateway behind one MCP request. Listing tools and finding a
+ * called tool only need the catalog, so a remote server that fails is left
+ * out, except a server that could own a called tool's name: a call to a
+ * server that is down reports that server's failure, not "tool not found".
+ */
+export async function prepareWorkspaceToolGatewayForMcpRequest(
+  request: Request,
+  prepare: (options: {
+    calledToolNames: readonly string[];
+  }) => Promise<PreparedWorkspaceToolGateway>,
+): Promise<PreparedWorkspaceToolGateway> {
+  return await prepare({ calledToolNames: await mcpRequestCalledToolNames(request) });
+}
+
+/** The callable catalog entry an MCP tool name (or a first-party alias) names. */
+function workspaceToolGatewayMcpEntry<
+  Entry extends { modelName: string; identity: { serverId: string } },
+>(entries: readonly Entry[], name: string): Entry | undefined {
+  const current = currentFirstPartyToolReference(name);
+  return (
+    entries.find((candidate) => candidate.modelName === name) ??
+    (current === undefined
+      ? undefined
+      : entries.find(
+          (candidate) =>
+            candidate.modelName === current && candidate.identity.serverId === "opengeni",
+        ))
   );
 }
 

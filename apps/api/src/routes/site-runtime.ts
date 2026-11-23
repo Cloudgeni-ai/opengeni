@@ -1138,7 +1138,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // Reject undeclared identities before any connector is prepared.
       if (call)
         await authorizeSite(deps.db, authorization.grant, { ...site, identity: call.identity });
-      const prepared = await prepareWorkspaceToolGateway(deps, authorization, options);
+      // A server that is down is left out of a listing; a call keeps only its
+      // own server required.
+      const prepared = await prepareWorkspaceToolGateway(
+        deps,
+        authorization,
+        call ? { ...options, callServerId: call.identity.serverId } : { ...options, listing: true },
+      );
       try {
         result = call
           ? await callWorkspaceToolGateway(

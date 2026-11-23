@@ -203,6 +203,18 @@ shows managers one line per affected collection or database.
   catalog (which may carry a person's credentials) are refused. Tool
   arguments may not contain vault references. The tool gateway call itself
   uses the deployer's workspace grant, as a shared app sync does.
+  The call returns the tool's JSON value, read as app syncs read it: the
+  structured content, else the first text part that parses as JSON, else
+  the text. Text that happens to be valid JSON is parsed (`"null"` becomes
+  `null`, a long numeric id becomes a number), as in syncs. A tool error
+  throws with code `tool_error`.
+  `env.tools.call(tool, args, { raw: true })` returns the MCP result instead.
+  The bundle's `toolResults` (`"value"` by default, or `"raw"`) sets this per
+  version. Code uploaded before it existed reads as `"raw"`, and
+  `artifacts_get_source` reports it, so downloading and uploading the code
+  again keeps what it reads. During a rollout, an upload frozen by an older
+  API pod records `"raw"`. An API rolled back below this change returns the
+  MCP result to every version.
 - **Data** (`env.data`): shared, shared_read and append_only collections;
   `per_viewer` collections are refused, since the code isn't a viewer.
 - **Fetch**: HTTPS on the default port to hosts in the version's `egress`,
