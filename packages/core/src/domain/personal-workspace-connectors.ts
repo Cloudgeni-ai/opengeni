@@ -65,6 +65,8 @@ export type PersonalWorkspaceExtensionMcpServer = EnabledMcpCapabilityServer & {
     ConnectionMetadata,
     "id" | "workspaceId" | "subjectId" | "providerDomain" | "status"
   >;
+  /** With `lapsedConnection`: every one of the owner's accounts it matches. */
+  lapsedOwnAccountIds?: string[];
 };
 
 function canonicalUrl(value: string): string {
@@ -233,6 +235,7 @@ export async function personalWorkspaceExtensionMcpServers(
     origin: PersonalWorkspaceOriginConnections;
     server: OriginMcpCapabilityServer;
     connection: PersonalWorkspaceOriginConnections["connections"][number];
+    matchingIds: string[];
   };
   const candidates: Candidate[] = [];
   for (const origin of origins) {
@@ -248,7 +251,12 @@ export async function personalWorkspaceExtensionMcpServers(
       const connection = matching.find((candidate) => candidate.status === "active") ?? matching[0];
       if (!connection || !allowedByPolicy(server) || personalInstallations.has(server.capabilityId))
         continue;
-      candidates.push({ origin, server, connection });
+      candidates.push({
+        origin,
+        server,
+        connection,
+        matchingIds: matching.map((candidate) => candidate.id),
+      });
     }
   }
   // Working origins claim a server id or endpoint first, so a lapsed origin
@@ -268,7 +276,7 @@ export async function personalWorkspaceExtensionMcpServers(
   const carried: PersonalWorkspaceExtensionMcpServer[] = [];
   for (const candidate of candidates) {
     if (!claimed.has(candidate)) continue;
-    const { origin, server, connection } = candidate;
+    const { origin, server, connection, matchingIds } = candidate;
     let originWorkspaceName = originNames.get(origin.originWorkspaceId);
     if (originWorkspaceName === undefined) {
       originWorkspaceName =
@@ -293,6 +301,7 @@ export async function personalWorkspaceExtensionMcpServers(
               providerDomain: connection.providerDomain,
               status: connection.status,
             },
+            lapsedOwnAccountIds: matchingIds,
           }
         : {}),
     });
@@ -307,6 +316,11 @@ export async function personalWorkspaceExtensionMcpServers(
  * from a list that still shows it) runs without it instead of being refused;
  * any other unknown id is still refused by the caller.
  */
+export type LapsedCarriedConnector = OmittedConnectionAccount & {
+  /** The person's own accounts for this connector, all stopped working. */
+  ownAccountIds: readonly string[];
+};
+
 export async function lapsedPersonalCarriedConnectors(
   db: Database,
   input: {
@@ -316,7 +330,7 @@ export async function lapsedPersonalCarriedConnectors(
     serverIds: readonly string[];
     ownServers: readonly Pick<EnabledMcpCapabilityServer, "id" | "url">[];
   },
-): Promise<OmittedConnectionAccount[]> {
+): Promise<LapsedCarriedConnector[]> {
   if (input.serverIds.length === 0) return [];
   const wanted = new Set(input.serverIds);
   const carried = await personalWorkspaceExtensionMcpServers(db, {
@@ -339,6 +353,7 @@ export async function lapsedPersonalCarriedConnectors(
               providerDomain: server.lapsedConnection.providerDomain,
               status: server.lapsedConnection.status,
             },
+            ownAccountIds: server.lapsedOwnAccountIds ?? [server.lapsedConnection.id],
           },
         ]
       : [],

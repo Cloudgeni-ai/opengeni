@@ -822,6 +822,99 @@ test("a pick for a carried connector whose account stopped working is kept, so l
   }
 }, 120_000);
 
+test("a pick for a carried connector whose account stopped working must name the person's own account", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const grant = {
+    accountId: f.accountId,
+    workspaceId: f.miaPersonal,
+    subjectId: f.mia,
+    permissions: ["admin", "sessions:control"],
+    principalKind: "human_session",
+    metadata: {},
+  } as unknown as Parameters<typeof createSessionForRequest>[1];
+  const deps = {
+    settings,
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient: { wakeSessionWorkflow: async () => {} },
+    objectStorage: null,
+  } as unknown as Parameters<typeof createSessionForRequest>[0];
+  const tools = [
+    { kind: "mcp" as const, id: f.custom.serverId },
+    { kind: "mcp" as const, id: f.curated.serverId },
+  ];
+  const pick = (connectionId: string) => [{ serverId: f.custom.serverId, connectionId }];
+  const create = async (connectionAccounts: { serverId: string; connectionId: string }[]) =>
+    await createSessionForRequest(deps, grant, f.miaPersonal, {
+      initialMessage: "use my account",
+      resources: [],
+      tools,
+      connectionAccounts,
+      model: "scripted-model",
+      idempotencyKey: crypto.randomUUID(),
+    } as Parameters<typeof createSessionForRequest>[3]);
+  const followUp = async (
+    sessionId: string,
+    connectionAccounts: { serverId: string; connectionId: string }[],
+  ) =>
+    await acceptSessionUserMessageWithOutcome(
+      deps as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[0],
+      grant as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[1],
+      f.miaPersonal,
+      sessionId,
+      { text: "again", clientEventId: crypto.randomUUID(), delivery: "send", connectionAccounts },
+    );
+  const refusal = (connectionId: string) => ({
+    status: 422,
+    diagnostic: {
+      reason: "selected_account_unavailable",
+      accounts: [{ serverId: f.custom.serverId, connectionId, reason: "account_not_visible" }],
+    },
+  });
+  const foreign = [
+    crypto.randomUUID(), // made up
+    f.connections.bobAcme, // another member's account for the same connector
+    f.connections.teamLinear, // a workspace account for another connector
+  ];
+  await sql`update connections set status = 'needs_reauth' where id = ${f.connections.miaAcme}`;
+  try {
+    for (const id of foreign) await expect(create(pick(id))).rejects.toMatchObject(refusal(id));
+    // Her own lapsed account is accepted.
+    const chat = await create(pick(f.connections.miaAcme));
+    for (const id of foreign)
+      await expect(followUp(chat.id, pick(id))).rejects.toMatchObject(refusal(id));
+    const accepted = await followUp(chat.id, pick(f.connections.miaAcme));
+    expect(
+      (
+        await getSessionTurnConnectionAccountIntent(
+          client.db,
+          f.miaPersonal,
+          chat.id,
+          accepted.turn.id,
+        )
+      )?.selections,
+    ).toEqual(pick(f.connections.miaAcme));
+    // Her own account for another lapsed connector is a mismatch.
+    await sql`update connections set status = 'needs_reauth' where id = ${f.connections.miaLinear}`;
+    await expect(create(pick(f.connections.miaLinear))).rejects.toMatchObject({
+      status: 422,
+      diagnostic: {
+        accounts: [
+          {
+            serverId: f.custom.serverId,
+            connectionId: f.connections.miaLinear,
+            reason: "account_mismatch",
+          },
+        ],
+      },
+    });
+  } finally {
+    await sql`update connections set status = 'active'
+      where id in ${sql([f.connections.miaAcme, f.connections.miaLinear])}`;
+  }
+}, 120_000);
+
 test("a carried connector a working origin serves is never listed as lapsed from another origin", async () => {
   if (!shared) return;
   const f = fixture;

@@ -327,7 +327,9 @@ import {
   personalWorkspaceExtensionMcpServers,
   personalWorkspaceExtensionSubject,
   lapsedPersonalCarriedConnectors,
+  type LapsedCarriedConnector,
 } from "./personal-workspace-connectors";
+import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 import {
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
@@ -985,15 +987,50 @@ type ConnectionAccountGap = { serverId: string; connectionId: string | null; rea
 function withLapsedConnectorPicks(
   intent: ConnectionAccountIntent | null,
   picks: readonly McpConnectionAccountSelection[] | undefined,
-  lapsed: readonly OmittedConnectionAccount[],
+  lapsed: readonly LapsedCarriedConnector[],
 ): ConnectionAccountIntent | null {
   if (!intent || !picks?.length || lapsed.length === 0) return intent;
+  assertOwnLapsedConnectorPicks(picks, lapsed);
   const kept = picks.filter(
     (pick) =>
       lapsed.some((omitted) => omitted.serverId === pick.serverId) &&
       !intent.selections.some((selection) => selection.serverId === pick.serverId),
   );
   return kept.length ? { ...intent, selections: [...intent.selections, ...kept] } : intent;
+}
+
+/**
+ * A pick for a lapsed carried connector is kept only when it names one of the
+ * person's own accounts for that connector; anything else is refused exactly
+ * as a pick for a running connector would be.
+ */
+function assertOwnLapsedConnectorPicks(
+  picks: readonly McpConnectionAccountSelection[] | undefined,
+  lapsed: readonly LapsedCarriedConnector[],
+): void {
+  const refused = (picks ?? []).flatMap((pick) => {
+    const connector = lapsed.find((omitted) => omitted.serverId === pick.serverId);
+    if (!connector || connector.ownAccountIds.includes(pick.connectionId)) return [];
+    return [
+      {
+        serverId: pick.serverId,
+        connectionId: pick.connectionId,
+        reason: lapsed.some((other) => other.ownAccountIds.includes(pick.connectionId))
+          ? ("account_mismatch" as const)
+          : ("account_not_visible" as const),
+      },
+    ];
+  });
+  if (refused.length > 0)
+    throw new ConnectionAccountSelectionError(
+      "An attached connector account is unavailable. Review its connection settings.",
+      { version: 1, reason: "selected_account_unavailable", accounts: refused },
+    );
+}
+
+/** Left-out connectors as recorded on the turn, without the account list. */
+function lapsedAsOmitted(lapsed: readonly LapsedCarriedConnector[]): OmittedConnectionAccount[] {
+  return lapsed.map(({ ownAccountIds: _ownAccountIds, ...omitted }) => omitted);
 }
 
 function connectionAccountGaps(
@@ -3680,6 +3717,7 @@ async function createSessionForRequestInFileScope(
     ),
     ownServers: runtimeSettings.mcpServers,
   });
+  assertOwnLapsedConnectorPicks(payload.connectionAccounts, lapsedToolOmissions);
   const lapsedToolIds = new Set(lapsedToolOmissions.map((omitted) => omitted.serverId));
   const isLapsedToolRef = (tool: ToolRef) => tool.kind === "mcp" && lapsedToolIds.has(tool.id);
   const runnableRequestedTools = validateToolRefs(
@@ -4172,7 +4210,7 @@ async function createSessionForRequestInFileScope(
     payload.connectionAccounts,
     lapsedToolOmissions,
   );
-  const omittedSelections = [...lapsedToolOmissions, ...omittedPicks];
+  const omittedSelections = [...lapsedAsOmitted(lapsedToolOmissions), ...omittedPicks];
   if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
@@ -5260,6 +5298,7 @@ async function acceptSessionUserMessageInFileScope(
             ownServers: runtimeSettings.mcpServers,
           })
         : [];
+    assertOwnLapsedConnectorPicks(input.connectionAccounts, lapsedPickOmissions);
     const frozen = await freezeConnectionAccounts({
       db,
       accountId: grant.accountId,
@@ -5293,7 +5332,10 @@ async function acceptSessionUserMessageInFileScope(
       input.connectionAccounts,
       lapsedPickOmissions,
     );
-    const omittedSelections = [...lapsedPickOmissions, ...frozen.omittedSelections];
+    const omittedSelections = [
+      ...lapsedAsOmitted(lapsedPickOmissions),
+      ...frozen.omittedSelections,
+    ];
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const surface = resolveTurnSurface({
