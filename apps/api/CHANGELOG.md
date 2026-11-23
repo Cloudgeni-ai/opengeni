@@ -1,5 +1,42 @@
 # @opengeni/api-router
 
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: App server code: publishing refuses tool names that aren't tools in the workspace and names the id to use, and an agent's `app_server_run` and run logs act for the person whose turn it is.
+- ae9c227: Require Node.js 22.15 or later (`engines.node`) for the packages that load `@opengeni/storage`, which uses zlib's zstd streams; on older Node versions the import fails.
+- 2a8b173: Apps (Sites) can call API integrations such as OneDrive and SharePoint again. The last check before a targeted tool call compared the connection's last-used time, which the call itself had just updated, so every such call was refused and shown as "Couldn't confirm this finished".
+- Updated dependencies [ae9c227]
+- Updated dependencies [3595193]
+- Updated dependencies [ae9c227]
+- Updated dependencies [1d7c08a]
+  - @opengeni/runtime@6.37.1
+  - @opengeni/db@6.37.1
+  - @opengeni/core@6.37.1
+  - @opengeni/storage@6.37.1
+  - @opengeni/documents@6.37.1
+  - @opengeni/events@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/artifact-tool@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/config@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/github@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/vaults-bitwarden@6.37.1
+  - @opengeni/vaults-keeper@6.37.1
+  - @opengeni/vaults-onepassword@6.37.1
+  - @opengeni/vaults-protonpass@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes

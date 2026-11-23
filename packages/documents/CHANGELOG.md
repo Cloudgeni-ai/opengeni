@@ -1,5 +1,18 @@
 # @opengeni/documents
 
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: Require Node.js 22.15 or later (`engines.node`) for the packages that load `@opengeni/storage`, which uses zlib's zstd streams; on older Node versions the import fails.
+- Updated dependencies [3595193]
+- Updated dependencies [ae9c227]
+  - @opengeni/db@6.37.1
+  - @opengeni/storage@6.37.1
+  - @opengeni/config@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/network@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes

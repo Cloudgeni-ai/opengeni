@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 6.37.1
+
+### Patch Changes
+
+- a102af1: Keep the host's model and reasoning choice on every new chat. The draft uses the first available level as a fallback without changing the order of the level picker.
+  - @opengeni/connect@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/sdk@6.37.1
+
 ## 6.37.0
 
 ### Minor Changes
