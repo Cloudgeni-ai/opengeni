@@ -2,8 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { SITE_CHARTS_JS } from "./site-charts";
 
-type Og = Record<string, (...args: unknown[]) => unknown> & {
-  fmt: Record<string, (v: unknown, o?: unknown) => unknown>;
+type Draw = (el: unknown, options: unknown) => unknown;
+type Format = (v: unknown, o?: unknown) => unknown;
+type Og = {
+  fmt: { date: Format; delta: Format };
+  kpis: Draw;
+  bars: Draw;
+  line: Draw;
+  scatter: Draw;
+  table: Draw;
 };
 
 const WIDTH = 600;
@@ -137,7 +144,8 @@ describe("chart helpers in a DOM", () => {
     const tz = process.env.TZ;
     process.env.TZ = "America/New_York";
     const day = og.fmt.date("2026-01-15") as string;
-    process.env.TZ = tz;
+    if (tz === undefined) delete process.env.TZ;
+    else process.env.TZ = tz;
     expect(day).toContain("15");
     expect(og.fmt.delta(0.04)).toEqual({ text: "0%", tone: "flat" });
   });

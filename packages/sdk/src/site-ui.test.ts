@@ -27,8 +27,9 @@ describe("chart helpers", () => {
     scope.window = {};
     try {
       new Function(SITE_CHARTS_JS)();
+      type Format = (v: unknown, o?: unknown) => unknown;
       const og = scope.window.og as {
-        fmt: Record<string, (v: unknown, o?: unknown) => unknown>;
+        fmt: Record<"pct" | "money" | "compact" | "ms" | "num" | "delta", Format>;
       } & Record<string, unknown>;
       for (const name of ["kpis", "bars", "line", "scatter", "table"])
         expect(typeof og[name]).toBe("function");
@@ -46,7 +47,8 @@ describe("chart helpers", () => {
       });
       expect(og.fmt.delta(1.7, { unit: "pp" })).toEqual({ text: "\u25B2 +1.7 pp", tone: "good" });
     } finally {
-      scope.window = previous;
+      if (previous === undefined) delete scope.window;
+      else scope.window = previous;
     }
   });
 
