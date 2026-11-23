@@ -126,7 +126,7 @@ import {
   validateHeadlessSessionCookies,
   type HeadlessSessionCookies,
 } from "./headless-session-cookies";
-import { BrowserWindowParking } from "./window-parking";
+import { BrowserWindowParking, type BrowserWindowParkingStatus } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
 import { errorMessage, isRecord } from "@opengeni/contracts/values";
@@ -707,6 +707,49 @@ type TargetScreencast = {
   capturePromise: Promise<void> | null;
   subscriptions: Map<string, LatestBrowserFrameSubscription>;
   unsubscribe: () => void;
+  health: FrameStreamHealthState;
+};
+
+/** How one frame stream is doing, kept so a stream that stops producing
+ * frames can say why. Only states, counts, times and error kinds: never page
+ * content, URLs or error text. */
+type FrameStreamHealthState = {
+  createdAt: number;
+  seeded: boolean;
+  pollerRunning: boolean;
+  /** Why the sampling loop ended, if it did while the stream existed. */
+  pollerEnded: "aborted" | "replaced" | "failed" | null;
+  unresponsiveSince: number | null;
+  unresponsiveMethod: string | null;
+  consecutiveFailures: number;
+  lastFailure: string | null;
+  lastFailureAt: number | null;
+  /** Captures that finished without producing a frame. */
+  emptyCaptures: number;
+};
+
+export type BrowserFrameStreamHealth = {
+  windowParking: BrowserWindowParkingStatus | null;
+  streams: Array<{
+    targetId: string;
+    subscribers: number;
+    sequence: number;
+    ageMs: number;
+    sinceLastFrameMs: number | null;
+    seeded: boolean;
+    pollerRunning: boolean;
+    pollerEnded: FrameStreamHealthState["pollerEnded"];
+    capturing: boolean;
+    capturesRunning: number;
+    framesPaused: boolean;
+    frontTab: boolean;
+    unresponsiveForMs: number | null;
+    unresponsiveMethod: string | null;
+    consecutiveFailures: number;
+    lastFailure: string | null;
+    sinceLastFailureMs: number | null;
+    emptyCaptures: number;
+  }>;
 };
 
 /** What a target had seen before an action, so settling waits only for the
@@ -2815,6 +2858,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           capturePromise: null,
           subscriptions: new Map(),
           unsubscribe: () => undefined,
+          health: {
+            createdAt: Date.now(),
+            seeded: false,
+            pollerRunning: false,
+            pollerEnded: null,
+            unresponsiveSince: null,
+            unresponsiveMethod: null,
+            consecutiveFailures: 0,
+            lastFailure: null,
+            lastFailureAt: null,
+            emptyCaptures: 0,
+          },
         };
         state.screencasts.set(key, screencast);
         created = true;
@@ -2865,6 +2920,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           // as a running stream does.
           if (error instanceof CdpCommandTimeoutError) {
             seedFailure = undefined;
+            configured.screencast.health.unresponsiveSince ??= Date.now();
+            configured.screencast.health.unresponsiveMethod = error.method;
             frameStreamDiagnostic("browser.frame.subscribe.unseeded", {
               browserSessionId: this.browserSessionId,
               targetId,
@@ -2876,12 +2933,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         }
       }
       if (seedFailure !== undefined) throw seedFailure;
-      if (seeded)
+      if (seeded) {
+        configured.screencast.health.seeded = true;
         frameStreamDiagnostic("browser.frame.subscribe.seeded", {
           browserSessionId: this.browserSessionId,
           targetId,
           sequence: configured.screencast.sequence,
         });
+      }
     } catch (error) {
       await configured.subscription.close().catch(() => undefined);
       throw error;
@@ -7102,19 +7161,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private pollFallbackFrames(targetId: string, expected: TargetScreencast): void {
+    const health = expected.health;
+    health.pollerRunning = true;
+    health.pollerEnded = null;
+    const ended = (reason: NonNullable<FrameStreamHealthState["pollerEnded"]>) => {
+      health.pollerRunning = false;
+      health.pollerEnded = reason;
+    };
     void (async () => {
       let consecutiveFailures = 0;
       // Since when the page has not answered a frame's commands in time.
       let unresponsiveSince: number | null = null;
       while (!expected.fallbackAbort.signal.aborted) {
         await delay(FRAME_FALLBACK_INTERVAL_MS * expected.options.everyNthFrame);
-        if (expected.fallbackAbort.signal.aborted) return;
+        if (expected.fallbackAbort.signal.aborted) return ended("aborted");
         const state = this.states.get(targetId);
-        if (!state || state.screencasts.get(expected.key) !== expected) return;
+        if (!state || state.screencasts.get(expected.key) !== expected) return ended("replaced");
         if (Date.now() - expected.lastFrameAt < FRAME_FALLBACK_INTERVAL_MS) continue;
+        const sequence = expected.sequence;
         try {
           await this.captureFallbackFrame(targetId, expected);
+          if (expected.sequence === sequence) health.emptyCaptures += 1;
           consecutiveFailures = 0;
+          health.consecutiveFailures = 0;
+          health.unresponsiveSince = null;
+          health.unresponsiveMethod = null;
           if (unresponsiveSince !== null) {
             frameStreamDiagnostic("browser.frame.page_responsive", {
               browserSessionId: this.browserSessionId,
@@ -7130,6 +7201,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           // keeps sampling and shows the page again once it answers; the tab
           // closing or its browser going away still ends it (removeState).
           if (error instanceof CdpCommandTimeoutError) {
+            health.unresponsiveSince ??= Date.now();
+            health.unresponsiveMethod = error.method;
             if (unresponsiveSince === null) {
               unresponsiveSince = Date.now();
               frameStreamDiagnostic("browser.frame.page_unresponsive", {
@@ -7141,15 +7214,52 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             continue;
           }
           consecutiveFailures += 1;
+          health.consecutiveFailures = consecutiveFailures;
+          health.lastFailure = frameFailureKind(error);
+          health.lastFailureAt = Date.now();
           if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);
           if (current?.screencasts.get(expected.key) === expected) {
             this.failScreencast(current, expected, transportError(error));
           }
-          return;
+          return ended("failed");
         }
       }
-    })();
+      ended("aborted");
+    })().catch(() => ended("failed"));
+  }
+
+  /** The state of every live frame stream of this browser, for diagnosing a
+   * stream that stopped producing frames. Holds no page content. */
+  frameStreamHealth(now = Date.now()): BrowserFrameStreamHealth {
+    const streams: BrowserFrameStreamHealth["streams"] = [];
+    for (const state of this.states.values()) {
+      for (const screencast of state.screencasts.values()) {
+        const health = screencast.health;
+        streams.push({
+          targetId: state.targetId,
+          subscribers: screencast.subscriptions.size,
+          sequence: screencast.sequence,
+          ageMs: now - health.createdAt,
+          sinceLastFrameMs: screencast.lastFrameAt > 0 ? now - screencast.lastFrameAt : null,
+          seeded: health.seeded,
+          pollerRunning: health.pollerRunning,
+          pollerEnded: health.pollerEnded,
+          capturing: screencast.capturePromise !== null,
+          capturesRunning: state.capturesRunning.size,
+          framesPaused: state.framesPaused !== undefined,
+          frontTab: this.frontTargetId === state.targetId,
+          unresponsiveForMs:
+            health.unresponsiveSince === null ? null : now - health.unresponsiveSince,
+          unresponsiveMethod: health.unresponsiveMethod,
+          consecutiveFailures: health.consecutiveFailures,
+          lastFailure: health.lastFailure,
+          sinceLastFailureMs: health.lastFailureAt === null ? null : now - health.lastFailureAt,
+          emptyCaptures: health.emptyCaptures,
+        });
+      }
+    }
+    return { windowParking: this.windowParking?.status() ?? null, streams };
   }
 
   private refreshSubscribedFrame(targetId: string): void {
@@ -12317,6 +12427,14 @@ function tabNotRespondingError(cause: CdpCommandTimeoutError): InteractionContro
 
 function frameStreamDiagnostic(event: string, fields: Readonly<Record<string, unknown>>): void {
   console.info(JSON.stringify({ event, ...fields, at: new Date().toISOString() }));
+}
+
+/** An error's kind and CDP method, never its text (which can name pages). */
+function frameFailureKind(error: unknown): string {
+  if (error instanceof CdpProtocolError) return `CdpProtocolError:${error.method}:${error.code}`;
+  if (error instanceof CdpCommandTimeoutError) return `CdpCommandTimeoutError:${error.method}`;
+  if (error instanceof Error) return error.name || "Error";
+  return typeof error;
 }
 
 function normalizeTargetInfo(value: unknown): TargetInfo {

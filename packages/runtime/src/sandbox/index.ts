@@ -405,6 +405,7 @@ export {
   type BrowserControlPlacementSession,
   type BrowserControlScreenshotOptions,
   type BrowserControlFrame,
+  type BrowserFrameHealthValue,
   type BrowserStateDownloadGrant,
   type BrowserStateUploadGrant,
   type BrowserViewGrant,
