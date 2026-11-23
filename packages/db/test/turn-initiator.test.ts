@@ -270,7 +270,9 @@ async function addAcceptedScheduledOccurrence(
         causalHumanSubjectId: accepted.causalHumanSubjectId,
       },
       personalConnectionDelegations: accepted.personalConnectionDelegations,
-      mcpAccountBindings: accepted.mcpAccountBindings,
+      ...(accepted.mcpAccountBindings === undefined
+        ? {}
+        : { mcpAccountBindings: accepted.mcpAccountBindings }),
       xaiProviderAccountAuthoritySnapshot: accepted.xaiProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: run.id,
     },
