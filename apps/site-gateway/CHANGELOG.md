@@ -1,5 +1,12 @@
 # @opengeni/site-gateway
 
+## 0.3.8
+
+### Patch Changes
+
+- @opengeni/contracts@6.37.1
+- @opengeni/sdk@6.37.1
+
 ## 0.3.7
 
 ### Patch Changes

@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 6.37.1
+
+### Patch Changes
+
+- 601f949: The browser viewer no longer shows a frozen picture as live. A live view whose connection stays open but stops sending frames for 15 seconds opens a new stream; after the automatic retries it says the browser stopped sending its picture and offers to reconnect.
+- a102af1: Keep the host's model and reasoning choice on every new chat. The draft uses the first available level as a fallback without changing the order of the level picker.
+  - @opengeni/connect@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/sdk@6.37.1
+
 ## 6.37.0
 
 ### Minor Changes
