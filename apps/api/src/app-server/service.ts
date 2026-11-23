@@ -80,6 +80,7 @@ import {
 } from "@opengeni/network";
 import { retryWhileMissing } from "@opengeni/storage";
 import { callAppSyncToolThroughGateway, type AppSyncToolCaller } from "../app-sync/service";
+import { PERSONAL_GITHUB_TOOLS_SERVER_ID } from "../personal-github-tools";
 import { writeSiteDataWithAccess } from "../site-data/operations";
 import {
   meterSiteData,
@@ -1092,6 +1093,12 @@ export function routeAppServerTool(
       .sort((left, right) => left.serverId.localeCompare(right.serverId));
     if (shared) return { serverId: shared.serverId, toolName: tool.toolName };
     const name = inventory.canonical.get(canonicalServerId)?.name ?? "this tool's connector";
+    // Your GitHub is only ever a person's own account, never shared.
+    if (canonicalServerId === PERSONAL_GITHUB_TOOLS_SERVER_ID)
+      throw forbidden(
+        `Server code can't use ${name}: it runs only on each person's own GitHub account. Call it from the app's page instead.`,
+        { reason: "tool_acts_as_person", connector: name },
+      );
     throw forbidden(
       `Server code uses only the workspace's shared accounts, and no shared ${name} account is connected. A workspace admin can connect one and share it with the workspace.`,
       { reason: "shared_account_required", connector: name },

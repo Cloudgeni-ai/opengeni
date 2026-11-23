@@ -1353,6 +1353,67 @@ type GitHubProviderResult = {
 
 export class GitHubRestInputError extends Error {}
 export class GitHubRestAuthorityError extends Error {}
+
+/** How long one internal GitHub tools request may take (worker and API alike). */
+export const GITHUB_REST_INTERNAL_TIMEOUT_MS = 20_000;
+
+/** The tools-server configuration of an internal GitHub tools server (no remote MCP is contacted). */
+export function githubRestInternalServerConfig(id: string, name: string) {
+  return {
+    id,
+    name,
+    url: `${GITHUB_REST_API_ORIGIN}/`,
+    allowedTools: [...GITHUB_REST_TOOL_NAMES],
+    timeoutMs: GITHUB_REST_INTERNAL_TIMEOUT_MS,
+    cacheToolsList: true,
+  };
+}
+
+/** Only a well-formed bearer authorization from a resolved credential. */
+export function githubRestBearerHeaders(headers: Record<string, string>): Record<string, string> {
+  const authorization = new Headers(headers).get("authorization");
+  if (
+    !authorization ||
+    !/^Bearer [^\u0000-\u0020\u007f]+$/u.test(authorization) ||
+    authorization.length > 16_384
+  ) {
+    throw new GitHubRestAuthorityError("Personal GitHub authorization header is unavailable");
+  }
+  return { authorization };
+}
+
+/** A GET to api.github.com only, for authority lookups (a repository's live access). */
+export function githubRestGetter(
+  headers: Record<string, string>,
+  fetchImpl?: typeof fetch,
+): (url: URL) => Promise<Response> {
+  return async (url: URL): Promise<Response> => {
+    if (url.origin !== GITHUB_REST_API_ORIGIN) {
+      throw new GitHubRestAuthorityError("GitHub REST destination binding mismatch");
+    }
+    return await (fetchImpl ?? fetch)(url, {
+      method: "GET",
+      // A renamed repository answers with a same-origin redirect; the shared
+      // lookup follows it only to api.github.com.
+      redirect: "manual",
+      headers: {
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "OpenGeni-GitHub-Bridge/1",
+        ...headers,
+      },
+      signal: AbortSignal.timeout(GITHUB_REST_INTERNAL_TIMEOUT_MS),
+    });
+  };
+}
+
+/** The live-repository cache key of one personal GitHub connection grant. */
+export function personalGitHubRestCacheScope(
+  connectionId: string,
+  current: { connectionAuthorityGeneration: number; credentialBindingId: string },
+): string {
+  return `${connectionId}|${current.connectionAuthorityGeneration}|${current.credentialBindingId}`;
+}
 /**
  * The repository was removed from the chat. Its tools refuse it and
  * `repositories_list` leaves it out instead of failing the whole listing.
