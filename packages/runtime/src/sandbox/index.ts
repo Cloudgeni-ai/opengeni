@@ -125,6 +125,7 @@ import {
   verifyRestoredWorkspace,
   verifyRestoredWorkspaceContents,
   workspaceArchiveExcludedPaths,
+  workspaceArchiveHydrationFailureSummary,
   WorkspaceArchiveIntegrityError,
   type VerifiedWorkspaceArchive,
   type WorkspaceArchiveDescriptor,
@@ -2666,6 +2667,10 @@ export async function establishSandboxSessionFromEnvelope(
             (restored as { state?: unknown }).state,
           );
           if (error instanceof WorkspaceArchiveIntegrityError) throw error;
+          // The caller only sees the wrapped code; say here why it failed.
+          console.warn(
+            `[sandbox] cold-restore hydration failed for revision ${workspaceArchive.descriptor.revision}: ${workspaceArchiveHydrationFailureSummary(error)}`,
+          );
           throw new WorkspaceArchiveIntegrityError(
             "archive_hydration_failed",
             `failed to hydrate selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
