@@ -18,7 +18,7 @@ function app(
   },
 ) {
   const api = new Hono();
-  api.post("/mutation", (c) => {
+  api.on(["POST", "PUT", "PATCH", "DELETE"], "/mutation", (c) => {
     requireSameOriginBrowserMutation(c, { settings } as never);
     return c.json({ ok: true });
   });
@@ -61,6 +61,52 @@ describe("local browser mutation origin", () => {
 describe("managed browser mutation origin", () => {
   const managed = { productAccessMode: "managed", publicBaseUrl: "https://app.example.test" };
   const url = "https://api.example.test/mutation";
+  const sameOrigin = { origin: managed.publicBaseUrl, "sec-fetch-site": "same-origin" };
+
+  test("accepts body-less same-origin mutations without a content type over HTTP", async () => {
+    const api = app(managed);
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: api.fetch });
+    try {
+      for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+        const response = await fetch(new URL("/mutation", server.url), {
+          method,
+          headers: sameOrigin,
+        });
+        expect({ method, status: response.status }).toEqual({ method, status: 200 });
+        await response.body?.cancel();
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("still requires a trusted Origin and same-origin fetch metadata without a body", async () => {
+    const api = app(managed);
+    for (const headers of [
+      { "sec-fetch-site": "same-origin" },
+      { origin: managed.publicBaseUrl },
+      { ...sameOrigin, origin: "https://other.example.test" },
+      { ...sameOrigin, "sec-fetch-site": "cross-site" },
+    ]) {
+      expect((await api.request(url, { method: "POST", headers })).status).toBe(403);
+    }
+  });
+
+  test("rejects non-JSON content types and untyped payloads even from a trusted origin", async () => {
+    const api = app(managed);
+    for (const init of [
+      { body: new URLSearchParams({ value: "form" }) },
+      { body: Uint8Array.of(1) },
+      { headers: { "content-type": "text/plain" } },
+    ]) {
+      const response = await api.request(url, {
+        method: "POST",
+        ...init,
+        headers: { ...sameOrigin, ...init.headers },
+      });
+      expect(response.status).toBe(403);
+    }
+  });
 
   test("accepts only the public origin with same-origin fetch metadata", async () => {
     expect((await request("https://app.example.test", "same-origin", url, managed)).status).toBe(
