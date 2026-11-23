@@ -52,8 +52,36 @@ export function matchingConnectionAccounts(
 export type ConnectedAccountGroup = {
   serverId: string;
   name: string;
+  /** Includes accounts that stopped working (`status` not "active"); see `isLapsedAccount`. */
   accounts: ConnectionMetadata[];
 };
+
+/** An account that stopped working (for example its sign-in expired) and needs reconnecting. */
+export function isLapsedAccount(account: Pick<ConnectionMetadata, "status">): boolean {
+  return (
+    account.status === "needs_reauth" || account.status === "revoked" || account.status === "error"
+  );
+}
+
+/** The accounts a connector uses when the person made no choice: every working one. */
+export function defaultConnectionAccountIds(group: ConnectedAccountGroup): string[] {
+  return group.accounts.filter((account) => !isLapsedAccount(account)).map((account) => account.id);
+}
+
+/**
+ * The first account the connector would send that stopped working: an
+ * explicit pick that lapsed, or, with no choice, the only accounts it has.
+ */
+export function lapsedConnectionAccount(
+  group: ConnectedAccountGroup | undefined,
+  chosen: readonly string[] | undefined,
+): ConnectionMetadata | null {
+  if (!group) return null;
+  const lapsed = group.accounts.filter(isLapsedAccount);
+  if (lapsed.length === 0) return null;
+  if (chosen !== undefined) return lapsed.find((account) => chosen.includes(account.id)) ?? null;
+  return defaultConnectionAccountIds(group).length === 0 ? lapsed[0]! : null;
+}
 
 /** Missing key follows eligible defaults; an array is an exact, explicit set. */
 export type ConnectionAccountChoices = Record<string, string[]>;
@@ -104,8 +132,10 @@ export function connectedAccountGroups(
     const serverId = ref.serverId;
     const group = groups.get(serverId) ?? { serverId, name: ref.name, accounts: [] };
     for (const account of matchingConnectionAccounts(ref.connectionRef, connections).filter(
-      // Your own login works here only where you turned it on (D-54).
-      (entry) => entry.status === "active" && entry.turnedOnHere !== false,
+      // Your own login works here only where you turned it on (D-54). An
+      // account that stopped working stays listed so a pick of it shows as
+      // needing reconnecting rather than vanishing.
+      (entry) => entry.turnedOnHere !== false,
     )) {
       if (!group.accounts.some((existing) => existing.id === account.id))
         group.accounts.push(account);
@@ -123,7 +153,9 @@ export async function sessionConnectedAccounts(
 ): Promise<ConnectedAccountGroup[]> {
   const native = selectedNativeConnectorRefs(items);
   if (native.length === 0) return [];
-  const connections = knownConnections ?? (await client.listOwnConnectionAccounts(workspaceId));
+  const connections =
+    knownConnections ??
+    (await client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }));
   return connectedAccountGroups(native, connections);
 }
 
@@ -134,13 +166,17 @@ export function selectedConnectionAccounts(
   const selections: McpConnectionAccountSelection[] = [];
   const unresolved: ConnectedAccountGroup[] = [];
   for (const group of groups) {
-    // A workspace default can name a connector the sender has never connected.
-    // No eligible account means no access, not an account choice to resolve.
-    // Keep explicit empty/stale choices blocked: omission must not widen them.
-    if (choices[group.serverId] === undefined && group.accounts.length === 0) continue;
-    const chosen = choices[group.serverId] ?? group.accounts.map((account) => account.id);
+    // A workspace default can name a connector the sender has never connected
+    // (or whose accounts all stopped working). No working account means no
+    // access, not an account choice to resolve.
+    const defaults = defaultConnectionAccountIds(group);
+    if (choices[group.serverId] === undefined && defaults.length === 0) continue;
+    const chosen = choices[group.serverId] ?? defaults;
     // Until an explicit empty-set wire representation exists, fail closed:
     // never submit an omission that the backend might interpret as defaults.
+    // A pick that stopped working is still sent as picked: the server leaves
+    // it out without widening, and the connector shows "Reconnect required".
+    // Only an empty choice, or a pick no longer listed at all, needs review.
     if (
       !chosen.length ||
       chosen.some((id) => !group.accounts.some((account) => account.id === id))

@@ -357,7 +357,7 @@ export function WorkspaceComposerPlus(
       `/workspaces/${encodeURIComponent(workspaceId)}/plugins${item ? `?suggested_capability=${encodeURIComponent(item.id)}` : ""}`,
     );
   };
-  const reconnect = async (serverId: string) => {
+  const reconnect = async (serverId: string, account?: ConnectionMetadata) => {
     const generation = lifecycle.generation;
     const deniedRevision = lifecycle.deniedConnectionsRevision;
     const listed = current?.items.find((candidate) => candidate.runtime.mcpServerId === serverId);
@@ -365,11 +365,16 @@ export function WorkspaceComposerPlus(
     // reconnects through the account it was seen with.
     const mark = listed ? undefined : marked?.get(serverId);
     const item = listed ?? mark?.item;
-    const health = listed
-      ? connectionHealth(listed, current?.connections ?? [], current?.connections !== null)
-      : mark
-        ? connectionHealth(mark.item, mark.connections, true)
-        : null;
+    // A named account (a pick that stopped working) reconnects that account.
+    const health = account
+      ? item
+        ? connectionHealth(item, [account], true)
+        : null
+      : listed
+        ? connectionHealth(listed, current?.connections ?? [], current?.connections !== null)
+        : mark
+          ? connectionHealth(mark.item, mark.connections, true)
+          : null;
     const plan = item && health ? capabilityReconnectPlan(item, health) : null;
     // Reuse a surviving OAuth connection. A missing credential or API key uses
     // the existing settings repair flow so a new account is never silently bound.
@@ -453,7 +458,7 @@ export function WorkspaceComposerPlus(
       }}
       connectorActions={{
         ...props.connectorActions,
-        onReconnect: (id) => void reconnect(id),
+        onReconnect: (id, account) => void reconnect(id, account),
         // Rows already on screen refresh in place; only a first load shows rows loading.
         loading: loading && !current,
         error: canReadConnections === false ? deniedMessage : current ? error : null,

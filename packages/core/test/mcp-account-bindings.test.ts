@@ -121,34 +121,62 @@ test("a stale pick among several keeps only the sender's other picks", () => {
   const expired = { ...connection(), status: "needs_reauth" as const };
   const kept = connection();
   const unpicked = connection();
-  const removedId = crypto.randomUUID();
   const result = resolveMcpAccountBindings({
     ...input,
     connections: [expired, kept, unpicked],
     selections: [
       { serverId: server.id, connectionId: expired.id },
       { serverId: server.id, connectionId: kept.id },
-      { serverId: server.id, connectionId: removedId },
     ],
     unusableSelections: "omit",
   });
   expect(result.bindings.map((binding) => binding.connectionId)).toEqual([kept.id]);
   expect(result.omitted).toEqual([
     { serverId: server.id, connectionId: expired.id, reason: "account_inactive" },
-    { serverId: server.id, connectionId: removedId, reason: "account_not_visible" },
+  ]);
+});
+
+test("a pick the sender can't see is still refused when omitting", () => {
+  // A typo'd, forged or deleted id is not an account that stopped working.
+  const kept = connection();
+  const missingId = crypto.randomUUID();
+  let failure: unknown;
+  try {
+    resolveMcpAccountBindings({
+      ...input,
+      connections: [kept],
+      selections: [
+        { serverId: server.id, connectionId: kept.id },
+        { serverId: server.id, connectionId: missingId },
+      ],
+      unusableSelections: "omit",
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(ConnectionAccountSelectionError);
+  expect((failure as ConnectionAccountSelectionError).diagnostic.accounts).toEqual([
+    { serverId: server.id, connectionId: missingId, reason: "account_not_visible" },
   ]);
 });
 
 test("a pick naming another connector's account is still refused when omitting", () => {
   const foreign = { ...connection(), providerDomain: "other.example.test" };
+  // Another connector's account that also stopped working is still a mismatch.
+  const foreignExpired = {
+    ...connection(),
+    providerDomain: "other.example.test",
+    status: "needs_reauth" as const,
+  };
   const expired = { ...connection(), status: "revoked" as const };
   let failure: unknown;
   try {
     resolveMcpAccountBindings({
       ...input,
-      connections: [foreign, expired],
+      connections: [foreign, foreignExpired, expired],
       selections: [
         { serverId: server.id, connectionId: foreign.id },
+        { serverId: server.id, connectionId: foreignExpired.id },
         { serverId: server.id, connectionId: expired.id },
       ],
       unusableSelections: "omit",
@@ -159,6 +187,7 @@ test("a pick naming another connector's account is still refused when omitting",
   expect(failure).toBeInstanceOf(ConnectionAccountSelectionError);
   expect((failure as ConnectionAccountSelectionError).diagnostic.accounts).toEqual([
     { serverId: server.id, connectionId: foreign.id, reason: "account_mismatch" },
+    { serverId: server.id, connectionId: foreignExpired.id, reason: "account_mismatch" },
     { serverId: server.id, connectionId: expired.id, reason: "account_inactive" },
   ]);
   // A pick for a connector this turn does not use is refused as before.

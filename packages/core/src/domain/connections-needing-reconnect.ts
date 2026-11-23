@@ -13,7 +13,10 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
-import { listOwnConnectionMetadata } from "./personal-connection-delegations";
+import {
+  listOwnConnectionMetadata,
+  type OmittedConnectionAccount,
+} from "./personal-connection-delegations";
 import {
   catalogProviderDomain,
   INTEGRATION_BACKEND_PROJECTION_KEY,
@@ -151,11 +154,8 @@ const PROVIDER_NAMES: Record<string, string> = {
   "gmailmcp.googleapis.com": "Gmail",
   "drivemcp.googleapis.com": "Google Drive",
   "calendarmcp.googleapis.com": "Google Calendar",
+  "mcp.atlassian.com": "Atlassian",
 };
-
-// Leading host labels that name a service's endpoint rather than the service
-// (mcp.atlassian.com is Atlassian, not "Mcp").
-const GENERIC_HOST_LABELS = new Set(["mcp", "api", "app", "auth", "oauth", "cf"]);
 
 /** The service a connection's provider domain names, for notices ("Atlassian"). */
 export function connectionProviderName(providerDomain: string): string {
@@ -165,11 +165,7 @@ export function connectionProviderName(providerDomain: string): string {
     .replace(/^www\./u, "");
   const known = PROVIDER_NAMES[host];
   if (known) return known;
-  const labels = host.split(".");
-  // Keep the registrable name: never skip past the last two labels.
-  let index = 0;
-  while (index < labels.length - 2 && GENERIC_HOST_LABELS.has(labels[index]!)) index += 1;
-  const first = labels[index] ?? host;
+  const first = host.split(".")[0] ?? host;
   return first ? first.charAt(0).toUpperCase() + first.slice(1) : providerDomain;
 }
 
@@ -200,7 +196,12 @@ export type ConnectionNeedsReauthNoticeDeps = {
  */
 export async function postConnectionNeedsReauthNotice(
   deps: ConnectionNeedsReauthNoticeDeps,
-  broken: ConnectionNeedsReauth,
+  broken: Omit<ConnectionNeedsReauth, "httpStatus" | "use"> & {
+    /** The chat to carry it; the turn only when an attempt of it found the break. */
+    use?:
+      | ConnectionNeedsReauth["use"]
+      | { workspaceId: string; sessionId: string; turnId?: undefined };
+  },
 ): Promise<void> {
   const use = broken.use;
   if (!use) return;
@@ -227,9 +228,13 @@ export async function postConnectionNeedsReauthNotice(
       {
         type: "session.notification.posted",
         payload,
-        turnId: use.turnId,
-        turnGeneration: use.executionGeneration,
-        turnAttemptId: use.attemptId,
+        ...(use.turnId !== undefined
+          ? {
+              turnId: use.turnId,
+              turnGeneration: use.executionGeneration,
+              turnAttemptId: use.attemptId,
+            }
+          : {}),
       },
     ] as Parameters<typeof appendAndPublishEvents>[4]);
   } catch (error) {
@@ -237,6 +242,38 @@ export async function postConnectionNeedsReauthNotice(
     deps.observability?.warn("Connection reconnect notice was not posted", {
       connectionId: broken.connectionId,
       error: errorMessage(error),
+    });
+  }
+}
+
+/**
+ * A new message was accepted without picked accounts that stopped working
+ * (see `freezeConnectionAccounts`, "omit"). Log each, and for one whose
+ * sign-in the provider refused, post its reconnect notice on the chat the
+ * person sent from. The notice is keyed per connection, so it replaces any
+ * earlier one for the same account rather than adding another.
+ */
+export async function reportOmittedConnectionAccounts(
+  deps: Omit<ConnectionNeedsReauthNoticeDeps, "observability"> & {
+    observability?: Pick<Observability, "info" | "warn"> | undefined;
+  },
+  input: { workspaceId: string; sessionId: string; omitted: readonly OmittedConnectionAccount[] },
+): Promise<void> {
+  for (const omitted of input.omitted) {
+    deps.observability?.info("Picked connector account left out of an accepted message", {
+      sessionId: input.sessionId,
+      serverId: omitted.serverId,
+      connectionId: omitted.connectionId,
+      reason: omitted.reason,
+      status: omitted.account.status,
+    });
+    if (omitted.account.status !== "needs_reauth") continue;
+    await postConnectionNeedsReauthNotice(deps, {
+      workspaceId: omitted.account.workspaceId,
+      connectionId: omitted.connectionId,
+      subjectId: omitted.account.subjectId,
+      providerDomain: omitted.account.providerDomain,
+      use: { workspaceId: input.workspaceId, sessionId: input.sessionId },
     });
   }
 }

@@ -3,15 +3,19 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  persistProviderOAuthConnection,
+  setConnectionStatus,
   type Database,
   type DbClient,
 } from "@opengeni/db";
+import type { ConnectionAccountIntent } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { submitComposerDraftForRequest } from "../src/application/composer-submit";
 import { saveHumanComposerDraft } from "../src/application/session-commands";
 import { listOwnConnectionAccountsForGrant } from "../src/domain/personal-connection-delegations";
+import { resolveContinuedConnectionAccounts } from "../src/domain/session-connection-accounts";
 
 /*
  * Regression: a chat left open keeps the account list it loaded when it
@@ -73,23 +77,61 @@ describe("sending with an account list loaded earlier", () => {
     });
     const grant = access.workspaceGrants[0]!;
     const workspaceId = grant.workspaceId!;
+    const scope = { accountId: grant.accountId, workspaceId };
     const admin = shared!.admin;
-    const addLogin = async (label: string) =>
-      await admin.begin(async (tx) => {
-        await tx`select set_config('opengeni.account_id', ${grant.accountId}, true)`;
-        await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
-        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
-        const [row] = await tx<{ id: string }[]>`
-          insert into connections (
-            account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted, label
-          ) values (
-            ${grant.accountId}, ${workspaceId}, ${subjectId}, 'linear.app', 'oauth2', 'ciphertext', ${label}
-          ) returning id
-        `;
-        return row!.id;
+    // Personal accounts follow their owner through the organization membership.
+    const [personal] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${scope.accountId}, 'Personal')
+      returning id
+    `;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${personal!.id}, ${scope.accountId})
+    `;
+    await admin`
+      insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${scope.accountId}, ${subjectId}, 'active', ${personal!.id})
+    `;
+    const logins = new Map<string, { version: number }>();
+    const addLogin = async (email: string) => {
+      const connection = await persistProviderOAuthConnection(db, {
+        ...scope,
+        subjectId,
+        visibleToSubjectId: subjectId,
+        requireLiveUserAuthority: true,
+        allowCanonicalPersonalWorkspaceOwner: true,
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted: "test-ciphertext-never-resolved",
+        grantedScopes: [],
+        expiresAt: null,
+        credentialRole: "linear_test_account",
+        providerFamily: "linear",
+        providerPrincipalId: email,
+        metadata: {
+          credentialRole: "linear_test_account",
+          providerFamily: "linear",
+          providerPrincipalId: email,
+          email,
+        },
       });
-    const picked = await addLogin("work");
-    const other = await addLogin("personal");
+      if (!connection) throw new Error("connection was not created");
+      logins.set(connection.id, { version: connection.version });
+      return connection.id;
+    };
+    const expire = async (connectionId: string) => {
+      const moved = await setConnectionStatus(
+        db,
+        workspaceId,
+        "needs_reauth",
+        "connection refresh failed with HTTP 403",
+        { id: connectionId, version: logins.get(connectionId)!.version, subjectId },
+      );
+      if (!moved) throw new Error("connection status did not change");
+    };
+    const picked = await addLogin("work@example.test");
+    const other = await addLogin("home@example.test");
     const settings = testSettings({ sandboxBackend: "none", mcpServers: [linear] });
     const deps = {
       settings,
@@ -111,7 +153,7 @@ describe("sending with an account list loaded earlier", () => {
         resources: [],
         tools: [{ kind: "mcp", id: linear.id }],
         metadata: {},
-        model: "previous-model",
+        model: "scripted-model",
         reasoningEffort: "low",
         latencyMode: "standard",
         sandboxBackend: "none",
@@ -124,7 +166,7 @@ describe("sending with an account list loaded earlier", () => {
           text: "follow up on the Linear issue",
           annotations: [],
           resources: [],
-          model: "previous-model",
+          model: "scripted-model",
           reasoningEffort: "low",
           latencyMode: "standard",
         },
@@ -144,13 +186,15 @@ describe("sending with an account list loaded earlier", () => {
       const [turn] = await admin<
         {
           bindings: { canonicalServerId: string; connectionId: string }[] | null;
-          intent: { selections: { serverId: string; connectionId: string }[] } | null;
+          intent: ConnectionAccountIntent | null;
+          gaps: unknown;
         }[]
       >`
-        select mcp_account_bindings as bindings, connection_account_intent as intent
+        select mcp_account_bindings as bindings, connection_account_intent as intent,
+          metadata -> 'connectionAccountGaps' as gaps
         from session_turns where id = ${accepted.turn.id}
       `;
-      return turn!;
+      return { ...turn!, sessionId: session.id };
     };
 
     // While it works, the pick is bound exactly.
@@ -158,26 +202,54 @@ describe("sending with an account list loaded earlier", () => {
     expect(before.bindings?.map((binding) => binding.connectionId)).toEqual([picked]);
 
     // Its sign-in expires and a refresh is refused before the next Send.
-    await admin`
-      update connections set status = 'needs_reauth', last_error = 'connection refresh failed with HTTP 403'
-      where id = ${picked}
-    `;
+    await expire(picked);
     const stale = await send([{ serverId: linear.id, connectionId: picked }]);
     // Accepted, without the expired account and without the unpicked one.
     expect(stale.bindings).toEqual([]);
     // The pick is kept so a continuation narrows the same way, never widening.
     expect(stale.intent?.selections).toEqual([{ serverId: linear.id, connectionId: picked }]);
+    expect(stale.gaps).toEqual([
+      { serverId: linear.id, connectionId: picked, reason: "account_inactive" },
+    ]);
 
     // Picks of both accounts keep only the working one.
-    const mixed = await send([
+    const mixedPicks = [
       { serverId: linear.id, connectionId: picked },
       { serverId: linear.id, connectionId: other },
-    ]);
+    ];
+    const mixed = await send(mixedPicks);
     expect(mixed.bindings?.map((binding) => binding.connectionId)).toEqual([other]);
 
-    // An account disconnected since the list loaded is no longer visible to
-    // the sender; it is left out the same way.
-    const removed = await send([{ serverId: linear.id, connectionId: crypto.randomUUID() }]);
-    expect(removed.bindings).toEqual([]);
+    // A continuation of that message narrows exactly as the send did: it
+    // keeps the working pick rather than dropping the connector, and never
+    // adds an account that was not picked.
+    const continued = await resolveContinuedConnectionAccounts({
+      db,
+      settings,
+      ...scope,
+      sessionId: mixed.sessionId,
+      intent: mixed.intent!,
+    });
+    expect(continued.mcpAccountBindings?.map((binding) => binding.connectionId)).toEqual([other]);
+    expect(continued.gaps).toEqual([
+      { serverId: linear.id, connectionId: picked, reason: "account_inactive" },
+    ]);
+    // With only the expired pick, the connector runs with no account at all.
+    const lapsed = await resolveContinuedConnectionAccounts({
+      db,
+      settings,
+      ...scope,
+      sessionId: stale.sessionId,
+      intent: stale.intent!,
+    });
+    expect(lapsed.mcpAccountBindings).toEqual([]);
+    expect(lapsed.gaps).toEqual([
+      { serverId: linear.id, connectionId: picked, reason: "account_inactive" },
+    ]);
+
+    // An id the sender can't see (typo'd, forged or deleted) is still refused.
+    await expect(
+      send([{ serverId: linear.id, connectionId: crypto.randomUUID() }]),
+    ).rejects.toMatchObject({ diagnostic: { reason: "selected_account_unavailable" } });
   }, 180_000);
 });

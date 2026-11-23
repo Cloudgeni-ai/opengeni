@@ -70,9 +70,9 @@ function canonicalResource(value: string): string {
   }
 }
 
-/** A picked account left out of a turn because it can no longer be used. */
+/** A picked account left out of a turn because it stopped working. */
 export type OmittedMcpAccountSelection = McpConnectionAccountSelection & {
-  reason: "account_inactive" | "account_not_visible";
+  reason: "account_inactive";
 };
 
 type McpAccountBindingsInput = {
@@ -94,13 +94,14 @@ export function mcpAccountBindingsFromVisibleConnections(
 
 /**
  * `mcpAccountBindingsFromVisibleConnections`, but a picked account that has
- * stopped working (for example its sign-in expired) or is no longer visible
- * to the sender can be left out instead of refusing the whole request
- * (`unusableSelections: "omit"`). A left-out pick is never replaced: its
- * connector keeps only the sender's other usable picks, and with none it gets
- * no account at all, so the turn runs without it and says so. A pick that
- * names another connector's account still fails, since that is a malformed
- * request rather than an account that changed after it was shown.
+ * stopped working (for example its sign-in expired) can be left out instead
+ * of refusing the whole request (`unusableSelections: "omit"`). A left-out
+ * pick is never replaced: its connector keeps only the sender's other usable
+ * picks, and with none it gets no account at all, so the turn runs without it
+ * and says so. A pick that names an account the sender can't see, or another
+ * connector's account (even an inactive one), still fails: that is a
+ * malformed or stale request rather than an account that stopped working.
+ * `connections` may include inactive accounts; only active ones bind.
  */
 export function resolveMcpAccountBindings(
   input: McpAccountBindingsInput & { unusableSelections: "reject" | "omit" },
@@ -122,21 +123,12 @@ export function resolveMcpAccountBindings(
     );
     const selectedIds = new Set(selections.map((selection) => selection.connectionId));
     // Every account of this server the turn could use, whichever are chosen.
-    const usable = input.connections.filter((connection) => {
-      if (
-        connection.accountId !== input.accountId ||
-        connection.status !== "active" ||
-        connection.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
-        (ref.kind && connection.kind !== ref.kind) ||
-        (ref.resource &&
-          (typeof connection.metadata.resource !== "string" ||
-            canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource)))
-      )
-        return false;
-      return connection.subjectId !== null
-        ? !!input.subjectId && connection.subjectId === input.subjectId && !!connection.authorityId
-        : connection.workspaceId === input.workspaceId;
-    });
+    const usable = input.connections.filter(
+      (connection) =>
+        connection.status === "active" &&
+        belongsToServer(connection, ref, input) &&
+        (connection.subjectId === null || !!connection.authorityId),
+    );
     // Labelled among all of them, so an account reads the same whichever
     // accounts a turn attaches, and two that would read the same differ for
     // the agent as they do in the UI.
@@ -183,26 +175,28 @@ export function resolveMcpAccountBindings(
       const connection = input.connections.find(
         (candidate) => candidate.id === selection.connectionId,
       );
+      const ref = server?.connectionRef;
       return {
         serverId: selection.serverId,
         connectionId: selection.connectionId,
         reason:
-          !server?.connectionRef || server.connectionRef.authoritySource === "host"
+          !ref || ref.authoritySource === "host"
             ? ("connector_unavailable" as const)
             : !connection
               ? ("account_not_visible" as const)
-              : connection.status !== "active"
-                ? ("account_inactive" as const)
-                : ("account_mismatch" as const),
+              : // Another connector's account is a mismatch whatever its status.
+                !belongsToServer(connection, ref, input) ||
+                  (ref.connectionId !== undefined && ref.connectionId !== connection.id)
+                ? ("account_mismatch" as const)
+                : connection.status !== "active"
+                  ? ("account_inactive" as const)
+                  : ("account_mismatch" as const),
       };
     });
   const omitted: OmittedMcpAccountSelection[] = [];
   const refused: typeof unavailable = [];
   for (const account of unavailable) {
-    if (
-      input.unusableSelections === "omit" &&
-      (account.reason === "account_inactive" || account.reason === "account_not_visible")
-    ) {
+    if (input.unusableSelections === "omit" && account.reason === "account_inactive") {
       omitted.push({ ...account, reason: account.reason });
     } else {
       refused.push(account);
@@ -226,6 +220,26 @@ export function resolveMcpAccountBindings(
     ),
     omitted,
   };
+}
+
+/** The account is this connector's kind of account, owned by the sender or shared here. */
+function belongsToServer(
+  connection: ConnectionMetadata,
+  ref: NonNullable<McpServerConfig["connectionRef"]>,
+  input: Pick<McpAccountBindingsInput, "accountId" | "workspaceId" | "subjectId">,
+): boolean {
+  if (
+    connection.accountId !== input.accountId ||
+    connection.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
+    (ref.kind && connection.kind !== ref.kind) ||
+    (ref.resource &&
+      (typeof connection.metadata.resource !== "string" ||
+        canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource)))
+  )
+    return false;
+  return connection.subjectId !== null
+    ? !!input.subjectId && connection.subjectId === input.subjectId
+    : connection.workspaceId === input.workspaceId;
 }
 
 /** Workspace accounts never acquire a fabricated personal owner/delegation. */

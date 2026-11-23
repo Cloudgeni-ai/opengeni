@@ -25,12 +25,8 @@ import {
 
 test("reconnect notices name the service, not its endpoint host", () => {
   expect(connectionProviderName("mcp.atlassian.com")).toBe("Atlassian");
-  expect(connectionProviderName("api.elevenlabs.io")).toBe("Elevenlabs");
-  expect(connectionProviderName("mcp.slack.com")).toBe("Slack");
+  expect(connectionProviderName("MCP.Atlassian.com")).toBe("Atlassian");
   expect(connectionProviderName("gmailmcp.googleapis.com")).toBe("Gmail");
-  expect(connectionProviderName("mail.example.test")).toBe("Mail");
-  // Never skip into the top-level domain.
-  expect(connectionProviderName("mcp.com")).toBe("Mcp");
   expect(connectionProviderName("github.com")).toBe("Github");
 });
 

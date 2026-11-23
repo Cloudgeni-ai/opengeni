@@ -151,16 +151,51 @@ for (const explicit of [false, true]) {
   });
 }
 
-test("a connector whose only account stopped working is sent with no account, not refused", async () => {
+test("a connector whose only pick stopped working is never resent with no pick (that would widen)", async () => {
   const expired = crypto.randomUUID();
-  const { hook, sent, state } = await chat({
-    inventory: [account(expired)],
-    refuse: (ids) => (ids.includes(expired) ? expired : null),
-  });
-  state.inventory = [account(expired, "needs_reauth")];
-  await send(hook);
+  const other = crypto.randomUUID();
+  for (const explicit of [false, true]) {
+    const { hook, sent, state } = await chat({
+      inventory: explicit ? [account(expired), account(other)] : [account(expired)],
+      refuse: (ids) => (ids.includes(expired) ? expired : null),
+    });
+    if (explicit) await actRun(() => hook.result.current.accounts.selectAccount("mail", [expired]));
+    state.inventory = explicit
+      ? [account(expired, "needs_reauth"), account(other)]
+      : [account(expired, "needs_reauth")];
+    await send(hook);
 
-  expect(sent).toEqual([[expired], []]);
+    // No pick for a connector means "use its accounts", so no resend: the
+    // older API's refusal stands as today's failed message.
+    expect(sent).toEqual([[expired]]);
+    expect(hook.result.current.composer.optimisticMessages![0]).toMatchObject({
+      state: "failed",
+      error: COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE,
+    });
+    expect(state.deliveryErrors).toBe(1);
+    await hook.unmount();
+  }
+});
+
+test("a lapsed pick keeps Send enabled and is sent as picked, never swapped", async () => {
+  const picked = crypto.randomUUID();
+  const other = crypto.randomUUID();
+  const { hook, sent, state } = await chat({
+    inventory: [account(picked), account(other)],
+    // A current API leaves the lapsed pick out itself.
+    refuse: () => null,
+  });
+  await actRun(() => hook.result.current.accounts.selectAccount("mail", [picked]));
+  state.inventory = [account(picked, "needs_reauth"), account(other)];
+  await actRun(() => hook.result.current.accounts.refresh());
+  await flush();
+
+  expect(hook.result.current.accounts.requiresAccountChoice).toBe(false);
+  expect(hook.result.current.accounts.selections).toEqual([
+    { serverId: "mail", connectionId: picked },
+  ]);
+  await send(hook);
+  expect(sent).toEqual([[picked]]);
   expect(hook.result.current.composer.optimisticMessages ?? []).toEqual([]);
   expect(state.deliveryErrors).toBe(0);
   await hook.unmount();
@@ -187,8 +222,9 @@ test("a refused pick is never replaced by the connector's other account", async 
     error: COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE,
   });
   expect(state.deliveryErrors).toBe(1);
+  // The pick stays as the person made it; it shows as needing reconnecting.
   expect(hook.result.current.accounts.accountChoices).toEqual({ mail: [picked] });
-  expect(hook.result.current.accounts.requiresAccountChoice).toBe(true);
+  expect(hook.result.current.accounts.requiresAccountChoice).toBe(false);
   await hook.unmount();
 });
 

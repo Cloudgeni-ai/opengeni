@@ -80664,6 +80664,15 @@ export type InitializeSessionStartInput = {
    */
   initialOpeningTools?: readonly string[];
   /**
+   * Picked connector accounts the first message runs without because they
+   * stopped working, recorded on the initial turn like any other turn's gaps.
+   */
+  initialConnectionAccountGaps?: ReadonlyArray<{
+    serverId: string;
+    connectionId: string | null;
+    reason: string;
+  }>;
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -80722,7 +80731,10 @@ export type InitializeSessionStartResult = {
 
 /** Trusted per-message facts the create request froze for the initial turn. */
 function initialTurnMetadata(
-  input: Pick<InitializeSessionStartInput, "initialTimeZone" | "initialOpeningTools">,
+  input: Pick<
+    InitializeSessionStartInput,
+    "initialTimeZone" | "initialOpeningTools" | "initialConnectionAccountGaps"
+  >,
 ): Record<string, unknown> {
   const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
   const openingTools = openingToolsFromTurnMetadata({
@@ -80731,6 +80743,9 @@ function initialTurnMetadata(
   return {
     ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
     ...(openingTools.length ? { [OPENING_TOOLS_METADATA_KEY]: openingTools } : {}),
+    ...(input.initialConnectionAccountGaps?.length
+      ? { connectionAccountGaps: input.initialConnectionAccountGaps.slice(0, 32) }
+      : {}),
   };
 }
 

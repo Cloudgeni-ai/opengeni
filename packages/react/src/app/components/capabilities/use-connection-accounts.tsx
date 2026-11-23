@@ -13,6 +13,7 @@ import {
   TRANSIENT_RETRY_DELAYS_MS,
 } from "../../lib/transient-retry";
 import {
+  isLapsedAccount,
   selectedConnectionAccounts,
   sessionConnectedAccounts,
   type ConnectedAccountGroup,
@@ -23,12 +24,11 @@ import {
 export const CONNECTION_ACCOUNTS_STALE_AFTER_MS = 60_000;
 
 /**
- * The accounts a refused send can go again with: its picks minus those the
- * fresh inventory no longer offers (stopped working or no longer visible).
- * Null when nothing would change, or when leaving a connector's last pick
- * out would let the server use that connector's other accounts instead (a
- * message with no pick for a connector attaches all of its accounts), so a
- * resend never swaps in or widens to an account the person did not pick.
+ * The accounts a refused send can go again with: its picks minus those that
+ * stopped working or are no longer listed, but only where the connector keeps
+ * another pick. A connector left with no pick would mean "use its defaults",
+ * which could attach accounts the person did not pick, so its picks are sent
+ * as they were. Null when nothing can be dropped this way: the refusal stands.
  */
 export function accountsWithoutUnusablePicks(
   sent: readonly McpConnectionAccountSelection[],
@@ -38,15 +38,17 @@ export function accountsWithoutUnusablePicks(
     groups.some(
       (group) =>
         group.serverId === selection.serverId &&
-        group.accounts.some((account) => account.id === selection.connectionId),
+        group.accounts.some(
+          (account) => account.id === selection.connectionId && !isLapsedAccount(account),
+        ),
     );
-  const kept = sent.filter(usable);
+  const kept = sent.filter(
+    (selection) =>
+      usable(selection) ||
+      // Its connector's last usable pick is gone: dropping would widen.
+      !sent.some((other) => other.serverId === selection.serverId && usable(other)),
+  );
   if (kept.length === sent.length) return null;
-  for (const serverId of new Set(sent.map((selection) => selection.serverId))) {
-    if (kept.some((selection) => selection.serverId === serverId)) continue;
-    const others = groups.find((group) => group.serverId === serverId)?.accounts ?? [];
-    if (others.length > 0) return null;
-  }
   return kept;
 }
 
@@ -291,9 +293,10 @@ export function useConnectionAccounts(
     },
     /**
      * For a send refused over its connector accounts: re-read them and give
-     * the picks to send again with, leaving out only accounts that stopped
-     * working or are no longer visible. Never adds or swaps an account; null
-     * keeps the refusal. Explicit choices narrow to the picks still usable.
+     * the picks to send again with, leaving out accounts that stopped working
+     * or are no longer listed only where the connector keeps another pick.
+     * Never adds, swaps or widens; null keeps the refusal. Explicit choices
+     * narrow the same way.
      */
     reviseRefusedAccounts: async (
       error: unknown,

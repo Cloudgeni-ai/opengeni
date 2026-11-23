@@ -110,7 +110,7 @@ test("defaults attach all accounts; explicit narrowing survives inventory refres
   expect(state.selections).toEqual([]);
 });
 
-test("a default connector with no eligible accounts does not block; an explicit stale choice still does", async () => {
+test("a default connector with no eligible accounts does not block; a lapsed pick sends; a vanished pick still blocks", async () => {
   let inventory: ConnectionMetadata[] = [];
   const client = clientFor(async () => inventory);
   await act(async () => root.render(<Harness client={client} />));
@@ -122,6 +122,18 @@ test("a default connector with no eligible accounts does not block; an explicit 
   inventory = accounts;
   await act(async () => state.refresh());
   await act(async () => state.selectAccount("mail", ["two"]));
+  // The picked account stopped working: it is still sent as picked (the
+  // server leaves it out) and Send stays enabled.
+  inventory = accounts.map((account) =>
+    account.id === "two" ? { ...account, status: "needs_reauth" as const } : account,
+  );
+  await act(async () => state.refresh());
+  expect(state.requiresAccountChoice).toBe(false);
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+  expect(state.accountGroups[0]!.accounts.map((account) => account.status)).toContain(
+    "needs_reauth",
+  );
+  // A pick no longer listed at all (disconnected) still needs review.
   inventory = [];
   await act(async () => state.refresh());
   expect(state.requiresAccountChoice).toBe(true);

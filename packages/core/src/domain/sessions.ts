@@ -344,7 +344,9 @@ import { requireEnvironmentEncryption } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
+  type OmittedConnectionAccount,
 } from "./personal-connection-delegations";
+import { reportOmittedConnectionAccounts } from "./connections-needing-reconnect";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import {
@@ -969,6 +971,18 @@ export function validateSessionMcpCredentialUpdates(input: {
   return encryptedUpdates;
 }
 
+/** A connector account a turn runs without, recorded in its metadata. */
+type ConnectionAccountGap = { serverId: string; connectionId: string | null; reason: string };
+
+/** Picked accounts left out at admission, as turn gaps (never their account details). */
+function connectionAccountGaps(
+  omitted: readonly OmittedConnectionAccount[],
+): ConnectionAccountGap[] {
+  return omitted
+    .slice(0, 32)
+    .map(({ serverId, connectionId, reason }) => ({ serverId, connectionId, reason }));
+}
+
 export type CreateSessionOutcome = {
   session: CreateSessionResponse;
   /** The committed create/start effect represented by this request. */
@@ -1201,6 +1215,8 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   /** The creator's account intent, carried by work that continues the first turn. */
   connectionAccountIntent?: ConnectionAccountIntent | null;
+  /** Picked accounts the first message runs without because they stopped working. */
+  initialConnectionAccountGaps?: ConnectionAccountGap[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
@@ -1728,6 +1744,7 @@ async function finishStartSession(
     modelContext?: string | null;
     timeZone?: string | null;
     openingTools?: readonly string[];
+    initialConnectionAccountGaps?: ConnectionAccountGap[];
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -1819,6 +1836,9 @@ async function finishStartSession(
       turnExecutionPolicy: input.turnExecutionPolicy,
       ...(initialTimeZone ? { initialTimeZone } : {}),
       ...(input.openingTools?.length ? { initialOpeningTools: [...input.openingTools] } : {}),
+      ...(input.initialConnectionAccountGaps?.length
+        ? { initialConnectionAccountGaps: input.initialConnectionAccountGaps }
+        : {}),
       surface: input.surface ?? null,
       billingOrigin: input.billingOrigin ?? null,
       createdEventPayload: {
@@ -2162,6 +2182,8 @@ type PostUserMessageTurnInput = {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   /** The sender's account intent, carried by work that continues this turn. */
   connectionAccountIntent?: ConnectionAccountIntent | null;
+  /** Picked accounts the message runs without because they stopped working. */
+  connectionAccountGaps?: ConnectionAccountGap[];
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -2315,6 +2337,9 @@ export async function postUserMessageTurn(
   const turnMetadata = {
     ...(siteOrigin ? { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } : {}),
     ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
+    ...(input.connectionAccountGaps?.length
+      ? { connectionAccountGaps: input.connectionAccountGaps.slice(0, 32) }
+      : {}),
   };
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
@@ -4061,23 +4086,27 @@ async function createSessionForRequestInFileScope(
       workspace.settings,
     ),
   });
-  const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
-    await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
-      freezeConnectionAccounts({
-        db,
-        accountId: grant.accountId,
-        workspaceId,
-        settings: runtimeSettings,
-        tools: connectionAccountTools,
-        resources,
-        source: connectionDelegationSource,
-        authoritySelections: payload.connectionAccounts,
-        autoConnect: { settings: unresolvedDeps.settings },
-        // An account picked from a list loaded earlier may have stopped
-        // working since: start without it instead of refusing the message.
-        unusableSelections: "omit",
-      }),
-    );
+  const {
+    personalConnectionDelegations,
+    mcpAccountBindings,
+    connectionAccountIntent,
+    omittedSelections,
+  } = await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
+    freezeConnectionAccounts({
+      db,
+      accountId: grant.accountId,
+      workspaceId,
+      settings: runtimeSettings,
+      tools: connectionAccountTools,
+      resources,
+      source: connectionDelegationSource,
+      authoritySelections: payload.connectionAccounts,
+      autoConnect: { settings: unresolvedDeps.settings },
+      // An account picked from a list loaded earlier may have stopped
+      // working since: start without it instead of refusing the message.
+      unusableSelections: "omit",
+    }),
+  );
   if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
@@ -4604,6 +4633,9 @@ async function createSessionForRequestInFileScope(
       personalConnectionDelegations,
       mcpAccountBindings,
       connectionAccountIntent,
+      ...(omittedSelections.length
+        ? { initialConnectionAccountGaps: connectionAccountGaps(omittedSelections) }
+        : {}),
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
@@ -4680,6 +4712,12 @@ async function createSessionForRequestInFileScope(
     }
     throw error;
   }
+  if (omittedSelections.length > 0 && createOutcome.outcome === "created")
+    await reportOmittedConnectionAccounts(unresolvedDeps, {
+      workspaceId,
+      sessionId: createOutcome.session.id,
+      omitted: omittedSelections,
+    });
   return await withSessionCreateUsageRecording({
     deps,
     grant,
@@ -5128,25 +5166,29 @@ async function acceptSessionUserMessageInFileScope(
         connectionWorkspace.settings,
       ),
     });
-    const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
-      await freezeConnectionAccounts({
-        db,
-        accountId: grant.accountId,
-        workspaceId,
-        settings: runtimeSettings,
-        tools: connectionAccountTools,
-        resources: [...existingSession.resources, ...requestedResources],
-        source: connectionDelegationSource,
-        targetSessionId: sessionId,
-        ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
-        autoConnect: { settings: deps.settings },
-        // The composer's account list is loaded when the chat opens, so a
-        // picked account may have stopped working since (its sign-in
-        // expired). Send without it instead of refusing the message; its
-        // connector gets no other account, and the turn says it needs
-        // reconnecting.
-        unusableSelections: "omit",
-      });
+    const {
+      personalConnectionDelegations,
+      mcpAccountBindings,
+      connectionAccountIntent,
+      omittedSelections,
+    } = await freezeConnectionAccounts({
+      db,
+      accountId: grant.accountId,
+      workspaceId,
+      settings: runtimeSettings,
+      tools: connectionAccountTools,
+      resources: [...existingSession.resources, ...requestedResources],
+      source: connectionDelegationSource,
+      targetSessionId: sessionId,
+      ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
+      autoConnect: { settings: deps.settings },
+      // The composer's account list is loaded when the chat opens, so a
+      // picked account may have stopped working since (its sign-in
+      // expired). Send without it instead of refusing the message; its
+      // connector gets no other account, and the turn says it needs
+      // reconnecting.
+      unusableSelections: "omit",
+    });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const surface = resolveTurnSurface({
@@ -5200,6 +5242,9 @@ async function acceptSessionUserMessageInFileScope(
       personalConnectionDelegations,
       mcpAccountBindings,
       connectionAccountIntent,
+      ...(omittedSelections.length
+        ? { connectionAccountGaps: connectionAccountGaps(omittedSelections) }
+        : {}),
       ...(timeZone ? { timeZone } : {}),
 
       captureTurnAuthority: async (tx: Database, turnId: string) => {
@@ -5251,6 +5296,12 @@ async function acceptSessionUserMessageInFileScope(
         : {}),
     });
     if (!replay) recordUserMessageAccepted(deps.observability, { surface });
+    if (!replay && omittedSelections.length > 0)
+      await reportOmittedConnectionAccounts(deps, {
+        workspaceId,
+        sessionId,
+        omitted: omittedSelections,
+      });
     return {
       accepted,
       turn,
