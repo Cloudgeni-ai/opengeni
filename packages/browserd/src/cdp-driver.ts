@@ -792,6 +792,18 @@ type TargetState = {
    * first input on. When the tab's debugging ends under the fill, the next
    * attachment reads the field back (see fillHeldOnNewAttachment). */
   pendingFill?: { backendDOMNodeId: number; value: string };
+  /** A single left click whose press went out on this attachment and whose
+   * release has not been acknowledged, with what its hit-target guard
+   * reported as the press reached the page. When the tab's debugging ends
+   * under the press (a password manager adds its inline menu frame as the
+   * press focuses a login field), the next attachment finishes the click
+   * (see finishClickOnNewAttachment). */
+  pendingClick?: {
+    x: number;
+    y: number;
+    button: "left" | "right" | "middle";
+    verdicts: ReadonlyArray<HitTargetVerdict | null>;
+  };
   /** The document already known to draw, so input sent to it while its tab
    * is hidden reaches the page (see drawHiddenTabForInput). */
   inputDrawnDocument?: string;
@@ -2980,6 +2992,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // Input counts as sent once an effectful command left browserd, so a later
     // unresponsive-tab deadline must keep the action's outcome uncertain.
     let effects: { state: TargetState; before: number } | undefined;
+    // Where a run of the actions is: the action it is on, the tab's input
+    // count before that action, and whether every action has run. When the
+    // tab's debugging ends at a known point, the rest run on a new
+    // attachment (see resumeAfterDetach) from `resumeFrom`.
+    const progress = { actionIndex: 0, effectsBefore: 0, allRan: false };
+    let resumeFrom = 0;
     const targetId = this.browserTargetIdOf(command.targetId);
     // A tab in front whose page did not answer may wait on a dialog only the
     // person sees, which no debugger can read: cancelling it hides the tab
@@ -2997,23 +3015,45 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const act = async (state: TargetState, info: TargetInfo) => {
       effects = { state, before: state.actionEffectCount };
-      if (!state.dialog) await this.refreshFrame(state);
-      this.assertExpectedGenerations(command, state);
       const actions = command.action.type === "batch" ? command.action.actions : [command.action];
-      if (state.dialog && actions[0]?.type !== "handle_dialog") {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser JavaScript dialog must be handled before another action",
+      progress.allRan = false;
+      progress.actionIndex = resumeFrom;
+      progress.effectsBefore = state.actionEffectCount;
+      try {
+        if (!state.dialog) await this.refreshFrame(state);
+        // The remaining actions of a batch without fenceEachAction follow
+        // the page wherever the earlier ones took it.
+        if (resumeFrom === 0 || (command.action.type === "batch" && command.action.fenceEachAction))
+          this.assertExpectedGenerations(command, state);
+        if (state.dialog && actions[resumeFrom]?.type !== "handle_dialog") {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "browser JavaScript dialog must be handled before another action",
+          );
+        }
+      } catch (error) {
+        if (resumeFrom === 0 || !(error instanceof InteractionDefiniteDriverError)) throw error;
+        const unknown = new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `browser action #${resumeFrom} (${actions[resumeFrom]!.type}) failed after it sent input or completed ${resumeFrom} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
         );
+        unknown.failureReason = error.failureReason ?? error.code;
+        throw unknown;
       }
       if (!(command.action.type === "viewport" && command.action.mode === "fit")) {
         await this.bringToFrontForAction(state);
       }
-      let completedActions = 0;
+      let completedActions = resumeFrom;
       // Navigations complete only once their page committed, so a batch that
       // has so far only navigated and waited knows exactly where the tab is.
-      let onlyCommittedNavigation = true;
-      let committedNavigations = 0;
+      const ran = actions.slice(0, resumeFrom);
+      let onlyCommittedNavigation = ran.every(
+        (action) =>
+          action.type === "navigate" || action.type === "history" || action.type === "wait",
+      );
+      let committedNavigations = ran.filter(
+        (action) => action.type === "navigate" || action.type === "history",
+      ).length;
       const initialEffectCount = state.actionEffectCount;
       const requestsBeforeActions = {
         open: new Set(state.inflightRequests),
@@ -3021,11 +3061,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         navigation: state.navigationSequence,
       };
       for (const [actionIndex, action] of actions.entries()) {
+        if (actionIndex < resumeFrom) continue;
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
         state.locatorFollowsNavigation =
           command.action.type === "batch" && !command.action.fenceEachAction && actionIndex > 0;
         state.accessibilityRebuildDue = true;
         const effectsBeforeAction = state.actionEffectCount;
+        progress.actionIndex = actionIndex;
+        progress.effectsBefore = effectsBeforeAction;
+        delete state.pendingClick;
         try {
           if (action.type === "handle_dialog") {
             await this.dispatchAction(state, action, command.operationId);
@@ -3125,6 +3169,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }
       }
+      progress.allRan = true;
       // An open dialog is the page's state, whatever view was asked for: the
       // caller must handle it before anything else works in this tab. Its
       // observation reads nothing from the blocked page.
@@ -3268,25 +3313,112 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // input was sent, nothing ran: start again on a new attachment.
     const retryBeforeInput = () =>
       effects === undefined || effects.state.actionEffectCount === effects.before;
-    const observation = await this.withTarget(targetId, act, { retryBeforeInput }).catch(
-      async (error: unknown) => {
-        const failure = await this.actionFailure(error, effects);
-        if (effects) {
-          await this.observeOnNewAttachment(failure, effects.state, command);
-          // The fill's field holds the requested value on the new attachment:
-          // the fill completed, and the receipt shows the page as it left it.
-          if (
-            failure instanceof InteractionOutcomeUnknownDriverError &&
-            failure.observation &&
-            (await this.fillHeldOnNewAttachment(failure, effects.state, command))
-          )
-            return failure.observation as BrowserObservationValue;
+    const actions = command.action.type === "batch" ? command.action.actions : [command.action];
+    let observation: BrowserObservationValue | null;
+    // Each resume follows an attachment Chrome ended under an action; a page
+    // that keeps ending them stops after one per action.
+    for (let resumes = 0; ; resumes += 1) {
+      try {
+        observation = await this.withTarget(targetId, act, { retryBeforeInput });
+        break;
+      } catch (error) {
+        const next =
+          effects && resumes < actions.length
+            ? await this.resumeAfterDetach(effects.state, progress, actions)
+            : null;
+        if (next !== null && next < actions.length) {
+          resumeFrom = next;
+          continue;
         }
+        if (next !== null) {
+          // Every action ran; only the page as they left it is read on the
+          // new attachment. A page that cannot be read there leaves the
+          // outcome unknown, as before.
+          try {
+            observation =
+              command.observationMode === undefined || command.observationMode === "full"
+                ? await this.observe(command.targetId)
+                : null;
+            break;
+          } catch {
+            // Reported below from the original failure.
+          }
+        }
+        const failure = await this.actionFailure(error, effects);
+        if (effects) await this.observeOnNewAttachment(failure, effects.state, command);
         throw failure;
-      },
-    );
+      }
+    }
     this.refreshSubscribedFrame(targetId);
     return observation;
+  }
+
+  /**
+   * Where a run of actions can go on after Chrome ended the tab's debugging
+   * under it (it does when another extension adds a frame of its own, as a
+   * password manager does when a login field gets focus), or null when it
+   * cannot. The next action to run on a new attachment, or the number of
+   * actions when every one ran:
+   * - every action ran, and only reading the page after them failed;
+   * - the action under way sent no input: it runs again;
+   * - its fill's field holds the value on the new attachment: the fill is
+   *   complete;
+   * - its click's press reached the element (its hit-target guard reported
+   *   so) and the new attachment sends the release: the click is complete.
+   * Anything else stays unknown.
+   */
+  private async resumeAfterDetach(
+    state: TargetState,
+    progress: { actionIndex: number; effectsBefore: number; allRan: boolean },
+    actions: ReadonlyArray<{ readonly type: string }>,
+  ): Promise<number | null> {
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+    } catch {
+      return null;
+    }
+    if (
+      this.states.get(state.targetId) === state ||
+      this.crashedTargets.has(state.targetId) ||
+      this.goneTargets.has(this.tabIdOf(state.targetId)) ||
+      state.dialog
+    )
+      return null;
+    if (progress.allRan) return actions.length;
+    const index = progress.actionIndex;
+    if (state.actionEffectCount === progress.effectsBefore) return index;
+    if (actions[index]?.type === "fill" && (await this.fillHeldOnNewAttachment(state)))
+      return index + 1;
+    if (await this.finishClickOnNewAttachment(state)) return index + 1;
+    return null;
+  }
+
+  /**
+   * Finishes a single click whose press went out and reached its element
+   * before the tab's debugging ended: the new attachment sends the release
+   * at the same point, so the page gets the click a person's press and
+   * release give it. The guard's report proves the press arrived; without it
+   * nothing is sent. Chrome dispatches a click only for a release that
+   * follows a press, so a release the old attachment did deliver adds only a
+   * mouseup.
+   */
+  private async finishClickOnNewAttachment(state: TargetState): Promise<boolean> {
+    const click = state.pendingClick;
+    if (!click || click.verdicts.length === 0 || click.verdicts[0] !== null) return false;
+    try {
+      await this.withTarget(state.targetId, async (current) => {
+        await this.sendActionTarget(current, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x: click.x,
+          y: click.y,
+          button: click.button,
+          clickCount: 1,
+        });
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** What a failed action reports, given whether it already sent input. */
@@ -3366,21 +3498,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * value, read on the tab's new attachment. Only then is the fill known to be
    * complete; anything else stays unknown.
    */
-  private async fillHeldOnNewAttachment(
-    failure: InteractionOutcomeUnknownDriverError,
-    state: TargetState,
-    command: BrowserActionCommandValue,
-  ): Promise<boolean> {
+  private async fillHeldOnNewAttachment(state: TargetState): Promise<boolean> {
     const fill = state.pendingFill;
-    if (failure.message !== TAB_DISCONNECTED_UNDER_INPUT || command.action.type !== "fill" || !fill)
-      return false;
-    const current = this.states.get(state.targetId);
-    if (!current || current === state || current.nodeRoute) return false;
+    if (!fill) return false;
     try {
-      return (
-        (await this.callOnNode(current, fill.backendDOMNodeId, CONFIRM_EDITABLE_VALUE_FUNCTION, [
-          { value: fill.value },
-        ])) === true
+      return await this.withTarget(
+        state.targetId,
+        async (current) =>
+          (await this.callOnNode(current, fill.backendDOMNodeId, CONFIRM_EDITABLE_VALUE_FUNCTION, [
+            { value: fill.value },
+          ])) === true,
+        { read: true },
       );
     } catch {
       return false;
@@ -9127,6 +9255,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await moved;
       }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+        // Only a single click in the page's own frame can be finished on a
+        // new attachment: input to a frame of its own needs that frame's
+        // session, which a new attachment does not keep.
+        if (count === 1 && sessionId === undefined && guard?.reported)
+          state.pendingClick = { x, y, button, verdicts: guard.verdicts };
         await this.sendActionTarget(
           state,
           "Input.dispatchMouseEvent",
@@ -9139,6 +9272,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           { type: "mouseReleased", x, y, button, clickCount },
           input,
         );
+        delete state.pendingClick;
       }
       if (hidden) await moved;
     } catch (error) {
@@ -9147,6 +9281,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // the same page. The next action removes it, and it disarms itself
       // after a few seconds regardless.
       if (guard !== null) {
+        // A press whose tab's debugging ended under it may still be finished
+        // on a new attachment (see finishClickOnNewAttachment), which needs
+        // the guard's report that it reached the element. Over the
+        // extension bridge that report can still be on its way; take it in
+        // first. Bounded, and never waits on the page.
+        if (state.pendingClick) {
+          await this.ensureConnection()
+            .then((connection) => connection.flushEvents?.())
+            .catch(() => undefined);
+        }
         guard.stopReports();
         state.unsettledHitTargetGuards.push(guard);
       }
