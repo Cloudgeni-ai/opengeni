@@ -27,6 +27,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { linkCurrentSpanToAdmission, turnExecutionTelemetryKey } from "@opengeni/observability";
+import { SLOW_TURN_SETTLEMENT_MS } from "./phase-timer";
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -812,29 +813,45 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           ),
         }
       : undefined;
-    const result = await applySessionTurnSettlement(db, input.workspaceId, {
-      sessionId: input.sessionId,
-      turnId: attempt.turnId!,
-      triggerEventId: attempt.triggerEventId!,
-      attemptId: input.attemptId,
-      turnStatus: inputSettlement.turnStatus,
-      sessionStatus: inputSettlement.sessionStatus,
-      activeTurnId: inputSettlement.activeTurnId,
-      ...(inputSettlement.suppressGoalContinuation !== undefined
-        ? { suppressGoalContinuation: inputSettlement.suppressGoalContinuation }
-        : {}),
-      ...(inputSettlement.allowanceGoalPause
-        ? { allowanceGoalPause: inputSettlement.allowanceGoalPause }
-        : {}),
-      events: inputs,
-      ...(runState ? { runState } : {}),
-      ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
-      ...(dropProactiveCompactionRequest ? { dropProactiveCompactionRequest } : {}),
-      ...(inputSettlement.notStartedToolCallIds?.length
-        ? { notStartedToolCallIds: inputSettlement.notStartedToolCallIds }
-        : {}),
-      ...(inputSettlement.requirePendingSteer ? { requirePendingSteer: true } : {}),
-    });
+    const result = await applySessionTurnSettlement(
+      db,
+      input.workspaceId,
+      {
+        sessionId: input.sessionId,
+        turnId: attempt.turnId!,
+        triggerEventId: attempt.triggerEventId!,
+        attemptId: input.attemptId,
+        turnStatus: inputSettlement.turnStatus,
+        sessionStatus: inputSettlement.sessionStatus,
+        activeTurnId: inputSettlement.activeTurnId,
+        ...(inputSettlement.suppressGoalContinuation !== undefined
+          ? { suppressGoalContinuation: inputSettlement.suppressGoalContinuation }
+          : {}),
+        ...(inputSettlement.allowanceGoalPause
+          ? { allowanceGoalPause: inputSettlement.allowanceGoalPause }
+          : {}),
+        events: inputs,
+        ...(runState ? { runState } : {}),
+        ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
+        ...(dropProactiveCompactionRequest ? { dropProactiveCompactionRequest } : {}),
+        ...(inputSettlement.notStartedToolCallIds?.length
+          ? { notStartedToolCallIds: inputSettlement.notStartedToolCallIds }
+          : {}),
+        ...(inputSettlement.requirePendingSteer ? { requirePendingSteer: true } : {}),
+      },
+      {
+        onTiming: (timing) => {
+          if (timing.totalMs < SLOW_TURN_SETTLEMENT_MS) return;
+          observability.warn("slow turn settlement", {
+            sessionId: input.sessionId,
+            turnId: attempt.turnId,
+            attemptId: input.attemptId,
+            turnStatus: inputSettlement.turnStatus,
+            ...timing,
+          });
+        },
+      },
+    );
     if (result.action === "pending_steer_withdrawn") return "pending_steer_withdrawn";
     if (result.action === "stale") {
       // The terminal write can lose to a control transaction before the

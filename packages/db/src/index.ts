@@ -91802,12 +91802,79 @@ export type ApplySessionTurnSettlementResult =
       events: [];
     };
 
+/**
+ * Where one settlement spent its time, in milliseconds. Phases describe the
+ * last transaction attempt; `admissionMs` also covers earlier retried attempts.
+ * `validateMs`, `writeMs` and `commitMs` pass while the session row is locked.
+ */
+export type SessionTurnSettlementTiming = {
+  action: ApplySessionTurnSettlementResult["action"];
+  attempts: number;
+  /** From the call until the row locks were requested (pool, BEGIN, RLS setup). */
+  admissionMs: number;
+  /** Waiting for the control, workspace, session, turn and attempt row locks. */
+  lockWaitMs: number;
+  /** Fence checks, reads and run-state writes after the locks, before the turn writes. */
+  validateMs: number | null;
+  /** Settlement writes and their triggers. */
+  writeMs: number | null;
+  /** From the transaction body's return until COMMIT was acknowledged. */
+  commitMs: number;
+  totalMs: number;
+};
+
 export type ApplySessionTurnSettlementHooks = {
   /** Test-only failure injection after terminal projection but before commit. */
   afterRealtimeDelegationProjection?:
     | ((projection: { entryId: string; turnId: string }) => void | Promise<void>)
     | undefined;
+  /** Observes where a resolved settlement spent its time. */
+  onTiming?: ((timing: SessionTurnSettlementTiming) => void) | undefined;
 };
+
+type SessionTurnSettlementPhases = {
+  startedAt: number;
+  attempts: number;
+  lockRequestedAt: number | null;
+  lockedAt: number | null;
+  writeStartedAt: number | null;
+  bodyReturnedAt: number | null;
+};
+
+function markSessionTurnSettlementPhase(
+  phase: SessionTurnSettlementPhases,
+  mark: "lockRequestedAt" | "lockedAt" | "writeStartedAt" | "bodyReturnedAt",
+): void {
+  phase[mark] = performance.now();
+}
+
+function reportSessionTurnSettlementTiming(
+  onTiming: ApplySessionTurnSettlementHooks["onTiming"],
+  phase: SessionTurnSettlementPhases,
+  action: SessionTurnSettlementTiming["action"],
+): void {
+  if (!onTiming) return;
+  const finishedAt = performance.now();
+  const span = (from: number | null, to: number | null) =>
+    from === null || to === null ? null : Math.max(0, Math.round(to - from));
+  // An early (stale) return leaves later marks unset: its remaining time is
+  // reported as commit, during which the row locks were still held.
+  const bodyEnd = phase.bodyReturnedAt ?? phase.lockedAt ?? finishedAt;
+  try {
+    onTiming({
+      action,
+      attempts: phase.attempts,
+      admissionMs: span(phase.startedAt, phase.lockRequestedAt ?? finishedAt) ?? 0,
+      lockWaitMs: span(phase.lockRequestedAt, phase.lockedAt ?? finishedAt) ?? 0,
+      validateMs: span(phase.lockedAt, phase.writeStartedAt ?? phase.bodyReturnedAt),
+      writeMs: span(phase.writeStartedAt, phase.bodyReturnedAt),
+      commitMs: span(bodyEnd, finishedAt) ?? 0,
+      totalMs: span(phase.startedAt, finishedAt) ?? 0,
+    });
+  } catch {
+    // Timing is diagnostic; it never changes the settlement's outcome.
+  }
+}
 
 function attemptOutcomeForTurnStatus(status: SessionTurnStatus): SessionTurnAttemptOutcome | null {
   switch (status) {
@@ -92150,7 +92217,17 @@ export async function applySessionTurnSettlement(
         input.runState.pendingApprovals,
       )
     : null;
-  return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+  const phase: SessionTurnSettlementPhases = {
+    startedAt: performance.now(),
+    attempts: 0,
+    lockRequestedAt: null,
+    lockedAt: null,
+    writeStartedAt: null,
+    bodyReturnedAt: null,
+  };
+  const settled = await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+    phase.attempts += 1;
+    phase.lockRequestedAt = phase.lockedAt = phase.writeStartedAt = phase.bodyReturnedAt = null;
     // A terminal settlement cancels the turn's still-pending human-input rows.
     // Their parent resolution notices need the parent locked with the child,
     // so peek (unlocked) for such rows first; they are created only by this
@@ -92176,6 +92253,7 @@ export async function applySessionTurnSettlement(
           .limit(1)
       ).length > 0;
     return await scopedDb.transaction(async (tx) => {
+      markSessionTurnSettlementPhase(phase, "lockRequestedAt");
       const locks =
         input.turnStatus === "failed" ||
         input.turnStatus === "requires_action" ||
@@ -92192,6 +92270,7 @@ export async function applySessionTurnSettlement(
               turnIds: [input.turnId],
               attemptIds: [input.attemptId],
             });
+      markSessionTurnSettlementPhase(phase, "lockedAt");
       const session = locks.sessions.find((row) => row.id === input.sessionId);
       const turn = locks.turns.find((row) => row.id === input.turnId);
       const attempt = locks.attempts.find((row) => row.id === input.attemptId);
@@ -92606,6 +92685,7 @@ export async function applySessionTurnSettlement(
         });
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
+      markSessionTurnSettlementPhase(phase, "writeStartedAt");
       const now = new Date();
       const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       const attemptOutcome = attemptOutcomeForTurnStatus(input.turnStatus);
@@ -93168,6 +93248,7 @@ export async function applySessionTurnSettlement(
           });
         }
       }
+      markSessionTurnSettlementPhase(phase, "bodyReturnedAt");
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -93176,6 +93257,8 @@ export async function applySessionTurnSettlement(
       };
     });
   });
+  reportSessionTurnSettlementTiming(hooks.onTiming, phase, settled.action);
+  return settled;
 }
 
 import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";

@@ -221,6 +221,7 @@ import {
   servedRouteProcessingResidency,
 } from "./model-usage";
 import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
+import { createPhaseTimer, SLOW_TURN_SETTLEMENT_MS } from "./phase-timer";
 import {
   sessionTitleGenerationOptions,
   sessionTitleRoute,
@@ -2893,11 +2894,19 @@ export async function runTurnStreamAttempt(
       // the completed step was consumed above. Hand over at this boundary:
       // the turn ends `superseded`, and the Steer runs next on the same,
       // unchanged history.
+      // The replacement waits for every step below; a slow handover is
+      // logged with where it spent its time.
+      const handoverTiming = createPhaseTimer();
       await historySink.reconcileConversationTruth({ requireDurable: true });
+      handoverTiming.mark("reconcileMs");
       await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
+      handoverTiming.mark("checkpointMs");
       await finalizeTurnOpStreamOps();
+      handoverTiming.mark("streamOpsMs");
       await finishParallelSessionTitle();
+      handoverTiming.mark("titleMs");
       await flushHeldSessionUsageReceipts(db, input.sessionId);
+      handoverTiming.mark("usageReceiptsMs");
       const settled = await eventing.settle!({
         events: [
           {
@@ -2915,6 +2924,18 @@ export async function runTurnStreamAttempt(
         activeTurnId: null,
         requirePendingSteer: true,
       });
+      handoverTiming.mark("settleMs");
+      if (handoverTiming.totalMs() >= SLOW_TURN_SETTLEMENT_MS) {
+        observability.warn("slow Steer handover", {
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          attemptId: input.attemptId,
+          outcome:
+            settled === "pending_steer_withdrawn" ? settled : settled ? "superseded" : "stale",
+          ...handoverTiming.phases(),
+          totalMs: handoverTiming.totalMs(),
+        });
+      }
       if (settled === "pending_steer_withdrawn") {
         // The Steer was withdrawn or claimed in between. Keep working:
         // rebuild the input from the durable history and resume sampling.
