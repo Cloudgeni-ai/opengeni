@@ -973,11 +973,13 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
  */
 function retainedShellCancellationCommand(
   state: Pick<ActiveShellSession, "markerPath" | "token">,
+  termGraceMs = 100,
 ): string {
   const marker = singleQuote(state.markerPath!);
   const cancellation = singleQuote(shellCancellationPath(state.markerPath!));
   const markerDir = singleQuote(posix.dirname(state.markerPath!));
   const token = singleQuote(state.token!);
+  const termGracePolls = Math.max(1, Math.ceil(termGraceMs / 25));
   return [
     ...processInspectionCommandLines(),
     "umask 077",
@@ -999,7 +1001,7 @@ function retainedShellCancellationCommand(
     `[ "$__opengeni_live_pgid" = "$__opengeni_pgid" ] || { command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}; command rm -f "$__opengeni_marker"; exit 0; }`,
     'command kill -TERM "-$__opengeni_pgid" 2>/dev/null || true',
     "__opengeni_poll=0",
-    'while command kill -0 "-$__opengeni_pgid" 2>/dev/null && [ "$__opengeni_poll" -lt 4 ]; do',
+    `while command kill -0 "-$__opengeni_pgid" 2>/dev/null && [ "$__opengeni_poll" -lt ${termGracePolls} ]; do`,
     "  command sleep 0.025 2>/dev/null || true",
     "  __opengeni_poll=$((__opengeni_poll + 1))",
     "done",
@@ -1045,18 +1047,23 @@ export function parseRetainedProcessGroupControl(
 
 /** The same in-box TERM-then-KILL helper a turn uses to cancel its own retained
  * command, for a caller (the lease reaper) that only has the persisted
- * identity. It signals only the group whose leader still carries the token. */
-export function retainedProcessGroupStopCommand(control: RetainedProcessGroupControl): string {
-  return retainedShellCancellationCommand(control);
+ * identity. It signals only the group whose leader still carries the token.
+ * `termGraceMs` is how long the group gets to exit on TERM before KILL. */
+export function retainedProcessGroupStopCommand(
+  control: RetainedProcessGroupControl,
+  options: { termGraceMs?: number } = {},
+): string {
+  return retainedShellCancellationCommand(control, options.termGraceMs);
 }
 
-/** Interpret the helper's exit code. `stopped`: the group is gone (or never
- * published a marker and now cannot start user code); `live`: it survived
- * KILL; anything else proves nothing. */
+/** Interpret the helper's exit code for a command that already ran. `stopped`:
+ * the group is gone; `live`: it survived KILL; anything else proves nothing.
+ * A missing marker is inconclusive here: for an adopted command it may have
+ * been removed while the group still runs. */
 export function retainedProcessGroupStopOutcome(
   exitCode: number | null,
 ): "stopped" | "live" | "inconclusive" {
-  if (exitCode === 0 || exitCode === RETAINED_SHELL_MARKER_PENDING_EXIT_CODE) return "stopped";
+  if (exitCode === 0) return "stopped";
   if (exitCode === RETAINED_SHELL_GROUP_LIVE_EXIT_CODE) return "live";
   return "inconclusive";
 }

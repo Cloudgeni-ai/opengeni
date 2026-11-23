@@ -2233,6 +2233,45 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(probes).toEqual([{ mode: "observe", control: undefined }]);
   }, 60_000);
 
+  test("a replayed adoption fills a missing process-group identity but never replaces one", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ routerCommand: true });
+    const adopt = async (processGroupControl?: { markerPath: string; token: string }) =>
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt!.turnId,
+        executionGeneration: fixture.attempt!.executionGeneration,
+        attemptId: fixture.attempt!.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "node server.js",
+        ...(processGroupControl ? { processGroupControl } : {}),
+      });
+    const control = (token: string) => ({ markerPath: `/tmp/opengeni-turn-shell/${token}`, token });
+    const first = control(crypto.randomUUID());
+    await adopt();
+    await adopt(first);
+    await adopt(control(crypto.randomUUID()));
+    await closeTurnOwner(fixture, fixture.attempt!, "completed");
+    await requestSessionBackgroundCommandCancellation(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      commandId: fixture.process.id,
+      subjectId: "user:test-owner",
+    });
+    const probes: unknown[] = [];
+    await runReaper(
+      async (_settings, _lease, _process, _mode, _capture, _persistence, _budget, stored) => {
+        probes.push(stored);
+        return { status: "deferred", reason: "provider_running" };
+      },
+    );
+    expect(probes).toEqual([first]);
+  }, 60_000);
+
   test("session-owned cancellation is interrupted and settled with the process", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({

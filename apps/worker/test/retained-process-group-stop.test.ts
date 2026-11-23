@@ -9,7 +9,10 @@ import {
   parseRetainedProcessGroupControl,
   retainedProcessGroupStopOutcome,
 } from "@opengeni/runtime/sandbox";
-import { stopRetainedProcessGroup } from "../src/activities/sandbox-lease";
+import {
+  PROCESS_GROUP_STOP_TERM_GRACE_MS,
+  stopRetainedProcessGroup,
+} from "../src/activities/sandbox-lease";
 
 // The reaper runs the stop helper as one ordinary provider exec on the box.
 // Locally that exec is `bash -c`, reported with the same exit banner.
@@ -63,14 +66,17 @@ async function startWrappedCommand(command: string) {
 describe("Pause/Stop of an adopted unsupervised command", () => {
   test("ends the whole process group, including a child that ignores TERM, with no delayed write", async () => {
     // Mirrors the Workbench acceptance Pause fixture: every process ignores
-    // INT/TERM and writes a file after a delay unless it is killed first.
+    // INT/TERM and writes a file after a delay unless it is killed first. The
+    // delay outlasts the TERM grace, so only the KILL escalation stops it.
+    const writeAfterSeconds = PROCESS_GROUP_STOP_TERM_GRACE_MS / 1_000 + 3;
     const { dir, control, exited } = await startWrappedCommand(
       [
         "trap '' TERM INT",
-        '( trap "" TERM INT; sleep 2; echo child > "$OUT_DIR/child-wrote" ) &',
-        'sleep 2; echo leader > "$OUT_DIR/leader-wrote"',
+        `( trap "" TERM INT; sleep ${writeAfterSeconds}; echo child > "$OUT_DIR/child-wrote" ) &`,
+        `sleep ${writeAfterSeconds}; echo leader > "$OUT_DIR/leader-wrote"`,
       ].join("\n"),
     );
+    const startedAt = Date.now();
     const parsed = parseRetainedProcessGroupControl(control);
     expect(parsed).toEqual(control);
 
@@ -78,10 +84,38 @@ describe("Pause/Stop of an adopted unsupervised command", () => {
     const ended = await exited;
     expect(ended.signal ?? ended.code).not.toBeNull();
 
-    await delay(3_000);
+    await delay(Math.max(0, startedAt + (writeAfterSeconds + 1) * 1_000 - Date.now()));
     expect(existsSync(join(dir, "child-wrote"))).toBe(false);
     expect(existsSync(join(dir, "leader-wrote"))).toBe(false);
-  }, 20_000);
+  }, 30_000);
+
+  test("gives the group its TERM grace before KILL", async () => {
+    const { dir, control, exited } = await startWrappedCommand(
+      [
+        "trap 'sleep 1; echo graceful > \"$OUT_DIR/graceful\"; exit 0' TERM",
+        "while :; do sleep 0.1; done",
+      ].join("\n"),
+    );
+    expect(await stopRetainedProcessGroup(localBoxSession() as never, control)).toBe(true);
+    await exited;
+    expect(existsSync(join(dir, "graceful"))).toBe(true);
+  }, 30_000);
+
+  test("a missing marker or an exhausted sweep budget is not a stop", async () => {
+    const { control, exited } = await startWrappedCommand("sleep 1");
+    const missing = {
+      markerPath: control.markerPath.replace(control.token, crypto.randomUUID()),
+      token: "",
+    };
+    missing.token = missing.markerPath.slice(missing.markerPath.lastIndexOf("/") + 1);
+    expect(await stopRetainedProcessGroup(localBoxSession() as never, missing)).toBe(false);
+    expect(
+      await stopRetainedProcessGroup(localBoxSession() as never, control, {
+        until: Date.now() + 1_000,
+      }),
+    ).toBe(false);
+    expect(await exited).toEqual({ code: 0, signal: null });
+  }, 30_000);
 
   test("never signals a process whose arguments do not carry the token", async () => {
     const { dir, control, exited } = await startWrappedCommand(
@@ -130,7 +164,7 @@ describe("Pause/Stop of an adopted unsupervised command", () => {
     ])
       expect(parseRetainedProcessGroupControl(bad)).toBeNull();
     expect(retainedProcessGroupStopOutcome(0)).toBe("stopped");
-    expect(retainedProcessGroupStopOutcome(74)).toBe("stopped");
+    expect(retainedProcessGroupStopOutcome(74)).toBe("inconclusive");
     expect(retainedProcessGroupStopOutcome(75)).toBe("live");
     expect(retainedProcessGroupStopOutcome(76)).toBe("inconclusive");
     expect(retainedProcessGroupStopOutcome(null)).toBe("inconclusive");

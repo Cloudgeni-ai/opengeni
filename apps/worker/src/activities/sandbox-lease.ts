@@ -3613,17 +3613,23 @@ type RetainedProcessProbeSession = ProviderCommandSession & {
 
 const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
 
-/** In-box yield for the process-group stop helper. The helper itself takes
- * well under a second (TERM, a short grace, then KILL until the group is gone). */
-const PROCESS_GROUP_STOP_YIELD_MS = 5_000;
+/** Pause/Stop give the process group this long to exit on TERM before KILL,
+ * as the supervised path does (SUPERVISED_STOP_KILL_AFTER_SECONDS). */
+export const PROCESS_GROUP_STOP_TERM_GRACE_MS = 5_000;
+/** In-box yield for the helper: the TERM grace, the KILL loop, and margin. */
+const PROCESS_GROUP_STOP_YIELD_MS = PROCESS_GROUP_STOP_TERM_GRACE_MS + 3_000;
+/** The provider call may return a little after the in-box yield. */
+const PROCESS_GROUP_STOP_TIMEOUT_MS = PROCESS_GROUP_STOP_YIELD_MS + 3_000;
 
 /** Run the turn wrapper's TERM-then-KILL helper for one command's process
  * group on its exact resumed box. True only when the helper proves the group
  * is gone; any transport error or inconclusive answer leaves the caller's
- * ordinary observation path unchanged. */
+ * ordinary observation path unchanged. Skipped (false) when the sweep's
+ * remaining budget cannot cover it; the next sweep retries. */
 export async function stopRetainedProcessGroup(
   session: RetainedProcessProbeSession,
   control: RetainedProcessGroupControl,
+  budget?: RetainedProcessDrainBudget,
 ): Promise<boolean> {
   const runner = session as {
     execCommand?: (args: {
@@ -3643,16 +3649,19 @@ export async function stopRetainedProcessGroup(
   };
   const run = runner.execCommand ?? runner.exec;
   if (!run) return false;
+  if (budget && Date.now() + PROCESS_GROUP_STOP_TIMEOUT_MS > budget.until) return false;
   try {
     const result = await withRetainedProcessProbeTimeout(
       run.call(session, {
-        cmd: retainedProcessGroupStopCommand(control),
+        cmd: retainedProcessGroupStopCommand(control, {
+          termGraceMs: PROCESS_GROUP_STOP_TERM_GRACE_MS,
+        }),
         login: false,
         tty: false,
         yieldTimeMs: PROCESS_GROUP_STOP_YIELD_MS,
         maxOutputTokens: 128,
       }),
-      PROCESS_GROUP_STOP_YIELD_MS,
+      PROCESS_GROUP_STOP_TIMEOUT_MS,
     );
     return retainedProcessGroupStopOutcome(sandboxCommandExitCode(result)) === "stopped";
   } catch {
@@ -3977,7 +3986,7 @@ export async function probeRetainedProcessAtProvider(
     // whose leader still carries this command's token.
     const groupStopped =
       mode === "cancel" && !supervisedCancelled && processGroupControl
-        ? await stopRetainedProcessGroup(session, processGroupControl)
+        ? await stopRetainedProcessGroup(session, processGroupControl, drainBudget)
         : false;
     // A stopped command takes up to the supervisor's KILL escalation to exit.
     // Wait for it here, within the sweep's budget, so the stop settles now

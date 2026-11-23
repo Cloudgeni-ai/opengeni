@@ -4091,10 +4091,12 @@ provider-specific reconciliation then proves exact exit/loss before settlement.
 For an unsupervised Modal command (the Modal SDK has no command signal), the
 turn stores the command wrapper's process-group identity (its randomized marker
 path and the token in the group leader's arguments) with the background command
-at adoption. A stop requested by Pause, Cancel or Stop runs the turn's own
-in-box TERM-then-KILL helper with that identity: it signals only the group whose
-leader still carries the token, and settlement still waits for the provider's
-exit banner. Descendants that leave the group (`setsid`, double fork) are not
+at adoption. A stop requested by Pause, Cancel or Stop runs, on the lease
+reaper's next sweep (`OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS`, 30 s by
+default), the turn's own in-box TERM-then-KILL helper with that identity: it
+signals only the group whose leader still carries the token, gives it 5 s to
+exit on TERM before KILL, and settlement still waits for the provider's exit
+banner. Descendants that leave the group (`setsid`, double fork) are not
 reached; native command supervision covers those. Commands adopted before this
 identity was stored keep the earlier behaviour and run until they exit.
 Resume never revives a stopping command. Connected Machines and other

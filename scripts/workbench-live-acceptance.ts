@@ -75,8 +75,12 @@ const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
  */
 export const CONTROL_FIXTURE_READY_MS = 45_000;
 /** How long the hostile Pause fixture sleeps after printing its ready marker
- * before it writes its zombie artifact. */
-export const PAUSE_FIXTURE_DELAYED_WRITE_SECONDS = 30;
+ * before it writes its zombie artifact. Pause marks an adopted background
+ * command stopping and the sandbox lease reaper ends its process group on its
+ * next sweep (every 30 s by default, plus the sweep's own work), so the window
+ * must cover the time to click Pause plus one reaper period with room to
+ * spare. A shorter window would race the reaper instead of testing Pause. */
+export const PAUSE_FIXTURE_DELAYED_WRITE_SECONDS = 120;
 /** Zombie probes after Pause run only once the fixture's delayed write would
  * have happened, plus this margin, so a process Pause failed to stop is caught
  * by the first probe instead of slipping past it. */
