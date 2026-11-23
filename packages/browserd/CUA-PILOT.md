@@ -33,7 +33,11 @@ its timeout.
 In the background, `type_text` types into a Chromium browser's own field (the
 address bar) with keystrokes posted to the browser, not an accessibility
 insert: the field shows inserted text but never takes it, so Return after it
-loaded nothing (`cu-browser-field-keys`). Each `run_steps` step reports the
+loaded nothing (`cu-browser-field-keys`). Whether the text goes to that field
+is decided once the window is key: a Chromium window in the background reports
+no focused element until then, so right after `cmd+T` the new tab's address
+bar was not recognised, took an accessibility insert, and Return loaded
+nothing while every step reported success. Each `run_steps` step reports the
 `effect` its tool could confirm, so a batch's key press that was only sent
 can be told from one the app was seen to take.
 Popup options are chosen without pressing their items (`cu-popup-options`,
