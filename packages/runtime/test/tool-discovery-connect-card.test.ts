@@ -38,6 +38,11 @@ const DYNAMICS = {
   providerDomain: "dynamics.com",
 };
 const CLOSE = { capabilityId: "mcp:close", name: "Close", providerDomain: "close.com" };
+const CONNECTED_MACHINE = {
+  capabilityId: "api:connected-machine",
+  name: "Connected Machine",
+  providerDomain: "opengeni.ai",
+};
 
 function candidate(name: string, description: string): Tool {
   return tool({
@@ -287,6 +292,22 @@ describe("searches that keep today's behaviour and show no card", () => {
     expect(requested).toEqual([]);
     expect(outputOf(result).notConnected).toBeUndefined();
     expect(outputOf(result).connectCard).toBeUndefined();
+  });
+
+  test("the platform's own name (an app chat's 'Opengeni app') never shows a built-in card", async () => {
+    for (const transport of TRANSPORTS) {
+      const { requested, request } = cardTool();
+      const result = await runtimeWith(transport, {
+        matches: [CONNECTED_MACHINE],
+        request,
+      }).prepareSearch({
+        query:
+          "Inspect the current published Opengeni app version named Team Linear issues or its current live preview to count how many open issues are listed.",
+      });
+      expect(requested).toEqual([]);
+      expect(outputOf(result).notConnected).toBeUndefined();
+      expect(outputOf(result).connectCard).toBeUndefined();
+    }
   });
 
   test("an ordinary word that is an integration's name names it without a card", async () => {
