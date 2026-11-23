@@ -21,8 +21,16 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
-import { AppServerError, runAppServer, type AppServerDeps } from "../src/app-server/service";
+import {
+  AppServerError,
+  appServerActingSubject,
+  appServerRuns,
+  runAppServer,
+  testAppServer,
+  type AppServerDeps,
+} from "../src/app-server/service";
 import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
+import { liveMemberGrant } from "../src/site-tool-data";
 import type { SiteToolAccountInventory } from "../src/site-tool-routing";
 
 // App server code against PostgreSQL as the restricted application role:
@@ -618,52 +626,64 @@ test("the code pauses once the publisher can no longer manage the app", async ()
   expect(f.toolCalls).toEqual([]);
 });
 
+type AgentTurn = { sessionId: string; turnId: string; attemptId: string };
+
+/**
+ * A running agent turn in the owner's Only me chat, started by `subjectId`
+ * (a person) or by a service (a schedule, a key).
+ */
+async function agentTurn(
+  f: Awaited<ReturnType<typeof fixture>>,
+  kind: "subject" | "service",
+  subjectId: string,
+): Promise<AgentTurn> {
+  const session = await createSession(db.db, {
+    ...f.scope,
+    initialMessage: "Load the issues on the server",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+    subjectId: f.owner.subjectId,
+    visibility: "user_private",
+  });
+  const [turn] = await shared.admin<{ id: string }[]>`
+    insert into session_turns (
+      account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend,
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+    ) values (
+      ${f.scope.accountId}, ${f.scope.workspaceId}, ${session.id}, gen_random_uuid(),
+      ${`app-server-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish', 'test-model',
+      'medium', 'none', 1, ${kind}, ${subjectId}, '{"accepted":true}'::jsonb
+    ) returning id`;
+  const attemptId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx`update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
+    await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
+    await tx`insert into session_turn_attempts (
+      id, account_id, workspace_id, session_id, turn_id, execution_generation,
+      state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+      verified_control_revision, mcp_approval_policies
+    ) values (
+      ${attemptId}, ${f.scope.accountId}, ${f.scope.workspaceId}, ${session.id}, ${turn!.id},
+      1, 'running', 'app-server-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
+      '{}'::jsonb
+    )`;
+  });
+  return { sessionId: session.id, turnId: turn!.id, attemptId };
+}
+
 test("code an agent published runs on the authority of the person it acted for", async () => {
   const f = await fixture();
   expect((await f.publish(SERVER_CODE)).status).toBe(200);
   // An agent publishes with its worker's service subject and its turn, here
   // in the person's Only me chat, so the turn is private to them.
-  const turnBy = async (kind: "subject" | "service", subjectId: string) => {
-    const session = await createSession(db.db, {
-      ...f.scope,
-      initialMessage: "Load the issues on the server",
-      resources: [],
-      tools: [],
-      metadata: {},
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      createdBy: { kind: "subject", subjectId: f.owner.subjectId },
-      subjectId: f.owner.subjectId,
-      visibility: "user_private",
-    });
-    const [turn] = await shared.admin<{ id: string }[]>`
-      insert into session_turns (
-        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
-        status, position, prompt, model, reasoning_effort, sandbox_backend,
-        execution_generation, initiator_kind, initiator_subject_id, initiator_context
-      ) values (
-        ${f.scope.accountId}, ${f.scope.workspaceId}, ${session.id}, gen_random_uuid(),
-        ${`app-server-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish', 'test-model',
-        'medium', 'none', 1, ${kind}, ${subjectId}, '{"accepted":true}'::jsonb
-      ) returning id`;
-    const attemptId = crypto.randomUUID();
-    await shared.admin.begin(async (tx) => {
-      await tx`update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
-      await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
-      await tx`insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id, execution_generation,
-        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision, mcp_approval_policies
-      ) values (
-        ${attemptId}, ${f.scope.accountId}, ${f.scope.workspaceId}, ${session.id}, ${turn!.id},
-        1, 'running', 'app-server-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
-        '{}'::jsonb
-      )`;
-    });
-    return { sessionId: session.id, turnId: turn!.id, attemptId };
-  };
+  const turnBy = (kind: "subject" | "service", subjectId: string) => agentTurn(f, kind, subjectId);
   const publishedBy = async (source: { sessionId: string; turnId: string; attemptId: string }) => {
     await shared.admin`
       insert into workspace_artifact_events (
@@ -693,6 +713,70 @@ test("code an agent published runs on the authority of the person it acted for",
   const refused = await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/issues" });
   expect(refused.status).toBe(403);
   expect(refused.json.error.details?.reason).toBe("deployer_cannot_manage");
+});
+
+test("an agent tries the code and reads its runs as the person whose turn it is", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  f.setIsolate(async (_run, host) => {
+    const called = await host("tools.call", { tool: "linear/list_issues", arguments: {} });
+    return {
+      logs: "listed shared issues\n",
+      bodyBase64: Buffer.from(JSON.stringify(called.json)).toString("base64"),
+    };
+  });
+  const owner = await liveMemberGrant(f.deps, f.scope, f.owner.subjectId);
+  // An agent's grant carries its worker's subject, which is never a member.
+  const agentGrant = (turn: AgentTurn) =>
+    ({
+      ...owner!,
+      principalKind: "agent_attempt",
+      subjectId: "worker:first-party-mcp",
+      metadata: { ...turn, executionGeneration: 1 },
+    }) as AccessGrant;
+  const turn = await agentTurn(f, "subject", f.owner.subjectId);
+  expect(await appServerActingSubject(f.deps, agentGrant(turn))).toBe(f.owner.subjectId);
+  const ran = await testAppServer(f.deps, agentGrant(turn), f.siteId, { path: "/issues" });
+  expect(ran.status, ran.body).toBe(200);
+  expect(f.toolCalls.at(-1)?.serverId).toBe("linear__team");
+  expect(f.runs.at(-1)?.context.viewer?.id).toBe(`user:${f.owner.subjectId}`);
+  const runs = await appServerRuns(f.deps, agentGrant(turn), f.siteId, {});
+  expect(runs.runs[0]?.logs).toContain("listed shared issues");
+
+  // A turn without a person has no one to run as: refused, and its output isn't shown.
+  const personless = await agentTurn(f, "service", "api_key:fixture");
+  expect(await appServerActingSubject(f.deps, agentGrant(personless))).toBeNull();
+  const refused = await testAppServer(f.deps, agentGrant(personless), f.siteId, {
+    path: "/issues",
+  }).catch((error: unknown) => error);
+  expect(refused).toBeInstanceOf(AppServerError);
+  const hidden = await appServerRuns(f.deps, agentGrant(personless), f.siteId, {}).catch(
+    (error: unknown) => error,
+  );
+  expect(JSON.stringify(hidden)).not.toContain("listed shared issues");
+});
+
+test("publishing refuses a tool name that isn't a tool here and names the id to use", async () => {
+  const f = await fixture();
+  const route = `account-${"3f9a5c".padEnd(64, "0")}`;
+  f.setInventory({
+    canonical: new Map([["linear", { name: "Linear" } as never]]),
+    plain: new Set(),
+    accounts: [
+      { serverId: route, canonicalServerId: "linear", shared: true, connector: "Linear" } as never,
+    ],
+    capabilityServers: new Set(),
+  });
+  // The model-facing name of the shared account's tools, not its identity.
+  const refused = await f.publish({ ...SERVER_CODE, tools: ["linear_3f9a5c/list_issues"] });
+  expect(refused.status, JSON.stringify(refused.json)).toBe(422);
+  expect(JSON.stringify(refused.json)).toContain(`use ${route}/list_issues`);
+  // The identity, or the connector, publishes.
+  expect((await f.publish({ ...SERVER_CODE, tools: [`${route}/list_issues`] })).status).toBe(200);
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  // An account route the publisher can't see may be shared with others: runs decide.
+  const unseen = `account-${"b".repeat(64)}/list_issues`;
+  expect((await f.publish({ ...SERVER_CODE, tools: [unseen] })).status).toBe(200);
 });
 
 test("an upload of no files removes the code", async () => {
