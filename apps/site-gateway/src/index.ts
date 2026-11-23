@@ -25,6 +25,7 @@ import {
   SITE_UI_STYLESHEET_PATH,
 } from "@opengeni/sdk/site-ui";
 import { handleApi } from "./api";
+import { siteUiAsset } from "./site-ui-asset";
 import {
   handleAppServerInternal,
   isAppServerInternalPath,
@@ -73,25 +74,6 @@ function plain(status: number, body: string, headers: HeadersInit = {}): Respons
   out.set("Content-Type", "text/plain; charset=utf-8");
   if (!out.has("Cache-Control")) out.set("Cache-Control", "no-store");
   return new Response(body, { status, headers: out });
-}
-
-/**
- * The opt-in Opengeni look for apps (`<link rel="stylesheet" href="/__opengeni/ui.css">`)
- * and its chart helpers (`<script src="/__opengeni/charts.js">`). Site HTML
- * runs in an opaque origin, so both may be read cross-origin.
- */
-function siteUiAsset(request: Request, hsts: boolean, contentType: string, body: string): Response {
-  if (request.method !== "GET" && request.method !== "HEAD")
-    return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
-  const headers = applySecurityHeaders(
-    new Headers({
-      "content-type": contentType,
-      "cache-control": "public, max-age=300",
-    }),
-    { noindex: true, hsts },
-  );
-  headers.set("Cross-Origin-Resource-Policy", "cross-origin");
-  return new Response(request.method === "HEAD" ? null : body, { headers });
 }
 
 function robots(noindex: boolean): Response {

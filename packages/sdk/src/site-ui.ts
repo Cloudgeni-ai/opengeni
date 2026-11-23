@@ -81,7 +81,7 @@ export const SITE_UI_CSS = [
   `.og-chart text{font-family:var(--og-font-sans);font-size:0.75rem;fill:var(--og-fg-muted);font-variant-numeric:tabular-nums}`,
   `.og-chart .og-axis-title{fill:var(--og-fg-label);font-weight:500}.og-chart .og-point-label{fill:var(--og-fg-label)}.og-chart .og-strong{fill:var(--og-fg);font-weight:600}`,
   `.og-chart .og-better{fill:var(--og-fg-subtle);font-style:italic}.og-chart .og-ref-label{fill:var(--og-fg-subtle)}`,
-  `.og-chart .og-grid{stroke:var(--og-border);stroke-width:1}.og-chart .og-grid-x{stroke-dasharray:2 3}.og-chart .og-ref{stroke:var(--og-fg-subtle);stroke-dasharray:4 4}`,
+  `.og-chart .og-gridline{stroke:var(--og-border);stroke-width:1}.og-chart .og-grid-x{stroke-dasharray:2 3}.og-chart .og-ref{stroke:var(--og-fg-subtle);stroke-dasharray:4 4}`,
   `.og-chart .og-line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.og-chart .og-line-hl{stroke-width:3}.og-chart .og-line-dash{stroke-dasharray:5 4}.og-chart .og-area{opacity:.12;stroke:none}`,
   `.og-chart .og-guide{stroke:var(--og-border-strong)}.og-chart .og-dot{stroke:var(--og-canvas);stroke-width:1.5}.og-chart .og-dot:focus{outline:none;stroke:var(--og-focus);stroke-width:2}.og-chart .og-whisker{stroke-width:2;opacity:.45}`,
   `.og-legend{display:flex;flex-wrap:wrap;gap:4px 16px;margin:0 0 8px;font-size:0.8125rem;line-height:1.4;color:var(--og-fg-label)}`,
@@ -91,8 +91,8 @@ export const SITE_UI_CSS = [
   `.og-bars-label{font-size:0.875rem;line-height:1.3;color:var(--og-fg-label);max-width:17rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`,
   `.og-bars-cell{display:grid;gap:3px;min-width:0;padding-right:4.5rem}.og-bars-neg .og-bars-cell{padding-left:4.5rem}`,
   `.og-bars-track{position:relative;height:14px}.og-bars-multi .og-bars-track{height:10px}`,
-  `.og-bars-bar{position:absolute;top:0;bottom:0;border-radius:3px;min-width:2px}.og-bars-ci{position:absolute;top:50%;height:2px;margin-top:-1px;background:var(--og-fg);opacity:.55}`,
-  `.og-bars-value{position:absolute;top:50%;transform:translateY(-50%);font-size:0.8125rem;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--og-fg)}`,
+  `.og-bars-bar{forced-color-adjust:none;position:absolute;top:0;bottom:0;border-radius:3px;min-width:2px}.og-bars-ci{position:absolute;top:50%;height:2px;margin-top:-1px;background:var(--og-fg);opacity:.55}`,
+  `.og-bars-value{position:absolute;top:50%;transform:translateY(-50%);font-size:0.8125rem;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--og-fg)}.og-bars-missing{color:var(--og-fg-subtle)}`,
   `@media (max-width:480px){.og-bars{grid-template-columns:minmax(0,1fr);gap:2px 0}.og-bars-label{max-width:none}.og-bars-cell{margin-bottom:6px}.og-kpi{padding:12px}.og-kpi-value{font-size:1.375rem}.og-hide-narrow{display:none}.og-table th,.og-table td{padding:8px}}`,
 ].join("\n");
 
@@ -103,7 +103,7 @@ const STYLESHEET_IMPORT =
   /^<style\b[^>]*>\s*@import\s+(?:url\(\s*)?(["']?)\/__opengeni\/ui\.css\1\s*\)?\s*;?\s*<\/style\s*>$/i;
 /** An empty `<script src="/__opengeni/charts.js">` (other attributes such as `defer` allowed). */
 const CHARTS_SCRIPT_TAG =
-  /^<script\b(?=[^>]*\bsrc\s*=\s*(["']?)\/__opengeni\/charts\.js\1(?:[\s>]))[^>]*>\s*<\/script\s*>$/i;
+  /^<script\b(?=[^>]*\ssrc\s*=\s*(["']?)\/__opengeni\/charts\.js\1(?:[\s>]))[^>]*>\s*<\/script\s*>$/i;
 
 /**
  * Replace the opt-in `<link rel="stylesheet" href="/__opengeni/ui.css">`, or a

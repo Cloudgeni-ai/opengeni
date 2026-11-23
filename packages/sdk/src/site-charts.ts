@@ -102,11 +102,11 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       var unit = o.unit == null ? "%" : o.unit;
       var mag = Math.abs(v);
       var body = unit === "%" ? fmt.pct(mag, { digits: o.digits != null ? o.digits : mag >= 10 ? 0 : 1 }) : unit === "pp" ? fmt.num(mag, { digits: o.digits != null ? o.digits : 1 }) + " pp" : format(unit)(mag);
-      var flat = mag < (o.flat != null ? o.flat : 1e-9);
+      var flat = mag < (o.flat != null ? o.flat : 1e-9) || !/[1-9]/.test(body);
       var arrow = flat ? "" : v > 0 ? "\u25B2 " : "\u25BC ";
       var better = o.better || "higher";
       var tone = flat || better === "none" ? "flat" : (v > 0) === (better === "higher") ? "good" : "bad";
-      return { text: arrow + (flat ? "0" : (v > 0 ? "+" : "\u2212") + body), tone: tone };
+      return { text: arrow + (flat ? body.replace(/[0-9.,]+/, "0") : (v > 0 ? "+" : "\u2212") + body), tone: tone };
     },
   };
   function format(f) {
@@ -117,7 +117,8 @@ export const SITE_CHARTS_JS = String.raw`(function () {
   function toDate(v) {
     if (v instanceof Date) return v;
     if (typeof v === "string" && /^\d{4}-\d{2}/.test(v)) {
-      var d = new Date(/^\d{4}-\d{2}$/.test(v) ? v + "-01T00:00:00" : v);
+      // Date-only strings are local dates (new Date("2026-01-15") would be UTC).
+      var d = new Date(/^\d{4}-\d{2}$/.test(v) ? v + "-01T00:00:00" : /^\d{4}-\d{2}-\d{2}$/.test(v) ? v + "T00:00:00" : v);
       return isNaN(d) ? null : d;
     }
     return null;
@@ -203,7 +204,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
   }
   function tooltip(node) {
     var tip = node.querySelector(":scope > .og-tip");
-    if (!tip) { tip = h("div", "og-tip"); tip.hidden = true; tip.setAttribute("role", "status"); node.appendChild(tip); }
+    if (!tip) { tip = h("div", "og-tip"); tip.hidden = true; tip.setAttribute("aria-hidden", "true"); node.appendChild(tip); }
     return {
       show: function (lines, x, y) {
         tip.replaceChildren();
@@ -221,16 +222,15 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       hide: function () { tip.hidden = true; },
     };
   }
-  // Redraw on width changes; returns {update(options)}.
+  // Redraw on width changes.
   function responsive(node, draw) {
     node.classList.add("og-chart");
     var last = -1;
     var run = function () { var w = node.clientWidth; if (w && w !== last) { last = w; draw(w); } };
-    if (window.ResizeObserver) new ResizeObserver(run).observe(node);
+    if (window.ResizeObserver) new window.ResizeObserver(run).observe(node);
     else window.addEventListener("resize", run);
     run();
-    if (!last) requestAnimationFrame(run);
-    return function () { last = -1; run(); };
+    if (last <= 0) requestAnimationFrame(run);
   }
 
   // ---- KPI cards ----------------------------------------------------------
@@ -266,7 +266,11 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     var f = format(o.format);
     if (o.sort !== false && series.length === 1) {
       var dir = o.sort === "asc" ? 1 : -1;
-      data.sort(function (a, b) { return dir * ((get(a, series[0].key) || 0) - (get(b, series[0].key) || 0)); });
+      data.sort(function (a, b) {
+        var x = get(a, series[0].key), y = get(b, series[0].key);
+        if (!isNum(x) || !isNum(y)) return isNum(x) ? -1 : isNum(y) ? 1 : 0;
+        return dir * (x - y);
+      });
     }
     var vals = [];
     data.forEach(function (r) {
@@ -284,6 +288,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       var rowHl = o.highlight != null && (typeof o.highlight === "function" ? o.highlight(r) : o.highlight === name);
       var lab = h("div", "og-bars-label" + (rowHl ? " og-strong" : ""), name);
       lab.title = name;
+      lab.setAttribute("aria-hidden", "true");
       var cell = h("div", "og-bars-cell");
       cell.setAttribute("role", "listitem");
       var aria = [name];
@@ -315,7 +320,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
           else val.style.left = "calc(" + Math.max(b, o.ci ? (get(r, o.ci[1]) - min) / span || 0 : 0) * 100 + "% + 6px)";
           track.appendChild(val);
         } else {
-          track.appendChild(h("span", "og-bars-value og-muted", (o.missing || DASH)));
+          track.appendChild(h("span", "og-bars-value og-bars-missing", (o.missing || DASH)));
         }
         aria.push((x.label ? x.label + " " : "") + f(v));
         cell.appendChild(track);
@@ -337,12 +342,12 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     var yf = tickFormat(o.yFormat || o.format, yt.ticks);
     var left = Math.ceil(Math.max.apply(null, yt.ticks.map(function (t) { return textWidth(yf(t)); }))) + 10;
     var pad = { l: Math.max(left, 28), r: 12, t: o.yLabel || o.better ? 26 : 8, b: o.xLabel ? 44 : 26 };
-    var svg = s("svg", { width: w, height: H, viewBox: "0 0 " + w + " " + H, role: "img" });
+    var svg = s("svg", { width: w, height: H, viewBox: "0 0 " + w + " " + H, role: o.focusable ? "group" : "img" });
     if (o.title) s("title", {}, svg).textContent = o.title;
     var X = function (v) { return pad.l + ((v - xs.lo) / (xs.hi - xs.lo || 1)) * (w - pad.l - pad.r); };
     var Y = function (v) { return H - pad.b - ((v - yt.lo) / (yt.hi - yt.lo || 1)) * (H - pad.t - pad.b); };
     yt.ticks.forEach(function (t) {
-      s("line", { x1: pad.l, x2: w - pad.r, y1: Y(t), y2: Y(t), class: "og-grid" }, svg);
+      s("line", { x1: pad.l, x2: w - pad.r, y1: Y(t), y2: Y(t), class: "og-gridline" }, svg);
       var tx = s("text", { x: pad.l - 8, y: Y(t), "text-anchor": "end", "dominant-baseline": "middle" }, svg);
       tx.textContent = yf(t);
     });
@@ -394,9 +399,12 @@ export const SITE_CHARTS_JS = String.raw`(function () {
   // {data, x, y | series, format, xFormat, highlight, refs:[{value,label}], zero, area, height}
   function line(el, o) {
     var node = host(el);
-    var data = o.data || [];
+    var data = (o.data || []).slice();
     if (!data.length) return empty(node, o);
     var series = seriesOf(o);
+    // Plot in x order, whatever order the rows came in.
+    if (data.every(function (r) { return isNum(get(r, o.x)); })) data.sort(function (a, b) { return get(a, o.x) - get(b, o.x); });
+    else if (data.every(function (r) { return toDate(get(r, o.x)); })) data.sort(function (a, b) { return toDate(get(a, o.x)) - toDate(get(b, o.x)); });
     var xv = data.map(function (r) { return get(r, o.x); });
     var numericX = xv.every(isNum);
     var pos = function (i) { return numericX ? xv[i] : i; };
@@ -404,7 +412,8 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     var yf = format(o.yFormat || o.format);
     var ys = [];
     data.forEach(function (r) { series.forEach(function (x) { var v = get(r, x.key); if (isNum(v)) ys.push(v); }); });
-    (o.refs || []).forEach(function (rf) { ys.push(rf.value); });
+    var refs = (o.refs || []).filter(function (rf) { return isNum(rf.value); });
+    refs.forEach(function (rf) { ys.push(rf.value); });
     if (!ys.length) return empty(node, o);
     var tip = null;
     var head = series.length > 1 ? legend(series) : null;
@@ -419,17 +428,20 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       var fr = frame(body, w, Object.assign({ zero: false }, o), xs, ys);
       var idx = data.map(function (_, i) { return { v: pos(i), i: i }; });
       xTicks(fr, idx, function (t) { return xfmt(xv[t.i]); });
-      (o.refs || []).forEach(function (rf) {
+      refs.forEach(function (rf) {
         s("line", { x1: fr.pad.l, x2: w - fr.pad.r, y1: fr.Y(rf.value), y2: fr.Y(rf.value), class: "og-ref" }, fr.svg);
         var t = s("text", { x: w - fr.pad.r, y: fr.Y(rf.value) - 4, "text-anchor": "end", class: "og-ref-label" }, fr.svg);
         t.textContent = rf.label || yf(rf.value);
       });
       var order = series.map(function (x, i) { return i; }).sort(function (a, b) { return series[a].hl - series[b].hl; });
       order.forEach(function (si) {
-        var x = series[si], d = "", up = false;
+        var x = series[si], d = "", up = false, lone = [];
         data.forEach(function (r, i) {
           var v = get(r, x.key);
           if (!isNum(v)) { up = false; return; }
+          // A point with no neighbour on either side gets a dot, or it would be invisible.
+          var prev = i > 0 && isNum(get(data[i - 1], x.key)), next = i < data.length - 1 && isNum(get(data[i + 1], x.key));
+          if (!prev && !next) lone.push([fr.X(pos(i)), fr.Y(v)]);
           d += (up ? "L" : "M") + fr.X(pos(i)).toFixed(1) + "," + fr.Y(v).toFixed(1);
           up = true;
         });
@@ -438,6 +450,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
           s("path", { d: d + "L" + fr.X(pos(data.length - 1)) + "," + base + "L" + fr.X(pos(0)) + "," + base + "Z", class: "og-area", style: "fill:" + x.color }, fr.svg);
         }
         s("path", { d: d, class: "og-line" + (x.hl ? " og-line-hl" : "") + (x.dash ? " og-line-dash" : ""), style: "stroke:" + x.color }, fr.svg);
+        lone.forEach(function (p) { s("circle", { cx: p[0], cy: p[1], r: 3.5, class: "og-dot", style: "fill:" + x.color }, fr.svg); });
       });
       var guide = s("line", { y1: fr.pad.t, y2: fr.H - fr.pad.b, class: "og-guide", visibility: "hidden" }, fr.svg);
       var hit = s("rect", { x: fr.pad.l, y: 0, width: Math.max(0, w - fr.pad.l - fr.pad.r), height: fr.H, fill: "transparent" }, fr.svg);
@@ -477,7 +490,9 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     if (!data.length) return empty(node, o);
     var groups = [];
     data.forEach(function (r) { var g = o.group ? String(get(r, o.group)) : ""; if (groups.indexOf(g) < 0) groups.push(g); });
-    var gs = seriesOf({ series: groups.map(function (g) { return { key: g, label: g }; }), highlight: o.highlight });
+    // highlight names a group (mute the others) or one point (by label, or row => boolean).
+    var hlGroup = o.highlight != null && typeof o.highlight !== "function" && groups.indexOf(String(o.highlight)) >= 0;
+    var gs = seriesOf({ series: groups.map(function (g) { return { key: g, label: g }; }), highlight: hlGroup ? o.highlight : null });
     var gcol = {}; gs.forEach(function (g) { gcol[g.key] = g; });
     var xf = format(o.xFormat || "num"), yf = format(o.yFormat || o.format);
     var xsv = data.map(function (r) { return get(r, o.x); });
@@ -493,14 +508,14 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     node.appendChild(body);
     responsive(body, function (w) {
       var xt = nice(Math.min.apply(null, xsv), Math.max.apply(null, xsv), w < 480 ? 3 : 5, o.zeroX);
-      var fr = frame(body, w, o, xt, ysv);
-      xt.ticks.forEach(function (t) { s("line", { x1: fr.X(t), x2: fr.X(t), y1: fr.pad.t, y2: fr.H - fr.pad.b, class: "og-grid og-grid-x" }, fr.svg); });
+      var fr = frame(body, w, Object.assign({ focusable: true }, o), xt, ysv);
+      xt.ticks.forEach(function (t) { s("line", { x1: fr.X(t), x2: fr.X(t), y1: fr.pad.t, y2: fr.H - fr.pad.b, class: "og-gridline og-grid-x" }, fr.svg); });
       xTicks(fr, xt.ticks, tickFormat(o.xFormat || "num", xt.ticks));
       var placed = [];
       var tip = null;
       var marks = data.map(function (r) {
         var g = gcol[o.group ? String(get(r, o.group)) : ""];
-        var rowHl = o.highlight != null && (typeof o.highlight === "function" ? o.highlight(r) : g.hl || o.highlight === get(r, o.label));
+        var rowHl = o.highlight != null && (typeof o.highlight === "function" ? !!o.highlight(r) : hlGroup ? g.hl : String(o.highlight) === String(get(r, o.label)));
         var c = o.group ? g.color : o.highlight != null && !rowHl ? color(0, true) : color(0);
         return { r: r, x: fr.X(get(r, o.x)), y: fr.Y(get(r, o.y)), c: c, hl: rowHl };
       });
@@ -585,7 +600,8 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       if (o.title) t.setAttribute("aria-label", o.title);
       var thead = h("thead"), tr = h("tr");
       cols.forEach(function (c) {
-        var numeric = c.align ? c.align === "right" : isNum(get(rows[0], c.key)) || !!c.format;
+        var sample = rows.map(function (r) { return get(r, c.key); }).filter(function (v) { return v != null; })[0];
+        var numeric = c.align ? c.align === "right" : isNum(sample) || !!c.format;
         c._num = numeric;
         c._wrap = !numeric && rows.some(function (r) { var v = get(r, c.key); return typeof v === "string" && v.length > 32; });
         var th = h("th", (numeric ? "og-num" : "") + (c._wrap ? " og-wrap" : "") + (c.optional ? " og-hide-narrow" : ""));
@@ -600,6 +616,8 @@ export const SITE_CHARTS_JS = String.raw`(function () {
             state.dir = state.key === c.key && state.dir === "desc" ? "asc" : "desc";
             state.key = c.key;
             draw();
+            var again = node.querySelector("th[aria-sort] .og-sort");
+            if (again) again.focus();
           });
           th.appendChild(b);
         }
@@ -608,7 +626,8 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       thead.appendChild(tr);
       var tbody = h("tbody");
       list.slice(0, limit).forEach(function (r) {
-        var row = h("tr", o.highlight && o.highlight(r) ? "og-highlight" : "");
+        var hl = o.highlight == null ? false : typeof o.highlight === "function" ? o.highlight(r) : String(get(r, cols[0].key)) === String(o.highlight);
+        var row = h("tr", hl ? "og-highlight" : "");
         cols.forEach(function (c, ci) {
           var v = get(r, c.key);
           var cell = h(ci === 0 ? "th" : "td", (c._num ? "og-num" : "") + (c._wrap ? " og-wrap" : "") + (c.optional ? " og-hide-narrow" : ""));
@@ -634,7 +653,12 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       if (limit < list.length) {
         var more = h("button", "og-button og-button-ghost og-more", "Show all " + list.length);
         more.type = "button";
-        more.addEventListener("click", function () { state.all = true; draw(); });
+        more.addEventListener("click", function () {
+          state.all = true;
+          draw();
+          var first = node.querySelectorAll("tbody tr")[limit];
+          if (first) { first.tabIndex = -1; first.focus(); }
+        });
         node.appendChild(more);
       }
     }
