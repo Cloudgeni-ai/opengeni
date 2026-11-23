@@ -22,6 +22,25 @@
 @import "./effective-tokens.css";
 @import "./session-capability.css";
 
+/* Fade only the dimming, not the panel nested inside it. Radix's portal and
+   overlay use a CSS animation (not a transition) to hold the node on close.
+   Keep it around long enough for the panel's own exit animation to finish. */
+.og-modal-overlay-fade {
+  transition: background-color 150ms;
+}
+@starting-style {
+  .og-modal-overlay-fade {
+    background-color: transparent;
+  }
+}
+.og-modal-overlay-fade[data-state="closed"] {
+  background-color: transparent;
+  animation: og-modal-overlay-exit var(--og-modal-exit-duration, 150ms);
+}
+@keyframes og-modal-overlay-exit {
+  from, to { --og-modal-overlay-present: 1; }
+}
+
 /* Full-surface preview preparation. The ripple keeps its private ink and glow
    (read by the canvas effect as literal colors), tuned to the app's teal glow
    on a neutral ground; the steady label uses the host's typography and text

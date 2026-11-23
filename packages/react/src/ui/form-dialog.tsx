@@ -13,6 +13,7 @@ import {
 } from "react";
 import { ArrowLeftIcon, LoaderCircleIcon, LockIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
+import { ModalLayer } from "../lib/modal-layer";
 
 import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "./button";
@@ -734,34 +735,35 @@ export function FormDialog({
     <DialogPrimitive.Root {...overlay.rootProps}>
       {trigger ? <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger> : null}
       <DialogContainedPortal>
-        <DialogPrimitive.Overlay
-          className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-[120ms] starting:opacity-0"
+        <ModalLayer
+          className="fixed inset-0 z-50 bg-black/50 transition-colors duration-[120ms] starting:bg-transparent"
           style={layer}
-        />
-        <DialogPrimitive.Content
-          {...overlay.contentProps}
-          style={layer}
-          {...(frame.description ? {} : { "aria-describedby": undefined })}
-          className={cn(
-            "fixed z-50 flex flex-col outline-hidden transition-opacity duration-[120ms] starting:opacity-0",
-            "inset-x-0 bottom-0 max-h-[92dvh]",
-            "sm:inset-x-auto sm:bottom-auto sm:top-[12vh] sm:left-1/2 sm:max-h-[76vh] sm:w-[calc(100vw-2rem)] sm:-translate-x-1/2",
-            DIALOG_WIDTH[size],
-          )}
         >
-          <FormChromeContext.Provider value={DIALOG_CHROME}>
-            <SectionFrameReset>
-              <WindowBarTitleBoundary>
-                <FormFrame
-                  variant="dialog"
-                  {...frame}
-                  {...overlay.frameProps}
-                  className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
-                />
-              </WindowBarTitleBoundary>
-            </SectionFrameReset>
-          </FormChromeContext.Provider>
-        </DialogPrimitive.Content>
+          <DialogPrimitive.Content
+            {...overlay.contentProps}
+            style={layer}
+            {...(frame.description ? {} : { "aria-describedby": undefined })}
+            className={cn(
+              "fixed z-50 flex flex-col outline-hidden transition-opacity duration-[120ms] starting:opacity-0",
+              "inset-x-0 bottom-0 max-h-[92dvh]",
+              "sm:inset-x-auto sm:bottom-auto sm:top-[12vh] sm:left-1/2 sm:max-h-[76vh] sm:w-[calc(100vw-2rem)] sm:-translate-x-1/2",
+              DIALOG_WIDTH[size],
+            )}
+          >
+            <FormChromeContext.Provider value={DIALOG_CHROME}>
+              <SectionFrameReset>
+                <WindowBarTitleBoundary>
+                  <FormFrame
+                    variant="dialog"
+                    {...frame}
+                    {...overlay.frameProps}
+                    className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
+                  />
+                </WindowBarTitleBoundary>
+              </SectionFrameReset>
+            </FormChromeContext.Provider>
+          </DialogPrimitive.Content>
+        </ModalLayer>
       </DialogContainedPortal>
     </DialogPrimitive.Root>
   );

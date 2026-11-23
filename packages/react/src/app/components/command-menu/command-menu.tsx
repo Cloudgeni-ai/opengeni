@@ -93,6 +93,7 @@ import {
 } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
 import { DialogOverlay, DialogPortal } from "../../../ui/dialog";
+import { ModalLayer } from "../../../lib/modal-layer";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { Keycaps } from "./keycaps";
 import { ChatTitleInParent } from "./chat-title";
@@ -1345,241 +1346,244 @@ function CommandMenuDialog(props: {
   return (
     <DialogPrimitive.Root open={props.open} onOpenChange={onOpenChange}>
       <DialogPortal>
-        <DialogOverlay className="bg-black/25 dark:bg-black/45" />
-        <DialogPrimitive.Content
-          data-og-command-menu=""
-          aria-label="Command menu"
-          aria-describedby={undefined}
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            inputRef.current?.focus();
-          }}
-          onCloseAutoFocus={(event) => {
-            // An action moves focus where it belongs (the new chat's composer,
-            // the title being renamed); only a plain close returns focus.
-            if (ranAction.current) {
+        <ModalLayer overlay={DialogOverlay} className="bg-black/25 dark:bg-black/45">
+          <DialogPrimitive.Content
+            data-og-command-menu=""
+            aria-label="Command menu"
+            aria-describedby={undefined}
+            onOpenAutoFocus={(event) => {
               event.preventDefault();
-              return;
-            }
-            const target = props.returnFocus.current;
-            if (target?.isConnected) {
-              event.preventDefault();
-              target.focus({ preventScroll: true });
-            }
-            const next = afterClose.current;
-            afterClose.current = null;
-            next?.();
-          }}
-          onEscapeKeyDown={(event) => {
-            // Esc steps back out of a chat's actions, or the workspace list
-            // reached from the menu, before it closes the menu.
-            if (!focusChat && !(pickingWorkspace && !props.pickWorkspace)) return;
-            event.preventDefault();
-            leaveChat();
-          }}
-          onKeyDown={onKeyDown}
-          className={cn(
-            "fixed top-[12dvh] left-1/2 z-50 flex max-h-[min(560px,76dvh)] w-[calc(100vw-1.5rem)] max-w-[640px] -translate-x-1/2 flex-col overflow-hidden",
-            "rounded-2xl border border-border bg-surface text-fg shadow-og-lg outline-hidden",
-            "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-98",
-            "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-98",
-            "duration-[120ms] max-sm:top-3",
-          )}
-        >
-          <DialogPrimitive.Title className="sr-only">Command menu</DialogPrimitive.Title>
-          <div className="flex min-h-13 shrink-0 items-center gap-2.5 border-b border-border px-4">
-            <SearchIcon aria-hidden="true" className="size-4 shrink-0 text-fg-muted" />
-            {focusChat ? (
-              <button
-                type="button"
-                onClick={leaveChat}
-                title="Back to all results"
-                className="inline-flex max-w-[45%] shrink-0 items-center gap-1 rounded-full bg-hover py-0.5 pr-1.5 pl-2.5 text-xs font-medium text-fg outline-hidden hover:bg-selection focus-visible:outline-2 focus-visible:outline-ring/55"
-              >
-                <span className="truncate">{focusChat.title}</span>
-                <ChevronRightIcon aria-hidden="true" className="size-3.5 text-fg-muted" />
-              </button>
-            ) : pickingWorkspace ? (
-              <button
-                type="button"
-                onClick={leaveChat}
-                title="Back to all results"
-                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-hover py-0.5 pr-1.5 pl-2.5 text-xs font-medium text-fg outline-hidden hover:bg-selection focus-visible:outline-2 focus-visible:outline-ring/55"
-              >
-                Workspaces
-                <ChevronRightIcon aria-hidden="true" className="size-3.5 text-fg-muted" />
-              </button>
-            ) : null}
-            <input
-              ref={inputRef}
-              role="combobox"
-              aria-expanded="true"
-              aria-controls={listId}
-              aria-autocomplete="list"
-              aria-activedescendant={activeItem ? optionId(activeItem) : undefined}
-              aria-label={
-                focusChat
-                  ? `Actions for ${focusChat.title}`
-                  : pickingWorkspace
-                    ? "Search workspaces"
-                    : meetingPages
-                      ? "Search chats, apps, meetings and actions"
-                      : "Search chats, apps and actions"
+              inputRef.current?.focus();
+            }}
+            onCloseAutoFocus={(event) => {
+              // An action moves focus where it belongs (the new chat's composer,
+              // the title being renamed); only a plain close returns focus.
+              if (ranAction.current) {
+                event.preventDefault();
+                return;
               }
-              autoComplete="off"
-              autoCorrect="off"
-              spellCheck={false}
-              enterKeyHint="go"
-              value={query}
-              maxLength={200}
-              placeholder={placeholder}
-              onChange={(event) => setQuery(event.target.value)}
-              // The whole menu is the focus context; a ring on the field adds noise.
-              style={{ outline: "none" }}
-              className="h-13 min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-hidden placeholder:text-fg-subtle"
-            />
-            {searching ? (
-              <span
-                aria-hidden="true"
-                className="size-3.5 shrink-0 animate-spin rounded-full border-[1.5px] border-fg-subtle/40 border-t-fg-muted"
-              />
-            ) : null}
-          </div>
-          <div
-            ref={listRef}
-            id={listId}
-            role="listbox"
-            aria-label={focusChat ? "Chat actions" : pickingWorkspace ? "Workspaces" : "Results"}
-            className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5"
+              const target = props.returnFocus.current;
+              if (target?.isConnected) {
+                event.preventDefault();
+                target.focus({ preventScroll: true });
+              }
+              const next = afterClose.current;
+              afterClose.current = null;
+              next?.();
+            }}
+            onEscapeKeyDown={(event) => {
+              // Esc steps back out of a chat's actions, or the workspace list
+              // reached from the menu, before it closes the menu.
+              if (!focusChat && !(pickingWorkspace && !props.pickWorkspace)) return;
+              event.preventDefault();
+              leaveChat();
+            }}
+            onKeyDown={onKeyDown}
+            className={cn(
+              "fixed top-[12dvh] left-1/2 z-50 flex max-h-[min(560px,76dvh)] w-[calc(100vw-1.5rem)] max-w-[640px] -translate-x-1/2 flex-col overflow-hidden",
+              "rounded-2xl border border-border bg-surface text-fg shadow-og-lg outline-hidden",
+              "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-98",
+              "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-98",
+              "duration-[120ms] max-sm:top-3",
+            )}
           >
-            {items.length === 0 ? (
-              <p className="px-2.5 py-6 text-center text-sm text-fg-muted">
-                {searching ? "Searching…" : "No matches"}
-              </p>
-            ) : (
-              groups.map((group) =>
-                group.items.length === 0 ? null : (
-                  <div key={group.label} role="group" aria-label={group.label}>
-                    {groups.length > 1 || !focusChat ? (
-                      <div className="truncate px-2.5 pt-2 pb-1 text-xs leading-4.5 font-medium text-fg-muted">
-                        {group.label}
-                      </div>
-                    ) : null}
-                    {group.items.map((item) => {
-                      const index = items.indexOf(item);
-                      const selected = index === activeIndex;
-                      const Icon = item.icon;
-                      return (
-                        <div
-                          key={item.key}
-                          id={optionId(item)}
-                          data-item-key={item.key}
-                          role="option"
-                          aria-selected={selected}
-                          onPointerMove={() => {
-                            if (!selected) setActive(index);
-                          }}
-                          onPointerDown={(event) => event.preventDefault()}
-                          onClick={(event) =>
-                            item.run({ newTab: platform === "mac" ? event.metaKey : event.ctrlKey })
-                          }
-                          className={cn(
-                            "relative flex min-h-9 w-full min-w-0 cursor-default items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-sm text-fg-label select-none pointer-coarse:min-h-11",
-                            selected ? "bg-hover text-fg" : null,
-                          )}
-                        >
-                          {item.chat ? (
-                            <ChatAvatar
-                              chat={item.chat}
-                              name={item.chat.title}
-                              fallback={
-                                <Icon
-                                  aria-hidden="true"
-                                  className={cn(
-                                    "size-4 shrink-0",
-                                    selected ? "text-fg" : "text-fg-muted",
-                                  )}
-                                />
-                              }
-                            />
-                          ) : item.tile ? (
-                            <span
-                              aria-hidden="true"
-                              className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted"
-                            >
-                              {item.tile}
-                            </span>
-                          ) : (
-                            <Icon
-                              aria-hidden="true"
-                              className={cn(
-                                "size-4 shrink-0",
-                                selected ? "text-fg" : "text-fg-muted",
-                              )}
-                            />
-                          )}
-                          {item.parentTitle ? (
-                            <ChatTitleInParent
-                              title={<Highlighted text={item.title} query={item.highlight} />}
-                              parentTitle={item.parentTitle}
-                            />
-                          ) : (
-                            <span className="min-w-0 flex-1 truncate">
-                              <Highlighted text={item.title} query={item.highlight} />
-                            </span>
-                          )}
-                          {item.workspaceTag ? <WorkspaceTag name={item.workspaceTag} /> : null}
-                          <ChatStatusMarks status={item.status ?? null} />
-                          {item.meta ? (
-                            <span className="shrink-0 text-xs text-fg-muted tabular-nums">
-                              {item.meta}
-                            </span>
-                          ) : null}
-                          {item.chord ? (
-                            // Touch screens have no keys to press.
-                            <Keycaps
-                              chord={item.chord}
-                              platform={platform}
-                              className="pointer-coarse:hidden"
-                            />
-                          ) : null}
+            <DialogPrimitive.Title className="sr-only">Command menu</DialogPrimitive.Title>
+            <div className="flex min-h-13 shrink-0 items-center gap-2.5 border-b border-border px-4">
+              <SearchIcon aria-hidden="true" className="size-4 shrink-0 text-fg-muted" />
+              {focusChat ? (
+                <button
+                  type="button"
+                  onClick={leaveChat}
+                  title="Back to all results"
+                  className="inline-flex max-w-[45%] shrink-0 items-center gap-1 rounded-full bg-hover py-0.5 pr-1.5 pl-2.5 text-xs font-medium text-fg outline-hidden hover:bg-selection focus-visible:outline-2 focus-visible:outline-ring/55"
+                >
+                  <span className="truncate">{focusChat.title}</span>
+                  <ChevronRightIcon aria-hidden="true" className="size-3.5 text-fg-muted" />
+                </button>
+              ) : pickingWorkspace ? (
+                <button
+                  type="button"
+                  onClick={leaveChat}
+                  title="Back to all results"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-hover py-0.5 pr-1.5 pl-2.5 text-xs font-medium text-fg outline-hidden hover:bg-selection focus-visible:outline-2 focus-visible:outline-ring/55"
+                >
+                  Workspaces
+                  <ChevronRightIcon aria-hidden="true" className="size-3.5 text-fg-muted" />
+                </button>
+              ) : null}
+              <input
+                ref={inputRef}
+                role="combobox"
+                aria-expanded="true"
+                aria-controls={listId}
+                aria-autocomplete="list"
+                aria-activedescendant={activeItem ? optionId(activeItem) : undefined}
+                aria-label={
+                  focusChat
+                    ? `Actions for ${focusChat.title}`
+                    : pickingWorkspace
+                      ? "Search workspaces"
+                      : meetingPages
+                        ? "Search chats, apps, meetings and actions"
+                        : "Search chats, apps and actions"
+                }
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                enterKeyHint="go"
+                value={query}
+                maxLength={200}
+                placeholder={placeholder}
+                onChange={(event) => setQuery(event.target.value)}
+                // The whole menu is the focus context; a ring on the field adds noise.
+                style={{ outline: "none" }}
+                className="h-13 min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-hidden placeholder:text-fg-subtle"
+              />
+              {searching ? (
+                <span
+                  aria-hidden="true"
+                  className="size-3.5 shrink-0 animate-spin rounded-full border-[1.5px] border-fg-subtle/40 border-t-fg-muted"
+                />
+              ) : null}
+            </div>
+            <div
+              ref={listRef}
+              id={listId}
+              role="listbox"
+              aria-label={focusChat ? "Chat actions" : pickingWorkspace ? "Workspaces" : "Results"}
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5"
+            >
+              {items.length === 0 ? (
+                <p className="px-2.5 py-6 text-center text-sm text-fg-muted">
+                  {searching ? "Searching…" : "No matches"}
+                </p>
+              ) : (
+                groups.map((group) =>
+                  group.items.length === 0 ? null : (
+                    <div key={group.label} role="group" aria-label={group.label}>
+                      {groups.length > 1 || !focusChat ? (
+                        <div className="truncate px-2.5 pt-2 pb-1 text-xs leading-4.5 font-medium text-fg-muted">
+                          {group.label}
                         </div>
-                      );
-                    })}
-                  </div>
-                ),
-              )
-            )}
-          </div>
-          <div className="hidden shrink-0 items-center gap-4 border-t border-border px-4 py-2 text-xs text-fg-muted pointer-fine:flex">
-            <FooterHint
-              keys={[{ code: "ArrowUp" }, { code: "ArrowDown" }]}
-              label="Move"
-              platform={platform}
-            />
-            <FooterHint
-              keys={[{ code: "Enter" }]}
-              label={pickingWorkspace ? "Switch" : "Open"}
-              platform={platform}
-            />
-            {focusChat || pickingWorkspace ? (
-              <FooterHint keys={[{ code: "Escape" }]} label="Back" platform={platform} />
-            ) : (
-              <FooterHint keys={[{ code: "Tab" }]} label="Chat actions" platform={platform} />
-            )}
-            {surface === "web" && !focusChat && !pickingWorkspace ? (
+                      ) : null}
+                      {group.items.map((item) => {
+                        const index = items.indexOf(item);
+                        const selected = index === activeIndex;
+                        const Icon = item.icon;
+                        return (
+                          <div
+                            key={item.key}
+                            id={optionId(item)}
+                            data-item-key={item.key}
+                            role="option"
+                            aria-selected={selected}
+                            onPointerMove={() => {
+                              if (!selected) setActive(index);
+                            }}
+                            onPointerDown={(event) => event.preventDefault()}
+                            onClick={(event) =>
+                              item.run({
+                                newTab: platform === "mac" ? event.metaKey : event.ctrlKey,
+                              })
+                            }
+                            className={cn(
+                              "relative flex min-h-9 w-full min-w-0 cursor-default items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-sm text-fg-label select-none pointer-coarse:min-h-11",
+                              selected ? "bg-hover text-fg" : null,
+                            )}
+                          >
+                            {item.chat ? (
+                              <ChatAvatar
+                                chat={item.chat}
+                                name={item.chat.title}
+                                fallback={
+                                  <Icon
+                                    aria-hidden="true"
+                                    className={cn(
+                                      "size-4 shrink-0",
+                                      selected ? "text-fg" : "text-fg-muted",
+                                    )}
+                                  />
+                                }
+                              />
+                            ) : item.tile ? (
+                              <span
+                                aria-hidden="true"
+                                className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted"
+                              >
+                                {item.tile}
+                              </span>
+                            ) : (
+                              <Icon
+                                aria-hidden="true"
+                                className={cn(
+                                  "size-4 shrink-0",
+                                  selected ? "text-fg" : "text-fg-muted",
+                                )}
+                              />
+                            )}
+                            {item.parentTitle ? (
+                              <ChatTitleInParent
+                                title={<Highlighted text={item.title} query={item.highlight} />}
+                                parentTitle={item.parentTitle}
+                              />
+                            ) : (
+                              <span className="min-w-0 flex-1 truncate">
+                                <Highlighted text={item.title} query={item.highlight} />
+                              </span>
+                            )}
+                            {item.workspaceTag ? <WorkspaceTag name={item.workspaceTag} /> : null}
+                            <ChatStatusMarks status={item.status ?? null} />
+                            {item.meta ? (
+                              <span className="shrink-0 text-xs text-fg-muted tabular-nums">
+                                {item.meta}
+                              </span>
+                            ) : null}
+                            {item.chord ? (
+                              // Touch screens have no keys to press.
+                              <Keycaps
+                                chord={item.chord}
+                                platform={platform}
+                                className="pointer-coarse:hidden"
+                              />
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ),
+                )
+              )}
+            </div>
+            <div className="hidden shrink-0 items-center gap-4 border-t border-border px-4 py-2 text-xs text-fg-muted pointer-fine:flex">
               <FooterHint
-                keys={[{ code: "Enter", mod: true }]}
-                label="New tab"
+                keys={[{ code: "ArrowUp" }, { code: "ArrowDown" }]}
+                label="Move"
                 platform={platform}
               />
-            ) : null}
-            <span className="ml-auto inline-flex items-center gap-1.5">
-              <Keycaps chord={{ code: "Slash", mod: true }} platform={platform} />
-              All shortcuts
-            </span>
-          </div>
-        </DialogPrimitive.Content>
+              <FooterHint
+                keys={[{ code: "Enter" }]}
+                label={pickingWorkspace ? "Switch" : "Open"}
+                platform={platform}
+              />
+              {focusChat || pickingWorkspace ? (
+                <FooterHint keys={[{ code: "Escape" }]} label="Back" platform={platform} />
+              ) : (
+                <FooterHint keys={[{ code: "Tab" }]} label="Chat actions" platform={platform} />
+              )}
+              {surface === "web" && !focusChat && !pickingWorkspace ? (
+                <FooterHint
+                  keys={[{ code: "Enter", mod: true }]}
+                  label="New tab"
+                  platform={platform}
+                />
+              ) : null}
+              <span className="ml-auto inline-flex items-center gap-1.5">
+                <Keycaps chord={{ code: "Slash", mod: true }} platform={platform} />
+                All shortcuts
+              </span>
+            </div>
+          </DialogPrimitive.Content>
+        </ModalLayer>
       </DialogPortal>
     </DialogPrimitive.Root>
   );

@@ -21,6 +21,7 @@ import {
 } from "../components/zoom-pan-image";
 import { cn } from "../lib/cn";
 import { isTextEntryTarget } from "../lib/keyboard-targets";
+import { ModalLayer } from "../lib/modal-layer";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
 
@@ -370,145 +371,153 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         <AnimatePresence>
           {state !== null ? (
             <DialogContainedPortal forceMount>
-              <Dialog.Overlay asChild forceMount>
+              <ModalLayer asChild forceMount>
                 <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
+                  initial={{ backgroundColor: "rgba(0, 0, 0, 0)", "--og-lightbox-blur": "0px" }}
+                  animate={{
+                    backgroundColor: "rgba(0, 0, 0, 0.9)",
+                    "--og-lightbox-blur": "var(--blur-md, 12px)",
+                  }}
+                  exit={{ backgroundColor: "rgba(0, 0, 0, 0)", "--og-lightbox-blur": "0px" }}
                   transition={{ duration: 0.15 }}
                   className={cn(
-                    "og-root fixed inset-0 z-50 bg-black/90 backdrop-blur-md",
-                    NO_WINDOW_DRAG,
-                  )}
-                  style={portalStyle}
-                />
-              </Dialog.Overlay>
-              <Dialog.Content
-                asChild
-                forceMount
-                data-window-layer
-                aria-label={state.label}
-                onOpenAutoFocus={(event) => event.preventDefault()}
-              >
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.98 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.98 }}
-                  transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-                  // Content is a full-inset centering wrapper layered above the
-                  // Overlay, so Radix's own click-outside (which fires on the
-                  // Overlay) can never see a backdrop click — every click lands on
-                  // Content. So Content dismisses itself: a press that begins and
-                  // ends on its empty space or caption (the padding, the figure's
-                  // gutters, the gaps around the zoom controls) closes it. The image
-                  // area closes on its own when a click misses the image.
-                  onPointerDown={(event) => {
-                    pressedBackdrop.current = isLightboxBackdrop(event.target, event.currentTarget);
-                  }}
-                  onClick={(event) => {
-                    const pressed = pressedBackdrop.current;
-                    pressedBackdrop.current = false;
-                    // Selecting caption text is a drag across the backdrop; keep it open.
-                    const selection = event.currentTarget.ownerDocument.getSelection();
-                    if (
-                      pressed &&
-                      (!selection || selection.isCollapsed) &&
-                      isLightboxBackdrop(event.target, event.currentTarget)
-                    ) {
-                      close();
-                    }
-                  }}
-                  className={cn(
-                    "og-root fixed inset-0 z-50 flex items-center justify-center p-6 sm:p-12",
+                    "og-root fixed inset-0 z-50 before:pointer-events-none before:absolute before:inset-0 before:backdrop-blur-(--og-lightbox-blur)",
                     NO_WINDOW_DRAG,
                   )}
                   style={portalStyle}
                 >
-                  <Dialog.Title className="sr-only">{state.label}</Dialog.Title>
-                  <Dialog.Description className="sr-only">
-                    {state.caption ??
-                      t("timeline.screenshotLightbox.expandedLowercase", {
-                        lowerCase: state.label.toLowerCase(),
-                      })}
-                  </Dialog.Description>
-                  {gallery ? (
-                    <LightboxStepButton
-                      direction="previous"
-                      label={
-                        state.controlLabels?.previous ??
-                        t("timeline.screenshotLightbox.previousImage")
-                      }
-                      onClick={() => step(-1)}
-                    />
-                  ) : null}
-                  {/* The image fills the window and zooms and pans in place;
-                      its caption, zoom controls and position sit below it. */}
-                  <figure
-                    className={cn(
-                      "m-0 flex size-full min-h-0 flex-col items-center gap-3",
-                      gallery && "px-12 sm:px-16",
-                    )}
+                  <Dialog.Content
+                    asChild
+                    forceMount
+                    data-window-layer
+                    aria-label={state.label}
+                    onOpenAutoFocus={(event) => event.preventDefault()}
                   >
-                    <div className="relative min-h-0 w-full flex-1">
-                      {/* A plain <img>: this SDK is framework-agnostic, with no host Image component. */}
-                      <ZoomPanSurface
-                        controller={zoom}
-                        src={state.src}
-                        alt={state.caption ?? state.label}
-                        onBackdropClick={close}
-                        imageClassName="rounded-og-md border border-white/10 shadow-og-lg"
-                      />
-                    </div>
-                    <ZoomControls
-                      controller={zoom}
-                      labels={{
-                        zoomIn:
-                          state.controlLabels?.zoomIn ?? t("timeline.screenshotLightbox.zoomIn"),
-                        zoomOut:
-                          state.controlLabels?.zoomOut ?? t("timeline.screenshotLightbox.zoomOut"),
-                        fit: state.controlLabels?.fit ?? t("timeline.screenshotLightbox.fit"),
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.98 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.98 }}
+                      transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                      // Content fills the overlay, so Radix's own click-outside
+                      // can never see a backdrop click — every click lands on
+                      // Content. So Content dismisses itself: a press that begins and
+                      // ends on its empty space or caption (the padding, the figure's
+                      // gutters, the gaps around the zoom controls) closes it. The image
+                      // area closes on its own when a click misses the image.
+                      onPointerDown={(event) => {
+                        pressedBackdrop.current = isLightboxBackdrop(
+                          event.target,
+                          event.currentTarget,
+                        );
                       }}
-                      className="rounded-full border border-white/15 bg-black/60 px-1 text-white/70 backdrop-blur"
-                      buttonClassName="rounded-full text-white/70 hover:bg-white/10 hover:text-white disabled:text-white/30"
-                    />
-                    {gallery ? (
-                      <figcaption className="flex max-w-2xl flex-col items-center gap-1 text-center font-og-mono text-og-xs">
-                        {state.caption ? (
-                          <span className="text-white/55">{state.caption}</span>
-                        ) : null}
-                        <span className="tabular-nums text-white/35" aria-live="polite">
-                          {gallery.index + 1}{" "}
-                          {t("timeline.screenshotLightbox.ofLength", {
-                            length: gallery.items.length,
+                      onClick={(event) => {
+                        const pressed = pressedBackdrop.current;
+                        pressedBackdrop.current = false;
+                        // Selecting caption text is a drag across the backdrop; keep it open.
+                        const selection = event.currentTarget.ownerDocument.getSelection();
+                        if (
+                          pressed &&
+                          (!selection || selection.isCollapsed) &&
+                          isLightboxBackdrop(event.target, event.currentTarget)
+                        ) {
+                          close();
+                        }
+                      }}
+                      className={cn(
+                        "og-root fixed inset-0 z-50 flex items-center justify-center p-6 sm:p-12",
+                        NO_WINDOW_DRAG,
+                      )}
+                      style={portalStyle}
+                    >
+                      <Dialog.Title className="sr-only">{state.label}</Dialog.Title>
+                      <Dialog.Description className="sr-only">
+                        {state.caption ??
+                          t("timeline.screenshotLightbox.expandedLowercase", {
+                            lowerCase: state.label.toLowerCase(),
                           })}
-                        </span>
-                      </figcaption>
-                    ) : state.caption ? (
-                      <figcaption className="max-w-2xl text-center font-og-mono text-og-xs text-white/55">
-                        {state.caption}
-                      </figcaption>
-                    ) : (
-                      <figcaption className="font-og-mono text-og-xs uppercase tracking-[0.1em] text-white/35">
-                        {t("timeline.screenshotLightbox.escOrClickOutsideTo")}
-                      </figcaption>
-                    )}
-                  </figure>
-                  <ScreenshotLightboxControls
-                    src={state.src}
-                    downloadFilename={state.downloadFilename}
-                    controlLabels={state.controlLabels}
-                  />
-                  {gallery ? (
-                    <LightboxStepButton
-                      direction="next"
-                      label={
-                        state.controlLabels?.next ?? t("timeline.screenshotLightbox.nextImage")
-                      }
-                      onClick={() => step(1)}
-                    />
-                  ) : null}
+                      </Dialog.Description>
+                      {gallery ? (
+                        <LightboxStepButton
+                          direction="previous"
+                          label={
+                            state.controlLabels?.previous ??
+                            t("timeline.screenshotLightbox.previousImage")
+                          }
+                          onClick={() => step(-1)}
+                        />
+                      ) : null}
+                      {/* The image fills the window and zooms and pans in place;
+                      its caption, zoom controls and position sit below it. */}
+                      <figure
+                        className={cn(
+                          "m-0 flex size-full min-h-0 flex-col items-center gap-3",
+                          gallery && "px-12 sm:px-16",
+                        )}
+                      >
+                        <div className="relative min-h-0 w-full flex-1">
+                          {/* A plain <img>: this SDK is framework-agnostic, with no host Image component. */}
+                          <ZoomPanSurface
+                            controller={zoom}
+                            src={state.src}
+                            alt={state.caption ?? state.label}
+                            onBackdropClick={close}
+                            imageClassName="rounded-og-md border border-white/10 shadow-og-lg"
+                          />
+                        </div>
+                        <ZoomControls
+                          controller={zoom}
+                          labels={{
+                            zoomIn:
+                              state.controlLabels?.zoomIn ??
+                              t("timeline.screenshotLightbox.zoomIn"),
+                            zoomOut:
+                              state.controlLabels?.zoomOut ??
+                              t("timeline.screenshotLightbox.zoomOut"),
+                            fit: state.controlLabels?.fit ?? t("timeline.screenshotLightbox.fit"),
+                          }}
+                          className="rounded-full border border-white/15 bg-black/60 px-1 text-white/70 backdrop-blur"
+                          buttonClassName="rounded-full text-white/70 hover:bg-white/10 hover:text-white disabled:text-white/30"
+                        />
+                        {gallery ? (
+                          <figcaption className="flex max-w-2xl flex-col items-center gap-1 text-center font-og-mono text-og-xs">
+                            {state.caption ? (
+                              <span className="text-white/55">{state.caption}</span>
+                            ) : null}
+                            <span className="tabular-nums text-white/35" aria-live="polite">
+                              {gallery.index + 1}{" "}
+                              {t("timeline.screenshotLightbox.ofLength", {
+                                length: gallery.items.length,
+                              })}
+                            </span>
+                          </figcaption>
+                        ) : state.caption ? (
+                          <figcaption className="max-w-2xl text-center font-og-mono text-og-xs text-white/55">
+                            {state.caption}
+                          </figcaption>
+                        ) : (
+                          <figcaption className="font-og-mono text-og-xs uppercase tracking-[0.1em] text-white/35">
+                            {t("timeline.screenshotLightbox.escOrClickOutsideTo")}
+                          </figcaption>
+                        )}
+                      </figure>
+                      <ScreenshotLightboxControls
+                        src={state.src}
+                        downloadFilename={state.downloadFilename}
+                        controlLabels={state.controlLabels}
+                      />
+                      {gallery ? (
+                        <LightboxStepButton
+                          direction="next"
+                          label={
+                            state.controlLabels?.next ?? t("timeline.screenshotLightbox.nextImage")
+                          }
+                          onClick={() => step(1)}
+                        />
+                      ) : null}
+                    </motion.div>
+                  </Dialog.Content>
                 </motion.div>
-              </Dialog.Content>
+              </ModalLayer>
             </DialogContainedPortal>
           ) : null}
         </AnimatePresence>

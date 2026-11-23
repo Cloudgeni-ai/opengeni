@@ -9,6 +9,7 @@ import {
 } from "@opengeni/sdk/this-computer";
 import { CheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
+import { ModalLayer } from "../../lib/modal-layer";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { usePortalTokenStyle } from "../../lib/use-portal-token-style";
 import {
@@ -459,36 +460,42 @@ export function ThisComputerSetup({
       <span ref={anchor} hidden />
       <Dialog.Root open={open} onOpenChange={onOpenChange}>
         <Dialog.Portal container={container ?? undefined}>
-          <Dialog.Overlay className="og-root og-tc-overlay" style={portalStyle} />
-          <Dialog.Content
-            className="og-root og-tc-dialog"
-            style={portalStyle}
-            data-phase={phase}
-            onOpenAutoFocus={(event) => {
-              // The dialog itself takes focus, so no button starts out ringed.
-              event.preventDefault();
-              (event.currentTarget as HTMLElement | null)?.focus();
-            }}
-            onInteractOutside={(event) => {
-              // A stray click beside the dialog mustn't end setup midway.
-              if (phase !== "intro" && phase !== "done") event.preventDefault();
-            }}
-          >
-            {!closable ? null : (
-              <Dialog.Close className="og-tc-close" aria-label={labels.close}>
-                <XIcon aria-hidden />
-              </Dialog.Close>
-            )}
-            <div className="og-tc-body" aria-busy={busyConnecting || undefined}>
-              <div className="og-tc-content" key={phase === "permissions" ? `p-${current}` : phase}>
-                {lead}
-                <Dialog.Title className="og-tc-title">{title}</Dialog.Title>
-                <Dialog.Description className="og-tc-description">{description}</Dialog.Description>
-                {body}
+          <ModalLayer className="og-root og-tc-overlay" style={portalStyle}>
+            <Dialog.Content
+              className="og-root og-tc-dialog"
+              style={portalStyle}
+              data-phase={phase}
+              onOpenAutoFocus={(event) => {
+                // The dialog itself takes focus, so no button starts out ringed.
+                event.preventDefault();
+                (event.currentTarget as HTMLElement | null)?.focus();
+              }}
+              onInteractOutside={(event) => {
+                // A stray click beside the dialog mustn't end setup midway.
+                if (phase !== "intro" && phase !== "done") event.preventDefault();
+              }}
+            >
+              {!closable ? null : (
+                <Dialog.Close className="og-tc-close" aria-label={labels.close}>
+                  <XIcon aria-hidden />
+                </Dialog.Close>
+              )}
+              <div className="og-tc-body" aria-busy={busyConnecting || undefined}>
+                <div
+                  className="og-tc-content"
+                  key={phase === "permissions" ? `p-${current}` : phase}
+                >
+                  {lead}
+                  <Dialog.Title className="og-tc-title">{title}</Dialog.Title>
+                  <Dialog.Description className="og-tc-description">
+                    {description}
+                  </Dialog.Description>
+                  {body}
+                </div>
               </div>
-            </div>
-            {footer ? <div className="og-tc-footer">{footer}</div> : null}
-          </Dialog.Content>
+              {footer ? <div className="og-tc-footer">{footer}</div> : null}
+            </Dialog.Content>
+          </ModalLayer>
         </Dialog.Portal>
       </Dialog.Root>
     </>
