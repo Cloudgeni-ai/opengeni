@@ -40,7 +40,10 @@ describe("chart helpers", () => {
       expect(og.fmt.compact(2_286_002)).toBe("2.3M");
       expect(og.fmt.ms(1840)).toBe("1.8 s");
       expect(og.fmt.num(null)).toBe("\u2014");
-      expect(og.fmt.delta(-18, { better: "lower" })).toEqual({ text: "\u25BC \u221218%", tone: "good" });
+      expect(og.fmt.delta(-18, { better: "lower" })).toEqual({
+        text: "\u25BC \u221218%",
+        tone: "good",
+      });
       expect(og.fmt.delta(1.7, { unit: "pp" })).toEqual({ text: "\u25B2 +1.7 pp", tone: "good" });
     } finally {
       scope.window = previous;
@@ -48,7 +51,8 @@ describe("chart helpers", () => {
   });
 
   test("the stylesheet defines every series colour for light and both dark forms", () => {
-    for (let i = 1; i <= 6; i++) expect(SITE_UI_CSS.match(new RegExp(`--og-series-${i}:`, "g"))).toHaveLength(3);
+    for (let i = 1; i <= 6; i++)
+      expect(SITE_UI_CSS.match(new RegExp(`--og-series-${i}:`, "g"))).toHaveLength(3);
   });
 });
 

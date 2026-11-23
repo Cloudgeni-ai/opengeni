@@ -69,7 +69,7 @@ export const SITE_UI_CSS = [
   `.og-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}`,
   `.og-empty{padding:24px 16px;text-align:center;color:var(--og-fg-muted);border:1px dashed var(--og-border);border-radius:var(--og-radius-card)}`,
   `.og-details>summary{cursor:pointer;font-weight:500;padding:8px 0;color:var(--og-fg-label)}.og-details[open]>summary{margin-bottom:8px}`,
-  `.og-table-wrap{overflow-x:auto;max-width:100%}.og-table-wrap th,.og-table-wrap td{white-space:nowrap}.og-table-wrap .og-wrap{white-space:normal;min-width:14rem}`,
+  `.og-table-wrap{overflow-x:auto;max-width:100%;--og-wrap-bg:var(--og-canvas);background:linear-gradient(to right,var(--og-wrap-bg) 40%,transparent) left/24px 100% no-repeat local,linear-gradient(to left,var(--og-wrap-bg) 40%,transparent) right/24px 100% no-repeat local,radial-gradient(farthest-side at 0 50%,rgb(0 0 0/.2),transparent) left/10px 100% no-repeat scroll,radial-gradient(farthest-side at 100% 50%,rgb(0 0 0/.2),transparent) right/10px 100% no-repeat scroll}.og-card .og-table-wrap{--og-wrap-bg:var(--og-surface)}.og-table-wrap th,.og-table-wrap td{white-space:nowrap}.og-table-wrap .og-wrap{white-space:normal;min-width:14rem}`,
   `.og-table td,.og-table tbody th{font-size:0.875rem;line-height:1.43;text-align:left;font-weight:400;color:var(--og-fg)}.og-table .og-num{text-align:right}.og-table tbody tr:last-child>*{border-bottom:0}`,
   `.og-table tbody tr:hover>*{background:var(--og-surface-2)}.og-table tr.og-highlight>*{background:var(--og-primary);font-weight:500}`,
   `.og-table .og-best{font-weight:600}.og-table .og-sort{all:unset;cursor:pointer;color:inherit}.og-table .og-sort:focus-visible{outline:2px solid var(--og-focus)}`,
@@ -88,12 +88,12 @@ export const SITE_UI_CSS = [
   `.og-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}.og-swatch-dash{height:0;border-top:2px dashed;border-radius:0;vertical-align:3px}`,
   `.og-tip{position:absolute;z-index:2;pointer-events:none;background:var(--og-surface);color:var(--og-fg);border:1px solid var(--og-border);border-radius:8px;padding:6px 8px;font-size:0.75rem;line-height:1.5;box-shadow:0 4px 16px rgb(0 0 0/.14);white-space:nowrap}.og-tip-title{font-weight:600}`,
   `.og-bars{display:grid;grid-template-columns:minmax(5rem,max-content) minmax(0,1fr);gap:8px 12px;align-items:center}`,
-  `.og-bars-label{font-size:0.875rem;line-height:1.3;color:var(--og-fg-label);max-width:14rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`,
+  `.og-bars-label{font-size:0.875rem;line-height:1.3;color:var(--og-fg-label);max-width:17rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`,
   `.og-bars-cell{display:grid;gap:3px;min-width:0;padding-right:4.5rem}.og-bars-neg .og-bars-cell{padding-left:4.5rem}`,
   `.og-bars-track{position:relative;height:14px}.og-bars-multi .og-bars-track{height:10px}`,
   `.og-bars-bar{position:absolute;top:0;bottom:0;border-radius:3px;min-width:2px}.og-bars-ci{position:absolute;top:50%;height:2px;margin-top:-1px;background:var(--og-fg);opacity:.55}`,
   `.og-bars-value{position:absolute;top:50%;transform:translateY(-50%);font-size:0.8125rem;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--og-fg)}`,
-  `@media (max-width:480px){.og-bars{grid-template-columns:minmax(0,1fr);gap:2px 0}.og-bars-label{max-width:none}.og-bars-cell{margin-bottom:6px}.og-kpi{padding:12px}.og-kpi-value{font-size:1.375rem}.og-hide-narrow{display:none}}`,
+  `@media (max-width:480px){.og-bars{grid-template-columns:minmax(0,1fr);gap:2px 0}.og-bars-label{max-width:none}.og-bars-cell{margin-bottom:6px}.og-kpi{padding:12px}.og-kpi-value{font-size:1.375rem}.og-hide-narrow{display:none}.og-table th,.og-table td{padding:8px}}`,
 ].join("\n");
 
 const STYLESHEET_TAG =
@@ -112,7 +112,8 @@ const CHARTS_SCRIPT_TAG =
  * helpers inline. Comments and other scripts stay literal.
  */
 export function resolveSiteUiStylesheet(html: string): string {
-  if (!html.includes(SITE_UI_STYLESHEET_PATH) && !html.includes(SITE_CHARTS_SCRIPT_PATH)) return html;
+  if (!html.includes(SITE_UI_STYLESHEET_PATH) && !html.includes(SITE_CHARTS_SCRIPT_PATH))
+    return html;
   const inline = `<style data-opengeni-ui>${SITE_UI_CSS.replace(/<\/style/gi, "<\\/style")}</style>`;
   return html.replace(
     /<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>|<style\b[^>]*>[\s\S]*?<\/style\s*>|<link\b[^>]*>/gi,
