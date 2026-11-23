@@ -49,6 +49,8 @@ import type { ConnectionAccountReads } from "./connection-account-reads";
 import {
   mcpAccountBindingsFromVisibleConnections,
   personalDelegationsForAccountBindings,
+  resolveMcpAccountBindings,
+  type OmittedMcpAccountSelection,
 } from "./mcp-account-bindings";
 
 export type PersonalConnectionDelegationSource =
@@ -1066,6 +1068,14 @@ export async function freezeConnectionAccounts(
      * it may use (docs/integrations-design.md, "Auto-connect").
      */
     autoConnect?: { settings: Settings; fetchImpl?: typeof fetch | undefined } | undefined;
+    /**
+     * A new message's picked connector accounts come from a list the sender
+     * loaded earlier, and one may have stopped working since (its sign-in
+     * expired) or gone. "omit" sends the message without such an account
+     * rather than refusing it; its connector is never given another account
+     * instead (see `resolveMcpAccountBindings`). Defaults to "reject".
+     */
+    unusableSelections?: "reject" | "omit";
   },
 ): Promise<{
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
@@ -1077,6 +1087,8 @@ export async function freezeConnectionAccounts(
    * predates intent).
    */
   connectionAccountIntent: ConnectionAccountIntent | null;
+  /** Picked accounts left out because they can no longer be used ("omit" only). */
+  omittedSelections: OmittedMcpAccountSelection[];
 }> {
   const selectedIds = new Set(input.tools.map((tool) => tool.id));
   const servers = input.settings.mcpServers.filter(
@@ -1088,6 +1100,7 @@ export async function freezeConnectionAccounts(
   const serverIds = new Set(servers.map((server) => server.id));
   let mcpAccountBindings: McpConnectionAccountBinding[];
   let connectionAccountIntent: ConnectionAccountIntent | null;
+  let omittedSelections: OmittedMcpAccountSelection[] = [];
   if (input.source.kind === "turn") {
     if (input.authoritySelections?.length) {
       throw new ConnectionAccountSelectionError(
@@ -1112,10 +1125,14 @@ export async function freezeConnectionAccounts(
         mcpAccountBindings: null,
         personalConnectionDelegations: await freezePersonalConnectionDelegations(input),
         connectionAccountIntent,
+        omittedSelections,
       };
     }
     mcpAccountBindings = inherited.filter((binding) => serverIds.has(binding.canonicalServerId));
   } else {
+    // The intent keeps every pick, including any left out below: a later
+    // continuation re-resolves it and must narrow to the same accounts,
+    // never widen to the connector's defaults.
     connectionAccountIntent = {
       version: 1,
       principal:
@@ -1134,7 +1151,7 @@ export async function freezeConnectionAccounts(
         subjectId: input.source.subjectId,
         servers,
       });
-    mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
+    const resolved = resolveMcpAccountBindings({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
@@ -1158,7 +1175,10 @@ export async function freezeConnectionAccounts(
             ),
           }
         : {}),
+      unusableSelections: input.unusableSelections ?? "reject",
     });
+    mcpAccountBindings = resolved.bindings;
+    omittedSelections = resolved.omitted;
   }
   // Dedicated first-party repository/social surfaces keep their
   // existing selection and authority contracts; they are not generic MCP routes.
@@ -1183,6 +1203,7 @@ export async function freezeConnectionAccounts(
       ...special,
     ],
     connectionAccountIntent,
+    omittedSelections,
   };
 }
 

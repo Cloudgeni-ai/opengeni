@@ -70,16 +70,41 @@ function canonicalResource(value: string): string {
   }
 }
 
-/** Pure admission projection over an already authorized inventory. Explicit
- * pairs narrow one connector; omission attaches all eligible accounts. */
-export function mcpAccountBindingsFromVisibleConnections(input: {
+/** A picked account left out of a turn because it can no longer be used. */
+export type OmittedMcpAccountSelection = McpConnectionAccountSelection & {
+  reason: "account_inactive" | "account_not_visible";
+};
+
+type McpAccountBindingsInput = {
   accountId: string;
   workspaceId: string;
   subjectId: string | null;
   servers: McpServerConfig[];
   connections: ConnectionMetadata[];
   selections?: McpConnectionAccountSelection[];
-}): McpConnectionAccountBinding[] {
+};
+
+/** Pure admission projection over an already authorized inventory. Explicit
+ * pairs narrow one connector; omission attaches all eligible accounts. */
+export function mcpAccountBindingsFromVisibleConnections(
+  input: McpAccountBindingsInput,
+): McpConnectionAccountBinding[] {
+  return resolveMcpAccountBindings({ ...input, unusableSelections: "reject" }).bindings;
+}
+
+/**
+ * `mcpAccountBindingsFromVisibleConnections`, but a picked account that has
+ * stopped working (for example its sign-in expired) or is no longer visible
+ * to the sender can be left out instead of refusing the whole request
+ * (`unusableSelections: "omit"`). A left-out pick is never replaced: its
+ * connector keeps only the sender's other usable picks, and with none it gets
+ * no account at all, so the turn runs without it and says so. A pick that
+ * names another connector's account still fails, since that is a malformed
+ * request rather than an account that changed after it was shown.
+ */
+export function resolveMcpAccountBindings(
+  input: McpAccountBindingsInput & { unusableSelections: "reject" | "omit" },
+): { bindings: McpConnectionAccountBinding[]; omitted: OmittedMcpAccountSelection[] } {
   const remaining = new Set(
     (input.selections ?? []).map((selection) =>
       JSON.stringify([selection.serverId, selection.connectionId]),
@@ -147,42 +172,60 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
       });
     }
   }
-  if (remaining.size > 0) {
+  const unavailable = (input.selections ?? [])
+    .filter((selection) =>
+      remaining.has(JSON.stringify([selection.serverId, selection.connectionId])),
+    )
+    .map((selection) => {
+      const server = input.servers.find((candidate) => candidate.id === selection.serverId);
+      // Only inspect the caller's already-authorized inventory. Never look
+      // up an unavailable account globally merely to improve an error.
+      const connection = input.connections.find(
+        (candidate) => candidate.id === selection.connectionId,
+      );
+      return {
+        serverId: selection.serverId,
+        connectionId: selection.connectionId,
+        reason:
+          !server?.connectionRef || server.connectionRef.authoritySource === "host"
+            ? ("connector_unavailable" as const)
+            : !connection
+              ? ("account_not_visible" as const)
+              : connection.status !== "active"
+                ? ("account_inactive" as const)
+                : ("account_mismatch" as const),
+      };
+    });
+  const omitted: OmittedMcpAccountSelection[] = [];
+  const refused: typeof unavailable = [];
+  for (const account of unavailable) {
+    if (
+      input.unusableSelections === "omit" &&
+      (account.reason === "account_inactive" || account.reason === "account_not_visible")
+    ) {
+      omitted.push({ ...account, reason: account.reason });
+    } else {
+      refused.push(account);
+    }
+  }
+  if (refused.length > 0) {
     throw new ConnectionAccountSelectionError(
       "An attached connector account is unavailable. Review its connection settings.",
       {
         version: 1,
         reason: "selected_account_unavailable",
-        accounts: (input.selections ?? [])
-          .filter((selection) =>
-            remaining.has(JSON.stringify([selection.serverId, selection.connectionId])),
-          )
-          .map((selection) => {
-            const server = input.servers.find((candidate) => candidate.id === selection.serverId);
-            // Only inspect the caller's already-authorized inventory. Never look
-            // up an unavailable account globally merely to improve an error.
-            const connection = input.connections.find(
-              (candidate) => candidate.id === selection.connectionId,
-            );
-            return {
-              serverId: selection.serverId,
-              connectionId: selection.connectionId,
-              reason:
-                !server?.connectionRef || server.connectionRef.authoritySource === "host"
-                  ? ("connector_unavailable" as const)
-                  : !connection
-                    ? ("account_not_visible" as const)
-                    : connection.status !== "active"
-                      ? ("account_inactive" as const)
-                      : ("account_mismatch" as const),
-            };
-          }),
+        // Name every unusable pick, including ones "omit" would leave out, so
+        // the person can fix them all at once.
+        accounts: unavailable,
       },
     );
   }
-  return McpConnectionAccountBindings.parse(
-    bindings.sort((left, right) => left.serverId.localeCompare(right.serverId)),
-  );
+  return {
+    bindings: McpConnectionAccountBindings.parse(
+      bindings.sort((left, right) => left.serverId.localeCompare(right.serverId)),
+    ),
+    omitted,
+  };
 }
 
 /** Workspace accounts never acquire a fabricated personal owner/delegation. */

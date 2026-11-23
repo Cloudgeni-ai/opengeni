@@ -35,6 +35,7 @@ function Harness({
   canReadConnections = true,
   items = catalog,
   transientRetry,
+  staleAfterMs,
 }: {
   client: ChatClient<OpenGeniBrowserClient>;
   id?: string | undefined;
@@ -45,6 +46,7 @@ function Harness({
   transientRetry?:
     | { delaysMs?: readonly number[] | undefined; reconnectIntervalMs?: number | undefined }
     | undefined;
+  staleAfterMs?: number | undefined;
 }) {
   state = useConnectionAccounts(
     client,
@@ -53,6 +55,7 @@ function Harness({
     canReadConnections,
     {},
     transientRetry,
+    staleAfterMs,
   );
   return null;
 }
@@ -399,4 +402,26 @@ test("a longer outage marks the inventory unavailable, blocks Send, and reconnec
   expect(state.unavailable).toBe(false);
   expect(state.error).toBeNull();
   expect(state.selections).toHaveLength(2);
+});
+
+test("returning to a chat left open re-reads an old account list, so an expired account is not sent", async () => {
+  let inventory = accounts;
+  let reads = 0;
+  const client = clientFor(async () => {
+    reads += 1;
+    return inventory;
+  });
+  await act(async () => root.render(<Harness client={client} staleAfterMs={30} />));
+  expect(reads).toBe(1);
+  expect(state.selections).toHaveLength(2);
+  // A quick return does not re-read a fresh list.
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(reads).toBe(1);
+  // While the chat sat open, account "one" stopped working.
+  inventory = [{ ...accounts[0]!, status: "needs_reauth" }, accounts[1]!];
+  await wait(40);
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await wait(10);
+  expect(reads).toBe(2);
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
 });

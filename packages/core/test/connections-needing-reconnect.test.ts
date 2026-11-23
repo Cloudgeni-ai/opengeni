@@ -15,12 +15,24 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
+  connectionProviderName,
   connectionNeedsReauthNoticeKey,
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
   postConnectionNeedsReauthNotice,
 } from "../src/domain/connections-needing-reconnect";
+
+test("reconnect notices name the service, not its endpoint host", () => {
+  expect(connectionProviderName("mcp.atlassian.com")).toBe("Atlassian");
+  expect(connectionProviderName("api.elevenlabs.io")).toBe("Elevenlabs");
+  expect(connectionProviderName("mcp.slack.com")).toBe("Slack");
+  expect(connectionProviderName("gmailmcp.googleapis.com")).toBe("Gmail");
+  expect(connectionProviderName("mail.example.test")).toBe("Mail");
+  // Never skip into the top-level domain.
+  expect(connectionProviderName("mcp.com")).toBe("Mcp");
+  expect(connectionProviderName("github.com")).toBe("Github");
+});
 
 /* A connection that exists but stopped working is named to the agent (which
    account, since when) and its owner is told once, on their inbox. */

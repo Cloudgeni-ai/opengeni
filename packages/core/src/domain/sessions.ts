@@ -4073,6 +4073,9 @@ async function createSessionForRequestInFileScope(
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
         autoConnect: { settings: unresolvedDeps.settings },
+        // An account picked from a list loaded earlier may have stopped
+        // working since: start without it instead of refusing the message.
+        unusableSelections: "omit",
       }),
     );
   if (effectiveGoal) {
@@ -5137,6 +5140,12 @@ async function acceptSessionUserMessageInFileScope(
         targetSessionId: sessionId,
         ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
         autoConnect: { settings: deps.settings },
+        // The composer's account list is loaded when the chat opens, so a
+        // picked account may have stopped working since (its sign-in
+        // expired). Send without it instead of refusing the message; its
+        // connector gets no other account, and the turn says it needs
+        // reconnecting.
+        unusableSelections: "omit",
       });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);

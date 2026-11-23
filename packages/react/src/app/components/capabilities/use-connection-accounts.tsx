@@ -18,6 +18,9 @@ import {
   type ConnectionAccountChoices,
 } from "./session-connection-accounts";
 
+/** How old a chat's account list may get before returning to the chat re-reads it. */
+export const CONNECTION_ACCOUNTS_STALE_AFTER_MS = 60_000;
+
 export function useConnectionAccounts(
   client: ChatClient<OpenGeniBrowserClient>,
   session: Pick<Session, "id" | "workspaceId"> & { selectedIds: string[] },
@@ -28,6 +31,8 @@ export function useConnectionAccounts(
     delaysMs?: readonly number[] | undefined;
     reconnectIntervalMs?: number | undefined;
   } = {},
+  /** A chat left open re-reads its accounts on return after this long. */
+  staleAfterMs = CONNECTION_ACCOUNTS_STALE_AFTER_MS,
 ) {
   const retryDelaysMs = transientRetry.delaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
   const reconnectIntervalMs = transientRetry.reconnectIntervalMs ?? TRANSIENT_RECONNECT_INTERVAL_MS;
@@ -71,12 +76,15 @@ export function useConnectionAccounts(
     unavailable: boolean;
   } | null>(null);
   const request = useRef(0);
+  /** When the last inventory read started, for re-reading a stale one on return. */
+  const lastRead = useRef(0);
   const refresh = useCallback(
     async (quietRetries = true) => {
       if (scope.current.epoch !== epoch) return;
       const invocation = scope.current;
       if (invocation.canReadConnections !== true) return;
       const revision = ++request.current;
+      lastRead.current = Date.now();
       const current = () =>
         request.current === revision &&
         scope.current.client === invocation.client &&
@@ -132,6 +140,23 @@ export function useConnectionAccounts(
       counter.current++;
     };
   }, [refresh]);
+  // An account can stop working while the chat sits open (its sign-in
+  // expires). Re-read when the person comes back to a chat whose list is
+  // old, so the connector shows as needing reconnecting before they send.
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") return;
+    const onReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastRead.current < staleAfterMs) return;
+      void refresh();
+    };
+    document.addEventListener("visibilitychange", onReturn);
+    window.addEventListener("focus", onReturn);
+    return () => {
+      document.removeEventListener("visibilitychange", onReturn);
+      window.removeEventListener("focus", onReturn);
+    };
+  }, [refresh, staleAfterMs]);
   const matches =
     canReadConnections === true &&
     result?.client === client &&

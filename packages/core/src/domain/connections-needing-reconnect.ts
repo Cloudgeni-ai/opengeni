@@ -153,14 +153,23 @@ const PROVIDER_NAMES: Record<string, string> = {
   "calendarmcp.googleapis.com": "Google Calendar",
 };
 
-function providerName(providerDomain: string): string {
+// Leading host labels that name a service's endpoint rather than the service
+// (mcp.atlassian.com is Atlassian, not "Mcp").
+const GENERIC_HOST_LABELS = new Set(["mcp", "api", "app", "auth", "oauth", "cf"]);
+
+/** The service a connection's provider domain names, for notices ("Atlassian"). */
+export function connectionProviderName(providerDomain: string): string {
   const host = providerDomain
     .trim()
     .toLowerCase()
     .replace(/^www\./u, "");
   const known = PROVIDER_NAMES[host];
   if (known) return known;
-  const first = host.split(".")[0] ?? host;
+  const labels = host.split(".");
+  // Keep the registrable name: never skip past the last two labels.
+  let index = 0;
+  while (index < labels.length - 2 && GENERIC_HOST_LABELS.has(labels[index]!)) index += 1;
+  const first = labels[index] ?? host;
   return first ? first.charAt(0).toUpperCase() + first.slice(1) : providerDomain;
 }
 
@@ -202,7 +211,7 @@ export async function postConnectionNeedsReauthNotice(
       broken.connectionId,
       broken.subjectId,
     );
-    const service = providerName(broken.providerDomain);
+    const service = connectionProviderName(broken.providerDomain);
     const account = connection ? connectionAccountLabel(connection, "") : "";
     const payload = SessionNotificationPostedPayload.parse({
       key: connectionNeedsReauthNoticeKey(broken.connectionId),
