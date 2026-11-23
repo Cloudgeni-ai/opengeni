@@ -16,6 +16,16 @@
 -- does (inbox item, push, list hint). The agent still has the notice for its
 -- next turn; the first answer wins.
 --
+-- A notice delivered while the agent is busy needs nothing here: the session
+-- workflow peeks again after every turn, a pending notice is runnable work
+-- (even with a paused goal), and 1553 releases the question when that next
+-- turn ends without an answer.
+--
+-- The question rows are locked with SKIP LOCKED: whoever holds one (an
+-- answer, an expiry or 1553's release) is already settling it, and waiting
+-- would take child rows after the parent's session lock, out of the usual
+-- order.
+--
 -- Rolling: a new trigger and a SECURITY INVOKER trigger function (like
 -- 1546's), which the previous release's posture check accepts; it reads and
 -- writes only what the delivering transaction can under its own row security
@@ -62,14 +72,22 @@ BEGIN
     v_turn := split_part(v_key, ':', 3)::uuid;
     v_generation := split_part(v_key, ':', 4)::integer;
     FOR v_held IN
+      WITH claimable AS (
+        SELECT request.id
+        FROM session_human_input_requests request
+        WHERE request.workspace_id = NEW.workspace_id
+          AND request.session_id = v_child
+          AND request.turn_id = v_turn
+          AND request.turn_generation = v_generation
+          AND request.status = 'pending'
+          AND request.held_for_agent
+        FOR UPDATE SKIP LOCKED
+      )
       UPDATE session_human_input_requests request
       SET held_for_agent = false, updated_at = now()
+      FROM claimable
       WHERE request.workspace_id = NEW.workspace_id
-        AND request.session_id = v_child
-        AND request.turn_id = v_turn
-        AND request.turn_generation = v_generation
-        AND request.status = 'pending'
-        AND request.held_for_agent
+        AND request.id = claimable.id
       RETURNING request.id, request.session_id, request.turn_id, request.questions
     LOOP
       -- The same release as 1553's inbox trigger.
@@ -123,7 +141,8 @@ BEGIN
     END LOOP;
   EXCEPTION WHEN OTHERS THEN
     -- The child's own chat still shows the question.
-    RAISE WARNING 'held question release skipped for update %: %', NEW.id, SQLSTATE;
+    RAISE WARNING 'held question release skipped for update % (child session %): % %',
+      NEW.id, coalesce(v_child::text, 'unknown'), SQLSTATE, SQLERRM;
   END;
   RETURN NULL;
 END
