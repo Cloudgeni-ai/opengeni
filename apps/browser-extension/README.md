@@ -20,9 +20,13 @@ to the configured deployment.
 ## Controlled tabs
 
 While an agent controls a tab (the extension's debugger is attached), the tab
-sits in a grey tab group named after the product, one per window, and shows
-the agent's cursor as its icon, so the tab strip shows which tabs are in use.
-Both end once control has stayed ended for a moment.
+shows the agent's cursor as its icon and, if the person turned on "Tab group
+for agent tabs" in the extension menu, sits in a grey tab group named after
+the product, one per window, so the tab strip shows which tabs are in use.
+Both end once control has stayed ended for a moment. The tab group needs
+Chrome's optional `tabGroups` permission. Chrome warns about that permission
+and turns an extension off when an update newly requires a permission it
+warns about, so new permissions must always be optional.
 
 - `src/tab-group.ts`: a tab leaves the group and goes back to where it was,
   or to the person's own group it came from (made again if the tab was its

@@ -28,6 +28,10 @@ const siteEmpty = sitePermissions.querySelector<HTMLElement>("[data-empty]")!;
 const siteStale = sitePermissions.querySelector<HTMLElement>("[data-stale]")!;
 const siteRequest = sitePermissions.querySelector<HTMLElement>("[data-request]")!;
 const manageSitePermissions = sitePermissions.querySelector<HTMLButtonElement>("[data-manage]")!;
+const tabGroupToggle = document.querySelector<HTMLButtonElement>("[data-tab-group-toggle]")!;
+const tabGroupStatus = document.querySelector<HTMLElement>("[data-tab-group-status]")!;
+const TAB_GROUPS: chrome.permissions.Permissions = { permissions: ["tabGroups"] };
+let tabGroupAllowed = false;
 
 /** How often the open popup re-reads the connection state. */
 const STATUS_REFRESH_MS = 1000;
@@ -45,7 +49,17 @@ async function refresh(options: { label: boolean }): Promise<void> {
   // Only fill the label on open and after saving, so a refresh never
   // overwrites what the person is typing.
   if (options.label) label.value = status.profileLabel ?? "";
-  await refreshSitePermissions();
+  await Promise.all([refreshSitePermissions(), refreshTabGroup()]);
+}
+
+/** The tab group is optional (see the service worker): the person turns it
+ * on here, and Chrome asks them to confirm. */
+async function refreshTabGroup(): Promise<void> {
+  tabGroupAllowed = await chrome.permissions.contains(TAB_GROUPS).catch(() => false);
+  tabGroupToggle.textContent = tabGroupAllowed ? "Turn off" : "Turn on";
+  tabGroupStatus.textContent = tabGroupAllowed
+    ? `On. Tabs an agent is using sit in a grey ${BRAND.product} tab group.`
+    : `Off. Turn on to put tabs an agent is using in a grey ${BRAND.product} tab group. Chrome asks you to confirm.`;
 }
 
 /** Shown once the person allowed agents to set site permissions, while
@@ -73,6 +87,19 @@ async function refreshSitePermissions(): Promise<void> {
 
 manageSitePermissions.addEventListener("click", () => {
   void chrome.runtime.sendMessage({ type: "open_site_permissions" }).then(() => window.close());
+});
+
+// Chrome shows its confirmation only in answer to a click, so ask right in it.
+tabGroupToggle.addEventListener("click", () => {
+  tabGroupToggle.disabled = true;
+  void (
+    tabGroupAllowed ? chrome.permissions.remove(TAB_GROUPS) : chrome.permissions.request(TAB_GROUPS)
+  )
+    .catch(() => false)
+    .finally(() => {
+      tabGroupToggle.disabled = false;
+      void refreshTabGroup();
+    });
 });
 
 form.addEventListener("submit", (event) => {
