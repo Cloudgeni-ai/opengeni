@@ -113,6 +113,14 @@ import { ApiHttpError } from "./http/api-error";
 import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
 import { buildOpenGeniMcpServer, resolveSlackBotToolAvailability } from "./mcp/server";
+import {
+  buildPersonalGitHubToolsServer,
+  PERSONAL_GITHUB_TOOLS_SERVER_ID,
+  readPersonalGitHubToolsAuthority,
+  samePersonalGitHubToolsAuthority,
+  withPersonalGitHubToolsServer,
+  type PersonalGitHubToolsAuthority,
+} from "./personal-github-tools";
 import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
 import {
   withSiteSecretContext,
@@ -753,15 +761,18 @@ export function targetFenceIntegrationRoutes(
  */
 function workspaceToolGatewayTargetRouteCheck(input: {
   grant: AccessGrant;
+  deploymentSettings: Settings;
   staticSettings: Settings;
   gatewaySettings: Settings;
   integrations: readonly ApiIntegrationRuntime[];
   capabilityServers: readonly EnabledMcpCapabilityServer[];
   accountBindings: Awaited<ReturnType<typeof availableMcpAccountBindings>>;
   bindingSource: Parameters<typeof availableMcpAccountBindings>[0]["source"];
+  personalGitHub: PersonalGitHubToolsAuthority | null;
 }): (db: Database, stop: AbortSignal) => Promise<void> {
   const { grant, gatewaySettings, bindingSource } = input;
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
+  const usesPersonalGitHub = gatewayServerIds.has(PERSONAL_GITHUB_TOOLS_SERVER_ID);
   const selectedBindings = input.accountBindings.filter((binding) =>
     gatewayServerIds.has(binding.serverId),
   );
@@ -839,6 +850,16 @@ function workspaceToolGatewayTargetRouteCheck(input: {
       source: bindingSource,
       connections,
     });
+    // The caller's own Your GitHub, still the same connection and grant.
+    const currentPersonalGitHub = usesPersonalGitHub
+      ? await readPersonalGitHubToolsAuthority(db, input.deploymentSettings, grant)
+      : null;
+    stop.throwIfAborted();
+    if (
+      usesPersonalGitHub &&
+      !samePersonalGitHubToolsAuthority(currentPersonalGitHub, input.personalGitHub)
+    )
+      throw changed();
     let currentServers: string;
     let currentIntegrationRoutes: string;
     try {
@@ -848,9 +869,10 @@ function workspaceToolGatewayTargetRouteCheck(input: {
         bindings: currentBindings,
       });
       currentServers = digestCanonicalJson(
-        workspaceToolGatewaySettingsForGrant(currentRoutes.settings, grant).mcpServers.filter(
-          (server) => gatewayServerIds.has(server.id),
-        ),
+        workspaceToolGatewaySettingsForGrant(
+          withPersonalGitHubToolsServer(currentRoutes.settings, currentPersonalGitHub),
+          grant,
+        ).mcpServers.filter((server) => gatewayServerIds.has(server.id)),
       );
       currentIntegrationRoutes = digestCanonicalJson(
         integrationRoutes(currentIntegrations, currentBindings),
@@ -932,7 +954,16 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     tools: allGatewayToolRefs(settings),
     bindings: accountBindings,
   });
-  const callerSettings = workspaceToolGatewaySettingsForGrant(accountRoutes.settings, grant);
+  // Your GitHub tools run on the caller's own connection, when they have one
+  // with All my repositories (read only when this request may use them).
+  const personalGitHub =
+    (!targetNamespace || targetNamespace === PERSONAL_GITHUB_TOOLS_SERVER_ID) &&
+    (!allowedIdentities ||
+      allowedIdentities.some((identity) => identity.serverId === PERSONAL_GITHUB_TOOLS_SERVER_ID))
+      ? await readPersonalGitHubToolsAuthority(routeDeps.db, routeDeps.settings, grant)
+      : null;
+  const routedSettings = withPersonalGitHubToolsServer(accountRoutes.settings, personalGitHub);
+  const callerSettings = workspaceToolGatewaySettingsForGrant(routedSettings, grant);
   const targetServerId = options.target
     ? workspaceToolGatewayTargetServer(callerSettings, options.target)
     : undefined;
@@ -942,12 +973,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const gatewaySettings = workspaceToolGatewaySettingsForGrant(
     targetServerId
       ? {
-          ...accountRoutes.settings,
-          mcpServers: accountRoutes.settings.mcpServers.filter(
-            (server) => server.id === targetServerId,
-          ),
+          ...routedSettings,
+          mcpServers: routedSettings.mcpServers.filter((server) => server.id === targetServerId),
         }
-      : accountRoutes.settings,
+      : routedSettings,
     grant,
     allowedIdentities,
   );
@@ -961,12 +990,14 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     fence.setRoute(
       workspaceToolGatewayTargetRouteCheck({
         grant,
+        deploymentSettings: routeDeps.settings,
         staticSettings: resolvedCatalog.settings,
         gatewaySettings,
         integrations,
         capabilityServers,
         accountBindings,
         bindingSource,
+        personalGitHub,
       }),
     );
   const firstPartySettings =
@@ -1091,9 +1122,38 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         codexAppsDesignation,
       )
     : undefined;
-  const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
+  const personalGitHubServers =
+    personalGitHub && gatewayServerIds.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)
+      ? [
+          buildPersonalGitHubToolsServer({
+            db: routeDeps.db,
+            settings: routeDeps.settings,
+            grant,
+            authority: personalGitHub,
+            resolveCredential: async (request) =>
+              await resolveConnection(callerConnectionRequest(request)),
+            ...(routeDeps.githubPersonalFetch ? { fetchImpl: routeDeps.githubPersonalFetch } : {}),
+          }),
+        ]
+      : [];
+  const localMcpServers = [
+    ...firstPartyServers,
+    ...apiIntegrationServers,
+    ...personalGitHubServers,
+  ];
   const policyTargets = new Map(
     gatewaySettings.mcpServers.map((config) => {
+      // Your GitHub's choices are the person's GitHub action choices for that
+      // connection (Settings, GitHub), exactly as in their chats.
+      if (config.id === PERSONAL_GITHUB_TOOLS_SERVER_ID && personalGitHub)
+        return [
+          config.id,
+          {
+            connectionId: personalGitHub.connectionId,
+            serverId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+            policyWorkspaceId: grant.workspaceId,
+          },
+        ] as const;
       const binding = accountBindings.find((candidate) => candidate.serverId === config.id);
       return [
         config.id,

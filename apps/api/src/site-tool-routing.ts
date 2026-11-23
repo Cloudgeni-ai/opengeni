@@ -18,7 +18,14 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import { ApiHttpError } from "./http/api-error";
+import {
+  PERSONAL_GITHUB_TOOLS_SERVER_ID,
+  personalGitHubToolsOffered,
+  personalGitHubToolsServerConfig,
+  readPersonalGitHubToolsAuthority,
+} from "./personal-github-tools";
 import { exactAgentAttemptClaims } from "./sandbox/agent-fleet-context";
 import { allGatewayToolRefs } from "./workspace-tool-gateway";
 
@@ -235,6 +242,27 @@ export async function readSiteToolAccountInventory(
       },
     ];
   });
+  // Your GitHub runs on each viewer's own connection: a connector whose one
+  // account is theirs (All my repositories), or Connect when they have none.
+  if (personalGitHubToolsOffered(deps.settings) && !servers.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)) {
+    const config = personalGitHubToolsServerConfig();
+    servers.set(PERSONAL_GITHUB_TOOLS_SERVER_ID, { ...(config.url ? { url: config.url } : {}) });
+    canonical.set(PERSONAL_GITHUB_TOOLS_SERVER_ID, {
+      capabilityId: PERSONAL_GITHUB_CAPABILITY_ID,
+      name: "Your GitHub",
+      providerDomain: "github.com",
+    });
+    const personalGitHub = await readPersonalGitHubToolsAuthority(deps.db, deps.settings, grant);
+    if (personalGitHub)
+      accounts.push({
+        serverId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+        connector: "Your GitHub",
+        account: personalGitHub.login,
+        canonicalServerId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+        connectionId: personalGitHub.connectionId,
+        shared: false,
+      });
+  }
   return {
     canonical,
     plain,
