@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { describe, expect, test } from "bun:test";
+import { request as httpRequest } from "node:http";
 
 import {
   requireSameOriginBrowserMutation,
@@ -68,12 +69,22 @@ describe("managed browser mutation origin", () => {
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: api.fetch });
     try {
       for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
-        const response = await fetch(new URL("/mutation", server.url), {
-          method,
-          headers: sameOrigin,
+        // Exercise the server's HTTP parser with explicit empty framing,
+        // including for DELETE, rather than relying on fetch defaults.
+        const status = await new Promise<number | undefined>((resolve, reject) => {
+          const req = httpRequest(
+            new URL("/mutation", server.url),
+            { method, headers: { ...sameOrigin, "content-length": "0" } },
+            (res) => {
+              res.on("error", reject);
+              res.on("end", () => resolve(res.statusCode));
+              res.resume();
+            },
+          );
+          req.on("error", reject);
+          req.end();
         });
-        expect({ method, status: response.status }).toEqual({ method, status: 200 });
-        await response.body?.cancel();
+        expect({ method, status }).toEqual({ method, status: 200 });
       }
     } finally {
       await server.stop(true);
