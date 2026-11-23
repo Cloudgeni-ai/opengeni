@@ -123,5 +123,8 @@
     "@runloop/api-client": "1.16.2",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22.19"
   }
 }
