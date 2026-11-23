@@ -21,6 +21,9 @@
  *   (g) a package's built runtime, shipped source, or emitted declarations
  *       reference an @opengeni/* package that its published manifest does not
  *       declare.
+ *   (h) a package's built runtime imports a name from another @opengeni/*
+ *       package whose built entry does not export it by name, so Node and Bun
+ *       would refuse to load it (scripts/dist-named-imports.ts).
  *
  * Wired into the release gate and safe to run locally without publishing.
  */
@@ -31,6 +34,7 @@ import { dirname, join, resolve } from "node:path";
 import { Script } from "node:vm";
 import { gzipSync } from "node:zlib";
 import { artifactKernelWasmPackageSizeBudgets } from "./build-artifact-kernel-wasm-packages";
+import { verifyDistNamedImports } from "./dist-named-imports";
 import {
   declarationModuleSpecifiers,
   runtimeModuleSpecifiers,
@@ -519,6 +523,16 @@ for (const pkg of publishable) {
   ensureBuilt(pkgDir);
   assertBuiltExportTargets(pkg);
 }
+
+failures.push(
+  ...verifyDistNamedImports(
+    publishable.map((pkg) => ({
+      name: pkg.name,
+      root: join(repoRoot, pkg.dir),
+      packageJson: pkg.packageJson as PackageJson & { exports?: unknown },
+    })),
+  ),
+);
 
 const workerWorkflowBundlePath = join(repoRoot, "apps/worker/dist/workflow-bundle.js");
 if (!existsSync(workerWorkflowBundlePath)) {
