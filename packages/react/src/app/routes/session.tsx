@@ -4291,6 +4291,10 @@ function SessionChatPane(props: {
     ),
     [props.session.workspaceId],
   );
+  const artifactHref = useCallback(
+    (id: string) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`,
+    [props.session.workspaceId],
+  );
 
   const renderMessageText = useCallback(
     (
@@ -4314,7 +4318,7 @@ function SessionChatPane(props: {
       return (
         <div data-testid="assistant-markdown">
           <MarkdownText
-            artifactHref={(id) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`}
+            artifactHref={artifactHref}
             text={text}
             searchTarget={renderContext.searchTarget}
             softLineBreaks
@@ -4327,6 +4331,7 @@ function SessionChatPane(props: {
       );
     },
     [
+      artifactHref,
       context.accessContext.subjectId,
       context.client,
       props.onOpenSandboxFile,

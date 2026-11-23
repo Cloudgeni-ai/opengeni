@@ -75,7 +75,7 @@ import { displayImageSrc } from "../lib/content-hosting";
  * package's `og-*` design tokens so it reads as one cohesive dark surface — no
  * stock Tailwind colors leak in.
  *
- * It re-parses on every render, which is exactly right for streaming: a body
+ * It re-parses when the display text or a parsing option changes. A body
  * that is still arriving (an unterminated `**`, a half-open code fence, a table
  * mid-row) renders as best-effort markdown and resolves cleanly as the rest of
  * the tokens land. Consumers who want a different renderer can still pass
@@ -810,6 +810,48 @@ const SOFT_LINE_BREAK_REMARK_PLUGINS = [
   remarkSoftLineBreaks,
 ] as unknown as RemarkPlugins;
 
+// Link navigation and host preview callbacks live in context, below the
+// parser. Keep the parsed tree when only those callbacks (or shell state)
+// change. Context still reaches the individual link and preview components.
+const MarkdownContent = memo(function MarkdownContent({
+  text,
+  softLineBreaks,
+  mathPlugins,
+  annotateStandaloneLinks,
+  tokenize,
+  reveal,
+  revealTime,
+}: {
+  text: string;
+  softLineBreaks: boolean;
+  mathPlugins: ReturnType<typeof useMathPlugins>;
+  annotateStandaloneLinks: boolean;
+  tokenize: NonNullable<ReturnType<typeof useSecretsUi>>["tokenize"] | undefined;
+  reveal: StreamReveal | null;
+  revealTime: number;
+}) {
+  const baseRemarkPlugins = softLineBreaks ? SOFT_LINE_BREAK_REMARK_PLUGINS : REMARK_PLUGINS;
+  const remarkPlugins = mathPlugins
+    ? ([...baseRemarkPlugins, mathPlugins.remarkMathPlugin] as unknown as RemarkPlugins)
+    : baseRemarkPlugins;
+  const rehypePlugins = [
+    ...(annotateStandaloneLinks ? [rehypeStandaloneLinks] : []),
+    ...(tokenize ? [[rehypeSecretRefs, { tokenize }]] : []),
+    ...(reveal ? [[rehypeStreamReveal, { reveal, now: revealTime }]] : []),
+    ...(mathPlugins ? [mathPlugins.rehypeKatexPlugin] : []),
+  ] as unknown as Parameters<typeof ReactMarkdown>[0]["rehypePlugins"];
+  return (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={markdownComponents}
+      urlTransform={markdownUrlTransform}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
 function MarkdownImpl({
   children,
   artifactHref,
@@ -863,17 +905,8 @@ function MarkdownImpl({
   // Secret references become chip placeholders before the ink split, so a
   // reference is never cut into ink spans. Without a host tokenizer, or when
   // the text names no reference, the pipeline is unchanged.
-  const secretRefs =
-    secretsUi && mayContainSecretReference(children)
-      ? [[rehypeSecretRefs, { tokenize: secretsUi.tokenize }]]
-      : [];
-  // The plugins walk the standard hast tree; structural local types keep the
-  // modules dependency-free, at the cost of this narrowing cast at the seam.
-  const rehypePluginList: unknown[] = [
-    ...(linkRenderer ? [rehypeStandaloneLinks] : []),
-    ...secretRefs,
-    ...(revealActive && reveal !== null ? [[rehypeStreamReveal, { reveal, now }]] : []),
-  ];
+  const tokenize =
+    secretsUi && mayContainSecretReference(children) ? secretsUi.tokenize : undefined;
 
   // Drop tip ink after trailing age windows finish. Same commit crystallizes:
   // ink spans → final plain markdown (soften off) + a short local settle breath.
@@ -927,19 +960,6 @@ function MarkdownImpl({
   // KaTeX runs last so it reads math text whole, whatever earlier plugins did.
   const math = useMemo(() => prepareMathMarkdown(parseText), [parseText]);
   const mathPlugins = useMathPlugins(math.hasMath);
-  if (mathPlugins) {
-    rehypePluginList.push(mathPlugins.rehypeKatexPlugin);
-  }
-  const rehypePlugins =
-    rehypePluginList.length > 0
-      ? (rehypePluginList as unknown as NonNullable<
-          Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
-        >)
-      : undefined;
-  const baseRemarkPlugins = softLineBreaks ? SOFT_LINE_BREAK_REMARK_PLUGINS : REMARK_PLUGINS;
-  const remarkPlugins = mathPlugins
-    ? ([...baseRemarkPlugins, mathPlugins.remarkMathPlugin] as unknown as RemarkPlugins)
-    : baseRemarkPlugins;
   const linkContext = useMemo(
     () => ({ onSandboxFile, artifactHref, resolveLink, renderLink: linkRenderer }),
     [onSandboxFile, artifactHref, resolveLink, linkRenderer],
@@ -970,14 +990,15 @@ function MarkdownImpl({
               className,
             )}
           >
-            <ReactMarkdown
-              remarkPlugins={remarkPlugins}
-              rehypePlugins={rehypePlugins}
-              components={markdownComponents}
-              urlTransform={markdownUrlTransform}
-            >
-              {mathPlugins ? math.text : parseText}
-            </ReactMarkdown>
+            <MarkdownContent
+              text={mathPlugins ? math.text : parseText}
+              softLineBreaks={softLineBreaks}
+              mathPlugins={mathPlugins}
+              annotateStandaloneLinks={linkRenderer !== undefined}
+              tokenize={tokenize}
+              reveal={revealActive ? reveal : null}
+              revealTime={revealActive ? now : 0}
+            />
           </div>
         </TooltipProvider>
       </InteractiveContext.Provider>
