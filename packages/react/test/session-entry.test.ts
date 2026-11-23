@@ -235,7 +235,9 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/tool-action-wording.ts"))).toBe(true);
     // Plain copy for a refused machine move, shared with the native machine card.
     expect(reactSources.some((id) => id.endsWith("/src/machine-swap-copy.ts"))).toBe(true);
-    expect(reactSources.length).toBe(67);
+    // The new-chat controller resolves its model-level fallback without a renderer.
+    expect(reactSources.some((id) => id.endsWith("/src/model-levels.ts"))).toBe(true);
+    expect(reactSources.length).toBe(68);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
