@@ -48582,13 +48582,30 @@ export async function hasPendingSteerForTurn(
   );
 }
 
-/** The single predicate for a Steer waiting for a running turn's next model step. */
+/**
+ * The single predicate for a Steer waiting for a running turn's next model
+ * step. Prompts Steered together with the running turn (same `steerGroupId`)
+ * run after it in order rather than handing it over: the group interrupts
+ * once even when the worker cannot claim it as one turn.
+ */
 async function pendingSteerExists(
   db: Database,
   workspaceId: string,
   sessionId: string,
   turnId: string,
 ): Promise<boolean> {
+  const [running] = await db
+    .select({ metadata: schema.sessionTurns.metadata })
+    .from(schema.sessionTurns)
+    .where(
+      and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)),
+    )
+    .limit(1);
+  const runningGroup = running?.metadata?.steerGroupId;
+  const outsideRunningGroup =
+    typeof runningGroup === "string"
+      ? sql`coalesce(${schema.sessionTurns.metadata} ->> 'steerGroupId', '') <> ${runningGroup}`
+      : undefined;
   const [steerPrompt] = await db
     .select({ id: schema.sessionTurns.id })
     .from(schema.sessionTurns)
@@ -48599,6 +48616,7 @@ async function pendingSteerExists(
         eq(schema.sessionTurns.status, "queued"),
         ne(schema.sessionTurns.id, turnId),
         sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+        outsideRunningGroup,
       ),
     )
     .limit(1);
@@ -48621,6 +48639,7 @@ async function pendingSteerExists(
           eq(schema.sessionTurns.status, "queued"),
           ne(schema.sessionTurns.id, turnId),
           sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+          outsideRunningGroup,
           notWaitingForMachineOwnerSql(owner),
         ),
       )

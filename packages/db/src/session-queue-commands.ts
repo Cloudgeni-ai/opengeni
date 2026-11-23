@@ -2107,8 +2107,9 @@ export async function steerQueuedTurnInTransaction(
   }
   for (const member of together) {
     const row = rows.find((candidate) => candidate.id === member.turnId);
-    // Already started or withdrawn: nothing of it is left to Steer.
-    if (row && row.version !== member.expectedTurnVersion) {
+    // Already started or withdrawn: nothing of it is left to Steer. One that
+    // waits for the machine's owner is skipped below whatever its version.
+    if (row && !waitingForOwner.has(row.id) && row.version !== member.expectedTurnVersion) {
       throw new QueueCommandConflictError("PROMPT_CHANGED", "Prompt changed", {
         queueVersion: session.queueVersion,
         turnVersion: row.version,
@@ -2162,12 +2163,16 @@ export async function steerQueuedTurnInTransaction(
   );
   const now = new Date();
   const queueVersion = session.queueVersion + 1;
+  // Prompts Steered together share this command's id, so once the first of
+  // them runs the rest wait for it instead of handing it over again.
+  const steerGroupId = steered.length > 1 ? reserved.receipt.id : null;
   for (const row of steered) {
     // A repeated Steer (for example "Send now" on a deferred one) replaces the
     // earlier deferral facts instead of accumulating them.
     const {
       deferredUntilCompaction: _previousCompactionDeferral,
       deferredUntilModelStep: _previousModelStepDeferral,
+      steerGroupId: _previousSteerGroup,
       ...rowMetadata
     } = row.metadata;
     await db
@@ -2181,6 +2186,7 @@ export async function steerQueuedTurnInTransaction(
           replacedAttemptId: supersededAttemptId,
           interruptionCount,
           ...steerDeferralFacts(supersession),
+          ...(steerGroupId ? { steerGroupId } : {}),
         },
         updatedAt: now,
       })

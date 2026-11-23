@@ -604,15 +604,24 @@ export function useTurnQueue(
       const wanted = new Set(turnIds);
       // Queue order is delivery order. A prompt that already left the queue
       // reached the agent on its own and is not Steered again.
-      const turns = snapshotRef.current?.items.filter((item) => wanted.has(item.id)) ?? [];
-      if (turns.length <= 1) {
-        const only = turns[0]?.id ?? turnIds[turnIds.length - 1];
-        return only ? await steerTurn(only) : true;
+      // One command carries the target plus at most 200 others (the server's
+      // limit); the oldest go first and a later click Steers the rest.
+      const turns = (snapshotRef.current?.items.filter((item) => wanted.has(item.id)) ?? []).slice(
+        0,
+        201,
+      );
+      if (turns.length === 0) {
+        // All of them already reached the agent on their own.
+        void loadFresh();
+        return true;
       }
+      if (turns.length === 1) return await steerTurn(turns[0]!.id);
+      if (turns.some((turn) => pendingRef.current[turn.id])) return false;
       const ids = turns.map((turn) => turn.id);
+      const steeredIds = new Set(ids);
       const occurredAt = new Date().toISOString();
       setAcceptedSteers((current) => [
-        ...current.filter((steer) => !wanted.has(steer.turnId)),
+        ...current.filter((steer) => !steeredIds.has(steer.turnId)),
         ...turns.map(
           (turn): AcceptedQueueSteer => ({
             turnId: turn.id,
@@ -651,18 +660,18 @@ export function useTurnQueue(
       if (result === null && ids.every((turnId) => !after.some((item) => item.id === turnId))) {
         // Every prompt started on its own while the click was in flight.
         setMutationError(null);
-        setAcceptedSteers((current) => current.filter((steer) => !wanted.has(steer.turnId)));
+        setAcceptedSteers((current) => current.filter((steer) => !steeredIds.has(steer.turnId)));
         return true;
       }
       setAcceptedSteers((current) =>
         current.flatMap((steer) => {
-          if (!wanted.has(steer.turnId)) return [steer];
+          if (!steeredIds.has(steer.turnId)) return [steer];
           return accepted(steer.turnId) ? [{ ...steer, state: "queued" as const }] : [];
         }),
       );
       return result !== null || ids.some(accepted);
     },
-    [client, mutateTurns, sessionId, steerTurn, targetKey, workspaceId],
+    [client, loadFresh, mutateTurns, sessionId, steerTurn, targetKey, workspaceId],
   );
 
   const removeTurn = useCallback(

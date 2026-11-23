@@ -396,15 +396,20 @@ export function countOptimisticQueuedMessages(
   ).length;
 }
 
+/** Another change that takes a queued message out of Steer-all; a move does not. */
+function actedOn(kind: ReturnType<UseTurnQueueResult["mutationFor"]>): boolean {
+  return kind !== null && kind !== "move";
+}
+
 /**
  * The chip's Steer: every message waiting when it is clicked, in one command,
- * so the agent reads them together, in order, with no extra interruption. Just-sent
+ * so the agent gets them in order with one interruption. Just-sent
  * messages the server has not confirmed yet need their queued turn's id and
  * version, which arrive with the next queue read, so the click is taken at
  * once and carried out when all of them have landed. A message is dropped,
  * never retargeted, when its send fails, it is withdrawn or dismissed, the
- * agent starts it first, or something else (an edit, Up recall or another
- * Steer) already acts on it.
+ * agent starts it first, or something else (an edit, Up recall, delete or
+ * another Steer) already acts on it; a move in progress is waited for.
  */
 function useSteerAllQueued({
   messages,
@@ -447,8 +452,9 @@ function useSteerAllQueued({
     const next = new Map<string, string | null>();
     const landed: string[] = [];
     let placing = false;
-    // An edit, Up recall or Steer already acting on one of them wins for it.
-    const turnIds = request.turnIds.filter((turnId) => mutationFor(turnId) === null);
+    // An edit, Up recall, delete or Steer already acting on one of them wins
+    // for it; a move is waited for below so the order stays as sent.
+    const turnIds = request.turnIds.filter((turnId) => !actedOn(mutationFor(turnId)));
     for (const [clientEventId, knownTurnId] of request.pending) {
       const message = (messages ?? []).find(
         (candidate) => candidate.clientEventId === clientEventId,
@@ -457,7 +463,7 @@ function useSteerAllQueued({
       if (!message || message.state === "failed") continue;
       const turnId = message.turnId ?? knownTurnId;
       if (turnId && queuedTurnIds.has(turnId)) {
-        if (mutationFor(turnId) !== null) continue;
+        if (actedOn(mutationFor(turnId))) continue;
         landed.push(turnId);
         next.set(clientEventId, turnId);
         continue;
@@ -487,7 +493,7 @@ function useSteerAllQueued({
     /** Steer `turnIds` (queue order) and then `pendingClientEventIds` (sent order). */
     request: (turnIds: readonly string[], pendingClientEventIds: readonly string[]) => {
       if (pendingClientEventIds.length === 0 && !mutating) {
-        fire(turnIds.filter((turnId) => mutationFor(turnId) === null));
+        fire(turnIds.filter((turnId) => !actedOn(mutationFor(turnId))));
         return;
       }
       setRequest(
@@ -1103,7 +1109,7 @@ function SessionChromeView({
           ? { text: queuedTurnPresentation(t, latestQueuedTurn).text.trim() || null }
           : null;
   const steerableTurnIds = queuedTurns
-    .filter((turn) => queue.mutationFor(turn.id) === null)
+    .filter((turn) => !actedOn(queue.mutationFor(turn.id)))
     .map((turn) => turn.id);
   const steerablePending = optimisticQueued.filter((message) => message.state !== "failed");
   // A host queue without `steerTurns` keeps the earlier one-message Steer.
