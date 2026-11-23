@@ -11862,7 +11862,7 @@ export const sessionBackgroundCommands = pgTable(
     commandPreview: text("command_preview").notNull().default(""),
     commandText: text("command_text"),
     // Turn shell marker path of an unsupervised managed command, written at
-    // adoption so a later stop can signal its process group (migration 1559).
+    // adoption so a later stop can signal its process group (migration 1560).
     processGroupMarker: text("process_group_marker"),
     cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     cancelRequestedBy: text("cancel_requested_by"),

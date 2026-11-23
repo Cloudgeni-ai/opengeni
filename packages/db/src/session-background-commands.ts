@@ -719,7 +719,7 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
     turnId?: string;
     attemptId?: string;
     executionGeneration?: number;
-    /** Turn shell marker path of an unsupervised command; see migration 1559. */
+    /** Turn shell marker path of an unsupervised command; see migration 1560. */
     processGroupMarker?: string | undefined;
   },
 ): Promise<SessionBackgroundCommand> {
@@ -1604,7 +1604,7 @@ export type SessionCommandIdentity = {
 };
 
 /** The persisted process-group marker of the stopping managed command that
- * owns `retainedProcessId` (migration 1559), or null when it has none, is not
+ * owns `retainedProcessId` (migration 1560), or null when it has none, is not
  * stopping, or is not a managed command. */
 export async function getStoppingManagedCommandProcessGroupMarker(
   db: Database,

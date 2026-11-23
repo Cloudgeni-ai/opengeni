@@ -45700,7 +45700,7 @@ export async function adoptManagedSessionBackgroundCommand(
     processId: string;
     expected: SandboxRetainedProcessIdentity;
     command: string;
-    /** Turn shell marker path of an unsupervised command (migration 1559). */
+    /** Turn shell marker path of an unsupervised command (migration 1560). */
     processGroupMarker?: string | undefined;
   },
 ) {
