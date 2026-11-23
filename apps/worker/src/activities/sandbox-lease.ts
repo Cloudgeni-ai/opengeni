@@ -4074,8 +4074,13 @@ export async function stopRetainedProcessBeforeRead(
           input.providerDeadline ? "provider_deadline" : "explicit_stop",
         )) ?? false)
       : false;
+  // The group stop can take its whole yield; skip it when that would overrun
+  // the sweep's budget. The command stays stopping and the next sweep retries.
   const groupStopped =
-    input.mode === "cancel" && !supervisedCancelled && input.processGroupMarker
+    input.mode === "cancel" &&
+    !supervisedCancelled &&
+    input.processGroupMarker &&
+    Date.now() + RETAINED_PROCESS_GROUP_STOP_YIELD_MS < input.budgetUntil
       ? await stopRetainedProcessGroup(session, input.processGroupMarker)
       : false;
   // A stopped command takes up to the supervisor's KILL escalation to exit.

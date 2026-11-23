@@ -2358,6 +2358,15 @@ describe("retained-process terminal-owner reconciliation", () => {
       readWaitMs: 1_000,
     });
     expect(observed.calls).toEqual({ supervisedCancels: 1, execs: [] });
+
+    // A stop that could overrun the sweep's budget waits for the next sweep.
+    const late = fakeSession({ supervisedCancel: false, stopExit: 0 });
+    expect(await stop(late.session, { budgetUntil: Date.now() + 1_000 })).toEqual({
+      supervisedCancelled: false,
+      groupStopped: false,
+      readWaitMs: 1_000,
+    });
+    expect(late.calls.execs).toEqual([]);
   });
 
   test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {
