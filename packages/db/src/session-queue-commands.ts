@@ -1171,21 +1171,23 @@ async function loadQueuedTurns(
 }
 
 /**
- * Queue order for a newly Steered row. Steers waiting for the live turn's next
- * boundary are read in the order they were sent, so a later waiting Steer joins
- * the end of that leading run; an interrupting Steer (and any Steer with nothing
- * live to wait for) goes first. Queued Sends always stay behind every Steer.
+ * Queue order for newly Steered rows (one, or several Steered together, kept
+ * in their queue order). Steers waiting for the live turn's next boundary are
+ * read in the order they were sent, so later waiting Steers join the end of
+ * that leading run; an interrupting Steer (and any Steer with nothing live to
+ * wait for) goes first. Queued Sends always stay behind every Steer.
  */
 function steerQueueOrder(
-  target: QueuedTurnRow,
+  target: QueuedTurnRow | readonly QueuedTurnRow[],
   others: QueuedTurnRow[],
   supersession: Pick<
     SteerSupersessionResult,
     "liveCurrentTurnId" | "deferredUntilCompaction" | "deferredUntilModelStep"
   >,
 ): QueuedTurnRow[] {
+  const steered: QueuedTurnRow[] = Array.isArray(target) ? [...target] : [target as QueuedTurnRow];
   if (!supersession.liveCurrentTurnId || !steerSupersessionIsDeferred(supersession)) {
-    return [target, ...others];
+    return [...steered, ...others];
   }
   let waiting = 0;
   while (waiting < others.length) {
@@ -1196,7 +1198,7 @@ function steerQueueOrder(
     if (!waitingSteer) break;
     waiting += 1;
   }
-  return [...others.slice(0, waiting), target, ...others.slice(waiting)];
+  return [...others.slice(0, waiting), ...steered, ...others.slice(waiting)];
 }
 
 /**
@@ -1958,8 +1960,22 @@ export async function steerQueuedTurnInTransaction(
      * already-deferred Steer into an immediate one ("Send now").
      */
     interrupt?: boolean;
+    /**
+     * Other waiting prompts Steered in the same command. With this prompt they
+     * keep their queue order and reach the agent in one handover. Prompts that
+     * already left the queue are skipped; a changed one refuses the command.
+     */
+    together?: ReadonlyArray<{ turnId: string; expectedTurnVersion: number }>;
   },
 ): Promise<SteerQueueCommandResult> {
+  const together = [
+    ...new Map(
+      (input.together ?? [])
+        .filter((member) => member.turnId !== input.turnId)
+        .map((member) => [member.turnId, member] as const),
+    ).values(),
+  ];
+  const togetherIds = new Set(together.map((member) => member.turnId));
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
@@ -1978,7 +1994,9 @@ export async function steerQueuedTurnInTransaction(
         ? [input.actor.sessionId, input.sessionId]
         : [input.sessionId],
     turnIds:
-      input.actor.type === "agent_attempt" ? [input.actor.turnId, input.turnId] : [input.turnId],
+      input.actor.type === "agent_attempt"
+        ? [input.actor.turnId, input.turnId, ...togetherIds]
+        : [input.turnId, ...togetherIds],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
   const requestHash = canonicalSessionCommandHash({
@@ -1986,6 +2004,7 @@ export async function steerQueuedTurnInTransaction(
     controlEtag: input.controlEtag ?? null,
     // Omitted when false so earlier receipts keep their exact replay hash.
     ...(input.interrupt === true ? { interrupt: true } : {}),
+    ...(together.length > 0 ? { together } : {}),
   });
   const reserved = await reserveSessionCommandReceipt(db, {
     accountId: input.accountId,
@@ -2042,7 +2061,7 @@ export async function steerQueuedTurnInTransaction(
         and(
           eq(schema.sessionTurns.workspaceId, input.workspaceId),
           eq(schema.sessionTurns.sessionId, input.sessionId),
-          eq(schema.sessionTurns.id, input.turnId),
+          inArray(schema.sessionTurns.id, [input.turnId, ...togetherIds]),
           waitsForMachineOwnerSql(machineOwner),
         ),
       )
@@ -2086,6 +2105,18 @@ export async function steerQueuedTurnInTransaction(
       turnVersion: target.version,
     });
   }
+  for (const member of together) {
+    const row = rows.find((candidate) => candidate.id === member.turnId);
+    // Already started or withdrawn: nothing of it is left to Steer.
+    if (row && row.version !== member.expectedTurnVersion) {
+      throw new QueueCommandConflictError("PROMPT_CHANGED", "Prompt changed", {
+        queueVersion: session.queueVersion,
+        turnVersion: row.version,
+      });
+    }
+  }
+  const steered = rows.filter((row) => row.id === target.id || togetherIds.has(row.id));
+  const steeredIds = new Set(steered.map((row) => row.id));
 
   const supersession = await supersedeSessionCurrentDirectionInTransaction(db, {
     accountId: input.accountId,
@@ -2106,8 +2137,8 @@ export async function steerQueuedTurnInTransaction(
   const deferredUntilCompaction = supersession.deferredUntilCompaction;
   const deferredUntilModelStep = supersession.deferredUntilModelStep;
 
-  const withoutTarget = rows.filter((row) => row.id !== target.id);
-  const ordered = steerQueueOrder(target, withoutTarget, supersession);
+  const withoutSteered = rows.filter((row) => !steeredIds.has(row.id));
+  const ordered = steerQueueOrder(steered, withoutSteered, supersession);
   await normalizeQueuePositions(
     db,
     input.workspaceId,
@@ -2116,28 +2147,30 @@ export async function steerQueuedTurnInTransaction(
   );
   const now = new Date();
   const queueVersion = session.queueVersion + 1;
-  // A repeated Steer (for example "Send now" on a deferred one) replaces the
-  // earlier deferral facts instead of accumulating them.
-  const {
-    deferredUntilCompaction: _previousCompactionDeferral,
-    deferredUntilModelStep: _previousModelStepDeferral,
-    ...targetMetadata
-  } = target.metadata;
-  await db
-    .update(schema.sessionTurns)
-    .set({
-      version: target.version + 1,
-      metadata: {
-        ...targetMetadata,
-        delivery: "steer",
-        replacedTurnId: supersededTurnId,
-        replacedAttemptId: supersededAttemptId,
-        interruptionCount,
-        ...steerDeferralFacts(supersession),
-      },
-      updatedAt: now,
-    })
-    .where(eq(schema.sessionTurns.id, target.id));
+  for (const row of steered) {
+    // A repeated Steer (for example "Send now" on a deferred one) replaces the
+    // earlier deferral facts instead of accumulating them.
+    const {
+      deferredUntilCompaction: _previousCompactionDeferral,
+      deferredUntilModelStep: _previousModelStepDeferral,
+      ...rowMetadata
+    } = row.metadata;
+    await db
+      .update(schema.sessionTurns)
+      .set({
+        version: row.version + 1,
+        metadata: {
+          ...rowMetadata,
+          delivery: "steer",
+          replacedTurnId: supersededTurnId,
+          replacedAttemptId: supersededAttemptId,
+          interruptionCount,
+          ...steerDeferralFacts(supersession),
+        },
+        updatedAt: now,
+      })
+      .where(eq(schema.sessionTurns.id, row.id));
+  }
   let sequence = supersession.lastSequence;
   const actor =
     input.actor.type === "agent_attempt"
@@ -2152,29 +2185,33 @@ export async function steerQueuedTurnInTransaction(
       sequence: ++sequence,
       type: "turn.superseded",
       turnId: supersededTurnId,
-      payload: { reason: "steer", targetTurnId: target.id },
+      payload: { reason: "steer", targetTurnId: steered[0]!.id },
       occurredAt: now,
     });
   }
-  eventValues.push({
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    sequence: ++sequence,
-    type: "session.control.steer_requested",
-    turnId: steerTargetTurn?.id ?? target.id,
-    turnGeneration: steerTargetTurn?.executionGeneration ?? null,
-    turnAttemptId: steerTargetTurn?.activeAttemptId ?? null,
-    turnAssociation: steerTargetTurn ? "current" : null,
-    payload: {
-      operationId: reserved.receipt.id,
-      targetTurnId: target.id,
-      replacedTurnId: supersededTurnId,
-      stopping: liveCurrentTurnId !== null && !steerSupersessionIsDeferred(supersession),
-      ...steerDeferralFacts(supersession),
-    },
-    occurredAt: now,
-  });
+  // One fact per Steered prompt, in delivery order, so each moves into chat
+  // where it was Steered.
+  for (const row of steered) {
+    eventValues.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: ++sequence,
+      type: "session.control.steer_requested",
+      turnId: steerTargetTurn?.id ?? row.id,
+      turnGeneration: steerTargetTurn?.executionGeneration ?? null,
+      turnAttemptId: steerTargetTurn?.activeAttemptId ?? null,
+      turnAssociation: steerTargetTurn ? "current" : null,
+      payload: {
+        operationId: reserved.receipt.id,
+        targetTurnId: row.id,
+        replacedTurnId: supersededTurnId,
+        stopping: liveCurrentTurnId !== null && !steerSupersessionIsDeferred(supersession),
+        ...steerDeferralFacts(supersession),
+      },
+      occurredAt: now,
+    });
+  }
   const eventRows = await db
     .insert(schema.sessionEvents)
     .values(
@@ -2207,24 +2244,26 @@ export async function steerQueuedTurnInTransaction(
     })
     .where(eq(schema.sessions.id, input.sessionId));
   await db.insert(schema.auditEvents).values(
-    withLosslessContentWriteVersion(
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: actor,
-        action: "session.queue.steer",
-        targetType: "session_turn",
-        targetId: target.id,
-        metadata: {
-          operationId: reserved.receipt.id,
-          replacedTurnId: supersededTurnId,
-          interruptionCount,
-          deferredUntilCompaction,
-          deferredUntilModelStep,
+    steered.map((row) =>
+      withLosslessContentWriteVersion(
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: actor,
+          action: "session.queue.steer",
+          targetType: "session_turn",
+          targetId: row.id,
+          metadata: {
+            operationId: reserved.receipt.id,
+            replacedTurnId: supersededTurnId,
+            interruptionCount,
+            deferredUntilCompaction,
+            deferredUntilModelStep,
+          },
         },
-      },
-      "metadata",
-      "metadataCodecVersion",
+        "metadata",
+        "metadataCodecVersion",
+      ),
     ),
   );
   const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {

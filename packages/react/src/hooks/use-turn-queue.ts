@@ -106,6 +106,12 @@ export type UseTurnQueueResult = {
   ) => Promise<QueueRecallResult>;
   /** Advance the same durable waiting prompt; no duplicate prompt is created. */
   steerTurn: (turnId: string) => Promise<boolean>;
+  /**
+   * Steer several waiting prompts in one command: they keep their queue order
+   * and reach the agent in one handover. Prompts that already left the queue
+   * are skipped.
+   */
+  steerTurns?: (turnIds: readonly string[]) => Promise<boolean>;
   removeTurn: (turnId: string) => Promise<boolean>;
   pendingByTurn: Readonly<Record<string, QueueMutationKind>>;
   mutationFor: (turnId: string) => QueueMutationKind | null;
@@ -368,25 +374,35 @@ export function useTurnQueue(
     { enabled, discard: stateTargetKey === targetKey && deniesRetainedView(error) },
   );
 
-  const mutate = useCallback(
+  const mutateTurns = useCallback(
     async (
-      turnId: string,
+      turnIds: readonly string[],
       kind: QueueMutationKind,
       command: (
         current: SessionQueueSnapshot,
-        turn: SessionTurn,
+        turns: SessionTurn[],
         clientEventId: string,
       ) => Promise<SessionQueueMutationResponse>,
       failure: { quietWhenGone?: boolean } = {},
     ): Promise<SessionQueueMutationResponse | null> => {
       const ownedTargetKey = targetKey;
-      if (!sessionId || targetKeyRef.current !== ownedTargetKey || pendingRef.current[turnId]) {
+      if (
+        !sessionId ||
+        targetKeyRef.current !== ownedTargetKey ||
+        turnIds.length === 0 ||
+        turnIds.some((turnId) => pendingRef.current[turnId])
+      ) {
         return null;
       }
       const current = snapshotRef.current;
-      const turn = current?.items.find((candidate) => candidate.id === turnId);
-      if (!current || !turn) return null;
-      pendingRef.current = { ...pendingRef.current, [turnId]: kind };
+      const turns = turnIds.map((turnId) =>
+        current?.items.find((candidate) => candidate.id === turnId),
+      );
+      if (!current || turns.some((turn) => !turn)) return null;
+      pendingRef.current = {
+        ...pendingRef.current,
+        ...Object.fromEntries(turnIds.map((turnId) => [turnId, kind])),
+      };
       setStateTargetKey(ownedTargetKey);
       setPendingByTurn(pendingRef.current);
       setMutationError(null);
@@ -394,12 +410,12 @@ export function useTurnQueue(
       try {
         let result: SessionQueueMutationResponse;
         try {
-          result = await command(current, turn, clientEventId);
+          result = await command(current, turns as SessionTurn[], clientEventId);
         } catch (cause) {
           if (!isOutcomeUnknownError(cause)) throw cause;
           // Same-key replay is a fact check against the durable receipt. It
           // cannot duplicate the command even if the first response was lost.
-          result = await command(current, turn, clientEventId);
+          result = await command(current, turns as SessionTurn[], clientEventId);
         }
         if (targetKeyRef.current !== ownedTargetKey) return null;
         acceptSnapshot(ownedTargetKey, result.snapshot);
@@ -410,8 +426,8 @@ export function useTurnQueue(
             // Reconcile first: a prompt that already left the queue is the
             // caller's quiet outcome, never a flash of queue error.
             await loadFresh();
-            const stillWaiting = snapshotRef.current?.items.some(
-              (candidate) => candidate.id === turnId,
+            const stillWaiting = snapshotRef.current?.items.some((candidate) =>
+              turnIds.includes(candidate.id),
             );
             if (stillWaiting !== false && targetKeyRef.current === ownedTargetKey) {
               setMutationError(asError(cause));
@@ -423,15 +439,38 @@ export function useTurnQueue(
         }
         return null;
       } finally {
-        if (targetKeyRef.current === ownedTargetKey && turnId in pendingRef.current) {
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          turnIds.some((turnId) => turnId in pendingRef.current)
+        ) {
           const next = { ...pendingRef.current };
-          delete next[turnId];
+          for (const turnId of turnIds) delete next[turnId];
           pendingRef.current = next;
           setPendingByTurn(next);
         }
       }
     },
     [acceptSnapshot, loadFresh, sessionId, targetKey],
+  );
+
+  const mutate = useCallback(
+    async (
+      turnId: string,
+      kind: QueueMutationKind,
+      command: (
+        current: SessionQueueSnapshot,
+        turn: SessionTurn,
+        clientEventId: string,
+      ) => Promise<SessionQueueMutationResponse>,
+      failure: { quietWhenGone?: boolean } = {},
+    ): Promise<SessionQueueMutationResponse | null> =>
+      await mutateTurns(
+        [turnId],
+        kind,
+        async (current, turns, clientEventId) => await command(current, turns[0]!, clientEventId),
+        failure,
+      ),
+    [mutateTurns],
   );
 
   const moveTurn = useCallback(
@@ -558,6 +597,74 @@ export function useTurnQueue(
     [client, loadFresh, mutate, sessionId, targetKey, workspaceId, t],
   );
 
+  const steerTurns = useCallback(
+    async (turnIds: readonly string[]): Promise<boolean> => {
+      const ownedTargetKey = targetKey;
+      if (targetKeyRef.current !== ownedTargetKey) return false;
+      const wanted = new Set(turnIds);
+      // Queue order is delivery order. A prompt that already left the queue
+      // reached the agent on its own and is not Steered again.
+      const turns = snapshotRef.current?.items.filter((item) => wanted.has(item.id)) ?? [];
+      if (turns.length <= 1) {
+        const only = turns[0]?.id ?? turnIds[turnIds.length - 1];
+        return only ? await steerTurn(only) : true;
+      }
+      const ids = turns.map((turn) => turn.id);
+      const occurredAt = new Date().toISOString();
+      setAcceptedSteers((current) => [
+        ...current.filter((steer) => !wanted.has(steer.turnId)),
+        ...turns.map(
+          (turn): AcceptedQueueSteer => ({
+            turnId: turn.id,
+            triggerEventId: turn.triggerEventId,
+            text: turn.prompt,
+            annotations: turn.annotations ?? [],
+            resources: turn.resources,
+            tools: turn.tools,
+            occurredAt,
+            state: "sending",
+          }),
+        ),
+      ]);
+      // The newest prompt is the command's target: the agent takes the oldest
+      // first, so the newest is the last to leave the queue in a race.
+      const result = await mutateTurns(ids, "steer", (current, queued, clientEventId) => {
+        const target = queued[queued.length - 1]!;
+        return client.steerQueueItem(workspaceId, sessionId!, target.id, {
+          clientEventId,
+          expectedTurnVersion: target.version,
+          controlEtag: current.effectiveControl.controlEtag,
+          together: queued.slice(0, -1).map((turn) => ({
+            turnId: turn.id,
+            expectedTurnVersion: turn.version,
+          })),
+        });
+      });
+      if (targetKeyRef.current !== ownedTargetKey) return false;
+      const after = snapshotRef.current?.items ?? [];
+      const steered = (turnId: string): boolean => {
+        const waiting = after.find((candidate) => candidate.id === turnId);
+        // Gone: it advanced into chat, by this Steer or by the turn ending.
+        return waiting ? waiting.metadata.delivery === "steer" : true;
+      };
+      if (result === null && ids.every((turnId) => !after.some((item) => item.id === turnId))) {
+        // Every prompt started on its own while the click was in flight.
+        setMutationError(null);
+        setAcceptedSteers((current) => current.filter((steer) => !wanted.has(steer.turnId)));
+        return true;
+      }
+      setAcceptedSteers((current) =>
+        current.flatMap((steer) => {
+          if (!wanted.has(steer.turnId)) return [steer];
+          if (result === null || !steered(steer.turnId)) return [];
+          return [{ ...steer, state: "queued" as const }];
+        }),
+      );
+      return result !== null;
+    },
+    [client, mutateTurns, sessionId, steerTurn, targetKey, workspaceId],
+  );
+
   const removeTurn = useCallback(
     async (turnId: string): Promise<boolean> => {
       const result = await mutate(turnId, "delete", (_current, turn, clientEventId) =>
@@ -599,6 +706,7 @@ export function useTurnQueue(
     editTurn,
     recallTurn,
     steerTurn,
+    steerTurns,
     removeTurn,
     pendingByTurn: visiblePendingByTurn,
     mutationFor,
