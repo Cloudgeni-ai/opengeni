@@ -52,7 +52,9 @@ export function enginesFloorViolations(
       const installed = installedPackageJson(current.dir, name);
       const range = (installed?.engines as { node?: string } | undefined)?.node;
       if (typeof range === "string" && !Bun.semver.satisfies(floor, range)) {
-        violations.push(`${name}@${String(installed?.version)} needs node ${range} (via ${current.name})`);
+        violations.push(
+          `${name}@${String(installed?.version)} needs node ${range} (via ${current.name})`,
+        );
       }
     }
   };
