@@ -1,5 +1,12 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { lazy, useRef, type ComponentProps, type FormEvent, type ReactNode } from "react";
+import {
+  lazy,
+  useLayoutEffect,
+  useRef,
+  type ComponentProps,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   useNewConversation,
   type NewConversationController,
@@ -100,7 +107,12 @@ export function NewConversationView({
 }: NewConversationViewProps) {
   const t = useOpenGeniText();
   const labels = { ...DEFAULT_LABELS(t), ...overrides };
-  const { composer, config, catalog, files, uploadsEnabled, available } = creation;
+  const { composer, config, catalog, files, uploadsEnabled, available, setModelLevels } = creation;
+  const levels = composerProps?.controlsStart == null ? modelPickerProps?.levels : undefined;
+  // Register the control's configuration, not a model selection. The draft
+  // resolves its initial policy independently of the order of layout effects.
+  useLayoutEffect(() => setModelLevels(levels), [levels, setModelLevels]);
+  useLayoutEffect(() => () => setModelLevels(), [setModelLevels]);
   const root = useRef<HTMLFormElement>(null);
   const hostTheme = useHostTheme(root, { theme, surface });
   const transcription = useComposerTranscription(
@@ -155,8 +167,7 @@ export function NewConversationView({
           composerProps?.controlsStart ??
           (composer.policy ? (
             <ComposerModelPicker
-              levels={modelPickerProps?.levels}
-              startOnFirstLevel
+              levels={levels}
               groupPresentation={modelPickerProps?.groupPresentation}
               messages={modelPickerProps?.messages}
               rows={catalog.rows}

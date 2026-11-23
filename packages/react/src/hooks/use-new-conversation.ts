@@ -7,9 +7,10 @@ import {
 } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import type { SessionRealtimeModel } from "@opengeni/sdk/realtime";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { notifyObserver } from "../lib/notify-observer";
+import { modelLevelChoice, modelLevelsView, type ModelLevel } from "../model-levels";
 import {
   coerceReasoningEffortForModel,
   defaultEffortForModel,
@@ -83,6 +84,8 @@ type Attempt = {
 };
 type Completion = { sessionId: string; attempt: Attempt; generation: number };
 const NOOP_ASYNC = async () => {};
+const EMPTY_CHOICE: Choice = {};
+const NO_LEVELS: readonly ModelLevel[] = [];
 
 export type NewConversationController = ReturnType<typeof useNewConversation>;
 
@@ -109,7 +112,8 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   const available =
     options.enabled !== false && (options.createSession !== undefined || config.sessionCreation);
   const [text, setText] = useState("");
-  const [choice, setChoice] = useState<Choice>({});
+  const [choice, setChoice] = useState(EMPTY_CHOICE);
+  const [, setLevels] = useState(NO_LEVELS);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<{ cause: unknown } | null>(null);
   const [pending, setPending] = useState<Attempt | null>(null);
@@ -117,6 +121,20 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   const textRef = useRef(text);
   const textRevision = useRef(0);
   const choiceRef = useRef(choice);
+  const levelsRef = useRef(NO_LEVELS);
+  const setModelLevels = useCallback((levels = NO_LEVELS) => {
+    const previous = levelsRef.current;
+    if (
+      previous.length === levels.length &&
+      previous.every((level, index) => {
+        const next = levels[index];
+        return next?.model === level.model && next.effort === level.effort;
+      })
+    )
+      return;
+    levelsRef.current = levels;
+    setLevels(levels);
+  }, []);
   const filesRef = useRef(files);
   filesRef.current = files;
   const pendingRef = useRef<Attempt | null>(null);
@@ -150,9 +168,9 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     completionRef.current = null;
     textRef.current = "";
     textRevision.current = 0;
-    choiceRef.current = {};
+    choiceRef.current = EMPTY_CHOICE;
     setText("");
-    setChoice({});
+    setChoice(EMPTY_CHOICE);
     setSending(false);
     setError(null);
     setPending(null);
@@ -169,7 +187,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   };
   const updateChoice = (patch: Choice) => {
     if (!ownsScope()) return;
-    const next = { ...choiceRef.current, ...patch };
+    const next = { ...creationChoice(), ...patch };
     const model = catalog.models.find((row) => row.id === (next.model ?? defaultModel));
     if (model) {
       if (next.reasoningEffort)
@@ -183,14 +201,11 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     // reason goes. An unconfirmed create keeps its status until it settles.
     if (!pendingRef.current) setError(null);
   };
-  // The server picks its own default when none is sent; a host's preferred
-  // model must be sent to take effect.
-  const preferredChoice = (): Choice => (preferredModel ? { model: preferredModel } : {});
-  const effectivePolicy = () => {
-    const model = choiceRef.current.model ?? defaultModel;
+  const displayPolicy = (selected: Choice) => {
+    const model = selected.model ?? defaultModel;
     const definition = catalog.models.find((row) => row.id === model);
     const effort =
-      choiceRef.current.reasoningEffort ??
+      selected.reasoningEffort ??
       (definition
         ? defaultEffortForModel(definition)
         : (config.defaultReasoningEffort ?? "medium"));
@@ -198,9 +213,33 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       ? {
           model,
           reasoningEffort: definition ? coerceReasoningEffortForModel(definition, effort) : effort,
-          latencyMode: choiceRef.current.latencyMode ?? ("standard" as const),
+          latencyMode: selected.latencyMode ?? ("standard" as const),
         }
       : undefined;
+  };
+  const creationChoice = (): Choice => {
+    const selected = choiceRef.current;
+    // Explicit host defaults and draft edits win. A level fallback is a default,
+    // not an edit that can overwrite either of them when a view mounts.
+    if (preferredModel) return { model: preferredModel, ...selected };
+    if (
+      selected !== EMPTY_CHOICE ||
+      !showModelPicker ||
+      catalog.loading ||
+      !levelsRef.current.length
+    )
+      return selected;
+    const workspace = displayPolicy(EMPTY_CHOICE);
+    const view = modelLevelsView(t, {
+      levels: levelsRef.current,
+      rows: catalog.rows,
+      model: workspace?.model ?? "",
+      effort: workspace?.reasoningEffort ?? "medium",
+      latencyMode: "standard",
+    });
+    const first = view && view.index < 0 ? modelLevelChoice(view, 0, false) : null;
+    // Otherwise omit the model from the request and let the server default it.
+    return first ? { model: first.model, reasoningEffort: first.effort } : selected;
   };
   const create: Attempt["create"] =
     options.createSession ??
@@ -222,8 +261,9 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     if (!lifetime.mounted || lifetime.generation !== accepted.generation) return;
     const { attempt, sessionId } = accepted;
     const sentFiles = new Set(attempt.options.resources?.map((resource) => resource.fileId) ?? []);
+    const selected = showModelPicker ? creationChoice() : EMPTY_CHOICE;
     const policyChanged = (["model", "reasoningEffort", "latencyMode"] as const).some(
-      (field) => choiceRef.current[field] !== attempt.options[field],
+      (field) => selected[field] !== attempt.options[field],
     );
     const draft: InitialComposerDraft = {
       text:
@@ -233,7 +273,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       ),
       // Unchanged choices are already part of the created session. Do not
       // replace server-owned defaults with a browser's catalog estimate.
-      ...(policyChanged ? { policy: effectivePolicy() } : {}),
+      ...(policyChanged ? { policy: displayPolicy(selected) } : {}),
     };
     pendingRef.current = null;
     completionRef.current = null;
@@ -321,7 +361,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       create,
       options: {
         ...(resources.length ? { resources: structuredClone(resources) } : {}),
-        ...(showModelPicker ? { ...preferredChoice(), ...choiceRef.current } : {}),
+        ...(showModelPicker ? creationChoice() : {}),
       },
     });
   };
@@ -344,7 +384,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       clearDraft: false,
       create,
       options: {
-        ...(showModelPicker ? { ...preferredChoice(), ...choiceRef.current } : {}),
+        ...(showModelPicker ? creationChoice() : {}),
         startMode: "realtime",
       },
       realtimeModel: model,
@@ -376,7 +416,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     draftLoading: false,
     draftSaving: false,
     draftConflict: null,
-    policy: effectivePolicy() ?? null,
+    policy: displayPolicy(creationChoice()) ?? null,
     setModel: (model) => updateChoice({ model }),
     setReasoningEffort: (reasoningEffort) => updateChoice({ reasoningEffort }),
     setLatencyMode: (latencyMode) => updateChoice({ latencyMode }),
@@ -398,6 +438,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     uploadsEnabled,
     available,
     showModelPicker,
+    setModelLevels,
     catalog,
     composer,
     realtimeVoiceEnabled:

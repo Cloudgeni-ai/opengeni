@@ -36,10 +36,9 @@ export type ModelLevelPickerProps = ModelPolicyPickerProps & {
    */
   levels: readonly ModelLevel[];
   /**
-   * A new chat starts on the first level: when its model or effort is outside
-   * the levels (for example the workspace default), the first level is chosen
-   * once the catalog loads. Without it, an existing chat on another model
-   * keeps that model and shows its name.
+   * Legacy opt-in for a standalone picker: choose the first level once the
+   * catalog loads if the current policy is outside the levels. The stock new
+   * conversation instead resolves the default in its draft controller.
    */
   startOnFirstLevel?: boolean | undefined;
 };
