@@ -20,6 +20,8 @@ import {
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
+  mcpRequestCalledToolNames,
+  prepareWorkspaceToolGatewayForMcpRequest,
   requireWorkspaceToolGatewayGrant,
   requireWorkspaceToolGatewayAuthorization,
   requireWorkspaceSiteToolAuthorization,
@@ -260,10 +262,10 @@ describe("workspace tool gateway adapters", () => {
         } satisfies MCPServer,
       },
     ];
-    const prepare = (listing: boolean) =>
+    const prepare = (scope: Parameters<typeof workspaceToolGatewayPreparationRefs>[1]) =>
       prepareWorkspaceToolGatewayTools(
         settings,
-        workspaceToolGatewayPreparationRefs(settings, listing),
+        workspaceToolGatewayPreparationRefs(settings, scope),
         {
           accountId,
           workspaceId,
@@ -277,7 +279,7 @@ describe("workspace tool gateway adapters", () => {
       );
 
     test("is left out of a listing instead of failing it", async () => {
-      const prepared = await prepare(true);
+      const prepared = await prepare({ listing: true });
       try {
         expect(prepared.toolGatewayCatalog?.entries.map((entry) => entry.identity)).toEqual([
           { serverId: "opengeni", toolName: "session_get" },
@@ -287,17 +289,96 @@ describe("workspace tool gateway adapters", () => {
       }
     });
 
-    test("still fails a call preparation, and first-party servers stay required in a listing", async () => {
-      await expect(prepare(false)).rejects.toThrow();
-      expect(workspaceToolGatewayPreparationRefs(settings, false)).toEqual(
-        allGatewayToolRefs(settings),
-      );
+    test("is left out of a call to another server's tool", async () => {
+      const prepared = await prepare({ callServerId: "opengeni" });
+      try {
+        expect(prepared.toolGatewayCatalog?.entries.map((entry) => entry.identity)).toEqual([
+          { serverId: "opengeni", toolName: "session_get" },
+        ]);
+      } finally {
+        await prepared.close();
+      }
+    });
+
+    test("still fails a call to its own tool and an unscoped preparation; first-party servers stay required", async () => {
+      await expect(prepare({ callServerId: "cap-ledger" })).rejects.toThrow();
+      await expect(prepare({})).rejects.toThrow();
+      expect(workspaceToolGatewayPreparationRefs(settings)).toEqual(allGatewayToolRefs(settings));
       expect(
-        workspaceToolGatewayPreparationRefs(settings, true).map((ref) => [ref.id, ref.optional]),
+        workspaceToolGatewayPreparationRefs(settings, { listing: true }).map((ref) => [
+          ref.id,
+          ref.optional,
+        ]),
       ).toEqual([
         ["opengeni", undefined],
         ["cap-ledger", true],
       ]);
+      expect(
+        workspaceToolGatewayPreparationRefs(settings, { callServerId: "cap-ledger" }).map((ref) => [
+          ref.id,
+          ref.optional,
+        ]),
+      ).toEqual([
+        ["opengeni", undefined],
+        ["cap-ledger", undefined],
+      ]);
+    });
+
+    test("an MCP request lists without the dead server and re-prepares strictly for its missing tool", async () => {
+      const mcpRequest = (body: unknown) =>
+        new Request("https://api.example.test/mcp", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const seen: boolean[] = [];
+      const prepareFor = async ({ listing }: { listing: boolean }) => {
+        seen.push(listing);
+        return await prepare({ listing });
+      };
+      for (const body of [
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        // A healthy server's tool resolves in the listing.
+        [
+          {
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/call",
+            params: { name: "opengeni__session_get", arguments: {} },
+          },
+        ],
+      ]) {
+        seen.length = 0;
+        const prepared = await prepareWorkspaceToolGatewayForMcpRequest(
+          mcpRequest(body),
+          prepareFor,
+        );
+        await prepared.close();
+        expect(seen).toEqual([true]);
+      }
+      seen.length = 0;
+      expect(
+        await mcpRequestCalledToolNames(
+          mcpRequest({
+            jsonrpc: "2.0",
+            id: 3,
+            method: "tools/call",
+            params: { name: "cap-ledger__read" },
+          }),
+        ),
+      ).toEqual(["cap-ledger__read"]);
+      await expect(
+        prepareWorkspaceToolGatewayForMcpRequest(
+          mcpRequest({
+            jsonrpc: "2.0",
+            id: 3,
+            method: "tools/call",
+            params: { name: "cap-ledger__read", arguments: {} },
+          }),
+          prepareFor,
+        ),
+      ).rejects.toThrow();
+      expect(seen).toEqual([true, false]);
     });
   });
 
