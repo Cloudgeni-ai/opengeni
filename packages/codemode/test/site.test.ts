@@ -414,3 +414,20 @@ test("optional browser client loads without credentials; tool requests still nee
   ).toBe(500);
   expect(acquired).toBe(1);
 });
+
+test("local preview serves the look and chart helpers without credentials", async () => {
+  const handler = createCodemodeSiteRequestHandler(() => {
+    throw new Error("No attempt");
+  });
+  for (const [path, type, text] of [
+    ["/__opengeni/ui.css", "text/css; charset=utf-8", "--og-series-1"],
+    ["/__opengeni/charts.js", "text/javascript; charset=utf-8", "window.og"],
+  ] as const) {
+    const url = `http://localhost${path}`;
+    const response = await handler(new Request(url));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(type);
+    expect(await response.text()).toContain(text);
+    expect((await handler(new Request(url, { method: "POST" }))).status).toBe(405);
+  }
+});
