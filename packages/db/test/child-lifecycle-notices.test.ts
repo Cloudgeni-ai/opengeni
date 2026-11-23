@@ -2487,4 +2487,32 @@ describe("a sub-agent's question goes to the agent that started it first", () =>
     expect(await held(root.session.id)).toEqual([false]);
     expect(await inboxQuestions(root.session.id)).toEqual(["open"]);
   });
+
+  test("a question whose agent won't wake (its goal is paused) reaches the person", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleIdle(grant, parent);
+    await setSessionGoalStatus(client.db, grant.workspaceId, parent.session.id, {
+      status: "paused",
+      rationale: "waiting on the person",
+    });
+    await freezeChild(grant, child);
+    const delivered = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // The paused parent is not woken, so no agent turn will ever see it.
+    expect(delivered.shouldWake).toBe(false);
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+    expect(await attention(grant, parent.session.id)).toBe(1);
+  });
 });
