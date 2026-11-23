@@ -1,5 +1,13 @@
 # @opengeni/capabilities
 
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/network@6.37.2
+
 ## 6.37.1
 
 ### Patch Changes

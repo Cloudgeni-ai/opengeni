@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/connect@6.37.2
+
 ## 6.37.1
 
 ### Patch Changes
