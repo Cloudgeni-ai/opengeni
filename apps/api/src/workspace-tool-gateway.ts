@@ -1132,7 +1132,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const authNeeded: ToolAuthNeededPayload[] = [];
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
-    allGatewayToolRefs(gatewaySettings),
+    workspaceToolGatewayPreparationRefs(gatewaySettings, targetServerId !== undefined),
     {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1901,6 +1901,27 @@ export function allGatewayToolRefs(settings: Settings): ToolRef[] {
     id: server.id,
     ...(server.connectionRef ? { optional: true } : {}),
   }));
+}
+
+const FIRST_PARTY_GATEWAY_SERVER_IDS: ReadonlySet<string> = new Set(["opengeni", "files", "docs"]);
+
+/**
+ * The tools the gateway connects. The complete catalog lists what it can
+ * reach: a remote server that fails to connect (a custom MCP server that is
+ * down or whose host no longer resolves) is left out, as a turn leaves it
+ * out, instead of failing every app's tool list. A targeted call keeps its one
+ * server required so its own failure is reported, and first-party servers
+ * stay required everywhere.
+ */
+export function workspaceToolGatewayPreparationRefs(
+  settings: Settings,
+  targeted: boolean,
+): ToolRef[] {
+  return allGatewayToolRefs(settings).map((ref) =>
+    targeted || ref.kind !== "mcp" || FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id)
+      ? ref
+      : { ...ref, optional: true },
+  );
 }
 
 async function inMemoryMcpRegistration(
