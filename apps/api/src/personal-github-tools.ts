@@ -10,6 +10,7 @@ import {
 } from "@opengeni/contracts/personal-github";
 import {
   freezePersonalConnectionDelegations,
+  listOwnConnectionMetadata,
   livePersonalGitHubRepository,
   personalConnectionDelegationSourceForGrant,
 } from "@opengeni/core";
@@ -23,9 +24,12 @@ import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import {
   GITHUB_REST_API_ORIGIN,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
-  GITHUB_REST_TOOL_NAMES,
   GitHubRestAuthorityError,
   GitHubRestMcpServer,
+  githubRestBearerHeaders,
+  githubRestGetter,
+  githubRestInternalServerConfig,
+  personalGitHubRestCacheScope,
   type GitHubRestRepository,
   type GitHubRestResolvedAuthority,
 } from "@opengeni/runtime/github-rest-mcp";
@@ -46,7 +50,6 @@ export const PERSONAL_GITHUB_TOOLS_SERVER_ID = GITHUB_REST_MCP_PERSONAL_SERVER_I
 
 /** The serverId personal GitHub credentials are requested under (as in a turn). */
 const PERSONAL_GITHUB_CREDENTIAL_SERVER_ID = "github:personal";
-const REQUEST_TIMEOUT_MS = 20_000;
 
 export type PersonalGitHubToolsAuthority = Readonly<{
   subjectId: string;
@@ -73,7 +76,7 @@ export function personalGitHubToolsOffered(settings: Partial<GitHubSettings>): b
   );
 }
 
-/** The caller's own Your GitHub with All my repositories, or null. Never throws. */
+/** The caller's own Your GitHub with All my repositories, or null when they have none. */
 export async function readPersonalGitHubToolsAuthority(
   db: Database,
   settings: Partial<GitHubSettings>,
@@ -82,49 +85,70 @@ export async function readPersonalGitHubToolsAuthority(
   if (!personalGitHubToolsOffered(settings) || grant.principalKind === "api_key") return null;
   const source = personalConnectionDelegationSourceForGrant(grant);
   if (source.kind !== "subject") return null;
-  try {
-    const delegations = await freezePersonalConnectionDelegations({
-      db,
-      workspaceId: grant.workspaceId,
-      settings: {
-        mcpServers: [],
-        githubPersonalOauthEnabled: true,
-        githubPersonalAllRepositoriesEnabled: true,
-      },
-      tools: [],
-      source,
-    });
-    const delegation = delegations.find(isAllRepositoriesDelegation);
-    const selection = delegation?.personalGitHubRepositorySelection;
-    if (!delegation?.originWorkspaceId || !selection?.allRepositoriesAccess) return null;
-    const connection = await getConnectionMetadata(
-      db,
-      delegation.originWorkspaceId,
-      delegation.connectionId,
-      source.subjectId,
-    );
-    if (
-      !connection ||
-      connection.subjectId !== source.subjectId ||
-      connection.status !== "active" ||
-      !isPersonalGitHubConnection(connection)
-    )
-      return null;
-    const metadata = PersonalGitHubConnectionMetadata.parse(connection.metadata);
-    if (metadata.credentialBindingId !== selection.credentialBindingId) return null;
-    return {
-      subjectId: source.subjectId,
-      connectionId: delegation.connectionId,
-      originWorkspaceId: delegation.originWorkspaceId,
-      login: metadata.githubLogin,
-      credentialBindingId: selection.credentialBindingId,
-      connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
-      access: selection.allRepositoriesAccess,
-    };
-  } catch {
-    // Like any account that can't be read: not offered.
+  const delegations = await freezePersonalConnectionDelegations({
+    db,
+    workspaceId: grant.workspaceId,
+    settings: {
+      mcpServers: [],
+      githubPersonalOauthEnabled: true,
+      githubPersonalAllRepositoriesEnabled: true,
+    },
+    tools: [],
+    source,
+  });
+  const delegation = delegations.find(isAllRepositoriesDelegation);
+  const selection = delegation?.personalGitHubRepositorySelection;
+  if (!delegation?.originWorkspaceId || !selection?.allRepositoriesAccess) return null;
+  const connection = await getConnectionMetadata(
+    db,
+    delegation.originWorkspaceId,
+    delegation.connectionId,
+    source.subjectId,
+  );
+  if (
+    !connection ||
+    connection.subjectId !== source.subjectId ||
+    connection.status !== "active" ||
+    !isPersonalGitHubConnection(connection)
+  )
     return null;
-  }
+  const metadata = PersonalGitHubConnectionMetadata.safeParse(connection.metadata);
+  if (!metadata.success || metadata.data.credentialBindingId !== selection.credentialBindingId)
+    return null;
+  return {
+    subjectId: source.subjectId,
+    connectionId: delegation.connectionId,
+    originWorkspaceId: delegation.originWorkspaceId,
+    login: metadata.data.githubLogin,
+    credentialBindingId: selection.credentialBindingId,
+    connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+    access: selection.allRepositoriesAccess,
+  };
+}
+
+/**
+ * The caller's own Your GitHub connection that GitHub stopped accepting, so
+ * they are offered Reconnect for it rather than Connect for a new one.
+ */
+export async function readPersonalGitHubReconnectAccount(
+  db: Database,
+  settings: Partial<GitHubSettings>,
+  grant: AccessGrant,
+): Promise<{ connectionId: string; login: string | null } | null> {
+  if (!personalGitHubToolsOffered(settings) || grant.principalKind === "api_key") return null;
+  const source = personalConnectionDelegationSourceForGrant(grant);
+  if (source.kind !== "subject") return null;
+  const connections = await listOwnConnectionMetadata(db, {
+    accountId: source.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: source.subjectId,
+    reach: "anywhere",
+    includeInactive: true,
+  });
+  const stale = connections.find(personalGitHubConnectionNeedsReconnect);
+  if (!stale) return null;
+  const login = stale.metadata.githubLogin;
+  return { connectionId: stale.id, login: typeof login === "string" ? login : null };
 }
 
 function isAllRepositoriesDelegation(delegation: McpPersonalConnectionDelegation): boolean {
@@ -138,14 +162,7 @@ function isAllRepositoriesDelegation(delegation: McpPersonalConnectionDelegation
 
 /** The gateway's configuration entry for the tools (no remote server is contacted). */
 export function personalGitHubToolsServerConfig(): Settings["mcpServers"][number] {
-  return {
-    id: PERSONAL_GITHUB_TOOLS_SERVER_ID,
-    name: "GitHub — My account",
-    url: `${GITHUB_REST_API_ORIGIN}/`,
-    allowedTools: [...GITHUB_REST_TOOL_NAMES],
-    timeoutMs: REQUEST_TIMEOUT_MS,
-    cacheToolsList: true,
-  };
+  return githubRestInternalServerConfig(PERSONAL_GITHUB_TOOLS_SERVER_ID, "GitHub — My account");
 }
 
 /** `settings` with the Your GitHub server added when the caller has it. */
@@ -241,25 +258,8 @@ export function buildPersonalGitHubToolsServer(input: {
     });
     if (resolution.status !== "ok" || resolution.connectionId !== live.connectionId)
       throw await unavailable("Your GitHub credential is unavailable.");
-    return { resolution, headers: authorizationHeaders(resolution.headers) };
+    return { resolution, headers: githubRestBearerHeaders(resolution.headers) };
   };
-  const githubGet = (headers: Record<string, string>) => async (url: URL) => {
-    if (url.origin !== GITHUB_REST_API_ORIGIN)
-      throw new GitHubRestAuthorityError("GitHub REST destination binding mismatch");
-    return await fetchImpl(url, {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        accept: "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-        "user-agent": "OpenGeni-GitHub-Bridge/1",
-        ...headers,
-      },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  };
-  const cacheScope = (live: PersonalGitHubToolsAuthority) =>
-    `${live.connectionId}|${live.connectionAuthorityGeneration}|${live.credentialBindingId}`;
   /** The repository as GitHub describes it now, at the access the caller gets on it. */
   const liveRepository = async (
     live: PersonalGitHubToolsAuthority,
@@ -267,9 +267,9 @@ export function buildPersonalGitHubToolsServer(input: {
     lookup: { repositoryId: string } | { fullName: string },
   ): Promise<GitHubRestRepository | null> => {
     const repository = await livePersonalGitHubRepository({
-      cacheScope: cacheScope(live),
+      cacheScope: personalGitHubRestCacheScope(live.connectionId, live),
       repository: lookup,
-      githubGet: githubGet(headers),
+      githubGet: githubRestGetter(headers, fetchImpl),
     }).catch(() => {
       throw new GitHubRestAuthorityError("GitHub is temporarily unavailable. Try again.");
     });
@@ -287,22 +287,26 @@ export function buildPersonalGitHubToolsServer(input: {
       connectionId: live.connectionId,
     };
   };
-  /** Checked again immediately before each request GitHub receives. */
-  const authorizeEach =
-    (
-      resolution: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
-      check: () => Promise<void>,
-    ) =>
-    async () => {
+  /**
+   * Checked again before each request GitHub receives. The first one follows
+   * the authority read that resolved this credential, so it skips that read.
+   */
+  const authorizeEach = (
+    resolution: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
+    check: (reread: boolean) => Promise<void>,
+  ) => {
+    let requests = 0;
+    return async () => {
       if (resolution.authorizeProviderRequest && !(await resolution.authorizeProviderRequest()))
         return false;
       try {
-        await check();
+        await check(requests++ > 0);
         return true;
       } catch {
         return false;
       }
     };
+  };
   const resolved = (
     live: PersonalGitHubToolsAuthority,
     headers: Record<string, string>,
@@ -337,8 +341,8 @@ export function buildPersonalGitHubToolsServer(input: {
         destinationUrl,
         forceRefresh,
       );
-      const check = async () => {
-        const now = await current();
+      const check = async (reread: boolean) => {
+        const now = reread ? await current() : live;
         const repositoryNow = await liveRepository(now, headers, {
           repositoryId: repository.repositoryId,
         });
@@ -366,23 +370,12 @@ export function buildPersonalGitHubToolsServer(input: {
         return resolved(
           live,
           headers,
-          authorizeEach(resolution, async () => {
-            await current();
+          authorizeEach(resolution, async (reread) => {
+            if (reread) await current();
           }),
         );
       },
     },
   });
   return { id: PERSONAL_GITHUB_TOOLS_SERVER_ID, server };
-}
-
-function authorizationHeaders(headers: Record<string, string>): Record<string, string> {
-  const authorization = new Headers(headers).get("authorization");
-  if (
-    !authorization ||
-    !/^Bearer [^\u0000-\u0020\u007f]+$/u.test(authorization) ||
-    authorization.length > 16_384
-  )
-    throw new GitHubRestAuthorityError("Personal GitHub authorization header is unavailable");
-  return { authorization };
 }

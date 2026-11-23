@@ -5193,6 +5193,10 @@ export const englishMessages = {
   "sessionStatusModel.running": "Working",
   "sessionStatusModel.stuck": "Stuck",
   "sessionStatusModel.waitingOnYou": "Waiting on you",
+  "siteToolPersonalGitHub.description":
+    "This app runs on your own GitHub account with All my repositories. Connect or reconnect it and turn on All my repositories in GitHub settings, then try again.",
+  "siteToolPersonalGitHub.open": "Open GitHub settings",
+  "siteToolPersonalGitHub.title": "Use your own GitHub",
   "siteToolRecover.askSiteOwner": "Ask the app owner to publish it again.",
   "siteToolRecover.askWhoeverManages": "Ask whoever manages your {system} access.",
   "siteToolRecover.close": "Close",

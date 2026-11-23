@@ -77,7 +77,7 @@ function repositoryJson(fullName: string, id: string, push: boolean) {
   };
 }
 
-async function fixture(options: { offered?: boolean } = {}) {
+async function fixture(options: { offered?: boolean; mcpServers?: Settings["mcpServers"] } = {}) {
   const db = client!.db;
   const settings: Settings = testSettings({
     productAccessMode: "managed",
@@ -90,6 +90,7 @@ async function fixture(options: { offered?: boolean } = {}) {
     integrationsEnabled: true,
     integrationsStateSecret: "app-viewer-personal-github-state",
     environmentsEncryptionKey: Buffer.alloc(32, 23).toString("base64"),
+    ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
   });
   const key = environmentsEncryptionKeyBytes(settings)!;
   const ownerUser = `app-viewer-${crypto.randomUUID()}`;
@@ -412,6 +413,47 @@ describe("Your GitHub tools in an app", () => {
       policy: "block",
     });
     expect((await f.readiness(f.owner)).tools[0]).toMatchObject({ state: "blocked" });
+    expect(await failure(f.invoke(f.owner))).toBeDefined();
+    expect(f.github).toEqual([]);
+  });
+
+  test("a connection GitHub stopped accepting is offered Reconnect, not Connect", async () => {
+    if (!shared) return;
+    const f = await fixture();
+    const yours = await f.connectYourGitHub(f.owner, "benyhh", "owner-token", "write");
+    await shared.admin`update connections set status = 'needs_reauth' where id = ${yours.connectionId}`;
+    expect((await f.readiness(f.owner)).tools[0]).toMatchObject({ state: "reconnect" });
+    const setup = await describeWorkspaceSiteToolSetup(
+      f.deps,
+      f.owner.authorization,
+      f.site,
+      human,
+    );
+    expect(setup.items).toEqual([
+      expect.objectContaining({
+        action: "reconnect",
+        connector: "Your GitHub",
+        capabilityId: "api:github-personal",
+        connectionId: yours.connectionId,
+        account: "benyhh",
+        shared: false,
+      }),
+    ]);
+    expect(await failure(f.invoke(f.owner))).toBeDefined();
+    expect(f.github).toEqual([]);
+  });
+
+  test("a configured server with the reserved id stays as configured", async () => {
+    if (!shared) return;
+    const f = await fixture({
+      mcpServers: [{ id: "github_personal", name: "Configured", url: "https://mcp.example.test/" }],
+    });
+    await f.connectYourGitHub(f.owner, "benyhh", "owner-token", "write");
+    const inventory = await readSiteToolAccountInventory(f.deps, f.owner.grant);
+    expect(inventory.canonical.get("github_personal")?.name).not.toBe("Your GitHub");
+    expect(inventory.accounts.some((account) => account.connector === "Your GitHub")).toBe(false);
+    await failure(f.invoke(f.owner));
+    expect(f.github).toEqual([]);
   });
 
   test("only viewers who have Your GitHub may read the app's stored GitHub data", async () => {

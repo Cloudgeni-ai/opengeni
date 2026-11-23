@@ -24,6 +24,7 @@ import {
   PERSONAL_GITHUB_TOOLS_SERVER_ID,
   personalGitHubToolsOffered,
   personalGitHubToolsServerConfig,
+  readPersonalGitHubReconnectAccount,
   readPersonalGitHubToolsAuthority,
 } from "./personal-github-tools";
 import { exactAgentAttemptClaims } from "./sandbox/agent-fleet-context";
@@ -311,13 +312,27 @@ export async function readSiteToolReconnectAccounts(
   // Only a sign-in that must be renewed; `error` is any other failure, which
   // signing in again would not fix.
   const stale = connections.filter((connection) => connection.status === "needs_reauth");
-  if (stale.length === 0) return [];
+  const wanted = new Set(canonicalServerIds);
+  // Your GitHub: the viewer's own connection GitHub stopped accepting.
+  const personalGitHub = wanted.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)
+    ? await readPersonalGitHubReconnectAccount(deps.db, deps.settings, grant)
+    : null;
+  const personal: SiteToolReconnectAccount[] = personalGitHub
+    ? [
+        {
+          canonicalServerId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+          connectionId: personalGitHub.connectionId,
+          account: personalGitHub.login ?? "Your GitHub",
+          shared: false,
+        },
+      ]
+    : [];
+  if (stale.length === 0) return personal;
   const base = deps.catalogSourceSettings ?? deps.settings;
   const settings = await settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, base, {
     subjectId: grant.subjectId,
   });
-  const wanted = new Set(canonicalServerIds);
-  return mcpAccountBindingsFromVisibleConnections({
+  const mcp = mcpAccountBindingsFromVisibleConnections({
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
@@ -330,6 +345,7 @@ export async function readSiteToolReconnectAccounts(
     account: accountName(binding.accountLabel),
     shared: binding.subjectScope === "workspace",
   }));
+  return [...mcp, ...personal];
 }
 
 /**

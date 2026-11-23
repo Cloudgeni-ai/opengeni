@@ -772,7 +772,8 @@ function workspaceToolGatewayTargetRouteCheck(input: {
 }): (db: Database, stop: AbortSignal) => Promise<void> {
   const { grant, gatewaySettings, bindingSource } = input;
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
-  const usesPersonalGitHub = gatewayServerIds.has(PERSONAL_GITHUB_TOOLS_SERVER_ID);
+  const usesPersonalGitHub =
+    input.personalGitHub !== null && gatewayServerIds.has(PERSONAL_GITHUB_TOOLS_SERVER_ID);
   const selectedBindings = input.accountBindings.filter((binding) =>
     gatewayServerIds.has(binding.serverId),
   );
@@ -956,7 +957,12 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   });
   // Your GitHub tools run on the caller's own connection, when they have one
   // with All my repositories (read only when this request may use them).
+  // A configured server never takes the reserved id (as in a turn); if one
+  // does, it stays as configured and Your GitHub isn't added.
   const personalGitHub =
+    !accountRoutes.settings.mcpServers.some(
+      (server) => server.id === PERSONAL_GITHUB_TOOLS_SERVER_ID,
+    ) &&
     (!targetNamespace || targetNamespace === PERSONAL_GITHUB_TOOLS_SERVER_ID) &&
     (!allowedIdentities ||
       allowedIdentities.some((identity) => identity.serverId === PERSONAL_GITHUB_TOOLS_SERVER_ID))
