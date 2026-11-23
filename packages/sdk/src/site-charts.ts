@@ -49,8 +49,9 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     pct: function (v, o) {
       o = o || {};
       if (!isNum(v)) return DASH;
+      // One decimal below 100%, so a column of percentages lines up.
       var d = o.digits != null ? o.digits : Math.abs(v) >= 100 ? 0 : 1;
-      return NF({ maximumFractionDigits: d, minimumFractionDigits: o.digits != null ? d : 0 }).format(v) + "%";
+      return NF({ maximumFractionDigits: d, minimumFractionDigits: d }).format(v) + "%";
     },
     ratio: function (v, o) { return isNum(v) ? fmt.pct(v * 100, o) : DASH; },
     ms: function (v) {
@@ -98,7 +99,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       if (!isNum(v)) return { text: DASH, tone: "flat" };
       var unit = o.unit == null ? "%" : o.unit;
       var mag = Math.abs(v);
-      var body = unit === "%" ? fmt.pct(mag, { digits: o.digits }) : unit === "pp" ? fmt.num(mag, { digits: o.digits != null ? o.digits : 1 }) + " pp" : format(unit)(mag);
+      var body = unit === "%" ? fmt.pct(mag, { digits: o.digits != null ? o.digits : mag >= 10 ? 0 : 1 }) : unit === "pp" ? fmt.num(mag, { digits: o.digits != null ? o.digits : 1 }) + " pp" : format(unit)(mag);
       var flat = mag < (o.flat != null ? o.flat : 1e-9);
       var arrow = flat ? "" : v > 0 ? "\u25B2 " : "\u25BC ";
       var better = o.better || "higher";
@@ -179,8 +180,12 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     if (err <= 0.15) step *= 10; else if (err <= 0.35) step *= 5; else if (err <= 0.75) step *= 2;
     return step;
   }
-  // Rounded domain and ticks covering [lo, hi].
+  // Rounded domain and ticks covering [lo, hi], with a little room so no
+  // mark sits on the frame.
   function nice(lo, hi, count, zero) {
+    var room = (hi - lo) * 0.06;
+    if (!(zero && lo >= 0)) lo -= room;
+    hi += room;
     if (zero) { lo = Math.min(0, lo); hi = Math.max(0, hi); }
     if (lo === hi) { var pad = Math.abs(lo) * 0.1 || 1; lo -= pad; hi += pad; }
     var step = niceStep(hi - lo, count);
@@ -320,9 +325,9 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     var narrow = w < 480;
     var H = o.height || (narrow ? 220 : 260);
     var yt = nice(Math.min.apply(null, ys), Math.max.apply(null, ys), narrow ? 4 : 5, o.zero);
-    var yf = format(o.yFormat || o.format);
+    var yf = tickFormat(o.yFormat || o.format, yt.ticks);
     var left = Math.ceil(Math.max.apply(null, yt.ticks.map(function (t) { return textWidth(yf(t)); }))) + 10;
-    var pad = { l: Math.max(left, 28), r: 12, t: o.yLabel ? 24 : 8, b: o.xLabel ? 44 : 26 };
+    var pad = { l: Math.max(left, 28), r: 12, t: o.yLabel || o.better ? 26 : 8, b: o.xLabel ? 44 : 26 };
     var svg = s("svg", { width: w, height: H, viewBox: "0 0 " + w + " " + H, role: "img" });
     if (o.title) s("title", {}, svg).textContent = o.title;
     var X = function (v) { return pad.l + ((v - xs.lo) / (xs.hi - xs.lo || 1)) * (w - pad.l - pad.r); };
@@ -336,11 +341,26 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       var yl = s("text", { x: 0, y: 12, class: "og-axis-title" }, svg);
       yl.textContent = o.yLabel;
     }
+    // Which way is better, above the plot so it never covers a mark.
+    if (o.better && (o.better.x || o.better.y)) {
+      var arrow = { "higher,higher": "\u2197", "lower,higher": "\u2196", "higher,lower": "\u2198", "lower,lower": "\u2199" }[o.better.x + "," + o.better.y] ||
+        (o.better.x === "lower" ? "\u2190" : o.better.x === "higher" ? "\u2192" : o.better.y === "lower" ? "\u2193" : "\u2191");
+      var bt = s("text", { x: w - pad.r, y: 12, "text-anchor": "end", class: "og-better" }, svg);
+      bt.textContent = arrow + " " + (o.better.text || "better");
+    }
     if (o.xLabel) {
       var xl = s("text", { x: w - pad.r, y: H - 4, "text-anchor": "end", class: "og-axis-title" }, svg);
       xl.textContent = o.xLabel;
     }
     return { svg: svg, X: X, Y: Y, H: H, pad: pad, w: w, narrow: narrow };
+  }
+  // Ticks are round numbers: drop decimals they don't need ("40%", not "40.0%").
+  function tickFormat(f, ticks) {
+    var base = format(f);
+    var name = typeof f === "string" ? f : f && typeof f === "object" ? f.type : null;
+    if ((name === "pct" || name === "num") && ticks.every(function (t) { return Math.abs(t % 1) < 1e-9; }))
+      return function (v) { return fmt[name](v, { digits: 0 }); };
+    return base;
   }
   function xTicks(fr, ticks, label) {
     // Keep only ticks whose labels fit side by side.
@@ -460,13 +480,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       var xt = nice(Math.min.apply(null, xsv), Math.max.apply(null, xsv), w < 480 ? 3 : 5, o.zeroX);
       var fr = frame(body, w, o, xt, ysv);
       xt.ticks.forEach(function (t) { s("line", { x1: fr.X(t), x2: fr.X(t), y1: fr.pad.t, y2: fr.H - fr.pad.b, class: "og-grid og-grid-x" }, fr.svg); });
-      xTicks(fr, xt.ticks, xf);
-      if (o.better && (o.better.x || o.better.y)) {
-        var bx = o.better.x === "lower" ? fr.pad.l + 6 : w - fr.pad.r - 6;
-        var by = o.better.y === "lower" ? fr.H - fr.pad.b - 6 : fr.pad.t + 14;
-        var t = s("text", { x: bx, y: by, "text-anchor": o.better.x === "lower" ? "start" : "end", class: "og-better" }, fr.svg);
-        t.textContent = (o.better.x === "lower" ? "\u2190 " : "") + (o.better.text || "Better") + (o.better.x === "higher" ? " \u2192" : "") + (o.better.y === "higher" ? " \u2191" : o.better.y === "lower" ? " \u2193" : "");
-      }
+      xTicks(fr, xt.ticks, tickFormat(o.xFormat || "num", xt.ticks));
       var placed = [];
       var tip = null;
       var marks = data.map(function (r) {
@@ -491,17 +505,22 @@ export const SITE_CHARTS_JS = String.raw`(function () {
         dot.addEventListener("focus", show);
         dot.addEventListener("pointerleave", hide);
         dot.addEventListener("blur", hide);
-        placed.push({ x1: m.x - 7, x2: m.x + 7, y1: m.y - 7, y2: m.y + 7 });
+        placed.push({ x1: m.x - 6, x2: m.x + 6, y1: m.y - 6, y2: m.y + 6 });
       });
       // Direct labels where they fit; the rest stay in the tooltip.
       if (o.label && o.labels !== false) {
         marks.slice().sort(function (a, b) { return b.hl - a.hl; }).forEach(function (m) {
           var txt = String(get(m.r, o.label)), tw = textWidth(txt), th = 14;
-          var spots = [[m.x + 9, m.y + 4, "start"], [m.x - 9, m.y + 4, "end"], [m.x, m.y - 10, "middle"], [m.x, m.y + 18, "middle"]];
+          var spots = [[m.x + 11, m.y + 4, "start"], [m.x - 11, m.y + 4, "end"], [m.x, m.y - 11, "middle"], [m.x, m.y + 19, "middle"]];
           for (var i = 0; i < spots.length; i++) {
             var sx = spots[i][0], sy = spots[i][1], an = spots[i][2];
             var x1 = an === "start" ? sx : an === "end" ? sx - tw : sx - tw / 2;
-            var box = { x1: x1 - 4, x2: x1 + tw + 4, y1: sy - th + 3, y2: sy + 3 };
+            if (an === "middle") {
+              // Slide a centred label inward rather than lose it at an edge.
+              x1 = Math.max(fr.pad.l + 3, Math.min(w - fr.pad.r - tw - 3, x1));
+              sx = x1 + tw / 2;
+            }
+            var box = { x1: x1 - 3, x2: x1 + tw + 3, y1: sy - th + 3, y2: sy + 3 };
             if (box.x1 < fr.pad.l || box.x2 > w - fr.pad.r || box.y1 < fr.pad.t || box.y2 > fr.H - fr.pad.b) continue;
             if (placed.some(function (p) { return box.x1 < p.x2 && box.x2 > p.x1 && box.y1 < p.y2 && box.y2 > p.y1; })) continue;
             placed.push(box);
@@ -553,7 +572,8 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       cols.forEach(function (c) {
         var numeric = c.align ? c.align === "right" : isNum(get(rows[0], c.key)) || !!c.format;
         c._num = numeric;
-        var th = h("th", (numeric ? "og-num" : "") + (c.optional ? " og-hide-narrow" : ""));
+        c._wrap = !numeric && rows.some(function (r) { var v = get(r, c.key); return typeof v === "string" && v.length > 32; });
+        var th = h("th", (numeric ? "og-num" : "") + (c._wrap ? " og-wrap" : "") + (c.optional ? " og-hide-narrow" : ""));
         th.scope = "col";
         if (c.width) th.style.width = c.width;
         if (o.sortable === false) th.textContent = c.label != null ? c.label : c.key;
@@ -576,7 +596,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
         var row = h("tr", o.highlight && o.highlight(r) ? "og-highlight" : "");
         cols.forEach(function (c, ci) {
           var v = get(r, c.key);
-          var cell = h(ci === 0 ? "th" : "td", (c._num ? "og-num" : "") + (c.optional ? " og-hide-narrow" : ""));
+          var cell = h(ci === 0 ? "th" : "td", (c._num ? "og-num" : "") + (c._wrap ? " og-wrap" : "") + (c.optional ? " og-hide-narrow" : ""));
           if (ci === 0) cell.scope = "row";
           var text = typeof c.format === "function" ? c.format(v, r) : c.format ? format(c.format)(v) : v == null ? DASH : String(v);
           if (c.render) { var out = c.render(v, r); if (out instanceof Node) cell.appendChild(out); else cell.textContent = out; }

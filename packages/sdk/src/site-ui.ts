@@ -69,7 +69,7 @@ export const SITE_UI_CSS = [
   `.og-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}`,
   `.og-empty{padding:24px 16px;text-align:center;color:var(--og-fg-muted);border:1px dashed var(--og-border);border-radius:var(--og-radius-card)}`,
   `.og-details>summary{cursor:pointer;font-weight:500;padding:8px 0;color:var(--og-fg-label)}.og-details[open]>summary{margin-bottom:8px}`,
-  `.og-table-wrap{overflow-x:auto;max-width:100%}`,
+  `.og-table-wrap{overflow-x:auto;max-width:100%}.og-table-wrap th,.og-table-wrap td{white-space:nowrap}.og-table-wrap .og-wrap{white-space:normal;min-width:14rem}`,
   `.og-table td,.og-table tbody th{font-size:0.875rem;line-height:1.43;text-align:left;font-weight:400;color:var(--og-fg)}.og-table .og-num{text-align:right}.og-table tbody tr:last-child>*{border-bottom:0}`,
   `.og-table tbody tr:hover>*{background:var(--og-surface-2)}.og-table tr.og-highlight>*{background:var(--og-primary);font-weight:500}`,
   `.og-table .og-best{font-weight:600}.og-table .og-sort{all:unset;cursor:pointer;color:inherit}.og-table .og-sort:focus-visible{outline:2px solid var(--og-focus)}`,
