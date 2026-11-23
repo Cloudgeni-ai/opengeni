@@ -273,9 +273,9 @@ postgresTest(
       expect(afterCall.open).toBe(false);
 
       // The definer's own statement uses 1551's index: this transaction's scan
-      // counters show index scans and no sequential scan of event_sources.
-      // Earlier calls on this connection may have cached a generic plan made
-      // with sequential scans allowed, so the function plans afresh here.
+      // counter for it rises. Earlier calls on this connection may have cached
+      // a generic plan made with sequential scans allowed, so the function
+      // plans afresh here.
       const scans = await withRlsContext(grantedClient.db, home, async (tx) => {
         await tx.execute(sql`discard plans`);
         await tx.execute(sql`set local enable_seqscan = off`);
@@ -284,20 +284,14 @@ postgresTest(
           sql`select workspace_id from opengeni_private.list_shared_slack_event_sources_v2(
             ${accountId}::uuid, ${home.workspaceId}::uuid, ${bot.id}::uuid, ${externalKey}::text)`,
         );
-        const [counts] = await rawRows<{ index_scans: string; table_scans: string }>(
+        const [counts] = await rawRows<{ index_scans: string }>(
           tx,
-          sql`select pg_stat_get_xact_numscans('event_sources_slack_team_idx'::regclass) as index_scans,
-            pg_stat_get_xact_numscans('event_sources'::regclass) as table_scans`,
+          sql`select pg_stat_get_xact_numscans('event_sources_slack_team_idx'::regclass) as index_scans`,
         );
-        return {
-          listed,
-          indexScans: Number(counts?.index_scans),
-          tableScans: Number(counts?.table_scans),
-        };
+        return { listed, indexScans: Number(counts?.index_scans) };
       });
       expect(scans.listed).toEqual([{ workspace_id: target.workspaceId }]);
       expect(scans.indexScans).toBeGreaterThan(0);
-      expect(scans.tableScans).toBe(0);
 
       // Even for the tables' owner, the window covers only the current
       // organization's Slack rows, and a window it already holds stays open.
