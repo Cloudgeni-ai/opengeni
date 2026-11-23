@@ -1,5 +1,28 @@
 # @opengeni/runtime
 
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: App server code: publishing refuses tool names that aren't tools in the workspace and names the id to use, and an agent's `app_server_run` and run logs act for the person whose turn it is.
+- 1d7c08a: Restore streamed remote workspace archives that contain symlinks. A save stores the workspace's symlinks, but the streamed restore refused them, so any workspace with one could be saved and never restored. A failed hydration now logs why.
+- Updated dependencies [17783d3]
+  - @opengeni/config@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/jev@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/sdk@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes

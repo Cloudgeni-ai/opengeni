@@ -1,5 +1,43 @@
 # @opengeni/worker-bundle
 
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: Require Node.js 22.15 or later (`engines.node`) for the packages that load `@opengeni/storage`, which uses zlib's zstd streams; on older Node versions the import fails.
+- Updated dependencies [ae9c227]
+- Updated dependencies [3595193]
+- Updated dependencies [ae9c227]
+- Updated dependencies [1d7c08a]
+- Updated dependencies [17783d3]
+  - @opengeni/runtime@6.37.1
+  - @opengeni/db@6.37.1
+  - @opengeni/core@6.37.1
+  - @opengeni/storage@6.37.1
+  - @opengeni/documents@6.37.1
+  - @opengeni/config@6.37.1
+  - @opengeni/events@6.37.1
+  - @opengeni/github@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/jev@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/sdk@6.37.1
+  - @opengeni/subscriptions@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/vaults-bitwarden@6.37.1
+  - @opengeni/vaults-keeper@6.37.1
+  - @opengeni/vaults-onepassword@6.37.1
+  - @opengeni/vaults-protonpass@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes
