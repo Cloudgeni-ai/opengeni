@@ -733,9 +733,10 @@ test("a composer that mounts again opens Connectors from the last rows, refreshi
   again.remove();
 });
 
-test("Reconnect required stays until the connector is reconnected, even when the catalog stops listing it", async () => {
-  // A Personal workspace carries a connector from another workspace only while
-  // the person's account there works; once it stops, the catalog drops it.
+test("Reconnect required comes from the server, so it survives a reload or another device until reconnected", async () => {
+  // A Personal workspace's connector carried from another workspace: the
+  // catalog keeps listing it while the person's account there needs
+  // reconnecting, and the account inventory says so.
   const entry = {
     id: "mcp:atlassian",
     name: "Atlassian",
@@ -758,72 +759,70 @@ test("Reconnect required stays until the connector is reconnected, even when the
     turnedOnHere: true,
     status: "needs_reauth",
   } as ConnectionMetadata;
-  let items = [entry];
-  let connections = [account];
-  context.client = {
-    listCapabilities: async () => ({ items }),
-    listOwnConnectionAccounts: async () => connections,
-    catalogAssetUrl: () => null,
-  } as unknown as ChatClient<OpenGeniBrowserClient>;
-  const selections: string[][] = [];
+  const server = {
+    items: [entry],
+    connections: [account],
+  };
+  // Each mount gets its own client, as after a reload or on another device:
+  // nothing is remembered between them.
+  const freshClient = () =>
+    ({
+      listCapabilities: async () => ({ items: server.items }),
+      listOwnConnectionAccounts: async () => server.connections,
+      catalogAssetUrl: () => null,
+    }) as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [{ id: "atlassian", name: "Atlassian" }],
     selection: { mcpServerIds: new Set(["atlassian"]), firstPartyToolIds: new Set() },
     firstPartyTools: [],
     fileUploadsEnabled: false,
-    onToolSelectionChange: (selection: ComposerPlusProps["selection"]) => {
-      selections.push([...selection.mcpServerIds]);
-    },
+    onToolSelectionChange: () => {},
   } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
-  const container = document.createElement("div");
-  document.body.appendChild(container);
-  const root = createRoot(container);
-  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
   const status = () =>
-    composer!.servers.find((server) => server.id === "atlassian")?.connectionStatus;
-  expect(status()).toBe("reconnect");
+    composer!.servers.find((candidate) => candidate.id === "atlassian")?.connectionStatus;
+  const mount = async (mountProps = props) => {
+    context.client = freshClient();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<WorkspaceComposerPlus {...mountProps} />);
+      await Bun.sleep(0);
+    });
+    return async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    };
+  };
+  const refocus = async () =>
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Bun.sleep(0);
+    });
 
-  // The next read no longer lists it, and the host's rows carry no status.
-  items = [];
-  await act(async () => {
-    window.dispatchEvent(new Event("focus"));
-    await Bun.sleep(0);
-  });
+  let unmount = await mount();
   expect(status()).toBe("reconnect");
   expect(composer!.connectorActions?.onReconnect).toBeDefined();
+  await refocus();
+  await refocus();
+  expect(status()).toBe("reconnect");
+  await unmount();
 
-  // Reconnected: the account works again and the catalog lists it as ready.
-  items = [entry];
-  connections = [{ ...account, status: "active" } as ConnectionMetadata];
-  await act(async () => {
-    window.dispatchEvent(new Event("focus"));
-    await Bun.sleep(0);
-  });
+  // A reload (or another device) reads it again from the server.
+  unmount = await mount();
+  expect(status()).toBe("reconnect");
+
+  // Reconnected: the account works again.
+  server.connections = [{ ...account, status: "active" } as ConnectionMetadata];
+  await refocus();
   expect(status()).toBe("ready");
+  await unmount();
 
-  // Stops working again; then the person turns it off for this chat.
-  connections = [account];
-  await act(async () => {
-    window.dispatchEvent(new Event("focus"));
-    await Bun.sleep(0);
-  });
-  expect(status()).toBe("reconnect");
-  items = [];
-  await act(async () => {
-    window.dispatchEvent(new Event("focus"));
-    await Bun.sleep(0);
-  });
-  expect(status()).toBe("reconnect");
-  await act(async () =>
-    composer!.onToolSelectionChange({
-      mcpServerIds: new Set(),
-      firstPartyToolIds: new Set(),
-    } as unknown as ComposerPlusProps["selection"]),
-  );
-  expect(selections).toEqual([[]]);
-  await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+  // A connector gone from both the chat's connectors and the catalog leaves no row.
+  server.items = [];
+  server.connections = [account];
+  unmount = await mount({ ...props, servers: [] } as typeof props);
   expect(status()).toBeUndefined();
-  await act(async () => root.unmount());
-  container.remove();
+  await unmount();
 });

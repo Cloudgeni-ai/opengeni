@@ -391,8 +391,11 @@ now (a compaction-only turn has a few exceptions of its own, described under
 manual compaction in `docs/context-compaction.md`). A reconnected or newly
 connected account is therefore used, and a revoked one is not. A picked account that can no longer
 be used is never replaced by another account: the connector keeps the person's
-other picks that still work, as a new message would, and is left out of the
-continued turn when none remain. Each left-out pick or connector is recorded in
+other picks that still work, as a new message would. A connector whose picks
+all stopped working (`needs_reauth`, `revoked` or `error`) stays in the
+continued turn with no account bound; one whose picks can no longer be found
+or used for another reason (for example the account was deleted) is left out
+of it. Each left-out pick or connector is recorded in
 the turn's internal `connectionAccountGaps` metadata. A carried intent that names someone other than the continued turn's
 person resolves shared accounts only. A child session carries its parent turn's
 intent, so its own continuations resolve for the parent's person. Messages and

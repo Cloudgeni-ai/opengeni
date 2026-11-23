@@ -4716,6 +4716,7 @@ async function createSessionForRequestInFileScope(
     await reportOmittedConnectionAccounts(unresolvedDeps, {
       workspaceId,
       sessionId: createOutcome.session.id,
+      turnId: createOutcome.session.initialTurnId,
       omitted: omittedSelections,
     });
   return await withSessionCreateUsageRecording({
@@ -5300,6 +5301,8 @@ async function acceptSessionUserMessageInFileScope(
       await reportOmittedConnectionAccounts(deps, {
         workspaceId,
         sessionId,
+        turnId: turn.id,
+        turnGeneration: turn.executionGeneration,
         omitted: omittedSelections,
       });
     return {

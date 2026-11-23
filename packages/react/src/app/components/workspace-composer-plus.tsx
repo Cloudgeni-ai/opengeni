@@ -17,7 +17,6 @@ import {
 } from "../lib/capabilities";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { usePage } from "../lib/navigation";
-import type { McpServerOption } from "../lib/session-tools";
 
 type ConnectorCatalog = {
   items: CapabilityCatalogItem[];
@@ -48,87 +47,6 @@ function cacheConnectorCatalog(
   }
   if (value) byWorkspace.set(workspaceId, value);
   else byWorkspace.delete(workspaceId);
-}
-
-/**
- * A connector seen needing reconnecting, kept until it is reconnected or the
- * person turns it off for the chat. Its row otherwise drops the marker
- * whenever the composer has no current read (a reload after a sign-in or
- * grant refresh shows rows without status) and, in a Personal workspace,
- * when the catalog stops carrying a connector from another workspace whose
- * account stopped working, so the row vanishes moments after it appeared.
- */
-type NeedsReconnect = {
-  server: McpServerOption;
-  item: CapabilityCatalogItem;
-  connections: ConnectionMetadata[];
-};
-const needsReconnectCache = new WeakMap<object, Map<string, Map<string, NeedsReconnect>>>();
-
-function needsReconnectFor(client: object, workspaceId: string): Map<string, NeedsReconnect> {
-  let byWorkspace = needsReconnectCache.get(client);
-  if (!byWorkspace) {
-    byWorkspace = new Map();
-    needsReconnectCache.set(client, byWorkspace);
-  }
-  let marked = byWorkspace.get(workspaceId);
-  if (!marked) {
-    marked = new Map();
-    byWorkspace.set(workspaceId, marked);
-  }
-  return marked;
-}
-
-/**
- * Rows with every connector still needing reconnecting marked so. A fresh
- * read clears a mark only when it shows the connector working again, or its
- * account active again or gone; an unchanged or missing answer keeps it.
- */
-export function keepReconnectMarkers(
-  rows: McpServerOption[],
-  marked: Map<string, NeedsReconnect>,
-  current: ConnectorCatalog | null,
-): McpServerOption[] {
-  for (const row of rows) {
-    if (row.connectionStatus !== "reconnect" || !current) continue;
-    const item = current.items.find((candidate) => candidate.runtime.mcpServerId === row.id);
-    const account = item ? connectionHealth(item, current.connections ?? [], true) : null;
-    if (item && account?.state === "attention" && account.connection)
-      marked.set(row.id, { server: row, item, connections: [account.connection] });
-  }
-  if (current?.connections) {
-    for (const [serverId, mark] of marked) {
-      const row = rows.find((candidate) => candidate.id === serverId);
-      const listed = current.items.some((item) => item.runtime.mcpServerId === serverId);
-      if (
-        listed &&
-        row &&
-        row.connectionStatus !== "reconnect" &&
-        row.connectionStatus !== "unknown"
-      ) {
-        marked.delete(serverId);
-        continue;
-      }
-      if (!listed) {
-        const ids = new Set(mark.connections.map((connection) => connection.id));
-        const accounts = current.connections.filter((connection) => ids.has(connection.id));
-        const stillBroken = accounts.some(
-          (connection) => connection.status === "needs_reauth" || connection.status === "error",
-        );
-        if (!stillBroken) marked.delete(serverId);
-      }
-    }
-  }
-  if (marked.size === 0) return rows;
-  const next = rows.map((row) =>
-    marked.has(row.id) && row.connectionStatus !== "reconnect"
-      ? { ...marked.get(row.id)!.server, ...row, connectionStatus: "reconnect" as const }
-      : row,
-  );
-  for (const [serverId, mark] of marked) {
-    if (!next.some((row) => row.id === serverId)) next.push(mark.server);
-  }
-  return next;
 }
 
 export function WorkspaceComposerPlus(
@@ -192,9 +110,6 @@ export function WorkspaceComposerPlus(
         : null;
   const deniedMessage =
     "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access.";
-  // Marks belong to this caller and workspace; losing connection access drops them.
-  if (canReadConnections === false) needsReconnectCache.get(client)?.delete(workspaceId);
-  const marked = canReadConnections === true ? needsReconnectFor(client, workspaceId) : null;
   const reload = useCallback(async () => {
     const request = ++lifecycle.revision;
     const generation = lifecycle.generation;
@@ -360,21 +275,13 @@ export function WorkspaceComposerPlus(
   const reconnect = async (serverId: string, account?: ConnectionMetadata) => {
     const generation = lifecycle.generation;
     const deniedRevision = lifecycle.deniedConnectionsRevision;
-    const listed = current?.items.find((candidate) => candidate.runtime.mcpServerId === serverId);
-    // A connector the catalog stopped listing (its account stopped working)
-    // reconnects through the account it was seen with.
-    const mark = listed ? undefined : marked?.get(serverId);
-    const item = listed ?? mark?.item;
+    const item = current?.items.find((candidate) => candidate.runtime.mcpServerId === serverId);
     // A named account (a pick that stopped working) reconnects that account.
-    const health = account
-      ? item
+    const health = item
+      ? account
         ? connectionHealth(item, [account], true)
-        : null
-      : listed
-        ? connectionHealth(listed, current?.connections ?? [], current?.connections !== null)
-        : mark
-          ? connectionHealth(mark.item, mark.connections, true)
-          : null;
+        : connectionHealth(item, current?.connections ?? [], current?.connections !== null)
+      : null;
     const plan = item && health ? capabilityReconnectPlan(item, health) : null;
     // Reuse a surviving OAuth connection. A missing credential or API key uses
     // the existing settings repair flow so a new account is never silently bound.
@@ -433,29 +340,20 @@ export function WorkspaceComposerPlus(
         setBusyId(null);
     }
   };
-  const rows = composerConnectorOptions(
-    current
-      ? props.servers
-      : props.servers.map(({ connectionStatus, detail: _detail, ...server }) => ({
-          ...server,
-          ...(connectionStatus ? { connectionStatus: "unknown" as const } : {}),
-        })),
-    current?.items ?? [],
-    current?.connections ?? null,
-    (path) => client.catalogAssetUrl(path),
-  );
   return (
     <ComposerMobilePlus
       {...props}
-      servers={marked ? keepReconnectMarkers(rows, marked, current) : rows}
-      onToolSelectionChange={(selection) => {
-        // Turned off for this chat: the person has dealt with it.
-        for (const serverId of marked?.keys() ?? []) {
-          if (props.selection.mcpServerIds.has(serverId) && !selection.mcpServerIds.has(serverId))
-            marked?.delete(serverId);
-        }
-        props.onToolSelectionChange(selection);
-      }}
+      servers={composerConnectorOptions(
+        current
+          ? props.servers
+          : props.servers.map(({ connectionStatus, detail: _detail, ...server }) => ({
+              ...server,
+              ...(connectionStatus ? { connectionStatus: "unknown" as const } : {}),
+            })),
+        current?.items ?? [],
+        current?.connections ?? null,
+        (path) => client.catalogAssetUrl(path),
+      )}
       connectorActions={{
         ...props.connectorActions,
         onReconnect: (id, account) => void reconnect(id, account),

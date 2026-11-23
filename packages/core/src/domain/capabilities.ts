@@ -310,6 +310,9 @@ export async function buildCapabilityCatalog(input: {
         subjectId: input.subjectId,
         accountId: input.accountId,
         ownServers: [...input.settings.mcpServers, ...runnableMcpServers],
+        // Listed even when the owner's account stopped working, so its
+        // connector keeps showing that it needs reconnecting.
+        includeLapsed: true,
       })
     : [];
   return {

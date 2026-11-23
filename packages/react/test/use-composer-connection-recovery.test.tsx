@@ -127,9 +127,10 @@ for (const explicit of [false, true]) {
   test(`a refused send goes again once on its own without the account that stopped working (${explicit ? "explicit picks" : "default accounts"})`, async () => {
     const working = crypto.randomUUID();
     const expired = crypto.randomUUID();
+    let lapsed = true;
     const { hook, sent, state } = await chat({
       inventory: [account(working), account(expired)],
-      refuse: (ids) => (ids.includes(expired) ? expired : null),
+      refuse: (ids) => (lapsed && ids.includes(expired) ? expired : null),
     });
     if (explicit)
       await actRun(() => hook.result.current.accounts.selectAccount("mail", [working, expired]));
@@ -142,11 +143,23 @@ for (const explicit of [false, true]) {
     expect(hook.result.current.composer.value).toBe("");
     expect(state.deliveryErrors).toBe(0);
     expect(state.reads).toBe(2);
-    expect(hook.result.current.accounts.selections).toEqual([
-      { serverId: "mail", connectionId: working },
-    ]);
     expect(hook.result.current.accounts.requiresAccountChoice).toBe(false);
-    if (explicit) expect(hook.result.current.accounts.accountChoices).toEqual({ mail: [working] });
+    if (explicit) {
+      // Only the retry was narrowed: the person's picks stay, so the account
+      // is picked again once it is reconnected.
+      expect(hook.result.current.accounts.accountChoices).toEqual({ mail: [working, expired] });
+      lapsed = false;
+      state.inventory = [account(working), account(expired)];
+      await actRun(() => hook.result.current.accounts.refresh());
+      await flush();
+      await send(hook);
+      expect(sent.slice(2)).toEqual([[working, expired]]);
+      expect(hook.result.current.composer.optimisticMessages ?? []).toEqual([]);
+    } else {
+      expect(hook.result.current.accounts.selections).toEqual([
+        { serverId: "mail", connectionId: working },
+      ]);
+    }
     await hook.unmount();
   });
 }

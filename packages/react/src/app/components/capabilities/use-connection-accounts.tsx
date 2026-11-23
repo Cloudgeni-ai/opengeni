@@ -295,8 +295,9 @@ export function useConnectionAccounts(
      * For a send refused over its connector accounts: re-read them and give
      * the picks to send again with, leaving out accounts that stopped working
      * or are no longer listed only where the connector keeps another pick.
-     * Never adds, swaps or widens; null keeps the refusal. Explicit choices
-     * narrow the same way.
+     * Never adds, swaps or widens; null keeps the refusal. Only the retry is
+     * narrowed: the person's choices stay as they are, so an account they
+     * reconnect is picked again.
      */
     reviseRefusedAccounts: async (
       error: unknown,
@@ -306,25 +307,6 @@ export function useConnectionAccounts(
       const groups = await refresh(false);
       if (!groups) return null;
       const kept = accountsWithoutUnusablePicks(sent, groups);
-      if (!kept) return null;
-      if (scope.current.epoch === epoch && scope.current.canReadConnections === true) {
-        setChoices((current) => {
-          const accounts =
-            current?.client === client && current.identity === identity && current.epoch === epoch
-              ? current.accounts
-              : initialChoices;
-          const narrowed = { ...accounts };
-          for (const [serverId, ids] of Object.entries(accounts)) {
-            const still = ids.filter((id) =>
-              kept.some((pick) => pick.serverId === serverId && pick.connectionId === id),
-            );
-            // A pin with nothing left stays as it was: the next send asks to
-            // review it rather than widening to the connector's defaults.
-            if (still.length > 0) narrowed[serverId] = still;
-          }
-          return { client, identity, epoch, accounts: narrowed };
-        });
-      }
       return kept;
     },
   };

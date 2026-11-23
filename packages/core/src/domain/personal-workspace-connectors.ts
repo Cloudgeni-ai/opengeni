@@ -180,6 +180,12 @@ export async function personalWorkspaceExtensionMcpServers(
       | (() => Promise<readonly Pick<EnabledMcpCapabilityServer, "id" | "url">[]>);
     /** The owner's origin connections when the caller already read them. */
     origins?: readonly PersonalWorkspaceOriginConnections[];
+    /**
+     * Also carry connectors whose only matching connection stopped working,
+     * so the catalog keeps listing them as needing reconnecting. Listings
+     * only; never for anything that binds or runs a connector.
+     */
+    includeLapsed?: boolean;
   },
 ): Promise<PersonalWorkspaceExtensionMcpServer[]> {
   const subjectId = input.subjectId;
@@ -194,6 +200,7 @@ export async function personalWorkspaceExtensionMcpServers(
       accountId,
       workspaceId: input.workspaceId,
       subjectId,
+      ...(input.includeLapsed ? { includeLapsed: true } : {}),
     }));
   if (origins.length === 0) return [];
   const policy = await readOrganizationIntegrationPolicyForServing(db, {
@@ -219,9 +226,13 @@ export async function personalWorkspaceExtensionMcpServers(
       await listOriginMcpCapabilityServersForPersonalExtension(db, origin.originWorkspaceId);
     let originWorkspaceName: string | null = null;
     for (const server of servers) {
-      const connection = origin.connections.find((candidate) =>
-        refMatchesConnection(server.connectionRef, candidate),
+      const matching = origin.connections.filter(
+        (candidate) =>
+          (input.includeLapsed || candidate.status === "active") &&
+          refMatchesConnection(server.connectionRef, candidate),
       );
+      // A working connection wins over one that stopped working.
+      const connection = matching.find((candidate) => candidate.status === "active") ?? matching[0];
       if (
         !connection ||
         !allowedByPolicy(server) ||

@@ -450,6 +450,40 @@ test("the Personal connector page shows carried connectors labelled with their w
   expect(anonymous.items.some((item) => item.id === f.custom.id)).toBe(false);
 }, 60_000);
 
+test("a carried connector whose account stopped working stays listed but never runs", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const listed = async () =>
+    (
+      await buildCapabilityCatalog({
+        db: client.db,
+        workspaceId: f.miaPersonal,
+        settings,
+        subjectId: f.mia,
+      })
+    ).items.find((item) => item.id === f.custom.id);
+  const runs = async () =>
+    ids((await personalServers({ workspaceId: f.miaPersonal, subjectId: f.mia })).servers);
+  for (const status of ["needs_reauth", "error", "revoked"] as const) {
+    await sql`update connections set status = ${status} where id = ${f.connections.miaAcme}`;
+    try {
+      // The connector page and composer keep it, so it shows "Reconnect required"
+      // on every device and after a reload, until it is reconnected.
+      const item = await listed();
+      expect(item?.enabled).toBe(true);
+      expect(item?.metadata.personalExtension).toEqual({
+        originWorkspaceId: f.team,
+        originWorkspaceName: "Team workspace",
+      });
+      // Nothing that runs or binds a connector uses it.
+      expect(await runs()).toEqual([f.curated.serverId]);
+    } finally {
+      await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
+    }
+  }
+  expect(await runs()).toEqual([f.custom.serverId, f.curated.serverId].sort());
+}, 60_000);
+
 test("the owner can open a carried connector's approvals in their Personal workspace", async () => {
   if (!shared) return;
   const f = fixture;

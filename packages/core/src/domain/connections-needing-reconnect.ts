@@ -8,6 +8,7 @@ import { errorMessage } from "@opengeni/contracts/values";
 import {
   getConnectionMetadata,
   listConnectionsMetadata,
+  listSessionEvents,
   type ConnectionNeedsReauth,
   type Database,
 } from "@opengeni/db";
@@ -197,15 +198,26 @@ export type ConnectionNeedsReauthNoticeDeps = {
 export async function postConnectionNeedsReauthNotice(
   deps: ConnectionNeedsReauthNoticeDeps,
   broken: Omit<ConnectionNeedsReauth, "httpStatus" | "use"> & {
-    /** The chat to carry it; the turn only when an attempt of it found the break. */
-    use?:
-      | ConnectionNeedsReauth["use"]
-      | { workspaceId: string; sessionId: string; turnId?: undefined };
+    /**
+     * The chat to carry it, and the turn whose person it is for. Without a
+     * turn the inbox addresses it to the chat's owner.
+     */
+    use?: {
+      workspaceId: string;
+      sessionId: string;
+      turnId?: string | undefined;
+      attemptId?: string | undefined;
+      executionGeneration?: number | undefined;
+    };
+    /** Leave it alone when this chat already shows the notice (posted, not withdrawn). */
+    skipWhenShown?: boolean;
   },
 ): Promise<void> {
   const use = broken.use;
   if (!use) return;
   try {
+    const key = connectionNeedsReauthNoticeKey(broken.connectionId);
+    if (broken.skipWhenShown && (await noticeShown(deps.db, use, key))) return;
     const connection = await getConnectionMetadata(
       deps.db,
       broken.workspaceId,
@@ -215,7 +227,7 @@ export async function postConnectionNeedsReauthNotice(
     const service = connectionProviderName(broken.providerDomain);
     const account = connection ? connectionAccountLabel(connection, "") : "";
     const payload = SessionNotificationPostedPayload.parse({
-      key: connectionNeedsReauthNoticeKey(broken.connectionId),
+      key,
       title: `${service} needs reconnecting`,
       ...(account ? { subtitle: clip(account, NOTIFICATION_SUBTITLE_MAX_CHARS) } : {}),
       body: `${service} stopped accepting ${
@@ -228,12 +240,12 @@ export async function postConnectionNeedsReauthNotice(
       {
         type: "session.notification.posted",
         payload,
-        ...(use.turnId !== undefined
-          ? {
-              turnId: use.turnId,
-              turnGeneration: use.executionGeneration,
-              turnAttemptId: use.attemptId,
-            }
+        ...(use.turnId !== undefined ? { turnId: use.turnId } : {}),
+        ...(use.turnId !== undefined && use.executionGeneration !== undefined
+          ? { turnGeneration: use.executionGeneration }
+          : {}),
+        ...(use.turnId !== undefined && use.attemptId !== undefined
+          ? { turnAttemptId: use.attemptId }
           : {}),
       },
     ] as Parameters<typeof appendAndPublishEvents>[4]);
@@ -246,18 +258,49 @@ export async function postConnectionNeedsReauthNotice(
   }
 }
 
+/** Notification events read back to find a notice's latest state. */
+const NOTICE_LOOKBACK = 200;
+
+/** Whether the chat's latest event for this notice key posted it (not withdrew it). */
+async function noticeShown(
+  db: Database,
+  use: { workspaceId: string; sessionId: string },
+  key: string,
+): Promise<boolean> {
+  const events = await listSessionEvents(db, use.workspaceId, use.sessionId, {
+    includeTypes: ["session.notification.posted", "session.notification.withdrawn"],
+    direction: "before",
+    limit: NOTICE_LOOKBACK,
+  });
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    const payload = event.payload as { key?: unknown } | null;
+    if (payload?.key !== key) continue;
+    return event.type === "session.notification.posted";
+  }
+  return false;
+}
+
 /**
  * A new message was accepted without picked accounts that stopped working
  * (see `freezeConnectionAccounts`, "omit"). Log each, and for one whose
  * sign-in the provider refused, post its reconnect notice on the chat the
- * person sent from. The notice is keyed per connection, so it replaces any
- * earlier one for the same account rather than adding another.
+ * person sent from, on their turn so it reaches them rather than the chat's
+ * owner. A chat already showing that connection's notice gets no new one, so a
+ * dismissed notice stays dismissed while the account stays broken.
  */
 export async function reportOmittedConnectionAccounts(
   deps: Omit<ConnectionNeedsReauthNoticeDeps, "observability"> & {
     observability?: Pick<Observability, "info" | "warn"> | undefined;
   },
-  input: { workspaceId: string; sessionId: string; omitted: readonly OmittedConnectionAccount[] },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    /** The accepted turn the omission belongs to. */
+    turnId: string | null;
+    turnGeneration?: number | undefined;
+    omitted: readonly OmittedConnectionAccount[];
+  },
 ): Promise<void> {
   for (const omitted of input.omitted) {
     deps.observability?.info("Picked connector account left out of an accepted message", {
@@ -273,7 +316,15 @@ export async function reportOmittedConnectionAccounts(
       connectionId: omitted.connectionId,
       subjectId: omitted.account.subjectId,
       providerDomain: omitted.account.providerDomain,
-      use: { workspaceId: input.workspaceId, sessionId: input.sessionId },
+      use: {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        ...(input.turnId ? { turnId: input.turnId } : {}),
+        ...(input.turnId && input.turnGeneration !== undefined
+          ? { executionGeneration: input.turnGeneration }
+          : {}),
+      },
+      skipWhenShown: true,
     });
   }
 }

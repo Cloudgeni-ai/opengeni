@@ -230,7 +230,18 @@ export type PersonalWorkspaceOriginConnections = {
  */
 export async function personalWorkspaceOwnerOriginConnections(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    /**
+     * Also the owner's connections that stopped working (`needs_reauth`,
+     * `revoked`, `error`), so a listing keeps showing their connectors as
+     * needing reconnecting. Only for listings: anything that binds or runs a
+     * connector reads active connections only.
+     */
+    includeLapsed?: boolean;
+  },
   /** One resolution's shared reads (see `ConnectionAccountReads`). */
   reads?: ConnectionAccountReads,
 ): Promise<PersonalWorkspaceOriginConnections[]> {
@@ -239,17 +250,19 @@ export async function personalWorkspaceOwnerOriginConnections(
     ? await reads.isOwnPersonalWorkspace(ownerOf(input))
     : await isSubjectOwnPersonalWorkspace(db, input);
   if (!personalWorkspace) return [];
+  const { includeLapsed, ...owner } = input;
   const byOrigin = new Map<string, ConnectionMetadata[]>();
   for (const connection of await listOwnConnectionMetadata(db, {
-    ...input,
+    ...owner,
     reach: "anywhere",
+    ...(includeLapsed ? { includeInactive: true } : {}),
     ...(reads ? { reads } : {}),
   })) {
     if (
       connection.workspaceId === input.workspaceId ||
       connection.accountId !== input.accountId ||
       connection.subjectId !== input.subjectId ||
-      connection.status !== "active"
+      (connection.status !== "active" && !includeLapsed)
     )
       continue;
     byOrigin.set(connection.workspaceId, [
