@@ -505,10 +505,14 @@ test("tool calls return the tool's value; older code and raw: true get the MCP r
 
   // A version stored before the field existed reads the MCP result.
   expect((await f.publish(SERVER_CODE)).status).toBe(200);
-  await shared.admin`
-    update workspace_artifact_versions
-    set server_manifest = server_manifest - 'toolResults'
-    where id = ${f.versionId()}`;
+  // Version history is immutable; only a replica-role session can rewrite it.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      update workspace_artifact_versions
+      set server_manifest = server_manifest - 'toolResults'
+      where id = ${f.versionId()}`;
+  });
   expect((await callAs(call)).json.result).toMatchObject({ structuredContent: issues });
 });
 
