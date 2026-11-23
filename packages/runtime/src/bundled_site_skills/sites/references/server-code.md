@@ -34,11 +34,14 @@ One or more ES modules. The main module exports `fetch`:
 
 ```js
 // server/index.js
+// The tool's identity from `ogtool show <path>`: serverId/toolName.
+const LIST_ISSUES = "account-3f9a…/list_issues";
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/issues") {
-      const result = await env.tools.call("linear/list_issues", { first: 20 });
+      const result = await env.tools.call(LIST_ISSUES, { first: 20 });
       return Response.json(result);
     }
     return new Response("Not found", { status: 404 });
@@ -54,7 +57,7 @@ export default {
 | `env.app` | `{id, versionId}`. |
 | `env.trigger` | `"request"` from `site.server.fetch`, `"manual"` from `app_server_run`. |
 | `env.runId` | This run's id, as `app_server_runs` lists it. |
-| `env.tools.call(tool, args)` | A tool the bundle lists in `tools`, as `"serverId/toolName"`, on a shared account. Returns the tool's result. |
+| `env.tools.call(tool, args)` | A tool the bundle lists in `tools`, as `"serverId/toolName"` from its `identity` in `ogtool show <path>` (not the `linear_3f9a5c` name you call it by), on a shared account. Returns the tool's result. |
 | `env.data` | App data in shared, shared_read or append_only collections: `query(collection, {where, sort, limit, cursor})` (as in `references/site-data.md`), `get(collection, id)` or `get(collection, {key})`, `put(collection, key, value)`, `insert(collection, value)`, `delete(collection, id)`, `write(operations)`. Writes are the app's, not the viewer's. |
 | `fetch(url, init)` | HTTPS to hosts the bundle lists in `egress`. Put a listed vault secret in a header value: `Authorization: "Bearer \{{secret:Shared/Weather/api key}}"`. |
 
@@ -103,7 +106,7 @@ back if they fail.
    {
      "main": "index.js",
      "files": [{ "path": "index.js", "content": "..." }],
-     "tools": ["linear/list_issues"],
+     "tools": ["account-3f9a…/list_issues"],
      "egress": ["api.example.com"],
      "secrets": ["\{{secret:Shared/Weather/api key}}"]
    }
@@ -120,9 +123,11 @@ back if they fail.
    PUT the JSON there and publish with that `uploadId`.
 4. Publishing without a server upload keeps the current code. Upload
    `{"files": []}` to remove it.
-5. List every tool the code calls in the bundle's `tools`. Tools there run
-   only on shared accounts and only for the server code; the page's
-   `requestedTools` run as the viewer, so don't add server tools there.
+5. List every tool the code calls in the bundle's `tools`, with the same
+   `serverId/toolName` as in the code; publishing refuses names that aren't
+   tools here and says which id to use. Tools there run only on shared
+   accounts and only for the server code; the page's `requestedTools` run as
+   the viewer, so don't add server tools there.
 6. Listing vault secrets needs a workspace integration admin, and `egress`
    must list the hosts they are sent to. Each secret must exist when you
    publish. The code pauses if whoever makes a version current later (a

@@ -391,7 +391,7 @@ export async function getAppServerDeployment(
   });
   if (!found) return null;
   if (!found.sourceTurnId) return found.deployment;
-  const person = await turnPerson(db, workspaceId, found.sourceTurnId);
+  const person = await getSessionTurnPerson(db, workspaceId, found.sourceTurnId);
   return person ? { ...found.deployment, deployerSubjectId: person } : found.deployment;
 }
 
@@ -403,7 +403,7 @@ export async function getAppServerDeployment(
  * paused. Read without the caller's session actor: the turn may be in the
  * person's Only me chat, and only this subject leaves the function.
  */
-async function turnPerson(
+export async function getSessionTurnPerson(
   db: Database,
   workspaceId: string,
   turnId: string,

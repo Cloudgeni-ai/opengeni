@@ -60,6 +60,7 @@ import {
   getAppServerDeployment,
   getAppServerManifest,
   getAppServerRun,
+  getSessionTurnPerson,
   getVerifiedSubjectEmail,
   listAppServerRuns,
   SiteDataError,
@@ -91,6 +92,7 @@ import {
 } from "../site-data/service";
 import { signGatewayInternalRequest, siteSqlGatewayConfig } from "../site-sql/gateway";
 import { readSiteToolAccountInventory, type SiteToolAccountInventory } from "../site-tool-routing";
+import { exactAgentAttemptClaims } from "../sandbox/agent-fleet-context";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
 import { mintAppServerRunToken, verifyAppServerRunToken } from "./token";
 
@@ -349,6 +351,7 @@ export async function requireAppServerPublishable(
     throw new WorkspaceArtifactOperationError(
       "App server code is not enabled on this deployment, so this version can't carry server code. Publish without the server upload.",
     );
+  await requireAppServerToolsKnown(deps, grant, manifest);
   if (sendsToolDataOut(manifest) && !mayUseWorkspaceSecrets(grant))
     throw new WorkspaceArtifactOperationError(
       "Only a workspace admin can publish server code that both calls tools and lists outside hosts, since it can send tool data out of the workspace. Ask an admin to publish it, or remove the tools or the hosts.",
@@ -898,15 +901,96 @@ function parseGatewayResult(bytes: Uint8Array): AppServerGatewayRunResult | null
 export async function appServerViewerForGrant(
   deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
+  subjectId: string = grant.subjectId,
 ): Promise<AppServerViewer> {
   const [email, name] = await Promise.all([
-    getVerifiedSubjectEmail(deps.db, grant.subjectId).catch(() => null),
+    getVerifiedSubjectEmail(deps.db, subjectId).catch(() => null),
     workspaceMemberDisplayName(deps.db, {
       workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
+      subjectId,
     }).catch(() => null),
   ]);
-  return { id: `user:${grant.subjectId}`, email, name, kind: "member" };
+  return { id: `user:${subjectId}`, email, name, kind: "member" };
+}
+
+/**
+ * The person a grant acts for: its own subject, or for an agent the person
+ * whose turn it is (the same person its published code runs for). Null for
+ * a turn without a person (a schedule, a key), which stays unable to run
+ * code with tools or secrets.
+ */
+export async function appServerActingSubject(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+): Promise<string | null> {
+  const claims = exactAgentAttemptClaims(grant);
+  if (!claims) return grant.subjectId;
+  return await getSessionTurnPerson(deps.db, grant.workspaceId, claims.turnId).catch(() => null);
+}
+
+const ACCOUNT_ALIAS = /_([0-9a-f]{6})$/u;
+const connectorSlug = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "_")
+    .replace(/^_+|_+$/gu, "");
+
+/** The shared account route an unknown declared server most likely means, if one. */
+function sharedRouteFor(inventory: SiteToolAccountInventory, serverId: string): string | undefined {
+  const shared = inventory.accounts.filter((account) => account.shared === true);
+  const hex = ACCOUNT_ALIAS.exec(serverId)?.[1];
+  const byAlias = hex
+    ? shared.filter((account) => account.serverId.startsWith(`account-${hex}`))
+    : [];
+  if (byAlias.length === 1) return byAlias[0]!.serverId;
+  const slug = connectorSlug(serverId.replace(ACCOUNT_ALIAS, ""));
+  const byConnector = shared.filter((account) => connectorSlug(account.connector) === slug);
+  return byConnector.length === 1 ? byConnector[0]!.serverId : undefined;
+}
+
+/**
+ * Refuse a publish whose server code names a tool that doesn't exist here
+ * (for example the model-facing name `linear_4f9650` instead of the tool's
+ * identity), so it fails now with the exact id to use, not later on every
+ * run. Judged by the publishing person's own tools, as the runs will be;
+ * when those can't be read the publish goes ahead and runs check as usual.
+ */
+async function requireAppServerToolsKnown(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  manifest: AppServerManifest,
+): Promise<void> {
+  const declared = appServerDeclaredTools(manifest);
+  if (declared.length === 0) return;
+  const person = await appServerActingSubject(deps, grant);
+  const member = person
+    ? await liveMemberGrant(
+        deps,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        person,
+      ).catch(() => null)
+    : null;
+  if (!member) return;
+  const inventory = await memberToolInventory(deps, member).catch(() => null);
+  if (!inventory) return;
+  const unknown = declared.filter((tool) => {
+    try {
+      routeAppServerTool(inventory, declared, tool);
+      return false;
+    } catch (error) {
+      return error instanceof AppServerError && error.details["reason"] === "tool_unavailable";
+    }
+  });
+  if (unknown.length === 0) return;
+  const named = unknown.map((tool) => {
+    const route = sharedRouteFor(inventory, tool.serverId);
+    return route
+      ? `${tool.serverId}/${tool.toolName} (use ${route}/${tool.toolName})`
+      : `${tool.serverId}/${tool.toolName}`;
+  });
+  throw new WorkspaceArtifactOperationError(
+    `The server code names tools that aren't available here: ${named.join(", ")}. Name each tool by its identity, serverId/toolName as \`ogtool show <path>\` lists it, in both the bundle's tools and env.tools.call, then upload again and publish.`,
+  );
 }
 
 /**
@@ -1616,10 +1700,12 @@ function runOutputReader(deps: AppServerDeps, grant: AccessGrant, siteId: string
         const tools = manifest ? appServerDeclaredTools(manifest) : [];
         const secrets = manifest ? manifest.secrets.length > 0 : false;
         if (tools.length === 0 && !secrets) return true;
+        const person = await appServerActingSubject(deps, grant);
+        if (!person) return false;
         const member = await liveMemberGrant(
           deps,
           { accountId: grant.accountId, workspaceId: grant.workspaceId },
-          grant.subjectId,
+          person,
         );
         if (!member) return false;
         const inventory = await memberToolInventory(deps, member).catch(() => null);
@@ -1661,10 +1747,12 @@ export async function testAppServer(
   request: unknown,
 ): Promise<AppServerFetchResponse> {
   const { access, scope } = await managerScope(deps, grant, siteId);
+  // An agent runs it as the person whose turn it is (its own subject is never a member).
+  const person = await appServerActingSubject(deps, grant);
   return await runAppServer(deps, {
     scope,
     siteId: access.site.id,
-    viewer: await appServerViewerForGrant(deps, grant),
+    viewer: person ? await appServerViewerForGrant(deps, grant, person) : null,
     trigger: "manual",
     request,
   });

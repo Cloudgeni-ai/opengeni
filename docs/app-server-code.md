@@ -70,8 +70,16 @@ stored once per workspace by content
 - Code that declares `tools` and lists egress hosts could send tool data
   out of the workspace, so it needs the same admin to publish, and its
   deployer must stay one for it to run (`deployer_cannot_send_tool_data_out`).
+- Declared tools are `serverId/toolName` identities (as `ogtool show` lists
+  them), not an agent's model-facing names. Publishing refuses a name that
+  matches no tool in the publishing person's inventory and suggests the
+  shared account route it most likely means; when that inventory can't be
+  read, the publish goes ahead and runs check as usual.
 - Every publish goes live for all viewers; there is no draft run. Managers
-  try a version with `app_server_run` and roll back if needed.
+  try a version with `app_server_run` and roll back if needed. An agent's
+  `app_server_run`, and its reads of run logs, act for the person whose turn
+  it is (its own worker subject is never a member); a turn without a person
+  is refused.
 
 App packages don't carry server code yet: installing one drops it, and the
 installer publishes the code again.
