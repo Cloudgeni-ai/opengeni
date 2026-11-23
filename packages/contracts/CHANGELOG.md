@@ -1,5 +1,20 @@
 # @opengeni/contracts
 
+## 6.37.0
+
+### Minor Changes
+
+- c778f4a: Apps can carry server code. A version's JavaScript modules run on Cloudflare Dynamic Workers when the page calls `site.server.fetch(path, init)` in `@opengeni/sdk/site`, as the app rather than the viewer: tool calls (listed in the server bundle's `tools`) use only the workspace's shared connector accounts, outbound fetches may carry listed vault secrets, and app data writes are the app's. Code that uses tools or secrets runs only for signed-in workspace members who may use them; everyone else is refused. Data stored from shared accounts, by server code or by shared app syncs (including existing ones), is likewise shown only to workspace members who may use that connector: invited people and public visitors no longer see it, whatever the collection or sharing settings say. Code versions and rolls back with the app. Managers read runs with `getAppServerStatus` and `listAppServerRuns` in the SDK client and the `app_server_runs` and `app_server_run` agent tools; the app header shows one line while the newest run fails or the code is paused. Off unless `OPENGENI_SITES_SERVER_CODE_ENABLED` is set and the sites gateway has a `LOADER` binding. See docs/app-server-code.md.
+- a2ad192: Add the opt-in `fitViewport` prop to `BrowserViewer`. An embed can fit a managed Chromium page to its panel without cropping or overriding an explicitly set viewport. The console still scales its existing frame. Only viewer-fitted sizes carry to new tabs.
+
+### Patch Changes
+
+- 9eee30c: A workspace file uploaded into a page through a browser now keeps its own name in any script. Before, every character other than ASCII letters, digits, spaces, dots, underscores and dashes became `_`, so `Rørføring etg. 2 – rev A (SIM).pdf` reached the page as `R_rf_ring etg. 2 _ rev A _SIM_.pdf`. The staged copy is now named from the file's original name, with only path separators, control characters and characters Windows forbids replaced, a trailing dot or space removed, and the name kept within 240 UTF-8 bytes. A browser controller from before this change refuses such names as invalid; it is sent the ASCII names it has always accepted instead, so uploads keep working while machines update.
+- 36f5f96: Explain whether a Codex account needs a new sign-in, the available plans cannot serve the model, or an account is rate-limited, including the known reset time.
+- cf218c3: Report refused MCP destinations separately from connection failures. A native account that points to a blocked or unresolvable address now shows what went wrong in connection settings, while a temporary DNS failure still retries normally.
+- 9f7efdb: Offer only usable save destinations on secure questions, and keep task-scoped answers usable when delegated saved-logins access is off.
+- a0b9135: A sub-agent's question now goes first to the agent that started it. While that agent can still answer, you get no inbox item or phone notification for it, and Needs you and the attention counts leave it out. It reaches you as before if the agent's turn ends without an answer, the agent's turn fails, or the same pause also needs you. Questions only you can answer (passwords and other secrets, Skill reviews, approvals) still come straight to you. Sessions gain an optional `questionWithAgent` flag.
+
 ## 6.36.0
 
 ### Minor Changes

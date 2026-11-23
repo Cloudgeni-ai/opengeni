@@ -1,5 +1,49 @@
 # @opengeni/api-router
 
+## 6.37.0
+
+### Patch Changes
+
+- 9eee30c: A workspace file uploaded into a page through a browser now keeps its own name in any script. Before, every character other than ASCII letters, digits, spaces, dots, underscores and dashes became `_`, so `Rørføring etg. 2 – rev A (SIM).pdf` reached the page as `R_rf_ring etg. 2 _ rev A _SIM_.pdf`. The staged copy is now named from the file's original name, with only path separators, control characters and characters Windows forbids replaced, a trailing dot or space removed, and the name kept within 240 UTF-8 bytes. A browser controller from before this change refuses such names as invalid; it is sent the ASCII names it has always accepted instead, so uploads keep working while machines update.
+- 9f7efdb: Offer only usable save destinations on secure questions, and keep task-scoped answers usable when delegated saved-logins access is off.
+- 20daa38: Keep app data that once held shared-account tool data restricted after its sync is switched to a personal account, pointed elsewhere or deleted, until a manager resets the data.
+- Updated dependencies [cc649c3]
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [19fe301]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [20daa38]
+- Updated dependencies [a0b9135]
+  - @opengeni/db@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/runtime@6.37.0
+  - @opengeni/capabilities@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/core@6.37.0
+  - @opengeni/documents@6.37.0
+  - @opengeni/events@6.37.0
+  - @opengeni/codemode@6.37.0
+  - @opengeni/artifact-tool@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/decisions@6.37.0
+  - @opengeni/github@6.37.0
+  - @opengeni/interaction@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/storage@6.37.0
+  - @opengeni/tool-gateway@6.37.0
+  - @opengeni/vaults@6.37.0
+  - @opengeni/vaults-bitwarden@6.37.0
+  - @opengeni/vaults-keeper@6.37.0
+  - @opengeni/vaults-onepassword@6.37.0
+  - @opengeni/vaults-protonpass@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+  - @opengeni/agent-proto@6.37.0
+
 ## 6.36.0
 
 ### Minor Changes

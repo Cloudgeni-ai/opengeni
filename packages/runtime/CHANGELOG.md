@@ -1,5 +1,44 @@
 # @opengeni/runtime
 
+## 6.37.0
+
+### Patch Changes
+
+- a2ad192: Add the opt-in `fitViewport` prop to `BrowserViewer`. An embed can fit a managed Chromium page to its panel without cropping or overriding an explicitly set viewport. The console still scales its existing frame. Only viewer-fitted sizes carry to new tabs.
+- cf218c3: Report refused MCP destinations separately from connection failures. A native account that points to a blocked or unresolvable address now shows what went wrong in connection settings, while a temporary DNS failure still retries normally.
+- ee17f5d: The Agents page lists the ready-made agents not added yet under the workspace's own, each added in one click. The Artifacts page's Apps tab, and its empty state, offer ready-made apps the same way, opening the app once it's added (Capabilities' **Ready-made** tab now opens it too). Three new ready-made apps keep their own data: **Issue tracker**, **Incident log** and **Feedback board** (with votes), next to **Decision log**.
+
+  An agent's GitHub trigger now covers every repository the GitHub connection reaches, or only the repositories you choose, and each run checks out the repository its event is about. Before, the one repository picked in **Add trigger** was only checked out, so the trigger fired for every repository; existing agent triggers now fire only for that repository. An agent's GitHub trigger saved with no repository, which already fired for every repository, now also checks out each event's repository (from the workspace's GitHub allowlist) in its new chat. A trigger that continues a chat keeps the chosen repositories open there. Other automations are unchanged.
+
+  The pasted webhook secret steps are one component shared by Add a source, a source's page and Add trigger, and the Skills section on an agent's page has more room above **Add a Skill**.
+
+  New apps take the Opengeni look by default (`/__opengeni/ui.css`), single-file apps included, unless the person's design, the workspace's design system or the product the app is about comes first; the ready-made apps use it too. `ui.css` now sizes text in `rem`, so the reader's browser text size applies, and uses 16px inputs on touch screens so phones don't zoom when a field is tapped.
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [19fe301]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/sdk@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/capabilities@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/codemode@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/decisions@6.37.0
+  - @opengeni/interaction@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/tool-gateway@6.37.0
+  - @opengeni/vaults@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+  - @opengeni/jev@6.37.0
+  - @opengeni/agent-proto@6.37.0
+
 ## 6.36.0
 
 ### Minor Changes

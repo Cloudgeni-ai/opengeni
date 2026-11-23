@@ -1,5 +1,20 @@
 # @opengeni/capabilities
 
+## 6.37.0
+
+### Patch Changes
+
+- 19fe301: Fix `@opengeni/core` and `@opengeni/api-router` failing to load from npm (6.36.0): `@opengeni/capabilities` now exports the shared Nango helpers such as `NANGO_TAG` by name. The publish check now fails when a built package imports a name that another package's build doesn't export.
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/contracts@6.37.0
+  - @opengeni/network@6.37.0
+
 ## 6.36.0
 
 ### Patch Changes
