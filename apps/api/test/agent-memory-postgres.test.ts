@@ -15,6 +15,7 @@ import {
   createDb,
   createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  getAgent,
   initializeSessionStartAtomically,
   saveKnowledgeEntry,
   setAgentMemoryCollection,
@@ -24,6 +25,7 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { prepareAgentChatCreate } from "../src/agent-chats";
+import { delegatedChatMemory } from "../src/agent-delegation";
 import { listSlackAgentChatsForSession } from "../src/integrations/slack-interactions";
 import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
 
@@ -512,5 +514,35 @@ describe("an agent's Memory (real PostgreSQL)", () => {
       await prepareAgentChatCreate(deps, fixture.grant, fixture.home.workspaceId, off),
     ).toBeUndefined();
     expect(off["instructions"]).toBeUndefined();
+  }, 180_000);
+
+  test("a chat delegated to the agent gets its Memory guidance and slack_agent_chats", async () => {
+    if (!app) return;
+    const fixture = await workspaceWithAgent(app.db);
+    const agent = (await getAgent(app.db, fixture.home, fixture.agentId))!;
+    const sharedChat = delegatedChatMemory(agent, {
+      instructions: "Answer in English.",
+      ownerSubjectId: fixture.subjectId,
+      private: false,
+    });
+    expect(sharedChat.firstPartyMcpToolAdditions).toEqual(["slack_agent_chats"]);
+    expect(sharedChat.instructions).toStartWith("Answer in English.\n\n");
+    expect(sharedChat.instructions).toContain(`groupIds [${fixture.collectionId}]`);
+
+    // A private caller's child only reads the Memory, and still lists chats.
+    const privateChild = delegatedChatMemory(agent, {
+      instructions: undefined,
+      ownerSubjectId: fixture.subjectId,
+      private: true,
+    });
+    expect(privateChild.firstPartyMcpToolAdditions).toEqual(["slack_agent_chats"]);
+    expect(privateChild.instructions).toContain("never save anything from it");
+
+    // Memory off: nothing added.
+    const off = delegatedChatMemory(
+      { ...agent, memoryEnabled: false },
+      { instructions: "Hi", ownerSubjectId: fixture.subjectId, private: false },
+    );
+    expect(off).toEqual({ instructions: "Hi", firstPartyMcpToolAdditions: [] });
   }, 180_000);
 });

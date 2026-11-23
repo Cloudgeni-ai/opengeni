@@ -6,9 +6,13 @@ import {
   createScheduledTask,
   createSession,
   getScheduledTask,
+  getScheduledTaskRunAcceptedExecution,
   listScheduledTaskRuns,
+  saveKnowledgeEntry,
+  setAgentMemoryCollection,
   updateScheduledTask,
   type DbClient,
+  type KnowledgeContext,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -71,22 +75,53 @@ async function fixture() {
     (account_id, subject_id, status, personal_workspace_id)
     values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
-  const agent = async (name: string, options: { memoryEnabled?: boolean } = {}) =>
-    (
-      await createAgent(client.db, scope, {
-        visibility: "workspace",
-        ownerSubjectId: null,
-        name,
-        description: "",
-        avatar: { kind: "emoji", emoji: "🛠️", hue: 30 },
-        instructions: `You are ${name}.`,
-        memoryEnabled: options.memoryEnabled ?? false,
-        origin: "app",
-        sourceSessionId: null,
-        createdBySubjectId: grant.subjectId,
-        maxPerWorkspace: 500,
-      })
-    ).agent.id;
+  const agent = async (name: string, options: { memoryEnabled?: boolean } = {}) => {
+    const { agent: created } = await createAgent(client.db, scope, {
+      visibility: "workspace",
+      ownerSubjectId: null,
+      name,
+      description: "",
+      avatar: { kind: "emoji", emoji: "🛠️", hue: 30 },
+      instructions: `You are ${name}.`,
+      memoryEnabled: options.memoryEnabled ?? false,
+      origin: "app",
+      sourceSessionId: null,
+      createdBySubjectId: grant.subjectId,
+      maxPerWorkspace: 500,
+    });
+    if (options.memoryEnabled) {
+      // Its Memory: a workspace Knowledge collection.
+      const human: KnowledgeContext = {
+        ...scope,
+        actor: {
+          kind: "human",
+          principalKind: "human_session",
+          subjectId: grant.subjectId,
+          writeScopes: ["workspace", "personal"],
+          settingsScopes: ["workspace", "personal"],
+          review: true,
+        },
+      };
+      const collection = (await saveKnowledgeEntry(client.db, human, {
+        operationId: crypto.randomUUID(),
+        expectedVersion: 0,
+        scope: "workspace",
+        entry: {
+          kind: "group",
+          title: `${name} memory`,
+          content: `Memory of the agent ${name}.`,
+          groupIds: [],
+          evidence: [],
+          relationships: [],
+        },
+      })) as { entryId: string };
+      await setAgentMemoryCollection(client.db, scope, {
+        agentId: created.id,
+        collectionId: collection.entryId,
+      });
+    }
+    return created.id;
+  };
   const agentConfig = (agentId: string) => ({
     agentId,
     prompt: "Plan the day",
@@ -95,12 +130,15 @@ async function fixture() {
     metadata: {},
     sandboxBackend: "none" as const,
   });
-  const dispatch = async (taskId: string) => {
+  const dispatch = async (
+    taskId: string,
+    producerKey = `scheduled-agent-chat-${crypto.randomUUID()}`,
+  ) => {
     const result = await scheduledActivities().dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
       taskId,
       triggerType: "scheduled",
-      producerKey: `scheduled-agent-chat-${crypto.randomUUID()}`,
+      producerKey,
     });
     if (result.action !== "start" && result.action !== "signal") {
       const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, taskId, 1);
@@ -120,36 +158,160 @@ async function fixture() {
       select instructions from sessions where id = ${sessionId}`;
     return row?.instructions ?? null;
   };
-  const task = async (taskId: string) =>
-    (await getScheduledTask(client.db, grant.workspaceId, taskId))!;
-  return { grant, agent, agentConfig, dispatch, chatAgent, chatInstructions, task };
-}
-
-describe("an agent's automation chat, run by the dispatch (real PostgreSQL)", () => {
-  test("an agent with Memory starts its chat with the Memory guidance", async () => {
-    if (!available) return;
-    const f = await fixture();
-    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
-    const created = await createScheduledTask(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+  const chatTools = async (sessionId: string) => {
+    const [row] = await shared!.admin<
+      { first_party_mcp_tools: string[]; tool_policy: { firstPartyAdditions?: string[] } }[]
+    >`select first_party_mcp_tools, tool_policy from sessions where id = ${sessionId}`;
+    return row!;
+  };
+  // What the run accepted before it started its chat.
+  const accepted = async (taskId: string) => {
+    const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, taskId, 1);
+    return (await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: grant.workspaceId,
+      runId: run!.id,
+    }))!;
+  };
+  const memoryTask = async (
+    agentId: string,
+    options: {
+      runMode?: "new_session_per_run" | "reusable_session";
+      visibility?: "user_private";
+    } = {},
+  ) =>
+    await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
       name: "Review on mention",
       status: "active",
       schedule: { type: "manual" },
       temporalScheduleId: `scheduled-agent-chat-${crypto.randomUUID()}`,
-      runMode: "new_session_per_run",
+      runMode: options.runMode ?? "new_session_per_run",
       overlapPolicy: "allow_concurrent",
-      agentConfig: f.agentConfig(reviewer),
+      agentConfig: agentConfig(agentId),
       metadata: {},
+      ...(options.visibility ? { visibility: options.visibility } : {}),
     });
+  const task = async (taskId: string) =>
+    (await getScheduledTask(client.db, grant.workspaceId, taskId))!;
+  return {
+    grant,
+    agent,
+    agentConfig,
+    dispatch,
+    chatAgent,
+    chatInstructions,
+    chatTools,
+    accepted,
+    memoryTask,
+    task,
+  };
+}
 
-    // The guidance is part of the run's accepted instructions, so the
-    // database accepts the chat the run creates.
+describe("an agent's automation chat, run by the dispatch (real PostgreSQL)", () => {
+  test("an agent with Memory starts its chat with the Memory guidance and tools", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await f.memoryTask(reviewer);
+
+    // The guidance and slack_agent_chats are part of what the run accepted,
+    // so the database accepts the chat the run creates.
     const run = await f.dispatch(created.id);
     expect(run.action).toBe("start");
     expect(await f.chatAgent(run.sessionId)).toBe(reviewer);
-    expect(await f.chatInstructions(run.sessionId)).toContain("slack_agent_chats");
+    const instructions = await f.chatInstructions(run.sessionId);
+    expect(instructions).toContain("slack_agent_chats");
+    expect(instructions).toContain("Save lasting facts");
+    const accepted = await f.accepted(created.id);
+    expect(accepted.resolvedAgentInstructions).toBe(instructions!);
+    const tools = await f.chatTools(run.sessionId);
+    expect(tools.first_party_mcp_tools).toContain("slack_agent_chats");
+    expect(tools.tool_policy.firstPartyAdditions).toContain("slack_agent_chats");
+    expect(accepted.resolvedFirstPartyMcpTools).toEqual(tools.first_party_mcp_tools as never);
+  }, 120_000);
+
+  test("an agent without Memory gets neither the guidance nor slack_agent_chats", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const planner = await f.agent("Planner");
+    const run = await f.dispatch((await f.memoryTask(planner)).id);
+    expect(run.action).toBe("start");
+    expect(await f.chatInstructions(run.sessionId)).toBeNull();
+    const tools = await f.chatTools(run.sessionId);
+    expect(tools.first_party_mcp_tools).not.toContain("slack_agent_chats");
+    expect(tools.tool_policy.firstPartyAdditions ?? []).not.toContain("slack_agent_chats");
+  }, 120_000);
+
+  test("a recovered run keeps the agent and the accepted Memory instructions", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await f.memoryTask(reviewer);
+    const producerKey = `scheduled-agent-chat-recovery-${crypto.randomUUID()}`;
+    // The first attempt dies creating its chat, after the run was accepted.
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const fn = `fail_agent_chat_once_${suffix}`;
+    await shared!.admin.unsafe(
+      `create function ${fn}() returns trigger language plpgsql as $$ begin
+         if new.workspace_id = '${f.grant.workspaceId}'::uuid then
+           raise exception 'synthetic chat create failure';
+         end if;
+         return new;
+       end $$`,
+    );
+    await shared!.admin.unsafe(
+      `create trigger ${fn} before insert on sessions for each row execute function ${fn}()`,
+    );
+    try {
+      await expect(f.dispatch(created.id, producerKey)).rejects.toThrow();
+    } finally {
+      await shared!.admin.unsafe(`drop trigger if exists ${fn} on sessions`);
+      await shared!.admin.unsafe(`drop function if exists ${fn}()`);
+    }
+    const [queued] = await listScheduledTaskRuns(client.db, f.grant.workspaceId, created.id, 1);
+    expect(queued).toMatchObject({ status: "queued", sessionId: null });
+    const accepted = await f.accepted(created.id);
+    expect(accepted.resolvedAgentInstructions).toContain("slack_agent_chats");
+
+    // The same occurrence again recovers it from the accepted snapshot.
+    const run = await f.dispatch(created.id, producerKey);
+    expect(run.action).toBe("start");
+    expect(await f.chatAgent(run.sessionId)).toBe(reviewer);
+    expect(await f.chatInstructions(run.sessionId)).toBe(accepted.resolvedAgentInstructions!);
+    expect((await f.chatTools(run.sessionId)).first_party_mcp_tools).toContain("slack_agent_chats");
+  }, 120_000);
+
+  test("a reusable chat with Memory is started with the guidance", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await f.memoryTask(reviewer, { runMode: "reusable_session" });
+    const first = await f.dispatch(created.id);
+    expect(first.action).toBe("start");
+    expect(await f.chatAgent(first.sessionId)).toBe(reviewer);
+    expect(await f.chatInstructions(first.sessionId)).toBe(
+      (await f.accepted(created.id)).resolvedAgentInstructions!,
+    );
+    expect(await f.chatInstructions(first.sessionId)).toContain("slack_agent_chats");
+    expect((await f.task(created.id)).reusableSessionId).toBe(first.sessionId);
+    const second = await f.dispatch(created.id);
+    expect(second).toMatchObject({ action: "signal", sessionId: first.sessionId });
+  }, 120_000);
+
+  test("an Only me automation's chat gets the private Memory guidance", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await f.memoryTask(reviewer, { visibility: "user_private" });
+    const run = await f.dispatch(created.id);
+    expect(run.action).toBe("start");
+    expect(await f.chatAgent(run.sessionId)).toBe(reviewer);
+    const instructions = await f.chatInstructions(run.sessionId);
+    expect(instructions).toContain("never save anything from it to your Memory");
+    expect(instructions).not.toContain("Save lasting facts");
+    expect(instructions).toBe((await f.accepted(created.id)).resolvedAgentInstructions!);
   }, 120_000);
 
   test("its own chat is started with the agent, kept, and replaced with the new agent", async () => {

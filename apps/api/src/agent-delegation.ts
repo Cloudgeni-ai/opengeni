@@ -2,6 +2,7 @@ import {
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   type AccessGrant,
   type AgentErrorCode,
+  type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
 import { resolveWorkspaceAgentRef, type AgentRecord } from "@opengeni/db";
@@ -104,11 +105,13 @@ export async function resolveDelegationAgent(
 }
 
 /**
- * The delegated chat's Memory guidance, joined to its own instructions, the
- * way an app chat with the agent gets it. Unchanged when Memory is off or
- * there is no room: the knowledge tools still enforce the rules.
+ * What the delegated chat gets from the agent's Memory, the way an app chat
+ * with the agent does: the guidance joined to its own instructions, and
+ * `slack_agent_chats` when it may list the agent's other chats. Instructions
+ * stay unchanged when Memory is off or there is no room: the knowledge tools
+ * still enforce the rules.
  */
-export function delegatedChatInstructions(
+export function delegatedChatMemory(
   agent: AgentRecord,
   input: {
     instructions: string | undefined;
@@ -117,18 +120,26 @@ export function delegatedChatInstructions(
     slackDm?: boolean;
     memoryOff?: boolean;
   },
-): string | undefined {
-  if (!agent.memoryEnabled) return input.instructions;
-  const guidance = agentMemoryGuidance(
-    agentMemoryAccess(agent, {
-      private: input.private,
-      ownerSubjectId: input.ownerSubjectId,
-      memoryOff: input.memoryOff ?? false,
-      slackDm: input.slackDm ?? false,
-    }),
-  );
-  if (!guidance) return input.instructions;
+): { instructions: string | undefined; firstPartyMcpToolAdditions: FirstPartyMcpToolName[] } {
+  if (!agent.memoryEnabled) {
+    return { instructions: input.instructions, firstPartyMcpToolAdditions: [] };
+  }
+  const access = agentMemoryAccess(agent, {
+    private: input.private,
+    ownerSubjectId: input.ownerSubjectId,
+    memoryOff: input.memoryOff ?? false,
+    slackDm: input.slackDm ?? false,
+  });
+  const firstPartyMcpToolAdditions: FirstPartyMcpToolName[] = access.listChats
+    ? ["slack_agent_chats"]
+    : [];
+  const guidance = agentMemoryGuidance(access);
+  if (!guidance) return { instructions: input.instructions, firstPartyMcpToolAdditions };
   const own = input.instructions?.trim() ?? "";
   const combined = own ? `${own}\n\n${guidance}` : guidance;
-  return combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS ? combined : input.instructions;
+  return {
+    instructions:
+      combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS ? combined : input.instructions,
+    firstPartyMcpToolAdditions,
+  };
 }

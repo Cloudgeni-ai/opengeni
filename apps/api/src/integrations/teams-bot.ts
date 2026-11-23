@@ -90,6 +90,7 @@ import {
 } from "@opengeni/db";
 import { parseRequestJson } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { prepareAgentChatCreate } from "../agent-chats";
 import {
   teamsConnectionRefused,
   teamsLinkConflict,
@@ -2844,30 +2845,38 @@ async function drainRoute(
           }))
         )
           throw new HTTPException(403, { message: "personal_workspace_closed" });
-        const createRouteSession = async (agentId: string | null) =>
-          createSessionForRequest(
+        const createRouteSession = async (agentId: string | null) => {
+          const payload: Record<string, unknown> = {
+            requestedSessionId: r.session_id,
+            ...(agentId ? { agentId } : {}),
+            initialMessage: text,
+            ...(modelContext ? { modelContext } : {}),
+            // An organization agent's chat belongs to its workspace, whose
+            // members can see it; every other 1:1 chat is Only me.
+            visibility: r.personal && !organizationAgent ? "private" : "workspace",
+            idempotencyKey: `teams:${r.route_id}`,
+            clientEventId: inbound.event_id,
+            instructions: organizationAgent
+              ? `${TEAMS_SESSION_INSTRUCTIONS}\n\n${teamsOrganizationAgentInstructions(
+                  (await routeAgentLabel())?.workspaceName ?? null,
+                )}`
+              : TEAMS_SESSION_INSTRUCTIONS,
+            ...(organizationAgent ? teamsOrganizationAgentSessionOptions(deps.settings) : {}),
+          };
+          // A workspace agent's chat gets its Memory guidance and tools, as
+          // an app or Slack chat with the agent does.
+          const agentChat =
+            agentId && !organizationAgent
+              ? await prepareAgentChatCreate(scoped, grant, routeSessionWorkspace(r), payload)
+              : undefined;
+          return createSessionForRequest(
             scoped,
             grant,
             routeSessionWorkspace(r),
-            {
-              requestedSessionId: r.session_id,
-              ...(agentId ? { agentId } : {}),
-              initialMessage: text,
-              ...(modelContext ? { modelContext } : {}),
-              // An organization agent's chat belongs to its workspace, whose
-              // members can see it; every other 1:1 chat is Only me.
-              visibility: r.personal && !organizationAgent ? "private" : "workspace",
-              idempotencyKey: `teams:${r.route_id}`,
-              clientEventId: inbound.event_id,
-              instructions: organizationAgent
-                ? `${TEAMS_SESSION_INSTRUCTIONS}\n\n${teamsOrganizationAgentInstructions(
-                    (await routeAgentLabel())?.workspaceName ?? null,
-                  )}`
-                : TEAMS_SESSION_INSTRUCTIONS,
-              ...(organizationAgent ? teamsOrganizationAgentSessionOptions(deps.settings) : {}),
-            },
+            payload,
             undefined,
             {
+              ...agentChat,
               teamsConversation: {
                 routeId: r.route_id,
                 eventId: inbound.event_id,
@@ -2876,6 +2885,7 @@ async function drainRoute(
               },
             },
           );
+        };
         // An agent that went away between routing and create answers as a
         // plain chat in the same workspace, as in Slack. An organization
         // agent's chat is the agent's or nothing.

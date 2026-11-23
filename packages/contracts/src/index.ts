@@ -14276,7 +14276,11 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       resolvedFirstPartyMcpPermissions: z.array(Permission),
       /** Agent configuration resolved for generated sessions; absent = legacy. */
       resolvedAgentConfig: ResolvedAgentConfig.optional(),
-      /** Effective instructions from the `agent.instructions` alias, when set. */
+      /**
+       * The generated chat's effective instructions: the `agent.instructions`
+       * alias, followed by the bound agent's Memory guidance when it has
+       * Memory on. The chat is created with exactly these.
+       */
       resolvedAgentInstructions: primitives.nonEmptyString
         .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
         .optional(),

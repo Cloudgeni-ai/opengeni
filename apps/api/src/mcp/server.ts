@@ -710,7 +710,7 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   agentRefToolInput,
-  delegatedChatInstructions,
+  delegatedChatMemory,
   resolveDelegationAgent,
   delegationAgentSubject,
 } from "../agent-delegation";
@@ -7347,6 +7347,9 @@ function registerWorkspaceOrchestrationTools(
           const { machineTarget, title, projectId, agentName, ...request } = args;
           // Delegation by name: the child is a chat with that agent.
           let delegated: { agentId: string; instructions?: string } | null = null;
+          // Built-in tools the agent's chat gets on top of the defaults it
+          // follows (its Memory's `slack_agent_chats`), as an app chat does.
+          let delegatedFirstPartyAdditions: FirstPartyMcpToolName[] = [];
           // Whose agents the child may run, when not the grant's subject.
           let agentAccessSubjectId: string | undefined;
           if (agentName !== undefined) {
@@ -7369,13 +7372,15 @@ function registerWorkspaceOrchestrationTools(
               caller,
             );
             if (!resolved.ok) return agentDelegationFailureResult(resolved.code, resolved.message);
-            const instructions = delegatedChatInstructions(resolved.agent, {
+            const memory = delegatedChatMemory(resolved.agent, {
               instructions: request.instructions,
               ownerSubjectId: caller?.ownerSubjectId ?? grant.subjectId ?? null,
               private: caller?.private ?? false,
               slackDm: caller?.slackDm ?? false,
               memoryOff: request.memoryScope === "off" || (caller?.memoryOff ?? false),
             });
+            const instructions = memory.instructions;
+            delegatedFirstPartyAdditions = memory.firstPartyMcpToolAdditions;
             delegated = {
               agentId: resolved.agent.id,
               ...(instructions !== undefined ? { instructions } : {}),
@@ -7410,7 +7415,15 @@ function registerWorkspaceOrchestrationTools(
             rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
-            agentAccessSubjectId ? { agentAccessSubjectId } : {},
+            {
+              ...(agentAccessSubjectId ? { agentAccessSubjectId } : {}),
+              // Session creation applies these like any entry point's
+              // additions: only to a selection that follows the defaults,
+              // under the deployment ceiling, narrowed by the agent's Can use.
+              ...(delegatedFirstPartyAdditions.length
+                ? { firstPartyMcpToolAdditions: delegatedFirstPartyAdditions }
+                : {}),
+            },
           );
           return json(
             sessionCreateMutationReceipt(
