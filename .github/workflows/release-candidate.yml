@@ -1,4 +1,5 @@
 name: Release candidate
+run-name: release-candidate:${{ inputs.lane || 'release' }}:${{ inputs.source_sha }}
 
 # Build the complete public image set before staging. Every attempt uses a fresh
 # run-scoped tag, so an interrupted attempt can never lend orphaned manifests to
@@ -233,10 +234,6 @@ jobs:
                   echo "reuse_source_sha must be a 40-character lowercase git SHA" >&2
                   exit 1
                 }
-                git merge-base --is-ancestor "$REUSE_SOURCE_SHA" origin/production || {
-                  echo "reuse_source_sha must be in production ancestry" >&2
-                  exit 1
-                }
               fi
               if [ -n "$REUSE_IMAGES" ]; then
                 [ -n "$REUSE_SOURCE_SHA" ] || {
@@ -424,21 +421,26 @@ jobs:
           REUSE_IMAGES: ${{ inputs.reuse_images }}
         run: |
           set -euo pipefail
+          # Reuse is an optimisation: when the live candidate can't be proven,
+          # rebuild everything rather than fail the urgent build.
+          skip() {
+            echo "Not reusing images from ${REUSE_SOURCE_SHA}: $1; rebuilding every image" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
           dir="$RUNNER_TEMP/reused-candidate"
           mkdir -p "$dir" evidence
+          git merge-base --is-ancestor "$REUSE_SOURCE_SHA" origin/production || skip "not in production ancestry"
           gh release download "opengeni-candidate-${REUSE_SOURCE_SHA}" --dir "$dir" \
             --pattern release-candidate.json --pattern release-candidate.sha256 \
-            --pattern release-chart.sha256 --pattern 'opengeni-*.tgz'
-          (cd "$dir" && sed 's#evidence/##' release-candidate.sha256 | sha256sum --check --strict)
-          (cd "$dir" && sed 's#\.release/charts/##' release-chart.sha256 | sha256sum --check --strict)
+            --pattern release-chart.sha256 --pattern 'opengeni-*.tgz' || skip "no candidate receipt"
+          (cd "$dir" && sed 's#evidence/##' release-candidate.sha256 | sha256sum --check --strict) || skip "receipt checksum mismatch"
+          (cd "$dir" && sed 's#\.release/charts/##' release-chart.sha256 | sha256sum --check --strict) || skip "chart checksum mismatch"
           jq -e --arg sha "$REUSE_SOURCE_SHA" '.schemaVersion == 2 and .sourceSha == $sha' \
-            "$dir/release-candidate.json" > /dev/null
+            "$dir/release-candidate.json" > /dev/null || skip "unexpected receipt schema"
           roles=" ${REUSE_IMAGES//,/ } "
+          roles="${roles// relay / }"
           if git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent; then
             roles="${roles} relay "
-          elif [[ "$roles" == *" relay "* ]]; then
-            echo "agent/ changed since ${REUSE_SOURCE_SHA}; the relay cannot be reused" >&2
-            exit 1
           fi
           reused='{}'
           for role in api worker web sandbox relay artifact-materializer artifact-outbox-dispatcher desktop; do
@@ -446,18 +448,15 @@ jobs:
             if [ "$role" = desktop ]; then
               # The desktop box is pinned by the chart, not the receipt.
               ref="$(tar -xzOf "$dir"/opengeni-*.tgz opengeni/values.yaml | awk '$1 == "imageRef:" { gsub(/"/, "", $2); print $2; exit }')"
-              [ "${ref%@*}" = "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-desktop" ] || {
-                echo "reused chart desktop pin is not an Opengeni desktop image: ${ref}" >&2
-                exit 1
-              }
-              digest="${ref#*@}"
+              digest=""
+              [ "${ref%@*}" != "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-desktop" ] || digest="${ref#*@}"
             else
-              digest="$(jq -er --arg role "$role" --arg name "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}" \
-                '.images[$role] | select(.name == $name) | .digest' "$dir/release-candidate.json")"
+              digest="$(jq -r --arg role "$role" --arg name "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}" \
+                '.images[$role] | select(.name == $name) | .digest' "$dir/release-candidate.json" || true)"
             fi
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "no exact ${role} digest in candidate ${REUSE_SOURCE_SHA}" >&2
-              exit 1
+              echo "No exact ${role} digest in candidate ${REUSE_SOURCE_SHA}; rebuilding it" >> "$GITHUB_STEP_SUMMARY"
+              continue
             }
             key="${role//-/_}"
             echo "${key}=true" >> "$GITHUB_OUTPUT"

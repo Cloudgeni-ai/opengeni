@@ -3800,11 +3800,16 @@ async function verifyVersionHeadRelease({
 // fix must still be brought to main for the next ordinary release.
 // ---------------------------------------------------------------------------
 
+// The repository is public: only reviews from people with write access to it
+// (owners, organization members, collaborators) approve or block a hotfix.
+const HOTFIX_REVIEWER_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
 function hotfixApproval(reviews, pullIdentity, reviewAfterMerge) {
   const latestByReviewer = new Map();
   for (const value of reviews) {
     const review = record(value, "hotfix review");
     if (!["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) continue;
+    if (!HOTFIX_REVIEWER_ASSOCIATIONS.has(review.author_association)) continue;
     const reviewer = record(review.user, "hotfix reviewer");
     const reviewerId = assertPositiveInteger(reviewer.id, "hotfix reviewer ID");
     const reviewId = assertPositiveInteger(review.id, "hotfix review ID");

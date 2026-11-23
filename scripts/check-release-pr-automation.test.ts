@@ -2444,6 +2444,7 @@ function approvalFixture(
     state: options.reviewState ?? "APPROVED",
     commit_id: options.reviewCommit ?? pullHeadSha,
     submitted_at: options.reviewTime ?? "2026-07-23T11:59:00Z",
+    author_association: "MEMBER",
     html_url:
       `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
       `/pull/${pullNumber}#pullrequestreview-9001`,
@@ -2909,9 +2910,11 @@ describe("release approval provenance", () => {
       state: string,
       user: Record<string, unknown>,
       commitId = headSha,
+      association = "MEMBER",
     ) => ({
       id,
       state,
+      author_association: association,
       commit_id: commitId,
       submitted_at: "2026-07-23T11:59:00Z",
       user,
@@ -2949,6 +2952,8 @@ describe("release approval provenance", () => {
         [reviewFrom(1, "APPROVED", author)],
         [reviewFrom(1, "APPROVED", reviewer, "0".repeat(40))],
         [reviewFrom(1, "COMMENTED", reviewer)],
+        [reviewFrom(1, "APPROVED", reviewer, headSha, "NONE")],
+        [reviewFrom(1, "APPROVED", reviewer, headSha, "CONTRIBUTOR")],
         [reviewFrom(1, "APPROVED", reviewer), reviewFrom(2, "DISMISSED", reviewer)],
       ]) {
         const fixture = hotfixFixture({ reviews });
@@ -3002,6 +3007,22 @@ describe("release approval provenance", () => {
           logger: { log() {} },
         }),
       ).rejects.toThrow("must be true or false");
+    });
+
+    test("ignores a change request from someone without write access", async () => {
+      const outsider = { login: "drive-by", id: 7004, type: "User" };
+      const fixture = hotfixFixture({
+        reviews: [
+          reviewFrom(1, "APPROVED", reviewer),
+          reviewFrom(2, "CHANGES_REQUESTED", outsider, headSha, "NONE"),
+        ],
+      });
+      const result = await verifyApprovedMerge({
+        env: hotfixEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      });
+      expect(result.approval).toEqual(expect.objectContaining({ reviewerLogin: "second-pair" }));
     });
 
     test("refuses a hotfix with an outstanding change request", async () => {

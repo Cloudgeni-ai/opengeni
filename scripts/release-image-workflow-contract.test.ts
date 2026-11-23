@@ -912,6 +912,10 @@ describe("release image workflow contract", () => {
       "reuse_source_sha, reuse_images and review_after_merge are only valid for lane=hotfix",
     );
     expect(candidate).toContain('git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent');
+    expect(candidate).toContain(
+      "run-name: release-candidate:${{ inputs.lane || 'release' }}:${{ inputs.source_sha }}",
+    );
+    expect(candidate).toContain('skip "no candidate receipt"');
     expect(parsed.on.workflow_dispatch.inputs.reuse_images).toMatchObject({
       required: false,
       default: "",
