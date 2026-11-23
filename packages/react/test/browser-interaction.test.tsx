@@ -4314,10 +4314,12 @@ describe("BrowserViewer", () => {
       },
     };
     const sequence: string[] = [];
+    const reopening = Promise.withResolvers<void>();
     const client = fakeClient({
       listBrowserSessions: async () => ({ revision: 1, sessions: [suspended] }),
       resumeBrowserSession: async (_workspaceId, _browserSessionId, request) => {
         sequence.push("resume");
+        await reopening.promise;
         return mutation(resumed, "resume", request.operationId);
       },
       getBrowserSession: async () => {
@@ -4347,11 +4349,23 @@ describe("BrowserViewer", () => {
 
     expect(sequence).toEqual([]);
     expect(rendered.container.textContent).toContain("Browser is sleeping");
+    expect(rendered.container.textContent).toContain(
+      "Sign-ins and cookies are kept. The open page reloads, and unsaved form entries are lost.",
+    );
+    expect(rendered.container.querySelector(".lucide-moon")).not.toBeNull();
+    expect(rendered.container.querySelector(".lucide-loader-circle")).toBeNull();
     const open = [...rendered.container.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === "Open browser",
     );
     expect(open).toBeDefined();
     await actRun(() => open!.click());
+    await flush(40);
+
+    expect(sequence).toEqual(["resume"]);
+    expect(rendered.container.textContent).toContain("Opening browser");
+    expect(rendered.container.textContent).not.toContain("unsaved form entries");
+    expect(rendered.container.querySelector(".lucide-loader-circle")).not.toBeNull();
+    reopening.resolve();
     await flush(40);
 
     expect(sequence[0]).toBe("resume");

@@ -858,7 +858,7 @@ export const englishMessages = {
     "Install the {extensionName} extension in the profile you want to use.",
   "browserViewer.interactiveBrowserPage": "Interactive browser page",
   "browserViewer.itsPrivateStateIsSaved":
-    "Its private state is saved. Opening it creates a fresh, isolated browser process.",
+    "Sign-ins and cookies are kept. The open page reloads, and unsaved form entries are lost.",
   "browserViewer.itStoppedAfterItWent": "It stopped after it went unused.",
   "browserViewer.itStoppedUnexpectedly": "It stopped unexpectedly.",
   "browserViewer.live": "Live",

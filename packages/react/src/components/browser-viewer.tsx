@@ -34,6 +34,7 @@ import {
   Globe2Icon,
   LoaderCircleIcon,
   MonitorIcon,
+  MoonIcon,
   PlusIcon,
   RefreshCwIcon,
   RotateCcwIcon,
@@ -1178,6 +1179,7 @@ function BrowserLifecyclePanel(props: {
 }) {
   const t = useOpenGeniText();
   const failed = props.attempt?.error ?? null;
+  const sleeping = props.session.lifecycle === "suspended" && !props.attempt?.running;
   const label = failed
     ? t("browserViewer.browserCouldNotReopen")
     : props.session.lifecycle === "suspending"
@@ -1189,7 +1191,7 @@ function BrowserLifecyclePanel(props: {
           : t("browserViewer.browserIsSleeping");
   const detail = failed
     ? failed.message
-    : props.session.lifecycle === "suspended"
+    : sleeping
       ? t("browserViewer.itsPrivateStateIsSaved")
       : t("browserViewer.theBrowserWillReconnectHere");
   return (
@@ -1197,14 +1199,16 @@ function BrowserLifecyclePanel(props: {
       <div className="max-w-sm">
         <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
           {failed ? (
-            <CircleAlertIcon className="size-4.5 text-og-danger" />
+            <CircleAlertIcon aria-hidden="true" className="size-4.5 text-og-danger" />
+          ) : sleeping ? (
+            <MoonIcon aria-hidden="true" className="size-4.5" />
           ) : (
-            <LoaderCircleIcon className="size-4.5 animate-spin" />
+            <LoaderCircleIcon aria-hidden="true" className="size-4.5 motion-safe:animate-spin" />
           )}
         </span>
         <p className="mt-3 text-og-menu font-medium text-og-fg">{label}</p>
         <p className="mt-1 text-og-control leading-5 text-og-fg-muted">{detail}</p>
-        {failed || (props.session.lifecycle === "suspended" && !props.attempt?.running) ? (
+        {failed || sleeping ? (
           <button
             type="button"
             onClick={props.onResume}
