@@ -326,6 +326,7 @@ import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   personalWorkspaceExtensionMcpServers,
   personalWorkspaceExtensionSubject,
+  lapsedPersonalCarriedConnectors,
 } from "./personal-workspace-connectors";
 import {
   applySessionAgentConfigWriteThrough,
@@ -3644,8 +3645,28 @@ async function createSessionForRequestInFileScope(
   // written rows without it. Compare it only when the create request supplied
   // the field explicitly; the parsed schema default must not manufacture a
   // mismatch for a legacy draft.
+  const submittedTools = toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools);
+  // The person's own connector carried into their Personal workspace whose
+  // account stopped working is left out, as a lapsed account pick is, rather
+  // than refusing the chat; any other unknown id is still refused below.
+  const lapsedToolOmissions = await lapsedPersonalCarriedConnectors(db, {
+    workspaceId,
+    subjectId: grant.subjectId,
+    accountId: grant.accountId,
+    serverIds: submittedTools.flatMap((tool) =>
+      tool.kind === "mcp" && !runtimeSettings.mcpServers.some((server) => server.id === tool.id)
+        ? [tool.id]
+        : [],
+    ),
+    ownServers: runtimeSettings.mcpServers,
+  });
   const requestedTools = validateToolRefs(
-    toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
+    submittedTools.filter(
+      (tool) =>
+        !(
+          tool.kind === "mcp" && lapsedToolOmissions.some((omitted) => omitted.serverId === tool.id)
+        ),
+    ),
     runtimeSettings,
   );
   let selectedTools: ToolRef[];
@@ -4090,7 +4111,7 @@ async function createSessionForRequestInFileScope(
     personalConnectionDelegations,
     mcpAccountBindings,
     connectionAccountIntent,
-    omittedSelections,
+    omittedSelections: omittedPicks,
   } = await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
     freezeConnectionAccounts({
       db,
@@ -4100,13 +4121,20 @@ async function createSessionForRequestInFileScope(
       tools: connectionAccountTools,
       resources,
       source: connectionDelegationSource,
-      authoritySelections: payload.connectionAccounts,
+      // Picks for a lapsed carried connector left out above go with it.
+      authoritySelections: lapsedToolOmissions.length
+        ? payload.connectionAccounts?.filter(
+            (selection) =>
+              !lapsedToolOmissions.some((omitted) => omitted.serverId === selection.serverId),
+          )
+        : payload.connectionAccounts,
       autoConnect: { settings: unresolvedDeps.settings },
       // An account picked from a list loaded earlier may have stopped
       // working since: start without it instead of refusing the message.
       unusableSelections: "omit",
     }),
   );
+  const omittedSelections = [...lapsedToolOmissions, ...omittedPicks];
   if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
@@ -6027,16 +6055,34 @@ export async function updateSessionToolPolicy(
     request.mode === "workspace_default" && request.excludedMcpServerIds !== undefined;
   const requestedExclusions =
     request.mode === "workspace_default" ? (request.excludedMcpServerIds ?? []) : [];
+  const availableIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
+  // The person's own carried connector whose account stopped working is kept
+  // like a disconnected stored selection: chosen, but not run until reconnected.
+  const lapsedCarriedIds = explicitRequest
+    ? new Set(
+        (
+          await lapsedPersonalCarriedConnectors(deps.db, {
+            workspaceId: grant.workspaceId,
+            subjectId: grant.subjectId,
+            accountId: grant.accountId,
+            serverIds: explicitRequest.tools.flatMap((tool) =>
+              tool.kind === "mcp" && !availableIds.has(tool.id) ? [tool.id] : [],
+            ),
+            ownServers: runtimeSettings.mcpServers,
+          })
+        ).map((omitted) => omitted.serverId),
+      )
+    : new Set<string>();
   const explicitRequestedTools = explicitRequest
     ? (() => {
         // A disconnected stored selection remains policy truth, not executable
         // authority. Preserve exact existing refs while validating every new or
         // changed ref against the current runtime registry.
-        const availableIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
         const retainedUnavailableRefs = explicitRequest.tools.filter(
           (tool) =>
             !availableIds.has(tool.id) &&
-            existingSession.tools.some((existing) => stableJson(existing) === stableJson(tool)),
+            (existingSession.tools.some((existing) => stableJson(existing) === stableJson(tool)) ||
+              (tool.kind === "mcp" && lapsedCarriedIds.has(tool.id))),
         );
         const retainedIds = new Set(retainedUnavailableRefs.map((tool) => tool.id));
         const validatedCurrentRefs = validateToolRefs(

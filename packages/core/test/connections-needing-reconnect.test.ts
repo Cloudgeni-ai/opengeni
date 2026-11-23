@@ -282,9 +282,10 @@ describe("connections that need reconnecting", () => {
     expect(notices[0]!.payload).toMatchObject({
       key: connectionNeedsReauthNoticeKey(broken.id),
       title: "Mail needs reconnecting",
-      subtitle: "ada@example.test",
       urgency: "normal",
     });
+    // Everyone in a shared chat sees it: it names the service, not the account.
+    expect(JSON.stringify(notices[0]!.payload)).not.toContain("ada@example.test");
     const inbox = (await listInboxItems(db, { accountId: scope.accountId, subjectId: ada })).filter(
       (item) => item.sessionId === session.id && item.kind === "notification",
     );

@@ -742,8 +742,9 @@ test("Reconnect required comes from the server, so it survives a reload or anoth
     name: "Atlassian",
     kind: "mcp",
     enabled: true,
-    runtime: { available: true, mcpServerId: "atlassian" },
-    lifecycle: { readiness: "ready" },
+    // Listed, not runnable, while the account needs reconnecting.
+    runtime: { available: false, mcpServerId: "atlassian" },
+    lifecycle: { readiness: "attention" },
     connectionRef: {
       providerDomain: "mcp.atlassian.com",
       kind: "oauth2",
@@ -813,8 +814,15 @@ test("Reconnect required comes from the server, so it survives a reload or anoth
   unmount = await mount();
   expect(status()).toBe("reconnect");
 
-  // Reconnected: the account works again.
+  // Reconnected: the account works again and the connector can run.
   server.connections = [{ ...account, status: "active" } as ConnectionMetadata];
+  server.items = [
+    {
+      ...entry,
+      runtime: { ...entry.runtime, available: true },
+      lifecycle: { ...entry.lifecycle, readiness: "ready" },
+    } as CapabilityCatalogItem,
+  ];
   await refocus();
   expect(status()).toBe("ready");
   await unmount();

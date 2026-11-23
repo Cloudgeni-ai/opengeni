@@ -8,6 +8,10 @@ import { errorMessage } from "@opengeni/contracts/values";
 import {
   getConnectionMetadata,
   listConnectionsMetadata,
+  getSessionTurn,
+  getSessionTurnInitiatingHumanSubjectId,
+  getSessionVisibility,
+  isSubjectOwnPersonalWorkspace,
   listSessionEvents,
   type ConnectionNeedsReauth,
   type Database,
@@ -209,7 +213,10 @@ export async function postConnectionNeedsReauthNotice(
       attemptId?: string | undefined;
       executionGeneration?: number | undefined;
     };
-    /** Leave it alone when this chat already shows the notice (posted, not withdrawn). */
+    /**
+     * Leave it alone when this chat already shows the notice to the same
+     * person since the connection last changed (posted, not withdrawn).
+     */
     skipWhenShown?: boolean;
   },
 ): Promise<void> {
@@ -217,15 +224,32 @@ export async function postConnectionNeedsReauthNotice(
   if (!use) return;
   try {
     const key = connectionNeedsReauthNoticeKey(broken.connectionId);
-    if (broken.skipWhenShown && (await noticeShown(deps.db, use, key))) return;
     const connection = await getConnectionMetadata(
       deps.db,
       broken.workspaceId,
       broken.connectionId,
       broken.subjectId,
     );
+    if (
+      broken.skipWhenShown &&
+      (await noticeShown(deps.db, use, key, connection?.updatedAt ?? null))
+    )
+      return;
     const service = connectionProviderName(broken.providerDomain);
-    const account = connection ? connectionAccountLabel(connection, "") : "";
+    // Everyone in a shared chat sees its notices: name only the service there,
+    // not whose account it is (the person's own Personal workspace excepted).
+    const sharedWithOthers =
+      (await getSessionVisibility(deps.db, use.workspaceId, use.sessionId)) ===
+        "workspace_shared" &&
+      !(
+        connection?.subjectId &&
+        (await isSubjectOwnPersonalWorkspace(deps.db, {
+          accountId: connection.accountId,
+          workspaceId: use.workspaceId,
+          subjectId: connection.subjectId,
+        }))
+      );
+    const account = connection && !sharedWithOthers ? connectionAccountLabel(connection, "") : "";
     const payload = SessionNotificationPostedPayload.parse({
       key,
       title: `${service} needs reconnecting`,
@@ -261,24 +285,37 @@ export async function postConnectionNeedsReauthNotice(
 /** Notification events read back to find a notice's latest state. */
 const NOTICE_LOOKBACK = 200;
 
-/** Whether the chat's latest event for this notice key posted it (not withdrew it). */
+/**
+ * Whether the chat already shows this notice to the person `use.turnId` is
+ * for: its latest event for the key posted it (not withdrew it), on a turn of
+ * that same person, after the connection last changed (so a later break of a
+ * reconnected account is told again).
+ */
 async function noticeShown(
   db: Database,
-  use: { workspaceId: string; sessionId: string },
+  use: { workspaceId: string; sessionId: string; turnId?: string | undefined },
   key: string,
+  changedAt: string | null,
 ): Promise<boolean> {
   const events = await listSessionEvents(db, use.workspaceId, use.sessionId, {
     includeTypes: ["session.notification.posted", "session.notification.withdrawn"],
     direction: "before",
     limit: NOTICE_LOOKBACK,
   });
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]!;
-    const payload = event.payload as { key?: unknown } | null;
-    if (payload?.key !== key) continue;
-    return event.type === "session.notification.posted";
+  let latest: (typeof events)[number] | undefined;
+  for (let index = events.length - 1; index >= 0 && !latest; index -= 1) {
+    const payload = events[index]!.payload as { key?: unknown } | null;
+    if (payload?.key === key) latest = events[index];
   }
-  return false;
+  if (!latest || latest.type !== "session.notification.posted") return false;
+  if (changedAt && Date.parse(latest.occurredAt) < Date.parse(changedAt)) return false;
+  if (!use.turnId || !latest.turnId) return false;
+  if (latest.turnId === use.turnId) return true;
+  const [shownTo, sender] = [
+    await getSessionTurnInitiatingHumanSubjectId(db, use.workspaceId, latest.turnId),
+    await getSessionTurnInitiatingHumanSubjectId(db, use.workspaceId, use.turnId),
+  ];
+  return shownTo !== null && shownTo === sender;
 }
 
 /**
@@ -302,6 +339,16 @@ export async function reportOmittedConnectionAccounts(
     omitted: readonly OmittedConnectionAccount[];
   },
 ): Promise<void> {
+  // A new chat's first turn: its generation, so the notice is on that exact turn.
+  let turnGeneration = input.turnGeneration;
+  if (
+    input.turnId &&
+    turnGeneration === undefined &&
+    input.omitted.some((omitted) => omitted.account.status === "needs_reauth")
+  )
+    turnGeneration =
+      (await getSessionTurn(deps.db, input.workspaceId, input.turnId).catch(() => null))
+        ?.executionGeneration ?? undefined;
   for (const omitted of input.omitted) {
     deps.observability?.info("Picked connector account left out of an accepted message", {
       sessionId: input.sessionId,
@@ -320,8 +367,8 @@ export async function reportOmittedConnectionAccounts(
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         ...(input.turnId ? { turnId: input.turnId } : {}),
-        ...(input.turnId && input.turnGeneration !== undefined
-          ? { executionGeneration: input.turnGeneration }
+        ...(input.turnId && turnGeneration !== undefined
+          ? { executionGeneration: turnGeneration }
           : {}),
       },
       skipWhenShown: true,

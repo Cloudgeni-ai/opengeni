@@ -20,7 +20,12 @@ import {
 import { mcpAccountRouteId } from "../src/domain/mcp-account-bindings";
 import { freezeConnectionAccounts } from "../src/domain/personal-connection-delegations";
 import { getConnectorToolPermissions } from "../src/domain/connector-tool-permissions";
-import { acceptSessionUserMessageWithOutcome } from "../src/domain/sessions";
+import {
+  acceptSessionUserMessageWithOutcome,
+  createSessionForRequest,
+  updateSessionToolPolicy,
+} from "../src/domain/sessions";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts";
 
 // The Personal workspace is an extension of the organization for its one
 // owner: connectors behind the owner's own "Only me" connections made in a
@@ -475,14 +480,144 @@ test("a carried connector whose account stopped working stays listed but never r
         originWorkspaceId: f.team,
         originWorkspaceName: "Team workspace",
       });
+      // Listed as needing attention, never as ready: nothing selects it by
+      // default or offers it as runnable until it is reconnected.
+      expect(item?.runtime.available).toBe(false);
+      expect(item?.lifecycle.readiness).toBe("attention");
       // Nothing that runs or binds a connector uses it.
       expect(await runs()).toEqual([f.curated.serverId]);
+      // Its approvals page is not offered while it can't run.
+      await expect(
+        getConnectorToolPermissions({
+          db: client.db,
+          settings,
+          workspaceId: f.miaPersonal,
+          capabilityId: f.custom.id,
+          personalOwnerVerified: true,
+          grant: {
+            accountId: f.accountId,
+            workspaceId: f.miaPersonal,
+            subjectId: f.mia,
+            permissions: ["capabilities:read", "capabilities:manage"],
+            metadata: {},
+          } as unknown as Parameters<typeof getConnectorToolPermissions>[0]["grant"],
+        }),
+      ).rejects.toMatchObject({ status: 404 });
     } finally {
       await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
     }
   }
   expect(await runs()).toEqual([f.custom.serverId, f.curated.serverId].sort());
 }, 60_000);
+
+test("a carried connector whose account stopped working never blocks starting or continuing a chat", async () => {
+  if (!shared) return;
+  const f = fixture;
+  const scope = { accountId: f.accountId, workspaceId: f.miaPersonal };
+  const grant = {
+    ...scope,
+    subjectId: f.mia,
+    permissions: ["admin", "sessions:control"],
+    principalKind: "human_session",
+  } as unknown as Parameters<typeof createSessionForRequest>[1];
+  const deps = {
+    settings,
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient: { wakeSessionWorkflow: async () => {} },
+    objectStorage: null,
+  } as unknown as Parameters<typeof createSessionForRequest>[0];
+  const custom = { kind: "mcp" as const, id: f.custom.serverId };
+  const curated = { kind: "mcp" as const, id: f.curated.serverId };
+  const create = async (tools: { kind: "mcp"; id: string }[]) =>
+    await createSessionForRequest(deps, grant, f.miaPersonal, {
+      initialMessage: "use my tools",
+      resources: [],
+      tools,
+      model: "scripted-model",
+      idempotencyKey: crypto.randomUUID(),
+    });
+  const gapsOf = async (sessionId: string) =>
+    (
+      await sql<{ gaps: unknown }[]>`
+        select metadata -> 'connectionAccountGaps' as gaps from session_turns
+        where session_id = ${sessionId} order by created_at`
+    ).map((row) => row.gaps);
+
+  // Chosen while it worked: a chat whose tools name it.
+  const before = await create([custom, curated]);
+  await sql`update connections set status = 'needs_reauth' where id = ${f.connections.miaAcme}`;
+  try {
+    // A new chat whose selection still names it starts without it.
+    const including = await create([custom, curated]);
+    expect(including.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id)).toEqual([
+      f.curated.serverId,
+    ]);
+    expect(await gapsOf(including.id)).toEqual([
+      [
+        {
+          serverId: f.custom.serverId,
+          connectionId: f.connections.miaAcme,
+          reason: "account_inactive",
+        },
+      ],
+    ]);
+    // One without it is unaffected.
+    const excluding = await create([curated]);
+    expect(excluding.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id)).toEqual([
+      f.curated.serverId,
+    ]);
+    // Any other unknown connector is still refused.
+    await expect(create([{ kind: "mcp", id: "not_a_connector" }])).rejects.toMatchObject({
+      status: 422,
+    });
+
+    // A follow-up in the chat that chose it is accepted, without that connector.
+    const followUp = await acceptSessionUserMessageWithOutcome(
+      deps as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[0],
+      grant as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[1],
+      f.miaPersonal,
+      before.id,
+      { text: "again", clientEventId: crypto.randomUUID(), delivery: "send" },
+    );
+    const bindings = await getSessionTurnMcpAccountBindings(
+      client.db,
+      f.miaPersonal,
+      before.id,
+      followUp.turn.id,
+    );
+    expect(bindings?.map((binding) => binding.canonicalServerId)).toEqual([f.curated.serverId]);
+
+    // Turning it on for a chat that never had it keeps it chosen, not run.
+    const updated = await updateSessionToolPolicy(
+      deps as unknown as Parameters<typeof updateSessionToolPolicy>[0],
+      grant,
+      excluding.id,
+      {
+        mode: "explicit",
+        tools: [curated, custom],
+        firstPartyMcpTools: [...(excluding.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)],
+        expectedVersion: excluding.toolPolicyVersion ?? 1,
+      },
+    );
+    expect(updated.tools.map((tool) => tool.id)).toContain(f.custom.serverId);
+    await expect(
+      updateSessionToolPolicy(
+        deps as unknown as Parameters<typeof updateSessionToolPolicy>[0],
+        grant,
+        excluding.id,
+        {
+          mode: "explicit",
+          tools: [curated, { kind: "mcp", id: "not_a_connector" }],
+          firstPartyMcpTools: [...(updated.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)],
+          expectedVersion: updated.toolPolicyVersion ?? 2,
+        },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  } finally {
+    await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
+  }
+}, 120_000);
 
 test("the owner can open a carried connector's approvals in their Personal workspace", async () => {
   if (!shared) return;

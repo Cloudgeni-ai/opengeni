@@ -20,6 +20,7 @@ import { readOrganizationIntegrationPolicyForServing } from "@opengeni/db/organi
 import { dedicatedMcpIntegrationKey } from "./organization-integration-catalog";
 import {
   personalWorkspaceOwnerOriginConnections,
+  type OmittedConnectionAccount,
   type PersonalWorkspaceOriginConnections,
 } from "./personal-connection-delegations";
 
@@ -56,6 +57,14 @@ export type PersonalWorkspaceConnectorOrigin = {
 export type PersonalWorkspaceExtensionMcpServer = EnabledMcpCapabilityServer & {
   connectionRef: McpServerConnectionRef;
   personalExtension: PersonalWorkspaceConnectorOrigin;
+  /**
+   * Only with `includeLapsed`: the owner's account it is carried for stopped
+   * working, so it is listed as needing reconnecting and never runs.
+   */
+  lapsedConnection?: Pick<
+    ConnectionMetadata,
+    "id" | "workspaceId" | "subjectId" | "providerDomain" | "status"
+  >;
 };
 
 function canonicalUrl(value: string): string {
@@ -254,10 +263,66 @@ export async function personalWorkspaceExtensionMcpServers(
           originWorkspaceName,
           catalogScope,
         },
+        ...(connection.status !== "active"
+          ? {
+              lapsedConnection: {
+                id: connection.id,
+                workspaceId: connection.workspaceId,
+                subjectId: connection.subjectId,
+                providerDomain: connection.providerDomain,
+                status: connection.status,
+              },
+            }
+          : {}),
       });
     }
   }
   return carried;
+}
+
+/**
+ * Of `serverIds`, those that are the person's own connectors carried into
+ * their Personal workspace whose account stopped working, as left-out picks.
+ * A request naming one (a chat's tool selection made while it worked, or
+ * from a list that still shows it) runs without it instead of being refused;
+ * any other unknown id is still refused by the caller.
+ */
+export async function lapsedPersonalCarriedConnectors(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string | null | undefined;
+    accountId?: string | undefined;
+    serverIds: readonly string[];
+    ownServers: readonly Pick<EnabledMcpCapabilityServer, "id" | "url">[];
+  },
+): Promise<OmittedConnectionAccount[]> {
+  if (input.serverIds.length === 0) return [];
+  const wanted = new Set(input.serverIds);
+  const carried = await personalWorkspaceExtensionMcpServers(db, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    accountId: input.accountId,
+    ownServers: input.ownServers,
+    includeLapsed: true,
+  });
+  return carried.flatMap((server) =>
+    server.lapsedConnection && wanted.has(server.id)
+      ? [
+          {
+            serverId: server.id,
+            connectionId: server.lapsedConnection.id,
+            reason: "account_inactive" as const,
+            account: {
+              workspaceId: server.lapsedConnection.workspaceId,
+              subjectId: server.lapsedConnection.subjectId,
+              providerDomain: server.lapsedConnection.providerDomain,
+              status: server.lapsedConnection.status,
+            },
+          },
+        ]
+      : [],
+  );
 }
 
 export type PersonalWorkspaceExtensionApiIntegration = ApiIntegrationRuntime & {

@@ -22,6 +22,7 @@ import { getHumanComposerDraft, saveHumanComposerDraft } from "../src/applicatio
 import { connectionNeedsReauthNoticeKey } from "../src/domain/connections-needing-reconnect";
 import { listOwnConnectionAccountsForGrant } from "../src/domain/personal-connection-delegations";
 import { resolveContinuedConnectionAccounts } from "../src/domain/session-connection-accounts";
+import { createSessionForRequest } from "../src/domain/sessions";
 
 /*
  * Regression: a chat left open keeps the account list it loaded when it
@@ -228,6 +229,7 @@ async function fixture() {
     workspaceId,
     scope,
     settings,
+    deps,
     joinOrganization,
     addLogin,
     expire,
@@ -310,6 +312,7 @@ describe("sending with an account list loaded earlier", () => {
       grant,
       subjectId: owner,
       scope,
+      deps,
       joinOrganization,
       addLogin,
       expire,
@@ -344,6 +347,8 @@ describe("sending with an account list loaded earlier", () => {
     const posted = await notices();
     expect(posted).toHaveLength(1);
     expect(posted[0]!.turnId).toBe(first.turnId);
+    // Everyone in the chat can see it: it names the service, not her account.
+    expect(JSON.stringify(posted[0]!.payload)).not.toContain("bea@example.test");
     const inboxOf = async (person: string) =>
       (await listInboxItems(db, { accountId: scope.accountId, subjectId: person })).filter(
         (item) => item.sessionId === sessionId && item.kind === "notification",
@@ -368,5 +373,51 @@ describe("sending with an account list loaded earlier", () => {
     expect(
       (await getInboxItem(db, { itemId, accountId: scope.accountId, subjectId: sender }))?.status,
     ).toBe("dismissed");
+
+    // Reconnected and broken again later: she is told again.
+    await shared!.admin`update connections set status = 'active', updated_at = now()
+      where id = ${lapsedLogin}`;
+    await shared!.admin`update connections set status = 'needs_reauth', updated_at = now()
+      where id = ${lapsedLogin}`;
+    await sendIn(sessionId, pick, senderGrant);
+    expect(await notices()).toHaveLength(2);
+
+    // A new chat she starts with the expired pick: the notice is on its first
+    // turn (with that turn's generation) and reaches her.
+    const created = await createSessionForRequest(
+      deps as unknown as Parameters<typeof createSessionForRequest>[0],
+      senderGrant,
+      scope.workspaceId,
+      {
+        initialMessage: "follow up on the Linear issue",
+        resources: [],
+        tools: [{ kind: "mcp", id: linear.id }],
+        model: "scripted-model",
+        connectionAccounts: pick,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    const [initialTurn] = await shared!.admin<{ id: string; generation: number }[]>`
+      select id, execution_generation as generation from session_turns
+      where session_id = ${created.id}`;
+    expect(created.initialTurnId).toBe(initialTurn!.id);
+    const createdNotices = (await listSessionEvents(db, scope.workspaceId, created.id)).filter(
+      (event) =>
+        event.type === "session.notification.posted" &&
+        (event.payload as { key?: string }).key === key,
+    );
+    expect(createdNotices.map((event) => [event.turnId, event.turnGeneration])).toEqual([
+      [initialTurn!.id, initialTurn!.generation],
+    ]);
+    expect(
+      (await listInboxItems(db, { accountId: scope.accountId, subjectId: sender })).filter(
+        (item) => item.sessionId === created.id && item.kind === "notification",
+      ),
+    ).toHaveLength(1);
+    expect(
+      (await listInboxItems(db, { accountId: scope.accountId, subjectId: owner })).filter(
+        (item) => item.sessionId === created.id,
+      ),
+    ).toEqual([]);
   }, 180_000);
 });
