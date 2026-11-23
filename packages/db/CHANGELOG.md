@@ -1,5 +1,31 @@
 # @opengeni/db
 
+## 6.37.0
+
+### Patch Changes
+
+- cc649c3: Run app server code that an agent published on the authority of the person whose chat it acted for, instead of pausing it.
+- 36f5f96: Explain whether a Codex account needs a new sign-in, the available plans cannot serve the model, or an account is rate-limited, including the known reset time.
+- cf218c3: Report refused MCP destinations separately from connection failures. A native account that points to a blocked or unresolvable address now shows what went wrong in connection settings, while a temporary DNS failure still retries normally.
+- 9f7efdb: Offer only usable save destinations on secure questions, and keep task-scoped answers usable when delegated saved-logins access is off.
+- 20daa38: Keep app data that once held shared-account tool data restricted after its sync is switched to a personal account, pointed elsewhere or deleted, until a manager resets the data.
+- a0b9135: A sub-agent's question now goes first to the agent that started it. While that agent can still answer, you get no inbox item or phone notification for it, and Needs you and the attention counts leave it out. It reaches you as before if the agent's turn ends without an answer, the agent's turn fails, or the same pause also needs you. Questions only you can answer (passwords and other secrets, Skill reviews, approvals) still come straight to you. Sessions gain an optional `questionWithAgent` flag.
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/contracts@6.37.0
+  - @opengeni/subscriptions@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/codemode@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+
 ## 6.36.0
 
 ### Minor Changes
