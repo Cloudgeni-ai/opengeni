@@ -1469,6 +1469,15 @@ For a compact browser viewer, pass `showAdvancedControls={false}`. You can
 also render `InteractionInterventionBanner` independently from the same
 subpath.
 
+By default an embedded `BrowserViewer` scales the existing frame to fit while
+preserving its whole image and aspect ratio. Pass `fitViewport` to let an active
+viewer resize a managed Chromium page to the space below the viewer toolbar,
+as the console's browser panel does. The page reflows without cropping. This
+also changes what the agent sees in that tab, including responsive layout,
+screenshot size and pointer coordinates. Use the default when another caller
+controls the viewport or expects a fixed layout. Attached Chrome and other
+engines keep their existing viewport.
+
 ### Secret question display labels
 
 Use React message overrides such as `humanInputModel.username`,

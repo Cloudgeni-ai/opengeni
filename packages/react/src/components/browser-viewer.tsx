@@ -88,6 +88,7 @@ import { InteractionInterventionBanner } from "./interaction-intervention-banner
 import { BrowserSelectControl } from "./browser-select-control";
 import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { browserViewerFrameLimit, useFitBrowserViewport } from "./use-fit-browser-viewport";
 
 /** Auto-ending a lost attached-device browser: bounded retries for transient failures only. */
 const STALE_BROWSER_END_MAX_ATTEMPTS = 3;
@@ -120,6 +121,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride<ChatCl
   /** Hide workspace browser switching, browser/profile creation and diagnostics.
    * Keeps the current chat's tabs, address, live view, input and interventions. Defaults to true. */
   showAdvancedControls?: boolean | undefined;
+  /** Let this viewer resize a managed Chromium page to its panel. Changes the real
+   * page layout and agent screenshots. By default the viewer fits the existing frame. */
+  fitViewport?: boolean | undefined;
   className?: string | undefined;
   onNotify?: ((notification: BrowserViewerNotification) => void) | undefined;
   /** Tests/demos only. Production uses the browser's native WebSocket. */
@@ -183,6 +187,7 @@ export function BrowserViewer({
   enabled = true,
   active = true,
   showAdvancedControls = true,
+  fitViewport = false,
   className,
   onNotify,
   webSocketFactory,
@@ -197,7 +202,7 @@ export function BrowserViewer({
   const t = useOpenGeniText();
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
   const attached = useAttachedBrowsers({ ...override, enabled: enabled && showAdvancedControls });
-  const { client: configClient } = useEmbeddedBrowserInteraction(override);
+  const { client: configClient, workspaceId } = useEmbeddedBrowserInteraction(override);
   // The deployment's own branded extension when it ships one.
   const browserExtensionName = useClientConfigFlags(configClient as never).browserExtension?.name;
   const onlineAttachedBridges = useMemo(
@@ -463,7 +468,7 @@ export function BrowserViewer({
       controllerReady &&
       browser.selectedTarget !== null &&
       browser.session?.capabilities.liveFrames === true,
-    stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
+    stream: { format: "jpeg", quality: 76, ...browserViewerFrameLimit },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
   const receivedFrame = frameMatchesSelectedTarget(
@@ -490,6 +495,39 @@ export function BrowserViewer({
   // connection-generation loss; an unrelated lost Chrome must not poison the
   // selected managed browser's recovery UI.
   const selectedPlacement = (browser.session ?? selectedRegistrySession)?.placement;
+  const viewportRef = useFitBrowserViewport({
+    frame: receivedFrame,
+    scope:
+      fitViewport &&
+      enabled &&
+      active &&
+      frameIsLive &&
+      receivedFrame &&
+      !controlUnavailable &&
+      selectedPlacement?.kind !== "attached_device" &&
+      browser.session?.engine === "chromium" &&
+      browser.session.capabilities.humanInput
+        ? JSON.stringify([
+            workspaceId,
+            receivedFrame.browserSessionId,
+            receivedFrame.controllerGeneration,
+            receivedFrame.targetId,
+            receivedFrame.targetGeneration,
+          ])
+        : null,
+    onResize: (frame, width, height) =>
+      // The same fenced action as manual viewport changes, without treating a
+      // refused automatic resize as a failure of the person's input.
+      configClient.actInBrowser(workspaceId, frame.browserSessionId, {
+        operationId: crypto.randomUUID(),
+        targetId: frame.targetId,
+        expectedTargetGeneration: frame.targetGeneration,
+        expectedDocumentGeneration: frame.documentGeneration,
+        expectedFrameId: frame.frameId,
+        observationMode: "none",
+        action: { type: "viewport", width, height, mobile: false },
+      }),
+  });
   const selectedChromeGenerationLoss =
     selectedPlacement?.kind === "attached_device" &&
     isAttachedChromeGenerationLossError(connectionError);
@@ -1039,7 +1077,7 @@ export function BrowserViewer({
               </button>
             </div>
           ) : null}
-          <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div ref={viewportRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
             <BrowserViewport
               // A new control scope must discard every buffered gesture and queued action.
               key={JSON.stringify([
