@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { getSystemErrorMap } from "node:util";
 import { SessionEventType } from "@opengeni/contracts";
 
 const CODES = [
@@ -46,6 +47,15 @@ const CONSTRAINTS = new Set([
 const ERROR_NAMES = new Set([
   "Error",
   "TypeError",
+  "ReferenceError",
+  "SyntaxError",
+  "URIError",
+  "AbortError",
+  "DOMException",
+  "NatsError",
+  "SelfhostedControlError",
+  "ConnectedCommandCollectionError",
+  "OpStreamUnavailableError",
   "CompactionProviderResponseError",
   "EmptyCompactionSummaryError",
   "RangeError",
@@ -65,7 +75,14 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/api/src/fatal-process-boundary.ts",
   "apps/api/src/mcp/server.ts",
   "apps/api/src/mcp/orchestration-failure-diagnostic.ts",
+  "apps/api/src/mcp/request-abort.ts",
+  "apps/api/src/sandbox/command-completion.ts",
+  "apps/api/src/sandbox/metrics-ingestion.ts",
+  "apps/api/src/sandbox/operation-inventory.ts",
   "apps/api/dist/process/index.js",
+  "packages/runtime/src/sandbox/selfhosted/control-rpc.ts",
+  "packages/runtime/src/sandbox/selfhosted/op-stream.ts",
+  "packages/runtime/src/sandbox/selfhosted/terminal-replay.ts",
   "apps/worker/src/activities/agent-turn/run.ts",
   "apps/worker/src/activities/agent-turn/stream-attempt.ts",
   "packages/runtime/src/context-compaction.ts",
@@ -174,10 +191,93 @@ function errorKind(error: unknown): string {
     if (prototype === TypeError.prototype) return "TypeError";
     if (prototype === RangeError.prototype) return "RangeError";
     if (prototype === AggregateError.prototype) return "AggregateError";
+    if (prototype === ReferenceError.prototype) return "ReferenceError";
+    if (prototype === SyntaxError.prototype) return "SyntaxError";
+    if (prototype === URIError.prototype) return "URIError";
+    if (prototype === DOMException.prototype) return "DOMException";
   } catch {
     /* Untrusted proxies do not contribute type information. */
   }
   return "Error";
+}
+
+function* stackLocations(error: unknown) {
+  const stack = own(error, "stack");
+  if (typeof stack !== "string") return;
+  for (const frame of stack.slice(0, 16_384).split("\n").slice(1, 33)) {
+    const match = /(?:\(|\s)([^\s()]+):(\d{1,7}):(\d{1,7})\)?$/.exec(frame);
+    if (!match) continue;
+    const location = match[1]!;
+    yield {
+      location,
+      source: reviewedSource(location),
+      line: Number(match[2]),
+      column: Number(match[3]),
+    };
+  }
+}
+
+// Closed runtime/driver codes, not a syntax rule for arbitrary error.code values.
+const FATAL_CAUSE_CODES = new Set([
+  ...Array.from(getSystemErrorMap().values(), ([name]) => name),
+  "ABORT_ERR",
+  "ERR_INVALID_ARG_TYPE",
+  "ERR_INVALID_ARG_VALUE",
+  "ERR_INVALID_STATE",
+  "ERR_STREAM_DESTROYED",
+  "ERR_STREAM_PREMATURE_CLOSE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
+  "CONNECTION_REFUSED",
+  "CONNECT_TIMEOUT",
+  "08000",
+  "08001",
+  "08003",
+  "08004",
+  "08006",
+  "08P01",
+  "23502",
+  "23503",
+  "23505",
+  "23514",
+  "40001",
+  "40P01",
+  "42501",
+  "53300",
+  "57014",
+  "57P01",
+  "57P02",
+  "57P03",
+]);
+
+/** Only the top-level class, a reviewed code and up to three reviewed locations.
+ * Additional locations must come from trusted deployment artifacts, never the error. */
+export function fatalErrorLogCause(
+  error: unknown,
+  bundleSources: ReadonlyMap<string, string>,
+): {
+  kind: string;
+  code: string;
+  frames: string[];
+} {
+  const rawCode = own(error, "code");
+  const code =
+    typeof rawCode === "string" && FATAL_CAUSE_CODES.has(rawCode)
+      ? rawCode
+      : typeof rawCode === "number" && Number.isInteger(rawCode) && rawCode >= 0 && rawCode <= 16
+        ? String(rawCode)
+        : "unknown";
+  const frames: string[] = [];
+  for (const { location, source, line, column } of stackLocations(error)) {
+    const reviewed = source ?? bundleSources.get(location);
+    if (!reviewed) continue;
+    frames.push(`${reviewed}:${line}:${column}`);
+    if (frames.length === 3) break;
+  }
+  return { kind: errorKind(error), code, frames };
 }
 
 /** No arbitrary property reads, Error.toJSON, messages, SQL, parameters or function names. */
@@ -221,28 +321,14 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
       rejectionReason = "personal_machine_owner_required";
     }
     statement ??= databaseStatement(error);
-    const stack = own(error, "stack");
-    const frames =
-      typeof stack === "string"
-        ? stack
-            .slice(0, 16_384)
-            .split("\n")
-            .slice(1, 33)
-            .flatMap((frame) => {
-              const match = /(?:\(|\s)([^\s()]+):(\d{1,7}):(\d{1,7})\)?$/.exec(frame);
-              if (!match) return [];
-              // Even a path/function can contain a credential. Keep source-location
-              // fingerprints plus line/column, not untrusted textual stack bytes.
-              return [
-                {
-                  locationHash: createHash("sha256").update(match[1]!).digest("hex"),
-                  ...(reviewedSource(match[1]!) ? { source: reviewedSource(match[1]!)! } : {}),
-                  line: Number(match[2]),
-                  column: Number(match[3]),
-                },
-              ];
-            })
-        : [];
+    // Even a path/function can contain a credential. Keep source-location
+    // fingerprints plus line/column, not untrusted textual stack bytes.
+    const frames = Array.from(stackLocations(error), ({ location, source, line, column }) => ({
+      locationHash: createHash("sha256").update(location).digest("hex"),
+      ...(source ? { source } : {}),
+      line,
+      column,
+    }));
     causes.push({
       kind,
       ...(providerStatus === undefined ? {} : { providerStatus }),

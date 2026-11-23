@@ -2203,10 +2203,12 @@ The standalone `apps/api` entrypoint installs a one-shot fatal process
 boundary before configuration or dependency startup. Startup failures,
 unhandled promise rejections, and uncaught exceptions emit only reviewed
 structural diagnostics plus an opaque correlation id, drain accepted OTLP
-exports for a bounded interval, and then exit nonzero. Exception messages,
-stacks, enumerable fields, and arbitrary rejection values never cross the
-public telemetry boundary. Embedded API composition does not install process
-handlers because its host owns process lifecycle. One class is survivable once
+exports for a bounded interval, and then exit nonzero. The fatal log also
+includes a reviewed cause class and code and up to three reviewed source
+locations without requiring an exporter. Exception messages, raw stacks,
+arbitrary fields and rejection values never cross the public telemetry boundary.
+Embedded API composition does not install process handlers because its host
+owns process lifecycle. One class is survivable once
 the API is serving: an unhandled rejection that only reports a lost database
 connection (`isDatabaseConnectionLoss` in `packages/db/src/persistence-errors.ts`:
 SQLSTATE 57P01-57P03/08xxx, exact node-postgres socket-loss sentences, and
