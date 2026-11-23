@@ -11,6 +11,7 @@ import type { ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/c
 import {
   createDb,
   createOrganizationApiKey,
+  createSession,
   createWorkspace,
   ensureExternalIdentity,
   startAppServerRun,
@@ -615,6 +616,83 @@ test("the code pauses once the publisher can no longer manage the app", async ()
   expect(refused.json.error.details?.reason).toBe("deployer_cannot_manage");
   expect(f.runs.length).toBe(before);
   expect(f.toolCalls).toEqual([]);
+});
+
+test("code an agent published runs on the authority of the person it acted for", async () => {
+  const f = await fixture();
+  expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  // An agent publishes with its worker's service subject and its turn, here
+  // in the person's Only me chat, so the turn is private to them.
+  const turnBy = async (kind: "subject" | "service", subjectId: string) => {
+    const session = await createSession(db.db, {
+      ...f.scope,
+      initialMessage: "Load the issues on the server",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+      subjectId: f.owner.subjectId,
+      visibility: "user_private",
+    });
+    const [turn] = await shared.admin<{ id: string }[]>`
+      insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend,
+        execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      ) values (
+        ${f.scope.accountId}, ${f.scope.workspaceId}, ${session.id}, gen_random_uuid(),
+        ${`app-server-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish', 'test-model',
+        'medium', 'none', 1, ${kind}, ${subjectId}, '{"accepted":true}'::jsonb
+      ) returning id`;
+    const attemptId = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx`update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
+      await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
+      await tx`insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${f.scope.accountId}, ${f.scope.workspaceId}, ${session.id}, ${turn!.id},
+        1, 'running', 'app-server-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
+        '{}'::jsonb
+      )`;
+    });
+    return { sessionId: session.id, turnId: turn!.id, attemptId };
+  };
+  const publishedBy = async (source: { sessionId: string; turnId: string; attemptId: string }) => {
+    await shared.admin`
+      insert into workspace_artifact_events (
+        account_id, workspace_id, artifact_id, type, from_version_id, to_version_id,
+        operation_key, actor_subject_id, reason, source_session_id, source_turn_id,
+        source_attempt_id, source_execution_generation, created_at
+      ) values (
+        ${f.scope.accountId}, ${f.scope.workspaceId}, ${f.siteId}, 'published', null,
+        ${f.versionId()}, ${`agent:${crypto.randomUUID()}`}, 'worker:first-party-mcp',
+        'Published', ${source.sessionId}, ${source.turnId}, ${source.attemptId}, 1,
+        now() + interval '1 second'
+      )`;
+  };
+  f.setIsolate(async (_run, host) => {
+    const called = await host("tools.call", { tool: "linear/list_issues", arguments: {} });
+    return { bodyBase64: Buffer.from(JSON.stringify(called.json)).toString("base64") };
+  });
+
+  await publishedBy(await turnBy("subject", f.owner.subjectId));
+  const ran = await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/issues" });
+  expect(ran.status, JSON.stringify(ran.json)).toBe(200);
+  expect(f.toolCalls.at(-1)?.subjectId).toBe(f.owner.subjectId);
+
+  // A turn without a person (a schedule, a key) leaves only the service
+  // subject, which never manages the app: the code stays paused.
+  await publishedBy(await turnBy("service", "api_key:fixture"));
+  const refused = await f.request(f.member, "POST", `/${f.siteId}/server`, { path: "/issues" });
+  expect(refused.status).toBe(403);
+  expect(refused.json.error.details?.reason).toBe("deployer_cannot_manage");
 });
 
 test("an upload of no files removes the code", async () => {
