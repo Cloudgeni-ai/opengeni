@@ -28,6 +28,10 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   repository: "Cloudgeni-ai/opengeni",
   owner: "Cloudgeni-ai",
   defaultBranch: "main",
+  // Urgent app fixes merge reviewed hotfix/* PRs into this protected source
+  // pointer and ship through the hotfix candidate lane.
+  productionBranch: "production",
+  hotfixHeadPrefix: "hotfix/",
   versionBranch: "changeset-release/main",
   releaseWorkflowPath: ".github/workflows/release.yml",
   openVersionPrWorkflowPath: ".github/workflows/open-version-pr.yml",
@@ -298,11 +302,12 @@ function assertMainRef(value, expectedSha, label = "default branch") {
   invariant(actualSha === expectedSha, `${label} differs from the admitted base SHA`);
 }
 
-function directMainRefSha(value, label = "default branch") {
-  invariant(
-    value?.ref === `refs/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`,
-    `${label} ref changed`,
-  );
+function directMainRefSha(
+  value,
+  label = "default branch",
+  branch = RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+) {
+  invariant(value?.ref === `refs/heads/${branch}`, `${label} ref changed`);
   invariant(value?.object?.type === "commit", `${label} is not a direct commit ref`);
   return assertSha(value.object.sha, `${label} SHA`);
 }
@@ -985,9 +990,13 @@ function releaseHeadRecoveryContext(env, suppliedInputs) {
 }
 
 function assertRecoveryReleasePull(pull, context, expected) {
+  // A hotfix/* PR merged into protected production is the only non-main
+  // release source; its retained head is recovered against production.
+  const hotfix = pull?.base?.ref === RELEASE_AUTOMATION_CONTRACT.productionBranch;
   const identity = assertMergedPull(pull, {
     pullNumber: context.prNumber,
     sourceSha: context.sourceSha,
+    baseRef: hotfix ? RELEASE_AUTOMATION_CONTRACT.productionBranch : undefined,
   });
   invariant(identity.baseSha === context.baseSha, "release-head recovery base SHA changed");
   invariant(identity.headSha === context.headSha, "release-head recovery head SHA changed");
@@ -996,6 +1005,14 @@ function assertRecoveryReleasePull(pull, context, expected) {
     pull?.head?.repo?.full_name,
     "release-head recovery pull-request head repository",
   );
+  if (hotfix) {
+    invariant(
+      headRef.startsWith(RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix) &&
+        headRef.length > RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix.length &&
+        headRepository === RELEASE_AUTOMATION_CONTRACT.repository,
+      "release-head recovery into production requires a hotfix/* head in this repository",
+    );
+  }
   if (expected !== undefined) {
     assertIdentity(pull?.user, expected.author, "release-head recovery pull-request author");
     invariant(
@@ -1007,7 +1024,7 @@ function assertRecoveryReleasePull(pull, context, expected) {
       "release-head recovery pull-request head repository changed",
     );
   }
-  return { ...identity, headRef, headRepository };
+  return { ...identity, headRef, headRepository, hotfix };
 }
 
 async function assertSourceAncestorOfCurrentMain(
@@ -1107,7 +1124,22 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     source.treeSha === head.treeSha
       ? await classifyMergeOutcome(api, source, pullIdentity)
       : "provider-verified-moving-main";
-  await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
+  if (pullIdentity.hotfix) {
+    const production = RELEASE_AUTOMATION_CONTRACT.productionBranch;
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.sourceSha,
+      directMainRefSha(
+        await api.get(repositoryPath(`/git/ref/heads/${production}`)),
+        "release-head recovery production",
+        production,
+      ),
+      "release-head recovery production",
+      "hotfix source",
+    );
+  } else {
+    await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
+  }
   const historicalAdmission = await verifyHistoricalSourceAdmission({
     number: context.prNumber,
     baseSha: context.baseSha,
@@ -1745,7 +1777,13 @@ async function paginatedWorkflowAttemptJobs(api, runId, runAttempt) {
   throw new Error(`workflow-attempt job listing exceeded ${maximumPages * recordsPerPage} records`);
 }
 
-async function verifySuccessfulSourceChecks(api, checks, names, sha) {
+async function verifySuccessfulSourceChecks(
+  api,
+  checks,
+  names,
+  sha,
+  branch = RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+) {
   // GitHub failed-job reruns retain historical check runs under one workflow
   // run/check suite. Bind to that provider-owned run, then require its latest
   // attempt and exact aggregate jobs to be successful instead of trusting a
@@ -1779,7 +1817,7 @@ async function verifySuccessfulSourceChecks(api, checks, names, sha) {
       run.id === runId &&
       run.event === "push" &&
       run.path === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath &&
-      run.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch &&
+      run.head_branch === branch &&
       run.head_sha === sha &&
       run.repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
       run.head_repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
@@ -1803,10 +1841,7 @@ async function verifySuccessfulSourceChecks(api, checks, names, sha) {
     run.path === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
     "required source checks did not execute the CI workflow",
   );
-  invariant(
-    run.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
-    "required source workflow branch changed",
-  );
+  invariant(run.head_branch === branch, "required source workflow branch changed");
   invariant(run.head_sha === sha, "required source workflow run is bound to another commit");
   invariant(
     run.repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
@@ -1986,7 +2021,7 @@ function assertMergedPull(value, expected) {
     "pull-request URL changed",
   );
   invariant(
-    value?.base?.ref === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+    value?.base?.ref === (expected.baseRef ?? RELEASE_AUTOMATION_CONTRACT.defaultBranch),
     "pull-request base changed",
   );
   invariant(
@@ -2264,11 +2299,28 @@ function releaseApprovalContext(env, suppliedSourceSha, suppliedProvenanceSha) {
     controllerSha !== provenanceSha,
     "release controller must differ from the Version provenance",
   );
+  const lane = env.RELEASE_LANE ?? "";
+  invariant(lane === "" || lane === "release" || lane === "hotfix", "release lane is invalid");
+  const hotfix = lane === "hotfix";
+  // A hotfix's provenance_sha, when it differs from source_sha, is the merge of
+  // its reviewed hotfix/* PR into production: source_sha is then that PR's
+  // patch built onto the live released source (verifyHotfixOntoReleaseSource).
+  const hotfixOntoRelease = hotfix && provenanceSha !== sourceSha;
+  const reviewAfterMergeValue = env.RELEASE_REVIEW_AFTER_MERGE ?? "";
+  invariant(
+    ["", "false", "true"].includes(reviewAfterMergeValue),
+    "review_after_merge must be true or false",
+  );
+  const reviewAfterMerge = reviewAfterMergeValue === "true";
+  invariant(!reviewAfterMerge || hotfix, "review_after_merge is only valid for a hotfix");
   return {
     controllerSha,
     sourceSha,
     provenanceSha,
-    descendant: provenanceSha !== sourceSha,
+    descendant: !hotfix && provenanceSha !== sourceSha,
+    hotfix,
+    hotfixOntoRelease,
+    reviewAfterMerge,
     token: env.GITHUB_TOKEN,
   };
 }
@@ -2334,6 +2386,7 @@ async function readMergedReleasePull(api, mergeSha, label = "release source", op
   const pullIdentity = assertMergedPull(pull, {
     pullNumber,
     sourceSha: mergeSha,
+    baseRef: options.baseRef,
   });
   invariant(
     associatedPull.base?.sha === pullIdentity.baseSha &&
@@ -3732,11 +3785,427 @@ async function verifyVersionHeadRelease({
   return provenance;
 }
 
+// ---------------------------------------------------------------------------
+// Hotfix release admission.
+//
+// An urgent app fix lands as a reviewed hotfix/* PR merged into protected
+// `production`, not main, and ships before the next Version. The source is the
+// exact provider merge result of that PR, retained in current production
+// ancestry. It keeps the exact reviewed-head, topology, source-admission and
+// push-CI proofs of the ordinary lane, bound to `production` instead of main,
+// and additionally requires an approving review of the exact head by someone
+// other than its author, unless the dispatcher marks an urgent fix for review
+// after merge (recorded as approval: null, reviewAfterMerge: true). A merge commit retains the reviewed head as a parent
+// of protected production, so no separate release-head tag is required.
+// Version bumps stay on main: the candidate suffixes the chart version, and the
+// fix must still be brought to main for the next ordinary release.
+// ---------------------------------------------------------------------------
+
+// The repository is public: only reviews from people with write access to it
+// (owners, organization members, collaborators) approve or block a hotfix.
+const HOTFIX_REVIEWER_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+function hotfixApproval(reviews, pullIdentity, reviewAfterMerge) {
+  const latestByReviewer = new Map();
+  for (const value of reviews) {
+    const review = record(value, "hotfix review");
+    if (!["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) continue;
+    if (!HOTFIX_REVIEWER_ASSOCIATIONS.has(review.author_association)) continue;
+    const reviewer = record(review.user, "hotfix reviewer");
+    const reviewerId = assertPositiveInteger(reviewer.id, "hotfix reviewer ID");
+    const reviewId = assertPositiveInteger(review.id, "hotfix review ID");
+    const previous = latestByReviewer.get(reviewerId);
+    if (!previous || previous.id < reviewId) latestByReviewer.set(reviewerId, review);
+  }
+  const blocking = [...latestByReviewer.values()].filter(
+    (review) => review.state === "CHANGES_REQUESTED",
+  );
+  invariant(blocking.length === 0, "hotfix PR has an outstanding change request");
+  const approvals = [...latestByReviewer.values()].filter(
+    (review) =>
+      review.state === "APPROVED" &&
+      review.commit_id === pullIdentity.headSha &&
+      review.user.type === "User" &&
+      review.user.id !== pullIdentity.author.id,
+  );
+  if (approvals.length === 0 && reviewAfterMerge) return null;
+  invariant(
+    approvals.length > 0,
+    "hotfix PR has no approving review of its exact head by someone other than its author; " +
+      "approve it, or dispatch with review_after_merge=true for an urgent fix reviewed after the fact",
+  );
+  const approval = approvals.sort((left, right) => left.id - right.id)[0];
+  return {
+    reviewId: approval.id,
+    reviewerLogin: assertString(approval.user.login, "hotfix reviewer login"),
+    reviewerId: approval.user.id,
+    commitId: approval.commit_id,
+    submittedAt: new Date(
+      assertTimestamp(approval.submitted_at, "hotfix review time"),
+    ).toISOString(),
+  };
+}
+
+async function verifyHotfixRelease({ options, logger, context, api }) {
+  const production = RELEASE_AUTOMATION_CONTRACT.productionBranch;
+  // The reviewed hotfix merge on production; the released source equals it
+  // unless the fix is built onto the live release.
+  const mergeSha = context.provenanceSha;
+  const controllerTag = releaseHeadTagName(context.controllerSha);
+  const [initialMain, initialProduction, controllerValue, controllerRef, controllerReleaseValue] =
+    await Promise.all([
+      api.get(repositoryPath("/git/ref/heads/main")),
+      api.get(repositoryPath(`/git/ref/heads/${production}`)),
+      api.get(repositoryPath(`/git/commits/${context.controllerSha}`)),
+      api.get(repositoryPath(`/git/ref/tags/${controllerTag}`)),
+      api.get(repositoryPath(`/releases/tags/${controllerTag}`)),
+    ]);
+  // The controller is retained main code; the source is retained production.
+  const initialMainSha = directMainRefSha(initialMain, "initial release main");
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    context.controllerSha,
+    initialMainSha,
+    "initial release main",
+    "release controller",
+  );
+  const initialProductionSha = directMainRefSha(
+    initialProduction,
+    "initial production",
+    production,
+  );
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    mergeSha,
+    initialProductionSha,
+    "initial production",
+    "hotfix source",
+  );
+  const controller = assertCommit(
+    controllerValue,
+    context.controllerSha,
+    "release controller commit",
+  );
+  assertReleaseHeadRef(controllerRef, context.controllerSha);
+  const controllerRelease = assertReleaseHeadRelease(controllerReleaseValue, context.controllerSha);
+
+  const { source, pull, pullNumber, pullIdentity } = await readMergedReleasePull(
+    api,
+    mergeSha,
+    "hotfix source",
+    { baseRef: production },
+  );
+  const headRef = assertString(pull?.head?.ref, "hotfix PR head ref");
+  invariant(
+    headRef.startsWith(RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix) &&
+      headRef.length > RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix.length,
+    "hotfix source PR head is not a hotfix/* branch",
+  );
+  invariant(
+    pull?.head?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "hotfix source PR head is not in the release repository",
+  );
+  const [base, head] = await Promise.all([
+    api
+      .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
+      .then((value) => assertCommit(value, pullIdentity.baseSha, "reviewed base commit")),
+    api
+      .get(repositoryPath(`/git/commits/${pullIdentity.headSha}`))
+      .then((value) => assertCommit(value, pullIdentity.headSha, "reviewed head commit")),
+  ]);
+  const { mergeMethod, sourceComposition } = await classifyReleaseSourceComposition(
+    api,
+    source,
+    base,
+    head,
+    pullIdentity,
+  );
+  const reviews = await paginatedArray(
+    api,
+    repositoryPath(`/pulls/${pullNumber}/reviews`),
+    "hotfix PR reviews",
+  );
+  const approval = hotfixApproval(reviews, pullIdentity, context.reviewAfterMerge);
+  const review = mergedSourceReview(pullNumber, mergeSha, pullIdentity);
+  const [headChecks, sourceChecks] = await Promise.all([
+    paginatedCheckRuns(api, pullIdentity.headSha),
+    paginatedCheckRuns(api, mergeSha),
+  ]);
+  const sourceAdmission = await verifyDurableSourceAdmission({
+    api,
+    checks: headChecks,
+    pull,
+    pullNumber,
+    baseSha: pullIdentity.baseSha,
+    headSha: pullIdentity.headSha,
+    token: context.token,
+    fetchImpl: options.fetchImpl ?? globalThis.fetch,
+    logger,
+  });
+  const requiredSourceChecks = await verifySuccessfulSourceChecks(
+    api,
+    sourceChecks,
+    RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+    mergeSha,
+    production,
+  );
+  const ontoRelease = context.hotfixOntoRelease
+    ? await verifyHotfixOntoReleaseSource(
+        api,
+        context.sourceSha,
+        base,
+        head,
+        pullIdentity,
+        initialProductionSha,
+      )
+    : null;
+  const terminalProductionSha = directMainRefSha(
+    await api.get(repositoryPath(`/git/ref/heads/${production}`)),
+    "terminal production",
+    production,
+  );
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    mergeSha,
+    terminalProductionSha,
+    "terminal production",
+    "hotfix source",
+  );
+  const provenance = {
+    version: 2,
+    lane: "hotfix",
+    repository: RELEASE_AUTOMATION_CONTRACT.repository,
+    sourceSha: context.sourceSha,
+    sourceTreeSha: ontoRelease ? ontoRelease.source.treeSha : source.treeSha,
+    sourceParents: ontoRelease ? ontoRelease.source.parents : source.parents,
+    ...(ontoRelease
+      ? {
+          hotfixOntoRelease: {
+            mergeSha,
+            mergeTreeSha: source.treeSha,
+            releasedSourceSha: ontoRelease.releasedSourceSha,
+            releasedSourceTreeSha: ontoRelease.releasedSourceTreeSha,
+            patchManifestSha256: ontoRelease.patchManifestSha256,
+          },
+        }
+      : {}),
+    controller: {
+      sha: context.controllerSha,
+      treeSha: controller.treeSha,
+      release: controllerRelease,
+    },
+    pullRequestNumber: pullNumber,
+    pullRequestBase: production,
+    pullRequestHeadRef: headRef,
+    mergeMethod,
+    sourceComposition,
+    providerPullCommitCount: pullIdentity.commitCount,
+    mergedAt: new Date(pullIdentity.mergedAt).toISOString(),
+    reviewedBaseSha: pullIdentity.baseSha,
+    reviewedBaseTreeSha: base.treeSha,
+    reviewedHeadSha: pullIdentity.headSha,
+    reviewedHeadTreeSha: head.treeSha,
+    review,
+    approval,
+    reviewAfterMerge: approval === null,
+    sourceAdmission,
+    requiredSourceChecks,
+  };
+  logger.log(
+    `Verified hotfix PR #${pullNumber} into ${production} (${mergeMethod}), ` +
+      (approval
+        ? `approved by ${approval.reviewerLogin}`
+        : "UNREVIEWED (urgent; review after merge required)") +
+      `, with exact checks for ${mergeSha}` +
+      (ontoRelease
+        ? `; built as exactly its patch onto released ${ontoRelease.releasedSourceSha} (${context.sourceSha}).`
+        : "."),
+  );
+  return provenance;
+}
+
+// An urgent hotfix ships the reviewed PR patch on top of the live released
+// source, so undeployed production commits don't ship with it. The source must
+// be one commit on a candidate-built source in production ancestry whose
+// canonical tree change is exactly the reviewed patch.
+
+// Candidate receipts are created only by the release-candidate workflow with
+// its GITHUB_TOKEN; a hand-made release must never vouch for a source.
+async function assertCandidateReceipt(api, sha) {
+  const receipt = await api.getOptional(repositoryPath(`/releases/tags/opengeni-candidate-${sha}`));
+  invariant(receipt !== null, `released source ${sha} has no release candidate receipt`);
+  const author = RELEASE_AUTOMATION_CONTRACT.versionAuthor;
+  invariant(
+    receipt?.author?.id === author.id && receipt?.author?.type === author.type,
+    `release candidate receipt for ${sha} was not created by the release-candidate workflow`,
+  );
+}
+
+// The canonical tree change a reviewed PR makes: its merge base to its head.
+async function reviewedPatchManifest(api, baseSha, headSha, knownCommits = []) {
+  const comparison = await api.get(repositoryPath(`/compare/${baseSha}...${headSha}`));
+  invariant(
+    comparison?.base_commit?.sha === baseSha && comparison?.commits?.at(-1)?.sha === headSha,
+    "reviewed hotfix patch comparison identity changed",
+  );
+  const patchBaseSha = assertSha(comparison?.merge_base_commit?.sha, "reviewed patch-base SHA");
+  const commit = async (sha, label) =>
+    knownCommits.find((known) => known.sha === sha) ??
+    assertCommit(await api.get(repositoryPath(`/git/commits/${sha}`)), sha, label);
+  const [patchBase, head] = await Promise.all([
+    commit(patchBaseSha, "reviewed patch-base commit"),
+    commit(headSha, "reviewed head commit"),
+  ]);
+  const [baseTree, headTree] = await Promise.all([
+    api.get(repositoryPath(`/git/trees/${patchBase.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
+  ]);
+  const manifest = directTreeManifest(
+    canonicalReleaseLeafMap(baseTree, patchBase.treeSha, "reviewed patch-base tree"),
+    canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed head tree"),
+  );
+  invariant(manifest.length > 0, "reviewed hotfix patch is empty");
+  return manifest;
+}
+
+// The canonical tree change one single-parent build commit makes on its parent.
+async function builtPatchManifest(api, source) {
+  invariant(
+    source.parents.length === 1,
+    "a hotfix built onto a release must have exactly one parent",
+  );
+  const releasedSourceSha = source.parents[0];
+  const released = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${releasedSourceSha}`)),
+    releasedSourceSha,
+    "released source commit",
+  );
+  const [releasedTree, sourceTree] = await Promise.all([
+    api.get(repositoryPath(`/git/trees/${released.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
+  ]);
+  return {
+    released,
+    manifest: directTreeManifest(
+      canonicalReleaseLeafMap(releasedTree, released.treeSha, "released source tree"),
+      canonicalReleaseLeafMap(sourceTree, source.treeSha, "hotfix-onto-release source tree"),
+    ),
+  };
+}
+
+// An earlier hotfix build is trusted only as the exact reviewed patch of the
+// merged hotfix/* PR into production that its Hotfix-PR trailer names.
+async function assertHotfixBuildLink(api, link, message, productionSha) {
+  const production = RELEASE_AUTOMATION_CONTRACT.productionBranch;
+  const match = /^Hotfix-PR: ([1-9][0-9]*)$/m.exec(message);
+  invariant(
+    link.parents.length === 1 && match !== null,
+    `released source ${link.sha} is not in protected production ancestry`,
+  );
+  const pullNumber = Number(match[1]);
+  const pull = await api.get(repositoryPath(`/pulls/${pullNumber}`));
+  const headRef = String(pull?.head?.ref ?? "");
+  invariant(
+    pull?.merged === true &&
+      pull?.base?.ref === production &&
+      pull?.head?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+      headRef.startsWith(RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix) &&
+      headRef.length > RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix.length,
+    `released source ${link.sha} names Hotfix-PR #${pullNumber}, which is not a merged hotfix/* PR into ${production}`,
+  );
+  const mergeSha = assertSha(pull.merge_commit_sha, `Hotfix-PR #${pullNumber} merge SHA`);
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    mergeSha,
+    productionSha,
+    "production",
+    `Hotfix-PR #${pullNumber} merge`,
+  );
+  const [reviewed, built] = await Promise.all([
+    reviewedPatchManifest(
+      api,
+      assertSha(pull?.base?.sha, `Hotfix-PR #${pullNumber} base SHA`),
+      assertSha(pull?.head?.sha, `Hotfix-PR #${pullNumber} head SHA`),
+    ),
+    builtPatchManifest(api, link),
+  ]);
+  invariant(
+    manifestsMatch(reviewed, built.manifest),
+    `released source ${link.sha} is not exactly the reviewed patch of Hotfix-PR #${pullNumber}`,
+  );
+}
+
+// A released source is a candidate-built commit in protected production
+// ancestry, or an earlier hotfix built the same way onto one (a second hotfix
+// on top of a live one). Every link must carry its own workflow-made candidate
+// receipt and be exactly its own reviewed patch.
+async function assertReleasedSource(api, releasedSourceSha, productionSha) {
+  let current = releasedSourceSha;
+  for (let depth = 0; depth < 10; depth += 1) {
+    await assertCandidateReceipt(api, current);
+    if (current === productionSha) return;
+    const comparison = await api.get(repositoryPath(`/compare/${current}...${productionSha}`));
+    if (
+      comparison?.status === "ahead" &&
+      comparison?.base_commit?.sha === current &&
+      comparison?.merge_base_commit?.sha === current
+    ) {
+      return;
+    }
+    const value = await api.get(repositoryPath(`/git/commits/${current}`));
+    const link = assertCommit(value, current, "released source commit");
+    await assertHotfixBuildLink(api, link, String(value?.message ?? ""), productionSha);
+    current = link.parents[0];
+  }
+  invariant(
+    false,
+    `released source ${releasedSourceSha} is too many hotfixes away from production`,
+  );
+}
+
+async function verifyHotfixOntoReleaseSource(
+  api,
+  sourceSha,
+  base,
+  head,
+  pullIdentity,
+  productionSha,
+) {
+  const source = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${sourceSha}`)),
+    sourceSha,
+    "hotfix-onto-release source commit",
+  );
+  invariant(
+    source.parents.length === 1,
+    "a hotfix built onto a release must have exactly one parent",
+  );
+  const releasedSourceSha = source.parents[0];
+  await assertReleasedSource(api, releasedSourceSha, productionSha);
+  const [reviewedManifest, built] = await Promise.all([
+    reviewedPatchManifest(api, pullIdentity.baseSha, pullIdentity.headSha, [base, head]),
+    builtPatchManifest(api, source),
+  ]);
+  invariant(
+    manifestsMatch(reviewedManifest, built.manifest),
+    "hotfix source is not exactly the reviewed hotfix patch applied onto the released source",
+  );
+  return {
+    source,
+    releasedSourceSha,
+    releasedSourceTreeSha: built.released.treeSha,
+    patchManifestSha256: treeManifestSha256(reviewedManifest),
+  };
+}
+
 export async function verifyApprovedMerge(options = {}) {
   const env = options.env ?? process.env;
   const logger = options.logger ?? console;
   const context = releaseApprovalContext(env, options.sourceSha, options.provenanceSha);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
+  if (context.hotfix) {
+    return verifyHotfixRelease({ options, logger, context, api });
+  }
   if (context.descendant) {
     return verifyTestedDescendantRelease({ options, env, logger, context, api });
   }

@@ -37,9 +37,9 @@ export function trustedBrowserOrigins(settings: TrustedBrowserOriginSettings): s
  * The one browser-origin rule for cookie-authenticated state changes (model
  * and subscription connections, organization settings, site publishing).
  *
- * Managed and configured access modes accept only a JSON request whose
- * `Origin` is one of the deployment's trusted browser origins and whose fetch
- * metadata says `same-origin`. Local access mode (the `bun run dev` stack) has no public
+ * Managed and configured access modes require a trusted `Origin` and
+ * `Sec-Fetch-Site: same-origin`, even for requests without a body. Requests
+ * carrying a body must use JSON. Local access mode (the `bun run dev` stack) has no public
  * base URL and serves the web app and the API on different loopback ports,
  * so it accepts this stack's own browser origin instead, as the local
  * browser boundary does.
@@ -49,7 +49,10 @@ export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps)
   // ride along, so there is no cross-site request to guard against.
   if (isAgentActingAsPerson(c)) return;
   const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  if (contentType !== "application/json") {
+  // A body-less fetch needn't declare a media type. Check the actual body,
+  // not Content-Length; form or other non-JSON media types are still refused.
+  const hasNoBodyOrType = contentType === undefined && c.req.raw.body === null;
+  if (contentType !== "application/json" && !hasNoBodyOrType) {
     throw new HTTPException(403, {
       message: "JSON browser request required",
     });

@@ -22,6 +22,15 @@ const WINDOW_COMMAND_TIMEOUT_MS = 2_000;
 
 type WindowState = "normal" | "minimized" | "maximized" | "fullscreen";
 
+export type BrowserWindowParkingStatus = {
+  /** Uses (operations and live views) keeping the windows presented. */
+  holders: number;
+  /** Windows this controller minimized and has not restored yet. */
+  parkedWindows: number;
+  mayHaveParkedWindows: boolean;
+  renderingSuspended: boolean;
+};
+
 export type WindowParkingConnection = {
   send<T = Record<string, unknown>>(
     method: string,
@@ -103,6 +112,16 @@ export class BrowserWindowParking {
   close(): void {
     this.closed = true;
     this.cancelTimer();
+  }
+
+  /** What parking is doing now, for diagnostics. */
+  status(): BrowserWindowParkingStatus {
+    return {
+      holders: this.holders,
+      parkedWindows: this.parked.size,
+      mayHaveParkedWindows: this.mayHaveParkedWindows,
+      renderingSuspended: this.renderingSuspended,
+    };
   }
 
   private schedule(): void {

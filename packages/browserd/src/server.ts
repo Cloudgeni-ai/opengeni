@@ -135,6 +135,9 @@ type BrowserSocketData = {
   subscription: BrowserFrameSubscription | null;
   expiryTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
+  openedAt: number;
+  framesSent: number;
+  lastSentAt: number | null;
 };
 
 type ComputerSessionAuthority = ComputerSessionReference & {
@@ -665,6 +668,12 @@ export class BrowserControlServer {
       routeNeedsControl(segments, request),
     );
     const reference = binding(authority);
+    if (segments.length === 4 && segments[3] === "frame-health") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return success(this.frameHealth(reference));
+    }
     if (segments.length === 4 && segments[3] === "targets") {
       if (request.method === "GET") {
         return await browserReadResponse(
@@ -1754,6 +1763,9 @@ export class BrowserControlServer {
         subscription: null,
         expiryTimer: null,
         closed: false,
+        openedAt: Date.now(),
+        framesSent: 0,
+        lastSentAt: null,
       },
       headers: { "sec-websocket-protocol": BROWSER_CONTROL_WEBSOCKET_PROTOCOL },
     });
@@ -2108,6 +2120,42 @@ export class BrowserControlServer {
     });
   }
 
+  /** The session's frame streams and the live views reading them, so the
+   * caller can record why a view stopped getting frames. States, counts and
+   * times only: no page content. */
+  private frameHealth(reference: BrowserSessionReference) {
+    const now = Date.now();
+    const sockets = [...this.sockets].flatMap((socket) => {
+      const data = socket.data;
+      if (
+        data.kind !== "browser" ||
+        data.closed ||
+        data.reference.browserSessionId !== reference.browserSessionId ||
+        data.reference.controllerGeneration !== reference.controllerGeneration
+      ) {
+        return [];
+      }
+      return [
+        {
+          targetId: data.targetId,
+          ageMs: now - data.openedAt,
+          subscribed: data.subscription !== null,
+          framesSent: data.framesSent,
+          sinceLastSentMs: data.lastSentAt === null ? null : now - data.lastSentAt,
+          bufferedBytes: socket.getBufferedAmount(),
+        },
+      ];
+    });
+    const health = this.supervisor.frameStreamHealth(reference);
+    return {
+      browserSessionId: reference.browserSessionId,
+      controllerGeneration: reference.controllerGeneration,
+      windowParking: health?.windowParking ?? null,
+      streams: health?.streams ?? [],
+      sockets,
+    };
+  }
+
   private onSocketClose(socket: BrowserSocket): void {
     if (socket.data.closed) return;
     socket.data.closed = true;
@@ -2177,6 +2225,8 @@ export class BrowserControlServer {
           break;
         }
         sent += 1;
+        data.framesSent = sent;
+        data.lastSentAt = Date.now();
         if (sent === 1) {
           console.info(
             JSON.stringify({

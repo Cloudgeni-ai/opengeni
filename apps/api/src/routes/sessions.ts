@@ -463,6 +463,7 @@ import {
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
   humanSecretWriteContext,
+  canSavePrivateSecretAnswer,
   isSignedInSecretAnswerer,
   prepareSecretAnswers,
   projectSecretAnswerTargets,
@@ -4989,6 +4990,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(secretAnswers.length
             ? {
                 secretAnswers,
+                privateSecretAnswerAuthorized: canSavePrivateSecretAnswer(authorization),
                 secretWriteContext: humanSecretWriteContext({
                   accountId: grant.accountId,
                   workspaceId,

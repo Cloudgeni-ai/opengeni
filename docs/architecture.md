@@ -1775,6 +1775,9 @@ and current authorization.
 Pending secret questions project save destinations separately from the frozen
 question. The database shares the asking turn's vault reach between this
 projection, answer admission, and live-attempt reference resolution.
+Verified external users acting through `asUser()` with `secrets:write` can
+answer into their own vault when that reach permits it; this does not confer
+native sign-in for other cards.
 
 See [Tool approvals](tool-approvals.md) for canonical policy, portable review and durable programmatic continuation.
 

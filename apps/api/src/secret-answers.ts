@@ -14,6 +14,8 @@ import {
   type SessionHumanInputRequest,
 } from "@opengeni/contracts";
 import {
+  externalAttributionForAuthorization,
+  hasPermission,
   isVerifiedDelegatedHumanAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
@@ -38,13 +40,24 @@ export function isSignedInSecretAnswerer(authorization: AccessGrantAuthorization
   );
 }
 
+/** An embedding host's verified asUser request can write its user's own vault,
+ * without being treated as a native sign-in for other kinds of cards. */
+export function canSavePrivateSecretAnswer(authorization: AccessGrantAuthorization): boolean {
+  const { grant } = authorization;
+  return (
+    isSignedInSecretAnswerer(authorization) ||
+    (hasPermission(grant.permissions, "secrets:write", grant.permissionMode) &&
+      externalAttributionForAuthorization(authorization, grant)?.actingMode === "external")
+  );
+}
+
 /** Project save destinations for the viewer; never rewrite the frozen question or the event. */
 export async function projectSecretAnswerTargets(
   db: Database,
   authorization: AccessGrantAuthorization,
   requests: SessionHumanInputRequest[],
 ): Promise<SessionHumanInputRequest[]> {
-  const signedIn = isSignedInSecretAnswerer(authorization);
+  const canSavePrivate = canSavePrivateSecretAnswer(authorization);
   const context = humanSecretWriteContext(authorization.grant);
   const byTurn = new Map<string, ReturnType<typeof listHumanInputSecretSaveTargets>>();
   return await Promise.all(
@@ -62,7 +75,7 @@ export async function projectSecretAnswerTargets(
       }
       return {
         ...request,
-        secretSaveTargets: (await read).filter((target) => target !== "user" || signedIn),
+        secretSaveTargets: (await read).filter((target) => target !== "user" || canSavePrivate),
       };
     }),
   );

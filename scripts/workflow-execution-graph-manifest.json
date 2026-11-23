@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "6a7bb70734c6592660004db7d3eb6efc054e87dc861c553de55c0997234ea384"
+      "sha256": "52c3548e6b7e0ae5d371c8be83f7494a3b6b210e638d7564a4695e2457b12d3a"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -146,7 +146,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "7cc8e2645baeb64514d285d783abc3826e22b03e2818a9f9d6696112c379b6b9"
+      "sha256": "a988a7fa7cc73f83d14680542c924e2786a4ca7c35e37763d11c2242b4a0a8a6"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -158,7 +158,7 @@
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
-      "sha256": "6991b859357d9807934d9e150bd4cd00e1db21d9c2af49832eecebc4cdd81d25"
+      "sha256": "0f6af1dc089547d836897b564b40dd24e7071f170458d5e17f75d173c6fd2a5d"
     },
     {
       "path": ".github/workflows/release.yml",
@@ -1943,13 +1943,13 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Make room for the desktop candidate",
-      "sha256": "ce761828efbc188840bd0759dafb03da008ca496b537335723ab06961e420469"
+      "sha256": "439ed690ac2281937c345aa6911952bb057ca68787b4e512efb7cbc5d08ba685"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Make room for the relay candidate",
-      "sha256": "803ae29c3c72c09e9c4ddd30eea67e45cbd715b1fe6cdf77888299744600a368"
+      "sha256": "3c05ccb542ccd45308c2cb501b6beb739b2a88515e856804639ed412d911ef93"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1966,8 +1966,14 @@
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
+      "step": "Plan hotfix image reuse",
+      "sha256": "024501c2fcefdc1845c3e724f5159d8706d23910c313ab79cf15abb0bdb24213"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
       "step": "Publish immutable source-SHA candidate receipt",
-      "sha256": "e03705f245936cdd193b72b00fb5e29fb0053860a84e493cff008df284585a72"
+      "sha256": "6770730f9c54128e4d85766994648f5b6089555900e7d2441236ca9b2cb78843"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1991,55 +1997,55 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve API candidate digest",
-      "sha256": "14471804891efb9b5aa9e380b404441b6d5bae5f51e15ef710ad38961cdda475"
+      "sha256": "f8312e0905a1ee7ad8d5670c3231b9261c8c1165d3fd105b1df29fb26e498b3e"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve artifact materializer candidate digest",
-      "sha256": "b0cc8bbb09f96db09b5f04bf37ccec18974326d0f42204527a255cd2a19abe34"
+      "sha256": "c402fd786564903ade03d66326d7610eff859d694f4d716114582d2f04314d7b"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve artifact outbox dispatcher candidate digest",
-      "sha256": "db8bec6ffd48620c3d5f96f8277a060967b5d44644339761cda51ee3cb3fbbf0"
+      "sha256": "e78f5f245db9ca63a796411c56f1d3a9df27ab409985243b33ead84f6d6d5fff"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve candidate identity",
-      "sha256": "acc453965326f8aa632c3e648a347f5b46c4f209f5ae5e978a5978657b68bb7d"
+      "sha256": "be9b07f5d2731e0de01ed8310fe580a4ae0cb67405f0a364581f31b07ebce29b"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve desktop candidate digest",
-      "sha256": "3f23534d8dde68b4e264e59ff162a0c518aab3c1d03d7a01845da82b2a47d2bb"
+      "sha256": "67669fcdc78b6427b4f313e0e9b40269aa25524bb8d24436cbc8aeb1842db219"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve relay candidate digest",
-      "sha256": "352aa7bdc5d0b4c8aaea46a6f86290de502048f8f0c24006de6503973dda7e81"
+      "sha256": "0dbd2d8a285260d9e78af5624dda082b9fc1323783cd84a592729aa88abf3382"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve sandbox candidate digest",
-      "sha256": "3a0da3f5bac441003f22556b3c169596082eb2d9cf4f9370e02337c7ff50db3f"
+      "sha256": "ef2240aba95c9124c69cedc7b9d794f103399ab51c126211f402c958b369750f"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve web candidate digest",
-      "sha256": "b799321a09055039bfaa593b74b6b45f6fd58f7a650fc749f07665613f4626d4"
+      "sha256": "b3d3bb003e457be9e175b25d702ceccbaec26a00d732817fc989aa436c08b5be"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve worker candidate digest",
-      "sha256": "6d69ec8f79a7cd9fd4c46f2a1ad1acd55486c859122aeac146000d554b5043fc"
+      "sha256": "f1cee98cd88d7a39c7b89a31e97f597cccaafcdc3c072538eac299fc91508773"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -2051,7 +2057,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Validate exact retained versioned main source",
-      "sha256": "e655c70e80fafae8f0e0b649999f37c8e0b6be79bc70ac41fa30c278f5fbbc0e"
+      "sha256": "e7dcde2554459862977802aa94fbed55d33fdd167447a5bf80cf3ce87b54389f"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -2225,13 +2231,13 @@
       "workflow": ".github/workflows/release-source-admission.yml",
       "job": "verify",
       "step": "Restore protected main history as Git data for the descendant merge audit",
-      "sha256": "69ac3710659e143481667807b4dbe8bfafe2cc82a729f0ab8007799889b54051"
+      "sha256": "41f82d94c98840efff61735c036ef06365ba23b96437ea6c4daa7e1886ec459a"
     },
     {
       "workflow": ".github/workflows/release-source-admission.yml",
       "job": "verify",
       "step": "Verify controller identity and exact reviewed merge provenance",
-      "sha256": "77094b22e5108af0dd359e7cb23ba329964a99ed564b527289a8cd106aae735e"
+      "sha256": "1a091cf77c14e341d61a7e8a9634e75c0735c2e4f0e9fd174d72311ade34d049"
     },
     {
       "workflow": ".github/workflows/release.yml",
