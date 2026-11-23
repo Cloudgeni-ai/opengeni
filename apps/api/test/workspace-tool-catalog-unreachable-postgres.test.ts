@@ -11,6 +11,7 @@ import { createTargetFence } from "../src/workspace-tool-target";
 import {
   callWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
+  prepareWorkspaceToolGatewayForGrant,
 } from "../src/workspace-tool-gateway";
 
 let shared: SharedTestDatabase | null = null;
@@ -116,6 +117,15 @@ describe("untargeted tool gateway preparation with an unreachable MCP server on 
       } finally {
         fence.close();
       }
+      // One server's identities (as app sync prepares): its own failure too.
+      const single = await prepareWorkspaceToolGatewayForGrant(deps, grant, [deadIdentity]).then(
+        async (result) => {
+          await result.close();
+          return null;
+        },
+        (error: unknown) => error,
+      );
+      expect(single).not.toBeNull();
     } finally {
       await provider.stop(true);
       await deleteWorkspace(client.db, grant.workspaceId);

@@ -143,11 +143,13 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
   reauthorize?: () => Promise<void>;
   /**
-   * Servers that dropped out of this preparation because they could not be
-   * reached (`PreparedAgentTools.unreachableMcpServers`), so a missing tool
-   * on one of them is answered as "try again", not as a tool that isn't there.
+   * Servers that dropped out of this preparation, because they could not be
+   * reached or were unavailable for any other reason
+   * (`PreparedAgentTools.unreachableMcpServers` and `unavailableMcpServers`),
+   * so a missing tool on one of them is answered as "try again", not as a
+   * tool that isn't there.
    */
-  unreachable?: ReadonlySet<string>;
+  unreachable?: Pick<ReadonlySet<string>, "has">;
   /**
    * The provider's own review of exact arguments (for Gmail, the message as it
    * would be sent), read through the same fenced connection. Empty when the
@@ -1132,7 +1134,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const authNeeded: ToolAuthNeededPayload[] = [];
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
-    workspaceToolGatewayPreparationRefs(gatewaySettings, targetServerId !== undefined),
+    workspaceToolGatewayPreparationRefs(
+      gatewaySettings,
+      workspaceToolGatewayPreparationScopedToCall(targetServerId, allowedIdentities),
+    ),
     {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1299,7 +1304,12 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
-    unreachable: prepared.unreachableMcpServers,
+    // Live views: a server can also drop out after preparation.
+    unreachable: {
+      has: (serverId: string) =>
+        prepared.unreachableMcpServers.has(serverId) ||
+        prepared.unavailableMcpServers.has(serverId),
+    },
     review: async (identity, args) => {
       const server = prepared.mcpServers.find(
         (candidate) => (candidate as { registryId?: unknown }).registryId === identity.serverId,
@@ -1909,18 +1919,33 @@ const FIRST_PARTY_GATEWAY_SERVER_IDS: ReadonlySet<string> = new Set(["opengeni",
  * The tools the gateway connects. The complete catalog lists what it can
  * reach: a remote server that fails to connect (a custom MCP server that is
  * down or whose host no longer resolves) is left out, as a turn leaves it
- * out, instead of failing every app's tool list. A targeted call keeps its one
- * server required so its own failure is reported, and first-party servers
- * stay required everywhere.
+ * out, instead of failing every app's tool list. A preparation scoped to a
+ * call keeps its server required so its own failure is reported, and
+ * first-party servers stay required everywhere.
  */
 export function workspaceToolGatewayPreparationRefs(
   settings: Settings,
-  targeted: boolean,
+  scopedToCall: boolean,
 ): ToolRef[] {
   return allGatewayToolRefs(settings).map((ref) =>
-    targeted || ref.kind !== "mcp" || FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id)
-      ? ref
-      : { ...ref, optional: true },
+    scopedToCall || FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id) ? ref : { ...ref, optional: true },
+  );
+}
+
+/**
+ * Whether a preparation serves a call to one server: a target, or allowed
+ * identities that all name one server (app sync, a legacy single-tool call).
+ * Allowed identities across several servers (a published app's declared
+ * tools) are a catalog, so a server that fails is left out there.
+ */
+export function workspaceToolGatewayPreparationScopedToCall(
+  targetServerId: string | undefined,
+  allowedIdentities: readonly { serverId: string }[] | undefined,
+): boolean {
+  if (targetServerId !== undefined) return true;
+  return (
+    allowedIdentities !== undefined &&
+    new Set(allowedIdentities.map((identity) => identity.serverId)).size === 1
   );
 }
 
