@@ -12,7 +12,11 @@
 #                       sandboxes' memory (the machine's, or their share of
 #                       a shared machine's), at most a quarter of the state
 #                       volume's free space. Nothing is written to it: each
-#                       VM's zswap writeback is off (ADR 14).
+#                       VM's zswap writeback is off (ADR 14). Each page zswap
+#                       holds takes a slot at its original size, so a smaller
+#                       file stops compression long before zswap's pool is
+#                       full (ADR 24). A file left smaller than this by an
+#                       earlier setting is made anew at the next boot.
 #   COMPUTE_MACHINE     dedicated (the default) or shared: a machine that
 #                       also runs other work (ADR 26). A shared machine
 #                       keeps its own watchdog and huge-page settings, and
@@ -70,12 +74,24 @@ else
   # only in front of a swap device.
   swapfile=/var/lib/compute/swapfile
   if ! swapon --show=NAME --noheadings | grep -qx "$swapfile"; then
-    if [ ! -f "$swapfile" ]; then
-      size=${COMPUTE_SWAP_SIZE:-}
-      if [ -z "$size" ]; then
-        quarter_kib=$(($(df -Pk /var/lib/compute | awk 'NR == 2 { print $4 }') / 4))
-        size="$((share_kib < quarter_kib ? share_kib : quarter_kib))K"
+    size=${COMPUTE_SWAP_SIZE:-}
+    if [ -z "$size" ]; then
+      quarter_kib=$(($(df -Pk /var/lib/compute | awk 'NR == 2 { print $4 }') / 4))
+      # The file's own space counts as free for its next size.
+      if [ -f "$swapfile" ]; then
+        quarter_kib=$((quarter_kib + $(du -k "$swapfile" | awk '{ print $1 }') / 4))
       fi
+      size="$((share_kib < quarter_kib ? share_kib : quarter_kib))K"
+    fi
+    # Not in use yet (this runs before the agent starts any VM), so a file
+    # smaller than asked holds nothing and is made anew at its size.
+    # A size numfmt cannot read (such as 16GiB) leaves the file as it is.
+    wanted=$(numfmt --from=iec "$size" 2>/dev/null || echo 0)
+    if [ -f "$swapfile" ] && [ "$(stat -c %s "$swapfile")" -lt "$wanted" ]; then
+      echo "host-setup: swap file is $(stat -c %s "$swapfile") bytes, smaller than $size: making it anew" >&2
+      rm -f "$swapfile"
+    fi
+    if [ ! -f "$swapfile" ]; then
       fallocate -l "$size" "$swapfile.part"
       chmod 600 "$swapfile.part"
       mkswap -q "$swapfile.part"

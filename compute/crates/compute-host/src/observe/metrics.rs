@@ -485,6 +485,11 @@ pub struct Gauges {
     pub zswap_stored: Option<u64>,
     /// Bytes of memory zswap holds, before compression.
     pub zswap_original: Option<u64>,
+    /// Bytes of swap: zswap's slots, one per page it holds at its
+    /// original size.
+    pub swap_total: Option<u64>,
+    /// Bytes of those slots free.
+    pub swap_free: Option<u64>,
     /// Free pages in the huge-page pool.
     pub huge_pages_free: Option<u64>,
     /// Total stall time in microseconds, `some` and `full`, for memory,
@@ -962,6 +967,8 @@ fn visit_gauges(gauges: &Gauges, each: &mut impl Visitor) {
         ("compute.host.memory.available", gauges.available),
         ("compute.host.zswap.stored", gauges.zswap_stored),
         ("compute.host.zswap.original", gauges.zswap_original),
+        ("compute.host.swap.total", gauges.swap_total),
+        ("compute.host.swap.free", gauges.swap_free),
         ("compute.host.hugepages.free", gauges.huge_pages_free),
         ("compute.transfer.foreground", gauges.transfers_foreground),
         ("compute.transfer.background", gauges.transfers_background),

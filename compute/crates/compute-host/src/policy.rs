@@ -281,10 +281,12 @@ const LEAST_ZSWAP_POOL_PERCENT: u64 = 20;
 
 /// What caps compressing the sandboxes' running VMs, measured against
 /// `share`, the host memory they may use (all of it, or a shared machine's
-/// share, ADR 26): a swap device under a quarter of it, since each
-/// compressed page takes a slot at its original size, and a zswap pool
-/// (`pool_percent` of all `host` memory, as zswap counts it) under
-/// [`LEAST_ZSWAP_POOL_PERCENT`] of it.
+/// share, ADR 26): a swap device smaller than it, since each compressed
+/// page takes a slot at its original size and guest memory compresses
+/// several times over (about 7:1 measured on a host whose slots ran out
+/// with the pool a tenth full), so the slots run out long before the pool;
+/// and a zswap pool (`pool_percent` of all `host` memory, as zswap counts
+/// it) under [`LEAST_ZSWAP_POOL_PERCENT`] of it.
 #[derive(Debug, PartialEq, Eq)]
 struct CompressionCaps {
     swap: bool,
@@ -298,7 +300,7 @@ fn compression_caps(
     pool_percent: Option<u64>,
 ) -> CompressionCaps {
     CompressionCaps {
-        swap: swap < share / 4,
+        swap: swap < share,
         pool: pool_percent.is_some_and(|percent| {
             u128::from(percent) * u128::from(host)
                 < u128::from(LEAST_ZSWAP_POOL_PERCENT) * u128::from(share)
@@ -335,8 +337,9 @@ fn compresses_running(profile: MemoryProfile, compress: bool, meminfo: &str, sha
         tracing::warn!(
             swap_mib = swap >> 20,
             share_mib = share >> 20,
-            "the swap device is under a quarter of the sandboxes' memory: it caps what running \
-             sandboxes can have compressed"
+            "the swap device is smaller than the sandboxes' memory: once its slots are taken \
+             nothing more is compressed, and a host short of memory ends VMs; make it at least \
+             as large (it is never written: zswap writeback is off)"
         );
     }
     if caps.pool {
@@ -500,32 +503,32 @@ mod tests {
     #[test]
     fn compression_caps_are_judged_against_the_share() {
         let host = 64 * GIB;
-        // A dedicated host: 8 GiB of swap caps 64 GiB, a 20 % pool does not.
+        // A dedicated host: 16 GiB of swap caps 64 GiB, a 20 % pool does not.
         assert_eq!(
-            compression_caps(8 * GIB, host, host, Some(20)),
+            compression_caps(16 * GIB, host, host, Some(20)),
             CompressionCaps {
                 swap: true,
                 pool: false
             }
         );
         assert_eq!(
-            compression_caps(16 * GIB, host, host, Some(11)),
+            compression_caps(64 * GIB, host, host, Some(11)),
             CompressionCaps {
                 swap: false,
                 pool: true
             }
         );
-        // A shared one with 16 GiB for sandboxes: host-setup's 8 GiB of swap
-        // and 11 % of the machine (7 GiB, 44 % of the share) are plenty.
+        // A shared one with 16 GiB for sandboxes: host-setup's 16 GiB of
+        // swap and 11 % of the machine (7 GiB, 44 % of the share) are plenty.
         assert_eq!(
-            compression_caps(8 * GIB, host, 16 * GIB, Some(11)),
+            compression_caps(16 * GIB, host, 16 * GIB, Some(11)),
             CompressionCaps {
                 swap: false,
                 pool: false
             }
         );
         assert_eq!(
-            compression_caps(2 * GIB, host, 16 * GIB, Some(4)),
+            compression_caps(8 * GIB, host, 16 * GIB, Some(4)),
             CompressionCaps {
                 swap: true,
                 pool: true
