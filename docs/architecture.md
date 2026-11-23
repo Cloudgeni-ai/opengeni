@@ -385,7 +385,9 @@ See [run lifecycle](run-lifecycle.md) for the durability and retry boundaries.
 Subscription serving revisions are attempt-scoped; the accepted model and
 frozen connection authority remain the logical turn's contract. Shared-core
 placement, candidate-aware capacity waits and lease-backed switch events use
-the same provider-neutral eligibility rules. The worker's serving hooks live
+the same provider-neutral eligibility rules. A Codex turn fails rather than
+parking when the placement snapshot proves only model entitlement refusals.
+The worker's serving hooks live
 in `apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts`;
 the metadata-only catalog helper also serves control-worker recovery without
 loading provider credentials. Remote-compaction conversion and UI activation

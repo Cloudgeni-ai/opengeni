@@ -9,6 +9,8 @@ export type SubscriptionCoreWaitPresentation = {
   reason: WaitReason | ProviderCapacityWaitReason;
   earliestResetAt: Date | null;
   reconnectAccount?: SubscriptionReconnectAccount;
+  /** Every usable candidate is blocked solely by a recorded model entitlement refusal. */
+  planRefusedModelId?: string;
 };
 
 /** Explain a wait using the same scoped world that produced the decision. */

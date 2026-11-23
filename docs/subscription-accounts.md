@@ -364,7 +364,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 ### Durable waits and recovery
 
 - **SUB-WAIT-01** Work waits only when nothing eligible has capacity, or when
-  SUB-SEL-04 or SUB-FAIL-05 forbids moving. Verification: `packages/db/test/subscription-core-waiter-candidates-postgres.test.ts`.
+  SUB-SEL-04 or SUB-FAIL-05 forbids moving. A new Codex chat turn fails instead
+  when the only blockers across its usable candidates are recorded model
+  entitlement refusals. Verification: `packages/db/test/subscription-core-waiter-candidates-postgres.test.ts`.
 - **SUB-WAIT-02** A wait is durable, explains its reason and expected reset
   where known, and resumes automatically when capacity returns or the pool
   changes. It resumes the turn only when the turn's own placement would run, and
