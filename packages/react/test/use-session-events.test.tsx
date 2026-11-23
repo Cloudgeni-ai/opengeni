@@ -2210,7 +2210,7 @@ describe("useSessionEvents", () => {
     const store = Array.from({ length: 40_000 }, (_, index) =>
       event(index + 1, "agent.message.delta", { text: "x" }),
     );
-    const { client, listCalls } = scriptedClient({ store });
+    const { client, listCalls, streamCalls } = scriptedClient({ store });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
       undefined,
@@ -2224,6 +2224,7 @@ describe("useSessionEvents", () => {
     );
     expect(hook.result.current.events[0]?.sequence).toBe(39_714);
     expect(hook.result.current.hasOlder).toBe(true);
+    expect(streamCalls).toEqual([40_000]);
     expect(listCalls).toEqual([
       {
         ...CONVERSATION_READ,
@@ -2242,6 +2243,44 @@ describe("useSessionEvents", () => {
     ]);
 
     await hook.unmount();
+  });
+
+  test("the dense-turn boundary read hands an exact cursor to the live stream", async () => {
+    const store = [
+      event(1, "session.created", {}),
+      event(2),
+      ...Array.from({ length: 80 }, (_, index) =>
+        event(index + 3, "agent.message.delta", { delta: "part", messageId: "answer" }),
+      ),
+    ];
+    const boundary = Promise.withResolvers<void>();
+    const streamed = [store.at(-1)!, event(83, "agent.message.completed", { text: "done" })];
+    const { client, listCalls, streamCalls } = scriptedClient({
+      store,
+      streamEvents: streamed,
+      listEvents: async (options) => {
+        if (options.before === 51) await boundary.promise;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(listCalls.map(({ limit }) => limit)).toEqual([32, 255]);
+      expect(streamCalls).toEqual([]);
+      await actRun(() => boundary.resolve());
+      await flush(20);
+      expect(streamCalls).toEqual([82]);
+      expect(hook.result.current.events.map(({ sequence }) => sequence)).toEqual(
+        Array.from({ length: 83 }, (_, index) => index + 1),
+      );
+    } finally {
+      boundary.resolve();
+      await hook.unmount();
+    }
   });
 
   test("coalesced tail opens the stream after coalescedUntil", async () => {

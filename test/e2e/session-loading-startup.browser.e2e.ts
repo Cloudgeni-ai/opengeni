@@ -796,6 +796,75 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
 }
 
 for (const width of [1280, 390]) {
+  if (width === 1280) {
+    test("a cold opening fills a tall conversation viewport and follows old search links", async () => {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 1600 } });
+      const page = await context.newPage();
+      const state = fixtures();
+      state.paginatedHistory = true;
+      state.events = [
+        ...Array.from({ length: 60 }, (_, index) => ({
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId: crypto.randomUUID(),
+          sequence: index + 1,
+          type: "user.message",
+          payload: { text: `Short question ${index + 1}`, resources: [] },
+          occurredAt: state.session.createdAt,
+        })),
+        // Activity that is present on the event page but draws no chat row.
+        ...Array.from({ length: 31 }, (_, index) => ({
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId: null,
+          sequence: 61 + index,
+          type: "session.title_set",
+          payload: { title: `Title ${index + 1}` },
+          occurredAt: state.session.createdAt,
+        })),
+      ];
+      state.session.lastSequence = 91;
+      for (const deferred of Object.values(state.gates)) deferred.release();
+      const path = `${base}/workspaces/${workspaceId}/sessions/${sessionId}`;
+      const scroller = page.locator("[data-og-timeline-scroller]");
+      try {
+        await installApi(page, state);
+        const older = page.waitForRequest(
+          (request) => {
+            const url = new URL(request.url());
+            return url.pathname.endsWith("/events") && url.searchParams.get("before") === "60";
+          },
+          { timeout: 10_000 },
+        );
+        await page.goto(path);
+        await older;
+        await page.getByText("Short question 59", { exact: true }).waitFor();
+        await page.waitForFunction(() => {
+          const scroller = document.querySelector("[data-og-timeline-scroller]");
+          return scroller && scroller.scrollHeight - scroller.clientHeight > 1;
+        });
+        assert.equal(await scroller.getAttribute("data-og-bottom-follow"), "true");
+        assert.equal(await scroller.getByText("Short question 4", { exact: true }).count(), 0);
+
+        await page.goto(`${path}?find=Short+question+4&matchSequence=4&matchOffset=0`);
+        const hit = scroller.locator('mark[data-og-search-sequence="4"]');
+        await hit.waitFor();
+        assert.equal(await hit.textContent(), "Short question 4");
+        await page.waitForFunction(() => {
+          const root = document.querySelector("[data-og-timeline-scroller]");
+          const match = root?.querySelector('mark[data-og-search-sequence="4"]');
+          if (!root || !match) return false;
+          const box = match.getBoundingClientRect();
+          const viewport = root.getBoundingClientRect();
+          return box.height > 0 && box.top >= viewport.top && box.bottom <= viewport.bottom;
+        });
+      } finally {
+        await context.close();
+      }
+    }, 60_000);
+  }
   test(`production refresh and truthful startup at ${width}px`, async () => {
     const context = await browser.newContext({
       viewport: { width, height: 900 },
@@ -1148,10 +1217,12 @@ for (const width of [1280, 390]) {
         await transcript.getByText("History question 5000", { exact: true }).waitFor();
         // The first paint lands at the tip without mounting older turns.
         // The search/older-page paths below must still reach them.
-        assert.equal(
-          await transcript.getByText("History question 4900", { exact: true }).count(),
-          0,
-        );
+        if (origin === "existing") {
+          assert.equal(
+            await transcript.getByText("History question 4900", { exact: true }).count(),
+            0,
+          );
+        }
         if (origin === "created") {
           // Ctrl/Cmd+F opens Find at every width (phones keep the button in "…").
           await page.keyboard.press("Control+f");

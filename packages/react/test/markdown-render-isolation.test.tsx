@@ -6,6 +6,8 @@ import { flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
 
 test("a long formatted history keeps its parsed bodies when link handlers change during streaming", async () => {
+  // Happy DOM does not implement compatMode; the web app renders in standards mode.
+  Object.defineProperty(document, "compatMode", { value: "CSS1Compat", configurable: true });
   await loadMathPlugins();
   const renderImage = mock(() => <span>Retained image</span>);
   const image = "![Example](artifact:8d5e17fe-2c91-44c4-9aae-4da0c9e1f122)";
