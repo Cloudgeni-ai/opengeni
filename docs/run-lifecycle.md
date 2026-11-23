@@ -3762,7 +3762,11 @@ restore, cold restore downloads the object into a verified disk spool (size and
 SHA-256 against the descriptor) before any box is created, then streams it into
 `tar -x` reading stdin in the new box. Every chunk passes the SDK's tar member
 checks before the box sees it and is hashed again, so a spool that changed
-after it was verified fails the restore. The restored tree is then
+after it was verified fails the restore. Symlinks restore as they were saved
+(`tar -c` stores them); no member may descend through one or repeat a path, so
+a link never redirects a write. A failed hydration logs the cause's class,
+code, tar check reason and exit code, never file names or the extractor's
+output. The restored tree is then
 fingerprinted against the descriptor as before. A provider without these
 stream methods reads the verified spool into one buffer and hydrates from it.
 Filesystem snapshot recovery boots the exact selected immutable Image directly,
