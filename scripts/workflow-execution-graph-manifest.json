@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "c5e0cbf842ba816c8fb9831d71a53961f731e687774a6c62dce651c7fd745bcd"
+      "sha256": "576a10a36b828daca7253d29188ece282226002f4eeaf3fbb208a759bad3fb52"
     },
     {
       "path": ".github/workflows/backup-image.yml",
@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ef6d01ad22d1d02da2a19faac082a0da98ca5c768e2f5d06e39d7fd6a942725d"
+      "sha256": "6a7bb70734c6592660004db7d3eb6efc054e87dc861c553de55c0997234ea384"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -118,7 +118,7 @@
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "5e1712fb3dc3e9db15f0dfebfbc75baf8aba5154b3f3503f1ac7c52918f774fa"
+      "sha256": "fcc7112a455c2037c49b4cd0f9c5bac52e2bae43de67d54f0b6c809965fc3bbf"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -146,7 +146,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "ce74793436faf6dd993278cf3b523dc65f1af948539ab54820f4e49def4dd5b5"
+      "sha256": "7cc8e2645baeb64514d285d783abc3826e22b03e2818a9f9d6696112c379b6b9"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
