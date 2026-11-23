@@ -1,11 +1,12 @@
 import { seedSenderConnections } from "./sender-connection-fixture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   renderMessageSentAtForModel,
   UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
+  type McpConnectionAccountBinding,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
@@ -34,6 +35,7 @@ import {
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
+  resolveAcceptedConnectionUse,
   saveComposerDraftInTransaction,
   SessionIdConflictError,
   settleScheduledTaskRunInTransaction,
@@ -137,6 +139,7 @@ async function addAcceptedScheduledOccurrence(
   grant: Awaited<ReturnType<typeof fixture>>,
   sessionId: string,
   service?: { name: string; context: Record<string, string | number | boolean> },
+  mcpAccountBindings?: McpConnectionAccountBinding[],
 ): Promise<{ taskId: string; runId: string }> {
   const task = await createScheduledTask(client.db, {
     accountId: grant.accountId,
@@ -216,6 +219,7 @@ async function addAcceptedScheduledOccurrence(
           }
         : null,
       personalConnectionDelegations: [],
+      mcpAccountBindings,
       personalResourceAuthoritySubjectId,
       causalHumanSubjectId:
         personalResourceAuthoritySubjectId ?? causalHumanAuthority?.subjectId ?? null,
@@ -266,6 +270,9 @@ async function addAcceptedScheduledOccurrence(
         causalHumanSubjectId: accepted.causalHumanSubjectId,
       },
       personalConnectionDelegations: accepted.personalConnectionDelegations,
+      ...(accepted.mcpAccountBindings === undefined
+        ? {}
+        : { mcpAccountBindings: accepted.mcpAccountBindings }),
       xaiProviderAccountAuthoritySnapshot: accepted.xaiProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: run.id,
     },
@@ -292,6 +299,121 @@ async function turnSurface(turnId: string): Promise<string | null> {
 }
 
 describe("immutable session turn initiators", () => {
+  test("scheduled claims deliver saved occurrences in order after their shared account lapses", async () => {
+    const grant = await fixture();
+    const workspaceId = grant.workspaceId!;
+    const { accountId } = grant;
+    const session = await createSession(client.db, sessionInput(grant));
+    const [connection] = await shared.admin<
+      { id: string; authority_generation: string }[]
+    >`insert into connections (account_id, workspace_id, provider_domain, kind, credential_encrypted)
+      values (${accountId}, ${workspaceId}, 'mail.test', 'oauth2', 'fixture-ciphertext')
+      returning id, authority_generation`;
+    const binding: McpConnectionAccountBinding = {
+      serverId: `account-${"b".repeat(64)}`,
+      canonicalServerId: "mail",
+      connectionId: connection!.id,
+      originWorkspaceId: workspaceId,
+      subjectScope: "workspace",
+      ownerSubjectId: null,
+      accountLabel: "Workspace mail",
+      providerDomain: "mail.test",
+      kind: "oauth2",
+      connectionRef: {
+        connectionId: connection!.id,
+        providerDomain: "mail.test",
+        subjectScope: "workspace",
+        kind: "oauth2",
+      },
+      connectionAuthorityGeneration: Number(connection!.authority_generation),
+    };
+    const first = await addAcceptedScheduledOccurrence(grant, session.id, undefined, [binding]);
+    const second = await addAcceptedScheduledOccurrence(grant, session.id, undefined, [binding]);
+    const pending = () => listOutstandingSessionSystemUpdates(client.db, workspaceId, session.id);
+    expect((await pending()).map((update) => update.sourceId)).toEqual([first.runId, second.runId]);
+
+    await shared.admin`update connections set status = 'needs_reauth',
+      authority_generation = authority_generation + 1 where id = ${binding.connectionId}`;
+
+    // Matching a run's frozen accounts is not enough. The claim must first
+    // mark that run's exact occurrence as delivered to the new turn.
+    await expect(
+      withWorkspaceRls(client.db, workspaceId, async (tx) => {
+        await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
+        await tx.execute(sql`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, source, position, prompt, model,
+            reasoning_effort, sandbox_backend, scheduled_task_run_id, mcp_account_bindings
+          ) select ${crypto.randomUUID()}, account_id, workspace_id, session_id, trigger_event_id,
+            ${`session-${session.id}`}, 'running', 'system', 1, '', 'scripted-model',
+            'medium', 'none', id, accepted_execution_snapshot -> 'mcpAccountBindings'
+          from scheduled_task_runs where id = ${first.runId}`);
+      }),
+    ).rejects.toMatchObject({
+      cause: { code: "42501", message: "MCP workspace account identity changed" },
+    });
+    expect((await pending()).map((update) => update.sourceId)).toEqual([first.runId, second.runId]);
+
+    for (const [index, occurrence] of [first, second].entries()) {
+      // A later reconnection must not lend the new generation to saved work.
+      if (index === 1) {
+        await shared.admin`update connections set status = 'active' where id = ${binding.connectionId}`;
+      }
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error(`Scheduled claim: ${claim.action}`);
+      expect(claim.turn.scheduledTaskRunId).toBe(occurrence.runId);
+      expect(claim.turn.mcpAccountBindings).toEqual([binding]);
+      expect(
+        (
+          await listSessionSystemUpdatesForTurn(client.db, workspaceId, session.id, claim.turn.id)
+        ).map((update) => update.sourceId),
+      ).toEqual([occurrence.runId]);
+      for (const usePhase of ["credential_resolution", "provider_request"] as const) {
+        const use = await resolveAcceptedConnectionUse(client.db, {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          turnId: claim.turn.id,
+          attemptId,
+          executionGeneration: claim.turn.executionGeneration,
+          physicalRequestId: crypto.randomUUID(),
+          usePhase,
+          serverId: binding.serverId,
+          connectionId: binding.connectionId,
+          providerDomain: binding.providerDomain,
+          connectionKind: binding.kind,
+          subjectScope: "workspace",
+        });
+        expect(use).toMatchObject({
+          status: "denied",
+          reason: index === 0 ? "connection_status_inactive" : "connection_generation_changed",
+        });
+      }
+      await applySessionTurnSettlement(client.db, workspaceId, {
+        sessionId: session.id,
+        turnId: claim.turn.id,
+        triggerEventId: claim.turn.triggerEventId,
+        attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [],
+      });
+      expect((await pending()).map((update) => update.sourceId)).toEqual(
+        index === 0 ? [second.runId] : [],
+      );
+    }
+  });
+
   test("an accepted legacy schedule keeps scheduler provenance and no human", async () => {
     const grant = await fixture();
     const session = await createSession(client.db, sessionInput(grant));
