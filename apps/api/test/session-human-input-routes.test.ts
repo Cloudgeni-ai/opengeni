@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   createSecretResolver,
   type ApiRouteDeps,
@@ -10,12 +11,16 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createOrganizationApiKey,
   createSession,
   encryptEnvironmentValue,
+  ensureExternalIdentity,
   ensureDefaultVault,
   ensureTaskVault,
   getSession,
   getVaultItem,
+  grantWorkspaceAccess,
+  listHumanInputSecretSaveTargets,
   submitHumanPromptInTransaction,
   updateWorkspaceSettings,
   upsertVaultItem,
@@ -29,12 +34,14 @@ import {
   signDelegatedAccessToken,
   skillReviewHumanInput,
   type HumanInputQuestion,
+  type Permission,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerSessionRoutes } from "../src/routes/sessions";
+import { registerVaultRoutes } from "../src/routes/vaults";
 
 const DELEGATION_SECRET = "session-human-input-route-secret";
 const ENCRYPTION_KEY = Buffer.alloc(32, 44);
@@ -88,7 +95,7 @@ beforeAll(async () => {
     triggerScheduledTask: noop,
   } as unknown as SessionWorkflowClient;
   app = new Hono();
-  registerSessionRoutes(app, {
+  const deps = {
     settings,
     db: client.db,
     bus: new MemoryEventBus(),
@@ -97,7 +104,9 @@ beforeAll(async () => {
     objectStorage: null,
     documentIndexer: { indexDocument: noop },
     getDocumentServices: () => ({}) as never,
-  } as unknown as ApiRouteDeps);
+  } as unknown as ApiRouteDeps;
+  registerSessionRoutes(app, deps);
+  registerVaultRoutes(app, deps);
 }, 180_000);
 
 afterAll(async () => {
@@ -110,13 +119,13 @@ async function frozenFixture(
     optionalText?: boolean;
     skillReview?: boolean;
     secretQuestion?: "saved-logins-on" | "saved-logins-off";
+    externalAsker?: boolean;
     asChild?: boolean;
     allowSkip?: boolean;
     expiresAt?: Date | null;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
-  const subjectId = `user:${suffix}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
     accountExternalId: `human-input-api-account-${suffix}`,
@@ -124,10 +133,12 @@ async function frozenFixture(
     workspaceExternalSource: "test",
     workspaceExternalId: `human-input-api-workspace-${suffix}`,
     workspaceName: "Human input API",
-    subjectId,
+    subjectId: `user:${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
-  if (options.secretQuestion) {
+  const external = options.externalAsker ? await externalVaultActor(grant) : undefined;
+  const subjectId = external?.identity.subjectId ?? grant.subjectId;
+  if (options.secretQuestion && !external) {
     const [personal] = await shared.admin<Array<{ id: string }>>`
       insert into workspaces (account_id, name) values (${grant.accountId}::uuid, 'Personal')
       returning id::text as id`;
@@ -183,7 +194,11 @@ async function frozenFixture(
   if (claimed.action !== "claimed") throw new Error(`fixture claim failed: ${claimed.reason}`);
   const requestId = crypto.randomUUID();
   const questions = options.secretQuestion
-    ? [SECRET_QUESTION]
+    ? [
+        external
+          ? { ...SECRET_QUESTION, secret: { ...SECRET_QUESTION.secret!, saveTo: "user" } }
+          : SECRET_QUESTION,
+      ]
     : options.skillReview
       ? skillReviewHumanInput({
           sourceOperationId: crypto.randomUUID(),
@@ -270,12 +285,222 @@ async function frozenFixture(
     sessionId: session.id,
     rootSessionId: parent?.id ?? session.id,
     requestId,
+    turnId: claimed.turn.id,
     authorization: `Bearer ${token}`,
+    external,
     questions,
   };
 }
 
+const externalVaultPermissions: Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "secrets:list",
+  "secrets:use",
+  "secrets:write",
+];
+
+async function externalVaultActor(scope: { accountId: string; workspaceId?: string | null }) {
+  const source = "example-embedding-host";
+  const externalId = crypto.randomUUID();
+  const identity = await ensureExternalIdentity(client.db, {
+    accountId: scope.accountId,
+    source,
+    externalId,
+  });
+  await grantWorkspaceAccess(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId!,
+    subjectId: identity.subjectId,
+    permissions: externalVaultPermissions,
+  });
+  return {
+    identity,
+    header: encodeURIComponent(
+      JSON.stringify({ mode: "external", identity: { source, externalId } }),
+    ),
+  };
+}
+
+async function vaultHostToken(accountId: string, permissions: Permission[]) {
+  const token = crypto.randomUUID();
+  await createOrganizationApiKey(client.db, {
+    accountId,
+    name: "Embedding host",
+    prefix: "test",
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    permissions,
+  });
+  return `Bearer ${token}`;
+}
+
 describe("structured human-input HTTP surface (real PostgreSQL)", () => {
+  test("a verified embedded person can save to their own vault without sharing it", async () => {
+    const fixture = await frozenFixture({ secretQuestion: "saved-logins-on", externalAsker: true });
+    const { accountId, workspaceId, sessionId, subjectId, turnId, requestId } = fixture;
+    const owner = fixture.external!;
+    const other = await externalVaultActor(fixture);
+    const organizationKey = await vaultHostToken(accountId, externalVaultPermissions);
+    const limitedKey = await vaultHostToken(
+      accountId,
+      externalVaultPermissions.filter((permission) => permission !== "secrets:write"),
+    );
+    const headers = (externalHeader?: string, authorization = organizationKey) => ({
+      authorization,
+      ...(externalHeader ? { "x-opengeni-external-actor": externalHeader } : {}),
+      "content-type": "application/json",
+    });
+    const workspace = `http://x/v1/workspaces/${workspaceId}`;
+    const session = `${workspace}/sessions/${sessionId}`;
+    const card = `${session}/human-input-requests/${requestId}`;
+    const value = "synthetic-embedded-secret";
+    const answer = (externalHeader?: string, authorization?: string) =>
+      app.request(`${session}/events`, {
+        method: "POST",
+        headers: headers(externalHeader, authorization),
+        body: JSON.stringify({
+          type: "user.humanInputResponse",
+          payload: {
+            requestId,
+            response: { outcome: "answered", answers: [] },
+            secretAnswers: [{ questionId: SECRET_QUESTION.id, saveTo: "user", value }],
+          },
+        }),
+      });
+
+    // A default vault does not have to exist yet. The database already admits the owner.
+    const writer = { kind: "subject" as const, accountId, workspaceId, subjectId };
+    const existing =
+      await shared.admin`select id from vaults where account_id = ${accountId} and owner_kind = 'user'`;
+    expect(existing).toHaveLength(0);
+    expect(await listHumanInputSecretSaveTargets(client.db, writer, { sessionId, turnId })).toEqual(
+      ["user", "task", "workspace"],
+    );
+
+    const ownCard = await app.request(card, { headers: headers(owner.header) });
+    expect(ownCard.status).toBe(200);
+    expect(await ownCard.json()).toMatchObject({
+      secretSaveTargets: ["user", "task", "workspace"],
+    });
+    const ownList = await app.request(`${session}/human-input-requests?status=pending`, {
+      headers: headers(owner.header),
+    });
+    expect(await ownList.json()).toMatchObject({
+      requests: [{ id: requestId, secretSaveTargets: ["user", "task", "workspace"] }],
+    });
+
+    // The same key by itself, a different person, an ordinary delegated bearer naming
+    // the owner, and an asUser request without the write permission must all fail.
+    for (const [actor, credential] of [
+      [undefined, organizationKey],
+      [other.header, organizationKey],
+      [undefined, fixture.authorization],
+      [owner.header, limitedKey],
+    ] as const) {
+      const projection = await app.request(card, { headers: headers(actor, credential) });
+      expect(projection.status).toBe(200);
+      expect(await projection.json()).toMatchObject({ secretSaveTargets: ["task", "workspace"] });
+      expect((await answer(actor, credential)).status).toBe(403);
+    }
+
+    const accepted = await answer(owner.header);
+    expect(accepted.status).toBe(202);
+    const event = await accepted.json();
+    const reference = formatSecretReference({
+      vault: "Private",
+      item: "Example login",
+      field: "password",
+    });
+    expect(event.payload.response.answers).toMatchObject([
+      { secret: { saveTo: "user", reference }, values: [reference] },
+    ]);
+    expect(JSON.stringify(event)).not.toContain(value);
+    const [vault] = await shared.admin`
+      select id, workspace_id, owner_organization_membership_id from vaults
+      where account_id = ${accountId} and owner_kind = 'user'`;
+    expect(vault).toMatchObject({
+      workspace_id: owner.identity.personalWorkspaceId,
+      owner_organization_membership_id: owner.identity.organizationMembershipId,
+    });
+    const ownVault = await app.request(`${workspace}/vaults/${vault!.id}`, {
+      headers: headers(owner.header),
+    });
+    expect(ownVault.status).toBe(200);
+    const otherVault = await app.request(`${workspace}/vaults/${vault!.id}`, {
+      headers: headers(other.header),
+    });
+    expect(otherVault.status).toBe(404);
+
+    // A later chat for the same person can use it; a chat in the same
+    // workspace for another person cannot, even with the exact reference.
+    async function resolveInNewChat(initiatingSubject: string) {
+      const next = await createSession(client.db, {
+        accountId,
+        workspaceId,
+        initialMessage: "Use a saved login",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        workspaceId,
+        initiatingSubject,
+        (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId,
+            workspaceId,
+            sessionId: next.id,
+            subjectId: initiatingSubject,
+            actor: { type: "human", subjectId: initiatingSubject },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Continue",
+            resources: [],
+            tools: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+      );
+      const attemptId = crypto.randomUUID();
+      const work = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: next.id,
+        workflowId: `session-${next.id}`,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        attemptId,
+        trigger: { kind: "next" },
+      });
+      if (work.action !== "claimed") throw new Error(`new chat did not claim: ${work.reason}`);
+      return createSecretResolver(
+        { db: client.db, encryptionKey: ENCRYPTION_KEY },
+        {
+          kind: "attempt",
+          accountId,
+          workspaceId,
+          sessionId: next.id,
+          turnId: work.turn.id,
+          executionGeneration: work.turn.executionGeneration,
+          attemptId,
+        },
+        { capabilityEnabled: true },
+      ).resolve([parseSecretReference(reference)], { surface: "mcp", toolName: "example_login" });
+    }
+
+    const resolved = await resolveInNewChat(subjectId);
+    expect([...resolved.values()].map((entry) => entry.material)).toEqual([
+      { type: "text", value },
+    ]);
+    await expect(resolveInNewChat(other.identity.subjectId)).rejects.toMatchObject({
+      failures: [{ code: "not_found" }],
+    });
+  });
+
   test.each([false, true])(
     "a restricted chat (child: %s) can use its secure answer, not other Task or workspace items",
     async (asChild) => {
