@@ -2403,7 +2403,8 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
     });
     expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
     // It redeems another reset from the organization page in one call, with
-    // no token (the fake answers this credit at once).
+    // no token. The fake fails this credit's first consume as ambiguous
+    // (ambiguousFailures++ === 0); 1 makes it answer at once whatever ran before.
     provider.ambiguousFailures = 1;
     const agentRedeem = await agent("/reset-credits/redeem", "POST");
     expect(agentRedeem.status).toBe(200);

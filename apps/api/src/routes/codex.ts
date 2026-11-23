@@ -1978,7 +1978,8 @@ async function prepareCodexRedemption(
       );
       if (adoption.kind === "in_progress") {
         throw new HTTPException(409, {
-          message: "this redemption is still in progress in another browser request",
+          message:
+            "this redemption is still in progress; try again shortly with the same attemptId",
         });
       }
       if (adoption.kind === "not_found") {
