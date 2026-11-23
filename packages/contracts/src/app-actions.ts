@@ -92,10 +92,18 @@ export function appActionPaymentPage(
  * on it, so the page is its own confirmation. A billing portal link is
  * different: whoever holds it can change the payment method or cancel the
  * plan, so it keeps the confirmation.
+ *
+ * A browser-only action is refused whatever the answer, so nobody is asked
+ * to allow it.
  */
 export function appActionNeedsConfirmation(entry: ActionCatalogEntry): boolean {
   const page = appActionPaymentPage(entry);
-  return appActionChangesState(entry) && page !== "credits" && page !== "subscription";
+  return (
+    appActionChangesState(entry) &&
+    !entry.browserOnly &&
+    page !== "credits" &&
+    page !== "subscription"
+  );
 }
 
 /**
@@ -453,6 +461,10 @@ export function appActionConfirmationTitle(
         : `Turn off video for every chat in ${workspace}?`;
     }
     default: {
+      if (entry.path.endsWith("/codex/accounts/:accountId/reset-credits/redeem")) {
+        const account = targets?.accountId ? targetLabel(targets.accountId) : undefined;
+        return `Redeem a usage-limit reset for ${account ? `“${account}”` : "this ChatGPT account"}?`;
+      }
       // Name what it changes, as the server found it; else where it applies.
       // The card's facts say more about it.
       const parameter = appActionTargetParameter(entry);

@@ -111,7 +111,12 @@ export function isActionCatalogExempt(path: string): boolean {
  * reason instead of a bare 401. Everything else an agent with the person's
  * full access can do as them. Matched against "METHOD /path".
  */
-export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{
+  pattern: RegExp;
+  reason: string;
+  /** What an agent uses instead, when the person needn't do it in the browser. */
+  agentAlternative?: string;
+}> = [
   {
     pattern:
       /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^POST \/v1\/workspaces\/:workspaceId\/integrations\/teams\/(bot|link)\/microsoft-sign-in$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
@@ -139,11 +144,20 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     reason:
       "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent",
   },
+  {
+    pattern: /^POST \/v1\/\w+\/:\w+\/codex\/accounts\/:accountId\/reset-credits\/prepare$/,
+    reason: "it is the web app's confirmation step for redeeming a usage-limit reset",
+    agentAlternative:
+      "Redeem the reset with its reset-credits/redeem action, in one call: the person's approval of that call is the confirmation.",
+  },
 ];
 
-export function actionCatalogBrowserOnlyReason(method: string, path: string): string | undefined {
+export function actionCatalogBrowserOnlyRule(
+  method: string,
+  path: string,
+): (typeof ACTION_CATALOG_BROWSER_ONLY)[number] | undefined {
   const key = `${method} ${path}`;
-  return ACTION_CATALOG_BROWSER_ONLY.find((rule) => rule.pattern.test(key))?.reason;
+  return ACTION_CATALOG_BROWSER_ONLY.find((rule) => rule.pattern.test(key));
 }
 
 /** A registered route and the source of its handlers, which name its inputs. */
@@ -684,7 +698,7 @@ export function buildActionCatalog(
   return included
     .map((route, index) => {
       const name = preferred[index];
-      const browserOnly = actionCatalogBrowserOnlyReason(route.method, route.path);
+      const browserOnly = actionCatalogBrowserOnlyRule(route.method, route.path);
       const secretFields = actionSecretFields(route);
       return {
         id: name && counts.get(name) === 1 ? name : `${route.method} ${route.path}`,
@@ -693,7 +707,10 @@ export function buildActionCatalog(
         request: [...route.request],
         ...(route.query.length > 0 ? { query: [...route.query] } : {}),
         response: [...route.response],
-        ...(browserOnly ? { browserOnly } : {}),
+        ...(browserOnly ? { browserOnly: browserOnly.reason } : {}),
+        ...(browserOnly?.agentAlternative
+          ? { agentAlternative: browserOnly.agentAlternative }
+          : {}),
         ...(route.permission ? { permission: route.permission } : {}),
         ...(secretFields.length > 0 ? { secretFields } : {}),
       };

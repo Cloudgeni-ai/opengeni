@@ -710,3 +710,30 @@ test("no action's secret request fields nest inside each other", () => {
     }
   }
 });
+
+test("a chat redeems a usage-limit reset with one approval card, naming the account", () => {
+  for (const scope of ["workspaces/:workspaceId", "organizations/:organizationId"]) {
+    // The web app's prepare step is never a card in a chat: an agent can't use it.
+    const prepare = `POST /v1/${scope}/codex/accounts/:accountId/reset-credits/prepare`;
+    expect(findAppAction(prepare)?.browserOnly).toBeTruthy();
+    expect(findAppAction(prepare)?.agentAlternative).toContain("reset-credits/redeem");
+    expect(appActionCallNeedsConfirmation({ id: prepare })).toBe(false);
+    // Redeeming asks once.
+    const redeem = `POST /v1/${scope}/codex/accounts/:accountId/reset-credits/redeem`;
+    expect(findAppAction(redeem)?.browserOnly).toBeUndefined();
+    expect(appActionCallNeedsConfirmation({ id: redeem })).toBe(true);
+    const call = {
+      id: redeem,
+      pathParameters: { workspaceId: "ws-1", organizationId: "org-1", accountId: "acct-1" },
+      body: { attemptId: crypto.randomUUID(), creditId: "credit-1" },
+    };
+    expect(
+      appActionConfirmationTitle(call, here, {
+        accountId: { kind: "account", name: "Work", account: "bendik@example.com" },
+      }),
+    ).toBe("Redeem a usage-limit reset for “Work · bendik@example.com”?");
+    expect(appActionConfirmationTitle(call, here)).toBe(
+      "Redeem a usage-limit reset for this ChatGPT account?",
+    );
+  }
+});

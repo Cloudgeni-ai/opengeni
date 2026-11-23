@@ -18,8 +18,10 @@ describe("action descriptions", () => {
   });
 
   test("every subscription, model and vault connection action has a description", () => {
+    // Agents never see a browser-only action, so it needs none.
     const missing = ACTION_CATALOG.filter(
-      (entry) => DESCRIBED_ACTION_PATH.test(entry.path) && !actionDescription(entry),
+      (entry) =>
+        DESCRIBED_ACTION_PATH.test(entry.path) && !entry.browserOnly && !actionDescription(entry),
     ).map((entry) => `${entry.method} ${entry.path}`);
     expect(missing).toEqual([]);
   });

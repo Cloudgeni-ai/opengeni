@@ -434,21 +434,15 @@ const RULES: Rule[] = [
   },
   {
     method: "POST",
-    pattern: /\/codex\/accounts\/:accountId\/reset-credits\/prepare$/,
-    text: () =>
-      "Prepare redeeming one ChatGPT usage-limit reset for a Codex account, with a new attemptId and the reset's creditId from the account's overview. Returns a confirmation token for redeem. A workspace's own account is redeemed by the person who connected it; an organization account by an organization owner or admin, even if no workspace uses it. Redeeming is irreversible and uses up the reset: only do it when the person asked for it.",
-  },
-  {
-    method: "POST",
     pattern: /\/codex\/accounts\/:accountId\/reset-credits\/redeem$/,
     text: () =>
-      "Redeem a prepared ChatGPT usage-limit reset: the same attemptId and creditId, the confirmationToken from prepare, and confirmation set to REDEEM_USAGE_LIMIT_RESET. Irreversible: only when the person asked for it. If the outcome is unknown, prepare and redeem again with the same attemptId; never start a new attempt for the same reset.",
+      "Redeem one ChatGPT usage-limit reset for a Codex account, in one call: body { attemptId: a new UUID, creditId: the reset's id from the account's overview }. A workspace's own account is redeemed by the person who connected it; an organization account by an organization owner or admin, even if no workspace uses it. Irreversible and uses up the reset: only when the person asked for it. If the outcome is unknown, call it again with the same attemptId; never start a new attempt for the same reset.",
   },
   {
     method: "GET",
     pattern: /\/organizations\/:organizationId\/codex\/accounts\/:accountId\/overview$/,
     text: () =>
-      "Read one organization Codex (ChatGPT) account's live usage and its usage-limit resets (each with its expiry), even when no workspace uses the account. Redeem one with reset-credits/prepare and then redeem.",
+      "Read one organization Codex (ChatGPT) account's live usage and its usage-limit resets (each with its expiry), even when no workspace uses the account. Redeem one with reset-credits/redeem.",
   },
   {
     method: "GET",
