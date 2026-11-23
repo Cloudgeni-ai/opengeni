@@ -842,8 +842,8 @@ for (const width of [1280, 390]) {
         await older;
         await page.getByText("Short question 59", { exact: true }).waitFor();
         await page.waitForFunction(() => {
-          const scroller = document.querySelector("[data-og-timeline-scroller]");
-          return scroller && scroller.scrollHeight - scroller.clientHeight > 1;
+          const root = document.querySelector("[data-og-timeline-scroller]");
+          return root && root.scrollHeight - root.clientHeight > 1;
         });
         assert.equal(await scroller.getAttribute("data-og-bottom-follow"), "true");
         assert.equal(await scroller.getByText("Short question 4", { exact: true }).count(), 0);
