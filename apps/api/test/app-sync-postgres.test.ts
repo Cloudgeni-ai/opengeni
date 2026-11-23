@@ -29,6 +29,7 @@ import {
   getScheduledTask,
   listScheduledTaskRuns,
   markEventOccurrenceStarted,
+  markSiteToolData,
   recordEventDelivery,
   type DbClient,
 } from "@opengeni/db";
@@ -1258,6 +1259,36 @@ test("a sync run still writing when a manager resets the data marks each page it
   const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, callTool);
   expect(run.lastRun.status, JSON.stringify(run.lastRun)).toBe("succeeded");
   // The page it wrote after the reset marked the collection again.
+  expect(await read()).toBe(403);
+});
+
+test("a writer's mark right before a reset stays, even when the target was marked long before", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  inventories(f, { [f.owner.subjectId]: [{ serverId: "orders-server" }] });
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const source = {
+    target: "collection:orders",
+    connector: "orders",
+    route: "orders-server",
+    shared: true,
+  };
+  const read = async () =>
+    (await f.request(f.alice, "POST", `/${f.siteId}/data/query`, { collection: "orders" })).status;
+  // Server code that reaches a shared account wrote here long ago.
+  await markSiteToolData(db.db, scope, f.siteId, [source]);
+  await shared.admin`update site_tool_data_sources set created_at = created_at - interval '5 minutes'
+    where site_id = ${f.siteId}`;
+  expect(await read()).toBe(403);
+  // It marks again right before its next write; a manager resets the data
+  // before that write lands. The write's mark must survive the reset.
+  await markSiteToolData(db.db, scope, f.siteId, [source]);
+  const reset = await f.request(f.owner, "POST", `/${f.siteId}/data/collections/orders/reset`, {
+    confirm: true,
+  });
+  expect(reset.status, JSON.stringify(reset.json)).toBe(200);
   expect(await read()).toBe(403);
 });
 
