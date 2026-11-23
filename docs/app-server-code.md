@@ -73,13 +73,15 @@ stored once per workspace by content
 - Declared tools are `serverId/toolName` identities (as `ogtool show` lists
   them), not an agent's model-facing names. Publishing refuses a name that
   matches no tool in the publishing person's inventory and suggests the
-  shared account route it most likely means; when that inventory can't be
-  read, the publish goes ahead and runs check as usual.
+  shared account route it most likely means. An account route id they can't
+  see, or an inventory that can't be read, lets the publish go ahead, and
+  runs check as usual.
 - Every publish goes live for all viewers; there is no draft run. Managers
   try a version with `app_server_run` and roll back if needed. An agent's
   `app_server_run`, and its reads of run logs, act for the person whose turn
-  it is (its own worker subject is never a member); a turn without a person
-  is refused.
+  it is (its own worker subject is never a member). A turn without a person
+  runs code without tools or secrets with no viewer, is refused code with
+  them, and doesn't see their run output.
 
 App packages don't carry server code yet: installing one drops it, and the
 installer publishes the code again.

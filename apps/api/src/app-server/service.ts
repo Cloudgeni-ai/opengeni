@@ -51,6 +51,7 @@ import {
   hasPermission,
   resolveServiceConnectionHeaders,
   ServiceConnectionCredentialError,
+  siteViewerForGrant,
   type ApiRouteDeps,
   type ObjectStorageDependency,
 } from "@opengeni/core";
@@ -60,7 +61,6 @@ import {
   getAppServerDeployment,
   getAppServerManifest,
   getAppServerRun,
-  getSessionTurnPerson,
   getVerifiedSubjectEmail,
   listAppServerRuns,
   SiteDataError,
@@ -92,7 +92,6 @@ import {
 } from "../site-data/service";
 import { signGatewayInternalRequest, siteSqlGatewayConfig } from "../site-sql/gateway";
 import { readSiteToolAccountInventory, type SiteToolAccountInventory } from "../site-tool-routing";
-import { exactAgentAttemptClaims } from "../sandbox/agent-fleet-context";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
 import { mintAppServerRunToken, verifyAppServerRunToken } from "./token";
 
@@ -914,21 +913,23 @@ export async function appServerViewerForGrant(
 }
 
 /**
- * The person a grant acts for: its own subject, or for an agent the person
- * whose turn it is (the same person its published code runs for). Null for
- * a turn without a person (a schedule, a key), which stays unable to run
- * code with tools or secrets.
+ * The person a grant acts for, as app data resolves it: its own subject, or
+ * for an agent the person behind its live turn. Null for a turn without a
+ * person (a schedule, a key).
  */
 export async function appServerActingSubject(
   deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
 ): Promise<string | null> {
-  const claims = exactAgentAttemptClaims(grant);
-  if (!claims) return grant.subjectId;
-  return await getSessionTurnPerson(deps.db, grant.workspaceId, claims.turnId).catch(() => null);
+  return await siteViewerForGrant(deps.db, grant).then(
+    (viewer) => viewer.subjectId,
+    () => null,
+  );
 }
 
 const ACCOUNT_ALIAS = /_([0-9a-f]{6})$/u;
+/** An account route id: it may be shared with others even when the publisher can't see it. */
+const ACCOUNT_ROUTE = /^account-[0-9a-f]{64}$/u;
 const connectorSlug = (value: string) =>
   value
     .toLowerCase()
@@ -953,7 +954,9 @@ function sharedRouteFor(inventory: SiteToolAccountInventory, serverId: string): 
  * (for example the model-facing name `linear_4f9650` instead of the tool's
  * identity), so it fails now with the exact id to use, not later on every
  * run. Judged by the publishing person's own tools, as the runs will be;
- * when those can't be read the publish goes ahead and runs check as usual.
+ * an account route id they can't see (one shared with a group they aren't
+ * in) and an unreadable inventory let the publish go ahead, and runs check
+ * as usual.
  */
 async function requireAppServerToolsKnown(
   deps: ApiRouteDeps,
@@ -974,6 +977,7 @@ async function requireAppServerToolsKnown(
   const inventory = await memberToolInventory(deps, member).catch(() => null);
   if (!inventory) return;
   const unknown = declared.filter((tool) => {
+    if (ACCOUNT_ROUTE.test(tool.serverId)) return false;
     try {
       routeAppServerTool(inventory, declared, tool);
       return false;
@@ -989,7 +993,7 @@ async function requireAppServerToolsKnown(
       : `${tool.serverId}/${tool.toolName}`;
   });
   throw new WorkspaceArtifactOperationError(
-    `The server code names tools that aren't available here: ${named.join(", ")}. Name each tool by its identity, serverId/toolName as \`ogtool show <path>\` lists it, in both the bundle's tools and env.tools.call, then upload again and publish.`,
+    `The server code names tools that aren't available to you here: ${named.join(", ")}. Name each tool by its identity, serverId/toolName as \`ogtool show <path>\` lists it, in both the bundle's tools and env.tools.call, then upload again and publish.`,
   );
 }
 
@@ -1621,7 +1625,7 @@ export async function appServerStatus(
       tools: [],
     };
   const summary = await summarizeAppServerRuns(deps.db, scope, access.site.id, startOfUtcDay());
-  const mayRead = runOutputReader(deps, grant, access.site.id);
+  const mayRead = runOutputReader(deps, grant, access.site.id, access.subjectId);
   let paused: string | null = null;
   try {
     await serverAuthority(deps, deployment);
@@ -1660,7 +1664,7 @@ export async function appServerRuns(
     ...(options.status ? { status: options.status } : {}),
     ...(options.before ? { before: options.before } : {}),
   });
-  const mayRead = runOutputReader(deps, grant, access.site.id);
+  const mayRead = runOutputReader(deps, grant, access.site.id, access.subjectId);
   return { runs: await Promise.all(runs.map((run) => withheldUnlessPermitted(run, mayRead))) };
 }
 
@@ -1674,7 +1678,10 @@ export async function appServerRun(
   const { access, scope } = await managerScope(deps, grant, siteId);
   const run = await getAppServerRun(deps.db, scope, access.site.id, runId);
   return run
-    ? await withheldUnlessPermitted(run, runOutputReader(deps, grant, access.site.id))
+    ? await withheldUnlessPermitted(
+        run,
+        runOutputReader(deps, grant, access.site.id, access.subjectId),
+      )
     : null;
 }
 
@@ -1687,7 +1694,13 @@ const RUN_OUTPUT_WITHHELD =
  * to the stored tool data rule: a live member who may use each declared tool's
  * connector, and `secrets:use` when it uses vault secrets.
  */
-function runOutputReader(deps: AppServerDeps, grant: AccessGrant, siteId: string) {
+function runOutputReader(
+  deps: AppServerDeps,
+  grant: AccessGrant,
+  siteId: string,
+  /** The reader as `managerScope` resolved them (an agent's turn person). */
+  person: string | null,
+) {
   const verdicts = new Map<string, Promise<boolean>>();
   return (versionId: string, known?: AppServerManifest | null): Promise<boolean> => {
     let verdict = verdicts.get(versionId);
@@ -1700,7 +1713,6 @@ function runOutputReader(deps: AppServerDeps, grant: AccessGrant, siteId: string
         const tools = manifest ? appServerDeclaredTools(manifest) : [];
         const secrets = manifest ? manifest.secrets.length > 0 : false;
         if (tools.length === 0 && !secrets) return true;
-        const person = await appServerActingSubject(deps, grant);
         if (!person) return false;
         const member = await liveMemberGrant(
           deps,
@@ -1748,7 +1760,7 @@ export async function testAppServer(
 ): Promise<AppServerFetchResponse> {
   const { access, scope } = await managerScope(deps, grant, siteId);
   // An agent runs it as the person whose turn it is (its own subject is never a member).
-  const person = await appServerActingSubject(deps, grant);
+  const person = access.subjectId;
   return await runAppServer(deps, {
     scope,
     siteId: access.site.id,

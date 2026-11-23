@@ -34,8 +34,8 @@ One or more ES modules. The main module exports `fetch`:
 
 ```js
 // server/index.js
-// The tool's identity from `ogtool show <path>`: serverId/toolName.
-const LIST_ISSUES = "account-3f9a…/list_issues";
+// The tool's identity from `ogtool show <path>`: "<identity.serverId>/<identity.toolName>".
+const LIST_ISSUES = "<serverId from ogtool show>/list_issues";
 
 export default {
   async fetch(request, env) {
@@ -106,7 +106,7 @@ back if they fail.
    {
      "main": "index.js",
      "files": [{ "path": "index.js", "content": "..." }],
-     "tools": ["account-3f9a…/list_issues"],
+     "tools": ["<serverId from ogtool show>/list_issues"],
      "egress": ["api.example.com"],
      "secrets": ["\{{secret:Shared/Weather/api key}}"]
    }

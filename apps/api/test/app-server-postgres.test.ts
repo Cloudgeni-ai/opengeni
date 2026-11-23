@@ -774,6 +774,9 @@ test("publishing refuses a tool name that isn't a tool here and names the id to 
   // The identity, or the connector, publishes.
   expect((await f.publish({ ...SERVER_CODE, tools: [`${route}/list_issues`] })).status).toBe(200);
   expect((await f.publish(SERVER_CODE)).status).toBe(200);
+  // An account route the publisher can't see may be shared with others: runs decide.
+  const unseen = `account-${"b".repeat(64)}/list_issues`;
+  expect((await f.publish({ ...SERVER_CODE, tools: [unseen] })).status).toBe(200);
 });
 
 test("an upload of no files removes the code", async () => {
