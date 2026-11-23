@@ -203,6 +203,13 @@ shows managers one line per affected collection or database.
   catalog (which may carry a person's credentials) are refused. Tool
   arguments may not contain vault references. The tool gateway call itself
   uses the deployer's workspace grant, as a shared app sync does.
+  The call returns the tool's JSON value, read as app syncs read it: the
+  structured content, else the first text part that parses as JSON, else
+  the text. A tool error throws with code `tool_error`.
+  `env.tools.call(tool, args, { raw: true })` returns the MCP result instead.
+  Code uploaded before this behaviour (its manifest has no
+  `toolResults: "value"`) keeps getting the MCP result until its server
+  bundle is uploaded again.
 - **Data** (`env.data`): shared, shared_read and append_only collections;
   `per_viewer` collections are refused, since the code isn't a viewer.
 - **Fetch**: HTTPS on the default port to hosts in the version's `egress`,

@@ -41,8 +41,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/issues") {
-      const result = await env.tools.call(LIST_ISSUES, { first: 20 });
-      return Response.json(result);
+      const issues = await env.tools.call(LIST_ISSUES, { first: 20 });
+      return Response.json(issues);
     }
     return new Response("Not found", { status: 404 });
   },
@@ -57,9 +57,13 @@ export default {
 | `env.app` | `{id, versionId}`. |
 | `env.trigger` | `"request"` from `site.server.fetch`, `"manual"` from `app_server_run`. |
 | `env.runId` | This run's id, as `app_server_runs` lists it. |
-| `env.tools.call(tool, args)` | A tool the bundle lists in `tools`, as `"serverId/toolName"` from its `identity` in `ogtool show <path>` (not the `linear_3f9a5c` name you call it by), on a shared account. Returns the tool's result. |
+| `env.tools.call(tool, args)` | A tool the bundle lists in `tools`, as `"serverId/toolName"` from its `identity` in `ogtool show <path>` (not the `linear_3f9a5c` name you call it by), on a shared account. Returns the tool's JSON value (its structured content, or its text parsed as JSON, else the text); a tool error throws with code `tool_error`. Pass `{ raw: true }` as a third argument for the full MCP result. |
 | `env.data` | App data in shared, shared_read or append_only collections: `query(collection, {where, sort, limit, cursor})` (as in `references/site-data.md`), `get(collection, id)` or `get(collection, {key})`, `put(collection, key, value)`, `insert(collection, value)`, `delete(collection, id)`, `write(operations)`. Writes are the app's, not the viewer's. |
 | `fetch(url, init)` | HTTPS to hosts the bundle lists in `egress`. Put a listed vault secret in a header value: `Authorization: "Bearer \{{secret:Shared/Weather/api key}}"`. |
+
+When you edit older server code that unwraps `result.structuredContent` or
+`result.content`, remove that unwrapping (or pass `{ raw: true }`) before
+uploading it again.
 
 A refused call throws an `Error` whose `code` says why, for example
 `shared_account_required`, `tool_not_declared`, `egress_not_listed`,

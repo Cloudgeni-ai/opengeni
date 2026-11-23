@@ -204,6 +204,12 @@ export const AppServerManifest = z.object({
   secrets: z.array(SecretReference).max(APP_SERVER_MAX_SECRETS),
   /** Tools the code calls, on shared accounts (`"serverId/toolName"`). */
   tools: z.array(ToolReference).max(APP_SERVER_MAX_TOOLS).default([]),
+  /**
+   * What `env.tools.call` returns: `"value"` (the tool's JSON value, as app
+   * syncs read it) for code published since it existed, `"raw"` (the MCP
+   * result) for code published before, so that code keeps working.
+   */
+  toolResults: z.enum(["raw", "value"]).default("raw"),
   /** SHA-256 over main, files, egress, secrets and tools: the code's identity in the gateway's cache. */
   digest: z.string().regex(/^[0-9a-f]{64}$/u),
 });

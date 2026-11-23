@@ -382,7 +382,13 @@ export async function getAppServerDeployment(
         siteId,
         status: row.status,
         versionId: row.versionId,
-        manifest: row.manifest ? { ...row.manifest, tools: row.manifest.tools ?? [] } : null,
+        manifest: row.manifest
+          ? {
+              ...row.manifest,
+              tools: row.manifest.tools ?? [],
+              toolResults: row.manifest.toolResults ?? "raw",
+            }
+          : null,
         requestedTools: row.requestedTools ?? [],
         deployerSubjectId: event?.actorSubjectId ?? row.createdBySubjectId,
       } satisfies AppServerDeployment,

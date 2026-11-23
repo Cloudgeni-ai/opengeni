@@ -182,7 +182,9 @@ function sha256(value: string | Uint8Array): string {
 }
 
 /** The digest that names one version's code: main, files, egress, secrets and tools. */
-export function appServerDigest(manifest: Omit<AppServerManifest, "digest">): string {
+export function appServerDigest(
+  manifest: Omit<AppServerManifest, "digest" | "toolResults">,
+): string {
   return sha256(
     JSON.stringify([
       manifest.main,
@@ -219,9 +221,48 @@ export function appServerManifestOf(bundle: AppServerBundle): {
     tools: [...new Set(bundle.tools ?? [])].sort(),
   };
   return {
-    manifest: AppServerManifest.parse({ ...base, digest: appServerDigest(base) }),
+    manifest: AppServerManifest.parse({
+      ...base,
+      toolResults: "value",
+      digest: appServerDigest(base),
+    }),
     files: files.map((file) => ({ sha256: file.sha256, bytes: file.bytes })),
   };
+}
+
+/**
+ * A tool result as server code reads it: the structured content, else the
+ * first text part that parses as JSON, else the text itself. A tool error
+ * throws with the tool's message.
+ */
+export function appServerToolValue(result: unknown): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const raw = result as { structuredContent?: unknown; content?: unknown; isError?: unknown };
+  const texts = Array.isArray(raw.content)
+    ? raw.content.flatMap((part) =>
+        part &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string"
+          ? [(part as { text: string }).text]
+          : [],
+      )
+    : [];
+  if (raw.isError === true)
+    throw invalid(texts.join("\n").slice(0, 1000) || "The tool returned an error.", {
+      reason: "tool_error",
+    });
+  if (raw.structuredContent !== undefined && raw.structuredContent !== null)
+    return raw.structuredContent;
+  if (!Array.isArray(raw.content)) return result;
+  for (const text of texts) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      continue;
+    }
+  }
+  return texts.length > 0 ? texts.join("\n") : null;
 }
 
 function refuseUpload(message: string): never {
@@ -1494,8 +1535,11 @@ export async function handleAppServerHostCall(
             identity,
             arguments: args as Record<string, unknown>,
           });
-          return { result };
+          // Code published before results were unwrapped keeps the raw MCP result.
+          const raw = deployment.manifest.toolResults !== "value" || call.input.raw === true;
+          return { result: raw ? result : appServerToolValue(result) };
         } catch (error) {
+          if (error instanceof AppServerError) throw error;
           const status = (error as { status?: unknown }).status;
           const message = error instanceof Error ? error.message : "";
           if (status === 409 || message.includes("approval_required"))

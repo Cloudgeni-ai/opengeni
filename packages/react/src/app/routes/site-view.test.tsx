@@ -108,7 +108,7 @@ mock.module("../lib/navigation", () => ({
   useSearch: () => ({}),
   useStringifySearch: () => () => "",
   // The window bar's module imports these; its title never calls them.
-  usePage: () => ({ opensBeside: false }),
+  usePage: () => ({ opensBeside: false, origin: () => "https://console.example" }),
   useRouter: () => ({ state: { location: { pathname: "/", state: routerLocationState } } }),
   useRouterState: () => undefined,
   Link: ({
@@ -681,6 +681,29 @@ test("the chat opens as a full chat in one click, and the app's menu opens its s
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-archived-message")).toBe(
     "This app is archived. Restore it from its settings.",
   );
+});
+
+test("the chat panel copies a link to its conversation", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const written: string[] = [];
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => void written.push(text) },
+  });
+  try {
+    const { container } = await render();
+    const copy = panel(container).querySelectorAll<HTMLElement>("[data-site-chat-copy-link]");
+    expect(copy).toHaveLength(1);
+    expect(copy[0]!.getAttribute("aria-label")).toBe("Copy link to this chat");
+    await act(async () => copy[0]!.click());
+    expect(written).toEqual([
+      `https://console.example/workspaces/${workspaceId}/sessions/${id(1)}`,
+    ]);
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
 });
 
 test("an archived app links to its details, where it can be restored", async () => {
