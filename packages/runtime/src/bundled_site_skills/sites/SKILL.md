@@ -1,6 +1,6 @@
 ---
 name: sites
-description: Build, edit, and publish apps. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider apps only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
+description: Build, edit, and publish apps. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider apps only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices. For a new app or a restyle, read `references/design.md` in the same `skill_read` as `SKILL.md`.
 ---
 
 # Apps
@@ -21,8 +21,8 @@ app on the web is built in (see "Publish to the web").
   short report), or a small personal tool that keeps the viewer's own entries
   (a blood-pressure or habit log, a reading list, a form that collects
   answers). No workspace tools, no AI, no data that several people edit
-  together. Follow "Single-file app" below; nothing else in this Skill is
-  needed.
+  together. Follow "Single-file app" below; besides `references/design.md`,
+  nothing else in this Skill is needed.
 - **Full app**: needs React or a build, workspace tools, AI or chat, data several
   people share or edit, app SQL, or several views with their own state.
   Follow "Full apps" below and read only the reference files the app needs.
@@ -79,7 +79,9 @@ tool calls.
 
 ## Look
 
-Every new app, single-file apps included, takes the first look that applies:
+Before writing markup for a new app or a restyle, read
+`references/design.md`. Every new app, single-file apps included, takes the
+first look that applies:
 
 1. The person's requested design, or the existing app's.
 2. A design system the workspace keeps in Knowledge or Skills, when one is in
@@ -87,7 +89,9 @@ Every new app, single-file apps included, takes the first look that applies:
 3. For an app about one product (a GitHub tracker, a PostHog dashboard), the
    Opengeni look with that product's accent and logo; the product's own look
    only when asked.
-4. Otherwise the Opengeni look: `<link rel="stylesheet" href="/__opengeni/ui.css">`
+4. For a page read by or shown to others (a landing page, invitation, menu,
+   portfolio), a design of its own.
+5. Otherwise the Opengeni look: `<link rel="stylesheet" href="/__opengeni/ui.css">`
    in `<head>`, `og-app` on `<body>`, its classes (`og-page`, `og-title`,
    `og-heading`, `og-card`, `og-button` with `og-button-primary`, `og-input`,
    `og-badge`, `og-table`, `og-muted`) and `--og-*` tokens for anything else.
@@ -100,8 +104,7 @@ height about 1.6 and about 70ch wide; `rem`/`em` for your own sizes; reflow on
 a phone instead of shrinking text; browser zoom and text scaling left working;
 small text only for secondary metadata. Don't restyle an existing app wholesale
 or force sizes with `!important`, and leave embedded components such as
-`SessionConversation` on their own styles. If `frontend-design` is available,
-use it for visual direction within this look.
+`SessionConversation` on their own styles.
 
 A single-file app that follows this needs no more checking than its
 one optional phone-width look. For a full app, before publishing, inspect actual
