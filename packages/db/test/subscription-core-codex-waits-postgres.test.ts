@@ -812,7 +812,12 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       ),
     ).toBe(true);
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
-    const plan = { kind: "wait", reason: "codex_plan_no_capacity", earliestResetAt: null };
+    const plan = {
+      kind: "wait",
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
+      planRefusedModelId: MODEL,
+    };
     expect(await place(turn)).toMatchObject(plan);
     expect(await evaluate(turn)).toMatchObject(plan);
 
@@ -888,6 +893,56 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         body: expect.stringContaining("Codex is rate-limited."),
       },
     });
+  });
+
+  test("only recorded plan refusals across the whole pool justify a terminal failure", async () => {
+    const org = await organization();
+    const first = await sharedConnection(org, "plan-first");
+    const second = await sharedConnection(org, "plan-second");
+    const until = new Date(Date.now() + 86_400_000);
+    const record = async (
+      turn: Awaited<ReturnType<typeof runningTurn>>,
+      id: string,
+      cause?: "entitlement",
+    ) =>
+      expect(
+        await recordSubscriptionCoreCodexModelCooldown(
+          client!.db,
+          turn.identity,
+          leaseOf(turn, id),
+          {
+            modelId: MODEL,
+            until: cause ? new Date(until.getTime() + 1_000) : until,
+            refreshGeneration: 1,
+            ...(cause ? { cause } : {}),
+          },
+        ),
+      ).toBe(true);
+    const probe = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const placed = await place(probe);
+    if (placed.kind !== "run") throw new Error("expected an available account");
+    const remaining = placed.connectionId === first ? second : first;
+    await record(probe, placed.connectionId, "entitlement");
+
+    const other = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(other)).toMatchObject({ kind: "run", connectionId: remaining });
+    await record(other, remaining); // an older, unclassified cooldown
+    const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(next)).not.toHaveProperty("planRefusedModelId");
+
+    await record(other, remaining, "entitlement");
+    expect(await place(next)).toMatchObject({
+      reason: "codex_plan_no_capacity",
+      planRefusedModelId: MODEL,
+    });
+
+    // A third authorized account that can run after a quota reset keeps the turn waiting.
+    const third = await sharedConnection(org, "quota-third");
+    const reset = Date.now() + 600_000;
+    await exhaust(org, third, reset);
+    const mixed = await place(next);
+    expect(mixed).toMatchObject({ kind: "wait", earliestResetAt: new Date(reset) });
+    expect(mixed).not.toHaveProperty("planRefusedModelId");
   });
 
   test("a redeemed reset credit resumes a turn parked on a stale weekly window without a usage read", async () => {

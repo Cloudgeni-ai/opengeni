@@ -31,6 +31,7 @@ import {
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import { assertCodexDispatchAdmission } from "./codex-credit-policy";
 import type { CodexTurnLease } from "./credential-leases";
+import { subscriptionCoreCodexPlanBlockedFailure } from "./codex-core-errors";
 import {
   assertCoreSourceConnected,
   coreLeaseRef,
@@ -256,5 +257,7 @@ async function parkCoreCodexTurn(
   deps: CapacityPhaseDeps,
   wait: Extract<SubscriptionCoreCodexPlacement, { kind: "wait" }>,
 ): Promise<CapacityPhaseOutcome> {
+  if (wait.planRefusedModelId)
+    throw subscriptionCoreCodexPlanBlockedFailure(wait.planRefusedModelId);
   return await parkCoreSubscriptionTurn(deps, wait, CODEX_CORE_WAIT_BINDING, "Codex");
 }

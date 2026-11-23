@@ -30,26 +30,40 @@ export function projectCodexSubscriptionWait(
   const models = failoverCandidateModels(input).filter((model) => modelPermitted(input, model));
   let reconnectAccount: SubscriptionReconnectAccount | undefined;
   let planBlocked = false;
+  let preferredModelRefused = false;
+  let onlyProvenPlanBlocks = true;
   let otherBlock = false;
   let timed: { at: number | null; rateLimited: boolean } | undefined;
   for (const connection of input.connections) {
     if (pinned ? pinned !== connection.id : !automaticallyUsable(input, connection)) continue;
     for (const model of models) {
       const reasons = connectionIneligibility(input, connection, model);
-      if (reasons.length === 0) continue;
+      if (reasons.length === 0) {
+        onlyProvenPlanBlocks = false;
+        continue;
+      }
       const codex = connection.provider === SUBSCRIPTION_CORE_CODEX_PROVIDER;
       const cooldown = connection.quota?.modelCooldownCauses?.[model];
-      // Only a proven plan refusal is a plan block. Older cooldowns did
-      // not record a cause; keep their timing without guessing why.
+      const provenPlanRefusal =
+        codex && reasons.includes("model_cooling_down") && cooldown?.cause === "entitlement";
+      // Skip pairs excluded by authority or policy. Catalog absence can
+      // explain a wait, but it is not a recorded refusal. Nor does a refusal
+      // with an independent quota or health blocker prove a plan-only wait.
+      const availableByPolicy = reasons.every((reason) =>
+        ["model_not_entitled", "model_cooling_down", "unhealthy", "exhausted"].includes(reason),
+      );
+      if (availableByPolicy) {
+        if (!provenPlanRefusal || reasons.includes("unhealthy") || reasons.includes("exhausted"))
+          onlyProvenPlanBlocks = false;
+        else if (model === input.session.preferredModelId) preferredModelRefused = true;
+      }
       if (
-        codex &&
-        ((reasons.includes("model_cooling_down") && cooldown?.cause === "entitlement") ||
-          (codexPlanKey(connection.planType) === "free" &&
+        availableByPolicy &&
+        (provenPlanRefusal ||
+          (codex &&
+            codexPlanKey(connection.planType) === "free" &&
             !connection.quota?.windows.length &&
-            reasons.includes("model_not_entitled"))) &&
-        reasons.every((reason) =>
-          ["model_not_entitled", "model_cooling_down", "unhealthy", "exhausted"].includes(reason),
-        )
+            reasons.includes("model_not_entitled")))
       ) {
         planBlocked = true;
         continue;
@@ -104,6 +118,12 @@ export function projectCodexSubscriptionWait(
   if (reconnectAccount && !otherBlock)
     return { reason: "codex_relogin_required", earliestResetAt: null, reconnectAccount };
   if (planBlocked && !otherBlock)
-    return { reason: "codex_plan_no_capacity", earliestResetAt: null };
+    return {
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
+      ...(onlyProvenPlanBlocks && preferredModelRefused
+        ? { planRefusedModelId: input.session.preferredModelId }
+        : {}),
+    };
   return null;
 }
