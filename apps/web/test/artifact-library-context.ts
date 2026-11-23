@@ -107,6 +107,10 @@ export const client = {
     fixtureActivity.prompts.push(draft.text);
     return { ...draft, revision: fixtureActivity.prompts.length };
   },
+  // The Apps tab and the empty page suggest ready-made apps; none here.
+  async listAppTemplates(_workspaceId: string) {
+    return [];
+  },
   async updateArtifactPin(
     _workspaceId: string,
     kind: ArtifactCatalogItem["kind"],

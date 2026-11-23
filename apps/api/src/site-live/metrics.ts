@@ -82,6 +82,8 @@ export function siteRuntimeOpLabel(method: string, suffix: string): string {
   if (method === "POST" && suffix === "/platform/timings") return "platform.timings";
   if (method === "POST" && suffix === "/site/reports") return "site.reports";
   if (method === "POST" && suffix === "/live/admit") return "live.admit";
+  if (method === "POST" && /^\/app-server\/[^/]+\/[^/]+\/host$/u.test(suffix))
+    return "app_server.host";
   const tool = /^\/tools\/([a-z][a-z-]*)$/u.exec(suffix);
   if (tool) return siteOpLabel(tool[1]);
   const sitePath = suffix === "/v1/config/client" ? suffix : `/v1/workspaces/site-host${suffix}`;

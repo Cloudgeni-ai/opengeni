@@ -28,7 +28,10 @@ import type {
   BrowserFrameWebSocket,
   BrowserFrameWebSocketFactory,
 } from "../src/hooks/use-browser-frame-stream";
-import { useBrowserFrameStream } from "../src/hooks/use-browser-frame-stream";
+import {
+  BROWSER_FRAME_STALL_MS,
+  useBrowserFrameStream,
+} from "../src/hooks/use-browser-frame-stream";
 import { useBrowserDownloads } from "../src/hooks/use-browser-downloads";
 import { useBrowserSession } from "../src/hooks/use-browser-session";
 import { useBrowserSessions } from "../src/hooks/use-browser-sessions";
@@ -2947,6 +2950,96 @@ describe("BrowserSession frame stream", () => {
     }
   });
 
+  test("does not show a stream that stopped sending frames as live", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
+    const sockets: FakeBrowserSocket[] = [];
+    const stalls: Array<() => void> = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const stallHandles = new Map<unknown, () => void>();
+    globalThis.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (typeof handler === "function" && delay === BROWSER_FRAME_STALL_MS) {
+        const handle = Symbol("stall");
+        const run = () => {
+          if (stallHandles.delete(handle)) handler(...args);
+        };
+        stallHandles.set(handle, run);
+        stalls.push(run);
+        return handle as unknown as ReturnType<typeof setTimeout>;
+      }
+      return originalSetTimeout(handler, delay, ...args);
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((handle?: unknown) => {
+      if (stallHandles.delete(handle)) return;
+      originalClearTimeout(handle as ReturnType<typeof setTimeout>);
+    }) as typeof clearTimeout;
+    const pendingStall = async () => {
+      const live = stalls.filter((run) => [...stallHandles.values()].includes(run));
+      expect(live).toHaveLength(1);
+      await actRun(() => live[0]!());
+    };
+    const client = fakeClient({
+      attachBrowserSession: async (_workspaceId, _browserSessionId, request) =>
+        attachment(request.targetId),
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          targetId: "target-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await flush(10);
+      await dispatch(sockets[0]!, "open");
+      await dispatch(sockets[0]!, "message", { data: frameMessage("target-1", 1).buffer });
+      await flush(5);
+      expect(hook.result.current.state).toBe("live");
+      expect(hook.result.current.frame?.sequence).toBe(1);
+
+      // The socket stays open, but no frame follows.
+      await pendingStall();
+      expect(sockets[0]?.closed).toBe(true);
+      expect(hook.result.current.state).toBe("reconnecting");
+      await flush(400);
+      expect(sockets).toHaveLength(2);
+
+      // A stream that answers again is live again.
+      await dispatch(sockets[1]!, "open");
+      await dispatch(sockets[1]!, "message", { data: frameMessage("target-1", 1).buffer });
+      await flush(5);
+      expect(hook.result.current.state).toBe("live");
+
+      // New streams that never send a frame end in a plain failure, not a
+      // frozen picture labelled live.
+      for (const index of [1, 2]) {
+        await pendingStall();
+        await flush(1_200);
+        expect(sockets).toHaveLength(index + 2);
+        await dispatch(sockets[index + 1]!, "open");
+        expect(hook.result.current.state).not.toBe("error");
+      }
+      await pendingStall();
+      expect(hook.result.current.state).toBe("error");
+      expect(hook.result.current.error?.message).toContain("stopped sending its picture");
+      await flush(1_500);
+      expect(sockets).toHaveLength(4);
+    } finally {
+      await hook.unmount();
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
   test("rejects a frame from a controller generation outside the attachment", async () => {
     // Native frame hashing/decoding is real asynchronous work, not a logical timer.
     jest.useRealTimers();
@@ -4314,10 +4407,12 @@ describe("BrowserViewer", () => {
       },
     };
     const sequence: string[] = [];
+    const reopening = Promise.withResolvers<void>();
     const client = fakeClient({
       listBrowserSessions: async () => ({ revision: 1, sessions: [suspended] }),
       resumeBrowserSession: async (_workspaceId, _browserSessionId, request) => {
         sequence.push("resume");
+        await reopening.promise;
         return mutation(resumed, "resume", request.operationId);
       },
       getBrowserSession: async () => {
@@ -4347,11 +4442,23 @@ describe("BrowserViewer", () => {
 
     expect(sequence).toEqual([]);
     expect(rendered.container.textContent).toContain("Browser is sleeping");
+    expect(rendered.container.textContent).toContain(
+      "Sign-ins and cookies are kept. The open page reloads, and unsaved form entries are lost.",
+    );
+    expect(rendered.container.querySelector(".lucide-moon")).not.toBeNull();
+    expect(rendered.container.querySelector(".lucide-loader-circle")).toBeNull();
     const open = [...rendered.container.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === "Open browser",
     );
     expect(open).toBeDefined();
     await actRun(() => open!.click());
+    await flush(40);
+
+    expect(sequence).toEqual(["resume"]);
+    expect(rendered.container.textContent).toContain("Opening browser");
+    expect(rendered.container.textContent).not.toContain("unsaved form entries");
+    expect(rendered.container.querySelector(".lucide-loader-circle")).not.toBeNull();
+    reopening.resolve();
     await flush(40);
 
     expect(sequence[0]).toBe("resume");

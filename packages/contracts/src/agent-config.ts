@@ -596,6 +596,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   app_webhook_save: "artifacts",
   app_webhook_list: "artifacts",
   app_webhook_delete: "artifacts",
+  app_server_runs: "artifacts",
+  app_server_run: "artifacts",
   site_files_list: "artifacts",
   site_files_upload: "artifacts",
   site_files_delete: "artifacts",

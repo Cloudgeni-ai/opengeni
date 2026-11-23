@@ -60,7 +60,7 @@ const TAR_BLOCK_SIZE = 512;
 const SPOOL_READ_BYTES = 1024 * 1024;
 
 export type WorkspaceTarStreamValidatorOptions = {
-  /** The SDK's hydration passes `false`; its capture check leaves it unset. */
+  /** `false` refuses symlink members, as the SDK's own buffered hydration does. */
   allowSymlinks?: boolean;
   /** Workspace-relative paths the archive must not write (ephemeral paths). */
   rejectRelPaths?: readonly string[];
@@ -512,8 +512,14 @@ export async function hydrateWorkspaceTarStreamFromSpool(
   expected: { archiveBytes: number; archiveSha256: string },
   options: { rejectRelPaths: readonly string[]; archiveLimits?: SandboxArchiveLimits | null },
 ): Promise<void> {
+  // Symlinks are allowed, as the capture check allows them: a remote capture
+  // (`tar -c`) stores the workspace's symlinks, so refusing them here would
+  // leave every workspace that has one (`node_modules/.bin`, a virtualenv, a
+  // runtime socket link under `.config`) captured but never restorable. The
+  // archive is exactly the captured tree (its hash is checked below), the
+  // root is emptied before extraction, and no member may descend through a
+  // symlink or repeat a path, so a link can never redirect a later write.
   const validator = new WorkspaceTarStreamValidator({
-    allowSymlinks: false,
     rejectRelPaths: options.rejectRelPaths,
     archiveLimits: options.archiveLimits ?? null,
   });

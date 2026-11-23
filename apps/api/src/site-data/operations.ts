@@ -1,4 +1,10 @@
 import { outsideAgentReach, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireToolDataReader,
+  resetToolData,
+  siteToolDataTarget,
+  toolDataReaderOf,
+} from "../site-tool-data";
 import type {
   SiteDataCollectionDefinitionRequest,
   SiteDataDescribeResponse,
@@ -269,7 +275,9 @@ export async function deleteSiteDataCollection(
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   await consume(access, "write", 1);
-  return access.store.deleteCollection(access.caller, name);
+  const deleted = await access.store.deleteCollection(access.caller, name);
+  await resetCollectionToolData(deps, access, name);
+  return deleted;
 }
 
 export async function resetSiteDataCollection(
@@ -280,13 +288,39 @@ export async function resetSiteDataCollection(
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   await consume(access, "write", 1);
-  return access.store.resetCollection(access.caller, name);
+  const reset = await access.store.resetCollection(access.caller, name);
+  await resetCollectionToolData(deps, access, name);
+  return reset;
+}
+
+/** Its records are gone, so the collection's stored tool data marks stop counting. */
+async function resetCollectionToolData(deps: SiteDataDeps, access: SiteDataAccess, name: string) {
+  await resetToolData(
+    deps,
+    { accountId: access.caller.accountId, workspaceId: access.caller.workspaceId },
+    access.site.id,
+    siteToolDataTarget("collection", name),
+  );
 }
 
 /**
  * Mark the Site watched by a live connection and return its change number
  * and the collections this caller may read (live hints name only those).
  */
+/** Stored shared-account tool data is read only by members who may use it (site-tool-data.ts). */
+async function requireCollectionReader(
+  deps: SiteDataDeps,
+  access: SiteDataAccess,
+  collection: string,
+): Promise<void> {
+  await requireToolDataReader(deps, {
+    scope: { accountId: access.caller.accountId, workspaceId: access.caller.workspaceId },
+    siteId: access.site.id,
+    target: siteToolDataTarget("collection", collection),
+    reader: toolDataReaderOf(access),
+  });
+}
+
 export async function watchSiteData(
   deps: SiteDataDeps,
   grant: SiteDataAuthority,
@@ -305,6 +339,7 @@ export async function querySiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await requireCollectionReader(deps, access, query.collection);
   await consume(access, "read", 1);
   return access.store.query(access.caller, {
     collection: query.collection,
@@ -329,6 +364,7 @@ export async function getSiteDataRecord(
   surface: SiteDataSurface = {},
 ): Promise<SiteDataRecord | null> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await requireCollectionReader(deps, access, request.collection);
   await consume(access, "read", 1);
   return access.store.get(
     access.caller,
@@ -358,6 +394,17 @@ export async function writeSiteDataWithAccess(
   access: SiteDataAccess,
   operations: SiteDataWriteOperation[],
 ) {
+  // A write answers with the stored records, so it needs a reader of each collection.
+  for (const collection of new Set(
+    (operations as unknown[]).flatMap((op) =>
+      op !== null &&
+      typeof op === "object" &&
+      typeof (op as { collection?: unknown }).collection === "string"
+        ? [(op as { collection: string }).collection]
+        : [],
+    ),
+  ))
+    await requireCollectionReader(deps, access, collection);
   await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),
@@ -620,6 +667,7 @@ export async function exportSiteData(
   content: string;
 }> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
+  await requireCollectionReader(deps, access, collection);
   const records: SiteDataRecord[] = [];
   let cursor: string | null = null;
   let truncated = false;

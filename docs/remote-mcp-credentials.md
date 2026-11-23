@@ -388,7 +388,11 @@ scheduled occurrences. New empty sets mean no authenticated account routes;
 historical absent/null sets retain the legacy execution path. Scheduled tasks
 never save resolved accounts: each fresh occurrence resolves the execution
 owner's current accounts when it is accepted, and that accepted set is then
-fixed for the occurrence and its retries. Only a person can pin accounts
+fixed for the occurrence and its retries. Delivery copies the exact accepted
+receipt even if a shared account has since lapsed. Credential resolution and
+provider requests still reject an inactive or different account generation;
+the stale receipt cannot block later inputs or authorize a replacement account.
+Only a person can pin accounts
 (`pinnedAccounts`) on a schedule that starts its own session; a pin narrows
 only its own connector. Removing an MCP tool also removes its pins. Pins for
 unselected tools are rejected. When a pinned account can no longer be used, the

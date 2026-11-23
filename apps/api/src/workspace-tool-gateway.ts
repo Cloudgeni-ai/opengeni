@@ -87,6 +87,7 @@ import {
   isMcpAccountParameterChoiceError,
   isMcpRequestNotSentError,
   isMcpServerUnreachableError,
+  mcpServerNamespace,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -113,6 +114,14 @@ import { ApiHttpError } from "./http/api-error";
 import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
 import { buildOpenGeniMcpServer, resolveSlackBotToolAvailability } from "./mcp/server";
+import {
+  buildPersonalGitHubToolsServer,
+  PERSONAL_GITHUB_TOOLS_SERVER_ID,
+  readPersonalGitHubToolsAuthority,
+  samePersonalGitHubToolsAuthority,
+  withPersonalGitHubToolsServer,
+  type PersonalGitHubToolsAuthority,
+} from "./personal-github-tools";
 import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
 import {
   withSiteSecretContext,
@@ -438,7 +447,8 @@ export async function prepareAttestedWorkspaceToolGateway(
   attestations: WorkspaceToolGatewayCatalogAttestations | undefined,
   prepare: typeof prepareWorkspaceToolGateway = prepareWorkspaceToolGateway,
 ): Promise<PreparedWorkspaceToolGateway> {
-  const prepared = await prepare(routeDeps, authorization);
+  // Listing only: a remote server that fails is left out of the list.
+  const prepared = await prepare(routeDeps, authorization, { listing: true });
   attestations?.record(
     workspaceToolGatewayAttestationScope(authorization),
     prepared.toolGatewayCatalog,
@@ -506,7 +516,11 @@ export async function callWorkspaceToolGatewayForCaller(
         authorization,
         // A target-only call must behave exactly like the complete call: only
         // provider construction narrows, never the settings first-party tools see.
-        allowedIdentities ? { allowedIdentities, firstPartySettings: "caller" } : {},
+        // The complete catalog only checks the digest: another server that is
+        // down is left out, and the called tool's own server stays required.
+        allowedIdentities
+          ? { allowedIdentities, firstPartySettings: "caller" }
+          : { callServerId: request.identity.serverId },
       );
     } finally {
       prepareMs += performance.now() - startedAt;
@@ -605,11 +619,12 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities: readonly { serverId: string; toolName: string }[],
+  options: WorkspaceToolGatewayPreparationOptions = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
   }
-  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
+  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities, options);
 }
 
 export async function prepareWorkspaceToolGatewayForGrant(
@@ -630,6 +645,28 @@ export async function prepareWorkspaceToolGatewayForGrant(
 export type WorkspaceToolGatewayPreparationOptions = {
   target?: ToolGatewayTarget;
   signal?: AbortSignal;
+  /**
+   * Trusted (never a request-body field): this preparation only lists tools
+   * (catalog, declarations, MCP tools/list, the MCP consent screen). A remote
+   * MCP server that fails to connect is left out of the list instead of
+   * failing it.
+   */
+  listing?: boolean;
+  /**
+   * Trusted (never a request-body field): the server of the one tool this
+   * preparation calls or approves. Every other remote server only shapes the
+   * catalog, so one that fails is left out, as in a listing; this server stays
+   * required, so a call to a server that is down still reports its failure.
+   * An id that names no configured server keeps every server required.
+   */
+  callServerId?: string;
+  /**
+   * Trusted: the tool names one MCP request calls (`tools/call`), as the
+   * request wrote them. A remote server whose namespace could own one of them
+   * stays required; every other one is left out when it fails, as in a
+   * listing. A misspelled name therefore answers "tool not found".
+   */
+  calledToolNames?: readonly string[];
   /** Trusted transport callback, never a request-body field. */
   reauthorize?: () => Promise<void>;
   /**
@@ -753,15 +790,19 @@ export function targetFenceIntegrationRoutes(
  */
 function workspaceToolGatewayTargetRouteCheck(input: {
   grant: AccessGrant;
+  deploymentSettings: Settings;
   staticSettings: Settings;
   gatewaySettings: Settings;
   integrations: readonly ApiIntegrationRuntime[];
   capabilityServers: readonly EnabledMcpCapabilityServer[];
   accountBindings: Awaited<ReturnType<typeof availableMcpAccountBindings>>;
   bindingSource: Parameters<typeof availableMcpAccountBindings>[0]["source"];
+  personalGitHub: PersonalGitHubToolsAuthority | null;
 }): (db: Database, stop: AbortSignal) => Promise<void> {
   const { grant, gatewaySettings, bindingSource } = input;
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
+  const usesPersonalGitHub =
+    input.personalGitHub !== null && gatewayServerIds.has(PERSONAL_GITHUB_TOOLS_SERVER_ID);
   const selectedBindings = input.accountBindings.filter((binding) =>
     gatewayServerIds.has(binding.serverId),
   );
@@ -839,6 +880,16 @@ function workspaceToolGatewayTargetRouteCheck(input: {
       source: bindingSource,
       connections,
     });
+    // The caller's own Your GitHub, still the same connection and grant.
+    const currentPersonalGitHub = usesPersonalGitHub
+      ? await readPersonalGitHubToolsAuthority(db, input.deploymentSettings, grant)
+      : null;
+    stop.throwIfAborted();
+    if (
+      usesPersonalGitHub &&
+      !samePersonalGitHubToolsAuthority(currentPersonalGitHub, input.personalGitHub)
+    )
+      throw changed();
     let currentServers: string;
     let currentIntegrationRoutes: string;
     try {
@@ -848,9 +899,10 @@ function workspaceToolGatewayTargetRouteCheck(input: {
         bindings: currentBindings,
       });
       currentServers = digestCanonicalJson(
-        workspaceToolGatewaySettingsForGrant(currentRoutes.settings, grant).mcpServers.filter(
-          (server) => gatewayServerIds.has(server.id),
-        ),
+        workspaceToolGatewaySettingsForGrant(
+          withPersonalGitHubToolsServer(currentRoutes.settings, currentPersonalGitHub),
+          grant,
+        ).mcpServers.filter((server) => gatewayServerIds.has(server.id)),
       );
       currentIntegrationRoutes = digestCanonicalJson(
         integrationRoutes(currentIntegrations, currentBindings),
@@ -932,7 +984,21 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     tools: allGatewayToolRefs(settings),
     bindings: accountBindings,
   });
-  const callerSettings = workspaceToolGatewaySettingsForGrant(accountRoutes.settings, grant);
+  // Your GitHub tools run on the caller's own connection, when they have one
+  // with All my repositories (read only when this request may use them).
+  // A configured server never takes the reserved id (as in a turn); if one
+  // does, it stays as configured and Your GitHub isn't added.
+  const personalGitHub =
+    !accountRoutes.settings.mcpServers.some(
+      (server) => server.id === PERSONAL_GITHUB_TOOLS_SERVER_ID,
+    ) &&
+    (!targetNamespace || targetNamespace === PERSONAL_GITHUB_TOOLS_SERVER_ID) &&
+    (!allowedIdentities ||
+      allowedIdentities.some((identity) => identity.serverId === PERSONAL_GITHUB_TOOLS_SERVER_ID))
+      ? await readPersonalGitHubToolsAuthority(routeDeps.db, routeDeps.settings, grant)
+      : null;
+  const routedSettings = withPersonalGitHubToolsServer(accountRoutes.settings, personalGitHub);
+  const callerSettings = workspaceToolGatewaySettingsForGrant(routedSettings, grant);
   const targetServerId = options.target
     ? workspaceToolGatewayTargetServer(callerSettings, options.target)
     : undefined;
@@ -942,12 +1008,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const gatewaySettings = workspaceToolGatewaySettingsForGrant(
     targetServerId
       ? {
-          ...accountRoutes.settings,
-          mcpServers: accountRoutes.settings.mcpServers.filter(
-            (server) => server.id === targetServerId,
-          ),
+          ...routedSettings,
+          mcpServers: routedSettings.mcpServers.filter((server) => server.id === targetServerId),
         }
-      : accountRoutes.settings,
+      : routedSettings,
     grant,
     allowedIdentities,
   );
@@ -961,12 +1025,14 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     fence.setRoute(
       workspaceToolGatewayTargetRouteCheck({
         grant,
+        deploymentSettings: routeDeps.settings,
         staticSettings: resolvedCatalog.settings,
         gatewaySettings,
         integrations,
         capabilityServers,
         accountBindings,
         bindingSource,
+        personalGitHub,
       }),
     );
   const firstPartySettings =
@@ -1091,9 +1157,38 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         codexAppsDesignation,
       )
     : undefined;
-  const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
+  const personalGitHubServers =
+    personalGitHub && gatewayServerIds.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)
+      ? [
+          buildPersonalGitHubToolsServer({
+            db: routeDeps.db,
+            settings: routeDeps.settings,
+            grant,
+            authority: personalGitHub,
+            resolveCredential: async (request) =>
+              await resolveConnection(callerConnectionRequest(request)),
+            ...(routeDeps.githubPersonalFetch ? { fetchImpl: routeDeps.githubPersonalFetch } : {}),
+          }),
+        ]
+      : [];
+  const localMcpServers = [
+    ...firstPartyServers,
+    ...apiIntegrationServers,
+    ...personalGitHubServers,
+  ];
   const policyTargets = new Map(
     gatewaySettings.mcpServers.map((config) => {
+      // Your GitHub's choices are the person's GitHub action choices for that
+      // connection (Settings, GitHub), exactly as in their chats.
+      if (config.id === PERSONAL_GITHUB_TOOLS_SERVER_ID && personalGitHub)
+        return [
+          config.id,
+          {
+            connectionId: personalGitHub.connectionId,
+            serverId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+            policyWorkspaceId: grant.workspaceId,
+          },
+        ] as const;
       const binding = accountBindings.find((candidate) => candidate.serverId === config.id);
       return [
         config.id,
@@ -1132,7 +1227,13 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const authNeeded: ToolAuthNeededPayload[] = [];
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
-    allGatewayToolRefs(gatewaySettings),
+    workspaceToolGatewayPreparationRefs(gatewaySettings, {
+      listing: options.listing === true,
+      ...(options.callServerId === undefined ? {} : { callServerId: options.callServerId }),
+      ...(options.calledToolNames === undefined
+        ? {}
+        : { calledToolNames: options.calledToolNames }),
+    }),
     {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1465,16 +1566,7 @@ export function buildWorkspaceToolGatewayMcpServer(
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // A first-party tool's hidden alias (its former name) calls the same tool.
-    const name = request.params.name;
-    const current = currentFirstPartyToolReference(name);
-    const entry =
-      callableEntries.find((candidate) => candidate.modelName === name) ??
-      (current === undefined
-        ? undefined
-        : callableEntries.find(
-            (candidate) =>
-              candidate.modelName === current && candidate.identity.serverId === "opengeni",
-          ));
+    const entry = workspaceToolGatewayMcpEntry(callableEntries, request.params.name);
     if (!entry) throw new ToolGatewayToolNotFoundError();
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",
@@ -1901,6 +1993,91 @@ export function allGatewayToolRefs(settings: Settings): ToolRef[] {
     id: server.id,
     ...(server.connectionRef ? { optional: true } : {}),
   }));
+}
+
+const FIRST_PARTY_GATEWAY_SERVER_IDS: ReadonlySet<string> = new Set(["opengeni", "files", "docs"]);
+
+/**
+ * The tools the gateway connects. A listing (catalog, declarations) shows
+ * what it can reach: a remote server that fails to connect (a custom MCP
+ * server that is down or whose host no longer resolves) is left out, as a
+ * turn leaves it out, instead of failing every app's tool list. A call needs
+ * only its own server (`callServerId`, or the servers whose namespace could
+ * own a called MCP tool name): the others are left out the same way, so a
+ * dead server never fails calls to healthy tools. A preparation that names
+ * none of these, or a `callServerId` that matches no server, keeps every
+ * server required, and first-party servers stay required everywhere.
+ */
+export function workspaceToolGatewayPreparationRefs(
+  settings: Settings,
+  scope: { listing?: boolean; callServerId?: string; calledToolNames?: readonly string[] } = {},
+): ToolRef[] {
+  const refs = allGatewayToolRefs(settings);
+  const { callServerId, calledToolNames } = scope;
+  const callScoped =
+    (callServerId !== undefined && refs.some((ref) => ref.id === callServerId)) ||
+    calledToolNames !== undefined;
+  if (scope.listing !== true && !callScoped) return refs;
+  const required = (id: string) => {
+    if (scope.listing === true) return false;
+    if (id === callServerId) return true;
+    const prefix = `${mcpServerNamespace(id).namespace}__`;
+    return calledToolNames?.some((name) => name.startsWith(prefix)) === true;
+  };
+  return refs.map((ref) =>
+    FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id) || required(ref.id)
+      ? ref
+      : { ...ref, optional: true },
+  );
+}
+
+/** The tool names an MCP request calls (`tools/call`); empty when it only lists. */
+export async function mcpRequestCalledToolNames(request: Request): Promise<string[]> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself.
+    return [];
+  }
+  return (Array.isArray(body) ? body : [body]).flatMap((message) => {
+    if (!message || typeof message !== "object") return [];
+    const { method, params } = message as { method?: unknown; params?: unknown };
+    if (method !== "tools/call" || !params || typeof params !== "object") return [];
+    const name = (params as { name?: unknown }).name;
+    return typeof name === "string" ? [name] : [];
+  });
+}
+
+/**
+ * Prepares the gateway behind one MCP request. Listing tools and finding a
+ * called tool only need the catalog, so a remote server that fails is left
+ * out, except a server that could own a called tool's name: a call to a
+ * server that is down reports that server's failure, not "tool not found".
+ */
+export async function prepareWorkspaceToolGatewayForMcpRequest(
+  request: Request,
+  prepare: (options: {
+    calledToolNames: readonly string[];
+  }) => Promise<PreparedWorkspaceToolGateway>,
+): Promise<PreparedWorkspaceToolGateway> {
+  return await prepare({ calledToolNames: await mcpRequestCalledToolNames(request) });
+}
+
+/** The callable catalog entry an MCP tool name (or a first-party alias) names. */
+function workspaceToolGatewayMcpEntry<
+  Entry extends { modelName: string; identity: { serverId: string } },
+>(entries: readonly Entry[], name: string): Entry | undefined {
+  const current = currentFirstPartyToolReference(name);
+  return (
+    entries.find((candidate) => candidate.modelName === name) ??
+    (current === undefined
+      ? undefined
+      : entries.find(
+          (candidate) =>
+            candidate.modelName === current && candidate.identity.serverId === "opengeni",
+        ))
+  );
 }
 
 async function inMemoryMcpRegistration(

@@ -892,7 +892,64 @@ describe("release image workflow contract", () => {
       source_sha: "${{ inputs.source_sha }}",
       controller_sha: "${{ inputs.controller_sha }}",
       provenance_sha: "${{ inputs.provenance_sha }}",
+      lane: "${{ inputs.lane }}",
+      review_after_merge: "${{ inputs.review_after_merge }}",
     });
+    // Hotfix lane: explicit, defaulting to the ordinary Version lane; only the
+    // hotfix lane tolerates pending changesets, suffixes the version and may
+    // reuse the unchanged relay digest from the live candidate.
+    expect(parsed.on.workflow_dispatch.inputs.lane).toMatchObject({
+      required: false,
+      default: "release",
+      options: ["release", "hotfix"],
+    });
+    expect(parsed.on.workflow_dispatch.inputs.reuse_source_sha).toMatchObject({
+      required: false,
+      default: "",
+    });
+    expect(candidate).toContain('version="${version}-hotfix-${SOURCE_SHA::12}"');
+    expect(candidate).toContain(
+      "reuse_source_sha, reuse_images and review_after_merge are only valid for lane=hotfix",
+    );
+    expect(candidate).toContain('git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent');
+    expect(candidate).toContain(
+      "run-name: release-candidate:${{ inputs.lane || 'release' }}:${{ inputs.source_sha }}",
+    );
+    expect(candidate).toContain('skip "no candidate receipt"');
+    expect(parsed.on.workflow_dispatch.inputs.reuse_images).toMatchObject({
+      required: false,
+      default: "",
+    });
+    expect(parsed.on.workflow_dispatch.inputs.review_after_merge).toMatchObject({
+      required: false,
+      default: false,
+      type: "boolean",
+    });
+    // Per-workload rebuild: the reuse plan runs before any image build, and
+    // every image either builds or takes its exact reused digest, which the
+    // anonymous pull proof then covers like a built one.
+    const candidateSteps = parsed.jobs.candidate?.steps ?? [];
+    const candidateStepIndex = (id: string) => candidateSteps.findIndex((step) => step.id === id);
+    expect(candidateStepIndex("reuse")).toBeGreaterThan(-1);
+    for (const role of [
+      "api",
+      "worker",
+      "web",
+      "sandbox",
+      "relay",
+      "artifact-materializer",
+      "artifact-outbox-dispatcher",
+      "desktop",
+    ]) {
+      const key = role.replaceAll("-", "_");
+      expect(candidateStepIndex(`build-${role}`)).toBeGreaterThan(candidateStepIndex("reuse"));
+      expect(candidateSteps[candidateStepIndex(`build-${role}`)]?.if).toBe(
+        `\${{ steps.reuse.outputs.${key} != 'true' }}`,
+      );
+      expect(candidateSteps[candidateStepIndex(role)]?.env?.REUSED_DIGEST).toBe(
+        `\${{ steps.reuse.outputs.${key}_digest }}`,
+      );
+    }
     expect(parsed.jobs["artifact-runtime"]?.needs).toBe("admission");
     expect(parsed.jobs.candidate?.needs).toEqual(["admission", "artifact-runtime"]);
     expect(parsed.jobs.admission?.permissions).toEqual({
@@ -931,14 +988,19 @@ describe("release image workflow contract", () => {
     expect(verifyStep?.env).toMatchObject({
       SOURCE_SHA: "${{ inputs.source_sha }}",
       RELEASE_PROVENANCE_SHA: "${{ inputs.provenance_sha }}",
+      RELEASE_LANE: "${{ inputs.lane }}",
       RELEASE_DESCENDANT_GIT_DIR: "${{ github.workspace }}",
+    });
+    expect(admissionParsed.on.workflow_call.inputs.lane).toMatchObject({
+      required: false,
+      default: "release",
     });
     const historyStep = admissionParsed.jobs.verify?.steps?.find(
       (step) =>
         step.name === "Restore protected main history as Git data for the descendant merge audit",
     );
     expect(historyStep?.if).toBe(
-      "${{ inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}",
+      "${{ inputs.lane != 'hotfix' && inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}",
     );
     expect(historyStep?.run).toContain("--unshallow origin");
     expect(historyStep?.run).toContain("'+refs/heads/main:refs/remotes/origin/main'");

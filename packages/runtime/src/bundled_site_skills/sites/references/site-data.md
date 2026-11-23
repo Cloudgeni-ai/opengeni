@@ -182,7 +182,8 @@ on a personal sync, a trigger on your own Gmail or GitHub source also fires for
 each opted-in person's own one, for them only.
 
 `mode: "shared"` (default) runs on the saving person's connection and fills
-data everyone shares. `mode: "personal"` fills only each opted-in person's own
+data everyone shares; only workspace members who may use that connector see
+it, never guests or invited people. `mode: "personal"` fills only each opted-in person's own
 records from their own account. In the page, `await
 site.data.syncs.optIn(id)` asks Opengeni to confirm with the person (tool,
 account, collection) and resolves `{ optedIn }`; `optOut(id)` leaves. The page

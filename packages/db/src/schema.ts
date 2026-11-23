@@ -35,6 +35,7 @@ import type {
   SubscriptionPersonalAuthorityV2,
   TimelineAnnotation,
   SiteAssetManifest,
+  AppServerManifest,
   ToolGatewayIdentity,
   UserResourceDelegation,
   VaultPolicy,
@@ -561,6 +562,8 @@ export const workspaceArtifactVersions = pgTable(
     requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
     /** Asset files of a multi-file build (migration 1522); null for a single-file app. */
     assetManifest: jsonb("asset_manifest").$type<SiteAssetManifest>(),
+    /** App server code of this version (migration 1554); null without server code. */
+    serverManifest: jsonb("server_manifest").$type<AppServerManifest>(),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
@@ -1781,6 +1784,8 @@ export const vaultItems = pgTable(
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    secureAnswerSessionId: uuid("secure_answer_session_id"),
+    secureAnswerGeneration: bigint("secure_answer_generation", { mode: "number" }),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -463,6 +463,8 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   app_webhook_save: "updateSite",
   app_webhook_list: "checkSite",
   app_webhook_delete: "updateSite",
+  app_server_runs: "checkSite",
+  app_server_run: "checkSite",
   site_files_upload: "updateSite",
   site_files_delete: "updateSite",
   site_publication_update: "updateSite",

@@ -60,7 +60,7 @@ export {
   type OrgAgentPublishMoveOutcome,
   type OrgAgentResolveOutcome,
 } from "./org-agent-metrics";
-export { failureDiagnostic } from "./failure-diagnostic";
+export { failureDiagnostic, fatalErrorLogCause } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 import {
   projectTemporalFailureFacts,

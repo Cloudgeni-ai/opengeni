@@ -179,7 +179,9 @@ request/reply and machine streams, never commit evidence.
 Connected Machine socket credentials retain their five-minute revocation bound.
 Exact runner leases fence routing and event ingestion; enrollment-token renewal
 updates future dials in place. The native supervisor owns and closes
-each generation's control and bulk socket tasks independently of retained work.
+each generation's control and bulk socket tasks independently of retained work,
+preparing the replacement pair before the broker-reported JWT deadline without
+changing the exact runner lease.
 See [Connected Machines](connected-machines.md#control-transport-recovery).
 
 API replicas share the `opengeni-agent-state-ingestion` Core NATS queue group
@@ -383,7 +385,9 @@ See [run lifecycle](run-lifecycle.md) for the durability and retry boundaries.
 Subscription serving revisions are attempt-scoped; the accepted model and
 frozen connection authority remain the logical turn's contract. Shared-core
 placement, candidate-aware capacity waits and lease-backed switch events use
-the same provider-neutral eligibility rules. The worker's serving hooks live
+the same provider-neutral eligibility rules. A Codex turn fails rather than
+parking when the placement snapshot proves only model entitlement refusals.
+The worker's serving hooks live
 in `apps/worker/src/activities/agent-turn/subscription-serving-capacity.ts`;
 the metadata-only catalog helper also serves control-worker recovery without
 loading provider credentials. Remote-compaction conversion and UI activation
@@ -1768,6 +1772,12 @@ Tool approval and structured human input durably interrupt execution. The worker
 retains exact protocol state without pairing unfinished calls into model history.
 Responses bind the pending request, target turn, execution generation, requester,
 and current authorization.
+Pending secret questions project save destinations separately from the frozen
+question. The database shares the asking turn's vault reach between this
+projection, answer admission, and live-attempt reference resolution.
+Verified external users acting through `asUser()` with `secrets:write` can
+answer into their own vault when that reach permits it; this does not confer
+native sign-in for other cards.
 
 See [Tool approvals](tool-approvals.md) for canonical policy, portable review and durable programmatic continuation.
 
@@ -2193,10 +2203,12 @@ The standalone `apps/api` entrypoint installs a one-shot fatal process
 boundary before configuration or dependency startup. Startup failures,
 unhandled promise rejections, and uncaught exceptions emit only reviewed
 structural diagnostics plus an opaque correlation id, drain accepted OTLP
-exports for a bounded interval, and then exit nonzero. Exception messages,
-stacks, enumerable fields, and arbitrary rejection values never cross the
-public telemetry boundary. Embedded API composition does not install process
-handlers because its host owns process lifecycle. One class is survivable once
+exports for a bounded interval, and then exit nonzero. The fatal log also
+includes a reviewed cause class and code and up to three reviewed source
+locations without requiring an exporter. Exception messages, raw stacks,
+arbitrary fields and rejection values never cross the public telemetry boundary.
+Embedded API composition does not install process handlers because its host
+owns process lifecycle. One class is survivable once
 the API is serving: an unhandled rejection that only reports a lost database
 connection (`isDatabaseConnectionLoss` in `packages/db/src/persistence-errors.ts`:
 SQLSTATE 57P01-57P03/08xxx, exact node-postgres socket-loss sentences, and
@@ -2637,6 +2649,11 @@ not a new agent tool result. Workspace import still verifies size and SHA-256,
 replays an already-matching destination, and only replaces a differing file on
 the first authorized dispatch. Its command wait is 20 minutes (curl transfer
 timeout: 15 minutes), separate from the controller's one-minute default request.
+
+Managed Chromium serializes viewport actions with other actions on the same
+tab. A viewer can opt into fitting its panel; this cannot replace a tab's
+explicit viewport, and only viewer-fitted sizes carry to new tabs. The console
+only scales its frames and does not request a fit.
 
 `packages/browserd/src/page-protection.ts` owns the shared protected-field
 policy for DOM reads, editable-value confirmation and accessibility reads.
@@ -3518,6 +3535,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | App webhooks and app notifications (`site.notify`) | `packages/contracts/src/app-webhook.ts`, `packages/db/src/app-webhooks.ts`, `apps/api/src/app-webhooks/service.ts`, `apps/api/src/app-notify/service.ts`, `apps/api/src/routes/app-webhooks.ts`, `apps/api/src/mcp/app-webhook-tools.ts` | [`app-webhooks.md`](app-webhooks.md) |
+| App server code (`site.server.fetch`, Dynamic Workers) | `packages/contracts/src/app-server.ts`, `packages/db/src/app-server.ts`, `apps/api/src/app-server/`, `apps/api/src/routes/app-server.ts`, `apps/api/src/mcp/app-server-tools.ts`, `apps/site-gateway/src/app-server.ts`, `packages/sdk/src/site-server.ts` | [`app-server-code.md`](app-server-code.md) |
 | App data sync (no-model refresh of Site Data from a connected tool) | `packages/contracts/src/app-sync.ts`, `packages/db/src/app-sync.ts`, `apps/api/src/app-sync/service.ts`, `apps/api/src/routes/app-sync.ts`, `apps/api/src/mcp/app-sync-tools.ts`, `apps/worker/src/activities/scheduled-tasks.ts`, `packages/react/src/app/lib/app-sync-opt-in.tsx` | [`app-sync.md`](app-sync.md) |
 | Site Data (Site collections, files, access modes, quotas, App change events) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `packages/db/src/app-activity-events.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | App packages (export, install, upgrade, export file cleanup, syncs hook) | `packages/contracts/src/app-package.ts`, `apps/api/src/app-packages/`, `apps/api/src/routes/app-packages.ts`, `apps/api/src/mcp/app-package-tools.ts` | [`app-packages.md`](app-packages.md) |

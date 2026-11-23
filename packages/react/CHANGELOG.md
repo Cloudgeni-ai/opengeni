@@ -1,5 +1,58 @@
 # @opengeni/react
 
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/connect@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- 601f949: The browser viewer no longer shows a frozen picture as live. A live view whose connection stays open but stops sending frames for 15 seconds opens a new stream; after the automatic retries it says the browser stopped sending its picture and offers to reconnect.
+- a102af1: Keep the host's model and reasoning choice on every new chat. The draft uses the first available level as a fallback without changing the order of the level picker.
+  - @opengeni/connect@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/sdk@6.37.1
+
+## 6.37.0
+
+### Minor Changes
+
+- c778f4a: Apps can carry server code. A version's JavaScript modules run on Cloudflare Dynamic Workers when the page calls `site.server.fetch(path, init)` in `@opengeni/sdk/site`, as the app rather than the viewer: tool calls (listed in the server bundle's `tools`) use only the workspace's shared connector accounts, outbound fetches may carry listed vault secrets, and app data writes are the app's. Code that uses tools or secrets runs only for signed-in workspace members who may use them; everyone else is refused. Data stored from shared accounts, by server code or by shared app syncs (including existing ones), is likewise shown only to workspace members who may use that connector: invited people and public visitors no longer see it, whatever the collection or sharing settings say. Code versions and rolls back with the app. Managers read runs with `getAppServerStatus` and `listAppServerRuns` in the SDK client and the `app_server_runs` and `app_server_run` agent tools; the app header shows one line while the newest run fails or the code is paused. Off unless `OPENGENI_SITES_SERVER_CODE_ENABLED` is set and the sites gateway has a `LOADER` binding. See docs/app-server-code.md.
+- a2ad192: Add the opt-in `fitViewport` prop to `BrowserViewer`. An embed can fit a managed Chromium page to its panel without cropping or overriding an explicitly set viewport. The console still scales its existing frame. Only viewer-fitted sizes carry to new tabs.
+
+### Patch Changes
+
+- 36f5f96: Explain whether a Codex account needs a new sign-in, the available plans cannot serve the model, or an account is rate-limited, including the known reset time.
+- daaaaae: Show a still icon while a browser sleeps and explain that the open page reloads and unsaved form entries are lost when the browser reopens.
+- ee17f5d: The Agents page lists the ready-made agents not added yet under the workspace's own, each added in one click. The Artifacts page's Apps tab, and its empty state, offer ready-made apps the same way, opening the app once it's added (Capabilities' **Ready-made** tab now opens it too). Three new ready-made apps keep their own data: **Issue tracker**, **Incident log** and **Feedback board** (with votes), next to **Decision log**.
+
+  An agent's GitHub trigger now covers every repository the GitHub connection reaches, or only the repositories you choose, and each run checks out the repository its event is about. Before, the one repository picked in **Add trigger** was only checked out, so the trigger fired for every repository; existing agent triggers now fire only for that repository. An agent's GitHub trigger saved with no repository, which already fired for every repository, now also checks out each event's repository (from the workspace's GitHub allowlist) in its new chat. A trigger that continues a chat keeps the chosen repositories open there. Other automations are unchanged.
+
+  The pasted webhook secret steps are one component shared by Add a source, a source's page and Add trigger, and the Skills section on an agent's page has more room above **Add a Skill**.
+
+  New apps take the Opengeni look by default (`/__opengeni/ui.css`), single-file apps included, unless the person's design, the workspace's design system or the product the app is about comes first; the ready-made apps use it too. `ui.css` now sizes text in `rem`, so the reader's browser text size applies, and uses 16px inputs on touch screens so phones don't zoom when a field is tapped.
+
+- 9f7efdb: Offer only usable save destinations on secure questions, and keep task-scoped answers usable when delegated saved-logins access is off.
+- a0b9135: A sub-agent's question now goes first to the agent that started it. While that agent can still answer, you get no inbox item or phone notification for it, and Needs you and the attention counts leave it out. It reaches you as before if the agent's turn ends without an answer, the agent's turn fails, or the same pause also needs you. Questions only you can answer (passwords and other secrets, Skill reviews, approvals) still come straight to you. Sessions gain an optional `questionWithAgent` flag.
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/sdk@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/connect@6.37.0
+
 ## 6.36.0
 
 ### Minor Changes

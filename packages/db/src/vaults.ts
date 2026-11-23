@@ -9,6 +9,7 @@ import { sql } from "drizzle-orm";
 import {
   VaultErrorCode,
   type SecretPrincipal,
+  type SecretSaveTo,
   type VaultFieldKind,
   type VaultItemType,
   type VaultMode,
@@ -1018,6 +1019,28 @@ export type SecretAnswerWrite = {
   vaultId?: string;
   item: VaultItemWrite & { name: string };
 };
+
+/** Where this person's answer could be read by the turn that asked for it. */
+export async function listHumanInputSecretSaveTargets(
+  db: Database,
+  context: Extract<VaultDbContext, { kind: "subject" }>,
+  input: { sessionId: string; turnId: string },
+): Promise<SecretSaveTo[]> {
+  const principal = JSON.stringify({
+    kind: "human",
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+    humanInputTurnId: input.turnId,
+  });
+  const result = await inVaultContext(db, context, (scoped) =>
+    one<{ secretSaveTargets?: SecretSaveTo[] }>(
+      scoped,
+      sql`select session_secrets_view(${input.sessionId}::uuid, ${principal}::jsonb) as value`,
+    ),
+  );
+  return result.secretSaveTargets ?? ["task"];
+}
 
 /**
  * Write secret ask-card answers inside the caller's transaction (the

@@ -7,6 +7,7 @@ import type {
   SitePublishWarning,
   SiteSqlQueryAudience,
 } from "@opengeni/contracts";
+import { siteToolDataSources } from "../site-tool-data";
 import {
   getPublishedSite,
   getPublishedSiteVersion,
@@ -128,6 +129,11 @@ export type SiteReadinessInput = {
     guestAccess: SiteDataGuestAccess;
   }>;
   queries: ReadonlyArray<{ name: string; audience: SiteSqlQueryAudience }>;
+  /**
+   * Targets (`collection:<name>`, `sql`) holding shared-account tool data,
+   * with the connector it came from: only members who may use it see them.
+   */
+  toolData?: ReadonlyMap<string, string>;
   outsideModel: SiteOutsideModelChoice | null;
   /**
    * Why the workspace can't pay for the outside model right now (no credits
@@ -172,9 +178,20 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
       suggestion: "Let the assistant answer from the page and the app's own data for them.",
     });
   const byName = new Map(input.collections.map((collection) => [collection.name, collection]));
+  const toolDataLine = (name: string, connector: string) =>
+    add({
+      code: "tool_data_members_only",
+      message: `${name} holds ${connector} data from a shared account, so ${who} can't see it.`,
+      suggestion: "Only workspace members who can use it see it. Publish to members only.",
+    });
   for (const [name, use] of input.page?.collections ?? []) {
     const collection = byName.get(name);
     if (!collection) continue;
+    const connector = input.toolData?.get(`collection:${name}`);
+    if (connector) {
+      toolDataLine(name, connector);
+      continue;
+    }
     if (use.writes && collection.accessMode === "shared_read")
       add({
         code: "site_data_members_write",
@@ -206,6 +223,9 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
         fix: { kind: "site_data_guest_access", collection: name, guestAccess: "read" },
       });
   }
+  const sqlConnector = input.toolData?.get("sql");
+  if (sqlConnector && (input.page?.queries.size ?? 0) > 0)
+    toolDataLine("The app's database", sqlConnector);
   const queries = new Map(input.queries.map((query) => [query.name, query]));
   for (const name of input.page?.queries ?? []) {
     const query = queries.get(name);
@@ -319,6 +339,13 @@ export async function readSitePublicationReadiness(
         SITE_PAGE_USAGE_CACHE.delete(SITE_PAGE_USAGE_CACHE.keys().next().value!);
     }
   }
+  // A failed read reports nothing extra; reads still enforce the rule.
+  const toolData = new Map(
+    (await siteToolDataSources(deps, scope, publication.siteId).catch(() => [])).map((source) => [
+      source.target,
+      source.connector === "vault" ? "vault-backed" : source.connector,
+    ]),
+  );
   const [described, queries] = await Promise.all([
     page && page.collections.size > 0
       ? siteDataStore(deps.db)
@@ -337,6 +364,7 @@ export async function readSitePublicationReadiness(
       agent: { enabled: publication.agent.enabled, tools: publication.agent.tools },
       collections: described?.collections ?? [],
       queries,
+      toolData,
       outsideModel,
       outsideModelUnfunded,
     }),

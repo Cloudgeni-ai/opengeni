@@ -314,6 +314,7 @@ import {
   prepareAttestedWorkspaceToolGateway,
   prepareMcpOAuthWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
+  prepareWorkspaceToolGatewayForMcpRequest,
   requireWorkspaceToolApprovalAuthorization,
   workspaceToolGatewayDeclarations,
   workspaceToolGatewayServerTiming,
@@ -462,6 +463,7 @@ import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
 import { registerAppSyncRoutes } from "./routes/app-sync";
 import { registerAppWebhookRoutes } from "./routes/app-webhooks";
+import { registerAppServerRoutes } from "./routes/app-server";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
@@ -2288,10 +2290,13 @@ export function createAppComposition(
     if (oauthAccess) {
       return await withAccessGrantSessionRlsContext(routeDeps, oauthAccess.grant, async () => {
         if (c.req.method === "GET") return unsupportedGet();
-        const prepared = await prepareMcpOAuthWorkspaceToolGateway(
-          routeDeps,
-          oauthAccess.grant,
-          oauthAccess.allowedToolIdentities,
+        const prepared = await prepareWorkspaceToolGatewayForMcpRequest(boundedRequest, (options) =>
+          prepareMcpOAuthWorkspaceToolGateway(
+            routeDeps,
+            oauthAccess.grant,
+            oauthAccess.allowedToolIdentities,
+            options,
+          ),
         );
         const transport = createApiMcpTransport({
           enableJsonResponse: true,
@@ -2385,7 +2390,10 @@ export function createAppComposition(
           await authorizeBoundSession();
           if (c.req.method === "GET") return unsupportedGet();
           reads.handOffToToolDispatch();
-          const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+          const prepared = await prepareWorkspaceToolGatewayForMcpRequest(
+            boundedRequest,
+            (options) => prepareWorkspaceToolGateway(routeDeps, authorization, options),
+          );
           const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
           try {
             await mcp.connect(transport);
@@ -2724,7 +2732,11 @@ export function createAppComposition(
       { status: 400, message: "Invalid tool gateway approval" },
     );
     requireWorkspaceToolApprovalAuthorization(authorization);
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    // The catalog only checks the digest: another server that is down is left
+    // out, and the approved tool's own server stays required.
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, {
+      callServerId: parsed.identity.serverId,
+    });
     try {
       return c.json(
         await approveWorkspaceToolGatewayCall(
@@ -2901,6 +2913,7 @@ export function createAppComposition(
   registerSiteDataRoutes(app, routeDeps);
   registerAppSyncRoutes(app, routeDeps);
   registerAppWebhookRoutes(app, routeDeps);
+  registerAppServerRoutes(app, routeDeps);
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);

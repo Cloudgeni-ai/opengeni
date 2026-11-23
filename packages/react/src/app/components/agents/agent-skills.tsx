@@ -215,24 +215,27 @@ export function AgentSkills({
         );
       })}
       {agent.viewer.canEdit ? (
-        <SelectMenu
-          variant="combobox"
-          aria-label="Add a Skill"
-          name="skill"
-          size="sm"
-          className="w-full sm:w-80"
-          value={null}
-          placeholder="Add a Skill"
-          searchPlaceholder="Search Skills"
-          loading={catalog === null}
-          loadingLabel="Loading Skills…"
-          disabled={saving}
-          emptyMessage="No other Skills in this workspace."
-          options={options}
-          onValueChange={(name) => {
-            if (name) void save([...agent.skills, { name }]);
-          }}
-        />
+        // The same gap the other sections leave between their text and controls.
+        <div className="pt-3">
+          <SelectMenu
+            variant="combobox"
+            aria-label="Add a Skill"
+            name="skill"
+            size="sm"
+            className="w-full sm:w-80"
+            value={null}
+            placeholder="Add a Skill"
+            searchPlaceholder="Search Skills"
+            loading={catalog === null}
+            loadingLabel="Loading Skills…"
+            disabled={saving}
+            emptyMessage="No other Skills in this workspace."
+            options={options}
+            onValueChange={(name) => {
+              if (name) void save([...agent.skills, { name }]);
+            }}
+          />
+        </div>
       ) : null}
     </DetailSection>
   );

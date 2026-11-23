@@ -3600,6 +3600,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getAppServerStatus",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/status",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "getAppSyncOptInReview",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/opt-in",
@@ -5671,6 +5678,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ApiKey"
     ]
+  },
+  {
+    "id": "listAppServerRuns",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/runs",
+    "request": [],
+    "query": [
+      "before",
+      "limit",
+      "status"
+    ],
+    "response": []
   },
   {
     "id": "listAppSyncs",
@@ -7820,7 +7839,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
     "request": [],
-    "response": []
+    "response": [],
+    "browserOnly": "it is the web app's confirmation step for redeeming a usage-limit reset",
+    "agentAlternative": "Redeem the reset with its reset-credits/redeem action, in one call: the person's approval of that call is the confirmation."
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/redeem",
@@ -7872,7 +7893,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/prepare",
     "request": [],
-    "response": []
+    "response": [],
+    "browserOnly": "it is the web app's confirmation step for redeeming a usage-limit reset",
+    "agentAlternative": "Redeem the reset with its reset-credits/redeem action, in one call: the person's approval of that call is the confirmation."
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
@@ -8062,6 +8085,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SiteTakedownRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/server",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server",
+    "request": [],
     "response": []
   },
   {

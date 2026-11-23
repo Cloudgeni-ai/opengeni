@@ -1,5 +1,38 @@
 # @opengeni/config
 
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- 17783d3: Skill preview and install can read GitHub with a deployment token, so they no longer share GitHub's anonymous 60 requests/hour limit. Set the optional `OPENGENI_SKILL_IMPORT_GITHUB_TOKEN` to a fine-grained token with public-repository read access only; reads with it still refuse any repository that isn't public, and an invalid token now says so. Generated runtime artifacts carry the setting when it is set. Thanks to @hadialjurdi7-dot.
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/contracts@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+
 ## 6.36.0
 
 ### Minor Changes

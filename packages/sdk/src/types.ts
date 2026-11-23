@@ -3075,6 +3075,8 @@ export type SessionHumanInputRequest = {
    */
   origin?: "tool_call" | "secret_use_approval" | undefined;
   questions: HumanInputQuestion[];
+  /** Allowed destinations for a pending secret answer under this reader's authority. */
+  secretSaveTargets?: HumanInputSecretSaveTo[] | undefined;
   allowSkip: boolean;
   response: HumanInputResponse | null;
   respondedBy: string | null;
@@ -4927,6 +4929,8 @@ export type FirstPartyMcpToolName =
   | "app_webhook_save"
   | "app_webhook_list"
   | "app_webhook_delete"
+  | "app_server_runs"
+  | "app_server_run"
   | "site_files_list"
   | "site_files_upload"
   | "site_files_delete"

@@ -1,5 +1,15 @@
 # @opengeni/subscriptions
 
+## 6.37.2
+
+## 6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- 36f5f96: Explain whether a Codex account needs a new sign-in, the available plans cannot serve the model, or an account is rate-limited, including the known reset time.
+
 ## 6.36.0
 
 ### Patch Changes

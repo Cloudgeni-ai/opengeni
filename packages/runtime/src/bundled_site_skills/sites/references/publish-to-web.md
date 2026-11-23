@@ -15,6 +15,9 @@ query. Then tell the user in plain words who sees what. An app that uses
 personal-account tools shows clear connect states from
 `site.tools.$readiness`, so it works for teammates who have not connected yet.
 
+Server code tool calls and vault secrets (`references/server-code.md`) only
+work for workspace members permitted to use the tool; visitors get a refusal.
+
 ## Viewers, the embedded agent and limits
 
 - Viewer: `const viewer = await site.viewer` gives `{ kind, id, name, email,

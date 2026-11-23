@@ -153,6 +153,14 @@ import {
   fundedBillingOrigin,
 } from "@opengeni/core";
 import {
+  attachScheduledEventRepositories,
+  attachesEventRepositories,
+  eventRepositoryLookup,
+  scheduledEventRepositoryResources,
+  sessionResourcesMatchEventRun,
+  githubEventRepositories,
+} from "../scheduled-event-repositories";
+import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
 } from "../scheduled-alert-occurrence";
@@ -1443,6 +1451,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         sessionId: string;
         events: Awaited<ReturnType<typeof appendSessionEvents>>;
       }> = [];
+      // The repositories an agent's event run opens, resolved now: it asks
+      // GitHub, which must never happen inside the dispatch transaction.
+      const eventRepositoryResources = attachesEventRepositories(task, input)
+        ? await scheduledEventRepositoryResources(
+            db,
+            { workspaceId: task.workspaceId, taskId: task.id, producerKey: stableProducerKey },
+            eventRepositoryLookup(settings),
+          )
+        : [];
       const executeDispatch = async (dispatchDb: Database, deferPublications: boolean) => {
         const admittedRunId = crypto.randomUUID();
         const generatedSessionBinding = generatedTarget
@@ -1907,6 +1924,27 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 throw new Error(
                   "scheduled alert occurrence Opengeni Slack bot binding does not match its canonical session",
                 );
+              }
+            }
+            // An agent's GitHub event run checks out the repositories its
+            // events are about, offered by the workspace's GitHub App
+            // allowlist now. The chat was admitted with exactly the task's
+            // resources; these join it before its first turn starts, as an
+            // attach does.
+            if (eventRepositoryResources.length > 0) {
+              const attached = await attachScheduledEventRepositories(
+                { db: dispatchDb, bus },
+                {
+                  workspaceId: task.workspaceId,
+                  runId: run.id,
+                  sessionId: session.id,
+                  deferPublication: deferPublications,
+                  resources: eventRepositoryResources,
+                },
+              );
+              if (attached.session) session = attached.session;
+              if (deferPublications && attached.events.length > 0) {
+                deferredEvents.push({ sessionId: session.id, events: attached.events });
               }
             }
             session = await seedScheduledGeneratedSessionRoute({
@@ -2974,6 +3012,16 @@ async function recoverBoundScheduledTaskDispatch(input: {
       );
     }
   }
+  // An agent's GitHub event run's chat may also hold the repositories its events are about.
+  const recoversEventRun = attachesEventRepositories(task, input.run);
+  const recoveredEventRepositoryIds = new Set<number>(
+    recoversEventRun
+      ? githubEventRepositories(
+          (await getEventOccurrenceForScheduledTaskRun(input.db, task.workspaceId, input.run.id))
+            ?.events ?? [],
+        ).map((repository) => repository.id)
+      : [],
+  );
   let session: Awaited<ReturnType<typeof createSession>>;
   if (input.run.sessionId) {
     session = await requireSession(input.db, task.workspaceId, input.run.sessionId);
@@ -3256,7 +3304,11 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.sandboxOs !== input.acceptedExecution.resolvedSandboxOs ||
       session.activeSandboxId !==
         (acceptedScheduledMachineTarget(input.acceptedExecution)?.targetSandboxId ?? null) ||
-      stableJson(session.resources) !== stableJson(task.agentConfig.resources) ||
+      !sessionResourcesMatchEventRun({
+        sessionResources: session.resources,
+        taskResources: task.agentConfig.resources,
+        eventRepositoryIds: recoveredEventRepositoryIds,
+      }) ||
       stableJson(session.tools) !== stableJson(input.acceptedExecution.resolvedTools) ||
       stableJson(session.firstPartyMcpTools) !==
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpTools) ||
@@ -3277,6 +3329,25 @@ async function recoverBoundScheduledTaskDispatch(input: {
   }
   let workflowId = workflowIdForSession(session.id);
   if (generatedSession) {
+    // The repositories its events are about, if the dead dispatch had not
+    // attached them yet (an attach the chat already has is a no-op).
+    if (recoversEventRun) {
+      const attached = await attachScheduledEventRepositories(
+        { db: input.db, bus: input.bus },
+        {
+          workspaceId: task.workspaceId,
+          runId: input.run.id,
+          sessionId: session.id,
+          deferPublication: false,
+          resources: await scheduledEventRepositoryResources(
+            input.db,
+            { workspaceId: task.workspaceId, runId: input.run.id },
+            eventRepositoryLookup(input.settings),
+          ),
+        },
+      );
+      if (attached.session) session = attached.session;
+    }
     const goalSpec = task.agentConfig.goal ?? null;
     const started = await initializeSessionStartAtomically(input.db, {
       accountId: task.accountId,

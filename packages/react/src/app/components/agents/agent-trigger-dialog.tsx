@@ -17,8 +17,7 @@
  * source picked, with the note and chat choice. Its Cancel and Save come
  * back here.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { GitBranchIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Agent,
   AgentTemplateTrigger,
@@ -48,21 +47,23 @@ import {
   eventSourceLogoResolver,
 } from "../../../components/automations/event-source-tile";
 import { eventTypesLabel } from "../../../components/automations/event-trigger-model";
+import { PastedWebhookSteps } from "../../../components/automations/pasted-webhook-steps";
 import type { AutomationDraft } from "../../../components/automations/automation-model";
 import { CopyField } from "../../../ui/copy-field";
-import { Field, FieldStack, TextArea, TextInput } from "../../../ui/field";
+import { Field, FieldStack, TextArea } from "../../../ui/field";
 import { FormDialog } from "../../../ui/form-dialog";
 import { Notice } from "../../../ui/notice";
-import { SelectMenu, type SelectOption } from "../../../ui/select-menu";
+import { SelectMenu } from "../../../ui/select-menu";
 import { apiErrorFacts, isApiError, userErrorText } from "../../../ui/api-error";
 import { useAppContext } from "../../app-context";
 import { t } from "../../lib/console-text";
 import { githubConnectedOf, githubConnectHref } from "../../lib/github-connect";
 import { useNavigate } from "../../lib/navigation";
-import { gitHubRepositoryResource } from "../../lib/session-tools";
 import {
   agentTriggerAwaitsSecret,
   agentTriggerCreateRequest,
+  agentTriggerRepositoryEvents,
+  AGENT_TRIGGER_CHAT_REPOSITORIES_MAX,
   agentTriggerDraftForPick,
   agentTriggerDraftFromSuggestion,
   agentTriggerIssues,
@@ -82,9 +83,9 @@ import {
   type AgentTriggerSetup,
 } from "./agent-trigger-model";
 import { AgentTriggerPicker } from "./agent-trigger-picker";
+import { AgentTriggerRepositories } from "./agent-trigger-repositories";
+import { gitHubRepositoryResource } from "../../lib/session-tools";
 import { AgentTriggerChatField } from "./agent-trigger-chat-field";
-
-const NO_REPOSITORY = "__none__";
 
 export interface AgentTriggerDialogProps {
   agent: Agent;
@@ -258,22 +259,13 @@ function AgentTriggerDialogBody({
   const ready = setupReady && !awaitingSecret;
 
   // A GitHub event's run can open only the repositories it is given.
-  const listensOnGitHub = draft.events.triggers.some(
-    (trigger) =>
-      formSources?.find((source) => source.id === trigger.sourceId)?.kind === "github" ||
-      (!trigger.sourceId && trigger.templateSource?.kind === "github"),
-  );
+  const isGitHubTrigger = (trigger: AutomationDraft["events"]["triggers"][number]) =>
+    formSources?.find((source) => source.id === trigger.sourceId)?.kind === "github" ||
+    (!trigger.sourceId && trigger.templateSource?.kind === "github");
+  const listensOnGitHub = draft.events.triggers.some(isGitHubTrigger);
   const repositories = context.githubRepos ?? [];
-  const [repositoryId, setRepositoryId] = useState<string>(NO_REPOSITORY);
-  const repository = repositories.find((repo) => String(repo.id) === repositoryId);
-  const repositoryOptions: SelectOption[] = [
-    { value: NO_REPOSITORY, label: "None" },
-    ...repositories.map((repo) => ({
-      value: String(repo.id),
-      label: repo.fullName,
-      leading: <GitBranchIcon className="size-3.5 text-fg-subtle" />,
-    })),
-  ];
+  // Chosen `owner/name`s; none covers every repository.
+  const [chosenRepositories, setChosenRepositories] = useState<string[]>([]);
 
   const leave = (go: () => void) => {
     onOpenChange(false);
@@ -351,7 +343,12 @@ function AgentTriggerDialogBody({
     const found = agentTriggerIssues(t, draft, formSources ?? [], now);
     const noChat = chat.mode === "existing_session" && !chat.sessionId;
     if (noChat) setChatIssue("Choose a chat.");
-    if (Object.values(found).some(Boolean) || noChat) {
+    // The Repositories field says so: a continued chat opens at most 5.
+    const tooManyRepositories =
+      listensOnGitHub &&
+      chat.mode !== "new_session_per_run" &&
+      chosenRepositories.length > AGENT_TRIGGER_CHAT_REPOSITORIES_MAX;
+    if (Object.values(found).some(Boolean) || noChat || tooManyRepositories) {
       setIssues(found);
       if (found.events) setShowEvents(true);
       return false;
@@ -367,15 +364,31 @@ function AgentTriggerDialogBody({
       }
     }
     try {
-      const saved = { ...draft, events: await standIns.realEvents(withSource) };
+      const saved = {
+        ...draft,
+        events: await standIns.realEvents(
+          agentTriggerRepositoryEvents(
+            withSource,
+            // A suggestion's source added just now isn't in the list yet.
+            (trigger) => isGitHubTrigger(trigger) || trigger.templateSource?.kind === "github",
+            listensOnGitHub ? chosenRepositories : [],
+          ),
+        ),
+      };
       const created = await client.createScheduledTask(
         workspaceId,
         agentTriggerCreateRequest(t, {
           agent,
           suggestion,
           draft: saved,
+          // A new chat per run opens the repository its event is about; a
+          // continued chat keeps the chosen ones open instead.
           resources:
-            repository && listensOnGitHub ? [gitHubRepositoryResource(repository, "")] : [],
+            listensOnGitHub && chat.mode !== "new_session_per_run"
+              ? repositories
+                  .filter((repo) => chosenRepositories.includes(repo.fullName))
+                  .map((repo) => gitHubRepositoryResource(repo, ""))
+              : [],
           sources: formSources ?? [],
           now,
           chat,
@@ -472,28 +485,30 @@ function AgentTriggerDialogBody({
         {!picked ? null : setup && !setupReady ? (
           <SetupStep setup={setup} name={setupName} />
         ) : awaitingSecret && pickedSource && pasted ? (
-          <PastedSecretStep
-            key={`${pickedSource.id}:${replacingSecret ?? ""}`}
-            url={pickedSource.webhookUrl}
-            tile={<EventSourceTile source={pickedSource} logo={sourceLogo} size="sm" />}
-            setup={pasted}
-            inputRef={secretField}
-            onChange={() => {
-              setSecretIssue(undefined);
-              setError(null);
-            }}
-            error={secretIssue}
-            autoFocus={replacingSecret === pickedSource.id}
-            onKeep={
-              agentTriggerAwaitsSecret(pickedSource)
-                ? undefined
-                : () => {
-                    setReplacingSecret(null);
-                    setSecretIssue(undefined);
-                    setFocusReplace(true);
-                  }
-            }
-          />
+          <div data-agent-trigger-secret="" className="min-w-0">
+            <PastedWebhookSteps
+              key={`${pickedSource.id}:${replacingSecret ?? ""}`}
+              url={pickedSource.webhookUrl}
+              tile={<EventSourceTile source={pickedSource} logo={sourceLogo} size="sm" />}
+              setup={pasted}
+              inputRef={secretField}
+              onChange={() => {
+                setSecretIssue(undefined);
+                setError(null);
+              }}
+              error={secretIssue}
+              autoFocus={replacingSecret === pickedSource.id}
+              onKeep={
+                agentTriggerAwaitsSecret(pickedSource)
+                  ? undefined
+                  : () => {
+                      setReplacingSecret(null);
+                      setSecretIssue(undefined);
+                      setFocusReplace(true);
+                    }
+              }
+            />
+          </div>
         ) : isSchedule ? (
           <AutomationWhenField
             cadence={draft.cadence}
@@ -551,16 +566,12 @@ function AgentTriggerDialogBody({
           </div>
         )}
         {picked && ready && listensOnGitHub && repositories.length > 0 ? (
-          <Field label="Repository" optional hint="Each run can open it.">
-            <SelectMenu
-              variant={repositoryOptions.length > 8 ? "combobox" : "menu"}
-              options={repositoryOptions}
-              value={repositoryId}
-              onValueChange={setRepositoryId}
-              searchPlaceholder="Search repositories"
-              className="max-w-full"
-            />
-          </Field>
+          <AgentTriggerRepositories
+            repositories={repositories}
+            value={chosenRepositories}
+            onChange={setChosenRepositories}
+            newChatPerRun={chat.mode === "new_session_per_run"}
+          />
         ) : null}
         {picked && ready ? (
           <Field
@@ -576,7 +587,10 @@ function AgentTriggerDialogBody({
               rows={3}
               value={draft.instructions}
               onChange={(event) => update({ instructions: event.target.value })}
-              placeholder={agentTriggerMessage({ instructions: "", events: draft.events })}
+              placeholder={agentTriggerMessage({
+                instructions: "",
+                events: draft.events,
+              })}
             />
           </Field>
         ) : null}
@@ -633,65 +647,6 @@ function WebhookCreated({ url, secret }: { url: string; secret?: string | undefi
         <Field label="Signing secret" hint="Shown once.">
           <CopyField value={secret} label="signing secret" variant="field" />
         </Field>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * A Linear, Sentry or other app webhook's secret: the URL to paste into the
- * app, and one field for the secret the app then shows. The value goes only to
- * the server, which keeps it encrypted and never returns it.
- */
-function PastedSecretStep({
-  url,
-  tile,
-  setup,
-  inputRef,
-  onChange,
-  error,
-  autoFocus,
-  onKeep,
-}: {
-  url: string | null;
-  /** The source's logo, beside its URL. */
-  tile: ReactNode;
-  setup: { app: string; secretName: string; urlStep: string; secretStep: string };
-  inputRef: RefObject<HTMLInputElement | null>;
-  onChange: () => void;
-  error?: string | undefined;
-  autoFocus?: boolean | undefined;
-  /** While replacing a secret that is set: keep it instead. */
-  onKeep?: (() => void) | undefined;
-}) {
-  const label = setup.secretName.charAt(0).toUpperCase() + setup.secretName.slice(1);
-  return (
-    <div data-agent-trigger-secret="" className="flex min-w-0 flex-col gap-3">
-      <Field label="Webhook URL" hint={setup.urlStep}>
-        <div className="flex min-w-0 items-center gap-2">
-          {tile}
-          <div className="min-w-0 flex-1">
-            <CopyField variant="field" value={url ?? ""} label="webhook URL" placeholder="No URL" />
-          </div>
-        </div>
-      </Field>
-      <Field label={label} hint={setup.secretStep} error={error}>
-        <TextInput
-          ref={inputRef}
-          type="password"
-          mono
-          defaultValue=""
-          onChange={onChange}
-          suppressAutofill
-          autoFocus={autoFocus}
-        />
-      </Field>
-      {onKeep ? (
-        <div>
-          <button type="button" className="og-link text-xs" onClick={onKeep}>
-            Keep current {setup.secretName}
-          </button>
-        </div>
       ) : null}
     </div>
   );
@@ -768,7 +723,10 @@ function SuggestionSources({
             error={!trigger.sourceId ? sourceIssue : undefined}
           >
             <SelectMenu
-              options={fitting.map((source) => ({ value: source.id, label: source.name }))}
+              options={fitting.map((source) => ({
+                value: source.id,
+                label: source.name,
+              }))}
               value={trigger.sourceId || null}
               onValueChange={(sourceId) =>
                 onChange({
@@ -798,7 +756,10 @@ function SuggestionSources({
 function useTriggerSources(
   workspaceId: string,
   enabled: boolean,
-): { sources: EventSource[] | undefined; ready: ReadyEventSource[] | undefined } {
+): {
+  sources: EventSource[] | undefined;
+  ready: ReadyEventSource[] | undefined;
+} {
   const { client } = useAppContext();
   const [sources, setSources] = useState<EventSource[] | undefined>(undefined);
   const [ready, setReady] = useState<ReadyEventSource[] | undefined>(undefined);

@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  asAppAutomation,
+  keepSyncToolDataMarked,
+  markToolData,
+  siteToolDataTarget,
+} from "../site-tool-data";
+import {
   APP_SYNC_DEFAULT_PAGES,
   APP_SYNC_MAX_RECORDS,
   APP_SYNC_MAX_RUN_RECORDS,
@@ -214,21 +220,39 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** The text parts of an MCP tool result, in order. */
+export function toolResultTexts(result: unknown): string[] {
+  const content = isObject(result) ? result.content : undefined;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) =>
+    isObject(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : [],
+  );
+}
+
+/**
+ * How app syncs and app server code read a tool result as JSON: its
+ * structured content, or else the first text part that parses. `found` is
+ * false when neither gives a value.
+ */
+export function readToolResultJson(
+  result: unknown,
+): { found: true; value: unknown } | { found: false } {
+  const structured = isObject(result) ? result.structuredContent : undefined;
+  if (structured !== undefined && structured !== null) return { found: true, value: structured };
+  for (const text of toolResultTexts(result)) {
+    try {
+      return { found: true, value: JSON.parse(text) };
+    } catch {
+      continue;
+    }
+  }
+  return { found: false };
+}
+
 /** The tool result as JSON: structured content, or else the first text part that parses. */
 export function toolResultValue(result: ToolGatewayResult): unknown {
-  const structured = (result as { structuredContent?: unknown }).structuredContent;
-  if (structured !== undefined && structured !== null) return structured;
-  const content = (result as { content?: unknown }).content;
-  if (Array.isArray(content))
-    for (const part of content) {
-      if (isObject(part) && part.type === "text" && typeof part.text === "string") {
-        try {
-          return JSON.parse(part.text);
-        } catch {
-          continue;
-        }
-      }
-    }
+  const read = readToolResultJson(result);
+  if (read.found) return read.value;
   throw invalid("The tool didn't return JSON data the sync can read.");
 }
 
@@ -732,7 +756,7 @@ async function syncAccess(
   } else if (!action.target || action.mode !== "shared")
     throw invalid("This sync has nowhere to write. Save it again with a collection or a table.");
   const principal = action.mode === "shared" ? `schedule:${task.id}` : access.caller.principal;
-  return {
+  return asAppAutomation({
     ...access,
     // Sync writes are the server's own trusted writes: they count in the
     // App's manager window, and a personal one stays in the person's records.
@@ -747,7 +771,7 @@ async function syncAccess(
       // its writes aren't Opengeni's own and triggers hear them by default.
       chainDepth: context.chainDepth,
     },
-  };
+  });
 }
 
 async function syncWriter(
@@ -837,6 +861,31 @@ async function runForPerson(
       );
     const writer = await syncWriter(deps, grant, task, action, context);
     const identity = await toolForPerson(deps, grant, action, chosenAccount);
+    // A shared sync's target holds this account's data: mark it before each
+    // write, so reads need a member who may use the connector. Marking per
+    // page keeps it marked if a manager resets the data while this run is
+    // still writing (a reset removes earlier marks).
+    let markTarget = async () => {};
+    if (action.mode === "shared") {
+      const inventory = await readInventory(deps, grant).catch(() => null);
+      const account = inventory?.accounts.find((item) => item.serverId === identity.serverId);
+      const source = {
+        target: action.target
+          ? siteToolDataTarget("sql")
+          : siteToolDataTarget("collection", action.collection),
+        connector: account?.canonicalServerId ?? connectorToolOf(action).serverId,
+        route: identity.serverId,
+        shared: account?.shared === true,
+      };
+      markTarget = () =>
+        markToolData(
+          deps,
+          { accountId: task.accountId, workspaceId: task.workspaceId },
+          action.siteId,
+          [source],
+        );
+      await markTarget();
+    }
     const limit = Math.min(action.maxRecords ?? APP_SYNC_MAX_RECORDS, APP_SYNC_MAX_RUN_RECORDS);
     const paging = action.paging ?? null;
     const maxPages = paging ? (paging.maxPages ?? APP_SYNC_DEFAULT_PAGES) : 1;
@@ -875,6 +924,7 @@ async function runForPerson(
           seen.add(record.key);
           fresh += 1;
         }
+      await markTarget();
       summary.written += await writer.write(extracted.records);
       if (action.removeMissing)
         await recordAppSyncKeys(deps.db, {
@@ -1693,6 +1743,13 @@ export async function updateAppSync(
         events: patch.events,
       })
     : null;
+  // What the sync stored stays restricted after it changes mode or target.
+  await keepSyncToolDataMarked(
+    deps,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    siteId,
+    action,
+  );
   const updated = await deps.db.transaction(async (tx) => {
     const next = await updateScheduledTask(tx, grant.workspaceId, task.id, {
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
@@ -1766,7 +1823,14 @@ export async function deleteAppSync(
   syncId: string,
 ): Promise<{ deleted: string }> {
   const access = await managerAccess(deps, grant, siteId);
-  await requireSyncTask(deps, grant, siteId, syncId);
+  const { action } = await requireSyncTask(deps, grant, siteId, syncId);
+  // Its stored data outlives the sync, so it stays restricted.
+  await keepSyncToolDataMarked(
+    deps,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    siteId,
+    action,
+  );
   await deleteScheduledTaskLifecycle({
     db: deps.db,
     workspaceId: grant.workspaceId,

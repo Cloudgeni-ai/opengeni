@@ -946,6 +946,10 @@ class OpConsumer {
       this.settleResolve = resolve;
       this.settleReject = reject;
     });
+    // Replay frames can trigger a gap-heal attach before the initial attach
+    // answers. Observe an early rejection now, while keeping it on the same
+    // promise for the caller's settlement race once startup completes.
+    void settled.catch(() => undefined);
 
     // The op's one absolute deadline and its wall start here, before
     // subscription setup, so no setup time extends either. The wall covers the

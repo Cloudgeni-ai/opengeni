@@ -13,8 +13,62 @@ import {
  * Server-side Nango helpers (docs/nango.md): webhook signature verification and
  * the HTTP API client. The shared, browser-safe definitions live in
  * `@opengeni/contracts/nango` and are re-exported here.
+ *
+ * Re-export them by name: the bundler turns `export *` from another package
+ * inside a non-entry module into a runtime-only re-export, so ESM consumers
+ * of the published dist could not import these names (6.36.0 @opengeni/core).
  */
-export * from "@opengeni/contracts/nango";
+export {
+  INTEGRATION_BACKEND_CACHE_TTL_MS,
+  NANGO_DEFAULT_API_BASE_URL,
+  NANGO_DEPLOYMENT_TAG,
+  NANGO_INTEGRATION_KEY_PATTERN,
+  NANGO_PRICING,
+  NANGO_PROVIDER_CONFIG_KEY_PATTERN,
+  NANGO_PROVIDER_DOMAIN_PREFIX,
+  NANGO_REPLACEABLE_NATIVE_SOCIAL_PROVIDERS,
+  NANGO_TAG,
+  NATIVE_NANGO_INTEGRATIONS,
+  classifyNangoTool,
+  connectorProviderDomain,
+  credentialRequestTarget,
+  effectiveNangoIntegrations,
+  estimateNangoCostUsd,
+  isNangoConnectionCredential,
+  isNangoIntegrationKey,
+  isNangoProviderDomain,
+  nangoApiUrl,
+  nangoAttemptTags,
+  nangoAuthHeaders,
+  nangoDeploymentTag,
+  nangoDestinationAllowed,
+  nangoIntegrationKeyFromProviderDomain,
+  nangoProviderDomain,
+  nangoProxyRequest,
+  nangoTagsMatchAttempt,
+  nangoToolsIntegrationKeyFromMcpUrl,
+  nangoToolsMcpUrl,
+  nativeNangoIntegrationByKey,
+  nativeNangoIntegrationForMcpUrl,
+  nativeNangoIntegrationForProviderDomain,
+  parseNangoIntegrationDefinition,
+  readIdentityField,
+  sameConnectorProviderDomain,
+  selectNangoTools,
+} from "@opengeni/contracts/nango";
+export type {
+  EffectiveNangoIntegration,
+  IntegrationBackend,
+  IntegrationBackendSetting,
+  NangoAttemptTags,
+  NangoConnectionCredential,
+  NangoDestination,
+  NangoIntegrationDefinition,
+  NangoProxyTransport,
+  NangoToolDescriptor,
+  NangoToolSourceDefinition,
+  NativeNangoIntegration,
+} from "@opengeni/contracts/nango";
 
 // ---------------------------------------------------------------------------
 // Webhooks

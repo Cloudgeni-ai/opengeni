@@ -38,9 +38,23 @@ describe("packaged manifest", () => {
     expect(store.version).toBe("0.1.3");
   });
 
-  test("may group tabs, to show which ones an agent controls", async () => {
-    const { permissions } = await readJson("manifest.json");
-    expect(permissions).toContain("tabGroups");
+  test("asks for no new required permission, so an update never turns the extension off", async () => {
+    // Chrome turns an installed extension off when an update requires a
+    // permission it warns about, until the person accepts it. Version 0.3.0
+    // did that with `tabGroups`. A new permission must be optional.
+    const { permissions, optional_permissions } = await readJson("manifest.json");
+    expect(permissions).toEqual([
+      "alarms",
+      "debugger",
+      "downloads",
+      "nativeMessaging",
+      "scripting",
+      "storage",
+      "tabs",
+      "webNavigation",
+    ]);
+    // Grouping the tabs an agent controls is the person's choice.
+    expect(optional_permissions).toEqual(["contentSettings", "tabGroups"]);
   });
 
   test("lets pages load only the agent's cursor, at a URL that changes", async () => {

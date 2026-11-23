@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/storage",
-  "version": "6.36.0",
+  "version": "6.37.2",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -41,5 +41,8 @@
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22.15"
   }
 }

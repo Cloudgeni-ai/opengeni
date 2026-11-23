@@ -53,6 +53,13 @@ export interface GatewayEnv {
    * `src/site-live.ts`.
    */
   SITE_LIVE?: unknown;
+  /**
+   * Optional app server code: the Worker Loader binding (`worker_loaders`)
+   * that loads each app version's server code into its own Dynamic Worker
+   * isolate. Without it the internal app server route answers 404; see
+   * `src/app-server.ts`.
+   */
+  LOADER?: unknown;
 }
 
 export type WaitUntil = { waitUntil(promise: Promise<unknown>): void };

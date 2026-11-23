@@ -2487,4 +2487,81 @@ describe("a sub-agent's question goes to the agent that started it first", () =>
     expect(await held(root.session.id)).toEqual([false]);
     expect(await inboxQuestions(root.session.id)).toEqual(["open"]);
   });
+
+  test("a question whose agent won't wake (its goal is paused) reaches the person", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleIdle(grant, parent);
+    await setSessionGoalStatus(client.db, grant.workspaceId, parent.session.id, {
+      status: "paused",
+      rationale: "waiting on the person",
+    });
+    await freezeChild(grant, child);
+    const delivered = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // The paused parent is not woken, so no agent turn will ever see it.
+    expect(delivered.shouldWake).toBe(false);
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+    expect(await attention(grant, parent.session.id)).toBe(1);
+  });
+
+  test("a question delivered while its agent is busy, which then pauses its goal, is seen by its next turn and then reaches the person", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await freezeChild(grant, child);
+    const delivered = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // Busy: the running turn may still see it, so it stays with the agent.
+    expect(delivered.shouldWake).toBe(false);
+    expect(await held(child.session.id)).toEqual([true]);
+    // That turn pauses its goal and ends before draining the notice.
+    await setSessionGoalStatus(client.db, grant.workspaceId, parent.session.id, {
+      status: "paused",
+      rationale: "waiting on the person",
+    });
+    await settleIdle(grant, parent);
+    // The session workflow peeks again after every turn: the pending notice
+    // is work despite the paused goal, so the agent gets another turn.
+    expect(await held(child.session.id)).toEqual([true]);
+    expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn not claimed");
+    expect(await inboxQuestions(child.session.id)).toEqual([]);
+    // That turn ends without answering: the person gets the question.
+    await settleIdle(grant, { session: parent.session, turn: claim.turn, attemptId });
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+    expect(await attention(grant, parent.session.id)).toBe(1);
+  });
 });

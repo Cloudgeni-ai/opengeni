@@ -20,6 +20,11 @@ import {
 } from "@opengeni/contracts";
 import { SITE_UI_CSS, SITE_UI_STYLESHEET_PATH } from "@opengeni/sdk/site-ui";
 import { handleApi } from "./api";
+import {
+  handleAppServerInternal,
+  isAppServerInternalPath,
+  type LoopbackExports,
+} from "./app-server";
 import { handleAsset, isAssetPath } from "./assets";
 import { handleCallback, handleLogin, handleLogout } from "./auth";
 import { parseCookies, readSession, readVisitor } from "./cookies";
@@ -55,6 +60,8 @@ export type { GatewayEnv } from "./env";
 export { SiteDatabase } from "./site-database";
 /** The per-Site live-hint Durable Object class bound as `SITE_LIVE` (optional). */
 export { SiteLive } from "./site-live";
+/** The loopback entrypoint loaded app server code calls back through (`ctx.exports.AppServerHost`). */
+export { AppServerHost } from "./app-server";
 
 function plain(status: number, body: string, headers: HeadersInit = {}): Response {
   const out = applySecurityHeaders(new Headers(headers), { noindex: true, hsts: false });
@@ -105,7 +112,8 @@ export function unexpectedErrorResponse(request: Request, env: GatewayEnv): Resp
   if (
     isApiPath(url.pathname) ||
     isSiteDbInternalPath(url.pathname) ||
-    isSiteLiveInternalPath(url.pathname)
+    isSiteLiveInternalPath(url.pathname) ||
+    isAppServerInternalPath(url.pathname)
   )
     return jsonError(
       500,
@@ -149,6 +157,14 @@ export async function handleRequest(
     return await handleSiteDbInternal(request, url, env, config);
   if (isSiteLiveInternalPath(url.pathname))
     return await handleSiteLiveInternal(request, url, env, config);
+  if (isAppServerInternalPath(url.pathname))
+    return await handleAppServerInternal(
+      request,
+      url,
+      env,
+      config,
+      (ctx as WaitUntil & { exports?: LoopbackExports }).exports,
+    );
   const requestHost = url.hostname.toLowerCase();
   // `og.<domain>` is reserved for the console's HTML frame host, never a Site.
   if (isHtmlFrameHostRequest(requestHost, config.sitesDomain)) {

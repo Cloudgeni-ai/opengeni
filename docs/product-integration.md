@@ -1469,6 +1469,14 @@ For a compact browser viewer, pass `showAdvancedControls={false}`. You can
 also render `InteractionInterventionBanner` independently from the same
 subpath.
 
+`BrowserViewer` scales the existing frame by default, including in the console.
+An embed can pass `fitViewport` to reflow a managed Chromium page to the space
+below its toolbar without cropping. This can change the page layout, screenshot
+size and pointer coordinates the agent sees. An explicit viewport change takes
+precedence on its tab until reset; only a viewer-fitted size can carry to new
+tabs. Attached Chrome, other engines and controllers that do not support the
+fit request keep scaling their existing frame.
+
 ### Secret question display labels
 
 Use React message overrides such as `humanInputModel.username`,

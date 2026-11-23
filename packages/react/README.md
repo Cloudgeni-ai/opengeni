@@ -1812,10 +1812,11 @@ turns on.
 Omit `levels`, or pass an empty list, to show the full picker; that is the
 switch for people who should keep every model. Levels whose model the workspace
 cannot run are left out, and with none left the full picker is shown. A new
-chat starts on the first level, so list the everyday level first. A chat
-already on a model or effort outside the levels keeps it: the control shows
-that model's name until the person picks a level. Levels restrict the picker
-only; they do not limit which models the API accepts.
+chat keeps the host's chosen default. Without one, it uses the first runnable
+level if the workspace default is outside the levels, so list the everyday
+level first. An existing chat on a model or effort outside the levels keeps
+it: the control shows that model's name until the person picks a level.
+Levels do not limit which models the API accepts.
 
 `ModelLevelPicker` is the control itself and takes the same props as
 `ModelPolicyPicker` plus `levels`; `ComposerModelPicker` picks between the two.

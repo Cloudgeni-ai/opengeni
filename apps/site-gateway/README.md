@@ -195,6 +195,17 @@ request.
 add the binding next to `SITE_DB` in their Wrangler environment; the API sends
 notices through `SITES_GATEWAY_INTERNAL_ORIGIN` with the gateway secret.
 
+## App server code binding
+
+`LOADER` (a `[[worker_loaders]]` Dynamic Worker Loader) is optional. With it,
+`POST /_og/internal/app-server/<siteId>/run` (signed like the Site SQL route)
+loads an app version's server code into its own isolate, keyed by app,
+version and code digest, with `globalOutbound: null`, a CPU limit and a wall
+clock deadline. The code's only way out is the `AppServerHost` loopback
+entrypoint, which forwards its calls (tools, data, fetch) to the API's
+`/app-server/<site>/<version>/host` route with the run's token. See
+[docs/app-server-code.md](../../docs/app-server-code.md).
+
 ## Caching and takedown latency
 
 The gateway's colo caches (`caches.default`) are keyed by URLs on the real

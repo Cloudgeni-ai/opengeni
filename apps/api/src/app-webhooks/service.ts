@@ -34,6 +34,7 @@ import {
 } from "@opengeni/db";
 import { appSyncRecords, readPath, writePath } from "../app-sync/service";
 import { writeSiteDataWithAccess } from "../site-data/operations";
+import { asAppAutomation } from "../site-tool-data";
 import {
   meterSiteData,
   resolveSiteDataAccess,
@@ -490,7 +491,7 @@ async function deliveryAccess(deps: SiteDataDeps, row: AppWebhookRow): Promise<S
     chainDepth: APP_WEBHOOK_CHAIN_DEPTH,
   };
   const limits = siteDataLimits(deps.settings);
-  return {
+  return asAppAutomation({
     site,
     caller,
     subjectId: null,
@@ -501,7 +502,7 @@ async function deliveryAccess(deps: SiteDataDeps, row: AppWebhookRow): Promise<S
       validate: validateSiteDataRecord,
       afterWrite: (tx, summary) => meterSiteData(tx, scope, caller, null, "write", summary),
     },
-  };
+  });
 }
 
 function isJson(contentType: string | null): boolean {

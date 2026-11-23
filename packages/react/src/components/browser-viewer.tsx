@@ -34,6 +34,7 @@ import {
   Globe2Icon,
   LoaderCircleIcon,
   MonitorIcon,
+  MoonIcon,
   PlusIcon,
   RefreshCwIcon,
   RotateCcwIcon,
@@ -88,6 +89,7 @@ import { InteractionInterventionBanner } from "./interaction-intervention-banner
 import { BrowserSelectControl } from "./browser-select-control";
 import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { browserViewerFrameLimit, useFitBrowserViewport } from "./use-fit-browser-viewport";
 
 /** Auto-ending a lost attached-device browser: bounded retries for transient failures only. */
 const STALE_BROWSER_END_MAX_ATTEMPTS = 3;
@@ -120,6 +122,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride<ChatCl
   /** Hide workspace browser switching, browser/profile creation and diagnostics.
    * Keeps the current chat's tabs, address, live view, input and interventions. Defaults to true. */
   showAdvancedControls?: boolean | undefined;
+  /** Fit a managed Chromium page to this panel unless the tab was explicitly resized.
+   * Changes the real layout and agent screenshots. Defaults to scaling the frame. */
+  fitViewport?: boolean | undefined;
   className?: string | undefined;
   onNotify?: ((notification: BrowserViewerNotification) => void) | undefined;
   /** Tests/demos only. Production uses the browser's native WebSocket. */
@@ -183,6 +188,7 @@ export function BrowserViewer({
   enabled = true,
   active = true,
   showAdvancedControls = true,
+  fitViewport = false,
   className,
   onNotify,
   webSocketFactory,
@@ -197,7 +203,7 @@ export function BrowserViewer({
   const t = useOpenGeniText();
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
   const attached = useAttachedBrowsers({ ...override, enabled: enabled && showAdvancedControls });
-  const { client: configClient } = useEmbeddedBrowserInteraction(override);
+  const { client: configClient, workspaceId } = useEmbeddedBrowserInteraction(override);
   // The deployment's own branded extension when it ships one.
   const browserExtensionName = useClientConfigFlags(configClient as never).browserExtension?.name;
   const onlineAttachedBridges = useMemo(
@@ -463,7 +469,7 @@ export function BrowserViewer({
       controllerReady &&
       browser.selectedTarget !== null &&
       browser.session?.capabilities.liveFrames === true,
-    stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
+    stream: { format: "jpeg", quality: 76, ...browserViewerFrameLimit },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
   const receivedFrame = frameMatchesSelectedTarget(
@@ -490,6 +496,39 @@ export function BrowserViewer({
   // connection-generation loss; an unrelated lost Chrome must not poison the
   // selected managed browser's recovery UI.
   const selectedPlacement = (browser.session ?? selectedRegistrySession)?.placement;
+  const viewportRef = useFitBrowserViewport({
+    frame: receivedFrame,
+    scope:
+      fitViewport &&
+      enabled &&
+      active &&
+      frameIsLive &&
+      receivedFrame &&
+      !controlUnavailable &&
+      selectedPlacement?.kind !== "attached_device" &&
+      browser.session?.engine === "chromium" &&
+      browser.session.capabilities.humanInput
+        ? JSON.stringify([
+            workspaceId,
+            receivedFrame.browserSessionId,
+            receivedFrame.controllerGeneration,
+            receivedFrame.targetId,
+            receivedFrame.targetGeneration,
+          ])
+        : null,
+    onResize: (frame, width, height) =>
+      // The same fenced action as manual viewport changes, without treating a
+      // refused automatic resize as a failure of the person's input.
+      configClient.actInBrowser(workspaceId, frame.browserSessionId, {
+        operationId: crypto.randomUUID(),
+        targetId: frame.targetId,
+        expectedTargetGeneration: frame.targetGeneration,
+        expectedDocumentGeneration: frame.documentGeneration,
+        expectedFrameId: frame.frameId,
+        observationMode: "none",
+        action: { type: "viewport", width, height, mobile: false, mode: "fit" },
+      }),
+  });
   const selectedChromeGenerationLoss =
     selectedPlacement?.kind === "attached_device" &&
     isAttachedChromeGenerationLossError(connectionError);
@@ -1039,7 +1078,7 @@ export function BrowserViewer({
               </button>
             </div>
           ) : null}
-          <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div ref={viewportRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
             <BrowserViewport
               // A new control scope must discard every buffered gesture and queued action.
               key={JSON.stringify([
@@ -1178,6 +1217,7 @@ function BrowserLifecyclePanel(props: {
 }) {
   const t = useOpenGeniText();
   const failed = props.attempt?.error ?? null;
+  const sleeping = props.session.lifecycle === "suspended" && !props.attempt?.running;
   const label = failed
     ? t("browserViewer.browserCouldNotReopen")
     : props.session.lifecycle === "suspending"
@@ -1189,7 +1229,7 @@ function BrowserLifecyclePanel(props: {
           : t("browserViewer.browserIsSleeping");
   const detail = failed
     ? failed.message
-    : props.session.lifecycle === "suspended"
+    : sleeping
       ? t("browserViewer.itsPrivateStateIsSaved")
       : t("browserViewer.theBrowserWillReconnectHere");
   return (
@@ -1197,14 +1237,16 @@ function BrowserLifecyclePanel(props: {
       <div className="max-w-sm">
         <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
           {failed ? (
-            <CircleAlertIcon className="size-4.5 text-og-danger" />
+            <CircleAlertIcon aria-hidden="true" className="size-4.5 text-og-danger" />
+          ) : sleeping ? (
+            <MoonIcon aria-hidden="true" className="size-4.5" />
           ) : (
-            <LoaderCircleIcon className="size-4.5 animate-spin" />
+            <LoaderCircleIcon aria-hidden="true" className="size-4.5 motion-safe:animate-spin" />
           )}
         </span>
         <p className="mt-3 text-og-menu font-medium text-og-fg">{label}</p>
         <p className="mt-1 text-og-control leading-5 text-og-fg-muted">{detail}</p>
-        {failed || (props.session.lifecycle === "suspended" && !props.attempt?.running) ? (
+        {failed || sleeping ? (
           <button
             type="button"
             onClick={props.onResume}

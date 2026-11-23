@@ -11,6 +11,7 @@ import {
   createSession,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
+  listHumanInputSecretSaveTargets,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
   type PreparedSecretAnswer,
@@ -185,6 +186,19 @@ function prepared(
   };
 }
 
+function readTargets(fixture: Awaited<ReturnType<typeof freezeSecretRequest>>) {
+  return listHumanInputSecretSaveTargets(
+    client.db,
+    {
+      kind: "subject",
+      accountId: fixture.grant.accountId,
+      workspaceId: fixture.workspaceId,
+      subjectId: fixture.grant.subjectId,
+    },
+    { sessionId: fixture.session.id, turnId: fixture.turn.id },
+  );
+}
+
 async function vaultItemsNamed(accountId: string, name: string) {
   return await shared.admin<
     Array<{ id: string; vault_id: string; field: string; ciphertext: string }>
@@ -232,6 +246,7 @@ function respond(
 describe("secret ask-card answers", () => {
   test("writes the value to the vault in the accept transaction and stores only the reference (AC-2, AC-3)", async () => {
     const fixture = await freezeSecretRequest();
+    expect(await readTargets(fixture)).toEqual(["user", "task", "workspace"]);
     const canary = `canary-${crypto.randomUUID()}`;
     const accepted = await respond(fixture, {
       answers: [
@@ -284,6 +299,23 @@ describe("secret ask-card answers", () => {
     expect(event?.payload).toContain(answer!.secret!.reference);
     expect(event?.payload).not.toContain("secretAnswers");
     expect(event?.payload).not.toContain("forged");
+  });
+
+  test("a narrowed vault policy offers only destinations that the turn can read", async () => {
+    const fixture = await freezeSecretRequest();
+    await shared.admin`update sessions set vault_policy = ${shared.admin.json({ mode: "selected", vaultIds: [] })}::jsonb
+      where id = ${fixture.session.id}::uuid`;
+    expect(await readTargets(fixture)).toEqual(["task"]);
+    const answers = [{ questionId: CHOICE_QUESTION.id, values: ["staging"] }];
+    for (const saveTo of ["user", "workspace"] as const) {
+      await expect(
+        respond(fixture, { answers, secretAnswers: [prepared("fixture", { saveTo })] }),
+      ).rejects.toMatchObject({ code: "vault_permission_denied" });
+    }
+    expect(await vaultItemsNamed(fixture.grant.accountId, "GitHub")).toHaveLength(0);
+    expect(
+      await respond(fixture, { answers, secretAnswers: [prepared("fixture", { saveTo: "task" })] }),
+    ).toMatchObject({ action: "accepted" });
   });
 
   test("a failure after the item write rolls back both the answer and the item (AC-2)", async () => {

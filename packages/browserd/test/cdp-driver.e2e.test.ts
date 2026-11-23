@@ -900,7 +900,7 @@ e2e(
 );
 
 e2e(
-  "a tab opened after a viewport change has the size the agent set, and earlier tabs keep theirs",
+  "explicit viewport changes win over panel fits, and only fitted sizes carry to new tabs",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-viewport-tab-");
     const runner = await ManagedBrowserRunner.create({
@@ -932,15 +932,50 @@ e2e(
         }),
         observationMode: "none",
       });
-      const opened = await driver.openTarget(page("Later"));
-      expect([opened.viewport?.width, opened.viewport?.height]).toEqual([1600, 1000]);
+      const dimensions = (observation: BrowserObservation) => [
+        observation.viewport?.width,
+        observation.viewport?.height,
+      ];
+      const fit = {
+        type: "viewport",
+        width: 440,
+        height: 680,
+        mobile: false,
+        mode: "fit",
+      } as const;
+      const explicit = await driver.observe(first.target.id);
+      await driver.dispatch({ ...command(explicit, fit), observationMode: "none" });
+      expect(dimensions(await driver.observe(first.target.id))).toEqual([1600, 1000]);
+
+      const native = await driver.openTarget(page("After explicit change"));
+      expect(dimensions(native)).toEqual(earlierSize);
+      await driver.dispatch({ ...command(native, fit), observationMode: "none" });
+      expect(dimensions(await driver.observe(native.target.id))).toEqual([440, 680]);
+      const opened = await driver.openTarget(page("After fit"));
+      expect(dimensions(opened)).toEqual([440, 680]);
       const shot = await driver.captureScreenshot(opened.target.id, {
         format: "jpeg",
         quality: 50,
       });
-      expect([shot.width, shot.height]).toEqual([1600, 1000]);
+      expect([shot.width, shot.height]).toEqual([440, 680]);
       const unchanged = await driver.observe(earlier.target.id);
-      expect([unchanged.viewport?.width, unchanged.viewport?.height]).toEqual(earlierSize);
+      expect(dimensions(unchanged)).toEqual(earlierSize);
+
+      // Even with the same frame fence, the explicit action takes priority
+      // over a later fit on this tab and does not replace the inherited size.
+      const current = await driver.observe(opened.target.id);
+      await Promise.all([
+        driver.dispatch({
+          ...command(current, { type: "viewport", width: 960, height: 640, mobile: false }),
+          observationMode: "none",
+        }),
+        driver.dispatch({
+          ...command(current, { ...fit, width: 500 }),
+          observationMode: "none",
+        }),
+      ]);
+      expect(dimensions(await driver.observe(opened.target.id))).toEqual([960, 640]);
+      expect(dimensions(await driver.openTarget(page("After both")))).toEqual([440, 680]);
     } finally {
       await driver.close();
       await rm(directory, { recursive: true, force: true });

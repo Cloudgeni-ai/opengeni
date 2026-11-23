@@ -17,6 +17,8 @@ import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./app-sync";
 export * from "./app-webhooks";
+export * from "./app-server";
+export * from "./site-tool-data";
 export * from "./app-package-exports";
 export * from "./organization-connectors";
 import {
@@ -44994,8 +44996,10 @@ export async function acceptSessionHumanInputResponse(
     requestId: string;
     response: unknown;
     respondedBy: string;
-    /** API-owned verified managed/local browser stamp, never a submitted principal shape. */
+    /** API-owned sign-in proof for Skill review and existing native secret answers. */
     canonicalHumanSession?: boolean;
+    /** API-owned proof for saving a secret answer to Only me. Not a proof for any other card. */
+    privateSecretAnswerAuthorized?: boolean;
     /**
      * API-owned: the response comes from the person's own Opengeni sign-in
      * (browser, desktop or phone app), not an agent, personal key or
@@ -45352,7 +45356,8 @@ export async function acceptSessionHumanInputResponse(
         if (response.outcome === "answered" && secretAnswers.length > 0) {
           if (
             secretAnswers.some((answer) => answer.saveTo === "user") &&
-            input.canonicalHumanSession !== true
+            input.canonicalHumanSession !== true &&
+            input.privateSecretAnswerAuthorized !== true
           ) {
             throw new HumanInputResponseValidationError(
               "HUMAN_AUTH_REQUIRED",

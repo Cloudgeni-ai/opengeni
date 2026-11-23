@@ -24,6 +24,8 @@ import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-
 import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { listEventSources as listSessionLinkEventSources } from "@opengeni/db";
+import { getAppServerManifest } from "@opengeni/db";
+import { appServerObjectKey } from "@opengeni/contracts";
 import { sessionLinkGitHubWakeTarget } from "../integrations/session-link-status";
 import {
   registerSessionCoordinationTools,
@@ -227,6 +229,7 @@ import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-er
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
 import { registerAppSyncTools } from "./app-sync-tools";
+import { registerAppServerTools } from "./app-server-tools";
 import { registerAppWebhookTools } from "./app-webhook-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerAppPackageTools } from "./app-package-tools";
@@ -1861,6 +1864,16 @@ export function buildOpenGeniMcpServer(
       siteAgent,
     );
     registerAppWebhookTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
+    registerAppServerTools(
       server,
       deps,
       grant,
@@ -4581,7 +4594,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_prepare_upload",
     {
       description:
-        "Get signed upload URLs for an app's HTML, optional source JSON and, for a multi-file build, optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.",
+        'Get signed upload URLs for an app\'s HTML, optional source JSON, for a multi-file build optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML, and optional server code JSON {main, files: [{path, content}], tools?, egress?, secrets?} (see the sites Skill; omit it to keep the current code, {"files": []} removes it). Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.',
       inputSchema: {},
     },
     async () => {
@@ -4594,7 +4607,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_get_source",
     {
       description:
-        "Get artifact metadata, version id, and signed download URLs for HTML and optional source JSON. Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
+        "Get artifact metadata, version id, and signed download URLs for HTML, optional source JSON and the version's server code files (server, null without code). Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         versionId: z4.string().uuid().optional(),
@@ -4620,11 +4633,37 @@ function registerWorkspaceArtifactTools(
         projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
         projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
       ]);
-      const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
+      const storage = deps.objectStorage;
+      const [downloads, serverManifest] = await Promise.all([
+        workspaceArtifactDownloads(storage, ref, "sandbox"),
+        getAppServerManifest(deps.db, grant.workspaceId, artifactId, ref.version.id),
+      ]);
+      // The version's server code: download each file to edit it, then upload
+      // the whole bundle again ({main, files, tools, egress, secrets,
+      // toolResults}); keeping toolResults keeps what env.tools.call returns.
+      const serverCode = serverManifest
+        ? {
+            main: serverManifest.main,
+            tools: serverManifest.tools ?? [],
+            egress: serverManifest.egress,
+            secrets: serverManifest.secrets,
+            toolResults: serverManifest.toolResults ?? "raw",
+            files: await Promise.all(
+              serverManifest.files.map(async (file) => {
+                const signed = await storage.createGetUrl({
+                  key: appServerObjectKey(grant.workspaceId, file.sha256),
+                  audience: "sandbox",
+                });
+                return { path: file.path, url: signed.url, expiresAt: signed.expiresAt };
+              }),
+            ),
+          }
+        : null;
       return json({
         detail,
         version: projectedVersion,
         downloads,
+        server: serverCode,
         artifactReference: `[Open app](artifact:${artifactId})`,
       });
     },

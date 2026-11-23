@@ -43,6 +43,7 @@ import {
 import { SiteView } from "../../artifacts";
 import { useArtifactLabels } from "../../components/artifacts/artifact-chrome";
 import type { SiteLiveState } from "../../components/artifacts/artifact-sandbox";
+import { AppServerStatusLine } from "../components/artifacts/app-server-status";
 import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { useArtifactsBackLink } from "../components/artifacts/artifact-page-chrome";
 import type {
@@ -79,6 +80,7 @@ import {
   useSitePublicationLink,
 } from "../components/artifacts/site-public-link";
 import { useAppApi } from "../lib/app-api";
+import { useChatOperations } from "../lib/actions/chat-operations";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { Link, useNavigate, usePage, useRouter } from "../lib/navigation";
 import { hasWorkspacePermission } from "../lib/permissions";
@@ -523,6 +525,14 @@ export function SiteViewRoute({
             {versionMenu}
             <span className="min-w-2 flex-1" />
             <SiteLiveStateLabel state={liveState} />
+            {canPublish && artifact && !archived ? (
+              <AppServerStatusLine
+                workspaceId={workspaceId}
+                siteId={siteId}
+                versionId={artifact.currentVersion?.id ?? null}
+                onOpenChat={showChat}
+              />
+            ) : null}
             {siteControls}
             {layout.position === "left" && !titleInWindowBar ? null : showChatButton}
           </SiteHeader>
@@ -1036,6 +1046,7 @@ function SiteChatPanel({
 }) {
   const context = useAppContext();
   const api = useAppApi();
+  const chatOps = useChatOperations();
   const navigate = useNavigate();
   const panelId = useId();
   const panel = useRef<HTMLElement>(null);
@@ -1342,6 +1353,20 @@ function SiteChatPanel({
           >
             <PlusIcon aria-hidden="true" className="size-3.5" />
             New
+          </Button>
+        ) : null}
+        {selectedId ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Copy link to this chat"
+            title="Copy link"
+            data-site-chat-copy-link=""
+            className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+            onClick={() => void chatOps.copyLink({ id: selectedId, workspaceId })}
+          >
+            <LinkIcon aria-hidden="true" className="size-4" />
           </Button>
         ) : null}
         {selectedId ? (

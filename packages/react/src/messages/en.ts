@@ -858,7 +858,7 @@ export const englishMessages = {
     "Install the {extensionName} extension in the profile you want to use.",
   "browserViewer.interactiveBrowserPage": "Interactive browser page",
   "browserViewer.itsPrivateStateIsSaved":
-    "Its private state is saved. Opening it creates a fresh, isolated browser process.",
+    "Sign-ins and cookies are kept. The open page reloads, and unsaved form entries are lost.",
   "browserViewer.itStoppedAfterItWent": "It stopped after it went unused.",
   "browserViewer.itStoppedUnexpectedly": "It stopped unexpectedly.",
   "browserViewer.live": "Live",
@@ -1916,6 +1916,8 @@ export const englishMessages = {
     "The latest question is changing queue state. Try again.",
   "hooks.latestQuestion.theLatestQuestionIsIn": "The latest question is in the prompt queue.",
   "hooks.useBrowserFrameStream.browserViewLostConnection": "Browser view lost connection.",
+  "hooks.useBrowserFrameStream.browserPictureStopped":
+    "The browser stopped sending its picture. Reconnect to see the page as it is now.",
   "hooks.useBrowserSession.noBrowserTabIsSelected": "No browser tab is selected.",
   "hooks.useBrowserSession.theBrowserPageChangedOpen":
     "The browser page changed. Open the options again.",
@@ -5193,6 +5195,10 @@ export const englishMessages = {
   "sessionStatusModel.running": "Working",
   "sessionStatusModel.stuck": "Stuck",
   "sessionStatusModel.waitingOnYou": "Waiting on you",
+  "siteToolPersonalGitHub.description":
+    "This app runs on your own GitHub account with All my repositories. Connect or reconnect it and turn on All my repositories in GitHub settings, then try again.",
+  "siteToolPersonalGitHub.open": "Open GitHub settings",
+  "siteToolPersonalGitHub.title": "Use your own GitHub",
   "siteToolRecover.askSiteOwner": "Ask the app owner to publish it again.",
   "siteToolRecover.askWhoeverManages": "Ask whoever manages your {system} access.",
   "siteToolRecover.close": "Close",

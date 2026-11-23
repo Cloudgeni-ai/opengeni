@@ -74,7 +74,11 @@ import {
   type ScheduleNavigation,
 } from "./schedule-parts";
 import { scheduleErrorText } from "./schedule-model";
-import { PastedWebhookSteps, StandardWebhookHelp, WebhookUrlField } from "./event-source-setup";
+import {
+  SourcePastedWebhookSteps,
+  StandardWebhookHelp,
+  WebhookUrlField,
+} from "./event-source-setup";
 import { useEventSourceLogo } from "./use-event-sources";
 
 const NAME_MAX_LENGTH = 120;
@@ -963,7 +967,7 @@ function PasteSecretDialog({
         return true;
       }}
     >
-      <PastedWebhookSteps
+      <SourcePastedWebhookSteps
         source={source}
         secret={secret}
         error={error}

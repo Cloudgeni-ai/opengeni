@@ -273,7 +273,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
       "workspace:read",
     );
     const grant = requireWorkspaceToolGatewayAuthorization(authorization);
-    const prepared = await prepareWorkspaceToolGateway(deps, authorization);
+    const prepared = await prepareWorkspaceToolGateway(deps, authorization, { listing: true });
     const requestToken = opaque(REQUEST_PREFIX);
     try {
       await createMcpOAuthAuthorizationRequest(deps.db, {
@@ -385,7 +385,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
       return oauthAuthorizeBrowserError(c, WORKSPACE_CONTENT_FLOW_REFUSED_MESSAGE);
     }
     if (grant.workspaceId !== request.workspaceId || grant.accountId !== request.accountId) {
-      const prepared = await prepareWorkspaceToolGateway(deps, authorization);
+      const prepared = await prepareWorkspaceToolGateway(deps, authorization, { listing: true });
       try {
         const rebound = await rebindMcpOAuthAuthorizationRequest(deps.db, {
           requestHash: request.requestHash,

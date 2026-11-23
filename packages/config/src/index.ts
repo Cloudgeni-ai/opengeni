@@ -2378,6 +2378,10 @@ const SettingsSchema = z.object({
   // "Change events"). Turn on once the gateway has its SITE_LIVE binding; it
   // also needs the gateway's internal origin and secret.
   sitesLiveEnabled: EnvBoolean.default(false),
+  // App server code (docs/app-server-code.md): run an app version's server
+  // code in a Cloudflare Dynamic Worker the gateway loads (its LOADER
+  // binding). Also needs the gateway's internal origin and secret.
+  sitesServerCodeEnabled: EnvBoolean.default(false),
   sitesGatewayInternalOrigin: z
     .string()
     .url()
@@ -2581,6 +2585,14 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
+  /**
+   * Optional token for Skill source reads against GitHub (preview and install).
+   * Without it those reads are unauthenticated, and GitHub budgets unauthenticated
+   * callers per IP — one shared 60-requests/hour pool for the whole deployment.
+   * Use a fine-grained token with public-repository read access only; reads with
+   * it are still refused for any repository that isn't public.
+   */
+  skillImportGithubToken: z.string().min(1).optional(),
   signupChallengeEnabled: EnvBoolean.default(false),
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
@@ -6986,6 +6998,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
     sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
     sitesLiveEnabled: optional("OPENGENI_SITES_LIVE_ENABLED"),
+    sitesServerCodeEnabled: optional("OPENGENI_SITES_SERVER_CODE_ENABLED"),
     sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
     sitesSqlFreeStorageBytes: optional("OPENGENI_SITES_SQL_FREE_STORAGE_BYTES"),
     sitesSqlFreeRowsReadPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_READ_PER_MONTH"),
@@ -7120,6 +7133,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
+    skillImportGithubToken: optional("OPENGENI_SKILL_IMPORT_GITHUB_TOKEN"),
     signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),

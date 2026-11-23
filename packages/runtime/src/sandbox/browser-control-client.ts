@@ -10,6 +10,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
+import { z } from "zod";
 import { olderBrowserControllerMessage } from "./browser-controller-compatibility";
 import {
   BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER,
@@ -132,6 +133,60 @@ const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
 const NATIVE_PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
 export const BROWSER_CONTROL_ADMIN_TOKEN_FILE = "/tmp/opengeni-browserd/authority/admin-token";
+
+const nonNegative = z.number().finite().nonnegative();
+const shortText = z.string().max(256);
+
+/** A browser controller's report on its live frame streams (diagnostics). */
+export const BrowserFrameHealth = z.object({
+  browserSessionId: z.string(),
+  controllerGeneration: z.string(),
+  windowParking: z
+    .object({
+      holders: nonNegative,
+      parkedWindows: nonNegative,
+      mayHaveParkedWindows: z.boolean(),
+      renderingSuspended: z.boolean(),
+    })
+    .nullable(),
+  streams: z
+    .array(
+      z.object({
+        targetId: shortText,
+        subscribers: nonNegative,
+        sequence: nonNegative,
+        ageMs: nonNegative,
+        sinceLastFrameMs: nonNegative.nullable(),
+        seeded: z.boolean(),
+        pollerRunning: z.boolean(),
+        pollerEnded: z.enum(["aborted", "replaced", "failed"]).nullable(),
+        capturing: z.boolean(),
+        capturesRunning: nonNegative,
+        framesPaused: z.boolean(),
+        frontTab: z.boolean(),
+        unresponsiveForMs: nonNegative.nullable(),
+        unresponsiveMethod: shortText.nullable(),
+        consecutiveFailures: nonNegative,
+        lastFailure: shortText.nullable(),
+        sinceLastFailureMs: nonNegative.nullable(),
+        emptyCaptures: nonNegative,
+      }),
+    )
+    .max(64),
+  sockets: z
+    .array(
+      z.object({
+        targetId: shortText,
+        ageMs: nonNegative,
+        subscribed: z.boolean(),
+        framesSent: nonNegative,
+        sinceLastSentMs: nonNegative.nullable(),
+        bufferedBytes: nonNegative,
+      }),
+    )
+    .max(64),
+});
+export type BrowserFrameHealthValue = z.infer<typeof BrowserFrameHealth>;
 const COMMAND_OK = "OPENGENI_BROWSER_CONTROL_CLIENT_OK";
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
 const MAX_REQUEST_TIMEOUT_MS = INTERACTION_ACTION_DEADLINE_MAX_MS;
@@ -2016,6 +2071,27 @@ export class BrowserControlSessionClient {
       throw new BrowserControlProtocolError("browser controller returned malformed targets");
     }
     return data.map((target) => BrowserTarget.parse(target));
+  }
+
+  /** How the session's live frame streams are doing, from controllers that
+   * report it (an older controller refuses the route). Diagnostics only:
+   * states, counts and times, never page content. */
+  async frameHealth(): Promise<BrowserFrameHealthValue> {
+    const data = await this.parent.requestForSession({
+      method: "GET",
+      path: this.path("frame-health"),
+      token: this.viewToken,
+    });
+    const health = BrowserFrameHealth.parse(data);
+    if (
+      health.browserSessionId !== this.reference.browserSessionId ||
+      health.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned frame health for another session binding",
+      );
+    }
+    return health;
   }
 
   async listDownloads(): Promise<BrowserDownloadListResponseValue> {

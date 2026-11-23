@@ -89,8 +89,13 @@ answers; the API strips it before building any event, and the database writes
 the vault item in the same transaction as the answer. The agent's answer is
 `{secret: {reference, username, vaultName, itemName, saveTo}}`, never a value.
 
-Saving to Only me requires a signed-in human submitter. Only hosted vaults can
-be targets. Slack, push and email surfaces link to the card instead of
+For a pending secret question, `secretSaveTargets` on the request read is
+the allowed Save to list for the viewer and the asking turn. The server checks
+the destination again when accepting the answer. The agent's `saveTo` is a
+suggestion, not a grant. A signed-in person can save to Only me for their own
+turn. An embedding host can also submit for its verified external user through
+`asUser()` with `secrets:write`, subject to the same asking-turn vault reach.
+Only hosted vaults can be targets. Slack, push and email surfaces link to the card instead of
 collecting values, and voice asks the person to answer in the app. The full
 model is in [`secrets.md`](secrets.md#asking-a-person).
 

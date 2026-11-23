@@ -92,6 +92,8 @@ export const SITE_GATEWAY_SHELL_SCRIPT: string = [
   "id:\"site.report\",method:\"POST\",pattern:/^\\/site\\/reports$/u}",
   ",{",
   "id:\"site.notify\",method:\"POST\",pattern:/^\\/published-artifacts\\/current\\/notify$/u}",
+  ",{",
+  "id:\"server.fetch\",method:\"POST\",pattern:/^\\/published-artifacts\\/current\\/server$/u}",
   "]),SITE_TOOL_METHODS=Object.freeze([\"catalog\",\"declarations\",\"call\",\"resolve\",\"invoke\",\"readiness\",\"setup\",\"sync-review\",\"sync-opt-in\"]);",
   "function matchSiteOperation(method,path){",
   "if(/[%\\\\#\\u0000-\\u0020\\u007f]/u.test(path))return null;",

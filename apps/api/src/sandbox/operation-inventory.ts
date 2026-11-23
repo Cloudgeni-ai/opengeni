@@ -62,20 +62,19 @@ function decidingRow(
  *   collected now. Nothing is dropped before Opengeni has custody of it.
  * Without a row (foreground work, or a command deleted with its chat) there
  * is no durable record that anyone finished with the op: a foreground
- * consumer's progress lives only in its own run. So such an op, running or
- * completed, is ended only when it started on an earlier connection
- * generation than the current one: a different process held the connection
- * since, so no requester can still address it. Never on age: foreground
- * work may legitimately run for hours, and an old output is not a consumed
- * one. Generation 0 (an older Opengeni) is kept; the runner's own retention
- * bounds what it keeps.
+ * consumer's progress lives only in its own run. The same authenticated
+ * Connected Machine process can reclaim its exact address even with a higher
+ * lease generation. A requester may never have observed the interruption;
+ * the generation alone does not prove that its work was abandoned. Keep that
+ * work for the original requester; the runner's normal retention still applies.
+ * Compute retains its VM generation fence for work without a command row.
  */
 export function decideInventoryPage(input: {
   operations: readonly ReportedOperation[];
   commands: ReadonlyMap<string, readonly ConnectedCommandInventoryRow[]>;
-  connectionGeneration: string;
+  computeConnectionGeneration?: string;
 }): InventoryDecision {
-  const current = BigInt(input.connectionGeneration);
+  const current = BigInt(input.computeConnectionGeneration ?? "0");
   const decision: InventoryDecision = {
     end: [],
     released: [],
@@ -97,8 +96,10 @@ export function decideInventoryPage(input: {
       }
       continue;
     }
-    const startedOn = BigInt(operation.connectionGeneration || "0");
-    if (startedOn > 0n && startedOn < current) decision.end.push(operation.opId);
+    if (current > 0n) {
+      const startedOn = BigInt(operation.connectionGeneration || "0");
+      if (startedOn > 0n && startedOn < current) decision.end.push(operation.opId);
+    }
   }
   return decision;
 }
@@ -191,7 +192,9 @@ export async function answerOperationInventory(
   const decision = decideInventoryPage({
     operations,
     commands,
-    connectionGeneration: String(enrollment.connectionGeneration),
+    ...(enrollment.kind === "sandbox"
+      ? { computeConnectionGeneration: String(enrollment.connectionGeneration) }
+      : {}),
   });
   const warn = (message: string, opId: string, error: unknown) =>
     observability?.warn?.(message, {

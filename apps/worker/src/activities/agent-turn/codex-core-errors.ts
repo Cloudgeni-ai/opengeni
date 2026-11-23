@@ -8,6 +8,7 @@ import type {
   SubscriptionReconnectAccount,
 } from "@opengeni/contracts/subscription-capacity-wait";
 import type { WaitReason } from "@opengeni/subscriptions";
+import { productLabelForModelId } from "@opengeni/config";
 
 type SubscriptionCapacityWaitReason = WaitReason | ProviderCapacityWaitReason;
 
@@ -36,6 +37,8 @@ export type SubscriptionCoreCodexFailurePayload = {
   waitReason?: SubscriptionCapacityWaitReason;
   /** Refusal class when `code` is `subscription_account_refused`. */
   refusal?: SubscriptionCoreAccountRefusal;
+  /** Model refused by every eligible account in the placement pool. */
+  model?: string;
   /** ISO time the earliest known capacity returns, when placement knows it. */
   resetsAt?: string;
   /**
@@ -284,6 +287,19 @@ export function subscriptionCoreAccountRefusedFailure(
     },
     displayName,
   );
+}
+
+/** A plan refusal on every usable candidate is not a capacity reset. */
+export function subscriptionCoreCodexPlanBlockedFailure(
+  modelId: string,
+): SubscriptionCoreCodexTurnError {
+  return new SubscriptionCoreCodexTurnError({
+    error: `None of the Codex subscriptions available to this turn can run ${productLabelForModelId(modelId)}. Choose another model or connect a subscription whose plan includes it.`,
+    code: "subscription_account_refused",
+    retryable: false,
+    refusal: "entitlement",
+    model: modelId,
+  });
 }
 
 /** A Codex consumer that has not moved to the core yet (PR 2) must not read legacy tables. */
