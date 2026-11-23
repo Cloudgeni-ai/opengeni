@@ -8,13 +8,13 @@ light and dark, and reflow on a phone.
 ```html
 <link rel="stylesheet" href="/__opengeni/ui.css">
 <script src="/__opengeni/charts.js"></script>
-<body class="og-app"><main class="og-page og-page-wide og-stack">
+<body class="og-app"><main class="og-page og-page-wide og-stack" style="gap:28px">
   <header><h1 class="og-title">Q3 sales</h1><p class="og-muted">Jul–Sep 2026 · updated 1 Oct</p></header>
-  <p>Revenue beat target by 4%; Europe carried the quarter.</p>
+  <p style="font-size:1.125rem">Revenue beat target by 4%; Europe carried the quarter.</p>
   <div id="kpis"></div>
   <div class="og-grid">
-    <section class="og-card"><h2 class="og-heading">Revenue against target</h2><div id="trend"></div></section>
-    <section class="og-card"><h2 class="og-heading">Growth by region</h2><div id="regions"></div></section>
+    <section><h2 class="og-heading">Revenue beat target every month</h2><div id="trend"></div></section>
+    <section><h2 class="og-heading">Europe grew most</h2><div id="regions"></div></section>
   </div>
   <section><h2 class="og-heading">Products</h2><div id="products"></div></section>
   <details class="og-details"><summary>Method and raw counts</summary>…</details>
@@ -39,7 +39,7 @@ light and dark, and reflow on a phone.
 
 Formats: `"num"`, `"int"`, `"compact"`, `"money"` (`{type: "money", currency: "EUR"}`), `"pct"` (already in percent), `"ratio"` (0–1), `"ms"`, `"minutes"`, `"date"`, `"month"`, `"time"` or a function. `og.fmt.<name>(value)` formats your own text, and `og.fmt.delta(value, {unit, better})` returns `{text, tone}` for class `og-good`, `og-bad` or `og-flat`. `highlight` (a series or label name, or `row => boolean`) colours that item and greys the rest. Empty data shows "No data yet" (`empty` changes it). Classes for your own markup: `og-kpis`/`og-kpi`, `og-grid`, `og-num`, `og-good`/`og-bad`, `og-empty`, `og-details`, and `aria-pressed="true"` on an `og-button` toggle.
 
-- **Answer first.** A title, one line of scope and freshness, then the verdict in a sentence and three to six KPIs, each against a comparison (target, last period, competitors). Words carry the direction ("18% cheaper"), colour confirms it.
+- **Answer first, calmly.** A title, one line of scope and freshness, the verdict in one plain sentence, then three to six KPIs, each against a comparison (target, last period, competitors). Words carry the direction ("18% cheaper"), colour confirms it. Charts and tables sit on the page, not in cards; no banners or tinted panels.
 - **One question per chart**, titled with the question or the finding. Trend: line. Compare: bars. Trade-off: scatter. Exact values: table. No pies, gauges, 3D or dual axes.
 - **Colour means something.** Neutral by default, one highlight for the subject, green and red only for good and bad, never colour alone. Series colours come from `--og-series-1`…`6`; don't invent palettes or token names.
 - **Density.** About six KPIs, two to four charts and tables of six columns or fewer in the main view. Secondary metrics (token counts, raw totals, ids, method) go in `og-details` or a second view.
