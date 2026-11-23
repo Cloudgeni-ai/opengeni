@@ -1320,9 +1320,8 @@ describe("workbench live acceptance preflight", () => {
     });
 
     test("rejects a then command that is not the exact verification read", () => {
-      expect(transcript([patchThen("cat api/server.ts; touch x")])).toThrow(
-        "fixture lacks successful apply_patch proof",
-      );
+      const thenError = "fixture apply_patch then command is not a successful verification read";
+      expect(transcript([patchThen("cat api/server.ts; touch x")])).toThrow(thenError);
       expect(
         transcript([
           patchThen(
@@ -1330,15 +1329,42 @@ describe("workbench live acceptance preflight", () => {
             "Chunk ID: a\nProcess exited with code 1\nOutput:\n" + fileText,
           ),
         ]),
-      ).toThrow("fixture lacks successful apply_patch proof");
+      ).toThrow(thenError);
+      for (const note of [
+        "not run because this command needs approval; run it with exec_command.",
+        "not run because shell commands are unavailable in this session.",
+        "the command could not be run (refused). The patch was applied; check the workspace before running the command again with exec_command.",
+      ]) {
+        expect(
+          transcript([
+            {
+              name: "apply_patch",
+              arguments: { patch, then: "cat api/server.ts" },
+              output: `Patch applied.\n\nthen: ${note}`,
+            },
+          ]),
+        ).toThrow(thenError);
+      }
       expect(
         transcript([
           {
             name: "apply_patch",
             arguments: { patch, then: "cat api/server.ts" },
-            output: "Patch applied.\n\nthen: not run because the patch did not apply.",
+            output: "Error: hunk failed\n\nthen: not run because the patch did not apply.",
           },
         ]),
+      ).toThrow("fixture lacks successful apply_patch proof");
+      expect(
+        transcript([
+          {
+            name: "apply_patch",
+            arguments: { patch, then: 7 },
+            output: "Patch applied.\n\nthen: not run: `then` must be a string command.",
+          },
+        ]),
+      ).toThrow(thenError);
+      expect(
+        transcript([{ ...plainPatch, output: "Updated api/server.ts: Patch applied." }, read]),
       ).toThrow("fixture lacks successful apply_patch proof");
       expect(
         transcript([{ ...plainPatch, arguments: { patch, extra: "cat api/server.ts" } }, read]),
@@ -1354,6 +1380,9 @@ describe("workbench live acceptance preflight", () => {
         "fixture contains extra or unowned mutation-capable calls",
       );
       expect(transcript([plainPatch, plainPatch, read])).toThrow("fixture");
+      expect(transcript([patchThen("cat api/server.ts"), patchThen("cat api/server.ts")])).toThrow(
+        "fixture",
+      );
       expect(
         transcript([{ ...read, arguments: { cmd: "touch x" } }, patchThen("cat api/server.ts")]),
       ).toThrow("invalid pre-patch inspection");

@@ -932,13 +932,21 @@ export function assertFixtureModelPatch(
     /^Process exited with code 0$/mu.test(result) &&
     result.endsWith("Output:\n" + expected);
   // `then` is the patch call's own verification read: exactly the fixture's
-  // read command, run after the patch applied, with its exec result appended.
+  // read command, run after the patch applied, with its exec result appended
+  // after the runtime's `then:` header (packages/runtime/src/apply-patch-then.ts).
+  // A not-run note ("then: not run ...") never matches this prefix.
+  const readCommands = ["cat api/server.ts", "cat /workspace/api/server.ts"];
   const hasThen = patchArgs != null && Object.hasOwn(patchArgs, "then");
   const thenPrefix = "Patch applied.\n\nthen:\n";
   const patchResult = (patchOutput?.payload as any)?.output;
+  const patchApplied =
+    typeof patchResult === "string" &&
+    (hasThen
+      ? patchResult.startsWith("Patch applied.\n\nthen:")
+      : patchResult === "Patch applied.");
   const thenValid =
     hasThen &&
-    ["cat api/server.ts", "cat /workspace/api/server.ts"].includes(patchArgs.then) &&
+    readCommands.includes(patchArgs.then) &&
     typeof patchResult === "string" &&
     patchResult.startsWith(thenPrefix) &&
     verifiedRead(patchResult.slice(thenPrefix.length));
@@ -972,9 +980,12 @@ export function assertFixtureModelPatch(
     (patch.payload as any)?.name !== "apply_patch" ||
     !patchValid ||
     !patchOutput ||
-    (hasThen ? !thenValid : patchResult !== "Patch applied.")
+    !patchApplied
   ) {
     throw new Error("fixture lacks successful apply_patch proof owned by its accepted model turn");
+  }
+  if (hasThen && !thenValid) {
+    throw new Error("fixture apply_patch then command is not a successful verification read");
   }
   if (reads.length === 0 && !hasThen) {
     throw new Error("fixture lacks successful read-only verification after its patch");
@@ -984,7 +995,7 @@ export function assertFixtureModelPatch(
     return (
       (read.payload as any)?.name === "exec_command" &&
       read.sequence > patchOutput.sequence &&
-      args?.cmd === "cat api/server.ts" &&
+      readCommands.includes(args?.cmd) &&
       args.shell == null &&
       [undefined, null, "", "/workspace"].includes(args.workdir) &&
       Object.keys(args).every((key) =>
