@@ -2555,7 +2555,7 @@ const skillsSync = tool({
         } catch (error) {
           if (error instanceof HTTPException && error.status === 429) {
             return failure(
-              "GitHub's public request limit for this server has been reached. Try again after it resets, or upload the Skills from a local checkout.",
+              "GitHub's request limit for this server has been reached. Try again after it resets, or upload the Skills from a local checkout.",
             );
           }
           return failure(
