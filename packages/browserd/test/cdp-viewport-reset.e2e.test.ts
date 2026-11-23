@@ -102,7 +102,16 @@ e2e(
 
       await act(driver, id, { type: "viewport", width: 768, height: 1024, mobile: true });
       expect(await size(driver, id)).toMatchObject({ width: 768, height: 1024, maxTouchPoints: 1 });
-      // A tab opened now gets the size the agent set, as from a resized window.
+      const fitTab = await driver.openTarget(page("Fit"));
+      expect(await size(driver, fitTab.target.id)).toEqual(own);
+      const fit = {
+        type: "viewport",
+        width: 768,
+        height: 1024,
+        mobile: true,
+        mode: "fit",
+      } as const;
+      await act(driver, fitTab.target.id, fit);
       const during = await driver.openTarget(page("During"));
       expect(await size(driver, during.target.id)).toMatchObject({ width: 768, height: 1024 });
 
@@ -129,6 +138,9 @@ e2e(
       expect(await size(driver, during.target.id)).toMatchObject({ width: 768, height: 1024 });
       await act(driver, during.target.id, { type: "viewport_reset" });
       expect(await size(driver, during.target.id)).toEqual(own);
+      // Reset also makes the formerly explicit tab eligible for panel fitting.
+      await act(driver, id, fit);
+      expect(await size(driver, id)).toMatchObject({ width: 768, height: 1024 });
     });
   },
   90_000,

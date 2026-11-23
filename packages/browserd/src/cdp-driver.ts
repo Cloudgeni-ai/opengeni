@@ -853,12 +853,13 @@ type MeasuredViewport = {
   window: { width: number; height: number } | null;
 };
 
-/** A page size the agent set with the viewport action. */
+/** A page size set explicitly or fitted to a viewer. */
 type ViewportEmulation = {
   width: number;
   height: number;
   deviceScaleFactor: number;
   mobile: boolean;
+  mode: "explicit" | "fit";
 };
 
 type OopifSession = {
@@ -1166,9 +1167,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly downloadsSavedByPerson: boolean;
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
-  /** The size the agent last set. Tabs that open afterwards get it too, as
-   * they would from a resized window; tabs that already existed keep theirs. */
-  private sessionViewport: { viewport: ViewportEmulation; preexisting: Set<string> } | null = null;
+  /** Only fitted sizes carry to tabs that were opened after the panel fit. */
+  private fittedViewport: { viewport: ViewportEmulation; preexisting: Set<string> } | null = null;
   /** Each tab's own emulated size, re-applied when the tab is attached again
    * (Chromium drops the override with the attachment). */
   private readonly targetViewports = new Map<string, ViewportEmulation>();
@@ -2947,7 +2947,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "browser JavaScript dialog must be handled before another action",
         );
       }
-      await this.bringToFrontForAction(state);
+      if (!(command.action.type === "viewport" && command.action.mode === "fit")) {
+        await this.bringToFrontForAction(state);
+      }
       let completedActions = 0;
       // Navigations complete only once their page committed, so a batch that
       // has so far only navigated and waited knows exactly where the tab is.
@@ -5061,15 +5063,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  /** The size a tab being attached should have: its own, or the session's
-   * when the tab opened after the agent set one. */
+  /** Keep a tab's own size on reattach, or inherit the last fitted size if new. */
   private viewportFor(targetId: string): ViewportEmulation | null {
     const own = this.targetViewports.get(targetId);
     if (own) return own;
-    const session = this.sessionViewport;
-    if (!session || session.preexisting.has(targetId)) return null;
-    this.targetViewports.set(targetId, session.viewport);
-    return session.viewport;
+    const fitted = this.fittedViewport;
+    if (!fitted || fitted.preexisting.has(targetId)) return null;
+    this.targetViewports.set(targetId, fitted.viewport);
+    return fitted.viewport;
   }
 
   private async applyViewport(
@@ -7289,11 +7290,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       case "viewport": {
         this.assertViewportEmulation();
-        const viewport = {
+        const mode = action.mode ?? "explicit";
+        // Runs in the target action queue, so a fit queued behind an explicit
+        // change cannot overwrite it even if both used the same frame fence.
+        if (mode === "fit" && this.targetViewports.get(state.targetId)?.mode === "explicit") return;
+        const viewport: ViewportEmulation = {
           width: action.width,
           height: action.height,
           deviceScaleFactor: action.deviceScaleFactor ?? 1,
           mobile: action.mobile,
+          mode,
         };
         await this.withFramesPaused(state, async () => {
           if (!state.emulatedViewport) {
@@ -7302,14 +7308,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.applyViewportChange(
             state,
             async () => {
-              await this.sendActionTarget(state, "Emulation.setDeviceMetricsOverride", {
-                width: viewport.width,
-                height: viewport.height,
-                deviceScaleFactor: viewport.deviceScaleFactor,
-                mobile: viewport.mobile,
-                screenWidth: viewport.width,
-                screenHeight: viewport.height,
-              });
+              await this.sendActionTarget(
+                state,
+                "Emulation.setDeviceMetricsOverride",
+                {
+                  width: viewport.width,
+                  height: viewport.height,
+                  deviceScaleFactor: viewport.deviceScaleFactor,
+                  mobile: viewport.mobile,
+                  screenWidth: viewport.width,
+                  screenHeight: viewport.height,
+                },
+                {
+                  // A lost reply is not proof the explicit change did not take.
+                  onSent: () => {
+                    if (mode === "explicit") this.targetViewports.set(state.targetId, viewport);
+                  },
+                },
+              );
+              if (mode === "fit") this.targetViewports.set(state.targetId, viewport);
               if (viewport.mobile || state.touchEmulated) {
                 await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
                   enabled: viewport.mobile,
@@ -7322,11 +7339,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 height: viewport.height,
                 deviceScaleFactor: viewport.deviceScaleFactor,
               };
-              this.targetViewports.set(state.targetId, viewport);
-              this.sessionViewport = {
-                viewport,
-                preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
-              };
             },
             // The screen is exactly the size set. The layout size can be a
             // pixel more under a fractional display scale, and the reported
@@ -7335,6 +7347,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               measured.screenWidth === viewport.width && measured.screenHeight === viewport.height,
             VIEWPORT_NOT_TAKEN_MESSAGE,
           );
+          if (mode === "fit") {
+            this.fittedViewport = {
+              viewport,
+              preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
+            };
+          }
         });
         return;
       }
@@ -7355,10 +7373,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               }
               await this.redrawTab(state);
               state.emulatedViewport = undefined;
-              // Neither this tab, when attached again, nor tabs that open from
-              // now on get the size the agent set before.
-              this.targetViewports.delete(state.targetId);
-              this.sessionViewport = null;
             },
             (measured) =>
               own
@@ -7379,6 +7393,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                   ),
             VIEWPORT_RESET_NOT_TAKEN_MESSAGE,
           );
+          // Release explicit ownership only once the reset is confirmed.
+          this.targetViewports.delete(state.targetId);
+          this.fittedViewport = null;
         });
         return;
       }

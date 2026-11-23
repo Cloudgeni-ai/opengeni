@@ -143,7 +143,7 @@ const grant: AccessGrant = {
   permissions: ["sessions:read", "sessions:control", "stream:view"],
 };
 
-test("a product-origin Chromium viewer paints and controls a browser and a desktop", async () => {
+test("a product-origin Chromium viewer fits, paints and controls a browser and paints and controls a desktop", async () => {
   const build = await Bun.build({
     entrypoints: [
       new URL(
@@ -175,7 +175,7 @@ test("a product-origin Chromium viewer paints and controls a browser and a deskt
           return new Response(javascript, { headers: { "content-type": "text/javascript" } });
         if (pathname === "/styles.css") return new Response(css);
         return new Response(
-          '<!doctype html><link rel="stylesheet" href="/styles.css"><div id="viewer" style="height:95vh"></div><script type="module" src="/viewer.js"></script>',
+          '<!doctype html><link rel="stylesheet" href="/styles.css"><div id="viewer" class="og-root" style="height:95vh"></div><script type="module" src="/viewer.js"></script>',
           { headers: { "content-type": "text/html" } },
         );
       },
@@ -234,6 +234,45 @@ test("a product-origin Chromium viewer paints and controls a browser and a deskt
         );
       await expectPixel(255, 0);
       if (viewer === "browser") {
+        const fitted = await canvas.evaluate((surface) => ({
+          width: surface.parentElement!.clientWidth,
+          height: surface.parentElement!.clientHeight,
+        }));
+        const resized = page.waitForResponse(
+          (response) => response.url().endsWith(`/browser-sessions/${browserSessionId}/actions`),
+          { timeout: 5_000 },
+        );
+        await page.clock.fastForward(500);
+        const resizeResponse = await resized;
+        expect(resizeResponse.status()).toBe(200);
+        expect(await resizeResponse.json()).toMatchObject({ state: "completed" });
+        expect(inputs.browser).toHaveLength(1);
+        expect(inputs.browser[0]).toMatchObject({
+          expectedFrameId: "frame-1",
+          actor: { kind: "human", subjectId },
+          action: { type: "viewport", ...fitted, mobile: false, mode: "fit" },
+        });
+        await page
+          .waitForFunction(
+            ({ width, height }) => {
+              const surface = document.querySelector<HTMLCanvasElement>(
+                'canvas[aria-label="Interactive browser page"]',
+              );
+              return surface?.width === width && surface.height === height;
+            },
+            fitted,
+            { timeout: 5_000 },
+          )
+          .catch(async (cause) => {
+            const painted = await canvas.evaluate((surface) => ({
+              width: surface.getAttribute("width"),
+              height: surface.getAttribute("height"),
+            }));
+            throw new Error(
+              `Expected the resized frame ${JSON.stringify(fitted)} but painted ${JSON.stringify(painted)}`,
+              { cause },
+            );
+          });
         // An embedded viewer must count as browser activity without any human input.
         const heartbeat = page.waitForResponse((response) =>
           response.url().endsWith(`/browser-sessions/${browserSessionId}/heartbeat`),
@@ -250,9 +289,9 @@ test("a product-origin Chromium viewer paints and controls a browser and a deskt
       }
       await canvas.click();
       await expectPixel(0, 255);
-      expect(inputs[viewer]).toHaveLength(1);
-      expect(inputs[viewer][0]).toMatchObject({
-        expectedFrameId: "frame-1",
+      expect(inputs[viewer]).toHaveLength(viewer === "browser" ? 2 : 1);
+      expect(inputs[viewer].at(-1)).toMatchObject({
+        expectedFrameId: viewer === "browser" ? "frame-2" : "frame-1",
         actor: { kind: "human", subjectId },
         action: { type: "pointer", action: "click" },
       });
@@ -349,11 +388,13 @@ async function registerFixtureApi(app: Hono, controller: BrowserControlServer, o
 }
 
 async function fixtureController() {
-  const png = (background: "#ff0000" | "#00ff00") =>
-    sharp({ create: { ...bounds, channels: 3, background } })
+  const png = (background: "#ff0000" | "#00ff00", size = bounds) =>
+    sharp({ create: { width: size.width, height: size.height, channels: 3, background } })
       .png()
       .toBuffer();
   const [before, after] = await Promise.all([png("#ff0000"), png("#00ff00")]);
+  let browserSize = bounds;
+  let browserImage = before;
   const inputs = { browser: [] as BrowserActionCommand[], computer: [] as ComputerActionCommand[] };
   const frame = (sequence: number) => ({
     sequence,
@@ -369,6 +410,9 @@ async function fixtureController() {
   });
   const browserFrame = (sequence: number) => ({
     ...frame(sequence),
+    width: browserSize.width,
+    height: browserSize.height,
+    data: browserImage,
     browserSessionId,
     documentGeneration: browserTarget.documentGeneration,
     deviceScaleFactor: 1,
@@ -433,7 +477,14 @@ async function fixtureController() {
       },
       action: async (command: BrowserActionCommand) => {
         inputs.browser.push(command);
-        for (const stream of browserFrames) stream.push(browserFrame(2));
+        if (command.action.type === "viewport") {
+          const { width, height } = command.action;
+          browserSize = { ...bounds, width, height };
+          browserImage = await png("#ff0000", browserSize);
+        } else {
+          browserImage = await png("#00ff00", browserSize);
+        }
+        for (const stream of browserFrames) stream.push(browserFrame(inputs.browser.length + 1));
         return receipt("browser", command.operationId);
       },
       close: async () => {},

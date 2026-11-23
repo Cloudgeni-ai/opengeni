@@ -305,6 +305,7 @@ export class MockOpenGeniClient implements SessionClientLike {
   private browserTargets = new Map<string, BrowserTarget[]>([
     [DEMO_BROWSER_SESSION_ID, [fabricateBrowserTarget(DEMO_BROWSER_SESSION_ID)]],
   ]);
+  private browserViewports = new Map<string, { width: number; height: number }>();
   private browserDownloads = new Map<string, BrowserDownload[]>([
     [DEMO_BROWSER_SESSION_ID, [fabricateBrowserDownload(DEMO_BROWSER_SESSION_ID)]],
   ]);
@@ -1970,11 +1971,11 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   /** Frame metadata source for the deterministic demo transport. Not part of
    *  SessionClientLike; production frames come from browserd. */
-  demoBrowserFrameTarget(browserSessionId: string, targetId: string): BrowserTarget | null {
+  demoBrowserFrameTarget(browserSessionId: string, targetId: string) {
     const target = (this.browserTargets.get(browserSessionId) ?? []).find(
       (candidate) => candidate.id === targetId,
     );
-    return target ? { ...target } : null;
+    return target ? { ...target, demoViewport: this.browserViewports.get(target.id) } : null;
   }
 
   async getBrowserSession(_workspaceId: string, browserSessionId: string): Promise<BrowserSession> {
@@ -2162,6 +2163,10 @@ export class MockOpenGeniClient implements SessionClientLike {
           url: action.url,
           documentGeneration: `demo-document-${this.browserRevision + 1}`,
         };
+      } else if (action.type === "viewport") {
+        this.browserViewports.set(target.id, { width: action.width, height: action.height });
+      } else if (action.type === "viewport_reset") {
+        this.browserViewports.delete(target.id);
       } else if (action.type === "clipboard") {
         const currentClipboard =
           this.browserClipboards.get(browserSessionId) ??

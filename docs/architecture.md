@@ -2643,6 +2643,11 @@ replays an already-matching destination, and only replaces a differing file on
 the first authorized dispatch. Its command wait is 20 minutes (curl transfer
 timeout: 15 minutes), separate from the controller's one-minute default request.
 
+Managed Chromium serializes viewport actions with other actions on the same
+tab. A viewer can opt into fitting its panel; this cannot replace a tab's
+explicit viewport, and only viewer-fitted sizes carry to new tabs. The console
+only scales its frames and does not request a fit.
+
 `packages/browserd/src/page-protection.ts` owns the shared protected-field
 policy for DOM reads, editable-value confirmation and accessibility reads.
 Chromium DOM snapshots find protected nodes in child documents and flattened

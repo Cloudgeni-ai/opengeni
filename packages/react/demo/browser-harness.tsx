@@ -83,6 +83,7 @@ async function renderHarness() {
         </header>
         <BrowserViewer
           sessionId={sessionId}
+          fitViewport={params.get("fitViewport") === "1"}
           {...(webSocketFactory ? { webSocketFactory } : {})}
           className="min-h-0 flex-1"
         />

@@ -11,7 +11,7 @@ const props = {
 
 createRoot(document.getElementById("viewer")!).render(
   query.get("viewer") === "browser" ? (
-    <BrowserViewer {...props} showAdvancedControls={false} />
+    <BrowserViewer {...props} showAdvancedControls={false} fitViewport />
   ) : (
     <ComputerViewer {...props} />
   ),

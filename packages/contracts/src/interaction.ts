@@ -2422,6 +2422,8 @@ const browserActionVariants = [
       height: z.number().int().min(240).max(4_096),
       mobile: primitives.boolean,
       deviceScaleFactor: z.number().min(0.5).max(4).optional(),
+      /** Fit a viewer panel without replacing an explicitly set viewport. */
+      mode: z.literal("fit").optional(),
     })
     .strict(),
   /** Ends viewport emulation: the tab returns to the window's own size and scale. */
