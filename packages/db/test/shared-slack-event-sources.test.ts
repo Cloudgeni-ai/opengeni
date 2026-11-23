@@ -272,6 +272,27 @@ postgresTest(
       expect(afterCall.visible).toEqual([{ id: sources[home.workspaceId]! }]);
       expect(afterCall.open).toBe(false);
 
+      // The definer's own statement uses 1551's index: this transaction's scan
+      // counter for it rises. Earlier calls on this connection may have cached
+      // a generic plan made with sequential scans allowed, so the function
+      // plans afresh here.
+      const scans = await withRlsContext(grantedClient.db, home, async (tx) => {
+        await tx.execute(sql`discard plans`);
+        await tx.execute(sql`set local enable_seqscan = off`);
+        const listed = await rawRows<{ workspace_id: string }>(
+          tx,
+          sql`select workspace_id from opengeni_private.list_shared_slack_event_sources_v2(
+            ${accountId}::uuid, ${home.workspaceId}::uuid, ${bot.id}::uuid, ${externalKey}::text)`,
+        );
+        const [counts] = await rawRows<{ index_scans: string }>(
+          tx,
+          sql`select pg_stat_get_xact_numscans('event_sources_slack_team_idx'::regclass) as index_scans`,
+        );
+        return { listed, indexScans: Number(counts?.index_scans) };
+      });
+      expect(scans.listed).toEqual([{ workspace_id: target.workspaceId }]);
+      expect(scans.indexScans).toBeGreaterThan(0);
+
       // Even for the tables' owner, the window covers only the current
       // organization's Slack rows, and a window it already holds stays open.
       ownerClient = createDb(owned.ownerUrl);

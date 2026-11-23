@@ -68,4 +68,9 @@ describe("resolveSiteUiStylesheet", () => {
     expect(SITE_UI_CSS).toContain(":root[data-og-theme=dark]");
     expect(SITE_UI_CSS).not.toMatch(/(^|[}\s])(body|html|\*)\s*\{/);
   });
+
+  test("sizes text in rem, so the reader's text size applies, and keeps phone inputs at 16px", () => {
+    expect(SITE_UI_CSS).not.toMatch(/(font-size|line-height):\s*[\d.]+px|font:[^;}]*\d+px/);
+    expect(SITE_UI_CSS).toContain("@media (pointer:coarse){.og-input{font-size:1rem}}");
+  });
 });

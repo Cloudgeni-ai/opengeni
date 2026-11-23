@@ -14,6 +14,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { installReadyMadeApp } from "@opengeni/react/app/lib/ready-made-apps";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import type { ReadyMadeKind } from "./capabilities-section";
 
@@ -250,37 +251,22 @@ export function ReadyMadeSection({
       } else if (entry.kind === "app") {
         const template = appTemplates?.find((each) => each.key === key);
         if (!template) return;
-        // One key per ready-made app: adding it again returns the same app,
-        // unless that app was archived, then it's added fresh.
-        let installed = await client.installAppPackage(workspaceId, {
-          package: template.package,
-          idempotencyKey: `ready-made:${template.key}`,
-        });
-        // Each archived copy keys the next one, so adding again finds the live copy.
-        for (
-          let hops = 0;
-          installed.replayed && installed.app.status !== "active" && hops < 20;
-          hops += 1
-        ) {
-          installed = await client.installAppPackage(workspaceId, {
-            package: template.package,
-            idempotencyKey: `ready-made:${template.key}:after:${installed.app.id}`,
-          });
-        }
+        // Adding it again returns the same app (the Artifacts page adds the same way).
+        const installed = await installReadyMadeApp(client, workspaceId, template);
         setAddedApps((current) => new Map(current).set(key, installed.app.id));
         if (installed.notInstalled.length > 0) {
           toast.warning(`${entry.name} was added without some parts`, {
             description: installed.notInstalled.map((problem) => problem.reason).join(" "),
           });
-          return;
+        } else if (!installed.replayed) {
+          toast.success(`Added ${entry.name}`);
         }
-        if (installed.replayed) {
-          void navigate({
-            to: "/workspaces/$workspaceId/artifacts/$artifactId",
-            params: { workspaceId, artifactId: installed.app.id },
-          });
-          return;
-        }
+        // Open it: the app asks for any tool it uses that isn't connected yet.
+        void navigate({
+          to: "/workspaces/$workspaceId/artifacts/$artifactId",
+          params: { workspaceId, artifactId: installed.app.id },
+        });
+        return;
       } else {
         const item = librarySkills?.find((each) => each.id === key);
         const libraryId = metadataString(item?.metadata.libraryId);

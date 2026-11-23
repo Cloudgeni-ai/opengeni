@@ -27,8 +27,8 @@ describe("Sites skill single-file path", () => {
     expect(choice).toBeGreaterThan(-1);
     expect(choice).toBeLessThan(simple);
     expect(simple).toBeLessThan(apps);
+    const section = skill.slice(simple, skill.indexOf("## Look"));
     expect(simple).toBeLessThan(skill.indexOf("## AI and tools come from the host"));
-    const section = skill.slice(simple, skill.indexOf("## Make new apps readable by default"));
     expect(section).toContain("Do not set a goal");
     expect(section).toContain("At most one quick look at phone width");
     expect(section).toContain("`requestedTools: []`");
@@ -46,10 +46,7 @@ describe("Sites skill single-file path", () => {
     expect(choice).toContain("keeps the viewer's own entries");
     expect(choice).toContain("Build what the person asked for.");
     expect(choice).toContain("instead of building them");
-    const section = skill.slice(
-      skill.indexOf("## Single-file app"),
-      skill.indexOf("## Make new apps readable by default"),
-    );
+    const section = skill.slice(skill.indexOf("## Single-file app"), skill.indexOf("## Look"));
     expect(section).toContain('<script src="/__opengeni/site-tools/client.js"></script>');
     expect(section).toContain('.data.collection("entries")');
     expect(section).toContain("`opengeni__app_data_define_collection`");
@@ -65,7 +62,7 @@ describe("Sites skill single-file path", () => {
     expect(build).toContain("## Completion gate (full apps)");
     expect(build).toContain("This gate applies to full apps.");
     const readable = skill.slice(
-      skill.indexOf("## Make new apps readable by default"),
+      skill.indexOf("## Look"),
       skill.indexOf("## Edit an existing app"),
     );
     expect(readable).toContain("For a full app, before publishing");

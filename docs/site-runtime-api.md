@@ -505,7 +505,9 @@ Apps opened in Opengeni follow its light or dark theme: the frame's
 matches it and changes without a reload. (Safari doesn't pass a frame's
 `color-scheme` to `prefers-color-scheme`, so there an app follows the
 system's theme; that differs only when Opengeni's appearance is set to the
-other one.) An app that wants Opengeni's own look opts in with one tag:
+other one.) An app takes Opengeni's own look with one tag; the bundled
+`sites` Skill gives every new app this look unless a design comes first (the
+person's, the workspace's, or the product the app is about):
 
 ```html
 <link rel="stylesheet" href="/__opengeni/ui.css">

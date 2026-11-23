@@ -553,7 +553,28 @@ whole.
   GitHub not yet connected to the
   workspace makes **Connect GitHub** the one action (Connected tools), and
   any other kind (Gmail's mailbox to connect or pick, an MCP server to pick)
-  makes **Add <source>** the one action (the Add a source page). A GitHub event can add one repository. The **Note** is
+  makes **Add <source>** the one action (the Add a source page). A GitHub
+  trigger's **Repositories** (`agent-trigger-repositories.tsx`) are all the
+  GitHub connection reaches (the default) or the ones chosen, saved as a
+  `data.repository.full_name` condition (`equals` or `in`, at most 50) on
+  each GitHub trigger; an automation with a new chat per run keeps no
+  repository, and one that continues a chat keeps the chosen ones. The condition
+  names the repository, so it stops matching once the repository is renamed
+  or transferred (choose it again then). Each new-chat run of an agent's trigger
+  checks out the repositories its GitHub events are about (at most 5): the
+  worker attaches each, after the chat is admitted and before its first turn,
+  only when one of the workspace's own GitHub App installations offers it in
+  the allowlist, through the ordinary attach (`attachSessionRepositoryResource`),
+  which checks the allowlist again. Other automations keep only the
+  repositories they were saved with, and so does an agent's trigger that has
+  a repository of its own. The worker asks GitHub, through the allowlisted
+  installation, to resolve the event's `owner/name` and attaches it only when
+  GitHub's id is the allowlisted one, with GitHub's name and default branch
+  (event data can come from a test event), as the scheduler, so a repository
+  someone removed from the chat stays removed. Migration 1556 gave agents' GitHub
+  triggers saved with one repository (before they named it in a condition, so
+  they fired for every repository) an `equals` condition for it; other
+  automations were left as they are. The **Note** is
   optional: each run gets the event and the agent's Instructions do the
   rest (an empty note sends "Handle this event." or "Do your scheduled
   work."). **Chat** (`agent-trigger-chat-field.tsx`) says where runs go:
@@ -673,12 +694,15 @@ Opengeni's own GitHub tools) and suggested triggers:
 
 GitHub events carry no changed file paths, so CVE scanner's pull request
 trigger fires for every pull request and its run stops at once when no
-lockfile, dependency manifest or Dockerfile changed. A new ready-made agent
+lockfile, dependency manifest or Dockerfile changed. The Agents page lists
+the ones not added here yet under the workspace's agents, as **Ready-made**
+(each one click to add, then its page), for someone who can add agents; **Add
+agent** offers the same. A new ready-made agent
 is one more content file; no product code names any of them. Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the same dialog filled in from the suggestion (its events,
 conditions, note and name) so the person only picks the source and, for
-GitHub, a repository, then saves; a GitHub, Slack or This workspace source
+GitHub, the repositories, then saves; a GitHub, Slack or This workspace source
 it lacks is added on save. Its **Open full form** opens the automation form
 at the suggestion (`?agent=<id>&agentTrigger=<n>&returnTo=agent`). Ready-made agents
 name no internal Skills. Each names the `team` it is for ("Engineering"); Capabilities

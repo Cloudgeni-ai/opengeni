@@ -90,6 +90,7 @@ describe("GitHub webhook deliveries", () => {
     expect(event.actor).toEqual({ kind: "person", name: "octocat" });
     const data = event.data as Record<string, any>;
     expect(data.repository.full_name).toBe("acme/api");
+    expect(data.repository.id).toBe(42);
     expect(data.repository.hooks_url).toBeUndefined();
     expect(data.pull_request.head).toEqual({ ref: "retries", sha: "abc123" });
     expect(data.pull_request.labels).toEqual(["backend"]);
