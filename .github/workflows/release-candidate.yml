@@ -20,6 +20,19 @@ on:
         required: false
         default: ""
         type: string
+      lane:
+        description: release builds a Version source; hotfix builds the merge of an approved hotfix/* PR into production (CONTRIBUTING.md, Hotfix).
+        required: false
+        default: release
+        type: choice
+        options:
+          - release
+          - hotfix
+      reuse_source_sha:
+        description: Hotfix only. Source SHA of the live production candidate; images whose build inputs did not change are reused from its receipt.
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: release-candidate-${{ inputs.source_sha }}
@@ -40,6 +53,7 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       controller_sha: ${{ inputs.controller_sha }}
       provenance_sha: ${{ inputs.provenance_sha }}
+      lane: ${{ inputs.lane }}
     permissions:
       actions: read
       checks: read
@@ -148,6 +162,8 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          RELEASE_LANE: ${{ inputs.lane }}
+          REUSE_SOURCE_SHA: ${{ inputs.reuse_source_sha }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -184,10 +200,37 @@ jobs:
             echo "release candidate source must remain in current production ancestry; promote main first" >&2
             exit 1
           }
-          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
-            echo "pending changesets remain; merge the generated Version PR first" >&2
-            exit 1
-          fi
+          case "$RELEASE_LANE" in
+            release)
+              [ -z "$REUSE_SOURCE_SHA" ] || {
+                echo "reuse_source_sha is only valid for lane=hotfix" >&2
+                exit 1
+              }
+              if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
+                echo "pending changesets remain; merge the generated Version PR first" >&2
+                exit 1
+              fi
+              ;;
+            hotfix)
+              # A hotfix ships before the next Version, so its tree may carry
+              # pending changesets. They are released on main with the
+              # forward-port; the hotfix version is a suffix of the chart's.
+              if [ -n "$REUSE_SOURCE_SHA" ]; then
+                [[ "$REUSE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+                  echo "reuse_source_sha must be a 40-character lowercase git SHA" >&2
+                  exit 1
+                }
+                git merge-base --is-ancestor "$REUSE_SOURCE_SHA" origin/production || {
+                  echo "reuse_source_sha must be in production ancestry" >&2
+                  exit 1
+                }
+              fi
+              ;;
+            *)
+              echo "unknown release lane: $RELEASE_LANE" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Set up controller Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -238,9 +281,19 @@ jobs:
         id: meta
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_LANE: ${{ inputs.lane }}
         run: |
           set -euo pipefail
           version="$(cd .release/controller && bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml")"
+          if [ "$RELEASE_LANE" = hotfix ]; then
+            # The base version is already taken by its own release. One
+            # alphanumeric prerelease identifier keeps it valid semver.
+            [[ "$version" != *-* ]] || {
+              echo "hotfix base chart version ${version} is already a prerelease" >&2
+              exit 1
+            }
+            version="${version}-hotfix-${SOURCE_SHA::12}"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "candidate_tag=candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "source_tree_sha=$(git rev-parse "$SOURCE_SHA^{tree}")" >> "$GITHUB_OUTPUT"
@@ -446,10 +499,42 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # Every image except the relay copies the whole source tree, so a hotfix
+      # rebuilds them. The relay builds from agent/ alone: when agent/ is
+      # unchanged since the live candidate, reuse its exact relay digest.
+      - name: Plan hotfix relay reuse
+        id: reuse
+        if: ${{ inputs.lane == 'hotfix' && inputs.reuse_source_sha != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          REUSE_SOURCE_SHA: ${{ inputs.reuse_source_sha }}
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent; then
+            echo "agent/ changed since ${REUSE_SOURCE_SHA}; rebuilding the relay" >> "$GITHUB_STEP_SUMMARY"
+            echo "relay=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          dir="$RUNNER_TEMP/reused-candidate"
+          mkdir -p "$dir"
+          gh release download "opengeni-candidate-${REUSE_SOURCE_SHA}" --dir "$dir" \
+            --pattern release-candidate.json --pattern release-candidate.sha256
+          (cd "$dir" && sed 's#evidence/##' release-candidate.sha256 | sha256sum --check --strict)
+          jq -e --arg sha "$REUSE_SOURCE_SHA" --arg name "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-relay" \
+            '.schemaVersion == 2 and .sourceSha == $sha and .images.relay.name == $name' \
+            "$dir/release-candidate.json" > /dev/null
+          digest="$(jq -r '.images.relay.digest' "$dir/release-candidate.json")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "Reusing relay ${digest} from candidate ${REUSE_SOURCE_SHA} (agent/ unchanged)" >> "$GITHUB_STEP_SUMMARY"
+          echo "relay=true" >> "$GITHUB_OUTPUT"
+          echo "relay_digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The API, worker, web and sandbox images fill the runner's disk, and the
       # relay's cross-compilation toolchain then fails to unpack ("no space left
       # on device"). Free the runner before it, as before the desktop image.
       - name: Make room for the relay candidate
+        if: ${{ steps.reuse.outputs.relay != 'true' }}
         run: |
           set -euo pipefail
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -458,6 +543,7 @@ jobs:
 
       - name: Build and push relay candidate
         id: build-relay
+        if: ${{ steps.reuse.outputs.relay != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: agent
@@ -474,8 +560,14 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-relay.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.relay_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1

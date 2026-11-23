@@ -6,6 +6,8 @@ name: Release source admission
 # distinct provenance_sha admits source_sha as a fully green first-parent main
 # descendant of that exact Version merge; protected-main history is then fetched
 # as Git objects only so every intervening merge tree is recomputed.
+# lane=hotfix admits source_sha as the exact merge of an approved hotfix/* PR
+# into protected production, with its production push CI.
 on:
   workflow_call:
     inputs:
@@ -21,6 +23,11 @@ on:
         description: Optional exact Version PR merge SHA that source_sha descends from. Empty selects the exact-source lane.
         required: false
         default: ""
+        type: string
+      lane:
+        description: release (Version source on main) or hotfix (approved hotfix/* merge into production).
+        required: false
+        default: release
         type: string
 
 permissions:
@@ -76,5 +83,6 @@ jobs:
           RELEASE_CONTROLLER_SHA: ${{ inputs.controller_sha }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_PROVENANCE_SHA: ${{ inputs.provenance_sha }}
+          RELEASE_LANE: ${{ inputs.lane }}
           RELEASE_DESCENDANT_GIT_DIR: ${{ github.workspace }}
         run: node scripts/check-release-pr-automation.mjs verify-approved-merge

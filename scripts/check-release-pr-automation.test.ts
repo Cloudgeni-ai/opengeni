@@ -2349,6 +2349,10 @@ function approvalFixture(
     movingMainParentRetainsBase?: boolean;
     patchComparisonWrongHead?: boolean;
     pullCommitCount?: number;
+    hotfix?: boolean;
+    hotfixHeadRef?: string;
+    productionSha?: string;
+    reviews?: Array<Record<string, unknown>>;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
@@ -2437,6 +2441,12 @@ function approvalFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     requests.push({ method, path: url.pathname, query: url.searchParams });
+    if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/production`) {
+      return response({
+        ref: "refs/heads/production",
+        object: { type: "commit", sha: options.productionSha ?? mergeSha },
+      });
+    }
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`) {
       mainReads += 1;
       return response(
@@ -2502,12 +2512,14 @@ function approvalFixture(
         user: author,
         merged_by: merger,
         base: {
-          ref: "main",
+          ref: options.hotfix ? "production" : "main",
           sha: reviewedBaseSha,
           repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         },
         head: {
-          ref: "changeset-release/main",
+          ref: options.hotfix
+            ? (options.hotfixHeadRef ?? "hotfix/urgent-fix")
+            : "changeset-release/main",
           sha: pullHeadSha,
           repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         },
@@ -2725,7 +2737,7 @@ function approvalFixture(
       );
     }
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews`)
-      return response([review]);
+      return response(options.reviews ?? [review]);
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews/9001`)
       return response({
         ...review,
@@ -2741,7 +2753,7 @@ function approvalFixture(
           event: "push",
           path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
           head_sha: mergeSha,
-          head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+          head_branch: options.hotfix ? "production" : RELEASE_AUTOMATION_CONTRACT.defaultBranch,
           check_suite_id: sourceCiCheckSuiteId,
           html_url:
             `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
@@ -2842,6 +2854,168 @@ function approvalFixture(
 }
 
 describe("release approval provenance", () => {
+  describe("hotfix lane", () => {
+    const hotfixMainSha = "ab".repeat(20);
+    const hotfixEnv = (overrides: Record<string, string> = {}) =>
+      approvalEnv({ RELEASE_LANE: "hotfix", ...overrides });
+    const hotfixFixture = (options: Parameters<typeof approvalFixture>[0] = {}) =>
+      approvalFixture({
+        hotfix: true,
+        controllerSha,
+        initialMainSha: hotfixMainSha,
+        terminalMainSha: hotfixMainSha,
+        controllerAncestorMainShas: [hotfixMainSha],
+        author: { login: "fix-author", id: 7001, type: "User" },
+        ...options,
+      });
+    const reviewFrom = (
+      id: number,
+      state: string,
+      user: Record<string, unknown>,
+      commitId = headSha,
+    ) => ({
+      id,
+      state,
+      commit_id: commitId,
+      submitted_at: "2026-07-23T11:59:00Z",
+      user,
+    });
+    const reviewer = { login: "second-pair", id: 7002, type: "User" };
+
+    test("admits an approved hotfix/* PR merged into production without a Version or release-head tag", async () => {
+      const fixture = hotfixFixture({ releaseHeadRefSha: null, release: null });
+      const result = await verifyApprovedMerge({
+        env: hotfixEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      });
+      expect(result).toEqual(
+        expect.objectContaining({
+          lane: "hotfix",
+          sourceSha: mergeSha,
+          pullRequestBase: "production",
+          pullRequestHeadRef: "hotfix/urgent-fix",
+          reviewedHeadSha: headSha,
+          approval: expect.objectContaining({
+            reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+            commitId: headSha,
+          }),
+        }),
+      );
+      expect(result).not.toHaveProperty("releaseHead");
+      expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+    });
+
+    test("refuses a hotfix without a non-author approval of the exact head", async () => {
+      const author = { login: "fix-author", id: 7001, type: "User" };
+      for (const reviews of [
+        [],
+        [reviewFrom(1, "APPROVED", author)],
+        [reviewFrom(1, "APPROVED", reviewer, "0".repeat(40))],
+        [reviewFrom(1, "COMMENTED", reviewer)],
+        [reviewFrom(1, "APPROVED", reviewer), reviewFrom(2, "DISMISSED", reviewer)],
+      ]) {
+        const fixture = hotfixFixture({ reviews });
+        await expect(
+          verifyApprovedMerge({
+            env: hotfixEnv(),
+            fetchImpl: fixture.fetchImpl,
+            logger: { log() {} },
+          }),
+        ).rejects.toThrow("no approving review of its exact head");
+      }
+    });
+
+    test("refuses a hotfix with an outstanding change request", async () => {
+      const other = { login: "third-pair", id: 7003, type: "User" };
+      const fixture = hotfixFixture({
+        reviews: [reviewFrom(1, "APPROVED", reviewer), reviewFrom(2, "CHANGES_REQUESTED", other)],
+      });
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv(),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("outstanding change request");
+    });
+
+    test("refuses a PR into main, a non-hotfix head and a source outside production", async () => {
+      const mainPull = approvalFixture({
+        controllerSha,
+        initialMainSha: hotfixMainSha,
+        terminalMainSha: hotfixMainSha,
+        controllerAncestorMainShas: [hotfixMainSha],
+      });
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv(),
+          fetchImpl: mainPull.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("pull-request base changed");
+      const featureHead = hotfixFixture({ hotfixHeadRef: "feature/fix" });
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv(),
+          fetchImpl: featureHead.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("not a hotfix/* branch");
+      const diverged = hotfixFixture({ productionSha: "cd".repeat(20) });
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv(),
+          fetchImpl: diverged.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("initial production is not ahead of the hotfix source");
+    });
+
+    test("requires the production push CI run, not a main run", async () => {
+      const fixture = hotfixFixture({
+        sourceRun: {
+          id: sourceCiRunId,
+          run_attempt: sourceCiRunAttempt,
+          status: "completed",
+          conclusion: "success",
+          event: "push",
+          path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+          head_sha: mergeSha,
+          head_branch: "main",
+          check_suite_id: sourceCiCheckSuiteId,
+          repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+          head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        },
+      });
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv(),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow();
+    });
+
+    test("rejects an unknown lane and a hotfix with a separate provenance", async () => {
+      const fixture = hotfixFixture();
+      await expect(
+        verifyApprovedMerge({
+          env: approvalEnv({ RELEASE_LANE: "fast" }),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("release lane is invalid");
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv({ RELEASE_PROVENANCE_SHA: "ef".repeat(20) }),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("no separate Version provenance");
+    });
+  });
+
   test("requires the workflow graph and dispatch ref to be the retained controller", async () => {
     const fixture = approvalFixture();
     await expect(

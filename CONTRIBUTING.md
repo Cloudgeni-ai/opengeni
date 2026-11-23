@@ -137,11 +137,20 @@ and artifacts afterward. Never print values or commit them to Git.
 
 **Promote `main` → `production`:** open a GitHub PR with base `production` and compare `main`. Merge with a **merge commit** (never squash, never GitHub rebase-and-merge: both rewrite SHAs and poison the next promote). The extra merge commit lives only on `production`. The next ship is the same PR shape again. Do not PR `production` back to `main` just because of that merge commit. Do not force-push `production`.
 
-**Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies).
-Then bring the hotfix back to `main` so daily work is not stranded. Once the main
-queue is enabled, queue that PR with a merge commit. Before activation, follow
-the currently allowed main merge method and the same local-test/review process.
-Production protections and the incident hotfix lane are unchanged.
+**Hotfix (urgent fix to production):** a merged hotfix can always be shipped
+without waiting for a release and without rolling back. Follow
+[Ship an urgent fix to production](https://github.com/Cloudgeni-ai/opengeni-ops/blob/main/docs/runbooks/ship-urgent-fix.md):
+
+1. Branch `hotfix/<name>` from `production`, PR it into `production`, get an
+   approving review of the exact head from someone other than the author, and
+   merge with a merge commit. Put the changeset in the forward-port, not here.
+2. In opengeni-ops run `bun run release:hotfix -- --pr <number>`. It builds the
+   candidate with `release-candidate.yml` `lane=hotfix` (pending changesets are
+   allowed; the chart version is `<live version>-hotfix-<sha12>`) and rolls
+   production forward through the ordinary release operator.
+3. Open the forward-port PR into `main` at the same time (the same patch plus
+   the changeset) and land it through the batcher, so the next ordinary release
+   ships it.
 
 **Official cut:** dispatch `open-version-pr.yml` on `main` (or set `VERSION_PR_ON_PUSH=true`). Merge the Version PR, promote that SHA to `production`, then `workflow_dispatch` the evidence-bound candidate / acceptance / publication workflows. Do not commit version bumps onto `production`. Official source ancestry is `origin/production`. The `production` pointer already exists; do not recreate it and do not force-push.
 
