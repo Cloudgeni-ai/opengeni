@@ -1117,6 +1117,7 @@ function recoverySealFixture(
     tagLookupStatus?: number;
     releaseLookupStatus?: number;
     sourceTreeSha?: string;
+    hotfix?: boolean;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
@@ -1142,12 +1143,12 @@ function recoverySealFixture(
     user: RELEASE_AUTOMATION_CONTRACT.releaseApprover,
     merged_by: merger,
     base: {
-      ref: "main",
+      ref: options.hotfix ? "production" : "main",
       sha: baseSha,
       repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
     },
     head: {
-      ref: "codex/release-chart-0.22.24",
+      ref: options.hotfix ? "hotfix/urgent-fix" : "codex/release-chart-0.22.24",
       sha: headSha,
       repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
     },
@@ -1215,6 +1216,8 @@ function recoverySealFixture(
     if (method !== "GET") return response({ message: "unexpected mutation" }, 405);
     if (url.pathname === prefix) return response(repository());
     if (url.pathname === `${prefix}/git/ref/heads/main`) return response(mainRef(currentMainSha));
+    if (url.pathname === `${prefix}/git/ref/heads/production`)
+      return response({ ref: "refs/heads/production", object: { type: "commit", sha: mergeSha } });
     if (url.pathname === `${prefix}/pulls/${pullNumber}`) {
       const readIndex = pullReads;
       pullReads += 1;
@@ -1597,6 +1600,39 @@ describe("release head retention recovery", () => {
         .filter((request) => request.path.endsWith(`/releases/tags/${result.releaseHead.name}`)),
     ).toHaveLength(2);
     expect(fixture.checks).toHaveLength(2);
+  });
+
+  test("retains a hotfix/* head merged into production without main ancestry", async () => {
+    const fixture = recoverySealFixture({
+      hotfix: true,
+      currentMainContainsSource: false,
+      releaseHeadRef: null,
+      release: null,
+    });
+    const result = await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+    expect(result.releaseHead.sha).toBe(headSha);
+    expect(
+      fixture.requests.some((request) => request.path.endsWith("/git/ref/heads/production")),
+    ).toBe(true);
+    const notHotfix = recoverySealFixture({
+      hotfix: true,
+      headRefs: ["feature/fix"],
+      releaseHeadRef: null,
+      release: null,
+    });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: notHotfix.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("requires a hotfix/* head");
+    expect(notHotfix.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
   test("replays recovery idempotently for a reviewed non-Version release head", async () => {

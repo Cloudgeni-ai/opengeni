@@ -990,9 +990,13 @@ function releaseHeadRecoveryContext(env, suppliedInputs) {
 }
 
 function assertRecoveryReleasePull(pull, context, expected) {
+  // A hotfix/* PR merged into protected production is the only non-main
+  // release source; its retained head is recovered against production.
+  const hotfix = pull?.base?.ref === RELEASE_AUTOMATION_CONTRACT.productionBranch;
   const identity = assertMergedPull(pull, {
     pullNumber: context.prNumber,
     sourceSha: context.sourceSha,
+    baseRef: hotfix ? RELEASE_AUTOMATION_CONTRACT.productionBranch : undefined,
   });
   invariant(identity.baseSha === context.baseSha, "release-head recovery base SHA changed");
   invariant(identity.headSha === context.headSha, "release-head recovery head SHA changed");
@@ -1001,6 +1005,14 @@ function assertRecoveryReleasePull(pull, context, expected) {
     pull?.head?.repo?.full_name,
     "release-head recovery pull-request head repository",
   );
+  if (hotfix) {
+    invariant(
+      headRef.startsWith(RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix) &&
+        headRef.length > RELEASE_AUTOMATION_CONTRACT.hotfixHeadPrefix.length &&
+        headRepository === RELEASE_AUTOMATION_CONTRACT.repository,
+      "release-head recovery into production requires a hotfix/* head in this repository",
+    );
+  }
   if (expected !== undefined) {
     assertIdentity(pull?.user, expected.author, "release-head recovery pull-request author");
     invariant(
@@ -1012,7 +1024,7 @@ function assertRecoveryReleasePull(pull, context, expected) {
       "release-head recovery pull-request head repository changed",
     );
   }
-  return { ...identity, headRef, headRepository };
+  return { ...identity, headRef, headRepository, hotfix };
 }
 
 async function assertSourceAncestorOfCurrentMain(
@@ -1112,7 +1124,22 @@ export async function recoverReleaseHeadEvidence(options = {}) {
     source.treeSha === head.treeSha
       ? await classifyMergeOutcome(api, source, pullIdentity)
       : "provider-verified-moving-main";
-  await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
+  if (pullIdentity.hotfix) {
+    const production = RELEASE_AUTOMATION_CONTRACT.productionBranch;
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.sourceSha,
+      directMainRefSha(
+        await api.get(repositoryPath(`/git/ref/heads/${production}`)),
+        "release-head recovery production",
+        production,
+      ),
+      "release-head recovery production",
+      "hotfix source",
+    );
+  } else {
+    await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
+  }
   const historicalAdmission = await verifyHistoricalSourceAdmission({
     number: context.prNumber,
     baseSha: context.baseSha,
