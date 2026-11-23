@@ -31,8 +31,7 @@ A minute of thought, no document:
   actions are plain or `og-button-ghost`.
 - **Lead with the working surface**: the table, list, board or form, set
   straight on the page. Summary numbers earn a place only when someone acts
-  on them; then one quiet row (label in `og-subtle`, value at heading size),
-  not four large cards.
+  on them, and then say what they compare to (a target, the last period).
 - **Show the data's shape.** This is where a tool stops looking generic. A
   stage is its place in a row of steps, a date is how far away it is ("in 9
   days", "3 days late"), an amount is a bar or a figure, a person is initials
@@ -62,9 +61,6 @@ A minute of thought, no document:
   `--og-focus`.
 - **Icons** are inline SVG from one family, 16 or 20px, `currentColor`, 1.5px
   stroke. No emoji as icons.
-- **Charts** are inline SVG drawn with tokens: the series that matters in
-  `--og-fg` or the accent, the others in muted grays, values labelled on the
-  marks instead of a legend, gridlines in `--og-border`. No gradient fills.
 
 ## Pages with a design of their own
 
@@ -124,7 +120,7 @@ Leave these out unless the person asks for them:
 - A purple, indigo or blue gradient hero, gradient text, glow, glass blur or
   decorative blobs.
 - Emoji as icons or in headings.
-- A row of three or four identical stat cards above everything.
+- Stat cards above a tool where nobody acts on the numbers.
 - Every block in the same rounded card with the same soft shadow; a colored
   stripe down a card's edge.
 - A small all-caps label above every heading; numbered markers (01, 02, 03)
