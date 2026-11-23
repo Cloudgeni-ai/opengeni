@@ -2962,6 +2962,48 @@ describe("release approval provenance", () => {
       }
     });
 
+    test("admits an unreviewed urgent hotfix only with review_after_merge and records it", async () => {
+      const fixture = hotfixFixture({ reviews: [] });
+      const result = await verifyApprovedMerge({
+        env: hotfixEnv({ RELEASE_REVIEW_AFTER_MERGE: "true" }),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      });
+      expect(result).toEqual(
+        expect.objectContaining({ lane: "hotfix", approval: null, reviewAfterMerge: true }),
+      );
+      const approved = hotfixFixture({ reviews: [reviewFrom(1, "APPROVED", reviewer)] });
+      const reviewed = await verifyApprovedMerge({
+        env: hotfixEnv({ RELEASE_REVIEW_AFTER_MERGE: "true" }),
+        fetchImpl: approved.fetchImpl,
+        logger: { log() {} },
+      });
+      expect(reviewed).toEqual(expect.objectContaining({ reviewAfterMerge: false }));
+      expect(reviewed.approval).toEqual(expect.objectContaining({ reviewerLogin: "second-pair" }));
+      const objected = hotfixFixture({ reviews: [reviewFrom(1, "CHANGES_REQUESTED", reviewer)] });
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv({ RELEASE_REVIEW_AFTER_MERGE: "true" }),
+          fetchImpl: objected.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("outstanding change request");
+      await expect(
+        verifyApprovedMerge({
+          env: approvalEnv({ RELEASE_REVIEW_AFTER_MERGE: "true" }),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("only valid for a hotfix");
+      await expect(
+        verifyApprovedMerge({
+          env: hotfixEnv({ RELEASE_REVIEW_AFTER_MERGE: "yes" }),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
+        }),
+      ).rejects.toThrow("must be true or false");
+    });
+
     test("refuses a hotfix with an outstanding change request", async () => {
       const other = { login: "third-pair", id: 7003, type: "User" };
       const fixture = hotfixFixture({

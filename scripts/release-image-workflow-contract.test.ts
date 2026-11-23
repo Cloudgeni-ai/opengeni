@@ -893,6 +893,7 @@ describe("release image workflow contract", () => {
       controller_sha: "${{ inputs.controller_sha }}",
       provenance_sha: "${{ inputs.provenance_sha }}",
       lane: "${{ inputs.lane }}",
+      review_after_merge: "${{ inputs.review_after_merge }}",
     });
     // Hotfix lane: explicit, defaulting to the ordinary Version lane; only the
     // hotfix lane tolerates pending changesets, suffixes the version and may
@@ -907,8 +908,44 @@ describe("release image workflow contract", () => {
       default: "",
     });
     expect(candidate).toContain('version="${version}-hotfix-${SOURCE_SHA::12}"');
-    expect(candidate).toContain("reuse_source_sha is only valid for lane=hotfix");
+    expect(candidate).toContain(
+      "reuse_source_sha, reuse_images and review_after_merge are only valid for lane=hotfix",
+    );
     expect(candidate).toContain('git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent');
+    expect(parsed.on.workflow_dispatch.inputs.reuse_images).toMatchObject({
+      required: false,
+      default: "",
+    });
+    expect(parsed.on.workflow_dispatch.inputs.review_after_merge).toMatchObject({
+      required: false,
+      default: false,
+      type: "boolean",
+    });
+    // Per-workload rebuild: the reuse plan runs before any image build, and
+    // every image either builds or takes its exact reused digest, which the
+    // anonymous pull proof then covers like a built one.
+    const candidateSteps = parsed.jobs.candidate?.steps ?? [];
+    const candidateStepIndex = (id: string) => candidateSteps.findIndex((step) => step.id === id);
+    expect(candidateStepIndex("reuse")).toBeGreaterThan(-1);
+    for (const role of [
+      "api",
+      "worker",
+      "web",
+      "sandbox",
+      "relay",
+      "artifact-materializer",
+      "artifact-outbox-dispatcher",
+      "desktop",
+    ]) {
+      const key = role.replaceAll("-", "_");
+      expect(candidateStepIndex(`build-${role}`)).toBeGreaterThan(candidateStepIndex("reuse"));
+      expect(candidateSteps[candidateStepIndex(`build-${role}`)]?.if).toBe(
+        `\${{ steps.reuse.outputs.${key} != 'true' }}`,
+      );
+      expect(candidateSteps[candidateStepIndex(role)]?.env?.REUSED_DIGEST).toBe(
+        `\${{ steps.reuse.outputs.${key}_digest }}`,
+      );
+    }
     expect(parsed.jobs["artifact-runtime"]?.needs).toBe("admission");
     expect(parsed.jobs.candidate?.needs).toEqual(["admission", "artifact-runtime"]);
     expect(parsed.jobs.admission?.permissions).toEqual({

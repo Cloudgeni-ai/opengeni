@@ -29,10 +29,20 @@ on:
           - release
           - hotfix
       reuse_source_sha:
-        description: Hotfix only. Source SHA of the live production candidate; images whose build inputs did not change are reused from its receipt.
+        description: Hotfix only. Source SHA of the live production candidate; the relay is reused from its receipt when agent/ is unchanged.
         required: false
         default: ""
         type: string
+      reuse_images:
+        description: Hotfix only. Comma list of images to reuse from the reuse_source_sha candidate instead of rebuilding (api, worker, web, sandbox, relay, artifact-materializer, artifact-outbox-dispatcher, desktop). The ops hotfix lane proposes it from the diff.
+        required: false
+        default: ""
+        type: string
+      review_after_merge:
+        description: Hotfix only. Urgent fix without a non-author approval; admitted and recorded as unreviewed for review after the fact.
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: release-candidate-${{ inputs.source_sha }}
@@ -54,6 +64,7 @@ jobs:
       controller_sha: ${{ inputs.controller_sha }}
       provenance_sha: ${{ inputs.provenance_sha }}
       lane: ${{ inputs.lane }}
+      review_after_merge: ${{ inputs.review_after_merge }}
     permissions:
       actions: read
       checks: read
@@ -164,6 +175,8 @@ jobs:
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
           RELEASE_LANE: ${{ inputs.lane }}
           REUSE_SOURCE_SHA: ${{ inputs.reuse_source_sha }}
+          REUSE_IMAGES: ${{ inputs.reuse_images }}
+          REVIEW_AFTER_MERGE: ${{ inputs.review_after_merge }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -202,8 +215,8 @@ jobs:
           }
           case "$RELEASE_LANE" in
             release)
-              [ -z "$REUSE_SOURCE_SHA" ] || {
-                echo "reuse_source_sha is only valid for lane=hotfix" >&2
+              [ -z "$REUSE_SOURCE_SHA" ] && [ -z "$REUSE_IMAGES" ] && [ "$REVIEW_AFTER_MERGE" != true ] || {
+                echo "reuse_source_sha, reuse_images and review_after_merge are only valid for lane=hotfix" >&2
                 exit 1
               }
               if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
@@ -224,6 +237,21 @@ jobs:
                   echo "reuse_source_sha must be in production ancestry" >&2
                   exit 1
                 }
+              fi
+              if [ -n "$REUSE_IMAGES" ]; then
+                [ -n "$REUSE_SOURCE_SHA" ] || {
+                  echo "reuse_images requires reuse_source_sha" >&2
+                  exit 1
+                }
+                for role in ${REUSE_IMAGES//,/ }; do
+                  case "$role" in
+                    api|worker|web|sandbox|relay|artifact-materializer|artifact-outbox-dispatcher|desktop) ;;
+                    *)
+                      echo "unknown reuse_images entry: $role" >&2
+                      exit 1
+                      ;;
+                  esac
+                done
               fi
               ;;
             *)
@@ -381,8 +409,69 @@ jobs:
           OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         run: scripts/bake-agent.sh sign
 
+      # A hotfix rebuilds every image except those it reuses by exact digest
+      # from the live candidate's verified receipt: the relay whenever agent/
+      # (its whole build context) is unchanged, plus the images the operator
+      # lists in reuse_images (the ops hotfix lane proposes them from the diff).
+      # Every reused digest is re-proven by anonymous pull below and recorded.
+      - name: Plan hotfix image reuse
+        id: reuse
+        if: ${{ inputs.lane == 'hotfix' && inputs.reuse_source_sha != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          REUSE_SOURCE_SHA: ${{ inputs.reuse_source_sha }}
+          REUSE_IMAGES: ${{ inputs.reuse_images }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/reused-candidate"
+          mkdir -p "$dir" evidence
+          gh release download "opengeni-candidate-${REUSE_SOURCE_SHA}" --dir "$dir" \
+            --pattern release-candidate.json --pattern release-candidate.sha256 \
+            --pattern release-chart.sha256 --pattern 'opengeni-*.tgz'
+          (cd "$dir" && sed 's#evidence/##' release-candidate.sha256 | sha256sum --check --strict)
+          (cd "$dir" && sed 's#\.release/charts/##' release-chart.sha256 | sha256sum --check --strict)
+          jq -e --arg sha "$REUSE_SOURCE_SHA" '.schemaVersion == 2 and .sourceSha == $sha' \
+            "$dir/release-candidate.json" > /dev/null
+          roles=" ${REUSE_IMAGES//,/ } "
+          if git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent; then
+            roles="${roles} relay "
+          elif [[ "$roles" == *" relay "* ]]; then
+            echo "agent/ changed since ${REUSE_SOURCE_SHA}; the relay cannot be reused" >&2
+            exit 1
+          fi
+          reused='{}'
+          for role in api worker web sandbox relay artifact-materializer artifact-outbox-dispatcher desktop; do
+            [[ "$roles" == *" ${role} "* ]] || continue
+            if [ "$role" = desktop ]; then
+              # The desktop box is pinned by the chart, not the receipt.
+              ref="$(tar -xzOf "$dir"/opengeni-*.tgz opengeni/values.yaml | awk '$1 == "imageRef:" { gsub(/"/, "", $2); print $2; exit }')"
+              [ "${ref%@*}" = "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-desktop" ] || {
+                echo "reused chart desktop pin is not an Opengeni desktop image: ${ref}" >&2
+                exit 1
+              }
+              digest="${ref#*@}"
+            else
+              digest="$(jq -er --arg role "$role" --arg name "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}" \
+                '.images[$role] | select(.name == $name) | .digest' "$dir/release-candidate.json")"
+            fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "no exact ${role} digest in candidate ${REUSE_SOURCE_SHA}" >&2
+              exit 1
+            }
+            key="${role//-/_}"
+            echo "${key}=true" >> "$GITHUB_OUTPUT"
+            echo "${key}_digest=${digest}" >> "$GITHUB_OUTPUT"
+            reused="$(jq -c --arg role "$role" --arg digest "$digest" '. + {($role): $digest}' <<<"$reused")"
+            echo "Reusing ${role} ${digest} from candidate ${REUSE_SOURCE_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          done
+          jq -n --arg sourceSha "$SOURCE_SHA" --arg reuseSourceSha "$REUSE_SOURCE_SHA" --argjson images "$reused" \
+            '{schemaVersion:1,sourceSha:$sourceSha,reusedFrom:$reuseSourceSha,images:$images}' \
+            > evidence/release-candidate-reuse.json
+
       - name: Build and push API candidate
         id: build-api
+        if: ${{ steps.reuse.outputs.api != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -402,8 +491,14 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-api.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.api_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || {
@@ -414,6 +509,7 @@ jobs:
 
       - name: Build and push worker candidate
         id: build-worker
+        if: ${{ steps.reuse.outputs.worker != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -433,8 +529,14 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-worker.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.worker_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
@@ -442,6 +544,7 @@ jobs:
 
       - name: Build and push web candidate
         id: build-web
+        if: ${{ steps.reuse.outputs.web != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -462,8 +565,14 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-web.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.web_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
@@ -471,6 +580,7 @@ jobs:
 
       - name: Build and push headless sandbox candidate
         id: build-sandbox
+        if: ${{ steps.reuse.outputs.sandbox != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -492,43 +602,18 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-sandbox.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.sandbox_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      # Every image except the relay copies the whole source tree, so a hotfix
-      # rebuilds them. The relay builds from agent/ alone: when agent/ is
-      # unchanged since the live candidate, reuse its exact relay digest.
-      - name: Plan hotfix relay reuse
-        id: reuse
-        if: ${{ inputs.lane == 'hotfix' && inputs.reuse_source_sha != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          REUSE_SOURCE_SHA: ${{ inputs.reuse_source_sha }}
-        run: |
-          set -euo pipefail
-          if ! git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent; then
-            echo "agent/ changed since ${REUSE_SOURCE_SHA}; rebuilding the relay" >> "$GITHUB_STEP_SUMMARY"
-            echo "relay=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          dir="$RUNNER_TEMP/reused-candidate"
-          mkdir -p "$dir"
-          gh release download "opengeni-candidate-${REUSE_SOURCE_SHA}" --dir "$dir" \
-            --pattern release-candidate.json --pattern release-candidate.sha256
-          (cd "$dir" && sed 's#evidence/##' release-candidate.sha256 | sha256sum --check --strict)
-          jq -e --arg sha "$REUSE_SOURCE_SHA" --arg name "${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-relay" \
-            '.schemaVersion == 2 and .sourceSha == $sha and .images.relay.name == $name' \
-            "$dir/release-candidate.json" > /dev/null
-          digest="$(jq -r '.images.relay.digest' "$dir/release-candidate.json")"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "Reusing relay ${digest} from candidate ${REUSE_SOURCE_SHA} (agent/ unchanged)" >> "$GITHUB_STEP_SUMMARY"
-          echo "relay=true" >> "$GITHUB_OUTPUT"
-          echo "relay_digest=$digest" >> "$GITHUB_OUTPUT"
 
       # The API, worker, web and sandbox images fill the runner's disk, and the
       # relay's cross-compilation toolchain then fails to unpack ("no space left
@@ -575,6 +660,7 @@ jobs:
 
       - name: Build and push artifact materializer candidate
         id: build-artifact-materializer
+        if: ${{ steps.reuse.outputs.artifact_materializer != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -594,8 +680,14 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-artifact-materializer:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-artifact-materializer.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.artifact_materializer_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
@@ -603,6 +695,7 @@ jobs:
 
       - name: Build and push artifact outbox dispatcher candidate
         id: build-artifact-outbox-dispatcher
+        if: ${{ steps.reuse.outputs.artifact_outbox_dispatcher != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -622,8 +715,14 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-artifact-outbox-dispatcher:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-artifact-outbox-dispatcher.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.artifact_outbox_dispatcher_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
@@ -633,6 +732,7 @@ jobs:
       # pins it by digest as desktop.imageRef, so every release carries the box
       # built from its own source. It is large: free the runner first.
       - name: Make room for the desktop candidate
+        if: ${{ steps.reuse.outputs.desktop != 'true' }}
         run: |
           set -euo pipefail
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -641,6 +741,7 @@ jobs:
 
       - name: Build and push desktop candidate
         id: build-desktop
+        if: ${{ steps.reuse.outputs.desktop != 'true' }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -662,8 +763,14 @@ jobs:
         env:
           IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-desktop:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-desktop.outputs.digest }}
+          REUSED_DIGEST: ${{ steps.reuse.outputs.desktop_digest }}
         run: |
           set -euo pipefail
+          if [ -n "$REUSED_DIGEST" ]; then
+            # Anonymous pull of this exact digest is proven below with the others.
+            echo "digest=$REUSED_DIGEST" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
@@ -845,6 +952,7 @@ jobs:
             evidence/release-chart.sha256
             .release/charts/opengeni-${{ steps.meta.outputs.version }}.tgz
             evidence/release-packages-plan.json
+            evidence/release-candidate-reuse.json
           if-no-files-found: error
           retention-days: 90
 
@@ -876,7 +984,10 @@ jobs:
             cmp evidence/release-chart.sha256 /tmp/opengeni-release-candidate-existing/release-chart.sha256
             cmp ".release/charts/opengeni-${RELEASE_VERSION}.tgz" "/tmp/opengeni-release-candidate-existing/opengeni-${RELEASE_VERSION}.tgz"
           else
+            reuse_asset=()
+            [ ! -f evidence/release-candidate-reuse.json ] || reuse_asset=(evidence/release-candidate-reuse.json)
             gh release create "$tag" \
+              "${reuse_asset[@]}" \
               evidence/release-candidate.json \
               evidence/release-candidate.sha256 \
               evidence/release-chart.sha256 \

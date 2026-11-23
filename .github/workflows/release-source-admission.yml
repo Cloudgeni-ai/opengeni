@@ -29,6 +29,11 @@ on:
         required: false
         default: release
         type: string
+      review_after_merge:
+        description: Hotfix only. Admit an urgent hotfix without a non-author approval; the receipt records it as unreviewed.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -84,5 +89,6 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_PROVENANCE_SHA: ${{ inputs.provenance_sha }}
           RELEASE_LANE: ${{ inputs.lane }}
+          RELEASE_REVIEW_AFTER_MERGE: ${{ inputs.review_after_merge }}
           RELEASE_DESCENDANT_GIT_DIR: ${{ github.workspace }}
         run: node scripts/check-release-pr-automation.mjs verify-approved-merge

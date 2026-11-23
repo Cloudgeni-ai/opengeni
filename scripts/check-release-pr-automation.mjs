@@ -2306,12 +2306,20 @@ function releaseApprovalContext(env, suppliedSourceSha, suppliedProvenanceSha) {
     !hotfix || provenanceSha === sourceSha,
     "a hotfix release has no separate Version provenance",
   );
+  const reviewAfterMergeValue = env.RELEASE_REVIEW_AFTER_MERGE ?? "";
+  invariant(
+    ["", "false", "true"].includes(reviewAfterMergeValue),
+    "review_after_merge must be true or false",
+  );
+  const reviewAfterMerge = reviewAfterMergeValue === "true";
+  invariant(!reviewAfterMerge || hotfix, "review_after_merge is only valid for a hotfix");
   return {
     controllerSha,
     sourceSha,
     provenanceSha,
     descendant: provenanceSha !== sourceSha,
     hotfix,
+    reviewAfterMerge,
     token: env.GITHUB_TOKEN,
   };
 }
@@ -3785,13 +3793,14 @@ async function verifyVersionHeadRelease({
 // ancestry. It keeps the exact reviewed-head, topology, source-admission and
 // push-CI proofs of the ordinary lane, bound to `production` instead of main,
 // and additionally requires an approving review of the exact head by someone
-// other than its author. A merge commit retains the reviewed head as a parent
+// other than its author, unless the dispatcher marks an urgent fix for review
+// after merge (recorded as approval: null, reviewAfterMerge: true). A merge commit retains the reviewed head as a parent
 // of protected production, so no separate release-head tag is required.
 // Version bumps stay on main: the candidate suffixes the chart version, and the
 // fix must still be brought to main for the next ordinary release.
 // ---------------------------------------------------------------------------
 
-function hotfixApproval(reviews, pullIdentity) {
+function hotfixApproval(reviews, pullIdentity, reviewAfterMerge) {
   const latestByReviewer = new Map();
   for (const value of reviews) {
     const review = record(value, "hotfix review");
@@ -3813,9 +3822,11 @@ function hotfixApproval(reviews, pullIdentity) {
       review.user.type === "User" &&
       review.user.id !== pullIdentity.author.id,
   );
+  if (approvals.length === 0 && reviewAfterMerge) return null;
   invariant(
     approvals.length > 0,
-    "hotfix PR has no approving review of its exact head by someone other than its author",
+    "hotfix PR has no approving review of its exact head by someone other than its author; " +
+      "approve it, or dispatch with review_after_merge=true for an urgent fix reviewed after the fact",
   );
   const approval = approvals.sort((left, right) => left.id - right.id)[0];
   return {
@@ -3905,7 +3916,7 @@ async function verifyHotfixRelease({ options, logger, context, api }) {
     repositoryPath(`/pulls/${pullNumber}/reviews`),
     "hotfix PR reviews",
   );
-  const approval = hotfixApproval(reviews, pullIdentity);
+  const approval = hotfixApproval(reviews, pullIdentity, context.reviewAfterMerge);
   const review = mergedSourceReview(pullNumber, context.sourceSha, pullIdentity);
   const [headChecks, sourceChecks] = await Promise.all([
     paginatedCheckRuns(api, pullIdentity.headSha),
@@ -3966,12 +3977,16 @@ async function verifyHotfixRelease({ options, logger, context, api }) {
     reviewedHeadTreeSha: head.treeSha,
     review,
     approval,
+    reviewAfterMerge: approval === null,
     sourceAdmission,
     requiredSourceChecks,
   };
   logger.log(
-    `Verified hotfix PR #${pullNumber} into ${production} (${mergeMethod}), approved by ` +
-      `${approval.reviewerLogin}, with exact checks for ${context.sourceSha}.`,
+    `Verified hotfix PR #${pullNumber} into ${production} (${mergeMethod}), ` +
+      (approval
+        ? `approved by ${approval.reviewerLogin}`
+        : "UNREVIEWED (urgent; review after merge required)") +
+      `, with exact checks for ${context.sourceSha}.`,
   );
   return provenance;
 }
