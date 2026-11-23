@@ -719,8 +719,19 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
     turnId?: string;
     attemptId?: string;
     executionGeneration?: number;
+    /** Turn shell marker path of an unsupervised command; see migration 1559. */
+    processGroupMarker?: string | undefined;
   },
 ): Promise<SessionBackgroundCommand> {
+  const processGroupMarker = input.processGroupMarker ?? null;
+  if (
+    processGroupMarker !== null &&
+    (processGroupMarker.length > 1024 ||
+      !processGroupMarker.startsWith("/") ||
+      /[\0\n\r']/u.test(processGroupMarker))
+  ) {
+    throw new Error("Managed background command process-group marker is malformed");
+  }
   const [process] = await db
     .select({
       accountId: schema.sandboxRetainedProcesses.accountId,
@@ -758,6 +769,7 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
       retainedProcessId: input.retainedProcessId,
       commandPreview: commandPreview(input.command),
       commandText: input.command,
+      processGroupMarker,
       launchTurnId: input.turnId ?? null,
       launchAttemptId: input.attemptId ?? null,
       launchExecutionGeneration: input.executionGeneration ?? null,
@@ -1590,6 +1602,35 @@ export type SessionCommandIdentity = {
   sessionId: string;
   commandId: string;
 };
+
+/** The persisted process-group marker of the stopping managed command that
+ * owns `retainedProcessId` (migration 1559), or null when it has none, is not
+ * stopping, or is not a managed command. */
+export async function getStoppingManagedCommandProcessGroupMarker(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; retainedProcessId: string },
+): Promise<string | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({ marker: schema.sessionBackgroundCommands.processGroupMarker })
+        .from(schema.sessionBackgroundCommands)
+        .where(
+          and(
+            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            eq(schema.sessionBackgroundCommands.retainedProcessId, input.retainedProcessId),
+            eq(schema.sessionBackgroundCommands.provider, "managed"),
+            eq(schema.sessionBackgroundCommands.state, "stopping"),
+          ),
+        )
+        .limit(1);
+      return row?.marker ?? null;
+    },
+  );
+}
 
 /** The immutable machine locator of one of this session's RUNNING connected
  * commands, copied at adoption: what any attempt of the session reads its

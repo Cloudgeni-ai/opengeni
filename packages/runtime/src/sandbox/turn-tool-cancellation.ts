@@ -223,9 +223,13 @@ type CommandCancellationSession = {
   /** Whether the provider locator remains controllable from another worker
    * process after this turn returns. */
   canAdoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): boolean;
+  /** `processGroupMarker` is the wrapper's marker path, persisted with the
+   * session background command so a later Pause, Cancel or explicit stop can
+   * stop its whole process group without this turn's memory. */
   adoptRetainedProcessAsBackgroundCommand?(
     providerSessionId: number,
     command?: string,
+    processGroupMarker?: string,
   ): Promise<void>;
   /** Rebind a session background command started by an earlier turn so this
    * turn reads and writes it through the retained-process path. False when the
@@ -689,6 +693,20 @@ function shellCancellationPath(markerPath: string): string {
   return `${markerPath}.cancelled`;
 }
 
+const TURN_SHELL_MARKER_PATH =
+  /^\/[A-Za-z0-9._/-]{0,512}\/opengeni-turn-shell\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/** Whether `value` is the process-group marker path a turn shell wrapper
+ * writes: an absolute `<tmp>/opengeni-turn-shell/<uuid>` path, never a
+ * relative, traversing or otherwise unexpected one. */
+export function isTurnShellMarkerPath(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    TURN_SHELL_MARKER_PATH.test(value) &&
+    !value.split("/").some((segment) => segment === "." || segment === "..")
+  );
+}
+
 function processInspectionCommandLines(): string[] {
   return [
     "__opengeni_process_group_id() {",
@@ -971,10 +989,45 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
  * malformed, mismatched, or unavailable identity never opens the fence.
  */
 function retainedShellCancellationCommand(state: ActiveShellSession): string {
-  const marker = singleQuote(state.markerPath!);
-  const cancellation = singleQuote(shellCancellationPath(state.markerPath!));
-  const markerDir = singleQuote(posix.dirname(state.markerPath!));
-  const token = singleQuote(state.token!);
+  return processGroupStopScript(state.markerPath!, state.token!);
+}
+
+/** Exit codes of {@link processGroupStopCommand}. */
+export const PROCESS_GROUP_STOP_EXIT = {
+  /** The group is absent (stopped now or already gone). */
+  stopped: 0,
+  /** No marker: the wrapper never started user code or already exited. */
+  markerAbsent: RETAINED_SHELL_MARKER_PENDING_EXIT_CODE,
+  /** The group survived TERM and KILL. */
+  groupLive: RETAINED_SHELL_GROUP_LIVE_EXIT_CODE,
+  /** Identity could not be read or validated. */
+  inconclusive: RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE,
+} as const;
+
+/**
+ * The in-box helper that stops the process group of a command started through
+ * {@link cancellableShellCommand}, given only its marker path. A session
+ * background command outlives the turn that wrapped it, so whoever stops it
+ * later (Pause, terminal Cancel or an explicit stop, through the
+ * retained-process reconciler) knows the persisted marker path but not the
+ * turn's in-memory state. The token is the marker's file name, exactly as the
+ * wrapper derived it. The same token/PGID identity guard as the in-turn
+ * cancellation runs before any signal, TERM escalates to KILL, and success
+ * means the group is absent. The result is a best-effort stop only: exit/loss
+ * proof still comes from the provider.
+ */
+export function processGroupStopCommand(markerPath: string): string {
+  if (!isTurnShellMarkerPath(markerPath)) {
+    throw new Error("Process-group stop requires a turn shell marker path");
+  }
+  return processGroupStopScript(markerPath, posix.basename(markerPath));
+}
+
+function processGroupStopScript(markerPath: string, rawToken: string): string {
+  const marker = singleQuote(markerPath);
+  const cancellation = singleQuote(shellCancellationPath(markerPath));
+  const markerDir = singleQuote(posix.dirname(markerPath));
+  const token = singleQuote(rawToken);
   return [
     ...processInspectionCommandLines(),
     "umask 077",
@@ -2568,6 +2621,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       await state.processSession.adoptRetainedProcessAsBackgroundCommand(
         state.sessionId,
         state.command,
+        state.markerPath && isTurnShellMarkerPath(state.markerPath) ? state.markerPath : undefined,
       );
       this.shellSessions.delete(state.sessionId);
     }

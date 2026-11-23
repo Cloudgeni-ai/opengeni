@@ -25,7 +25,12 @@ import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
 import { createHash, randomUUID } from "node:crypto";
 import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
-import { isProviderCommandObservationUnavailableError } from "@opengeni/runtime";
+import {
+  isProviderCommandObservationUnavailableError,
+  isTurnShellMarkerPath,
+  processGroupStopCommand,
+  PROCESS_GROUP_STOP_EXIT,
+} from "@opengeni/runtime";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
@@ -116,6 +121,7 @@ import {
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
   connectedCommandReconciliationRetryMs,
+  getStoppingManagedCommandProcessGroupMarker,
   recordConnectedCommandOutputConsumption,
   settleConnectedCommandOutputReleaseClaim,
   settleConnectedCommandOutputRetry,
@@ -478,6 +484,8 @@ export type RetainedProcessProbeFn = (
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
   drainBudget?: RetainedProcessDrainBudget,
+  /** Persisted turn shell marker of an unsupervised stopping command. */
+  processGroupMarker?: string | null,
 ) => Promise<RetainedProcessProbeResult>;
 
 /** Shared wall-clock bound on output draining within one reconciliation sweep. */
@@ -3204,6 +3212,25 @@ async function reconcileTerminalRetainedProcesses(
               );
               supervisionMetric("cancellation_intent");
             }
+            // An unsupervised stopping command has no supervisor to cancel
+            // through. Its persisted wrapper marker lets the cancelling probe
+            // signal its process group, instead of only waiting for an exit
+            // that a command ignoring INT/TERM may never make.
+            const processGroupMarker =
+              !supervised && claim.ownerState === "background_stopping"
+                ? await getStoppingManagedCommandProcessGroupMarker(db, {
+                    accountId: process.accountId,
+                    workspaceId: process.workspaceId,
+                    sessionId: process.sessionId,
+                    retainedProcessId: process.id,
+                  }).catch((error: unknown) => {
+                    observability.warn(
+                      "sandbox reaper: stopping command process-group marker unavailable",
+                      { processId: process.id, error: errorMessage(error) },
+                    );
+                    return null;
+                  })
+                : null;
             const legacyDeadlineStop =
               lease!.rotationReason === "provider_deadline" &&
               !supervised &&
@@ -3240,6 +3267,7 @@ async function reconcileTerminalRetainedProcesses(
               },
               commandPersistence,
               drainBudget,
+              processGroupMarker,
             ).then(
               (value) => ({ ok: true as const, value }),
               (error: unknown) => ({ ok: false as const, error }),
@@ -3581,6 +3609,12 @@ type RetainedProcessProbeClient = {
 
 type RetainedProcessProbeSession = ProviderCommandSession & {
   acknowledgeCommandOutput?: (result: string) => Promise<void>;
+  execCommand?: (args: {
+    cmd: string;
+    tty?: boolean;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<unknown>;
   writeStdin?: (args: {
     sessionId: number;
     chars: string;
@@ -3711,6 +3745,7 @@ export async function probeRetainedProcessAtProvider(
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
   drainBudget?: RetainedProcessDrainBudget,
+  processGroupMarker?: string | null,
 ): Promise<RetainedProcessProbeResult> {
   if (
     lease.id !== process.leaseId ||
@@ -3902,11 +3937,19 @@ export async function probeRetainedProcessAtProvider(
             lease.rotationReason === "provider_deadline" ? "provider_deadline" : "explicit_stop",
           )) ?? false)
         : false;
+    // An unsupervised command has no supervisor to stop it, and a non-PTY
+    // command has no provider signal: stop its process group in the box
+    // through the wrapper's persisted marker. Best effort; the read below
+    // remains the only exit proof.
+    const groupStopped =
+      mode === "cancel" && !supervisedCancelled && processGroupMarker
+        ? await stopRetainedProcessGroup(session, processGroupMarker)
+        : false;
     // A stopped command takes up to the supervisor's KILL escalation to exit.
     // Wait for it here, within the sweep's budget, so the stop settles now
     // instead of after a backoff; the read returns as soon as it exits.
     const readWaitMs =
-      supervisedCancelled &&
+      (supervisedCancelled || groupStopped) &&
       Date.now() + RETAINED_PROCESS_STOP_SETTLE_WAIT_MS < (drainBudget?.until ?? Infinity)
         ? RETAINED_PROCESS_STOP_SETTLE_WAIT_MS
         : 1_000;
@@ -4014,6 +4057,38 @@ export async function probeRetainedProcessAtProvider(
     }
   }
   return observation;
+}
+
+/**
+ * Run the turn shell's token/PGID-guarded TERM/KILL helper for an unsupervised
+ * command's process group, as a separate exec on the same box. True when the
+ * helper reports the group absent (stopped, or already gone). Never exit
+ * proof: a malformed marker, a missing exec surface, a timeout or any failure
+ * returns false, and the caller's provider read still decides settlement.
+ */
+export async function stopRetainedProcessGroup(
+  session: Pick<RetainedProcessProbeSession, "execCommand">,
+  processGroupMarker: string,
+): Promise<boolean> {
+  if (!isTurnShellMarkerPath(processGroupMarker) || typeof session.execCommand !== "function")
+    return false;
+  try {
+    const result = await withRetainedProcessProbeTimeout(
+      session.execCommand({
+        cmd: processGroupStopCommand(processGroupMarker),
+        tty: false,
+        yieldTimeMs: 2_000,
+        maxOutputTokens: 128,
+      }),
+    );
+    const exitCode = typeof result === "string" ? parseExecBannerExitCode(result) : null;
+    return (
+      exitCode === PROCESS_GROUP_STOP_EXIT.stopped ||
+      exitCode === PROCESS_GROUP_STOP_EXIT.markerAbsent
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Classify only exact SDK control banners. Arbitrary output, malformed text,

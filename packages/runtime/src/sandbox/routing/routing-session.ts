@@ -365,6 +365,9 @@ export interface RoutingSandboxSessionDeps {
     backend: ResolvedActiveBackend;
     process: RoutingRetainedProcess;
     command?: string | undefined;
+    /** Turn shell marker path of an unsupervised command (see
+     * processGroupStopCommand); absent for supervised commands. */
+    processGroupMarker?: string | undefined;
   }) => Promise<void>;
   /** Find the durable identity of a session background command this session
    * owns, by the provider handle an earlier turn returned to the model. Only a
@@ -3039,6 +3042,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async adoptRetainedProcessAsBackgroundCommand(
     providerSessionId: number,
     command?: string,
+    processGroupMarker?: string,
   ): Promise<void> {
     const record = this.retainedProcess(providerSessionId);
     if (!this.canAdoptRetainedProcessAsBackgroundCommand(providerSessionId)) {
@@ -3053,10 +3057,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       );
     }
     await this.captureRetainedOutput(record);
+    // A supervised command is stopped through its native supervisor; only an
+    // unsupervised one needs the wrapper's process-group identity.
+    const supervised =
+      record.process.providerCommand?.kind === "modal-router-v1" &&
+      Boolean(record.process.providerCommand.supervision);
     record.backgroundAdoption ??= this.deps.adoptProcessAsBackgroundCommand({
       backend: record.backend,
       process: record.process,
       command,
+      ...(processGroupMarker && !supervised ? { processGroupMarker } : {}),
     });
     try {
       await record.backgroundAdoption;

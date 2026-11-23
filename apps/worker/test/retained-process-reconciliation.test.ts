@@ -85,6 +85,7 @@ import {
   captureRetainedProbeOutput,
   createSandboxLeaseActivities,
   probeRetainedProcessAtProvider,
+  stopRetainedProcessGroup,
   RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
   RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
   RETAINED_PROCESS_STOP_SETTLE_WAIT_MS,
@@ -2189,6 +2190,93 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(updates).toEqual([
       { classification: "info", summary: "`bun test --watch` was stopped." },
     ]);
+  });
+
+  test.each([true, false])(
+    "an unsupervised stopping command hands its process-group marker to the cancelling probe (marker: %s)",
+    async (withMarker) => {
+      if (!available) return;
+      // Pause, terminal Cancel and an explicit stop all move an adopted
+      // command to `stopping`. Without a supervisor, only the wrapper's marker
+      // lets the reconciler stop a command that ignores INT/TERM.
+      const fixture = await promoteTurnProcess();
+      const marker = `/tmp/opengeni-turn-shell/${crypto.randomUUID()}`;
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt!.turnId,
+        executionGeneration: fixture.attempt!.executionGeneration,
+        attemptId: fixture.attempt!.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "bash pause.sh",
+        ...(withMarker ? { processGroupMarker: marker } : {}),
+      });
+      await closeTurnOwner(fixture, fixture.attempt!, "completed");
+      expect(
+        await requestSessionBackgroundCommandCancellation(db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.sessionId,
+          commandId: fixture.process.id,
+          subjectId: "user:test-owner",
+        }),
+      ).toMatchObject({ accepted: true, command: { state: "stopping" } });
+
+      const observed: { mode?: string; marker?: string | null } = {};
+      await runReaper(async (_settings, _lease, process, mode, _c, _p, _b, processGroupMarker) => {
+        expect(process.id).toBe(fixture.process.id);
+        observed.mode = mode;
+        observed.marker = processGroupMarker;
+        return {
+          status: "proved",
+          proof: { outcome: "exited", exitCode: 137, reason: "provider_exit_banner" },
+        };
+      });
+      expect(observed).toEqual({ mode: "cancel", marker: withMarker ? marker : null });
+    },
+  );
+
+  test("adoption refuses a malformed process-group marker", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess();
+    await expect(
+      adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt!.turnId,
+        executionGeneration: fixture.attempt!.executionGeneration,
+        attemptId: fixture.attempt!.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "sleep 60",
+        processGroupMarker: "relative/opengeni-turn-shell/x'; rm -rf /",
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("a retained process-group stop succeeds only when the helper reports the group absent", async () => {
+    const marker = `/tmp/opengeni-turn-shell/${crypto.randomUUID()}`;
+    const commands: string[] = [];
+    const session = (exitCode: number | "throw") => ({
+      execCommand: async (args: { cmd: string }) => {
+        commands.push(args.cmd);
+        if (exitCode === "throw") throw new Error("exec unavailable");
+        return `Process exited with code ${exitCode}\nOutput:\n`;
+      },
+    });
+    expect(await stopRetainedProcessGroup(session(0), marker)).toBe(true);
+    expect(await stopRetainedProcessGroup(session(74), marker)).toBe(true);
+    expect(await stopRetainedProcessGroup(session(75), marker)).toBe(false);
+    expect(await stopRetainedProcessGroup(session(76), marker)).toBe(false);
+    expect(await stopRetainedProcessGroup(session("throw"), marker)).toBe(false);
+    expect(commands).toHaveLength(5);
+    expect(commands[0]).toContain(marker);
+    expect(await stopRetainedProcessGroup(session(0), "/tmp/opengeni-turn-shell/../x")).toBe(false);
+    expect(await stopRetainedProcessGroup({}, marker)).toBe(false);
+    expect(commands).toHaveLength(5);
   });
 
   test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {

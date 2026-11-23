@@ -999,6 +999,9 @@ export {
 } from "./model-context-inspector";
 export {
   createTurnToolCancellationController,
+  isTurnShellMarkerPath,
+  processGroupStopCommand,
+  PROCESS_GROUP_STOP_EXIT,
   TurnSandboxCommandCancelledError,
 } from "./sandbox/turn-tool-cancellation";
 export type {

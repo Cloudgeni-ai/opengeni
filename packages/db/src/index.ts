@@ -45700,6 +45700,8 @@ export async function adoptManagedSessionBackgroundCommand(
     processId: string;
     expected: SandboxRetainedProcessIdentity;
     command: string;
+    /** Turn shell marker path of an unsupervised command (migration 1559). */
+    processGroupMarker?: string | undefined;
   },
 ) {
   return await withRlsContext(
@@ -45753,6 +45755,7 @@ export async function adoptManagedSessionBackgroundCommand(
           commandId: input.processId,
           retainedProcessId: input.processId,
           command: input.command,
+          processGroupMarker: input.processGroupMarker,
           turnId: input.turnId,
           attemptId: input.attemptId,
           executionGeneration: input.executionGeneration,
