@@ -5,7 +5,13 @@ import type {
   AppServerTrigger,
   ToolGatewayIdentity,
 } from "@opengeni/contracts";
-import { rawRows, withRlsContext, withWorkspaceRls, type Database } from "./database";
+import {
+  rawRows,
+  withoutSessionRlsActor,
+  withRlsContext,
+  withWorkspaceRls,
+  type Database,
+} from "./database";
 import * as schema from "./schema";
 
 /**
@@ -308,7 +314,8 @@ export type AppServerDeployment = {
   /**
    * The person who made this version the current one (its latest publish or
    * rollback), else who created it: the code runs on their authority while
-   * they still manage the app.
+   * they still manage the app. When an agent did it, this is the person whose
+   * turn the agent was acting on, not the agent's own service subject.
    */
   deployerSubjectId: string;
 };
@@ -325,7 +332,7 @@ export async function getAppServerDeployment(
   versionId?: string,
 ): Promise<AppServerDeployment | null> {
   if (!UUID.test(siteId) || (versionId !== undefined && !UUID.test(versionId))) return null;
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const found = await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
         accountId: schema.workspaceArtifacts.accountId,
@@ -353,7 +360,10 @@ export async function getAppServerDeployment(
       .limit(1);
     if (!row || (versionId !== undefined && row.versionId !== versionId)) return null;
     const [event] = await scopedDb
-      .select({ actorSubjectId: schema.workspaceArtifactEvents.actorSubjectId })
+      .select({
+        actorSubjectId: schema.workspaceArtifactEvents.actorSubjectId,
+        sourceTurnId: schema.workspaceArtifactEvents.sourceTurnId,
+      })
       .from(schema.workspaceArtifactEvents)
       .where(
         and(
@@ -366,6 +376,7 @@ export async function getAppServerDeployment(
       .orderBy(desc(schema.workspaceArtifactEvents.createdAt))
       .limit(1);
     return {
+      deployment: {
       accountId: row.accountId,
       workspaceId,
       siteId,
@@ -373,7 +384,50 @@ export async function getAppServerDeployment(
       versionId: row.versionId,
       manifest: row.manifest ? { ...row.manifest, tools: row.manifest.tools ?? [] } : null,
       requestedTools: row.requestedTools ?? [],
-      deployerSubjectId: event?.actorSubjectId ?? row.createdBySubjectId,
+        deployerSubjectId: event?.actorSubjectId ?? row.createdBySubjectId,
+      } satisfies AppServerDeployment,
+      sourceTurnId: event?.sourceTurnId ?? null,
     };
   });
+  if (!found) return null;
+  if (!found.sourceTurnId) return found.deployment;
+  const person = await turnPerson(db, workspaceId, found.sourceTurnId);
+  return person ? { ...found.deployment, deployerSubjectId: person } : found.deployment;
+}
+
+/**
+ * The person a turn acted for: an agent publishes with its worker's service
+ * subject, which is never a member, so its code runs on the authority of the
+ * person whose turn it was (still checked as a live manager on every run). A
+ * turn without a person (a schedule, a key) has none, so the code stays
+ * paused. Read without the caller's session actor: the turn may be in the
+ * person's Only me chat, and only this subject leaves the function.
+ */
+async function turnPerson(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+): Promise<string | null> {
+  return await withoutSessionRlsActor(() =>
+    withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+          initiatorKind: schema.sessionTurns.initiatorKind,
+          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.id, turnId),
+          ),
+        )
+        .limit(1);
+      return (
+        turn?.initiatingHumanSubjectId ??
+        (turn?.initiatorKind === "subject" ? turn.initiatorSubjectId : null)
+      );
+    }),
+  );
 }
