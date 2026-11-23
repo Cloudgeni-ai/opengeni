@@ -1,5 +1,13 @@
 # @opengeni/sdk
 
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/connect@6.37.3
+
 ## 6.37.2
 
 ### Patch Changes
