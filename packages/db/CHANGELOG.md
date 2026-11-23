@@ -1,5 +1,23 @@
 # @opengeni/db
 
+## 6.37.1
+
+### Patch Changes
+
+- 3595193: Distinguish proven Codex model entitlement refusals from waits for capacity, so an entirely plan-blocked pool can fail a turn promptly.
+- e71502d: A sub-agent's question held for the agent that started it now reaches the person when that agent isn't woken by it (its goal is paused, the chat is paused or its admission is blocked), instead of waiting silently with no inbox item, push or list hint.
+- bc538e2: Deliver already accepted scheduled work when a shared connector has lapsed, without letting that work use the stale credential or a different account.
+- e71502d: Keep app data restricted when a manager resets it while server code or a sync is writing shared-account tool data to a target it marked long before: marking again right before a write restarts the mark's reset grace.
+- Updated dependencies [17783d3]
+  - @opengeni/config@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/subscriptions@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes
