@@ -723,15 +723,17 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
     processGroupMarker?: string | undefined;
   },
 ): Promise<SessionBackgroundCommand> {
-  const processGroupMarker = input.processGroupMarker ?? null;
-  if (
-    processGroupMarker !== null &&
-    (processGroupMarker.length > 1024 ||
-      !processGroupMarker.startsWith("/") ||
-      /[\0\n\r']/u.test(processGroupMarker))
-  ) {
-    throw new Error("Managed background command process-group marker is malformed");
-  }
+  // A malformed marker never fails adoption: the command is kept without one
+  // (observable, not signalable by the reconciler). The worker validates the
+  // exact turn shell form again before using it.
+  const candidateMarker = input.processGroupMarker ?? null;
+  const processGroupMarker =
+    candidateMarker !== null &&
+    candidateMarker.length <= 1024 &&
+    candidateMarker.startsWith("/") &&
+    !/[\0\n\r']/u.test(candidateMarker)
+      ? candidateMarker
+      : null;
   const [process] = await db
     .select({
       accountId: schema.sandboxRetainedProcesses.accountId,

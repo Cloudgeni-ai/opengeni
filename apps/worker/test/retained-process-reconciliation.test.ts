@@ -11,6 +11,7 @@ import { Manifest } from "@openai/agents/sandbox";
 import {
   createSandboxClientForBackend,
   isInSandboxSupervisedProcess,
+  processGroupStopCommand,
   RoutingSandboxSession,
   serializeEstablishedSandboxEnvelope,
 } from "@opengeni/runtime";
@@ -86,6 +87,8 @@ import {
   createSandboxLeaseActivities,
   probeRetainedProcessAtProvider,
   stopRetainedProcessGroup,
+  stopRetainedProcessBeforeRead,
+  RETAINED_PROCESS_GROUP_TERM_GRACE_MS,
   RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
   RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
   RETAINED_PROCESS_STOP_SETTLE_WAIT_MS,
@@ -2238,45 +2241,123 @@ describe("retained-process terminal-owner reconciliation", () => {
     },
   );
 
-  test("adoption refuses a malformed process-group marker", async () => {
+  test("a malformed process-group marker is dropped without failing adoption", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess();
-    await expect(
-      adoptManagedSessionBackgroundCommand(db, {
-        accountId: fixture.accountId,
-        workspaceId: fixture.workspaceId,
-        sessionId: fixture.sessionId,
-        turnId: fixture.attempt!.turnId,
-        executionGeneration: fixture.attempt!.executionGeneration,
-        attemptId: fixture.attempt!.attemptId,
-        processId: fixture.process.id,
-        expected: retainedProcessSettlementIdentity(fixture.process),
-        command: "sleep 60",
-        processGroupMarker: "relative/opengeni-turn-shell/x'; rm -rf /",
-      }),
-    ).rejects.toThrow();
+    await adoptManagedSessionBackgroundCommand(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      turnId: fixture.attempt!.turnId,
+      executionGeneration: fixture.attempt!.executionGeneration,
+      attemptId: fixture.attempt!.attemptId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(fixture.process),
+      command: "sleep 60",
+      processGroupMarker: "relative/opengeni-turn-shell/x'; rm -rf /",
+    });
+    const rows = await admin<{ state: string; marker: string | null }[]>`
+      select state, process_group_marker as marker from session_background_commands
+      where retained_process_id = ${fixture.process.id}`;
+    expect(rows).toEqual([{ state: "running", marker: null }]);
   });
 
-  test("a retained process-group stop succeeds only when the helper reports the group absent", async () => {
+  test("a retained process-group stop succeeds only when the helper proves the group absent", async () => {
     const marker = `/tmp/opengeni-turn-shell/${crypto.randomUUID()}`;
-    const commands: string[] = [];
+    const commands: Array<{ cmd: string; yieldTimeMs?: number }> = [];
     const session = (exitCode: number | "throw") => ({
-      execCommand: async (args: { cmd: string }) => {
-        commands.push(args.cmd);
+      execCommand: async (args: { cmd: string; yieldTimeMs?: number }) => {
+        commands.push(args);
         if (exitCode === "throw") throw new Error("exec unavailable");
         return `Process exited with code ${exitCode}\nOutput:\n`;
       },
     });
     expect(await stopRetainedProcessGroup(session(0), marker)).toBe(true);
-    expect(await stopRetainedProcessGroup(session(74), marker)).toBe(true);
+    // A missing marker is not a stop: the group may live on without it.
+    expect(await stopRetainedProcessGroup(session(74), marker)).toBe(false);
     expect(await stopRetainedProcessGroup(session(75), marker)).toBe(false);
     expect(await stopRetainedProcessGroup(session(76), marker)).toBe(false);
     expect(await stopRetainedProcessGroup(session("throw"), marker)).toBe(false);
     expect(commands).toHaveLength(5);
-    expect(commands[0]).toContain(marker);
+    // The reconciler gives TERM the same grace as a supervised stop and waits
+    // long enough for it.
+    expect(commands[0]!.cmd).toBe(
+      processGroupStopCommand(marker, { termGraceMs: RETAINED_PROCESS_GROUP_TERM_GRACE_MS }),
+    );
+    expect(RETAINED_PROCESS_GROUP_TERM_GRACE_MS).toBe(5_000);
+    expect(commands[0]!.yieldTimeMs).toBeGreaterThan(RETAINED_PROCESS_GROUP_TERM_GRACE_MS);
     expect(await stopRetainedProcessGroup(session(0), "/tmp/opengeni-turn-shell/../x")).toBe(false);
     expect(await stopRetainedProcessGroup({}, marker)).toBe(false);
     expect(commands).toHaveLength(5);
+  });
+
+  test("a cancelling probe stops an unsupervised command's process group before its read", async () => {
+    const marker = `/tmp/opengeni-turn-shell/${crypto.randomUUID()}`;
+    const fakeSession = (input: { supervisedCancel: boolean; stopExit: number }) => {
+      const calls = { supervisedCancels: 0, execs: [] as string[] };
+      return {
+        calls,
+        session: {
+          cancelSupervisedCommand: async () => {
+            calls.supervisedCancels += 1;
+            return input.supervisedCancel;
+          },
+          execCommand: async (args: { cmd: string }) => {
+            calls.execs.push(args.cmd);
+            return `Process exited with code ${input.stopExit}\nOutput:\n`;
+          },
+        },
+      };
+    };
+    const stop = async (
+      session: ReturnType<typeof fakeSession>["session"],
+      overrides: Partial<Parameters<typeof stopRetainedProcessBeforeRead>[1]> = {},
+    ) =>
+      await stopRetainedProcessBeforeRead(session, {
+        mode: "cancel",
+        providerSessionId: 71,
+        providerDeadline: false,
+        processGroupMarker: marker,
+        budgetUntil: Infinity,
+        ...overrides,
+      });
+
+    // Unsupervised, with a marker: the group stop runs, and its proof lets the
+    // read wait for the exit.
+    const unsupervised = fakeSession({ supervisedCancel: false, stopExit: 0 });
+    expect(await stop(unsupervised.session)).toEqual({
+      supervisedCancelled: false,
+      groupStopped: true,
+      readWaitMs: RETAINED_PROCESS_STOP_SETTLE_WAIT_MS,
+    });
+    expect(unsupervised.calls.execs).toEqual([
+      processGroupStopCommand(marker, { termGraceMs: RETAINED_PROCESS_GROUP_TERM_GRACE_MS }),
+    ]);
+
+    // A missing marker or a live group is no stop: the read stays short.
+    for (const stopExit of [74, 75, 76]) {
+      const failed = fakeSession({ supervisedCancel: false, stopExit });
+      expect(await stop(failed.session)).toMatchObject({ groupStopped: false, readWaitMs: 1_000 });
+      expect(failed.calls.execs).toHaveLength(1);
+    }
+
+    // A supervised cancellation never runs the marker stop.
+    const supervised = fakeSession({ supervisedCancel: true, stopExit: 0 });
+    expect(await stop(supervised.session)).toEqual({
+      supervisedCancelled: true,
+      groupStopped: false,
+      readWaitMs: RETAINED_PROCESS_STOP_SETTLE_WAIT_MS,
+    });
+    expect(supervised.calls.execs).toEqual([]);
+
+    // Observation and markerless commands never signal anything.
+    const observed = fakeSession({ supervisedCancel: false, stopExit: 0 });
+    expect(await stop(observed.session, { mode: "observe" })).toMatchObject({ readWaitMs: 1_000 });
+    expect(await stop(observed.session, { processGroupMarker: null })).toMatchObject({
+      groupStopped: false,
+      readWaitMs: 1_000,
+    });
+    expect(observed.calls).toEqual({ supervisedCancels: 1, execs: [] });
   });
 
   test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {

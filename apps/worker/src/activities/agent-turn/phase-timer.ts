@@ -22,5 +22,9 @@ export function createPhaseTimer(now: () => number = () => performance.now()) {
     totalMs(): number {
       return Math.round(lastAt - startedAt);
     },
+    /** Time since the timer started, including any phase not yet marked. */
+    elapsedMs(): number {
+      return Math.round(now() - startedAt);
+    },
   };
 }

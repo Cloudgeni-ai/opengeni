@@ -396,10 +396,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       // Spawn asynchronously so this process keeps reaping its killed child,
       // as the sandbox's own process tree does.
       const stopGroup = async () =>
-        await Bun.spawn(["/bin/sh", "-c", processGroupStopCommand(adoptedMarker!)], {
-          stdout: "ignore",
-          stderr: "ignore",
-        }).exited;
+        await Bun.spawn(
+          ["/bin/sh", "-c", processGroupStopCommand(adoptedMarker!, { termGraceMs: 300 })],
+          { stdout: "ignore", stderr: "ignore" },
+        ).exited;
       expect(await stopGroup()).toBe(PROCESS_GROUP_STOP_EXIT.stopped);
       expect(
         await Promise.race([
@@ -409,12 +409,52 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       ).toBe(true);
       await Bun.sleep(2_500);
       expect(existsSync(zombie)).toBe(false);
+      // A later stop leaves no start tombstone behind, however often it runs.
+      expect(existsSync(`${adoptedMarker}.cancelled`)).toBe(false);
       // A repeated stop is idempotent once the group is gone.
       expect([PROCESS_GROUP_STOP_EXIT.stopped, PROCESS_GROUP_STOP_EXIT.markerAbsent]).toContain(
         (await stopGroup()) as never,
       );
+      expect(existsSync(`${adoptedMarker}.cancelled`)).toBe(false);
     } finally {
       for (const child of children) child.kill("SIGKILL");
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test("a process-group stop gives TERM its grace before KILL", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-stop-grace-"));
+    const marker = join(root, "opengeni-turn-shell", crypto.randomUUID());
+    const cleaned = join(root, "cleaned.txt");
+    const child = Bun.spawn(
+      [
+        "/bin/sh",
+        "-c",
+        cancellableShellCommand(
+          `trap 'sleep 0.5; printf cleaned > '"'${cleaned}'"'; exit 0' TERM; printf 'READY\\n'; while :; do sleep 0.1; done`,
+          marker,
+        ),
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    try {
+      const reader = child.stdout.getReader();
+      let printed = "";
+      while (!printed.includes("READY")) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`fixture exited early: ${printed}`);
+        printed += new TextDecoder().decode(value);
+      }
+      reader.releaseLock();
+      const stopped = await Bun.spawn(
+        ["/bin/sh", "-c", processGroupStopCommand(marker, { termGraceMs: 3_000 })],
+        { stdout: "ignore", stderr: "ignore" },
+      ).exited;
+      expect(stopped).toBe(PROCESS_GROUP_STOP_EXIT.stopped);
+      // The command's TERM handler ran to completion instead of being killed.
+      expect(existsSync(cleaned)).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
       rmSync(root, { recursive: true, force: true });
     }
   }, 20_000);
@@ -432,8 +472,14 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     ]) {
       expect(isTurnShellMarkerPath(invalid)).toBe(false);
     }
-    expect(() => processGroupStopCommand("/tmp/opengeni-turn-shell/x")).toThrow();
-    expect(processGroupStopCommand(marker)).toContain("0f8fad5b-d9cb-469f-a165-70867728950e");
+    expect(() =>
+      processGroupStopCommand("/tmp/opengeni-turn-shell/x", { termGraceMs: 5_000 }),
+    ).toThrow();
+    const stop = processGroupStopCommand(marker, { termGraceMs: 5_000 });
+    expect(stop).toContain("0f8fad5b-d9cb-469f-a165-70867728950e");
+    // 5 s of TERM grace in 100 ms polls, and no start tombstone.
+    expect(stop).toContain('[ "$__opengeni_poll" -lt 50 ]');
+    expect(stop).not.toContain(".cancelled");
   });
 
   test("an adopted native handle exposes its UUID and a later read honors the foreground wait", async () => {

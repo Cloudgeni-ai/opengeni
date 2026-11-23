@@ -91831,8 +91831,9 @@ export type ApplySessionTurnSettlementHooks = {
   afterRealtimeDelegationProjection?:
     | ((projection: { entryId: string; turnId: string }) => void | Promise<void>)
     | undefined;
-  /** Observes where a resolved settlement spent its time. */
-  onTiming?: ((timing: SessionTurnSettlementTiming) => void) | undefined;
+  /** Observes where a resolved settlement spent its time. A throw or a
+   * rejected promise is ignored. */
+  onTiming?: ((timing: SessionTurnSettlementTiming) => unknown) | undefined;
 };
 
 type SessionTurnSettlementPhases = {
@@ -91863,19 +91864,22 @@ function reportSessionTurnSettlementTiming(
   // An early (stale) return leaves later marks unset: its remaining time is
   // reported as commit, during which the row locks were still held.
   const bodyEnd = phase.bodyReturnedAt ?? phase.lockedAt ?? finishedAt;
+  const timing: SessionTurnSettlementTiming = {
+    action,
+    attempts: phase.attempts,
+    admissionMs: span(phase.startedAt, phase.lockRequestedAt ?? finishedAt) ?? 0,
+    lockWaitMs: span(phase.lockRequestedAt, phase.lockedAt ?? finishedAt) ?? 0,
+    validateMs: span(phase.lockedAt, phase.writeStartedAt ?? phase.bodyReturnedAt),
+    writeMs: span(phase.writeStartedAt, phase.bodyReturnedAt),
+    commitMs: span(bodyEnd, finishedAt) ?? 0,
+    totalMs: span(phase.startedAt, finishedAt) ?? 0,
+  };
+  // Timing is diagnostic; neither a throw nor a rejection from the observer
+  // changes the settlement's outcome or escapes as an unhandled rejection.
   try {
-    onTiming({
-      action,
-      attempts: phase.attempts,
-      admissionMs: span(phase.startedAt, phase.lockRequestedAt ?? finishedAt) ?? 0,
-      lockWaitMs: span(phase.lockRequestedAt, phase.lockedAt ?? finishedAt) ?? 0,
-      validateMs: span(phase.lockedAt, phase.writeStartedAt ?? phase.bodyReturnedAt),
-      writeMs: span(phase.writeStartedAt, phase.bodyReturnedAt),
-      commitMs: span(bodyEnd, finishedAt) ?? 0,
-      totalMs: span(phase.startedAt, finishedAt) ?? 0,
-    });
+    void Promise.resolve(onTiming(timing)).catch(() => {});
   } catch {
-    // Timing is diagnostic; it never changes the settlement's outcome.
+    // Ignored, as above.
   }
 }
 

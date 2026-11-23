@@ -3057,8 +3057,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       );
     }
     await this.captureRetainedOutput(record);
-    // A supervised command is stopped through its native supervisor; only an
-    // unsupervised one needs the wrapper's process-group identity.
+    // A supervised Modal command is stopped through its native supervisor, so
+    // its marker is not kept. Only the Modal supervised locator is recognised
+    // here; for anything else the reconciler's own supervised-cancel check
+    // decides, and runs the marker stop only when that did not happen.
     const supervised =
       record.process.providerCommand?.kind === "modal-router-v1" &&
       Boolean(record.process.providerCommand.supervision);

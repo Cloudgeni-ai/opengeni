@@ -71,7 +71,7 @@ async function claimedTurn() {
 
 async function cancelTurn(
   fixture: Awaited<ReturnType<typeof claimedTurn>>,
-  onTiming: (timing: SessionTurnSettlementTiming) => void,
+  onTiming: (timing: SessionTurnSettlementTiming) => unknown,
 ) {
   return await applySessionTurnSettlement(
     client.db,
@@ -142,5 +142,22 @@ describe("turn settlement timing", () => {
       throw new Error("observer failure");
     });
     expect(settled.action).toBe("settled");
+  }, 60_000);
+
+  test("a rejecting async observer never changes the settlement or escapes", async () => {
+    const fixture = await claimedTurn();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const settled = await cancelTurn(fixture, async () => {
+        throw new Error("async observer failure");
+      });
+      expect(settled.action).toBe("settled");
+      await Bun.sleep(20);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   }, 60_000);
 });
