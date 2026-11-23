@@ -3,7 +3,6 @@ import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
   canonicalSecretPermissions,
-  type AgentRecord,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -124,6 +123,7 @@ import {
   requireSession,
   requireWorkspace,
   settleScheduledTaskRunInTransaction,
+  SessionAgentNotFoundError,
   SessionSpawnDeniedDbError,
   updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
@@ -149,6 +149,9 @@ import {
 } from "./common";
 import { withFirstPartyTools } from "./goals";
 import {
+  AGENT_LIST_CHATS_TOOL,
+  agentListChatsToolAvailable,
+  agentListChatsToolPermitted,
   agentMemoryAccess,
   agentMemoryGuidance,
   agentRunAdmissionDenial,
@@ -768,6 +771,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // (its Memory's `slack_agent_chats`), kept on the chat like an app
       // chat's additions.
       let agentFirstPartyAdditions: FirstPartyMcpToolName[] = [];
+      // A task saved before the secret permission names were unified may still
+      // hold their retired aliases. The chat a run creates stores the canonical
+      // names, so the accepted run must name the same set or the database
+      // refuses the chat as an authority change.
+      const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
+        ? canonicalSecretPermissions(creatorPolicy.firstPartyMcpPermissions)
+        : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
       const generatedTarget =
         task.runMode === "new_session_per_run" ||
         (task.runMode === "reusable_session" && task.reusableSessionId === null);
@@ -797,6 +807,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               task.agentConfig.agentId,
             )
           : null;
+        const runMemoryAccess = runAgent?.memoryEnabled
+          ? agentMemoryAccess(runAgent, {
+              private: task.visibility === "private",
+              ownerSubjectId: task.ownerSubjectId,
+              memoryOff: false,
+            })
+          : null;
         try {
           const agentResolution = resolveSessionAgentConfigForCreate({
             settings,
@@ -808,21 +825,22 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             goal: task.agentConfig.goal !== undefined,
           });
           resolvedAgentConfig = agentResolution.config;
-          const runMemory = scheduledAgentRunMemory(runAgent, agentResolution.instructions, {
-            private: task.visibility === "private",
-            ownerSubjectId: task.ownerSubjectId,
-          });
-          resolvedAgentInstructions = runMemory.instructions;
-          // As in an app chat with the agent, the additions join a selection
-          // that follows the defaults, under the deployment's ceiling; an
-          // explicit creator selection stays as chosen. The agent's Can use
-          // still narrows them below.
-          if (!creatorPolicy?.firstPartyMcpTools) {
-            const allowed = resolveFirstPartyMcpToolPolicy(settings).allowed;
-            agentFirstPartyAdditions = runMemory.firstPartyMcpToolAdditions.filter((tool) =>
-              allowed.includes(tool),
-            );
-            firstPartyMcpTools = [...new Set([...firstPartyMcpTools, ...agentFirstPartyAdditions])];
+          // As in an app chat with the agent, the list-chats tool joins a
+          // selection that follows the defaults, under the deployment's
+          // ceiling, when the run's permissions can admit it; an explicit
+          // creator selection stays as chosen. The agent's Can use still
+          // narrows it below. A run whose owner can't be reached keeps an
+          // exact list instead of following the defaults (see
+          // `unreachableHuman`); the tool is in that list under the same
+          // ceiling and narrowing, since listing chats notifies nobody.
+          if (
+            runMemoryAccess?.listChats &&
+            !creatorPolicy?.firstPartyMcpTools &&
+            resolveFirstPartyMcpToolPolicy(settings).allowed.includes(AGENT_LIST_CHATS_TOOL) &&
+            agentListChatsToolPermitted(firstPartyMcpPermissions)
+          ) {
+            agentFirstPartyAdditions = [AGENT_LIST_CHATS_TOOL];
+            firstPartyMcpTools = [...new Set([...firstPartyMcpTools, AGENT_LIST_CHATS_TOOL])];
           }
           const written = applySessionAgentConfigWriteThrough({
             config: resolvedAgentConfig,
@@ -838,6 +856,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             firstPartyMcpTools,
             settings.mcpServers,
           );
+          // The guidance names the list-chats tool only when the chat has it.
+          resolvedAgentInstructions = runMemoryAccess
+            ? scheduledAgentRunInstructions(
+                agentResolution.instructions,
+                agentMemoryGuidance(runMemoryAccess, {
+                  listChatsTool: agentListChatsToolAvailable(
+                    firstPartyMcpTools,
+                    firstPartyMcpPermissions,
+                  ),
+                }),
+              )
+            : agentResolution.instructions;
         } catch (error) {
           const status =
             error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
@@ -849,13 +879,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           );
         }
       }
-      // A task saved before the secret permission names were unified may still
-      // hold their retired aliases. The chat a run creates stores the canonical
-      // names, so the accepted run must name the same set or the database
-      // refuses the chat as an authority change.
-      const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
-        ? canonicalSecretPermissions(creatorPolicy.firstPartyMcpPermissions)
-        : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
       // A fresh occurrence resolves the immutable owner's current accounts.
       // Retry/recovery above uses the already accepted occurrence snapshot.
       const connectionSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -2609,6 +2632,11 @@ function scheduledRunRecoveryTerminalError(
   if (error instanceof SessionSpawnDeniedDbError) {
     return new ScheduledRunTerminalAuthorityError("scheduled_session_spawn_denied", error.message);
   }
+  // The run's agent was deleted, or made Only me where this run is not its
+  // owner's Only me chat. Every attempt would be refused the same way.
+  if (error instanceof SessionAgentNotFoundError) {
+    return new ScheduledRunTerminalAuthorityError("scheduled_agent_unavailable", error.message);
+  }
   if (error instanceof Error && error.message.startsWith("Session not found:")) {
     return new ScheduledRunTerminalAuthorityError(
       "scheduled_target_session_unavailable",
@@ -3752,30 +3780,18 @@ export function scheduledGeneratedChatSettings(
 }
 
 /**
- * What a run with an agent gets from that agent's Memory, as an app chat with
- * the agent does: the guidance after the task's own instructions, and
- * `slack_agent_chats` when it may list the agent's other chats. Instructions
- * stay unchanged when Memory is off or there is no room within both the
- * session's and the accepted snapshot's limits (the knowledge tools still
- * enforce the rules).
+ * A run with an agent gets that agent's Memory guidance after the task's own
+ * instructions, as an app chat with the agent does. Unchanged without
+ * guidance or without room within both the session's and the accepted
+ * snapshot's limits (the knowledge tools still enforce the rules).
  */
-function scheduledAgentRunMemory(
-  agent: AgentRecord | null,
+function scheduledAgentRunInstructions(
   instructions: string | undefined,
-  chat: { private: boolean; ownerSubjectId: string | null },
-): { instructions: string | undefined; firstPartyMcpToolAdditions: FirstPartyMcpToolName[] } {
-  if (!agent?.memoryEnabled) return { instructions, firstPartyMcpToolAdditions: [] };
-  const access = agentMemoryAccess(agent, { ...chat, memoryOff: false });
-  const firstPartyMcpToolAdditions: FirstPartyMcpToolName[] = access.listChats
-    ? ["slack_agent_chats"]
-    : [];
-  const guidance = agentMemoryGuidance(access);
-  if (!guidance) return { instructions, firstPartyMcpToolAdditions };
+  guidance: string | null,
+): string | undefined {
+  if (!guidance) return instructions;
   const own = instructions?.trim() ?? "";
   const combined = own ? `${own}\n\n${guidance}` : guidance;
   const limit = Math.min(SESSION_INSTRUCTIONS_MAX_CHARACTERS, AGENT_INSTRUCTIONS_MAX_CHARACTERS);
-  return {
-    instructions: combined.length <= limit ? combined : instructions,
-    firstPartyMcpToolAdditions,
-  };
+  return combined.length <= limit ? combined : instructions;
 }

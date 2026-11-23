@@ -5,6 +5,7 @@ import {
   createDb,
   createScheduledTask,
   createSession,
+  deleteAgent,
   getScheduledTask,
   getScheduledTaskRunAcceptedExecution,
   listScheduledTaskRuns,
@@ -14,6 +15,7 @@ import {
   type DbClient,
   type KnowledgeContext,
 } from "@opengeni/db";
+import { DEFAULT_FIRST_PARTY_MCP_PERMISSIONS } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -177,6 +179,7 @@ async function fixture() {
     options: {
       runMode?: "new_session_per_run" | "reusable_session";
       visibility?: "user_private";
+      firstPartyMcpPermissions?: string[];
     } = {},
   ) =>
     await createScheduledTask(client.db, {
@@ -192,11 +195,49 @@ async function fixture() {
       agentConfig: agentConfig(agentId),
       metadata: {},
       ...(options.visibility ? { visibility: options.visibility } : {}),
+      ...(options.firstPartyMcpPermissions
+        ? {
+            creatorPolicy: {
+              firstPartyMcpTools: null,
+              firstPartyMcpPermissions: options.firstPartyMcpPermissions as never,
+              sessionPolicy: null,
+            },
+          }
+        : {}),
     });
+  // Make every chat insert in this workspace fail; returns the cleanup.
+  const failChatCreate = async () => {
+    const fn = `fail_agent_chat_${crypto.randomUUID().replaceAll("-", "")}`;
+    await shared!.admin.unsafe(
+      `create function ${fn}() returns trigger language plpgsql as $$ begin
+         if new.workspace_id = '${grant.workspaceId}'::uuid then
+           raise exception 'synthetic chat create failure';
+         end if;
+         return new;
+       end $$`,
+    );
+    await shared!.admin.unsafe(
+      `create trigger ${fn} before insert on sessions for each row execute function ${fn}()`,
+    );
+    return async () => {
+      await shared!.admin.unsafe(`drop trigger if exists ${fn} on sessions`);
+      await shared!.admin.unsafe(`drop function if exists ${fn}()`);
+    };
+  };
+  const rawDispatch = async (taskId: string, producerKey: string) =>
+    await scheduledActivities().dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId,
+      triggerType: "scheduled",
+      producerKey,
+    });
+  const latestRun = async (taskId: string) =>
+    (await listScheduledTaskRuns(client.db, grant.workspaceId, taskId, 1))[0]!;
   const task = async (taskId: string) =>
     (await getScheduledTask(client.db, grant.workspaceId, taskId))!;
   return {
     grant,
+    scope,
     agent,
     agentConfig,
     dispatch,
@@ -205,6 +246,9 @@ async function fixture() {
     chatTools,
     accepted,
     memoryTask,
+    failChatCreate,
+    rawDispatch,
+    latestRun,
     task,
   };
 }
@@ -251,24 +295,11 @@ describe("an agent's automation chat, run by the dispatch (real PostgreSQL)", ()
     const created = await f.memoryTask(reviewer);
     const producerKey = `scheduled-agent-chat-recovery-${crypto.randomUUID()}`;
     // The first attempt dies creating its chat, after the run was accepted.
-    const suffix = crypto.randomUUID().replaceAll("-", "");
-    const fn = `fail_agent_chat_once_${suffix}`;
-    await shared!.admin.unsafe(
-      `create function ${fn}() returns trigger language plpgsql as $$ begin
-         if new.workspace_id = '${f.grant.workspaceId}'::uuid then
-           raise exception 'synthetic chat create failure';
-         end if;
-         return new;
-       end $$`,
-    );
-    await shared!.admin.unsafe(
-      `create trigger ${fn} before insert on sessions for each row execute function ${fn}()`,
-    );
+    const restore = await f.failChatCreate();
     try {
       await expect(f.dispatch(created.id, producerKey)).rejects.toThrow();
     } finally {
-      await shared!.admin.unsafe(`drop trigger if exists ${fn} on sessions`);
-      await shared!.admin.unsafe(`drop function if exists ${fn}()`);
+      await restore();
     }
     const [queued] = await listScheduledTaskRuns(client.db, f.grant.workspaceId, created.id, 1);
     expect(queued).toMatchObject({ status: "queued", sessionId: null });
@@ -281,6 +312,64 @@ describe("an agent's automation chat, run by the dispatch (real PostgreSQL)", ()
     expect(await f.chatAgent(run.sessionId)).toBe(reviewer);
     expect(await f.chatInstructions(run.sessionId)).toBe(accepted.resolvedAgentInstructions!);
     expect((await f.chatTools(run.sessionId)).first_party_mcp_tools).toContain("slack_agent_chats");
+  }, 120_000);
+
+  test("a deleted agent fails a fresh run with scheduled_agent_unavailable", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await f.memoryTask(reviewer);
+    expect(await deleteAgent(client.db, f.scope, reviewer)).toBe(true);
+    const result = await f.rawDispatch(created.id, `deleted-agent-${crypto.randomUUID()}`);
+    expect(result).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+    expect(await f.latestRun(created.id)).toMatchObject({
+      status: "failed",
+      error: "scheduled_agent_unavailable",
+      sessionId: null,
+    });
+  }, 120_000);
+
+  test("an agent deleted before recovery fails the run with scheduled_agent_unavailable", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await f.memoryTask(reviewer);
+    const producerKey = `deleted-agent-recovery-${crypto.randomUUID()}`;
+    const restore = await f.failChatCreate();
+    try {
+      await expect(f.rawDispatch(created.id, producerKey)).rejects.toThrow();
+    } finally {
+      await restore();
+    }
+    expect(await f.latestRun(created.id)).toMatchObject({ status: "queued", sessionId: null });
+    expect(await deleteAgent(client.db, f.scope, reviewer)).toBe(true);
+    const result = await f.rawDispatch(created.id, producerKey);
+    expect(result).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+    expect(await f.latestRun(created.id)).toMatchObject({
+      status: "failed",
+      error: "scheduled_agent_unavailable",
+      sessionId: null,
+    });
+  }, 120_000);
+
+  test("a run whose permissions can't admit slack_agent_chats gets neither it nor its sentence", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const reviewer = await f.agent("Reviewer", { memoryEnabled: true });
+    const created = await f.memoryTask(reviewer, {
+      firstPartyMcpPermissions: DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter(
+        (permission) => permission !== "sessions:read",
+      ),
+    });
+    const run = await f.dispatch(created.id);
+    expect(run.action).toBe("start");
+    const instructions = await f.chatInstructions(run.sessionId);
+    expect(instructions).toContain("search it with knowledge_search");
+    expect(instructions).not.toContain("slack_agent_chats");
+    expect(instructions).toBe((await f.accepted(created.id)).resolvedAgentInstructions!);
+    const tools = await f.chatTools(run.sessionId);
+    expect(tools.first_party_mcp_tools).not.toContain("slack_agent_chats");
+    expect(tools.tool_policy.firstPartyAdditions ?? []).not.toContain("slack_agent_chats");
   }, 120_000);
 
   test("a reusable chat with Memory is started with the guidance", async () => {

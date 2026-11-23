@@ -13,6 +13,7 @@ import {
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  AGENT_LIST_CHATS_TOOL,
   assertGoalResumeAllowed,
   createGitHubPersonalEventSource,
   MissingPermissionRefusal,
@@ -710,7 +711,8 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   agentRefToolInput,
-  delegatedChatMemory,
+  delegatedChatHasListChatsTool,
+  delegatedChatInstructions,
   resolveDelegationAgent,
   delegationAgentSubject,
 } from "../agent-delegation";
@@ -7347,8 +7349,10 @@ function registerWorkspaceOrchestrationTools(
           const { machineTarget, title, projectId, agentName, ...request } = args;
           // Delegation by name: the child is a chat with that agent.
           let delegated: { agentId: string; instructions?: string } | null = null;
-          // Built-in tools the agent's chat gets on top of the defaults it
-          // follows (its Memory's `slack_agent_chats`), as an app chat does.
+          // Its Memory's `slack_agent_chats`, added like an app chat's
+          // addition. Only a chat created without a calling chat follows the
+          // defaults and takes additions; a child sees only what its parent
+          // sees.
           let delegatedFirstPartyAdditions: FirstPartyMcpToolName[] = [];
           // Whose agents the child may run, when not the grant's subject.
           let agentAccessSubjectId: string | undefined;
@@ -7372,15 +7376,29 @@ function registerWorkspaceOrchestrationTools(
               caller,
             );
             if (!resolved.ok) return agentDelegationFailureResult(resolved.code, resolved.message);
-            const memory = delegatedChatMemory(resolved.agent, {
+            const createRequest = request as {
+              firstPartyMcpTools?: FirstPartyMcpToolName[];
+              firstPartyMcpPermissions?: Permission[];
+            };
+            const listChatsTool =
+              resolved.agent.memoryEnabled &&
+              (await delegatedChatHasListChatsTool(deps, {
+                workspaceId: grant.workspaceId,
+                callerSessionId,
+                requestedTools: createRequest.firstPartyMcpTools,
+                requestedPermissions: createRequest.firstPartyMcpPermissions,
+              }));
+            const instructions = delegatedChatInstructions(resolved.agent, {
               instructions: request.instructions,
               ownerSubjectId: caller?.ownerSubjectId ?? grant.subjectId ?? null,
               private: caller?.private ?? false,
               slackDm: caller?.slackDm ?? false,
               memoryOff: request.memoryScope === "off" || (caller?.memoryOff ?? false),
+              listChatsTool,
             });
-            const instructions = memory.instructions;
-            delegatedFirstPartyAdditions = memory.firstPartyMcpToolAdditions;
+            if (listChatsTool && callerSessionId === null) {
+              delegatedFirstPartyAdditions = [AGENT_LIST_CHATS_TOOL];
+            }
             delegated = {
               agentId: resolved.agent.id,
               ...(instructions !== undefined ? { instructions } : {}),
@@ -7417,9 +7435,6 @@ function registerWorkspaceOrchestrationTools(
             title === undefined ? {} : { automaticTitleCandidate: title },
             {
               ...(agentAccessSubjectId ? { agentAccessSubjectId } : {}),
-              // Session creation applies these like any entry point's
-              // additions: only to a selection that follows the defaults,
-              // under the deployment ceiling, narrowed by the agent's Can use.
               ...(delegatedFirstPartyAdditions.length
                 ? { firstPartyMcpToolAdditions: delegatedFirstPartyAdditions }
                 : {}),

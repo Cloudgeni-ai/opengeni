@@ -319,6 +319,7 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   scheduled_session_paused: "automations.run.error.chatPaused",
   session_cancelled: "automations.run.error.chatEnded",
   scheduled_target_session_unavailable: "automations.run.error.chatGone",
+  scheduled_agent_unavailable: "automations.run.error.agentUnavailable",
   scheduled_target_execution_changed: "automations.run.error.chatChanged",
   scheduled_workspace_paused: "automations.run.error.workspacePaused",
   scheduled_task_paused_before_claim: "automations.run.error.automationInactive",

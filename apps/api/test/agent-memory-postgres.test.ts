@@ -15,7 +15,6 @@ import {
   createDb,
   createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
-  getAgent,
   initializeSessionStartAtomically,
   saveKnowledgeEntry,
   setAgentMemoryCollection,
@@ -23,9 +22,10 @@ import {
   type KnowledgeContext,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { prepareAgentChatCreate } from "../src/agent-chats";
-import { delegatedChatMemory } from "../src/agent-delegation";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { listSlackAgentChatsForSession } from "../src/integrations/slack-interactions";
 import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
 
@@ -516,33 +516,109 @@ describe("an agent's Memory (real PostgreSQL)", () => {
     expect(off["instructions"]).toBeUndefined();
   }, 180_000);
 
-  test("a chat delegated to the agent gets its Memory guidance and slack_agent_chats", async () => {
+  test("a chat delegated to the agent by name gets its Memory, and the list-chats tool only when it will have it", async () => {
     if (!app) return;
     const fixture = await workspaceWithAgent(app.db);
-    const agent = (await getAgent(app.db, fixture.home, fixture.agentId))!;
-    const sharedChat = delegatedChatMemory(agent, {
-      instructions: "Answer in English.",
-      ownerSubjectId: fixture.subjectId,
-      private: false,
-    });
-    expect(sharedChat.firstPartyMcpToolAdditions).toEqual(["slack_agent_chats"]);
-    expect(sharedChat.instructions).toStartWith("Answer in English.\n\n");
-    expect(sharedChat.instructions).toContain(`groupIds [${fixture.collectionId}]`);
+    const noop = async () => undefined;
+    const deps = {
+      db: app.db,
+      settings,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        signalUserMessage: noop,
+        wakeSessionWorkflow: noop,
+        requestSessionWorkflowWakeDispatch: noop,
+        signalApprovalDecision: noop,
+        signalSessionControl: noop,
+      },
+      objectStorage: null,
+    } as unknown as ApiRouteDeps;
+    const delegate = async (grant: AccessGrant, args: Record<string, unknown> = {}) => {
+      const server = buildOpenGeniMcpServer(deps, grant) as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+        >;
+      };
+      const result = (await server._registeredTools["session_create"]!.handler(
+        {
+          initialMessage: "Draft the release notes",
+          agentName: "Release desk",
+          model: "scripted-model",
+          sandboxBackend: "none",
+          ...args,
+        },
+        {},
+      )) as { content: Array<{ text: string }> };
+      const receipt = JSON.parse(result.content[0]!.text) as { resource?: { id: string } };
+      if (!receipt.resource) throw new Error(`session_create refused: ${result.content[0]!.text}`);
+      const [row] = await shared!.admin<
+        {
+          agent_id: string | null;
+          parent_session_id: string | null;
+          instructions: string | null;
+          first_party_mcp_tools: string[];
+        }[]
+      >`select agent_id, parent_session_id, instructions, first_party_mcp_tools
+        from sessions where id = ${receipt.resource.id}`;
+      return row!;
+    };
 
-    // A private caller's child only reads the Memory, and still lists chats.
-    const privateChild = delegatedChatMemory(agent, {
-      instructions: undefined,
-      ownerSubjectId: fixture.subjectId,
-      private: true,
-    });
-    expect(privateChild.firstPartyMcpToolAdditions).toEqual(["slack_agent_chats"]);
-    expect(privateChild.instructions).toContain("never save anything from it");
+    // No calling chat: it follows the defaults, and gets the tool as an
+    // app chat with the agent does.
+    const root = await delegate(fixture.grant, { instructions: "Answer in English." });
+    expect(root.agent_id).toBe(fixture.agentId);
+    expect(root.parent_session_id).toBeNull();
+    expect(root.instructions).toStartWith("Answer in English.\n\n");
+    expect(root.instructions).toContain(`groupIds [${fixture.collectionId}]`);
+    expect(root.instructions).toContain("slack_agent_chats");
+    expect(root.first_party_mcp_tools).toContain("slack_agent_chats");
 
-    // Memory off: nothing added.
-    const off = delegatedChatMemory(
-      { ...agent, memoryEnabled: false },
-      { instructions: "Hi", ownerSubjectId: fixture.subjectId, private: false },
-    );
-    expect(off).toEqual({ instructions: "Hi", firstPartyMcpToolAdditions: [] });
+    // From a chat without the tool: the child sees only what its parent
+    // sees, so it isn't told about the tool.
+    const caller = await agentChat(app.db, fixture, { private: false });
+    try {
+      // The worker signs the chat's selection into its grant.
+      const child = await delegate({
+        ...caller.agentGrant,
+        metadata: { ...caller.agentGrant.metadata, firstPartyMcpTools: ["session_create"] },
+      });
+      expect(child.agent_id).toBe(fixture.agentId);
+      expect(child.parent_session_id).toBe(caller.sessionId);
+      expect(child.first_party_mcp_tools).not.toContain("slack_agent_chats");
+      expect(child.instructions).toContain(`groupIds [${fixture.collectionId}]`);
+      expect(child.instructions).not.toContain("slack_agent_chats");
+    } finally {
+      await caller.close();
+    }
+  }, 180_000);
+
+  test("an app chat with an explicit built-in list without the tool is not told about it", async () => {
+    if (!app) return;
+    const fixture = await workspaceWithAgent(app.db);
+    const deps = { db: app.db, settings } as unknown as ApiRouteDeps;
+    const explicit: Record<string, unknown> = {
+      agentId: fixture.agentId,
+      firstPartyMcpTools: ["knowledge_search"],
+    };
+    expect(
+      await prepareAgentChatCreate(deps, fixture.grant, fixture.home.workspaceId, explicit),
+    ).toBeUndefined();
+    expect(explicit["instructions"]).toContain(`groupId ${fixture.collectionId}`);
+    expect(explicit["instructions"]).not.toContain("slack_agent_chats");
+
+    const withoutPermission: Record<string, unknown> = {
+      agentId: fixture.agentId,
+      firstPartyMcpPermissions: ["workspace:read"],
+    };
+    expect(
+      await prepareAgentChatCreate(
+        deps,
+        fixture.grant,
+        fixture.home.workspaceId,
+        withoutPermission,
+      ),
+    ).toBeUndefined();
+    expect(withoutPermission["instructions"]).not.toContain("slack_agent_chats");
   }, 180_000);
 });

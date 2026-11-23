@@ -1,3 +1,9 @@
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  FIRST_PARTY_TOOL_AUTHORIZATION,
+  type FirstPartyMcpToolName,
+  type Permission,
+} from "@opengeni/contracts";
 import type { AgentRecord } from "@opengeni/db";
 
 /**
@@ -130,20 +136,59 @@ export function agentMemoryUnreadableMessage(access: AgentMemoryAccess): string 
 
 const CONTEXT_MISSING = "When context is missing";
 
+/** The tool an agent's chat lists its other shared chats with. */
+export const AGENT_LIST_CHATS_TOOL = "slack_agent_chats" as const satisfies FirstPartyMcpToolName;
+
+/**
+ * Whether a chat with this first-party selection and permission ceiling gets
+ * the list-chats tool: it is selected, and the ceiling can satisfy its
+ * registration predicate (the same table the first-party MCP server admits it
+ * with). A null ceiling is the default one, as the delegated token is signed.
+ */
+export function agentListChatsToolAvailable(
+  tools: readonly FirstPartyMcpToolName[],
+  permissions: readonly Permission[] | null | undefined,
+): boolean {
+  if (!tools.includes(AGENT_LIST_CHATS_TOOL)) return false;
+  return agentListChatsToolPermitted(permissions);
+}
+
+/** Whether the permission ceiling can admit the list-chats tool at all. */
+export function agentListChatsToolPermitted(
+  permissions: readonly Permission[] | null | undefined,
+): boolean {
+  const ceiling = permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+  const policy: { allOf?: readonly Permission[] } =
+    FIRST_PARTY_TOOL_AUTHORIZATION[AGENT_LIST_CHATS_TOOL];
+  return (policy.allOf ?? []).every(
+    (permission) => ceiling.includes(permission) || ceiling.includes("workspace:admin"),
+  );
+}
+
 /**
  * What an agent's chat is told about its Memory, or null when Memory is off.
- * The collection id is the one place it is named.
+ * The collection id is the one place it is named. `listChatsTool: false`
+ * leaves out the sentence about `slack_agent_chats`, for a chat that will not
+ * have that tool.
  */
-export function agentMemoryGuidance(access: AgentMemoryAccess): string | null {
+export function agentMemoryGuidance(
+  access: AgentMemoryAccess,
+  options: { listChatsTool?: boolean } = {},
+): string | null {
   const dm = access.saveKnowledge
     ? null
     : "This chat is private: never save anything from it to Knowledge.";
   if (!access.listChats) return dm;
-  const chats = "check your other chats with slack_agent_chats";
+  const listChatsTool = options.listChatsTool ?? true;
+  const chats = `check your other chats with ${AGENT_LIST_CHATS_TOOL}`;
   const id = access.collectionId;
-  if (!id || !access.read) return [`${CONTEXT_MISSING}, ${chats}.`, dm].filter(Boolean).join(" ");
+  if (!id || !access.read) {
+    return (
+      [listChatsTool ? `${CONTEXT_MISSING}, ${chats}.` : null, dm].filter(Boolean).join(" ") || null
+    );
+  }
   const lines = [
-    `Your Memory is Knowledge collection ${id}. ${CONTEXT_MISSING}, search it with knowledge_search (groupId ${id}, also view needs_review; say so when you rely on an unreviewed entry), then ${chats}.`,
+    `Your Memory is Knowledge collection ${id}. ${CONTEXT_MISSING}, search it with knowledge_search (groupId ${id}, also view needs_review; say so when you rely on an unreviewed entry)${listChatsTool ? `, then ${chats}` : ""}.`,
   ];
   if (access.write && access.saveKnowledge) {
     lines.push(

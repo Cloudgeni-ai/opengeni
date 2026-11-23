@@ -3,9 +3,22 @@ import {
   type AccessGrant,
   type AgentErrorCode,
   type FirstPartyMcpToolName,
+  type Permission,
 } from "@opengeni/contracts";
-import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
-import { resolveWorkspaceAgentRef, type AgentRecord } from "@opengeni/db";
+import { resolveFirstPartyMcpToolPolicy, resolveSessionFirstPartyMcpTools } from "@opengeni/config";
+import {
+  AGENT_LIST_CHATS_TOOL,
+  agentListChatsToolPermitted,
+  agentMemoryAccess,
+  agentMemoryGuidance,
+  type ApiRouteDeps,
+} from "@opengeni/core";
+import {
+  getSession,
+  requireWorkspace,
+  resolveWorkspaceAgentRef,
+  type AgentRecord,
+} from "@opengeni/db";
 import * as z4 from "zod/v4";
 
 import { isOpenSlackAgentSubject } from "./integrations/slack-open-agents";
@@ -105,13 +118,51 @@ export async function resolveDelegationAgent(
 }
 
 /**
- * What the delegated chat gets from the agent's Memory, the way an app chat
- * with the agent does: the guidance joined to its own instructions, and
- * `slack_agent_chats` when it may list the agent's other chats. Instructions
- * stay unchanged when Memory is off or there is no room: the knowledge tools
- * still enforce the rules.
+ * Whether the delegated chat will have `slack_agent_chats`. A chat created
+ * from a chat is its child: it sees only what its parent sees (its explicit
+ * list may only narrow the parent's effective selection) under the parent's
+ * permission ceiling, so it has the tool only when its parent does. A chat
+ * created without a calling chat follows the defaults, where session creation
+ * adds the tool as an app chat's addition, unless the request names its own
+ * list without it.
  */
-export function delegatedChatMemory(
+export async function delegatedChatHasListChatsTool(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    callerSessionId: string | null;
+    requestedTools: readonly FirstPartyMcpToolName[] | undefined;
+    requestedPermissions: readonly Permission[] | undefined;
+  },
+): Promise<boolean> {
+  if (!resolveFirstPartyMcpToolPolicy(deps.settings).allowed.includes(AGENT_LIST_CHATS_TOOL)) {
+    return false;
+  }
+  const requested = input.requestedTools?.includes(AGENT_LIST_CHATS_TOOL) ?? true;
+  if (input.callerSessionId === null) {
+    return requested && agentListChatsToolPermitted(input.requestedPermissions);
+  }
+  const parent = await getSession(deps.db, input.workspaceId, input.callerSessionId);
+  if (!parent) return false;
+  const parentTools = resolveSessionFirstPartyMcpTools(
+    deps.settings,
+    parent,
+    (await requireWorkspace(deps.db, input.workspaceId)).settings,
+  );
+  return (
+    requested &&
+    parentTools.includes(AGENT_LIST_CHATS_TOOL) &&
+    agentListChatsToolPermitted(input.requestedPermissions ?? parent.firstPartyMcpPermissions)
+  );
+}
+
+/**
+ * The delegated chat's Memory guidance, joined to its own instructions, the
+ * way an app chat with the agent gets it. The `slack_agent_chats` sentence is
+ * left out when the chat won't have that tool. Unchanged when Memory is off
+ * or there is no room: the knowledge tools still enforce the rules.
+ */
+export function delegatedChatInstructions(
   agent: AgentRecord,
   input: {
     instructions: string | undefined;
@@ -119,27 +170,21 @@ export function delegatedChatMemory(
     private: boolean;
     slackDm?: boolean;
     memoryOff?: boolean;
+    listChatsTool: boolean;
   },
-): { instructions: string | undefined; firstPartyMcpToolAdditions: FirstPartyMcpToolName[] } {
-  if (!agent.memoryEnabled) {
-    return { instructions: input.instructions, firstPartyMcpToolAdditions: [] };
-  }
-  const access = agentMemoryAccess(agent, {
-    private: input.private,
-    ownerSubjectId: input.ownerSubjectId,
-    memoryOff: input.memoryOff ?? false,
-    slackDm: input.slackDm ?? false,
-  });
-  const firstPartyMcpToolAdditions: FirstPartyMcpToolName[] = access.listChats
-    ? ["slack_agent_chats"]
-    : [];
-  const guidance = agentMemoryGuidance(access);
-  if (!guidance) return { instructions: input.instructions, firstPartyMcpToolAdditions };
+): string | undefined {
+  if (!agent.memoryEnabled) return input.instructions;
+  const guidance = agentMemoryGuidance(
+    agentMemoryAccess(agent, {
+      private: input.private,
+      ownerSubjectId: input.ownerSubjectId,
+      memoryOff: input.memoryOff ?? false,
+      slackDm: input.slackDm ?? false,
+    }),
+    { listChatsTool: input.listChatsTool },
+  );
+  if (!guidance) return input.instructions;
   const own = input.instructions?.trim() ?? "";
   const combined = own ? `${own}\n\n${guidance}` : guidance;
-  return {
-    instructions:
-      combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS ? combined : input.instructions,
-    firstPartyMcpToolAdditions,
-  };
+  return combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS ? combined : input.instructions;
 }
