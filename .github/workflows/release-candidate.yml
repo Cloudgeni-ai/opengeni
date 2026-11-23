@@ -35,7 +35,7 @@ on:
         default: ""
         type: string
       reuse_images:
-        description: Hotfix only. Comma list of images to reuse from the reuse_source_sha candidate instead of rebuilding (api, worker, web, sandbox, relay, artifact-materializer, artifact-outbox-dispatcher, desktop). The ops hotfix lane proposes it from the diff.
+        description: Hotfix only. Comma list of images to reuse from the reuse_source_sha candidate instead of rebuilding (api, worker, sandbox, relay, artifact-materializer, artifact-outbox-dispatcher, desktop). Web is always rebuilt because it bakes the deployment revision. The ops hotfix lane proposes it from the diff.
         required: false
         default: ""
         type: string
@@ -262,7 +262,7 @@ jobs:
                 }
                 for role in ${REUSE_IMAGES//,/ }; do
                   case "$role" in
-                    api|worker|web|sandbox|relay|artifact-materializer|artifact-outbox-dispatcher|desktop) ;;
+                    api|worker|sandbox|relay|artifact-materializer|artifact-outbox-dispatcher|desktop) ;;
                     *)
                       echo "unknown reuse_images entry: $role" >&2
                       exit 1
@@ -461,9 +461,12 @@ jobs:
           roles="${roles// relay / }"
           if git diff --quiet "$REUSE_SOURCE_SHA" "$SOURCE_SHA" -- agent; then
             roles="${roles} relay "
+          else
+            # api bakes the agent binaries; sandbox and desktop build the agent in.
+            for role in api sandbox desktop; do roles="${roles// ${role} / }"; done
           fi
           reused='{}'
-          for role in api worker web sandbox relay artifact-materializer artifact-outbox-dispatcher desktop; do
+          for role in api worker sandbox relay artifact-materializer artifact-outbox-dispatcher desktop; do
             [[ "$roles" == *" ${role} "* ]] || continue
             if [ "$role" = desktop ]; then
               # The desktop box is pinned by the chart, not the receipt.

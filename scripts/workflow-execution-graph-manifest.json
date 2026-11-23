@@ -146,7 +146,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "a5c23267b883333a378d085119e9227fa6bffec819fd90aeced2639a35017ea7"
+      "sha256": "c93fcb1a1e3a5cb21b0cd32b556875b2e2c19502658566ec6503db2c99de8ef4"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -1967,7 +1967,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Plan hotfix image reuse",
-      "sha256": "b25a03f468a3b3ec75da2071956ec23a2241ce8326a3d04e1af1a3fa300498b6"
+      "sha256": "ec9177a14772fad7b288a8e0ff61d799c3ac956b4957dfdf92363461d26b56cc"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -2057,7 +2057,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Validate exact retained versioned main source",
-      "sha256": "c44c6c1e19a509fd20ec4ee74ae1c2e8ba4680b206d6d4b78176d7790e3ee5ac"
+      "sha256": "e7dcde2554459862977802aa94fbed55d33fdd167447a5bf80cf3ce87b54389f"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
