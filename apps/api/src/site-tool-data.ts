@@ -179,7 +179,7 @@ export async function markToolData(
   siteId: string,
   sources: readonly SiteToolDataSource[],
 ): Promise<void> {
-  await markSiteToolData(deps.db, scope, siteId, sources);
+  await markSiteToolData(deps.db, scope, siteId, sources, { restart: true });
 }
 
 /**

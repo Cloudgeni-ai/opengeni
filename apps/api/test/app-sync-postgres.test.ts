@@ -29,6 +29,7 @@ import {
   getScheduledTask,
   listScheduledTaskRuns,
   markEventOccurrenceStarted,
+  markSiteToolData,
   recordEventDelivery,
   type DbClient,
 } from "@opengeni/db";
@@ -51,6 +52,7 @@ import {
   type AppSyncToolCaller,
 } from "../src/app-sync/service";
 import { readSiteSharedSyncTools } from "../src/workspace-tool-target";
+import { keepSyncToolDataMarked, markToolData } from "../src/site-tool-data";
 
 // App data sync against PostgreSQL as the restricted application role. The
 // connected tool is a fake; everything else (automations, run history, Site
@@ -1259,6 +1261,122 @@ test("a sync run still writing when a manager resets the data marks each page it
   expect(run.lastRun.status, JSON.stringify(run.lastRun)).toBe("succeeded");
   // The page it wrote after the reset marked the collection again.
   expect(await read()).toBe(403);
+});
+
+test("a writer's mark right before a reset stays, even when the target was marked long before", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  inventories(f, { [f.owner.subjectId]: [{ serverId: "orders-server" }] });
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const source = {
+    target: "collection:orders",
+    connector: "orders",
+    route: "orders-server",
+    shared: true,
+  };
+  const read = async () =>
+    (await f.request(f.alice, "POST", `/${f.siteId}/data/query`, { collection: "orders" })).status;
+  // Server code that reaches a shared account wrote here long ago (the
+  // write path, markToolData).
+  await markToolData({ db: db.db }, scope, f.siteId, [source]);
+  await shared.admin`update site_tool_data_sources set created_at = created_at - interval '5 minutes'
+    where site_id = ${f.siteId}`;
+  expect(await read()).toBe(403);
+  // It marks again right before its next write; a manager resets the data
+  // before that write lands. The write's mark must survive the reset.
+  await markToolData({ db: db.db }, scope, f.siteId, [source]);
+  const reset = await f.request(f.owner, "POST", `/${f.siteId}/data/collections/orders/reset`, {
+    confirm: true,
+  });
+  expect(reset.status, JSON.stringify(reset.json)).toBe(200);
+  expect(await read()).toBe(403);
+});
+
+test("a shared-account mark raises the shared flag of an existing mark and nothing lowers it", async () => {
+  const f = await fixture();
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const marks = async () =>
+    await shared.admin<{ connector: string; route: string; shared: boolean }[]>`
+      select connector, route, shared from site_tool_data_sources where site_id = ${f.siteId}`;
+  // A sync edit keeps its target marked first, without knowing the route is
+  // a shared account.
+  await keepSyncToolDataMarked({ db: db.db }, scope, f.siteId, {
+    mode: "shared",
+    collection: "orders",
+    tool: { serverId: "orders-server", toolName: "list_orders" },
+  });
+  const [kept] = await marks();
+  expect(kept).toMatchObject({ route: "orders-server", shared: false });
+  const source = {
+    target: "collection:orders",
+    connector: kept!.connector,
+    route: kept!.route,
+    shared: true,
+  };
+  // A shared-account write to the same target raises the flag.
+  await markToolData({ db: db.db }, scope, f.siteId, [source]);
+  expect((await marks()).map((mark) => mark.shared)).toEqual([true]);
+  // Neither a later sync edit nor a non-shared write lowers it.
+  await keepSyncToolDataMarked({ db: db.db }, scope, f.siteId, {
+    mode: "shared",
+    collection: "orders",
+    tool: { serverId: "orders-server", toolName: "list_orders" },
+  });
+  await markToolData({ db: db.db }, scope, f.siteId, [{ ...source, shared: false }]);
+  expect((await marks()).map((mark) => mark.shared)).toEqual([true]);
+  // A sync edit after an older non-shared mark raises it too.
+  await shared.admin`update site_tool_data_sources set shared = false where site_id = ${f.siteId}`;
+  await markSiteToolData(db.db, scope, f.siteId, [source]);
+  expect((await marks()).map((mark) => mark.shared)).toEqual([true]);
+});
+
+test("editing a shared sync keeps its old target's mark time, so a reset right after lifts it", async () => {
+  const f = await fixture();
+  for (const name of ["orders", "archive"])
+    await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/${name}`, {
+      accessMode: "shared_read",
+    });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool,
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const syncId = String(created.json.id);
+  const run = await runAppSyncNow(
+    f.deps,
+    f.owner.grant,
+    f.siteId,
+    syncId,
+    fakeTool(() => [{ id: "o-1", total: 3 }]).callTool,
+  );
+  expect(run.lastRun.status, JSON.stringify(run.lastRun)).toBe("succeeded");
+  inventories(f, { [f.owner.subjectId]: [{ serverId: "orders-server" }] });
+  const read = async (collection: string) =>
+    (await f.request(f.alice, "POST", `/${f.siteId}/data/query`, { collection })).status;
+  expect(await read("orders")).toBe(403);
+  // The sync last wrote long ago; now a manager points it elsewhere. That
+  // edit keeps the old target marked, but is not a write: the mark keeps its
+  // time.
+  await shared.admin`update site_tool_data_sources set created_at = created_at - interval '5 minutes'
+    where site_id = ${f.siteId}`;
+  const moved = await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    collection: "archive",
+  });
+  expect(moved.status, JSON.stringify(moved.json)).toBe(200);
+  expect(await read("orders")).toBe(403);
+  // A reset within the minute after the edit removes what the sync stored,
+  // so the restriction lifts; the sync's new target stays restricted.
+  const reset = await f.request(f.owner, "POST", `/${f.siteId}/data/collections/orders/reset`, {
+    confirm: true,
+  });
+  expect(reset.status, JSON.stringify(reset.json)).toBe(200);
+  expect(await read("orders")).toBe(200);
+  expect(await read("archive")).toBe(403);
 });
 
 test("an archived App's syncs stop", async () => {

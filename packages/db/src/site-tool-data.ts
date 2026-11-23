@@ -35,14 +35,26 @@ export const SITE_TOOL_DATA_RESET_GRACE_MS = 60_000;
 /**
  * Mark targets before the data is stored. Marks stay until a manager resets
  * the target, which removes them; a later write marks it again.
+ * A write (`restart`) restarts an existing mark's time, so the reset grace is
+ * measured from the mark just before that write. Keeping a mark for data
+ * already stored (a sync edit) leaves its time alone, so a reset right after
+ * still lifts it. Either way a shared-account source raises the mark's
+ * `shared` flag; it is never lowered here.
  */
 export async function markSiteToolData(
   db: Database,
   scope: Scope,
   siteId: string,
   sources: readonly SiteToolDataSource[],
+  options: { restart?: boolean } = {},
 ): Promise<void> {
   if (sources.length === 0) return;
+  const onConflict = options.restart
+    ? sql`on conflict (workspace_id, site_id, target, connector, route)
+            do update set created_at = now(),
+              shared = site_tool_data_sources.shared or excluded.shared`
+    : sql`on conflict (workspace_id, site_id, target, connector, route)
+            do update set shared = site_tool_data_sources.shared or excluded.shared`;
   await withRlsContext(db, scope, async (tx) => {
     for (const source of sources)
       await rawRows(
@@ -51,7 +63,7 @@ export async function markSiteToolData(
             (account_id, workspace_id, site_id, target, connector, route, shared)
           values (${scope.accountId}, ${scope.workspaceId}, ${siteId}, ${source.target},
             ${source.connector.slice(0, 256)}, ${source.route.slice(0, 256)}, ${source.shared})
-          on conflict do nothing`,
+          ${onConflict}`,
       );
   });
 }

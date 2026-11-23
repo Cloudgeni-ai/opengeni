@@ -438,7 +438,8 @@ export async function prepareAttestedWorkspaceToolGateway(
   attestations: WorkspaceToolGatewayCatalogAttestations | undefined,
   prepare: typeof prepareWorkspaceToolGateway = prepareWorkspaceToolGateway,
 ): Promise<PreparedWorkspaceToolGateway> {
-  const prepared = await prepare(routeDeps, authorization);
+  // Listing only: a remote server that fails is left out of the list.
+  const prepared = await prepare(routeDeps, authorization, { listing: true });
   attestations?.record(
     workspaceToolGatewayAttestationScope(authorization),
     prepared.toolGatewayCatalog,
@@ -630,6 +631,13 @@ export async function prepareWorkspaceToolGatewayForGrant(
 export type WorkspaceToolGatewayPreparationOptions = {
   target?: ToolGatewayTarget;
   signal?: AbortSignal;
+  /**
+   * Trusted (never a request-body field): this preparation only lists tools
+   * (GET /tools/catalog, /tools/declarations). A remote MCP server that fails
+   * to connect is left out of the list instead of failing it. Calls never
+   * set it, so a call still reports its server's own failure.
+   */
+  listing?: boolean;
   /** Trusted transport callback, never a request-body field. */
   reauthorize?: () => Promise<void>;
   /**
@@ -1132,7 +1140,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const authNeeded: ToolAuthNeededPayload[] = [];
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
-    allGatewayToolRefs(gatewaySettings),
+    workspaceToolGatewayPreparationRefs(gatewaySettings, options.listing === true),
     {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1901,6 +1909,24 @@ export function allGatewayToolRefs(settings: Settings): ToolRef[] {
     id: server.id,
     ...(server.connectionRef ? { optional: true } : {}),
   }));
+}
+
+const FIRST_PARTY_GATEWAY_SERVER_IDS: ReadonlySet<string> = new Set(["opengeni", "files", "docs"]);
+
+/**
+ * The tools the gateway connects. A listing (catalog, declarations) shows
+ * what it can reach: a remote server that fails to connect (a custom MCP
+ * server that is down or whose host no longer resolves) is left out, as a
+ * turn leaves it out, instead of failing every app's tool list. Calls keep
+ * every server as before, and first-party servers stay required everywhere.
+ */
+export function workspaceToolGatewayPreparationRefs(
+  settings: Settings,
+  listing: boolean,
+): ToolRef[] {
+  return allGatewayToolRefs(settings).map((ref) =>
+    !listing || FIRST_PARTY_GATEWAY_SERVER_IDS.has(ref.id) ? ref : { ...ref, optional: true },
+  );
 }
 
 async function inMemoryMcpRegistration(
