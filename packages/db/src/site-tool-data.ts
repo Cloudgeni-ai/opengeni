@@ -35,6 +35,8 @@ export const SITE_TOOL_DATA_RESET_GRACE_MS = 60_000;
 /**
  * Mark targets before the data is stored. Marks stay until a manager resets
  * the target, which removes them; a later write marks it again.
+ * Marking an already marked target restarts its time: the reset grace is
+ * measured from the latest mark, the one just before this write.
  */
 export async function markSiteToolData(
   db: Database,
@@ -51,7 +53,8 @@ export async function markSiteToolData(
             (account_id, workspace_id, site_id, target, connector, route, shared)
           values (${scope.accountId}, ${scope.workspaceId}, ${siteId}, ${source.target},
             ${source.connector.slice(0, 256)}, ${source.route.slice(0, 256)}, ${source.shared})
-          on conflict do nothing`,
+          on conflict (workspace_id, site_id, target, connector, route)
+            do update set created_at = now()`,
       );
   });
 }
