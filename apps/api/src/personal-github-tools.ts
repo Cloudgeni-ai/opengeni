@@ -20,7 +20,7 @@ import {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
-import type { LocalMcpServerRegistration } from "@opengeni/runtime";
+import type { LocalMcpServerRegistration } from "@opengeni/runtime/workspace-tool-gateway";
 import {
   GITHUB_REST_API_ORIGIN,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
