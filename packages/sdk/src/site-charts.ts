@@ -72,9 +72,11 @@ export const SITE_CHARTS_JS = String.raw`(function () {
       if (o && o.time) { opts.hour = "2-digit"; opts.minute = "2-digit"; }
       return new Intl.DateTimeFormat(undefined, opts).format(d);
     },
-    month: function (v) {
+    // "Oct 2025"; o.short drops the year ("Nov") for ticks between year starts.
+    month: function (v, o) {
       var d = toDate(v);
-      return d ? new Intl.DateTimeFormat(undefined, { month: "short", year: "2-digit" }).format(d) : String(v);
+      if (!d) return String(v);
+      return new Intl.DateTimeFormat(undefined, o && o.short ? { month: "short" } : { month: "short", year: "numeric" }).format(d);
     },
     time: function (v) {
       var d = toDate(v);
@@ -147,18 +149,23 @@ export const SITE_CHARTS_JS = String.raw`(function () {
   // Series list from options: [{key, label, color?}].
   function seriesOf(o) {
     var list = o.series || [{ key: o.value || o.y, label: o.valueLabel || o.yLabel || "" }];
+    var quiet = 0;
     return list.map(function (x, i) {
       var it = typeof x === "string" ? { key: x, label: x } : x;
       var hl = o.highlight != null && (o.highlight === it.label || o.highlight === it.key);
-      return { key: it.key, label: it.label != null ? it.label : String(it.key), color: it.color || (o.highlight != null && !hl ? color(i, true) : color(hl ? 0 : i)), hl: hl };
+      // Around a highlight the others are grey; every second one is a darker,
+      // dashed grey so they stay apart.
+      var muted = o.highlight != null && !hl, dash = muted && quiet++ % 2 === 1;
+      var c = it.color || (muted ? (dash ? "var(--og-fg-subtle)" : color(i, true)) : color(hl ? 0 : i));
+      return { key: it.key, label: it.label != null ? it.label : String(it.key), color: c, hl: hl, dash: dash };
     });
   }
   function legend(series) {
     var box = h("div", "og-legend");
     series.forEach(function (x) {
       var item = h("span", "og-legend-item");
-      var sw = h("span", "og-swatch");
-      sw.style.background = x.color;
+      var sw = h("span", "og-swatch" + (x.dash ? " og-swatch-dash" : ""));
+      sw.style[x.dash ? "borderColor" : "background"] = x.color;
       item.append(sw, document.createTextNode(x.label));
       if (x.hl) item.style.fontWeight = "600";
       box.appendChild(item);
@@ -289,7 +296,9 @@ export const SITE_CHARTS_JS = String.raw`(function () {
           bar.style.left = a * 100 + "%";
           bar.style.width = (b - a) * 100 + "%";
           var muted = o.highlight != null && series.length === 1 && !rowHl;
-          bar.style.background = series.length === 1 ? (muted ? color(0, true) : color(0)) : x.color;
+          // With better: "higher" | "lower", a bar on the bad side of zero is red.
+          var bad = o.better && (o.better === "higher" ? v < 0 : v > 0);
+          bar.style.background = series.length === 1 ? (muted ? color(0, true) : bad && min < 0 ? "var(--og-danger)" : color(0)) : x.color;
           track.appendChild(bar);
           if (o.ci && series.length === 1) {
             var lo = get(r, o.ci[0]), hi = get(r, o.ci[1]);
@@ -363,17 +372,21 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     return base;
   }
   function xTicks(fr, ticks, label) {
-    // Keep only ticks whose labels fit side by side.
-    var lastEnd = -Infinity;
-    ticks.forEach(function (t, i) {
+    // Keep only ticks whose labels fit side by side. The first tick and
+    // labels carrying a year ("Jan 2026") are placed first, so they survive.
+    var cand = ticks.map(function (t, i) {
       var txt = label(t), tw = textWidth(txt), x = fr.X(t.v != null ? t.v : t);
       var anchor = "middle", start = x - tw / 2;
       if (start < fr.pad.l - 4) { anchor = "start"; start = x; }
       if (x + tw / 2 > fr.w) { anchor = "end"; start = x - tw; }
-      if (start < lastEnd + 8) return;
-      lastEnd = start + tw;
-      var el = s("text", { x: x, y: fr.H - fr.pad.b + 16, "text-anchor": anchor }, fr.svg);
-      el.textContent = txt;
+      return { txt: txt, x: x, anchor: anchor, a: start, b: start + tw, p: i === 0 || /\d{4}/.test(txt) ? 0 : 1, i: i };
+    });
+    var placed = [];
+    cand.slice().sort(function (m, n) { return m.p - n.p || m.i - n.i; }).forEach(function (c) {
+      if (placed.some(function (q) { return c.a < q.b + 8 && c.b > q.a - 8; })) return;
+      placed.push(c);
+      var el = s("text", { x: c.x, y: fr.H - fr.pad.b + 16, "text-anchor": c.anchor }, fr.svg);
+      el.textContent = c.txt;
     });
   }
 
@@ -424,7 +437,7 @@ export const SITE_CHARTS_JS = String.raw`(function () {
           var base = fr.Y(Math.max(0, Math.min.apply(null, ys)));
           s("path", { d: d + "L" + fr.X(pos(data.length - 1)) + "," + base + "L" + fr.X(pos(0)) + "," + base + "Z", class: "og-area", style: "fill:" + x.color }, fr.svg);
         }
-        s("path", { d: d, class: "og-line" + (x.hl ? " og-line-hl" : ""), style: "stroke:" + x.color }, fr.svg);
+        s("path", { d: d, class: "og-line" + (x.hl ? " og-line-hl" : "") + (x.dash ? " og-line-dash" : ""), style: "stroke:" + x.color }, fr.svg);
       });
       var guide = s("line", { y1: fr.pad.t, y2: fr.H - fr.pad.b, class: "og-guide", visibility: "hidden" }, fr.svg);
       var hit = s("rect", { x: fr.pad.l, y: 0, width: Math.max(0, w - fr.pad.l - fr.pad.r), height: fr.H, fill: "transparent" }, fr.svg);
@@ -449,7 +462,9 @@ export const SITE_CHARTS_JS = String.raw`(function () {
     var ds = xv.map(toDate);
     if (!ds.every(Boolean)) return function (v) { return String(v); };
     var span = ds[ds.length - 1] - ds[0];
-    if (xv.every(function (v) { return /^\d{4}-\d{2}$/.test(v); })) return fmt.month;
+    if (xv.every(function (v) { return /^\d{4}-\d{2}$/.test(v); }))
+      // Year on the first month and on January only.
+      return function (v) { var d = toDate(v); return fmt.month(v, { short: !(v === xv[0] || (d && d.getMonth() === 0)) }); };
     if (span <= 2 * 86400000) return fmt.time;
     return function (v) { return fmt.date(v); };
   }
