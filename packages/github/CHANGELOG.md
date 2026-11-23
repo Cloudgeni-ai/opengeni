@@ -1,5 +1,13 @@
 # @opengeni/github
 
+## 6.37.1
+
+### Patch Changes
+
+- @opengeni/config@6.37.1
+- @opengeni/contracts@6.37.1
+- @opengeni/network@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes
