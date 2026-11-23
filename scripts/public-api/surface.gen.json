@@ -42149,6 +42149,8 @@
     },
     "@opengeni/sdk/site-ui": {
       "resolveSiteUiStylesheet": "value",
+      "SITE_CHARTS_JS": "value",
+      "SITE_CHARTS_SCRIPT_PATH": "value",
       "SITE_UI_CSS": "value",
       "SITE_UI_STYLESHEET_PATH": "value"
     },
