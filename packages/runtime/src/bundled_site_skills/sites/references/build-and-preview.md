@@ -239,6 +239,7 @@ elsewhere. Make it feel native:
   `og-table`). It styles only what you mark. A bundler can't resolve the
   `<link>`, so a Bun + React app puts `<style>@import "/__opengeni/ui.css";</style>`
   in `index.html` instead (the build leaves it alone).
+- Dashboards and charts: `references/dashboards.md`.
 - Links to a page (`/releases`) work from the sidebar too: add one with
   `sidebar_layout_update` (an `app` item with the App's id and `path`).
 
