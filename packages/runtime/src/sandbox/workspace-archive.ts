@@ -155,6 +155,30 @@ export class WorkspaceArchiveIntegrityError extends Error {
   }
 }
 
+/**
+ * Why a hydration failed, for the server log, without workspace content: the
+ * error's class and code, a tar check's reason with any member path cut off,
+ * and an extractor's exit code. Never the extractor's stderr or file names.
+ */
+export function workspaceArchiveHydrationFailureSummary(error: unknown): string {
+  if (!(error instanceof Error)) return `non-error ${typeof error}`;
+  const parts = [error.constructor?.name || error.name || "Error"];
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === "string" && /^[a-z_]{1,64}$/u.test(code)) parts.push(`code=${code}`);
+  const details = (error as { details?: unknown }).details;
+  if (details && typeof details === "object") {
+    const { reason, exitCode } = details as { reason?: unknown; exitCode?: unknown };
+    if (typeof reason === "string") {
+      const category = reason.split(":")[0]!.trim().slice(0, 80);
+      if (category) parts.push(`reason=${JSON.stringify(category)}`);
+    }
+    if (typeof exitCode === "number" && Number.isInteger(exitCode)) {
+      parts.push(`exitCode=${exitCode}`);
+    }
+  }
+  return parts.join(" ");
+}
+
 type WorkspaceSession = {
   /** Present only on the reaper's restricted Docker capture attachment. */
   assertWorkspaceCaptureAuthority?: () => Promise<void>;

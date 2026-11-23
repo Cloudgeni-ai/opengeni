@@ -23,6 +23,7 @@ import {
   modelLevelChoice,
   modelLevelsView,
   type ModelLevel,
+  type ModelLevelChoice,
   type ModelLevelsView,
 } from "../model-levels";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
@@ -36,12 +37,13 @@ export type ModelLevelPickerProps = ModelPolicyPickerProps & {
    */
   levels: readonly ModelLevel[];
   /**
-   * A new chat starts on the first level: when its model or effort is outside
-   * the levels (for example the workspace default), the first level is chosen
-   * once the catalog loads. Without it, an existing chat on another model
-   * keeps that model and shows its name.
+   * Legacy opt-in for a standalone picker: choose the first level once the
+   * catalog loads if the current policy is outside the levels. The stock new
+   * conversation instead resolves the default in its draft controller.
    */
   startOnFirstLevel?: boolean | undefined;
+  /** Apply the complete level policy instead of calling the individual setters. */
+  onLevelChoice?: ((choice: ModelLevelChoice) => void) | undefined;
 };
 
 /*
@@ -137,6 +139,10 @@ export function ModelLevelPicker(props: ModelLevelPickerProps) {
     if (!view) return;
     const choice = modelLevelChoice(view, index, ultrafast);
     if (!choice) return;
+    if (props.onLevelChoice) {
+      props.onLevelChoice(choice);
+      return;
+    }
     if (choice.model !== props.model) props.onModelChange(choice.model);
     if (choice.effort !== props.effort) props.onEffortChange(choice.effort as ReasoningEffort);
     if (choice.latencyMode !== props.latencyMode) props.onLatencyModeChange(choice.latencyMode);
@@ -163,7 +169,7 @@ export function ModelLevelPicker(props: ModelLevelPickerProps) {
     );
   }
   if (!view) {
-    const { levels: _levels, startOnFirstLevel: _start, ...picker } = props;
+    const { levels: _levels, startOnFirstLevel: _start, onLevelChoice: _choice, ...picker } = props;
     return <ModelPolicyPicker {...picker} />;
   }
   return (
@@ -184,12 +190,16 @@ export function ModelLevelPicker(props: ModelLevelPickerProps) {
 export function ComposerModelPicker(
   props: ModelPolicyPickerProps & {
     levels?: readonly ModelLevel[] | undefined;
-    startOnFirstLevel?: boolean | undefined;
-  },
+  } & Pick<ModelLevelPickerProps, "startOnFirstLevel" | "onLevelChoice">,
 ) {
-  const { levels, startOnFirstLevel, ...picker } = props;
+  const { levels, startOnFirstLevel, onLevelChoice, ...picker } = props;
   return levels && levels.length > 0 ? (
-    <ModelLevelPicker {...picker} levels={levels} startOnFirstLevel={startOnFirstLevel} />
+    <ModelLevelPicker
+      {...picker}
+      levels={levels}
+      startOnFirstLevel={startOnFirstLevel}
+      onLevelChoice={onLevelChoice}
+    />
   ) : (
     <ModelPolicyPicker {...picker} />
   );
