@@ -377,13 +377,13 @@ export async function getAppServerDeployment(
       .limit(1);
     return {
       deployment: {
-      accountId: row.accountId,
-      workspaceId,
-      siteId,
-      status: row.status,
-      versionId: row.versionId,
-      manifest: row.manifest ? { ...row.manifest, tools: row.manifest.tools ?? [] } : null,
-      requestedTools: row.requestedTools ?? [],
+        accountId: row.accountId,
+        workspaceId,
+        siteId,
+        status: row.status,
+        versionId: row.versionId,
+        manifest: row.manifest ? { ...row.manifest, tools: row.manifest.tools ?? [] } : null,
+        requestedTools: row.requestedTools ?? [],
         deployerSubjectId: event?.actorSubjectId ?? row.createdBySubjectId,
       } satisfies AppServerDeployment,
       sourceTurnId: event?.sourceTurnId ?? null,
@@ -418,10 +418,7 @@ async function turnPerson(
         })
         .from(schema.sessionTurns)
         .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.id, turnId),
-          ),
+          and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)),
         )
         .limit(1);
       return (
