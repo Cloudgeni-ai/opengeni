@@ -6,6 +6,7 @@ import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
 } from "../browser-ephemeral";
+import { logStalledBrowserFrames } from "../browser-frame-health";
 import { createHash, randomUUID } from "node:crypto";
 import {
   environmentsEncryptionKeyBytes,
@@ -2572,6 +2573,9 @@ export function registerBrowserSessionRoutes(
         "browser.read",
         async ({ sessionClient, binding }) => {
           await sessionClient.listTargets();
+          // Live views send this heartbeat while they are open, so a view
+          // whose picture stopped is recorded here with the reason.
+          await logStalledBrowserFrames(sessionClient, browserSessionId);
           return BrowserSessionHeartbeatResponse.parse({
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
