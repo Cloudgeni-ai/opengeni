@@ -171,10 +171,10 @@ every catalog read, session create, approval-policy read and worker claim.
   `includeLapsed` opt-in, as not runnable (`runtime.available: false`,
   readiness `attention`), so it shows as needing reconnecting rather than
   vanishing, and is never a default tool or offered as ready. Nothing runs or
-  binds it. A new chat or tool-policy change that still names it is accepted:
-  a new chat starts without it and records an `account_inactive` gap, and a
-  tool-policy change keeps it chosen but not run until it is reconnected. Any
-  other unknown connector id is still refused.
+  binds it. A new chat or tool-policy change that still names it is accepted
+  and keeps it chosen but not run until it is reconnected; a new chat's first
+  turn records an `account_inactive` gap for it. Any other unknown connector id
+  is still refused.
 
 API Integrations follow the same rules
 (`personalWorkspaceExtensionApiIntegrations`): a curated definition (for

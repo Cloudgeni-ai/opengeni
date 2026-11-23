@@ -236,20 +236,19 @@ export async function postConnectionNeedsReauthNotice(
     )
       return;
     const service = connectionProviderName(broken.providerDomain);
-    // Everyone in a shared chat sees its notices: name only the service there,
-    // not whose account it is (the person's own Personal workspace excepted).
-    const sharedWithOthers =
-      (await getSessionVisibility(deps.db, use.workspaceId, use.sessionId)) ===
-        "workspace_shared" &&
-      !(
-        connection?.subjectId &&
-        (await isSubjectOwnPersonalWorkspace(deps.db, {
-          accountId: connection.accountId,
-          workspaceId: use.workspaceId,
-          subjectId: connection.subjectId,
-        }))
-      );
-    const account = connection && !sharedWithOthers ? connectionAccountLabel(connection, "") : "";
+    // Others may see a chat's notices: name whose account it is only in a
+    // private chat or in the account owner's own Personal workspace. Any other
+    // or unknown visibility names only the service.
+    const showAccount =
+      !!connection &&
+      ((await getSessionVisibility(deps.db, use.workspaceId, use.sessionId)) === "user_private" ||
+        (!!connection.subjectId &&
+          (await isSubjectOwnPersonalWorkspace(deps.db, {
+            accountId: connection.accountId,
+            workspaceId: use.workspaceId,
+            subjectId: connection.subjectId,
+          }))));
+    const account = connection && showAccount ? connectionAccountLabel(connection, "") : "";
     const payload = SessionNotificationPostedPayload.parse({
       key,
       title: `${service} needs reconnecting`,

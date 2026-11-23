@@ -548,11 +548,26 @@ test("a carried connector whose account stopped working never blocks starting or
   const before = await create([custom, curated]);
   await sql`update connections set status = 'needs_reauth' where id = ${f.connections.miaAcme}`;
   try {
-    // A new chat whose selection still names it starts without it.
+    // A new chat whose selection still names it keeps it chosen but starts
+    // without running or binding it.
     const including = await create([custom, curated]);
-    expect(including.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id)).toEqual([
-      f.curated.serverId,
-    ]);
+    expect(
+      including.tools
+        .filter((tool) => tool.kind === "mcp")
+        .map((tool) => tool.id)
+        .sort(),
+    ).toEqual([f.curated.serverId, f.custom.serverId].sort());
+    const firstTurns = await sql<{ id: string }[]>`
+      select id from session_turns where session_id = ${including.id} order by created_at`;
+    const firstBindings = await getSessionTurnMcpAccountBindings(
+      client.db,
+      f.miaPersonal,
+      including.id,
+      firstTurns[0]!.id,
+    );
+    expect(firstBindings?.map((binding) => binding.canonicalServerId) ?? []).not.toContain(
+      f.custom.serverId,
+    );
     expect(await gapsOf(including.id)).toEqual([
       [
         {
@@ -614,6 +629,25 @@ test("a carried connector whose account stopped working never blocks starting or
         },
       ),
     ).rejects.toMatchObject({ status: 422 });
+
+    // Once the account is reconnected, the chat that kept it chosen gets it back.
+    await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
+    const reconnected = await acceptSessionUserMessageWithOutcome(
+      deps as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[0],
+      grant as unknown as Parameters<typeof acceptSessionUserMessageWithOutcome>[1],
+      f.miaPersonal,
+      including.id,
+      { text: "it works again", clientEventId: crypto.randomUUID(), delivery: "send" },
+    );
+    const reconnectedBindings = await getSessionTurnMcpAccountBindings(
+      client.db,
+      f.miaPersonal,
+      including.id,
+      reconnected.turn.id,
+    );
+    expect(
+      reconnectedBindings?.find((binding) => binding.canonicalServerId === f.custom.serverId),
+    ).toMatchObject({ connectionId: f.connections.miaAcme });
   } finally {
     await sql`update connections set status = 'active' where id = ${f.connections.miaAcme}`;
   }

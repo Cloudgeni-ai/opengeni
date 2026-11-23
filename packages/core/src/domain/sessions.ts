@@ -3660,15 +3660,18 @@ async function createSessionForRequestInFileScope(
     ),
     ownServers: runtimeSettings.mcpServers,
   });
-  const requestedTools = validateToolRefs(
-    submittedTools.filter(
-      (tool) =>
-        !(
-          tool.kind === "mcp" && lapsedToolOmissions.some((omitted) => omitted.serverId === tool.id)
-        ),
-    ),
+  const lapsedToolIds = new Set(lapsedToolOmissions.map((omitted) => omitted.serverId));
+  const isLapsedToolRef = (tool: ToolRef) => tool.kind === "mcp" && lapsedToolIds.has(tool.id);
+  const runnableRequestedTools = validateToolRefs(
+    submittedTools.filter((tool) => !isLapsedToolRef(tool)),
     runtimeSettings,
   );
+  // The lapsed ref stays chosen in the stored tools, as a policy update keeps
+  // it, so the chat gets it back once the account is reconnected; it is left
+  // out only of this turn's runtime and account binding below.
+  const requestedTools = lapsedToolIds.size
+    ? [...runnableRequestedTools, ...submittedTools.filter(isLapsedToolRef)]
+    : runnableRequestedTools;
   let selectedTools: ToolRef[];
   let toolPolicy: SessionToolPolicy;
   if (parentSession) {
@@ -3689,7 +3692,7 @@ async function createSessionForRequestInFileScope(
     );
     if (toolsProvided) {
       assertToolRefsSubset(
-        requestedTools,
+        runnableRequestedTools,
         parentEffective,
         "child tools may only narrow the parent session tool policy",
       );
@@ -4100,7 +4103,7 @@ async function createSessionForRequestInFileScope(
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
   const connectionAccountTools = sessionToolsForConnectionAccounts({
-    session: { tools, toolPolicy },
+    session: { tools: tools.filter((tool) => !isLapsedToolRef(tool)), toolPolicy },
     runtimeMcpServers: runtimeSettings.mcpServers,
     defaultMcpServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
       capabilityRuntimeSettings.mcpServers,
