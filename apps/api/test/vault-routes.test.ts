@@ -732,6 +732,22 @@ describe("vault routes", () => {
     );
     expect(hiddenCopy.status).toBeLessThan(300);
     expect(hiddenCopy.json).toMatchObject({ useOnly: true, canReveal: false });
+    // Its creator can still move it between shared vaults; it stays use-only.
+    const hiddenMove = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${hidden.json.id}/move`,
+      asCreator,
+      { targetVaultId: other.json.id, mode: "move", newName: "HIDDEN_KEY_MOVED" },
+    );
+    expect(hiddenMove.status).toBeLessThan(300);
+    expect(hiddenMove.json).toMatchObject({ useOnly: true, canReveal: false });
+    const hiddenBack = await call(
+      "POST",
+      `${base}/vaults/${other.json.id}/items/${hidden.json.id}/move`,
+      asCreator,
+      { targetVaultId: team.json.id, mode: "move", newName: "HIDDEN_KEY" },
+    );
+    expect(hiddenBack.status).toBeLessThan(300);
 
     // Its values can be replaced; it can't be turned back.
     const rotated = await call(
@@ -739,7 +755,7 @@ describe("vault routes", () => {
       `${base}/vaults/${team.json.id}/items/${hidden.json.id}`,
       asCreator,
       {
-        expectedGeneration: hidden.json.generation,
+        expectedGeneration: hiddenBack.json.generation,
         fields: [{ fieldId: hiddenField.id, name: "value", value: "hidden-value-2" }],
       },
     );

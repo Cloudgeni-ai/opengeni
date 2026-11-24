@@ -575,8 +575,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     viewer: RevealViewer,
   ): Promise<{ hidden: boolean; useOnly: boolean }> {
     const source = await getVaultItem(deps.db, context, { itemId });
-    const { revealable } = await itemRevealable(context, source, viewer);
+    const { revealable, useOnly: alreadyUseOnly } = await itemRevealable(context, source, viewer);
     if (revealable) return { hidden: false, useOnly: false };
+    // Already use-only: a move keeps the mark and a copy inherits it, so
+    // nobody gains sight of anything (a password manager still can't take it).
+    if (alreadyUseOnly) return { hidden: true, useOnly: false };
     const target = await getVault(deps.db, context, { vaultId: targetVaultId });
     const widened = vaultItemRevealable(
       {
