@@ -64,6 +64,12 @@ pub struct HostGauges {
     pub zswap_stored: Option<u64>,
     /// Bytes of memory it holds, before compression (`Zswapped`).
     pub zswap_original: Option<u64>,
+    /// Bytes of swap, zswap's slots (`SwapTotal`): each page it holds
+    /// takes one at its original size.
+    pub swap_total: Option<u64>,
+    /// Bytes of those slots free (`SwapFree`): with none left zswap takes
+    /// no more pages, and running sandboxes can no longer be compressed.
+    pub swap_free: Option<u64>,
     /// Free pages in the huge-page pool (`HugePages_Free`).
     pub huge_pages_free: Option<u64>,
     /// Total stall microseconds, `some` and `full`, for memory, I/O and
@@ -103,6 +109,8 @@ pub(crate) fn parse_gauges(meminfo: &str, pressure: [Option<&str>; 3]) -> HostGa
     HostGauges {
         zswap_stored: field("Zswap").map(|kib| kib << 10),
         zswap_original: field("Zswapped").map(|kib| kib << 10),
+        swap_total: field("SwapTotal").map(|kib| kib << 10),
+        swap_free: field("SwapFree").map(|kib| kib << 10),
         huge_pages_free: field("HugePages_Free"),
         pressure: pressure.map(|text| [total(text, "some"), total(text, "full")]),
     }
@@ -162,7 +170,8 @@ Hugepagesize:       2048 kB
     /// without zswap, or a resource without `full` pressure.
     #[test]
     fn host_gauges_are_read_where_the_kernel_reports_them() {
-        let meminfo = "MemTotal: 1000 kB\nZswap:  64 kB\nZswapped: 256 kB\nHugePages_Free: 7\n";
+        let meminfo = "MemTotal: 1000 kB\nSwapTotal: 4096 kB\nSwapFree: 1024 kB\n\
+                       Zswap:  64 kB\nZswapped: 256 kB\nHugePages_Free: 7\n";
         let memory = "some avg10=0.00 avg60=0.00 avg300=0.00 total=1500\n\
                       full avg10=0.00 avg60=0.00 avg300=0.00 total=700\n";
         let cpu = "some avg10=0.00 avg60=0.00 avg300=0.00 total=99\n";
@@ -172,6 +181,8 @@ Hugepagesize:       2048 kB
             HostGauges {
                 zswap_stored: Some(64 << 10),
                 zswap_original: Some(256 << 10),
+                swap_total: Some(4096 << 10),
+                swap_free: Some(1024 << 10),
                 huge_pages_free: Some(7),
                 pressure: [[Some(1500), Some(700)], [None, None], [Some(99), None]],
             }

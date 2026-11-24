@@ -1693,7 +1693,7 @@
       "id": 34,
       "type": "timeseries",
       "title": "Requested, borrowed and compressed",
-      "description": "Memory running sandboxes requested, what they hold in RAM above their requests (borrowed), the host memory their compressed pages take, and how much of their memory is out of RAM at its original size. Borrowed memory is what the host takes back first when it is short.",
+      "description": "Memory running sandboxes requested, what they hold in RAM above their requests (borrowed), the host memory their compressed pages take, and how much of their memory is out of RAM at its original size. Borrowed memory is what the host takes back first when it is short. Free swap slots: every page out of RAM takes one at its original size, and with none left nothing more is compressed.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1746,6 +1746,13 @@
           "refId": "D",
           "expr": "sum by (host_name) (compute_memory_swapped_bytes{host_name=~\"$host\"})",
           "legendFormat": "{{host_name}} out of RAM",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "E",
+          "expr": "max by (host_name) (compute_host_swap_free_bytes{host_name=~\"$host\"})",
+          "legendFormat": "{{host_name}} free swap slots",
           "editorMode": "code",
           "range": true
         }
