@@ -444,6 +444,16 @@ function InvitationMenuItems({
   );
 }
 
+function hasInvitationActions(
+  invitation: OrganizationInvitation,
+  directory: OrganizationDirectory,
+): boolean {
+  return (
+    canResendInvitation(invitation) ||
+    canRevokeOrganizationInvitation(directory.actorRole, invitation.role)
+  );
+}
+
 /* ------------------------------------------------------------ small parts */
 
 function PersonAvatar({
@@ -824,12 +834,15 @@ function PeopleList({
                 }}
                 onOpen={() => nav.openInvitation(invitation.id)}
                 menu={
-                  <InvitationMenuItems
-                    invitation={invitation}
-                    directory={directory}
-                    actions={actions}
-                  />
+                  hasInvitationActions(invitation, directory) ? (
+                    <InvitationMenuItems
+                      invitation={invitation}
+                      directory={directory}
+                      actions={actions}
+                    />
+                  ) : undefined
                 }
+                indicator={hasInvitationActions(invitation, directory) ? undefined : "open"}
               />
             );
           })}
