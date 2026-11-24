@@ -13,15 +13,15 @@
 --   opens one inbox notice for the automation's owner while its blocker
 --   review holds a blocker with no chat notice (one per blocked episode,
 --   keyed by the blocked run), and resolves it once the review clears, a
---   chat notice takes over, or the automation is deleted. A new owner gets
---   the notice instead of the old one. The notice is a
+--   chat notice takes over, or the automation is deleted. The notice is a
 --   chat-less inbox item (1503) linking to the automation. Everything it says
 --   comes from the review and the automation as stored, so a caller can only
 --   make it tell the truth; it reads both through their workspace policies,
 --   so it sees only the workspace the calling transaction is scoped to.
 -- * AFTER triggers call it whenever a review is written with a new state,
 --   blocked run or chat notice, or deleted (with its automation), and
---   whenever an automation is deleted (`deleted_at`) or changes owner. They run an
+--   whenever an automation is deleted (`deleted_at`); its owner never
+--   changes (scheduled_task_owner_immutable). They run an
 --   ordinary (invoker) trigger function: the runtime role's EXECUTE on the sync is
 --   withheld for one release (DEFERRED_RUNTIME_PRIVATE_ROUTINES), because the
 --   previous release refuses a runtime grant on a definer it doesn't know.
@@ -86,15 +86,14 @@ BEGIN
         END IF;
         RETURN 0;
       END IF;
-      -- One notice per blocked episode, to its current owner; an earlier
-      -- episode's, or an earlier owner's, is settled.
+      -- One notice per blocked episode; an earlier episode's is settled.
       v_key := v_prefix || v_review.blocked_run_id::text;
       UPDATE opengeni_private.inbox_items item
       SET status = 'resolved', resolved_at = now(), updated_at = now()
       WHERE item.account_id = v_account
         AND item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
         AND item.source_key LIKE v_prefix || '%%'
-        AND (item.source_key <> v_key OR item.recipient_subject_id <> v_task.owner_subject_id);
+        AND item.source_key <> v_key;
       v_title := CASE WHEN v_review.state = 'paused'
         THEN 'Automation paused itself' ELSE 'Automation needs attention' END;
       v_body := v_review.message || CASE WHEN v_review.state = 'paused'
@@ -178,8 +177,7 @@ CREATE TRIGGER scheduled_task_blocker_reviews_inbox_notice_delete_trg
   EXECUTE FUNCTION opengeni_private.scheduled_task_blocker_inbox_notice();
 
 CREATE TRIGGER scheduled_tasks_blocker_inbox_notice_update_trg
-  AFTER UPDATE OF deleted_at, owner_subject_id ON scheduled_tasks
+  AFTER UPDATE OF deleted_at ON scheduled_tasks
   FOR EACH ROW
-  WHEN (NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
-    OR NEW.owner_subject_id IS DISTINCT FROM OLD.owner_subject_id)
+  WHEN (NEW.deleted_at IS DISTINCT FROM OLD.deleted_at)
   EXECUTE FUNCTION opengeni_private.scheduled_task_blocker_inbox_notice();
