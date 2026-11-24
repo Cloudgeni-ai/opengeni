@@ -190,7 +190,11 @@ export function ModelAccessOnboardingPanel({
     billingMode === "stripe" && !startingCredits,
   );
   const [subscribingPlan, setSubscribingPlan] = useState<string | null>(null);
-  const planCheckoutKeys = useRef(new Map<string, string>());
+  // Per plan, the key and return URLs of its first attempt, so a retry
+  // replays exactly the same checkout request.
+  const planCheckouts = useRef(
+    new Map<string, { idempotencyKey: string; successUrl: string; cancelUrl: string }>(),
+  );
   // The row whose connect step is open: a provider, or buying credits.
   // Undefined until the person opens or closes one. Without a plan to offer,
   // the choice screen opens buying credits, as before.
@@ -239,10 +243,19 @@ export function ModelAccessOnboardingPanel({
     workspaceId,
   );
 
-  const variant = startingCredits ? "credits" : includedModel ? "included" : "choose";
+  // "plan" is the choice screen led by a paid plan. Its view waits for the
+  // plan read, so the event names the screen the person actually saw.
+  const variant = startingCredits
+    ? "credits"
+    : includedModel
+      ? "included"
+      : planOffer.offer
+        ? "plan"
+        : "choose";
+  const variantKnown = variant === "credits" || variant === "included" || planOffer.loaded;
   useEffect(() => {
-    onboardingJourney().viewed("model_access", variant);
-  }, [variant]);
+    if (variantKnown) onboardingJourney().viewed("model_access", variant);
+  }, [variant, variantKnown]);
 
   useEffect(() => {
     cancelled.current = false;
@@ -264,7 +277,7 @@ export function ModelAccessOnboardingPanel({
     stopDeviceLogin();
     onboardingJourney().completed(
       "model_access",
-      variant === "choose" && !won ? "skipped" : "start_chatting",
+      (variant === "choose" || variant === "plan") && !won ? "skipped" : "start_chatting",
     );
     onComplete();
   }
@@ -516,22 +529,26 @@ export function ModelAccessOnboardingPanel({
 
   async function subscribeToPlan(plan: OnboardingPlan): Promise<void> {
     if (!client || busy) return;
-    // One key per plan, so a retry resumes the same Stripe Checkout.
-    const idempotencyKey = planCheckoutKeys.current.get(plan.key) ?? crypto.randomUUID();
-    planCheckoutKeys.current.set(plan.key, idempotencyKey);
     setBusy(true);
     setSubscribingPlan(plan.key);
     try {
-      // Plan credit pays for the same credits model as a purchase.
-      const creditsModel = await creditsModelForCheckout(client, workspaceId);
+      let request = planCheckouts.current.get(plan.key);
+      if (!request) {
+        // Plan credit pays for the same credits model as a purchase.
+        const creditsModel = await creditsModelForCheckout(client, workspaceId);
+        request = {
+          idempotencyKey: crypto.randomUUID(),
+          successUrl: creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
+          cancelUrl: window.location.href,
+        };
+        planCheckouts.current.set(plan.key, request);
+      }
       const session = await client.createSubscriptionCheckout({
         accountId: organizationId,
         planKey: plan.key,
-        idempotencyKey,
-        successUrl: creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
-        cancelUrl: window.location.href,
+        ...request,
       });
-      onboardingJourney().completed("model_access", "plan_checkout");
+      onboardingJourney().completed("model_access", "plan_checkout", plan.key);
       window.location.assign(session.url);
     } catch (error) {
       toast.error("Checkout failed", { description: userErrorText(error) });
@@ -540,15 +557,17 @@ export function ModelAccessOnboardingPanel({
     }
   }
 
-  const planOfferCard = planOffer.offer ? (
-    <OnboardingPlanOfferCard
-      offer={planOffer.offer}
-      ownSubscriptions={!simplified}
-      busyPlanKey={subscribingPlan}
-      disabled={!client || busy || !!pending}
-      onSubscribe={(plan) => void subscribeToPlan(plan)}
-    />
-  ) : null;
+  const planOfferCard = (quiet: boolean) =>
+    planOffer.offer ? (
+      <OnboardingPlanOfferCard
+        offer={planOffer.offer}
+        ownSubscriptions={!simplified && (codexEnabled || supergrokEnabled)}
+        busyPlanKey={subscribingPlan}
+        disabled={!client || busy || !!pending}
+        quiet={quiet}
+        onSubscribe={(plan) => void subscribeToPlan(plan)}
+      />
+    ) : null;
 
   async function celebrateCheckout(status: BillingCheckoutStatus): Promise<void> {
     setBusy(true);
@@ -951,7 +970,7 @@ export function ModelAccessOnboardingPanel({
                 : `Connect a subscription or API key you already have${billingMode === "stripe" ? ", or add Opengeni credits" : ""}.`}{" "}
               You can also do this later.
             </p>
-            {planOfferCard ? <div className="mt-3">{planOfferCard}</div> : null}
+            {planOffer.offer ? <div className="mt-3">{planOfferCard(true)}</div> : null}
             <div className="mt-3">{connectOptions}</div>
             {selectionRetryNotice}
             {coupon ? <div className="mt-4 text-center">{coupon}</div> : null}
@@ -994,7 +1013,7 @@ export function ModelAccessOnboardingPanel({
                 : "Connect a plan or provider account you already have."}
         </p>
 
-        {planOfferCard ? <div className="mt-6">{planOfferCard}</div> : null}
+        {planOffer.offer ? <div className="mt-6">{planOfferCard(false)}</div> : null}
         <div className="mt-6">{connectOptions}</div>
         {selectionRetryNotice}
         {coupon ? <div className="mt-4 text-center">{coupon}</div> : null}

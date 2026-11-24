@@ -123,6 +123,7 @@ mock.module("@tanstack/react-router", () => ({
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
 const { ModelAccessOnboardingPanel } = await import("@/components/model-access-onboarding");
+const { onboardingPlanOffer } = await import("@/components/onboarding-plan-offer");
 const { DirectModelProviderForm } = await import("@/components/direct-model-provider-connection");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
@@ -3207,6 +3208,8 @@ describe("onboarding leads with Pro where plans are sold", () => {
       await act(async () => getPro.click());
       await flush();
       expect(createSubscriptionCheckout.mock.calls[1]![0].idempotencyKey).toBe(first.idempotencyKey);
+      expect(createSubscriptionCheckout.mock.calls[1]![0].successUrl).toBe(first.successUrl);
+      expect(createSubscriptionCheckout.mock.calls[1]![0].cancelUrl).toBe(first.cancelUrl);
       await clickButton(container, "Or Max for $100 / month");
       await flush();
       const max = createSubscriptionCheckout.mock.calls[2]![0];
@@ -3248,6 +3251,20 @@ describe("onboarding leads with Pro where plans are sold", () => {
     } finally {
       await unmount();
     }
+  });
+
+  test("the offer follows Billing's checkout rule for the current plan", () => {
+    const free = { key: "free", label: "Free", status: "active", cancelAtPeriodEnd: false };
+    expect(onboardingPlanOffer({ ...catalog, plan: free as never })?.primary.key).toBe("pro");
+    expect(onboardingPlanOffer({ ...catalog, plan: null })?.alternative?.key).toBe("max");
+    for (const plan of [
+      { ...free, status: "past_due" },
+      { ...free, cancelAtPeriodEnd: true },
+      { ...free, key: "enterprise", label: "Enterprise" },
+      { ...free, key: "max", label: "Max" },
+    ])
+      expect(onboardingPlanOffer({ ...catalog, plan: plan as never })).toBeNull();
+    expect(onboardingPlanOffer({ ...catalog, plans: [catalog.plans[0]!, catalog.plans[3]!] })).toBeNull();
   });
 
   test("starting credits keep their screen and never read plans", async () => {

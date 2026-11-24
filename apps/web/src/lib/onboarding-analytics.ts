@@ -35,7 +35,7 @@ export type OnboardingCompletion<Step extends OnboardingStep> =
   (typeof ONBOARDING_COMPLETIONS)[Step][number];
 
 /** The model-access screen variant, by what the organization already has. */
-export type ModelAccessVariant = "credits" | "included" | "choose";
+export type ModelAccessVariant = "credits" | "included" | "choose" | "plan";
 
 // `model_access` is final unless the person chose to embed Opengeni, whose
 // developer setup step follows it.
@@ -52,7 +52,12 @@ type Capture = (
 
 export type OnboardingJourney = {
   viewed(step: OnboardingStep, variant?: ModelAccessVariant): void;
-  completed<Step extends OnboardingStep>(step: Step, via: OnboardingCompletion<Step>): void;
+  /** `plan` names the catalog plan a plan checkout was for. */
+  completed<Step extends OnboardingStep>(
+    step: Step,
+    via: OnboardingCompletion<Step>,
+    plan?: string,
+  ): void;
   /** The onboarding view went away or the page is being left. */
   left(): void;
 };
@@ -80,14 +85,14 @@ export function createOnboardingJourney(
       viewed.add(step);
       send("onboarding_step_viewed", { step, ...(variant ? { variant } : {}) });
     },
-    completed(step, via) {
+    completed(step, via, plan) {
       if (finished || completed.has(step)) return;
       completed.add(step);
       if (step === "use_case") developerSetupFollows = via === "embed";
       if (FINAL_STEPS.has(step) && !(step === "model_access" && developerSetupFollows)) {
         finished = true;
       }
-      send("onboarding_step_completed", { step, via });
+      send("onboarding_step_completed", { step, via, ...(plan ? { plan } : {}) });
     },
     left() {
       if (finished || lastStep === null) return;
