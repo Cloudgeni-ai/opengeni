@@ -147,8 +147,9 @@ carries the reference. Agent output is not masked
 who may use a secret accordingly, and rotate a value that leaked. The
 database refuses to reveal or read out a use-only item too
 (`read_vault_field_ciphertext`), so it holds during a rolling deploy; servers
-still on the previous release keep the old member rule and its
-`fromReference` copies until they are replaced.
+still on the previous release keep the old member rule, and their copies
+(`fromReference`, copy, copy into a password manager) aren't marked, until
+they are replaced.
 
 **Capability.** The `secrets` capability is on by default. When an agent
 configuration switches it off, the agent gets no secret tools, prompt block or
