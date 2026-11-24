@@ -534,6 +534,13 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // A refusal's closed sub-reason, such as a site-runtime gateway signature
   // check (`missing_headers`, `skew`). Log only, never a metric label.
   ["rejectionDetail", /^[a-z][a-z_]{0,31}$/],
+  // Who sent a refused request (apps/api rejectedCallerLogAttributes): the
+  // hashed attempt key the worker logs as `correlationId`, a domain-separated
+  // credential hash, and the User-Agent's first product token. Never a raw
+  // identifier or credential. Log only, never a metric label.
+  ["callerCorrelationId", /^turn_[0-9a-f]{32}$/],
+  ["callerCredentialKey", /^cred_[0-9a-f]{32}$/],
+  ["callerAgent", /^[A-Za-z][A-Za-z0-9._-]{0,47}(?:\/[0-9A-Za-z][0-9A-Za-z.+_-]{0,31})?$/],
   // Web error beacon: a route PATTERN of lowercase literal and `$param`
   // segments (never a concrete path or id) and the bundle revision token, in
   // the exact wire grammar the API route admits.

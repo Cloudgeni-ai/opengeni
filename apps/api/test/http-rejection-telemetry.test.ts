@@ -4,17 +4,104 @@ import {
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
 } from "@opengeni/core";
-import { createObservability } from "@opengeni/observability";
+import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { createObservability, turnExecutionTelemetryKey } from "@opengeni/observability";
 import {
   httpRejectionFactsFromEnvelope,
   httpRejectionFactsFromError,
   normalizeRejectionMessage,
   readRejectionEnvelope,
+  rejectedCallerLogAttributes,
+  rejectedCredentialTelemetryKey,
   rejectionFingerprint,
 } from "../src/http/rejection-telemetry";
 import { sitePublishingError } from "../src/site-publishing/service";
 
 const sentinel = "SECRET_REJECTION_SENTINEL_5d1c";
+const delegationSecret = "rejected-caller-test-delegation-secret";
+const workspaceId = "00000000-0000-4000-8000-0000000000a1";
+const sessionId = "00000000-0000-4000-8000-0000000000b2";
+const attemptId = "00000000-0000-4000-8000-0000000000c3";
+
+/** A Codemode attempt bearer like the worker mints, already expired. */
+async function expiredAttemptBearer(secret = delegationSecret): Promise<string> {
+  return await signDelegatedAccessToken(secret, {
+    accountId: "00000000-0000-4000-8000-0000000000d4",
+    workspaceId,
+    subjectId: `sandbox:${attemptId}`,
+    subjectLabel: "sandbox Codemode",
+    permissions: ["codemode:call"],
+    sessionId,
+    turnId: "00000000-0000-4000-8000-0000000000e5",
+    attemptId,
+    executionGeneration: 1,
+    principalKind: "agent_attempt",
+    exp: Math.floor(Date.now() / 1000) - 3600,
+  });
+}
+
+function callerHeaders(bearer: string | null, userAgent?: string): Headers {
+  const headers = new Headers();
+  if (bearer) headers.set("authorization", `Bearer ${bearer}`);
+  if (userAgent !== undefined) headers.set("user-agent", userAgent);
+  return headers;
+}
+
+describe("rejected caller identity", () => {
+  test("an expired attempt bearer is named by the worker's hashed attempt key", async () => {
+    const bearer = await expiredAttemptBearer();
+    const attributes = await rejectedCallerLogAttributes(
+      callerHeaders(bearer, "opengeni-agent/0.1.171"),
+      delegationSecret,
+    );
+    expect(attributes).toEqual({
+      callerAgent: "opengeni-agent/0.1.171",
+      callerCorrelationId: turnExecutionTelemetryKey(workspaceId, sessionId, attemptId),
+    });
+    const logged = JSON.stringify(attributes);
+    for (const raw of [bearer, workspaceId, sessionId, attemptId]) {
+      expect(logged).not.toContain(raw);
+    }
+  });
+
+  test("a bearer that is not a verifiable attempt credential gets a stable hashed key", async () => {
+    const forged = await expiredAttemptBearer("another-secret");
+    for (const bearer of [forged, `og_${sentinel}`]) {
+      const first = await rejectedCallerLogAttributes(callerHeaders(bearer), delegationSecret);
+      const again = await rejectedCallerLogAttributes(callerHeaders(bearer), delegationSecret);
+      expect(first).toEqual({ callerCredentialKey: rejectedCredentialTelemetryKey(bearer) });
+      expect(again).toEqual(first);
+      expect(first.callerCredentialKey).toMatch(/^cred_[0-9a-f]{32}$/);
+      expect(JSON.stringify(first)).not.toContain(bearer);
+      expect(JSON.stringify(first)).not.toContain(sentinel);
+    }
+    expect(rejectedCredentialTelemetryKey("a")).not.toBe(rejectedCredentialTelemetryKey("b"));
+    // Without a delegation secret nothing is verified; the credential is still grouped.
+    expect(
+      await rejectedCallerLogAttributes(callerHeaders(await expiredAttemptBearer()), undefined),
+    ).toEqual({
+      callerCredentialKey: rejectedCredentialTelemetryKey(await expiredAttemptBearer()),
+    });
+  });
+
+  test("names only the User-Agent product token, and nothing without a credential", async () => {
+    expect(
+      await rejectedCallerLogAttributes(
+        callerHeaders(null, "Mozilla/5.0 (X11; Linux x86_64) Chrome/150.0"),
+        delegationSecret,
+      ),
+    ).toEqual({ callerAgent: "Mozilla/5.0" });
+    expect(
+      await rejectedCallerLogAttributes(callerHeaders(null, "curl"), delegationSecret),
+    ).toEqual({ callerAgent: "curl" });
+    for (const userAgent of ["", `"${sentinel}"`, `ok/${"9".repeat(40)}`, "-"]) {
+      expect(
+        await rejectedCallerLogAttributes(callerHeaders(null, userAgent), delegationSecret),
+      ).toEqual({});
+    }
+    expect(await rejectedCallerLogAttributes(new Headers(), delegationSecret)).toEqual({});
+  });
+});
 
 describe("HTTP rejection telemetry", () => {
   test("names the missing catalog permission without copying the message", () => {
@@ -288,6 +375,9 @@ describe("HTTP rejection telemetry", () => {
         rejectionReason: "permission:stream:view",
         rejectionFingerprint: "m_0123456789",
         rejectionDetail: "missing_headers",
+        callerCorrelationId: `turn_${"a".repeat(32)}`,
+        callerCredentialKey: `cred_${"b".repeat(32)}`,
+        callerAgent: "opengeni-agent/0.1.171",
       });
       observability.info("HTTP request completed", {
         status: 403,
@@ -295,6 +385,9 @@ describe("HTTP rejection telemetry", () => {
         rejectionReason: `free text ${sentinel}`,
         rejectionFingerprint: sentinel,
         rejectionDetail: `free text ${sentinel}`,
+        callerCorrelationId: sentinel,
+        callerCredentialKey: `cred_${sentinel}`,
+        callerAgent: `agent ${sentinel}`,
       });
     } finally {
       console.log = original;
@@ -304,6 +397,9 @@ describe("HTTP rejection telemetry", () => {
       rejectionReason: "permission:stream:view",
       rejectionFingerprint: "m_0123456789",
       rejectionDetail: "missing_headers",
+      callerCorrelationId: `turn_${"a".repeat(32)}`,
+      callerCredentialKey: `cred_${"b".repeat(32)}`,
+      callerAgent: "opengeni-agent/0.1.171",
     });
     expect(lines[1]).not.toContain(sentinel);
   });
@@ -473,5 +569,55 @@ describe("API request middleware", () => {
       series.join("\n"),
     ).toBe(true);
     expect(series.some((line) => line.includes('reason="unclassified"'))).toBe(false);
+  });
+
+  test("a refused request's log names the attempt whose process is still calling", async () => {
+    const { createApp } = await import("../src/app");
+    const { testSettings } = await import("@opengeni/testing/settings");
+    const settings = testSettings({ delegationSecret });
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (line: string) => lines.push(line);
+    try {
+      const observability = createObservability(
+        { ...settings, observabilityStructuredLogs: true, observabilityMetricsEnabled: true },
+        { component: "api" },
+      );
+      const app = createApp({
+        settings,
+        db: {} as never,
+        bus: {} as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+        observability,
+      });
+      app.get("/v1/test-only/refused-caller", () => {
+        throw new AuthenticationRequiredRefusal("credential_invalid");
+      });
+      const bearer = await expiredAttemptBearer();
+      const response = await app.request("/v1/test-only/refused-caller", {
+        headers: { authorization: `Bearer ${bearer}`, "user-agent": "opengeni-agent/0.1.171" },
+      });
+      expect(response.status).toBe(401);
+      const completed = lines
+        .map((line) => {
+          try {
+            return JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .find((line) => line?.message === "HTTP request completed");
+      expect(completed).toMatchObject({
+        status: 401,
+        rejectionReason: "credential_invalid",
+        callerCorrelationId: turnExecutionTelemetryKey(workspaceId, sessionId, attemptId),
+        callerAgent: "opengeni-agent/0.1.171",
+      });
+      expect(lines.join("\n")).not.toContain(bearer);
+      expect(lines.join("\n")).not.toContain(sessionId);
+    } finally {
+      console.log = original;
+    }
   });
 });

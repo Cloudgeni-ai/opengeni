@@ -59,6 +59,7 @@ import {
   httpRejectionFactsFromEnvelope,
   httpRejectionFactsFromError,
   readRejectionEnvelope,
+  rejectedCallerLogAttributes,
   type HttpRejectionFacts,
 } from "./http/rejection-telemetry";
 import {
@@ -81,6 +82,7 @@ import {
   environmentsEncryptionKeyBytes,
   landingOriginEntries,
   orgAgentsEnabledForAccount,
+  resolveFirstPartyDelegationSecret,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -1212,6 +1214,12 @@ export function createAppComposition(
             correlationId,
             ...(sdkVersion ? { sdkVersion } : {}),
             ...(rejection ? rejectionLogAttributes(rejection) : {}),
+            ...(rejection
+              ? await rejectedCallerLogAttributes(
+                  c.req.raw.headers,
+                  resolveFirstPartyDelegationSecret(deps.settings),
+                )
+              : {}),
           });
         } catch (error) {
           const status = httpStatusForError(error);

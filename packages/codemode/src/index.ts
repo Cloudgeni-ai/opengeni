@@ -1,6 +1,6 @@
 import { resolveCatalogTool } from "./tool-reference";
 import { Buffer } from "node:buffer";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_VERSION,
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
@@ -44,6 +44,11 @@ import { CodemodeConnectionError, describeCodemodeConnectionFailure } from "./co
 
 import { siteHostWorkspacePath } from "@opengeni/contracts/site-session-http";
 import { materializeCodemodeImages } from "./images";
+import {
+  codemodeRefusedBearerKey,
+  isTerminalCodemodeBearerRefusal,
+  type CodemodeRefusedBearerStore,
+} from "./refused-bearers";
 
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
 
@@ -186,6 +191,9 @@ export type CodemodeClientOptions = {
   fetch?: typeof globalThis.fetch;
   pollIntervalMs?: number;
   timeoutMs?: number;
+  /** Remembers permanently refused bearers across processes (command-line
+   * clients start one process per call). In-process memory always applies. */
+  refusedBearers?: CodemodeRefusedBearerStore;
 };
 
 export type CodemodeCallOptions = {
@@ -239,9 +247,10 @@ export function isCodemodeCallerStaleError(error: unknown): error is CodemodeTra
   return error instanceof CodemodeTransportError && error.remoteCode === CODEMODE_CALLER_STALE_CODE;
 }
 
-/** Bearers the API refused as stale, per API base, shared by every client in
- * this process: a program that builds a fresh client per retry must not reach
- * the API with a dead bearer either. Only digests are kept, never bearer bytes. */
+/** Bearers the API refused permanently (401, or a stale caller), per API base,
+ * shared by every client in this process: a program that builds a fresh client
+ * per retry must not reach the API with a dead bearer either. Only digests are
+ * kept, never bearer bytes. */
 const staleCallerRefusals = new Map<string, CodemodeTransportError>();
 const STALE_CALLER_REFUSALS_RETAINED = 64;
 
@@ -577,11 +586,22 @@ export class CodemodeClient {
   private async request(path: string, init: RequestInit, throwOnError = true): Promise<Response> {
     const token =
       typeof this.options.token === "function" ? await this.options.token() : this.options.token;
-    // A bearer refused as stale never becomes valid again: fail locally with
+    // A bearer refused for good never becomes valid again: fail locally with
     // the same refusal. A renewed bearer (token file rewritten for a new
     // attempt) has another digest and is sent normally.
-    const refusalKey = `${this.baseUrl}\u0000${createHash("sha256").update(token).digest("hex")}`;
-    const refused = staleCallerRefusals.get(refusalKey);
+    const refusalKey = codemodeRefusedBearerKey(this.baseUrl, token);
+    let refused = staleCallerRefusals.get(refusalKey);
+    if (!refused && this.options.refusedBearers) {
+      const remembered = await this.options.refusedBearers.read(refusalKey);
+      if (remembered) {
+        refused = new CodemodeTransportError(remembered.message, remembered.status, {
+          ...(remembered.code ? { code: remembered.code } : {}),
+          retryable: false,
+          outcomeUnknown: false,
+        });
+        rememberRefusedBearer(refusalKey, refused);
+      }
+    }
     if (refused) {
       throw new CodemodeTransportError(refused.message, refused.status, {
         ...(refused.remoteCode ? { code: refused.remoteCode } : {}),
@@ -634,17 +654,26 @@ export class CodemodeClient {
         // The status is sufficient; never echo an unbounded provider body.
       }
       const error = new CodemodeTransportError(message, response.status, errorOptions);
-      if (isCodemodeCallerStaleError(error)) {
-        staleCallerRefusals.set(refusalKey, error);
-        if (staleCallerRefusals.size > STALE_CALLER_REFUSALS_RETAINED) {
-          staleCallerRefusals.delete(staleCallerRefusals.keys().next().value!);
-        }
+      if (isTerminalCodemodeBearerRefusal(response.status, error.remoteCode)) {
+        rememberRefusedBearer(refusalKey, error);
+        await this.options.refusedBearers?.record(refusalKey, {
+          status: response.status,
+          ...(error.remoteCode ? { code: error.remoteCode } : {}),
+          message: error.message,
+        });
         // The bearer's attempt ended: nothing it could ask for is current.
         this.catalogSnapshot = null;
       }
       throw error;
     }
     return response;
+  }
+}
+
+function rememberRefusedBearer(key: string, error: CodemodeTransportError): void {
+  staleCallerRefusals.set(key, error);
+  if (staleCallerRefusals.size > STALE_CALLER_REFUSALS_RETAINED) {
+    staleCallerRefusals.delete(staleCallerRefusals.keys().next().value!);
   }
 }
 
@@ -1102,6 +1131,7 @@ export * from "./environment";
 export * from "./connection-failure";
 export * from "./interaction";
 export * from "./images";
+export * from "./refused-bearers";
 export * from "./artifacts";
 export * from "./structured";
 export * from "./declarations";

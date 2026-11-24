@@ -53,6 +53,7 @@ type RecordedRequest = { method: string; path: string; authorization: string | n
 function codemodeServer(
   options: {
     failStatus?: number;
+    failCode?: string;
     outcomeUnknown?: boolean;
     loseFirstPostResponse?: boolean;
     result?: Record<string, unknown>;
@@ -131,7 +132,12 @@ function codemodeServer(
       });
       if (options.failStatus) {
         return Response.json(
-          { error: { message: "mock Codemode failure" } },
+          {
+            error: {
+              message: "mock Codemode failure",
+              ...(options.failCode ? { details: { code: options.failCode } } : {}),
+            },
+          },
           { status: options.failStatus },
         );
       }
@@ -1053,5 +1059,92 @@ describe("ogtool CLI", () => {
     } finally {
       mock.server.stop(true);
     }
+  });
+
+  describe("a script that loops on a permanently refused bearer", () => {
+    async function markerRoot(): Promise<string> {
+      const root = await mkdtemp(join(tmpdir(), "opengeni-ogtool-refusals-"));
+      temporaryRoots.push(root);
+      return root;
+    }
+
+    for (const [status, failCode] of [
+      [401, "credential_invalid"],
+      [403, "agent_attempt_caller_stale"],
+    ] as const) {
+      test(`reaches the API once after HTTP ${status} ${failCode}`, async () => {
+        const mock = codemodeServer({ failStatus: status, failCode });
+        const environment = {
+          OPENGENI_CODEMODE_URL: mock.url,
+          OPENGENI_CODEMODE_TOKEN: "dead-bearer",
+          TMPDIR: await markerRoot(),
+        };
+        try {
+          const results = [];
+          for (const args of [["list"], ["call", "docs.search", "{}"], ["list"]]) {
+            results.push(await run(args, environment));
+          }
+          for (const result of results) {
+            expect(result.exitCode).toBe(1);
+            expect(result.stderr).toContain("mock Codemode failure");
+          }
+          expect(mock.requests).toHaveLength(1);
+          // The marker holds a hash, never the bearer.
+          const markers = Bun.spawnSync(["grep", "-r", "dead-bearer", environment.TMPDIR]);
+          expect(markers.stdout.toString()).toBe("");
+          // A renewed bearer is sent normally.
+          await run(["list"], { ...environment, OPENGENI_CODEMODE_TOKEN: "renewed-bearer" });
+          expect(mock.requests.at(-1)?.authorization).toBe("Bearer renewed-bearer");
+          expect(mock.requests).toHaveLength(2);
+        } finally {
+          mock.server.stop(true);
+        }
+      });
+    }
+
+    test("keeps sending after a refusal that can clear", async () => {
+      const mock = codemodeServer({ failStatus: 403, failCode: "missing_permission" });
+      const environment = {
+        OPENGENI_CODEMODE_URL: mock.url,
+        OPENGENI_CODEMODE_TOKEN: "live-bearer",
+        TMPDIR: await markerRoot(),
+      };
+      try {
+        expect((await run(["list"], environment)).exitCode).toBe(1);
+        expect((await run(["list"], environment)).exitCode).toBe(1);
+        expect(mock.requests).toHaveLength(2);
+      } finally {
+        mock.server.stop(true);
+      }
+    });
+
+    test.skipIf(!process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT)(
+      "the native client and ogtool share the memory",
+      async () => {
+        const native = [process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT!, "codemode"];
+        for (const [first, second] of [
+          [native, undefined],
+          [undefined, native],
+        ] as const) {
+          const mock = codemodeServer({ failStatus: 401, failCode: "credential_invalid" });
+          const environment = {
+            OPENGENI_CODEMODE_URL: mock.url,
+            OPENGENI_CODEMODE_TOKEN: "dead-bearer",
+            TMPDIR: await markerRoot(),
+          };
+          try {
+            const refused = await run(["list"], environment, first ? [...first] : undefined);
+            const local = await run(["list"], environment, second ? [...second] : undefined);
+            expect(refused.exitCode).toBe(1);
+            expect(local.exitCode).toBe(1);
+            expect(local.stderr).toContain("mock Codemode failure");
+            expect(mock.requests).toHaveLength(1);
+          } finally {
+            mock.server.stop(true);
+          }
+        }
+      },
+      30_000,
+    );
   });
 });
