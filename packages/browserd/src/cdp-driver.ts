@@ -803,6 +803,17 @@ type ActionSettleBaseline = {
   navigation: number;
 };
 
+/** A main-frame navigation the running action started, until it commits or
+ * stops (see watchActionNavigation). */
+type ActionNavigationWatch = {
+  sequence: number;
+  commits: number;
+  url: string;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  ended: Promise<void>;
+  end: () => void;
+};
+
 type TargetState = {
   targetId: string;
   sessionId: string;
@@ -889,6 +900,12 @@ type TargetState = {
   /** A main-frame cross-document navigation has started but not yet committed
    * or stopped. */
   navigationPending: boolean;
+  /** An action is running on this tab, so navigations it starts are watched. */
+  watchingActionNavigation?: boolean;
+  actionNavigation?: ActionNavigationWatch | null;
+  /** The address of a navigation the running action started that was
+   * stopped because its website never answered. */
+  unansweredActionNavigation?: string | null;
   screencasts: Map<string, TargetScreencast>;
   tail: Promise<void>;
   unsubscribe: Array<() => void>;
@@ -3086,7 +3103,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (command.observationMode === "none" || command.observationMode === "input") return null;
       return await this.observe(this.tabIdOf(targetId));
     }
+    // While an action runs, a navigation it starts is watched, so a website
+    // that never answers ends the action instead of the tab (see
+    // watchActionNavigation).
     const act = async (state: TargetState, info: TargetInfo) => {
+      state.watchingActionNavigation = true;
+      try {
+        return await actOn(state, info);
+      } finally {
+        state.watchingActionNavigation = false;
+        state.unansweredActionNavigation = null;
+        this.endActionNavigationWatch(state);
+      }
+    };
+    const actOn = async (state: TargetState, info: TargetInfo) => {
       effects = { state, before: state.actionEffectCount };
       const actions = command.action.type === "batch" ? command.action.actions : [command.action];
       progress.allRan = false;
@@ -3168,6 +3198,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 // change before its input stays a refusal.
                 refindAfterDocumentChange: state.locatorFollowsNavigation === true,
               });
+              await this.awaitActionNavigation(state);
             });
           }
           state.nodeRoute = null;
@@ -4671,7 +4702,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.on(
         "Page.frameStoppedLoading",
         (event) => {
-          if (event.params.frameId === state.frame.id) state.navigationPending = false;
+          if (event.params.frameId !== state.frame.id) return;
+          state.navigationPending = false;
+          this.endActionNavigationWatch(state);
         },
         sessionId,
       ),
@@ -11747,6 +11780,95 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (event.params.frameId !== state.frame.id) return;
     state.navigationPending = true;
     state.navigationSequence += 1;
+    this.watchActionNavigation(state, event);
+  }
+
+  /**
+   * While a main-frame navigation waits for its website's first answer,
+   * Chromium holds every command for the page (reading it, running script)
+   * until the new document commits; only browser-side commands such as
+   * `Page.stopLoading` still answer. A link to a website that never answers
+   * would leave the action, and every later read of the tab, waiting until
+   * they time out with an unresponsive tab. So a navigation an action started
+   * gets the same bound as an explicit navigation: when nothing committed by
+   * then, loading stops, the tab keeps its page and the action says why.
+   */
+  private watchActionNavigation(state: TargetState, event: CdpEvent): void {
+    if (!state.watchingActionNavigation) return;
+    this.endActionNavigationWatch(state);
+    let end = () => {};
+    const ended = new Promise<void>((resolve) => {
+      end = resolve;
+    });
+    const watch: ActionNavigationWatch = {
+      sequence: state.navigationSequence,
+      commits: state.mainFrameCommits,
+      url: typeof event.params.url === "string" ? event.params.url : "",
+      timer: undefined,
+      ended,
+      end,
+    };
+    watch.timer = setTimeout(() => {
+      void this.stopUnansweredActionNavigation(state, watch);
+    }, this.navigationCommitTimeoutMs);
+    watch.timer.unref?.();
+    state.actionNavigation = watch;
+  }
+
+  private async stopUnansweredActionNavigation(
+    state: TargetState,
+    watch: ActionNavigationWatch,
+  ): Promise<void> {
+    if (state.actionNavigation !== watch) return;
+    if (
+      this.attached(state) &&
+      !state.dialog &&
+      state.navigationPending &&
+      state.navigationSequence === watch.sequence &&
+      state.mainFrameCommits === watch.commits
+    ) {
+      state.unansweredActionNavigation = watch.url;
+      await this.sendTarget(
+        state,
+        "Page.stopLoading",
+        {},
+        { timeoutMs: TARGET_CLOSE_SETTLE_TIMEOUT_MS },
+      ).catch(() => undefined);
+    }
+    this.endActionNavigationWatch(state);
+  }
+
+  private endActionNavigationWatch(state: TargetState): void {
+    const watch = state.actionNavigation;
+    if (!watch) return;
+    state.actionNavigation = null;
+    clearTimeout(watch.timer);
+    watch.end();
+  }
+
+  /** After an action's input: when it started a navigation that has not
+   * committed yet, wait for it to commit or to be stopped as unanswered, and
+   * end the action with a definite reason in the second case. */
+  private async awaitActionNavigation(state: TargetState): Promise<void> {
+    const watch = state.actionNavigation;
+    // A same-document step commits without ending the load, and a dialog
+    // stops the wait: neither leaves an unanswered navigation behind.
+    if (watch) {
+      while (
+        state.actionNavigation === watch &&
+        state.navigationPending &&
+        state.navigationSequence === watch.sequence &&
+        state.mainFrameCommits === watch.commits &&
+        !state.dialog &&
+        this.attached(state)
+      ) {
+        await Promise.race([watch.ended, delay(ACTION_REQUEST_POLL_MS)]);
+      }
+    }
+    const url = state.unansweredActionNavigation;
+    if (url === null || url === undefined) return;
+    state.unansweredActionNavigation = null;
+    throw new ActionNavigationNotAnsweredError(url, this.navigationCommitTimeoutMs);
   }
 
   /**
@@ -12348,6 +12470,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (frame.id !== state.frame.id) return;
     state.navigationPending = false;
     state.mainFrameCommits += 1;
+    this.endActionNavigationWatch(state);
     if (frame.loaderId !== state.frame.loaderId) {
       // The previous document and its frames are gone. Chromium does not
       // always report their unfinished requests (a WebUI start page's
@@ -16158,6 +16281,30 @@ class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
       true,
     );
     this.name = "NavigationNotAnsweredError";
+    this.failureReason = "destination_not_answered";
+  }
+}
+
+/** A page an action opened in its tab never answered, and the browser stopped
+ * loading it: the tab keeps the page the action ran on. */
+class ActionNavigationNotAnsweredError extends InteractionDefiniteDriverError {
+  constructor(url: string, timeoutMs: number) {
+    let origin = "";
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:")
+        origin = ` (${parsed.origin})`;
+    } catch {
+      // No address to name.
+    }
+    super(
+      "timeout",
+      `the page it opened${origin} did not load: its website did not answer within ${Math.round(
+        timeoutMs / 1_000,
+      )} seconds, so the browser stopped loading it and the tab still shows the previous page`,
+      false,
+    );
+    this.name = "ActionNavigationNotAnsweredError";
     this.failureReason = "destination_not_answered";
   }
 }
