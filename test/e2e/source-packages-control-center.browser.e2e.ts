@@ -181,9 +181,9 @@ describe("Bundles section browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      // New skill writes one; importing is the other way in, behind the ⋯.
-      await page.getByRole("button", { name: "More ways to add a skill", exact: true }).click();
-      await page.getByRole("menuitem", { name: "Import from URL", exact: true }).click();
+      // New skill writes one; uploading and importing from a URL share the Upload menu.
+      await page.getByRole("button", { name: "Upload", exact: true }).click();
+      await page.getByRole("menuitem", { name: "From a URL", exact: true }).click();
       let dialog = page.getByRole("dialog");
       await dialog.getByLabel("GitHub or skills.sh URL").fill(skillUrl);
       await dialog.getByRole("button", { name: "Preview", exact: true }).click();

@@ -1259,6 +1259,9 @@
 :where(.og-root).-my-1,:where(.og-root) .-my-1 {
     margin-block: calc(var(--spacing) * -1);
   }
+:where(.og-root).-my-3,:where(.og-root) .-my-3 {
+    margin-block: calc(var(--spacing) * -3);
+  }
 :where(.og-root).my-1,:where(.og-root) .my-1 {
     margin-block: calc(var(--spacing) * 1);
   }
@@ -1300,6 +1303,9 @@
   }
 :where(.og-root).-mt-\[7px\],:where(.og-root) .-mt-\[7px\] {
     margin-top: calc(7px * -1);
+  }
+:where(.og-root).mt-0,:where(.og-root) .mt-0 {
+    margin-top: calc(var(--spacing) * 0);
   }
 :where(.og-root).mt-0\.5,:where(.og-root) .mt-0\.5 {
     margin-top: calc(var(--spacing) * 0.5);
@@ -3843,6 +3849,12 @@
     background-color: var(--color-bg);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-bg) 35%, transparent);
+    }
+  }
+:where(.og-root).bg-bg\/90,:where(.og-root) .bg-bg\/90 {
+    background-color: var(--color-bg);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-bg) 90%, transparent);
     }
   }
 :where(.og-root).bg-black,:where(.og-root) .bg-black {
@@ -10534,6 +10546,11 @@
       max-width: var(--container-sm);
     }
   }
+:where(.og-root).sm\:max-w-xs,:where(.og-root) .sm\:max-w-xs {
+    @media (width >= 40rem) {
+      max-width: var(--container-xs);
+    }
+  }
 :where(.og-root).sm\:flex-1,:where(.og-root) .sm\:flex-1 {
     @media (width >= 40rem) {
       flex: 1;
@@ -10542,6 +10559,11 @@
 :where(.og-root).sm\:shrink-0,:where(.og-root) .sm\:shrink-0 {
     @media (width >= 40rem) {
       flex-shrink: 0;
+    }
+  }
+:where(.og-root).sm\:basis-auto,:where(.og-root) .sm\:basis-auto {
+    @media (width >= 40rem) {
+      flex-basis: auto;
     }
   }
 :where(.og-root).sm\:-translate-x-1\/2,:where(.og-root) .sm\:-translate-x-1\/2 {
@@ -15752,6 +15774,9 @@
 }
 :where(.og-root).og-capability-catalog-row[data-row-status="attention"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-row-status="attention"] .og-capability-catalog-status-line {
   color: var(--og-color-status-waiting, var(--og-color-fg-muted, inherit));
+}
+:where(.og-root).og-capability-catalog-row[data-status-tone="description"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-status-tone="description"] .og-capability-catalog-status-line {
+  color: var(--og-color-fg-muted, inherit);
 }
 :where(.og-root).og-connection-type-picker,:where(.og-root) .og-connection-type-picker {
   display: flex;

@@ -39,6 +39,9 @@ const record: SkillRecord = {
   ],
 };
 
+/** An edit that keeps a valid header, so the editor's own checks let it save. */
+const changedSkill = "---\nname: example\ndescription: Use for examples\n---\nchanged";
+
 function fixture(overrides: Record<string, unknown> = {}, admin = true) {
   const calls: Array<{ method: string; workspaceId: string; request?: unknown }> = [];
   const context = {
@@ -63,6 +66,9 @@ function fixture(overrides: Record<string, unknown> = {}, admin = true) {
       },
       async getPreferenceRegistry() {
         return { revisions: [] };
+      },
+      async changePreferenceRegistryScope() {
+        return {};
       },
       async saveWorkspaceSkill(workspaceId: string, request: unknown) {
         calls.push({ method: "save", workspaceId, request });
@@ -139,7 +145,9 @@ test("Skills list loads metadata first and saves the full edited folder without 
       files: [{ ...record.files[0]!, content: edited }, record.files[1]!],
       deletions: [],
     });
-    expect(view.container.textContent).toContain("Skill saved and active.");
+    expect(view.container.textContent).toContain(
+      "Skill saved. Agents use it from their next message.",
+    );
     const saved = calls.find((call) => call.method === "save")!.request as Record<string, unknown>;
     expect(saved).not.toHaveProperty("title");
     expect(saved).not.toHaveProperty("description");
@@ -160,7 +168,7 @@ test("a save finishing after workspace navigation cannot read or display old-wor
   const view = await mount(context);
   try {
     await view.click("Example");
-    await view.edit("changed");
+    await view.edit(changedSkill);
     await view.click("Save skill");
     await view.render("two");
     const readCount = calls.filter((call) => call.method === "read").length;
@@ -175,7 +183,9 @@ test("a save finishing after workspace navigation cannot read or display old-wor
     );
     expect(calls.filter((call) => call.method === "read")).toHaveLength(readCount);
     expect(view.container.querySelector("textarea")).toBeNull();
-    expect(view.container.textContent).not.toContain("Skill saved and active.");
+    expect(view.container.textContent).not.toContain(
+      "Skill saved. Agents use it from their next message.",
+    );
     expect(view.container.textContent).toContain("No skills yet.");
   } finally {
     await view.dispose();
@@ -187,7 +197,7 @@ test("workspace readers can inspect Skill files without edit controls", async ()
   const view = await mount(context);
   try {
     await view.click("Example");
-    expect(view.container.querySelector("textarea")?.disabled).toBe(true);
+    expect(view.container.querySelector("textarea")?.readOnly).toBe(true);
     expect(view.container.textContent).not.toContain("Save skill");
     expect(view.container.textContent).not.toContain("Add text file");
   } finally {
@@ -207,11 +217,11 @@ test("catalog pagination appends metadata without opening Skill files", async ()
   });
   const view = await mount(context);
   try {
-    await view.click("Load more Skills");
+    await view.click("Load more skills");
     expect(cursors).toEqual([undefined, "page-two"]);
     expect(view.container.textContent).toContain("Example");
     expect(view.container.textContent).toContain("Another Skill");
-    expect(view.container.textContent).not.toContain("Load more Skills");
+    expect(view.container.textContent).not.toContain("Load more skills");
     expect(calls.filter((call) => call.method === "read")).toHaveLength(0);
   } finally {
     await view.dispose();
@@ -302,7 +312,7 @@ test("save errors stay accessible inside the page without dropping the folder", 
   const view = await mount(context);
   try {
     await view.click("Example");
-    await view.edit("changed");
+    await view.edit(changedSkill);
     await view.click("Save skill");
     const page = view.container.querySelector("[data-capability-page]")!;
     expect(page.querySelector('[role="alert"]')?.textContent).toBe(
@@ -310,7 +320,7 @@ test("save errors stay accessible inside the page without dropping the folder", 
     );
     expect(page.textContent).not.toContain("Opengeni API");
     expect(view.container.querySelector("section > [role='alert']")).toBeNull();
-    expect(page.querySelector("textarea")?.value).toBe("changed");
+    expect(page.querySelector("textarea")?.value).toBe(changedSkill);
   } finally {
     await view.dispose();
   }
@@ -325,12 +335,14 @@ test("pending saves are announced inside the page without claiming activation", 
   const view = await mount(context);
   try {
     await view.click("Example");
-    await view.edit("changed");
+    await view.edit(changedSkill);
     await view.click("Save skill");
     expect(
       view.container.querySelector('[data-capability-page] [role="status"]')?.textContent,
     ).toBe("Saved for approval; not active yet.");
-    expect(view.container.textContent).not.toContain("Skill saved and active.");
+    expect(view.container.textContent).not.toContain(
+      "Skill saved. Agents use it from their next message.",
+    );
   } finally {
     await view.dispose();
   }
@@ -376,7 +388,7 @@ test("history keeps inactive revisions read-only and routes approval and restore
         history.value = revisionId!;
         history.dispatchEvent(new Event("change", { bubbles: true }));
       });
-      expect(view.container.querySelector("textarea")?.disabled).toBe(true);
+      expect(view.container.querySelector("textarea")?.readOnly).toBe(true);
       expect(view.container.textContent).not.toContain("Save skill");
       await view.click(label!);
       expect(mutations.at(-1)).toMatchObject({

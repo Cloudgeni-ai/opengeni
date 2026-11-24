@@ -6,15 +6,15 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@opengeni/react/ui/detail-page";
-import { DetailFact, DetailFacts, DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { Disclosure } from "@opengeni/react/ui/disclosure";
-import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
-import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
-import { cn } from "@opengeni/react/app/lib/utils";
+} from "./detail-page";
+import { DetailFact, DetailFacts, DetailSection } from "./detail-sheet";
+import { Disclosure } from "./disclosure";
+import { LogoTile, type LogoTileSize } from "./logo-tile";
+import { StatusBadge, type ProductStatus } from "./status-badge";
+import { cn } from "../lib/cn";
 
 /* ----------------------------------------------------------------------------
-   The one detail anatomy behind every Capabilities row (DESIGN.md section 8):
+   The one detail anatomy behind every Capabilities row:
    a connection, a skill and a plugin all open a page with a back link, a
    40px tile, the title with its status, a "by X" meta line, the main column
    of sections and a quiet aside card. Endpoints, scopes, registry names and

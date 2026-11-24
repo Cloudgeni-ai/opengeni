@@ -44843,6 +44843,34 @@
       "SiteList": "value",
       "SiteListProps": "type"
     },
+    "@opengeni/react/skills": {
+      "filesFromDrop": "value",
+      "humanizeName": "value",
+      "readSkillUpload": "value",
+      "readSkillUploadEntries": "value",
+      "scopeAudience": "value",
+      "scopeLabel": "value",
+      "SKILL_OWNER_FILTER_OPTIONS": "value",
+      "skillBody": "value",
+      "skillDisplayName": "value",
+      "skillFilesProblem": "value",
+      "SkillOwnerFilter": "type",
+      "skillOwnerListFilter": "value",
+      "SkillPage": "value",
+      "SkillsClient": "type",
+      "skillShortDescription": "value",
+      "SkillsPageSlot": "type",
+      "SkillsPanel": "value",
+      "SkillsPanelController": "type",
+      "SkillsPanelProps": "type",
+      "skillStatus": "value",
+      "skillSummary": "value",
+      "SkillUpload": "type",
+      "SkillUploadEntry": "type",
+      "SkillUploadError": "value",
+      "unzipSkillArchive": "value",
+      "UploadedFile": "type"
+    },
     "@opengeni/react/styles.css": {
       "default": "value"
     },
@@ -45220,6 +45248,17 @@
       "WEEKDAYS": "value",
       "zonedParts": "value",
       "zonedTimeToUtc": "value"
+    },
+    "@opengeni/react/ui/capability-page": {
+      "CapabilityAside": "value",
+      "CapabilityMark": "value",
+      "CapabilityPage": "value",
+      "CapabilityPageProps": "type",
+      "CapabilityStatus": "value",
+      "CapabilityStatusLabel": "type",
+      "OutcomeList": "value",
+      "TechnicalDetails": "value",
+      "TechnicalFact": "type"
     },
     "@opengeni/react/ui/card": {
       "Card": "value",

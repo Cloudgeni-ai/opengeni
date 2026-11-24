@@ -6,20 +6,15 @@ import {
   CapabilityMark,
   CapabilityPage,
   TechnicalDetails,
-} from "@/components/capabilities/capability-page";
-import {
-  humanizeName,
-  scopeAudience,
-  scopeLabel,
-  skillSummary,
-} from "@/components/capabilities/skill-copy";
-import { RowButton } from "@opengeni/react/ui/page-actions";
-import { Button } from "@opengeni/react/ui/button";
-import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { Input } from "@opengeni/react/ui/input";
-import { Select } from "@opengeni/react/ui/select";
-import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
-import { Textarea } from "@opengeni/react/ui/textarea";
+} from "../../ui/capability-page";
+import { humanizeName, scopeAudience, scopeLabel, skillSummary } from "../../app/lib/skill-names";
+import { RowButton } from "../../ui/page-actions";
+import { Button } from "../../ui/button";
+import { DetailSection } from "../../ui/detail-sheet";
+import { Input } from "../../ui/input";
+import { Select } from "../../ui/select";
+import { SettingRow, SettingRowGroup } from "../../ui/setting-row";
+import { Textarea } from "../../ui/textarea";
 
 /* ----------------------------------------------------------------------------
    A workspace skill's page: what it does, its instructions (SKILL.md and any
@@ -30,6 +25,7 @@ import { Textarea } from "@opengeni/react/ui/textarea";
    -------------------------------------------------------------------------- */
 
 const buttonClass = "rounded-[10px] pointer-coarse:h-11";
+const ALL_SCOPES: readonly SkillScope[] = ["user", "workspace", "organization"];
 
 export function skillStatus(
   record: Pick<SkillRecord, "pendingRevisionIds" | "status">,
@@ -66,6 +62,7 @@ export function SkillPage({
   onOpenRevision,
   reachSummary,
   onChangeReach,
+  scopes = ALL_SCOPES,
 }: {
   record: SkillRecord;
   files: SkillRecord["files"];
@@ -96,6 +93,8 @@ export function SkillPage({
   reachSummary?: string | undefined;
   /** Open "Available in"; omit for people who can't change the organization's Skills. */
   onChangeReach?: (() => void) | undefined;
+  /** The scopes this host offers; "Available to" shows only when there is a choice. */
+  scopes?: readonly SkillScope[] | undefined;
 }) {
   const skillFile = files.find((file) => file.path === "SKILL.md");
   const selected = files.find((file) => file.path === path);
@@ -152,6 +151,11 @@ export function SkillPage({
   ) : undefined;
 
   const activeVersion = history.find((revision) => revision.id === record.activeRevisionId);
+  const scopeChoices = ALL_SCOPES.filter(
+    (scope) => scope === record.scope || (scopes.includes(scope) && canManage(scope)),
+  );
+  const showReach = record.scope === "organization" && Boolean(reachSummary) && !isNew;
+  const showSettings = scopeChoices.length > 1 || showReach || history.length > 0;
 
   return (
     <CapabilityPage
@@ -161,13 +165,13 @@ export function SkillPage({
       title={title}
       status={isNew ? undefined : skillStatus(record)}
       meta={[
-        scopeLabel(record.scope),
+        scopes.length > 1 ? scopeLabel(record.scope) : null,
         isNew ? null : record.source ? "Installed from a source" : "Written in this workspace",
         activeVersion ? `Version ${activeVersion.revision}` : null,
       ]}
       actions={
         <>
-          {!isNew && record.scope !== "organization" && canManage(record.scope) ? (
+          {!isNew && !dirty && record.scope !== "organization" && canManage(record.scope) ? (
             <Button
               type="button"
               variant="destructive"
@@ -267,7 +271,9 @@ export function SkillPage({
           <Textarea
             aria-label={`Contents of ${path}`}
             value={selected?.content ?? ""}
-            disabled={!editable || busy}
+            // People who can't change it still read and copy it: read-only, not dimmed.
+            readOnly={!editable}
+            disabled={editable && busy}
             className="min-h-72 font-mono text-xs leading-5"
             onChange={(event) => onContentChange(event.target.value)}
           />
@@ -299,87 +305,89 @@ export function SkillPage({
         </div>
       </DetailSection>
 
-      <DetailSection title="Settings">
-        <SettingRowGroup className="-my-3">
-          <SettingRow
-            label="Available to"
-            controlWidth="auto"
-            control={
-              <div className="w-[200px] max-w-full">
-                <Select
-                  aria-label="Skill scope"
-                  value={record.scope}
-                  disabled={busy || !canManage(record.scope)}
-                  onChange={(event) => onChangeScope(event.target.value as SkillScope)}
-                  className="h-8 w-full min-w-[180px] rounded-[10px] bg-surface"
-                >
-                  {(["user", "workspace", "organization"] as const)
-                    .filter((scope) => scope === record.scope || canManage(scope))
-                    .map((scope) => (
-                      <option key={scope} value={scope}>
-                        {scopeLabel(scope)}
-                      </option>
-                    ))}
-                </Select>
-              </div>
-            }
-          />
-          {record.scope === "organization" && reachSummary && !isNew ? (
-            <SettingRow
-              label="Available in"
-              description={
-                record.availableHere === false
-                  ? "Agents in this workspace don't use it."
-                  : "Agents use it in these workspaces."
-              }
-              controlWidth="auto"
-              control={
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="text-sm text-fg-muted">{reachSummary}</span>
-                  {onChangeReach ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className={buttonClass}
-                      disabled={busy}
-                      onClick={onChangeReach}
+      {showSettings ? (
+        <DetailSection title="Settings">
+          <SettingRowGroup className="-my-3">
+            {scopeChoices.length > 1 ? (
+              <SettingRow
+                label="Available to"
+                controlWidth="auto"
+                control={
+                  <div className="w-[200px] max-w-full">
+                    <Select
+                      aria-label="Skill scope"
+                      value={record.scope}
+                      disabled={busy || !canManage(record.scope)}
+                      onChange={(event) => onChangeScope(event.target.value as SkillScope)}
+                      className="h-8 w-full min-w-[180px] rounded-[10px] bg-surface"
                     >
-                      Change
-                    </Button>
-                  ) : null}
-                </div>
-              }
-            />
-          ) : null}
-          {history.length ? (
-            <SettingRow
-              label="Version"
-              description="Open an earlier or proposed version to review it."
-              controlWidth="auto"
-              control={
-                <div className="w-[200px] max-w-full">
-                  <Select
-                    aria-label="History"
-                    value={record.revisionId ?? ""}
-                    disabled={busy}
-                    onChange={(event) => onOpenRevision(event.target.value)}
-                    className="h-8 w-full min-w-[180px] rounded-[10px] bg-surface"
-                  >
-                    {history.map((revision) => (
-                      <option key={revision.id} value={revision.id}>
-                        Version {revision.revision}
-                        {revision.id === record.activeRevisionId ? " - active" : ""}
-                        {record.pendingRevisionIds.includes(revision.id) ? " - pending" : ""}
-                      </option>
-                    ))}
-                  </Select>
-                </div>
-              }
-            />
-          ) : null}
-        </SettingRowGroup>
-      </DetailSection>
+                      {scopeChoices.map((scope) => (
+                        <option key={scope} value={scope}>
+                          {scopeLabel(scope)}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                }
+              />
+            ) : null}
+            {showReach ? (
+              <SettingRow
+                label="Available in"
+                description={
+                  record.availableHere === false
+                    ? "Agents in this workspace don't use it."
+                    : "Agents use it in these workspaces."
+                }
+                controlWidth="auto"
+                control={
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="text-sm text-fg-muted">{reachSummary}</span>
+                    {onChangeReach ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className={buttonClass}
+                        disabled={busy}
+                        onClick={onChangeReach}
+                      >
+                        Change
+                      </Button>
+                    ) : null}
+                  </div>
+                }
+              />
+            ) : null}
+            {history.length ? (
+              <SettingRow
+                label="Version"
+                description="Open an earlier or proposed version to review it."
+                controlWidth="auto"
+                control={
+                  <div className="w-[200px] max-w-full">
+                    <Select
+                      aria-label="History"
+                      value={record.revisionId ?? ""}
+                      disabled={busy}
+                      onChange={(event) => onOpenRevision(event.target.value)}
+                      className="h-8 w-full min-w-[180px] rounded-[10px] bg-surface"
+                    >
+                      {history.map((revision) => (
+                        <option key={revision.id} value={revision.id}>
+                          Version {revision.revision}
+                          {revision.id === record.activeRevisionId ? " - active" : ""}
+                          {record.pendingRevisionIds.includes(revision.id) ? " - pending" : ""}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                }
+              />
+            ) : null}
+          </SettingRowGroup>
+        </DetailSection>
+      ) : null}
 
       {!isNew ? (
         <TechnicalDetails
