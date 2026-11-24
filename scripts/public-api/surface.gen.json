@@ -33541,7 +33541,11 @@
         "$.clientEventId": "string!",
         "$.controlEtag": "string?",
         "$.expectedTurnVersion": "integer!",
-        "$.interrupt": "boolean?"
+        "$.interrupt": "boolean?",
+        "$.together": "array?",
+        "$.together[]": "object",
+        "$.together[].expectedTurnVersion": "integer!",
+        "$.together[].turnId": "string!"
       }
     },
     "StoredKnowledgeEntryContent": {

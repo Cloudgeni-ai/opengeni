@@ -11268,6 +11268,21 @@ export const SteerSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
      * already-waiting Steer into an immediate one.
      */
     interrupt: primitives.optionalBoolean,
+    /**
+     * Other waiting prompts to Steer with this one. All of them keep their
+     * queue order and reach the agent together, with no extra interruption.
+     * Prompts that already left the queue (this one included) or wait for a
+     * personal machine's owner are skipped; a changed one refuses the command.
+     */
+    together: z
+      .array(
+        z.object({
+          turnId: primitives.uuid,
+          expectedTurnVersion: primitives.positiveInteger,
+        }),
+      )
+      .max(200)
+      .optional(),
   }),
 );
 export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
