@@ -6,7 +6,7 @@ import { subscriptionAction } from "@opengeni/react/app/lib/subscription-plans";
 import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
 import { Button } from "@opengeni/react/ui/button";
 import { CheckIcon, Loader2Icon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type OnboardingPlan = BillingSubscriptionCatalog["plans"][number];
 
@@ -59,12 +59,16 @@ export function useOnboardingPlanOffer(
     offer: OnboardingPlanOffer | null;
   } | null>(null);
   const active = Boolean(enabled && client);
+  // The organization whose answer is settled: a new client object doesn't
+  // read again, so the screen can't switch after the fallback.
+  const settledFor = useRef<string | null>(null);
   useEffect(() => {
-    if (!active || !client) return;
+    if (!active || !client || settledFor.current === organizationId) return;
     let live = true;
     const settle = (offer: OnboardingPlanOffer | null) => {
       if (!live) return;
       live = false;
+      settledFor.current = organizationId;
       setState({ key: organizationId, offer });
     };
     const timeout = setTimeout(() => settle(null), PLAN_OFFER_TIMEOUT_MS);
@@ -163,9 +167,7 @@ export function OnboardingPlanOfferCard({
           onClick={() => onSubscribe(alternative)}
           {...analyticsAction("upgrade_plan")}
         >
-          {busyPlanKey === alternative.key ? (
-            <Loader2Icon className="size-4 animate-spin" />
-          ) : null}
+          {busyPlanKey === alternative.key ? <Loader2Icon className="size-4 animate-spin" /> : null}
           Or {alternative.label} for {monthly(alternative)} / month
         </Button>
       ) : null}

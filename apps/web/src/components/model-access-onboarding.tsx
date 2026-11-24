@@ -198,9 +198,7 @@ export function ModelAccessOnboardingPanel({
   // The row whose connect step is open: a provider, or buying credits.
   // Undefined until the person opens or closes one. Without a plan to offer,
   // the choice screen opens buying credits, as before.
-  const [openChoice, setOpen] = useState<ModelProviderId | "credits" | null | undefined>(
-    undefined,
-  );
+  const [openChoice, setOpen] = useState<ModelProviderId | "credits" | null | undefined>(undefined);
   const open =
     openChoice !== undefined
       ? openChoice

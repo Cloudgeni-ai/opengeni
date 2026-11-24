@@ -123,7 +123,8 @@ mock.module("@tanstack/react-router", () => ({
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
 const { ModelAccessOnboardingPanel } = await import("@/components/model-access-onboarding");
-const { onboardingPlanOffer } = await import("@/components/onboarding-plan-offer");
+const { onboardingPlanOffer, PLAN_OFFER_TIMEOUT_MS } =
+  await import("@/components/onboarding-plan-offer");
 const { DirectModelProviderForm } = await import("@/components/direct-model-provider-connection");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
@@ -3114,7 +3115,13 @@ describe("organization onboarding UI", () => {
 
 describe("onboarding leads with Pro where plans are sold", () => {
   const M = 1_000_000;
-  const plan = (key: string, label: string, price: number | null, credit: number, seats: number | null) => ({
+  const catalogPlan = (
+    key: string,
+    label: string,
+    price: number | null,
+    credit: number,
+    seats: number | null,
+  ) => ({
     key,
     label,
     stripePriceId: price ? `price_${key}` : null,
@@ -3128,10 +3135,10 @@ describe("onboarding leads with Pro where plans are sold", () => {
     accountId: "organization-a",
     revision: 38,
     plans: [
-      plan("free", "Free", 0, 10, 3),
-      plan("pro", "Pro", 20, 100, 5),
-      plan("max", "Max", 100, 500, 10),
-      plan("enterprise", "Enterprise", null, 0, null),
+      catalogPlan("free", "Free", 0, 10, 3),
+      catalogPlan("pro", "Pro", 20, 100, 5),
+      catalogPlan("max", "Max", 100, 500, 10),
+      catalogPlan("enterprise", "Enterprise", null, 0, null),
     ],
     plan: null,
   };
@@ -3188,7 +3195,9 @@ describe("onboarding leads with Pro where plans are sold", () => {
       // Buying credits is still one row away, but closed and after Pro.
       const credits = providerRow(container, "Opengeni credits")!;
       expect(credits).not.toBeNull();
-      expect(getPro.compareDocumentPosition(credits) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(
+        getPro.compareDocumentPosition(credits) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
       expect(
         Array.from(container.querySelectorAll("button")).some((button) =>
           button.textContent?.includes("in credits"),
@@ -3207,7 +3216,9 @@ describe("onboarding leads with Pro where plans are sold", () => {
       // A retry of the same plan reuses its key; Max is its own checkout.
       await act(async () => getPro.click());
       await flush();
-      expect(createSubscriptionCheckout.mock.calls[1]![0].idempotencyKey).toBe(first.idempotencyKey);
+      expect(createSubscriptionCheckout.mock.calls[1]![0].idempotencyKey).toBe(
+        first.idempotencyKey,
+      );
       expect(createSubscriptionCheckout.mock.calls[1]![0].successUrl).toBe(first.successUrl);
       expect(createSubscriptionCheckout.mock.calls[1]![0].cancelUrl).toBe(first.cancelUrl);
       await clickButton(container, "Or Max for $100 / month");
@@ -3239,6 +3250,39 @@ describe("onboarding leads with Pro where plans are sold", () => {
     }
   });
 
+  test("a slow plan read shows the usual screen, and a late answer doesn't switch it", async () => {
+    let answer: (value: typeof catalog) => void = () => undefined;
+    const realSetTimeout = globalThis.setTimeout;
+    const fallbacks: (() => void)[] = [];
+    globalThis.setTimeout = ((handler: () => void, ms?: number) => {
+      if (ms === PLAN_OFFER_TIMEOUT_MS) {
+        fallbacks.push(handler);
+        return 0;
+      }
+      return realSetTimeout(handler, ms);
+    }) as typeof setTimeout;
+    try {
+      const { container, unmount } = await renderChoice({
+        getBillingSubscriptionPlans: mock(
+          () => new Promise<typeof catalog>((resolve) => (answer = resolve)),
+        ),
+      });
+      try {
+        expect(container.querySelector("h1")).toBeNull();
+        await act(async () => fallbacks.forEach((fallback) => fallback()));
+        await flush();
+        expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
+        await act(async () => answer(catalog));
+        await flush();
+        expect(container.querySelector("[data-testid=onboarding-plan-offer]")).toBeNull();
+      } finally {
+        await unmount();
+      }
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+  });
+
   test("an organization that already has a paid plan is not offered one", async () => {
     const { container, unmount } = await renderChoice({
       getBillingSubscriptionPlans: mock(async () => ({
@@ -3264,7 +3308,9 @@ describe("onboarding leads with Pro where plans are sold", () => {
       { ...free, key: "max", label: "Max" },
     ])
       expect(onboardingPlanOffer({ ...catalog, plan: plan as never })).toBeNull();
-    expect(onboardingPlanOffer({ ...catalog, plans: [catalog.plans[0]!, catalog.plans[3]!] })).toBeNull();
+    expect(
+      onboardingPlanOffer({ ...catalog, plans: [catalog.plans[0]!, catalog.plans[3]!] }),
+    ).toBeNull();
   });
 
   test("starting credits keep their screen and never read plans", async () => {
