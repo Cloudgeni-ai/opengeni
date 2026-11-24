@@ -3124,6 +3124,7 @@ function rejectionLogAttributes(rejection: HttpRejectionFacts) {
     rejectionCode: rejection.code,
     rejectionReason: rejection.reason,
     ...(rejection.fingerprint ? { rejectionFingerprint: rejection.fingerprint } : {}),
+    ...(rejection.detail ? { rejectionDetail: rejection.detail } : {}),
   };
 }
 

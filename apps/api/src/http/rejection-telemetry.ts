@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { ErrorCode, Permission } from "@opengeni/contracts";
+import { SITE_GATEWAY_REFUSAL_REASONS } from "../site-publishing/gateway-signature";
 
 /**
  * Bounded, content-free classification of a rejected (4xx/5xx) API response,
@@ -18,11 +19,15 @@ import { ErrorCode, Permission } from "@opengeni/contracts";
  *   numbers normalized away. It groups identical refusals in logs; resolve it
  *   back to source text with `bun run scripts/resolve-rejection-fingerprint.ts`.
  *   It never becomes a metric label.
+ * - `detail` is the closed sub-reason of a refusal whose reason has one (a
+ *   site-runtime gateway signature refusal: `missing_headers`, `skew`, ...).
+ *   Logged only, never a metric label.
  */
 export type HttpRejectionFacts = {
   code: string;
   reason: string;
   fingerprint?: string;
+  detail?: string;
 };
 
 const ERROR_CODES: ReadonlySet<string> = new Set(ErrorCode.options);
@@ -33,6 +38,10 @@ const CONTROL_CODE = /^[a-z][a-z0-9_]{0,31}$/;
 /** A route's own authored top-level code, such as `SESSION_CREATE_REJECTED`. */
 const ROUTE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
 const MAX_ENVELOPE_BYTES = 32 * 1024;
+/** Reasons whose `details.reason` is a closed, content-free sub-reason. */
+const CLOSED_DETAIL_REASONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["site_gateway_signature_invalid", new Set<string>(SITE_GATEWAY_REFUSAL_REASONS)],
+]);
 
 export const UNCLASSIFIED_REJECTION_REASON = "unclassified";
 
@@ -61,6 +70,14 @@ function permissionReason(permission: unknown): string | null {
   return typeof permission === "string" && PERMISSIONS.has(permission)
     ? `permission:${permission}`
     : null;
+}
+
+/** The closed sub-reason for `reason`, from `details.reason`; never free text. */
+function closedDetail(reason: string, details: Record<string, unknown> | undefined) {
+  const value = details?.reason;
+  return typeof value === "string" && CLOSED_DETAIL_REASONS.get(reason)?.has(value)
+    ? { detail: value }
+    : {};
 }
 
 /**
@@ -101,16 +118,18 @@ export function httpRejectionFactsFromEnvelope(
     routeShaped && typeof record.code === "string" && !ERROR_CODES.has(record.code)
       ? record.code
       : null;
+  const reason =
+    permissionReason(details?.permission) ??
+    rejectionReasonFromMessage(message) ??
+    detailCode ??
+    controlCode ??
+    routeCode ??
+    UNCLASSIFIED_REJECTION_REASON;
   return {
     code,
-    reason:
-      permissionReason(details?.permission) ??
-      rejectionReasonFromMessage(message) ??
-      detailCode ??
-      controlCode ??
-      routeCode ??
-      UNCLASSIFIED_REJECTION_REASON,
+    reason,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
+    ...closedDetail(reason, details),
   };
 }
 
@@ -128,6 +147,8 @@ export function httpRejectionFactsFromError(
     error && typeof error === "object" ? (error as { details?: unknown }).details : undefined;
   const detailCode =
     details && typeof details === "object" ? (details as { code?: unknown }).code : undefined;
+  // No `detail` here: this path logs through the failure logger, which does
+  // not carry rejection attributes; refusals reach the envelope path first.
   return {
     code: fallbackCode,
     reason:

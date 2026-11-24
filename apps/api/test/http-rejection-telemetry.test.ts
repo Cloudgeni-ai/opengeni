@@ -12,6 +12,7 @@ import {
   readRejectionEnvelope,
   rejectionFingerprint,
 } from "../src/http/rejection-telemetry";
+import { sitePublishingError } from "../src/site-publishing/service";
 
 const sentinel = "SECRET_REJECTION_SENTINEL_5d1c";
 
@@ -201,6 +202,49 @@ describe("HTTP rejection telemetry", () => {
     ).toMatchObject({ code: "unauthenticated", reason: "session_expired" });
   });
 
+  test("a site gateway signature refusal logs its closed sub-reason", () => {
+    const refusal = (reason: unknown) =>
+      httpRejectionFactsFromEnvelope(
+        {
+          error: {
+            code: "unauthenticated",
+            message: "This request was not signed by the app gateway",
+            details: { reason, code: "site_gateway_signature_invalid" },
+          },
+        },
+        "unauthenticated",
+      );
+    expect(refusal("missing_headers")).toMatchObject({
+      reason: "site_gateway_signature_invalid",
+      detail: "missing_headers",
+    });
+    expect(refusal("bad_signature").detail).toBe("bad_signature");
+    // Anything outside the closed set, or on another reason, is dropped.
+    expect(refusal(`free ${sentinel}`)).not.toHaveProperty("detail");
+    expect(refusal(7)).not.toHaveProperty("detail");
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { error: { code: "conflict", message: "x", details: { code: "busy", reason: "skew" } } },
+        "conflict",
+      ),
+    ).not.toHaveProperty("detail");
+    // The refusal the site-runtime route actually throws, as the error
+    // handler serializes it into the envelope this classifier reads.
+    const thrown = sitePublishingError(
+      401,
+      "unauthenticated",
+      "site_gateway_signature_invalid",
+      "This request was not signed by the app gateway",
+      { reason: "skew" },
+    );
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { error: { code: thrown.code, message: thrown.message, details: thrown.details } },
+        "unauthenticated",
+      ),
+    ).toMatchObject({ reason: "site_gateway_signature_invalid", detail: "skew" });
+  });
+
   test("reads small JSON bodies without consuming the client response", async () => {
     const response = new Response(JSON.stringify({ error: { code: "forbidden" } }), {
       status: 403,
@@ -243,12 +287,14 @@ describe("HTTP rejection telemetry", () => {
         rejectionCode: "forbidden",
         rejectionReason: "permission:stream:view",
         rejectionFingerprint: "m_0123456789",
+        rejectionDetail: "missing_headers",
       });
       observability.info("HTTP request completed", {
         status: 403,
         rejectionCode: `forbidden ${sentinel}`,
         rejectionReason: `free text ${sentinel}`,
         rejectionFingerprint: sentinel,
+        rejectionDetail: `free text ${sentinel}`,
       });
     } finally {
       console.log = original;
@@ -257,6 +303,7 @@ describe("HTTP rejection telemetry", () => {
       rejectionCode: "forbidden",
       rejectionReason: "permission:stream:view",
       rejectionFingerprint: "m_0123456789",
+      rejectionDetail: "missing_headers",
     });
     expect(lines[1]).not.toContain(sentinel);
   });

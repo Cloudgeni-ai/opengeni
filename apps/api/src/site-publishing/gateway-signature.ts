@@ -31,6 +31,25 @@ export type SiteGatewayFields = {
   human: boolean;
 };
 
+/**
+ * Why a site-runtime request was refused. A closed set: the refusal's
+ * `details.reason`, also logged as `rejectionDetail` so unsigned traffic
+ * (`missing_headers`) is told apart from a gateway/API secret or clock problem
+ * (`bad_signature`, `skew`) without a query against the ingress logs.
+ */
+export const SITE_GATEWAY_REFUSAL_REASONS = [
+  "not_configured",
+  "missing_headers",
+  "bad_timestamp",
+  "skew",
+  "bad_body_hash",
+  "bad_signature",
+  "body_mismatch",
+  "credentials",
+] as const;
+
+export type SiteGatewayRefusalReason = (typeof SITE_GATEWAY_REFUSAL_REASONS)[number];
+
 export type SiteGatewayVerification =
   | {
       ok: true;
@@ -38,18 +57,7 @@ export type SiteGatewayVerification =
       /** The signed hex SHA-256 the body read afterwards must match. */
       bodySha256: string;
     }
-  | {
-      ok: false;
-      reason:
-        | "not_configured"
-        | "missing_headers"
-        | "bad_timestamp"
-        | "skew"
-        | "bad_body_hash"
-        | "bad_signature"
-        | "body_mismatch"
-        | "credentials";
-    };
+  | { ok: false; reason: SiteGatewayRefusalReason };
 
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
 

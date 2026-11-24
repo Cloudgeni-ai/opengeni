@@ -531,6 +531,9 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["rejectionCode", HTTP_REJECTION_CODE_PATTERN],
   ["rejectionReason", HTTP_REJECTION_REASON_PATTERN],
   ["rejectionFingerprint", /^m_[0-9a-f]{10}$/],
+  // A refusal's closed sub-reason, such as a site-runtime gateway signature
+  // check (`missing_headers`, `skew`). Log only, never a metric label.
+  ["rejectionDetail", /^[a-z][a-z_]{0,31}$/],
   // Web error beacon: a route PATTERN of lowercase literal and `$param`
   // segments (never a concrete path or id) and the bundle revision token, in
   // the exact wire grammar the API route admits.
