@@ -626,8 +626,12 @@ export async function publishPreparedCanaries(
     ) {
       throw new Error(`Frozen canary archive changed for ${pkg.name}`);
     }
+    // Read the current tags and only this canary version, not the full
+    // packument: full documents grow with every canary and, summed over the
+    // cohort, exceed the run's registry custody bound.
     const current = await read(pkg.name, fetch, registry, {
       revalidate: true,
+      receiptVersion: pkg.version,
       signal: AbortSignal.timeout(CANARY_RECEIPT_REQUEST_TIMEOUT_MS),
       custody,
     });
