@@ -138,14 +138,6 @@ async function render(node: ReactNode) {
   return { container, root };
 }
 
-function moreDisclosure(container: HTMLElement): HTMLButtonElement {
-  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "More",
-  );
-  if (!button) throw new Error("Missing More disclosure");
-  return button;
-}
-
 function setupDisclosure(container: HTMLElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
     (candidate) => candidate.textContent?.trim() === "Setup",
@@ -154,16 +146,8 @@ function setupDisclosure(container: HTMLElement): HTMLButtonElement {
   return button;
 }
 
-function lessButton(container: HTMLElement): HTMLButtonElement {
-  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Less",
-  );
-  if (!button) throw new Error("Missing Less control");
-  return button;
-}
-
 describe("session-first rail density", () => {
-  test("shows the shortcuts and the Setup group on tall screens regardless of the saved compact choice", async () => {
+  test("shows the shortcuts and a closed Setup group, ignoring the old compact choice", async () => {
     window.localStorage.setItem("opengeni.rail.nav", "false");
     window.localStorage.removeItem("opengeni.rail.setup");
     const rendered = await render(<PrimaryNav />);
@@ -186,28 +170,6 @@ describe("session-first rail density", () => {
     } finally {
       window.localStorage.removeItem("opengeni.rail.setup");
       await act(async () => rendered.root.unmount());
-    }
-  });
-
-  test("offers More and Less on short screens and remembers the compact-screen choice", async () => {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
-    const first = await render(<PrimaryNav />);
-    try {
-      expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
-      await act(async () => moreDisclosure(first.container).click());
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(2);
-      expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
-      await act(async () => lessButton(first.container).click());
-      expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
-    } finally {
-      await act(async () => first.root.unmount());
-    }
-    const persisted = await render(<PrimaryNav />);
-    try {
-      expect(moreDisclosure(persisted.container).getAttribute("aria-expanded")).toBe("false");
-    } finally {
-      await act(async () => persisted.root.unmount());
     }
   });
 
@@ -244,19 +206,14 @@ describe("session-first rail density", () => {
     }
   });
 
-  test("identifies an active shortcut when the compact disclosure hides its link", async () => {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
-    window.localStorage.setItem("opengeni.rail.nav", "false");
+  test("keeps the shortcuts on short screens and opens Setup for its current page", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
     pathname = "/workspaces/workspace-1/plugins";
     const rendered = await render(<PrimaryNav />);
     try {
-      const disclosure = moreDisclosure(rendered.container);
-      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-      expect(disclosure.getAttribute("data-active")).toBe("true");
-      expect(disclosure.getAttribute("aria-label")).toBe("More, current section Capabilities");
-      expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        0,
-      );
+      expect(rendered.container.textContent).not.toContain("More");
+      expect(setupDisclosure(rendered.container).getAttribute("aria-expanded")).toBe("true");
+      expect(rendered.container.textContent).toContain("Capabilities");
     } finally {
       await act(async () => rendered.root.unmount());
       rendered.container.remove();
