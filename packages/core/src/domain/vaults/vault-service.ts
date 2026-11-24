@@ -558,6 +558,36 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (!revealable) throw valueHiddenError({ id: item.id, name: item.name, useOnly });
   }
 
+  /**
+   * What a move or copy does about who can see values. `hidden`: the mover
+   * may only use the source, so a password manager (where values stay
+   * readable) can't take it. `useOnly`: the result would show the mover a
+   * value they can't see now (a copy records them as its saver; a move into
+   * their Only me vault makes it theirs), so it is marked use-only. A move
+   * between shared vaults keeps the item and who saved it, so it isn't.
+   */
+  async function moveVisibility(
+    context: VaultDbContext,
+    itemId: string,
+    targetVaultId: string,
+    mode: "move" | "copy",
+    viewer: RevealViewer,
+  ): Promise<{ hidden: boolean; useOnly: boolean }> {
+    const source = await getVaultItem(deps.db, context, { itemId });
+    const { revealable } = await itemRevealable(context, source, viewer);
+    if (revealable) return { hidden: false, useOnly: false };
+    const target = await getVault(deps.db, context, { vaultId: targetVaultId });
+    const widened = vaultItemRevealable(
+      {
+        vaultOwnerKind: target.ownerKind,
+        createdBySubjectId: mode === "copy" ? viewer.subjectId : source.createdBySubjectId,
+        useOnly: false,
+      },
+      viewer,
+    );
+    return { hidden: true, useOnly: widened };
+  }
+
   /** An item for a person or API key, with whether they may see its values. */
   async function present(
     actor: VaultRequestActor,
@@ -572,11 +602,14 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     return { ...toVaultItem(row, key()), useOnly, canReveal: revealable };
   }
 
-  /** The person an agent run acts for, as a viewer; agents never administer. */
+  /**
+   * The person an agent run acts for, as a viewer. An agent sees what that
+   * person saved or owns, never what they see only as an admin: its session's
+   * permissions don't prove the person administers now.
+   */
   async function principalViewer(
     principal: SecretPrincipal,
     actingSubjectId?: string | null,
-    permissions?: readonly string[],
   ): Promise<RevealViewer> {
     if (principal.kind === "human") {
       return { ...NO_VIEWER, subjectId: principal.subjectId };
@@ -590,13 +623,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
               refs: [],
             })
           ).meta.subjectId;
-    return {
-      ...NO_VIEWER,
-      subjectId,
-      workspaceAdmin:
-        permissions !== undefined &&
-        hasPermission(permissions as Parameters<typeof hasPermission>[0], "workspace:admin"),
-    };
+    return { ...NO_VIEWER, subjectId };
   }
 
   /**
@@ -1198,6 +1225,14 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const context = subjectContext(actor, workspaceId);
       const existing = await getVaultItem(deps.db, context, { itemId });
       const { expectedGeneration, useOnly, ...changes } = req;
+      // Only someone who can see the values may hide them from everyone:
+      // otherwise anyone who may edit could lock out the saver and admins.
+      if (useOnly) {
+        const seen = await itemRevealable(context, existing, viewerOf(actor));
+        if (!seen.revealable && !seen.useOnly) {
+          throw valueHiddenError({ id: existing.id, name: existing.name, useOnly: false });
+        }
+      }
       if (existing.vaultSource !== "opengeni") {
         const vault = await getVault(deps.db, context, { vaultId: existing.vaultId });
         if (useOnly) refuseUseOnlyInProvider(vault);
@@ -1268,11 +1303,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
     async moveItem(actor, workspaceId, itemId, req) {
       const context = subjectContext(actor, workspaceId);
-      // Moving or copying never widens who can see a value: an item its
-      // mover may only use stays use-only wherever it goes.
-      const { revealable } = await itemRevealable(
+      // Moving or copying never widens who can see a value.
+      const visibility = await moveVisibility(
         context,
-        await getVaultItem(deps.db, context, { itemId }),
+        itemId,
+        req.targetVaultId,
+        req.mode,
         viewerOf(actor),
       );
       const crossed = await moveAcrossProviders({
@@ -1283,7 +1319,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         mode: req.mode,
         newName: req.newName,
         createdBy: createdByKind(actor),
-        hidden: !revealable,
+        hidden: visibility.hidden,
       });
       if (crossed) return await present(actor, workspaceId, crossed);
       return await present(
@@ -1294,7 +1330,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           targetVaultId: req.targetVaultId,
           mode: req.mode,
           ...(req.newName !== undefined ? { newName: req.newName } : {}),
-          ...(revealable ? {} : { useOnly: true as const }),
+          ...(visibility.useOnly ? { useOnly: true as const } : {}),
         }),
       );
     },
@@ -1634,9 +1670,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const context = principalContext(principal);
       const target = await agentItemByReference(principal, input.reference);
       const vault = await agentVault(principal, input.toVault);
-      const { revealable } = await itemRevealable(
+      const visibility = await moveVisibility(
         context,
-        await getVaultItem(deps.db, context, { itemId: target.itemId }),
+        target.itemId,
+        vault.id,
+        input.mode ?? "move",
         await principalViewer(principal, target.actingSubjectId),
       );
       const crossed = await moveAcrossProviders({
@@ -1652,7 +1690,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         mode: input.mode ?? "move",
         newName: input.newName,
         createdBy: "agent",
-        hidden: !revealable,
+        hidden: visibility.hidden,
       });
       if (crossed) {
         return {
@@ -1665,7 +1703,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         targetVaultId: vault.id,
         mode: input.mode ?? "move",
         ...(input.newName !== undefined ? { newName: input.newName } : {}),
-        ...(revealable ? {} : { useOnly: true as const }),
+        ...(visibility.useOnly ? { useOnly: true as const } : {}),
       });
       return { item: toVaultItemSummary(row, key()), references: vaultItemReferences(row) };
     },
@@ -1714,7 +1752,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       await assertRevealable(
         principalContext(principal),
         await getVaultItem(deps.db, principalContext(principal), { itemId: target.itemId }),
-        await principalViewer(principal, target.actingSubjectId, permissions),
+        await principalViewer(principal, target.actingSubjectId),
       );
       // A value that needs the person's approval for each use never reaches
       // an agent's context, approved or not.

@@ -124,20 +124,28 @@ moves or copies into a password manager.
   only: a password manager keeps its values readable there
   (`vault_operation_unsupported`).
 
-An agent sees no more than the person it acts for. A refusal is
+An agent sees no more than the person it acts for, and only what that person
+saved or owns: admin rights don't pass to agents. A refusal is
 `vault_permission_denied` (403) with `details.reason` `use_without_reveal` or
-`use_only`, and it reads nothing, so it writes no reveal audit row. Moving or
-copying an item you may only use makes the result use-only, and a copy into a
-password manager is refused. Items carry `useOnly` and `canReveal` so apps can
-hide what would be refused. New shared items are not use-only by default:
+`use_only`, and it reads nothing, so it writes no reveal audit row. Only
+someone who can see an item may make it use-only. A copy of a use-only item is
+use-only. Copying an item you may only use, or moving it into your Only me
+vault, makes the result use-only; a move between shared vaults keeps the item
+as it is; a move or copy into a password manager is refused. One-time codes
+count as values: people who may only use a login don't see its codes. Items
+carry `useOnly` and `canReveal` so apps can hide what would be refused. New
+shared items are not use-only by default:
 the rule above already keeps their values from everyone but the saver and
 admins, and use-only is irreversible, so it is a choice.
 
-**Remaining gap.** Use-only protects stored values, not what an agent does with
-them. Anyone who can direct an agent that uses a secret can have it print,
-encode or send the value somewhere, and the output is not masked
+**Remaining gap.** Use-only protects stored values, not what is done with them.
+Anyone who can use a secret can send it somewhere they can read: an agent told
+to print, encode or post it, or a webhook, connection header or tool call that
+carries the reference. Agent output is not masked
 ([Agent-visible content](#agent-visible-content) forbids rewriting it). Choose
-who may use a secret accordingly, and rotate a value that leaked.
+who may use a secret accordingly, and rotate a value that leaked. During a
+rolling deploy of this change, servers still on the previous release ignore
+the rule until they are replaced.
 
 **Capability.** The `secrets` capability is on by default. When an agent
 configuration switches it off, the agent gets no secret tools, prompt block or

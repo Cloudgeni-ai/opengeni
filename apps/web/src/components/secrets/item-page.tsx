@@ -680,7 +680,9 @@ export function ItemPage({
                 <p className="mt-3 mb-0 text-xs leading-4.5 text-fg-muted">
                   {item.useOnly
                     ? "Use only: agents can use these values, but nobody can see or copy them."
-                    : "Agents can use these values. Only the person who saved this or an admin can see them."}
+                    : vault.source === "opengeni"
+                      ? "Agents can use these values. Only the person who saved this or an admin can see them."
+                      : "Agents can use these values. Only an admin can see them here."}
                 </p>
               ) : null}
             </DetailSection>

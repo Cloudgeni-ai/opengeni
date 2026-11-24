@@ -632,6 +632,42 @@ describe("vault routes", () => {
     );
     expect(replaced.status).toBe(200);
     expect(JSON.stringify(replaced.json)).not.toContain("shared-value-2");
+    // Nor make it use-only: that would lock out the saver and admins.
+    const lockOut = await call(
+      "PATCH",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}`,
+      asTeammate,
+      { expectedGeneration: replaced.json.generation, useOnly: true },
+    );
+    expect(lockOut.status).toBe(403);
+    // A move between shared vaults keeps the item as it is: its saver still
+    // sees it, and the teammate still can't.
+    const other = await call("POST", `${base}/vaults`, asCreator, {
+      name: "Other shared",
+      ownerKind: "workspace",
+    });
+    const sharedMove = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}/move`,
+      asTeammate,
+      { targetVaultId: other.json.id, mode: "move" },
+    );
+    expect(sharedMove.status).toBeLessThan(300);
+    expect(sharedMove.json).toMatchObject({ useOnly: false, canReveal: false });
+    const stillSeen = await call(
+      "POST",
+      revealPath(other.json.id, sharedItem.id, sharedField.id),
+      asCreator,
+      {},
+    );
+    expect(stillSeen.json.value).toBe("shared-value-2");
+    const movedBack = await call(
+      "POST",
+      `${base}/vaults/${other.json.id}/items/${sharedItem.id}/move`,
+      asCreator,
+      { targetVaultId: team.json.id, mode: "move" },
+    );
+    expect(movedBack.status).toBeLessThan(300);
 
     // Use-only: nobody sees it, its creator and admins included.
     const hidden = await call("POST", `${base}/vaults/${team.json.id}/items`, asCreator, {
@@ -677,6 +713,15 @@ describe("vault routes", () => {
     });
     expect(keyCopy.status).toBe(403);
     expect(JSON.stringify(keyCopy.json)).not.toContain("hidden-value-1");
+    // A copy of a use-only item is use-only, even for its creator.
+    const hiddenCopy = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${hidden.json.id}/move`,
+      asCreator,
+      { targetVaultId: other.json.id, mode: "copy" },
+    );
+    expect(hiddenCopy.status).toBeLessThan(300);
+    expect(hiddenCopy.json).toMatchObject({ useOnly: true, canReveal: false });
 
     // Its values can be replaced; it can't be turned back.
     const rotated = await call(
@@ -703,7 +748,7 @@ describe("vault routes", () => {
       "PATCH",
       `${base}/vaults/${team.json.id}/items/${sharedItem.id}`,
       asCreator,
-      { expectedGeneration: replaced.json.generation, useOnly: true },
+      { expectedGeneration: movedBack.json.generation, useOnly: true },
     );
     expect(later.status).toBe(200);
     const afterLater = await call(

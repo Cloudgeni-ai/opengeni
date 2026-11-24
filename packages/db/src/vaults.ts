@@ -649,7 +649,20 @@ export async function moveVaultItem(
       sql`select move_vault_item(${input.itemId}::uuid, ${input.targetVaultId}::uuid, ${input.mode},
         ${input.newName ?? null}, ${principal}::jsonb) as value`,
     );
-    if (input.useOnly) await insertUseOnly(scoped, context, row.id);
+    if (input.useOnly) {
+      await insertUseOnly(scoped, context, row.id);
+    } else if (row.id !== input.itemId) {
+      // A copy of a use-only item is use-only, decided in this transaction so
+      // a mark set meanwhile can't be missed.
+      const scope = contextScope(context);
+      await scoped.execute(
+        sql`insert into vault_item_use_only (account_id, item_id, set_by_subject_id)
+          select ${scope.accountId}::uuid, ${row.id}::uuid, ${scope.subjectId}
+          where exists (select 1 from vault_item_use_only
+            where account_id = ${scope.accountId}::uuid and item_id = ${input.itemId}::uuid)
+          on conflict do nothing`,
+      );
+    }
     return row;
   });
 }
@@ -670,19 +683,6 @@ async function insertUseOnly(
       values (${scope.accountId}::uuid, ${itemId}::uuid, ${scope.subjectId})
       on conflict do nothing`,
   );
-}
-
-/**
- * Marks a hosted item use-only: from then on nobody can reveal its values,
- * its creator and admins included. The caller must already have checked that
- * it may edit the item; there is no way to remove the mark.
- */
-export async function markVaultItemUseOnly(
-  db: Database,
-  context: VaultDbContext,
-  input: { itemId: string },
-): Promise<void> {
-  await inVaultContext(db, context, (scoped) => insertUseOnly(scoped, context, input.itemId));
 }
 
 /** Which of these items are use-only. */

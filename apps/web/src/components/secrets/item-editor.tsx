@@ -243,8 +243,10 @@ export function ItemEditorPage({
   const [expires, setExpires] = useState(toDateInput(item?.expiresAt ?? null));
   // One-way: a use-only item stays use-only. Hosted vaults only, since a
   // password manager keeps its values readable there.
-  const useOnlyAllowed = vault.source === "opengeni";
   const alreadyUseOnly = item?.useOnly === true;
+  // Only someone who can see the values may hide them from everyone.
+  const useOnlyAllowed =
+    vault.source === "opengeni" && (alreadyUseOnly || item?.canReveal !== false);
   const [useOnly, setUseOnly] = useState(alreadyUseOnly);
   const useOnlyId = useId();
   const [drafts, setDrafts] = useState<Draft[]>(() =>
