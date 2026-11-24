@@ -378,10 +378,7 @@ describe("agents through the API (real PostgreSQL)", () => {
         .status,
     ).toBe(403);
     // Who can use or edit it, and deleting it, stay with its creator and admins.
-    for (const change of [
-      { editAccess: "creator_and_admins" },
-      { visibility: "private" },
-    ]) {
+    for (const change of [{ editAccess: "creator_and_admins" }, { visibility: "private" }]) {
       expect(
         (await call(bob, "PATCH", `${base}/${created.id}`, { expectedVersion: 3, ...change }))
           .status,
@@ -397,9 +394,7 @@ describe("agents through the API (real PostgreSQL)", () => {
     });
     expect(restricted.status).toBe(200);
     expect(restricted.json.agent.editAccess).toBe("creator_and_admins");
-    expect((await call(bob, "GET", `${base}/${created.id}`)).json.agent.viewer.canEdit).toBe(
-      false,
-    );
+    expect((await call(bob, "GET", `${base}/${created.id}`)).json.agent.viewer.canEdit).toBe(false);
     expect(
       (await call(bob, "PATCH", `${base}/${created.id}`, { expectedVersion: 4, name: "Mine" }))
         .status,

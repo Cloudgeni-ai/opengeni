@@ -126,13 +126,29 @@ path is the agent's home.
 | --- | --- |
 | `GET /agents?filter=all\|yours`, `GET /agents/:id` | `sessions:read`; Only me agents only for their owner |
 | `POST /agents` | `sessions:create`; Only me needs a person who is a member of the organization; `organization` needs an organization admin |
-| `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates); changing it to `organization` also needs an organization admin |
+| `PATCH /agents/:id` (`expectedVersion` required) | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates), or anyone who can start chats there when its **Who can edit** is everyone ([Who can edit](#who-can-edit)); changing who can use or edit it stays with whoever made it and admins; changing it to `organization` also needs an organization admin |
+| `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin |
 | `GET /agents/:id/revisions?cursor&limit` | `sessions:read` |
 | `GET /agents/:id/chats?filter=yours\|everyone&direct&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner; `direct=true` leaves out Slack threads that only mentioned the agent |
 | `GET /agents/:id/slack` | `sessions:read`; also catches the agent up in the linked Slack workspaces |
 | `PUT /agents/:id/slack/:connectionId` | `workspace:admin`; the older `open` field sets **Anyone in the organization** for the agent (turning it on needs an organization admin) |
 | `DELETE /agents/:id/slack/:connectionId` | always `409 agent_slack_always_available`: there is nothing to turn off |
 | `GET /agents/:id/slack/:connectionId/channels`, `POST .../intro` | `workspace:admin` |
+
+### Who can edit
+
+A shared agent's **Who can edit** (`editAccess`, migration
+`1561_agent_edit_access.sql`) is `creator_and_admins` (whoever made it and the
+workspace's admins) or `everyone` (also anyone in its workspace who can start
+chats there). New agents default to `everyone`; agents made before it keep
+`creator_and_admins`, today's rule. It governs every edit of the agent: its
+name, icon, Instructions, Memory, Can use and Skills, through `/agents`,
+`/bot-templates`, the SDK and agent tools. Who can use it, Who can edit and
+deleting it stay with whoever made it and admins (`viewer.canManage`). Each
+edit rechecks the setting under the agent's row lock, so a concurrent change
+to it can't be raced. An Only me agent stays its owner's whatever the setting
+says. The agent page shows it as one row under Who can use it, read-only for
+people who can't manage the agent.
 
 - Limits: name 1 to 120 characters, description up to 280, Instructions up
   to 20,000 (an older client's `firstMessage` too, which joins them). Validation is lenient (trimmed, clear
@@ -687,7 +703,7 @@ Opengeni's own GitHub tools) and suggested triggers:
 | --- | --- | --- | --- |
 | Triage | Sorts new issues and reports | Bug fixer | A GitHub issue opens; a new message in a Slack channel; a Linear issue is created |
 | Bug fixer | Reproduces and fixes a bug in a pull request | PR reviewer | An issue is labelled `bug` |
-| PR reviewer | Reviews pull requests | None | A pull request opens or is ready for review |
+| PR reviewer | Reviews pull requests | None | A pull request opens or is ready for review; someone on the team mentions it on a pull request (one click) |
 | CVE scanner | Checks lockfiles and container images against known advisories (GitHub advisories, or osv-scanner or trivy in its sandbox), ranks by reachability and severity, fixes safe upgrades in one pull request, reports the rest | PR reviewer | Every Monday at 08:00; a pull request opens or is ready for review |
 | Incident responder | Gathers logs, metrics and recent deploys from connected tools, posts the likely cause and a mitigation | Bug fixer | Any event on a webhook (`*`, for alerts from monitoring); a new message in a Slack channel |
 | Dependency updater | Batches patch and minor upgrades into one pull request a week | PR reviewer | Every Monday at 09:00 |
@@ -704,7 +720,16 @@ opens the same dialog filled in from the suggestion (its events,
 conditions, note and name) so the person only picks the source and, for
 GitHub, the repositories, then saves; a GitHub, Slack or This workspace source
 it lacks is added on save. Its **Open full form** opens the automation form
-at the suggestion (`?agent=<id>&agentTrigger=<n>&returnTo=agent`). Ready-made agents
+at the suggestion (`?agent=<id>&agentTrigger=<n>&returnTo=agent`). A
+suggestion marked `oneClick` needs no choices and shows **Add** instead: it
+saves at once on the person's GitHub source (added first when GitHub is
+connected), or opens the same dialog when anything else is missing. PR
+reviewer's **Review when mentioned on a PR** is one: it listens for
+`issue_comment.created` on pull requests and
+`pull_request_review_comment.created` whose `data.comment.mentions_app` is
+true (the comment @mentions Opengeni's GitHub App, as `@slug` or
+`@slug[bot]`) and whose `data.comment.author_association` is `OWNER`,
+`MEMBER` or `COLLABORATOR`; the App's own comments never start it. Ready-made agents
 name no internal Skills. Each names the `team` it is for ("Engineering"); Capabilities
 **Ready-made** groups by it.
 

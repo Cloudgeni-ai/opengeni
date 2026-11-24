@@ -43,9 +43,7 @@ const VERSION_CONFLICT =
 function saveError(title: string, error: unknown) {
   toast.error(title, {
     description:
-      agentErrorCode(error) === "agent_version_conflict"
-        ? VERSION_CONFLICT
-        : userErrorText(error),
+      agentErrorCode(error) === "agent_version_conflict" ? VERSION_CONFLICT : userErrorText(error),
   });
 }
 
@@ -57,20 +55,11 @@ function saveError(title: string, error: unknown) {
  * The automations whose runs are chats with this agent. The server filters
  * by agent; this also drops anything an older server returned unfiltered.
  */
-export function agentTriggers(
-  tasks: readonly ScheduledTask[],
-  agentId: string,
-): ScheduledTask[] {
+export function agentTriggers(tasks: readonly ScheduledTask[], agentId: string): ScheduledTask[] {
   return tasks.filter((task) => task.agentConfig.agentId === agentId);
 }
 
-export function AgentStartsWhen({
-  agent,
-  workspaceId,
-}: {
-  agent: Agent;
-  workspaceId: string;
-}) {
+export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
   const context = useAppContext();
   const { client } = context;
   const navigate = useNavigate();
@@ -82,12 +71,10 @@ export function AgentStartsWhen({
   const [adding, setAdding] = useState<{ suggestion?: number } | null>(null);
   useEffect(() => {
     let live = true;
-    client
-      .listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 })
-      .then(
-        (list) => live && setTasks(agentTriggers(list, agent.id)),
-        () => live && setTasks([]),
-      );
+    client.listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 }).then(
+      (list) => live && setTasks(agentTriggers(list, agent.id)),
+      () => live && setTasks([]),
+    );
     // Names the sources its triggers listen to.
     client.listEventSources(workspaceId).then(
       (list) => live && setSources(list),
@@ -96,10 +83,7 @@ export function AgentStartsWhen({
     if (agent.templateKey) {
       client.listAgentTemplates(workspaceId).then(
         (list) =>
-          live &&
-          setTemplate(
-            list.find((entry) => entry.key === agent.templateKey) ?? null,
-          ),
+          live && setTemplate(list.find((entry) => entry.key === agent.templateKey) ?? null),
         () => undefined,
       );
     }
@@ -146,9 +130,7 @@ export function AgentStartsWhen({
       const next = on
         ? await client.resumeScheduledTask(workspaceId, task.id)
         : await client.pauseScheduledTask(workspaceId, task.id);
-      setTasks(
-        (list) => list?.map((row) => (row.id === next.id ? next : row)) ?? null,
-      );
+      setTasks((list) => list?.map((row) => (row.id === next.id ? next : row)) ?? null);
     } catch (error) {
       toast.error("Couldn't change the trigger", {
         description: userErrorText(error),
@@ -188,10 +170,7 @@ export function AgentStartsWhen({
         return;
       }
       const task = outcome.task;
-      setTasks((list) => [
-        ...(list ?? []).filter((row) => row.id !== task.id),
-        task,
-      ]);
+      setTasks((list) => [...(list ?? []).filter((row) => row.id !== task.id), task]);
       toast.success("Trigger added", { description: task.name });
     } catch (error) {
       toast.error("Couldn't add the trigger", {
@@ -207,21 +186,13 @@ export function AgentStartsWhen({
   // A suggestion the person already set up is not offered again.
   const suggestions = (template?.suggestedTriggers ?? [])
     .map((suggestion, index) => ({ suggestion, index }))
-    .filter(
-      ({ suggestion }) =>
-        !tasks?.some((task) => task.name.endsWith(suggestion.name)),
-    );
+    .filter(({ suggestion }) => !tasks?.some((task) => task.name.endsWith(suggestion.name)));
   return (
     <DetailSection
       title="Starts when"
       action={
         agent.viewer.canEdit ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setAdding({})}
-          >
+          <Button type="button" variant="outline" size="sm" onClick={() => setAdding({})}>
             <PlusIcon />
             Add trigger
           </Button>
@@ -231,9 +202,7 @@ export function AgentStartsWhen({
       {tasks === null ? (
         <SettingRowSkeleton />
       ) : tasks.length === 0 && suggestions.length === 0 ? (
-        <p className="m-0 text-sm text-fg-muted">
-          Only when someone starts a chat with it.
-        </p>
+        <p className="m-0 text-sm text-fg-muted">Only when someone starts a chat with it.</p>
       ) : null}
       {tasks?.map((task) => (
         <SettingRow
@@ -283,9 +252,7 @@ export function AgentStartsWhen({
                     Add
                   </RowButton>
                 ) : (
-                  <RowButton onClick={() => setAdding({ suggestion: index })}>
-                    Set up
-                  </RowButton>
+                  <RowButton onClick={() => setAdding({ suggestion: index })}>Set up</RowButton>
                 )
               }
             />
@@ -305,10 +272,7 @@ export function AgentStartsWhen({
             if (!open) setAdding(null);
           }}
           onCreated={(task) => {
-            setTasks((list) => [
-              ...(list ?? []).filter((row) => row.id !== task.id),
-              task,
-            ]);
+            setTasks((list) => [...(list ?? []).filter((row) => row.id !== task.id), task]);
             setAdding(null);
             toast.success("Trigger added", { description: task.name });
           }}
@@ -431,20 +395,10 @@ function MemoryEntryRow({
               onChange={(event) => setEditing(event.target.value)}
             />
             <div className="flex gap-2">
-              <Button
-                type="button"
-                size="sm"
-                disabled={busy || !editing.trim()}
-                onClick={save}
-              >
+              <Button type="button" size="sm" disabled={busy || !editing.trim()} onClick={save}>
                 Save
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => setEditing(null)}
-              >
+              <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(null)}>
                 Cancel
               </Button>
             </div>
@@ -482,13 +436,7 @@ function MemoryEntryRow({
 }
 
 /** What the agent's Memory holds: each entry, editable and removable. */
-export function AgentMemoryEntries({
-  agent,
-  workspaceId,
-}: {
-  agent: Agent;
-  workspaceId: string;
-}) {
+export function AgentMemoryEntries({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
   const { client } = useAppContext();
   const [entries, setEntries] = useState<KnowledgeEntrySummary[] | null>(null);
   const collectionId = agent.memory.enabled ? agent.memory.collectionId : null;
@@ -498,16 +446,11 @@ export function AgentMemoryEntries({
       return;
     }
     let live = true;
-    client
-      .listKnowledgeEntries(workspaceId, { groupId: collectionId, limit: 50 })
-      .then(
-        (response) =>
-          live &&
-          setEntries(
-            response.entries.filter((entry) => entry.id !== collectionId),
-          ),
-        () => live && setEntries([]),
-      );
+    client.listKnowledgeEntries(workspaceId, { groupId: collectionId, limit: 50 }).then(
+      (response) =>
+        live && setEntries(response.entries.filter((entry) => entry.id !== collectionId)),
+      () => live && setEntries([]),
+    );
     return () => {
       live = false;
     };
@@ -525,9 +468,7 @@ export function AgentMemoryEntries({
           entry={entry}
           workspaceId={workspaceId}
           canEdit={agent.viewer.canEdit}
-          onRemoved={(id) =>
-            setEntries((list) => list?.filter((row) => row.id !== id) ?? null)
-          }
+          onRemoved={(id) => setEntries((list) => list?.filter((row) => row.id !== id) ?? null)}
         />
       ))}
     </>

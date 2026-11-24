@@ -420,7 +420,8 @@ function AgentForm({
               {
                 value: "private",
                 label: "Only me",
-                disabled: lockedOut("private") || (visibility !== "private" && privateChats === false),
+                disabled:
+                  lockedOut("private") || (visibility !== "private" && privateChats === false),
                 disabledReason: lockedOut("private") ? SHARING_MANAGERS_ONLY : ONLY_ME_UNAVAILABLE,
               },
               {

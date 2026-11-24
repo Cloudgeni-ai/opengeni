@@ -83,10 +83,7 @@ export function agentTriggerRepositoryEvents(
   isGitHub: (trigger: EventTriggerDraft) => boolean,
   repositories: readonly string[],
 ): EventTriggersDraft {
-  const chosen = [...new Set(repositories)].slice(
-    0,
-    AGENT_TRIGGER_REPOSITORIES_MAX,
-  );
+  const chosen = [...new Set(repositories)].slice(0, AGENT_TRIGGER_REPOSITORIES_MAX);
   if (chosen.length === 0) return events;
   return {
     ...events,
@@ -102,8 +99,7 @@ export function agentTriggerRepositoryEvents(
         ...trigger,
         conditions: [
           ...trigger.conditions.filter(
-            (existing) =>
-              existing.field.trim() !== AGENT_TRIGGER_REPOSITORY_FIELD,
+            (existing) => existing.field.trim() !== AGENT_TRIGGER_REPOSITORY_FIELD,
           ),
           condition,
         ],
@@ -158,9 +154,7 @@ export interface AgentTriggerOption {
 
 export function agentTriggerPickKey(pick: AgentTriggerPick): string {
   if (pick.kind === "schedule") return "schedule";
-  return pick.kind === "source"
-    ? `source:${pick.sourceId}`
-    : `new:${pick.choice}`;
+  return pick.kind === "source" ? `source:${pick.sourceId}` : `new:${pick.choice}`;
 }
 
 /** `githubConnected`: null when unknown, so the server decides when the source is added. */
@@ -168,8 +162,7 @@ export function agentTriggerNewSetup(
   choice: EventSourceChoice,
   options: { githubConnected: boolean | null },
 ): AgentTriggerSetup {
-  if (choice === "github")
-    return options.githubConnected === false ? "connect_github" : "create";
+  if (choice === "github") return options.githubConnected === false ? "connect_github" : "create";
   if (choice === "slack" || choice === "workspace") return "create";
   if (choice === "webhook") return "create_webhook";
   if (isAppWebhookChoice(choice)) return "create_pasted";
@@ -204,9 +197,7 @@ export function agentTriggerOptions(
   const have = new Set(sources.map((source) => eventSourceChoiceOf(source)));
   // Active sources first; an inactive one still stands for its kind.
   const existing = [...sources]
-    .sort(
-      (a, b) => Number(a.status !== "active") - Number(b.status !== "active"),
-    )
+    .sort((a, b) => Number(a.status !== "active") - Number(b.status !== "active"))
     .map((source): AgentTriggerOption => {
       const option: AgentTriggerOption = {
         key: agentTriggerPickKey({ kind: "source", sourceId: source.id }),
@@ -216,8 +207,7 @@ export function agentTriggerOptions(
       };
       // A webhook waiting for its app's secret can be picked by whoever may
       // set it: the secret is pasted here.
-      if (source.status === "active" || agentTriggerCanPasteSecret(source))
-        return option;
+      if (source.status === "active" || agentTriggerCanPasteSecret(source)) return option;
       const badge = eventSourceStatusBadge(t, source);
       if (agentTriggerAwaitsSecret(source) && source.viewerAccess === "use")
         return { ...option, unavailable: "Its owner pastes the secret." };
@@ -227,12 +217,7 @@ export function agentTriggerOptions(
       };
     });
   const fresh = input.choices
-    .filter(
-      (meta) =>
-        meta.setup === "paste" ||
-        meta.choice === "mcp" ||
-        !have.has(meta.choice),
-    )
+    .filter((meta) => meta.setup === "paste" || meta.choice === "mcp" || !have.has(meta.choice))
     .map((meta): AgentTriggerOption => {
       const pick = { kind: "new", choice: meta.choice } as const;
       return {
@@ -270,8 +255,7 @@ export function agentTriggerDraftForPick(
     instructions: note,
     events: {
       ...emptyEventTriggersDraft(),
-      triggers:
-        pick.kind === "source" ? [newEventTriggerDraft(pick.sourceId)] : [],
+      triggers: pick.kind === "source" ? [newEventTriggerDraft(pick.sourceId)] : [],
     },
   };
 }
@@ -306,9 +290,7 @@ export function agentTriggerWithSources(
 }
 
 /** The message each run sends: the person's note, else a short default. */
-export function agentTriggerMessage(
-  draft: Pick<AutomationDraft, "instructions" | "events">,
-) {
+export function agentTriggerMessage(draft: Pick<AutomationDraft, "instructions" | "events">) {
   const note = draft.instructions.trim();
   if (note) return note;
   return draft.events.triggers.length > 0
@@ -325,8 +307,7 @@ export function agentTriggerMissingSource(
   for (const trigger of draft.events.triggers) {
     if (trigger.sourceId || !trigger.templateSource) continue;
     const wanted = trigger.templateSource;
-    if (!sources.some((source) => eventSourceFitsTemplate(wanted, source)))
-      return wanted;
+    if (!sources.some((source) => eventSourceFitsTemplate(wanted, source))) return wanted;
   }
   return undefined;
 }
@@ -339,13 +320,8 @@ export function agentTriggerSourceStep(
   wanted: AutomationTemplateEventSource,
   options: { githubConnected: boolean | null },
 ): AgentTriggerSetup {
-  const setup = agentTriggerNewSetup(
-    automationTemplateSourceChoice(wanted),
-    options,
-  );
-  return setup === "create_webhook" || setup === "create_pasted"
-    ? "add_source"
-    : setup;
+  const setup = agentTriggerNewSetup(automationTemplateSourceChoice(wanted), options);
+  return setup === "create_webhook" || setup === "create_pasted" ? "add_source" : setup;
 }
 
 /** A pasted webhook (Linear, Sentry, another app) whose secret isn't set yet. */
@@ -365,11 +341,7 @@ export function agentTriggerCanPasteSecret(
   source:
     | Pick<
         EventSource,
-        | "kind"
-        | "awaitingSigningSecret"
-        | "status"
-        | "statusReasonCode"
-        | "viewerAccess"
+        "kind" | "awaitingSigningSecret" | "status" | "statusReasonCode" | "viewerAccess"
       >
     | undefined,
 ): boolean {
@@ -386,9 +358,7 @@ export function agentTriggerSecretIssue(
   value: string,
   setup: { app: string; secretName: string },
 ): string | undefined {
-  return value.trim().length < 8
-    ? `Paste the ${setup.secretName} ${setup.app} shows.`
-    : undefined;
+  return value.trim().length < 8 ? `Paste the ${setup.secretName} ${setup.app} shows.` : undefined;
 }
 
 /**
@@ -410,14 +380,11 @@ export function agentTriggerIssues(
     instructions: agentTriggerMessage(draft),
     events: {
       ...draft.events,
-      triggers: draft.events.triggers.filter(
-        (trigger) => !pending.includes(trigger),
-      ),
+      triggers: draft.events.triggers.filter((trigger) => !pending.includes(trigger)),
     },
   };
   const issues = validateAutomationDraft(t, checked, sources, now);
-  if (!draft.cadence && draft.events.triggers.length === 0)
-    issues.when = "Choose when it starts.";
+  if (!draft.cadence && draft.events.triggers.length === 0) issues.when = "Choose when it starts.";
   return issues;
 }
 
@@ -460,14 +427,9 @@ export const AGENT_TRIGGER_NEW_CHAT: AgentTriggerChat = {
 };
 
 /** What the dialog says each run does, for the chat picked. */
-export function agentTriggerChatWords(
-  agent: Pick<Agent, "name">,
-  chat: AgentTriggerChat,
-): string {
-  if (chat.mode === "reusable_session")
-    return `Each run continues one chat with ${agent.name}`;
-  if (chat.mode === "existing_session")
-    return `Each run continues a chat with ${agent.name}`;
+export function agentTriggerChatWords(agent: Pick<Agent, "name">, chat: AgentTriggerChat): string {
+  if (chat.mode === "reusable_session") return `Each run continues one chat with ${agent.name}`;
+  if (chat.mode === "existing_session") return `Each run continues a chat with ${agent.name}`;
   return `Each run starts a new chat with ${agent.name}`;
 }
 
@@ -499,19 +461,10 @@ export function agentTriggerCreateRequest(
   const chat = input.chat ?? AGENT_TRIGGER_NEW_CHAT;
   return {
     ...base,
-    name: agentTriggerName(
-      t,
-      input.agent,
-      input.suggestion,
-      base,
-      input.sources,
-      input.now,
-    ),
+    name: agentTriggerName(t, input.agent, input.suggestion, base, input.sources, input.now),
     visibility: input.agent.visibility === "private" ? "private" : "workspace",
     runMode: chat.mode,
-    ...(chat.mode === "existing_session"
-      ? { targetSessionId: chat.sessionId }
-      : {}),
+    ...(chat.mode === "existing_session" ? { targetSessionId: chat.sessionId } : {}),
     agentConfig: {
       ...base.agentConfig,
       agentId: input.agent.id,
@@ -521,10 +474,7 @@ export function agentTriggerCreateRequest(
 }
 
 /** Why a save was refused, in words; a shared trigger the person may not add says so. */
-export function agentTriggerSaveError(
-  error: unknown,
-  visibility: "private" | "workspace",
-): string {
+export function agentTriggerSaveError(error: unknown, visibility: "private" | "workspace"): string {
   if (apiErrorFacts(error).status === 403 && visibility !== "private")
     return AGENT_TRIGGER_SHARED_DENIED;
   return userErrorText(error);
@@ -558,8 +508,7 @@ export async function addAgentSuggestedTrigger(
     now: Date;
   },
 ): Promise<{ kind: "created"; task: ScheduledTask } | { kind: "needs_setup" }> {
-  const visibility =
-    input.agent.visibility === "private" ? "private" : "workspace";
+  const visibility = input.agent.visibility === "private" ? "private" : "workspace";
   let sources = await input.client.listEventSources(input.workspaceId);
   let draft = agentTriggerDraftFromSuggestion(input.suggestion, {
     sources,
@@ -590,8 +539,7 @@ export async function addAgentSuggestedTrigger(
       },
     };
   }
-  if (draft.events.triggers.some((trigger) => !trigger.sourceId))
-    return { kind: "needs_setup" };
+  if (draft.events.triggers.some((trigger) => !trigger.sourceId)) return { kind: "needs_setup" };
   const task = await input.client.createScheduledTask(
     input.workspaceId,
     agentTriggerCreateRequest(t, {

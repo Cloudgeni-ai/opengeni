@@ -5,6 +5,7 @@ import {
   canonicalSecretPermissions,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
+import { commentOnRefusedPullRequests } from "../scheduled-refusal-pr-comments";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
 export { scheduledTaskSessionTitle } from "./scheduled-task-title";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
@@ -2524,6 +2525,28 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // existing chat that started in a Slack thread: its answer goes back to
       // that thread. Recurring automations into the chat don't. Best effort;
       // see docs/session-status-and-links.md.
+      // A pull request event's run that was refused before its chat started
+      // says so on the pull request (scheduled-refusal-pr-comments.ts).
+      if (input.triggerType === "event" && result.action === "blocked") {
+        const { db, settings, observability } = await services();
+        let producerKey: string | null = null;
+        try {
+          producerKey = scheduledTaskRunProducerKey(input);
+        } catch {
+          producerKey = null;
+        }
+        if (producerKey) {
+          await commentOnRefusedPullRequests(
+            {
+              db,
+              settings,
+              lookup: eventRepositoryLookup(settings),
+              warn: (message, fields) => observability.warn(message, fields),
+            },
+            { workspaceId: input.workspaceId, taskId: input.taskId, producerKey },
+          );
+        }
+      }
       if (input.triggerType === "event" && result.action === "signal") {
         const { db, observability } = await services();
         await reopenSlackThreadForOneTimeWake(db, {

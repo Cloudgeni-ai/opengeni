@@ -511,9 +511,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       actorSubjectId: viewer.subjectId,
       // Rechecked under the row lock: who can edit it may have just changed.
       authorize: (locked) =>
-        manages
-          ? agentManageableBy(viewer, locked)
-          : agentEditableBy(viewer, locked),
+        manages ? agentManageableBy(viewer, locked) : agentEditableBy(viewer, locked),
       patch: {
         ...(request.name !== undefined ? { name: request.name } : {}),
         ...(request.description !== undefined ? { description: request.description } : {}),

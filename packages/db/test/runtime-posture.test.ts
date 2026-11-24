@@ -4277,6 +4277,8 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "app_notifications",
     "event_sources",
     "connections",
+    "scheduled_tasks",
+    "scheduled_task_blocker_reviews",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4377,6 +4379,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sync_subscription_relogin_notice_v1(uuid)",
       "deliver_app_notification_v1(uuid)",
       "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+      "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4392,6 +4395,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sync_subscription_relogin_notice_v1(uuid)",
       "deliver_app_notification_v1(uuid)",
       "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+      "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
