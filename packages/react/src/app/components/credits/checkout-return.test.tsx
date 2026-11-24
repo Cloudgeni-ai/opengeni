@@ -51,7 +51,22 @@ const getBillingCheckout = mock(
 const getBilling = mock(
   async (_options: { accountId?: string }): Promise<BillingSummary> => billing("pro", "active"),
 );
-const client = { getBillingCheckout, getBilling };
+// The plans and the monthly credit each one grants once its invoice is paid.
+const monthlyCredit = { free: 10_000_000, pro: 100_000_000, max: 500_000_000 };
+const getBillingSubscriptionPlans = mock(async (_options: { accountId?: string }) => ({
+  accountId: "account",
+  revision: 1,
+  plans: Object.entries(monthlyCredit).map(([key, monthlyCreditMicros]) => ({
+    key,
+    monthlyCreditMicros,
+  })),
+  plan: null,
+}));
+const client = {
+  getBillingCheckout,
+  getBilling,
+  getBillingSubscriptionPlans,
+} as unknown as Parameters<typeof followCheckoutPageReturn>[0];
 mock.module("../../app-context", () => ({
   useAppContext: () => ({ client }),
 }));
@@ -75,7 +90,7 @@ function status(
 function billing(
   key: "free" | "pro" | "max",
   planStatus: string,
-  creditGrantedMicros = 100_000_000,
+  creditGrantedMicros: number = monthlyCredit[key],
 ): BillingSummary {
   const label = { free: "Free", pro: "Pro", max: "Max" }[key];
   return {
@@ -214,14 +229,15 @@ describe("back from checkout on the page it started from", () => {
       refreshed.push((event as CustomEvent<{ accountId: string }>).detail.accountId);
     window.addEventListener("credit-balance-changed", onChanged);
     // Back before the webhooks: still Free, then Pro not yet paid, then Pro
-    // active before its paid invoice granted the plan credit, then both.
+    // active while billing still reports Free's credit (the invoice webhook
+    // hasn't landed), then Pro with its own credit.
     getBilling
       .mockImplementationOnce(async () => billing("free", "active"))
       .mockImplementationOnce(async () => {
         throw new Error("dropped");
       })
       .mockImplementationOnce(async () => billing("pro", "incomplete"))
-      .mockImplementationOnce(async () => billing("pro", "active", 0))
+      .mockImplementationOnce(async () => billing("pro", "active", monthlyCredit.free))
       .mockImplementationOnce(async () => billing("pro", "active"));
     const checkout = { outcome: "plan" as const, accountId: "account-plan", planKey: "pro" };
     followCheckoutPageReturn(client, checkout, { intervalMs: 1 });
@@ -233,7 +249,8 @@ describe("back from checkout on the page it started from", () => {
     expect(getBilling).toHaveBeenCalledTimes(5);
     expect(getBilling.mock.calls[0]).toEqual([{ accountId: "account-plan" }]);
     expect(getBillingCheckout).not.toHaveBeenCalled();
-    expect(refreshed).toEqual(["account-plan"]);
+    // Once when Pro first reads active (Billing drops its upgrade button), once with its credit.
+    expect(refreshed).toEqual(["account-plan", "account-plan"]);
   });
 
   test("a plan that is not active yet never names another plan, and says it is still processing", async () => {

@@ -12,6 +12,16 @@ import {
 } from "@opengeni/react/app/lib/credit-checkout";
 import { parseCheckoutSessionId } from "./checkout-session-id";
 
+// The plans and the monthly credit each one grants once its invoice is paid.
+const catalog = async () =>
+  ({
+    plans: [
+      { key: "free", monthlyCreditMicros: 10_000_000 },
+      { key: "pro", monthlyCreditMicros: 100_000_000 },
+      { key: "team", monthlyCreditMicros: 0 },
+    ],
+  }) as never;
+
 const status = (state: "pending" | "granted", checkout: "open" | "complete" | "expired") => ({
   checkoutSessionId: "cs_test_1",
   status: checkout,
@@ -131,12 +141,13 @@ describe("credit checkout", () => {
     expect(read("checkoutReturn=success&checkoutAccount=a&checkoutPlan=<b>")).toBeNull();
   });
 
-  test("waits through another plan, an unpaid plan and dropped requests until the plan and its credit land", async () => {
+  test("waits through another plan, an unpaid plan, the old plan's credit and dropped requests", async () => {
     const reads = [
       { key: "free", label: "Free", status: "active", creditGrantedMicros: 10_000_000 },
       null,
       { key: "pro", label: "Pro", status: "incomplete", creditGrantedMicros: 0 },
-      { key: "pro", label: "Pro", status: "active", creditGrantedMicros: 0 },
+      // Active before its invoice: billing still reports Free's $10 credit.
+      { key: "pro", label: "Pro", status: "active", creditGrantedMicros: 10_000_000 },
       { key: "pro", label: "Pro", status: "active", creditGrantedMicros: 100_000_000 },
     ];
     const getBilling = mock(async (_options: { accountId?: string }) => {
@@ -144,39 +155,48 @@ describe("credit checkout", () => {
       if (plan === null) throw new Error("dropped");
       return { balance: { plan } } as never;
     });
+    let activated = 0;
     const plan = await waitForActivePlan(
-      { getBilling },
+      { getBilling, getBillingSubscriptionPlans: catalog },
       {
         accountId: "account-1",
         planKey: "pro",
         signal: new AbortController().signal,
         intervalMs: 1,
+        onActive: () => (activated += 1),
       },
     );
-    expect(plan).toMatchObject({ key: "pro", label: "Pro" });
+    expect(plan).toMatchObject({ key: "pro", label: "Pro", creditGrantedMicros: 100_000_000 });
     expect(getBilling).toHaveBeenCalledTimes(5);
     expect(getBilling.mock.calls[0]).toEqual([{ accountId: "account-1" }]);
+    expect(activated).toBe(1);
   });
 
-  test("a plan without credit is ready after the grace period; a refused read ends the wait", async () => {
+  test("a plan without credit is ready at once; without the catalog, after the grace period", async () => {
     const creditless = { key: "team", label: "Team", status: "active", creditGrantedMicros: 0 };
-    const plan = await waitForActivePlan(
-      { getBilling: async () => ({ balance: { plan: creditless } }) as never },
-      {
-        accountId: "account-1",
-        planKey: "team",
-        signal: new AbortController().signal,
-        intervalMs: 1,
-        creditGraceMs: 5,
-      },
-    );
-    expect(plan).toMatchObject({ key: "team" });
+    const getBilling = async () => ({ balance: { plan: creditless } }) as never;
+    const options = { accountId: "account-1", planKey: "team", intervalMs: 1 };
+    expect(
+      await waitForActivePlan(
+        { getBilling, getBillingSubscriptionPlans: catalog },
+        { ...options, signal: new AbortController().signal, creditGraceMs: 60_000 },
+      ),
+    ).toMatchObject({ key: "team" });
+    const unreadable = async () => {
+      throw new Error("plans unavailable");
+    };
+    expect(
+      await waitForActivePlan(
+        { getBilling, getBillingSubscriptionPlans: unreadable },
+        { ...options, signal: new AbortController().signal, creditGraceMs: 5 },
+      ),
+    ).toMatchObject({ key: "team" });
     const refused = mock(async () => {
       throw Object.assign(new Error("forbidden"), { status: 403 });
     });
     expect(
       await waitForActivePlan(
-        { getBilling: refused },
+        { getBilling: refused, getBillingSubscriptionPlans: catalog },
         { accountId: "x", planKey: "pro", signal: new AbortController().signal, intervalMs: 1 },
       ),
     ).toBeNull();
@@ -202,9 +222,15 @@ describe("credit checkout", () => {
         getBilling: async () =>
           ({
             balance: {
-              plan: { key: reads.shift(), label: "x", status: "active", creditGrantedMicros: 1 },
+              plan: {
+                key: reads.shift(),
+                label: "x",
+                status: "active",
+                creditGrantedMicros: 100_000_000,
+              },
             },
           }) as never,
+        getBillingSubscriptionPlans: catalog,
       },
       { accountId: "a", planKey: "pro", signal: controller.signal, intervalMs: 1 },
     );

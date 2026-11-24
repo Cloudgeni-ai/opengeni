@@ -18,7 +18,7 @@ export type CreditCheckoutClient = Pick<
 /** What the page a checkout returns to reads to confirm credits or a plan. */
 export type CheckoutReturnClient = Pick<
   ChatClient<OpenGeniBrowserClient>,
-  "getBillingCheckout" | "getBilling"
+  "getBillingCheckout" | "getBilling" | "getBillingSubscriptionPlans"
 >;
 
 /** Stripe replaces this placeholder in a success URL with the session id. */
@@ -245,25 +245,37 @@ function refusedRead(error: unknown): boolean {
 
 /**
  * Poll billing until the organization is on `planKey`, the plan is active and
- * its plan credit has landed. Stripe sends the subscription (the plan) and the
- * paid invoice (its credit) as separate webhooks in no fixed order; a plan
- * that stays creditless past `creditGraceMs` counts as ready, for plans
- * without credit. Resolves with that plan, so the confirmation names the plan
- * billing reports, never a guess; null when billing refuses the read. Rejects
- * only when aborted. Transient read failures keep polling.
+ * its monthly credit has landed. Stripe sends the subscription (the plan) and
+ * the paid invoice (its credit) as separate webhooks in no fixed order, and
+ * until the invoice lands billing still reports the old plan's credit; so the
+ * wait compares the granted credit with the plan's catalog credit. A plan
+ * active for `creditGraceMs` counts as ready anyway (an unreadable catalog, a
+ * credit that differs from the catalog).
+ * `onActive` runs once when the plan first reads active. Resolves with the
+ * plan, so the confirmation names the plan billing reports, never a guess;
+ * null when billing refuses the read. Rejects only when aborted. Transient
+ * read failures keep polling.
  */
 export async function waitForActivePlan(
-  client: Pick<CheckoutReturnClient, "getBilling">,
+  client: Pick<CheckoutReturnClient, "getBilling" | "getBillingSubscriptionPlans">,
   input: {
     accountId: string;
     planKey: string;
     signal: AbortSignal;
     intervalMs?: number | undefined;
     creditGraceMs?: number | undefined;
+    onActive?: (() => void) | undefined;
   },
 ): Promise<BillingPlanBalance | null> {
   const interval = input.intervalMs ?? 2_000;
   const creditGrace = input.creditGraceMs ?? 60_000;
+  const monthlyCredit = await client
+    .getBillingSubscriptionPlans({ accountId: input.accountId })
+    .then(
+      (catalog) =>
+        catalog.plans.find((plan) => plan.key === input.planKey)?.monthlyCreditMicros ?? null,
+    )
+    .catch(() => null);
   let activeSince: number | null = null;
   for (;;) {
     if (input.signal.aborted) throw input.signal.reason ?? new Error("aborted");
@@ -271,13 +283,12 @@ export async function waitForActivePlan(
       const plan = (await client.getBilling({ accountId: input.accountId })).balance.plan;
       const active =
         plan?.key === input.planKey && (plan.status === "active" || plan.status === "trialing");
+      if (active && activeSince === null) input.onActive?.();
       activeSince = active ? (activeSince ?? Date.now()) : null;
-      if (
-        plan &&
-        activeSince !== null &&
-        (plan.creditGrantedMicros > 0 || Date.now() - activeSince >= creditGrace)
-      )
-        return plan;
+      const credited =
+        (monthlyCredit !== null && (plan?.creditGrantedMicros ?? 0) >= monthlyCredit) ||
+        (activeSince !== null && Date.now() - activeSince >= creditGrace);
+      if (plan && active && credited) return plan;
     } catch (error) {
       if (refusedRead(error)) return null;
       // Keep waiting through a dropped request; the subscription itself is unaffected.

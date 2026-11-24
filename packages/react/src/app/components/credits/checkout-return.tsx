@@ -73,7 +73,7 @@ export function followCheckoutPageReturn(
  * plan, then names the plan billing reports.
  */
 function followPlanCheckoutReturn(
-  client: Pick<CheckoutReturnClient, "getBilling">,
+  client: Pick<CheckoutReturnClient, "getBilling" | "getBillingSubscriptionPlans">,
   checkout: Extract<CheckoutPageReturn, { outcome: "plan" }>,
   wait: { signal?: AbortSignal | undefined; intervalMs?: number | undefined },
 ): void {
@@ -87,6 +87,8 @@ function followPlanCheckoutReturn(
     planKey,
     signal: wait.signal ?? AbortSignal.timeout(CHECKOUT_RETURN_WAIT_MS),
     intervalMs: wait.intervalMs,
+    // Billing shows the new plan right away, so its old upgrade button goes.
+    onActive: () => notifyCreditBalanceChanged(accountId),
   })
     .then((plan) => {
       // Billing refused the read (a stale or foreign link): nothing to confirm.
@@ -94,7 +96,7 @@ function followPlanCheckoutReturn(
         toast.dismiss(toastId);
         return;
       }
-      // Plan credit changes the balance; Billing refreshes its plan with it.
+      // The plan credit landed: refresh the balance again.
       notifyCreditBalanceChanged(accountId);
       toast.success(`${plan.label} is active`, { id: toastId, duration: 10_000 });
     })
