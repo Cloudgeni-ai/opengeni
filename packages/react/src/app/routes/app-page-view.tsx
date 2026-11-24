@@ -171,7 +171,8 @@ export function AppPage({
       {/* Each time the app comes back on screen counts as opening it (Recent apps). */}
       {active ? <RecordAppOpened workspaceId={workspaceId} appId={appId} /> : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {chatButton && placement === "row" ? (
+        {/* Kept while the chat is open, so opening it doesn't resize the app. */}
+        {canChat && placement === "row" ? (
           <div
             data-app-page-chat-row=""
             className="flex h-10 shrink-0 items-center justify-end bg-canvas px-2"

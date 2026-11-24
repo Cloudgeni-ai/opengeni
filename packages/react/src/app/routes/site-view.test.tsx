@@ -1586,9 +1586,9 @@ test("an app opened as a page offers its chat from one button above it, and hide
   expect(
     [...panel(container).querySelectorAll("a")].map((a) => a.getAttribute("aria-label")),
   ).toEqual(["Open as a full chat"]);
-  // The row goes with the button while the chat is open.
+  // The row stays, empty, while the chat is open, so the app keeps its size.
   expect(chatButton(container)).toBeNull();
-  expect(container.querySelector("[data-app-page-chat-row]")).toBeNull();
+  expect(container.querySelector("[data-app-page-chat-row]")?.childElementCount).toBe(0);
   expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide chat");
 
   await act(async () =>
