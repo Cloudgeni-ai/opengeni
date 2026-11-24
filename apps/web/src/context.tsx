@@ -55,6 +55,7 @@ import { SecureContextWarning } from "@/components/secure-context-warning";
 import type { SignedOutPitch } from "@/components/signed-out-page";
 import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
+import { RouteRecoveryNotice } from "@/components/route-recovery-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
 import { renderedRoutePathname } from "@/lib/rendered-route-pathname";
@@ -661,6 +662,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <RouteRecoveryNotice ready={accessContext !== null} />
       <Suspense fallback={null}>
         <SignOutRecordingsDialog />
         <AdminStepUpDialog />

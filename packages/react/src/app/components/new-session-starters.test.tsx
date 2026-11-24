@@ -107,6 +107,10 @@ test("the new-chat page's Add credits button follows the addCredits switch", () 
   expect(route).toMatch(
     /const canTopUpCredits =\s*addCredits &&\s*context\.clientConfig\.billingMode === "stripe" &&/,
   );
+  // Only people who may manage billing see it; members never get a button that fails.
+  expect(route).toMatch(
+    /const canTopUpCredits =[^;]*hasAccountPermission\(context\.accessContext, workspace\?\.accountId \?\? "", "billing:manage"\)/,
+  );
   expect(route).toMatch(/\{canTopUpCredits && workspace\?\.accountId \? \(/);
 });
 
