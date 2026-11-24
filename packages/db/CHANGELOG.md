@@ -1,5 +1,45 @@
 # @opengeni/db
 
+## 6.38.0
+
+### Patch Changes
+
+- bd4550b: A person finishing a browser or computer handoff now resumes the agent's `interaction_request_human` call with the settled handoff. The resumed turn read the handoff outside the workspace's row-security scope, so under a database role that enforces it the call failed with "Interaction intervention resumed without a durable response".
+- bfe5398: A chat pinned to one subscription account now says so when it waits for that account. The chat keeps honouring the pin: its turn still waits for the chosen account and never moves to another one by itself. But the wait no longer tells people to switch the chat to another model, which did not help, because the pin holds whatever the model.
+
+  - The composer shows "This chat is pinned to the Claude account “Team”, which is out of capacity. Resets Sat 18:00." with one button, **Use automatic account choice**. It switches the chat back to automatic account choice through the existing session account choice (`connectionId: null`), which applies to the waiting turn, so it continues at once on another account. People who can't manage the chat are told who can. A turned-off or no-longer-eligible pinned account gets the same notice and button.
+  - The timeline keeps the wait's own explanation instead of the generic "switch to another model" line.
+  - The person's inbox notification is titled "Chat waiting for its pinned Claude account", names the account and when it has room again, and offers automatic account choice instead of a model switch. It is still sent once per waiting turn and updated in place when what it said changes.
+  - A worker's parent agent is told the same, with the `setSessionModelAccount` action (`connectionId: null`) as the way to let the worker continue, instead of `session_set_model`.
+
+  The account is named by its label only when the label is not an email address. The internal wait field that named an account needing a new sign-in is now `waitAccount` (type `SubscriptionWaitAccount`; `SubscriptionReconnectAccount` remains as a deprecated alias) and also names a pinned account.
+
+- b76dd79: A message is no longer refused when one of its connector accounts stopped working after the chat was opened (for example its sign-in expired). It is sent without that account: the connector keeps your other picks that still work, or runs without an account for that turn, and no other account is used in its place. The left-out account is recorded on the turn, logged, and an expired sign-in posts its reconnect notice in the chat, addressed to the person who sent the message (not the chat's owner in a shared chat) and posted once per break, so a dismissed notice stays dismissed while the account stays broken. The notice names the account only in a private chat or in its owner's own Personal workspace; anywhere else it names only the service. Work that continues the message narrows the same way, keeping your working picks rather than dropping the connector. An account id you can't see, or one that belongs to another connector, is still refused, and personal GitHub and social account picks stay strict because a repository or post can't be attached without that account. A chat left open re-reads its accounts when you return to it, and reconnect notices name the service (Atlassian, not "Mcp").
+
+  In the composer, a picked account that stopped working stays picked and shows "Reconnect required" on the connector and on the account, with a Reconnect action for that account. Send stays enabled.
+
+  If a server still refuses such a message, the chat re-reads its accounts and sends it again once on its own, leaving out a pick that stopped working only where the connector keeps another pick, with no failed message to resend. Only that resend is narrowed: your picks stay as you made them, so the account is used again once you reconnect it. It never adds, swaps or widens accounts: when no such resend exists, or the second send is refused too, the message shows as failed as before.
+
+  "Reconnect required" on a connector in + → Connectors now stays until you reconnect it, including after a reload and on other devices. In a Personal workspace, a connector carried from another workspace used to disappear from the connector list once its account stopped working; the list now keeps it as not runnable, marked as needing reconnecting, so it is never a default tool and chats never run it with that account. A new chat or tool selection that still names it is accepted instead of being refused, and keeps it chosen, with your account picks for it, so the chat gets it back once you reconnect and uses only the accounts you picked. The Open PR button no longer has a glow, matching the other primary buttons.
+
+- 262c8b2: Pause, terminal Cancel and an explicit stop now stop an unsupervised session background command's process group. Before, such a command was only marked stopping and kept running, so a process that ignored interrupts could still write after it should have stopped. Slow turn settlements and Steer handovers are now logged with the time spent in each phase.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/subscriptions@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

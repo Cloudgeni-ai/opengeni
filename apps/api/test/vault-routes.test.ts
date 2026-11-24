@@ -124,6 +124,7 @@ async function fixture() {
     return { accountId, workspaceId, subjectId };
   };
   const member = await person("member", "member", PEOPLE_PERMISSIONS);
+  const teammate = await person("teammate", "member", PEOPLE_PERMISSIONS);
   const viewer = await person("viewer", "member", ["sessions:read", "secrets:list"]);
   const orgAdmin = await person("admin", "admin", PEOPLE_PERMISSIONS);
   // The organization's owner, in the workspace their sign-up created.
@@ -132,7 +133,7 @@ async function fixture() {
     workspaceId: access.workspaceGrants[0]!.workspaceId,
     subjectId: `user:${userId}`,
   };
-  return { accountId, workspaceId, member, viewer, orgAdmin, owner };
+  return { accountId, workspaceId, member, teammate, viewer, orgAdmin, owner };
 }
 
 async function call(
@@ -519,6 +520,285 @@ describe("vault routes", () => {
       (await call("POST", `${base}/vaults`, asViewer, { name: "Viewer", ownerKind: "workspace" }))
         .status,
     ).toBe(403);
+  });
+
+  test("using a shared secret never implies seeing it; use-only hides it from everyone", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const base = `/v1/workspaces/${f.workspaceId}`;
+    const asCreator = await bearer(f.member, PEOPLE_PERMISSIONS);
+    const asTeammate = await bearer(f.teammate, PEOPLE_PERMISSIONS);
+    const asAdmin = await bearer(f.orgAdmin, [...PEOPLE_PERMISSIONS, "workspace:admin"]);
+    const revealPath = (vaultId: string, itemId: string, fieldId: string) =>
+      `${base}/vaults/${vaultId}/items/${itemId}/fields/${fieldId}/reveal`;
+    const audits = async (itemId: string) =>
+      (
+        await shared!.admin<{ count: number }[]>`
+          select count(*)::int as count from audit_events
+          where action = 'vault.field.revealed' and target_id = ${itemId}`
+      )[0]!.count;
+
+    const team = await call("POST", `${base}/vaults`, asCreator, {
+      name: "Shared",
+      ownerKind: "workspace",
+    });
+    expect(team.status).toBe(201);
+    const created = await call("POST", `${base}/vaults/${team.json.id}/items`, asCreator, {
+      type: "api_key",
+      name: "SHARED_KEY",
+      fields: [{ name: "value", value: "shared-value-1" }],
+    });
+    expect(created.status).toBe(201);
+    expect(created.json).toMatchObject({ useOnly: false, canReveal: true });
+    const sharedItem = created.json;
+    const sharedField = sharedItem.fields[0];
+
+    // The creator and a workspace admin may see it; a teammate may only use it.
+    const byCreator = await call(
+      "POST",
+      revealPath(team.json.id, sharedItem.id, sharedField.id),
+      asCreator,
+      {},
+    );
+    expect(byCreator.json.value).toBe("shared-value-1");
+    const byAdmin = await call(
+      "POST",
+      revealPath(team.json.id, sharedItem.id, sharedField.id),
+      asAdmin,
+      {},
+    );
+    expect(byAdmin.json.value).toBe("shared-value-1");
+    const seenByTeammate = await call(
+      "GET",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}`,
+      asTeammate,
+    );
+    expect(seenByTeammate.status).toBe(200);
+    expect(seenByTeammate.json).toMatchObject({ useOnly: false, canReveal: false });
+    const before = await audits(sharedItem.id);
+    const byTeammate = await call(
+      "POST",
+      revealPath(team.json.id, sharedItem.id, sharedField.id),
+      asTeammate,
+      {},
+    );
+    expect(byTeammate.status).toBe(403);
+    expect(byTeammate.json).toMatchObject({
+      error: "vault_permission_denied",
+      details: { reason: "use_without_reveal" },
+    });
+    expect(JSON.stringify(byTeammate.json)).not.toContain("shared-value-1");
+    // A refused reveal reads nothing.
+    expect(await audits(sharedItem.id)).toBe(before);
+
+    // Nor can the teammate copy it somewhere they could read it back.
+    const mine = await call("POST", `${base}/vaults`, asTeammate, {
+      name: "Teammate own",
+      ownerKind: "user",
+    });
+    expect(mine.status).toBe(201);
+    const copied = await call("POST", `${base}/vaults/${mine.json.id}/items`, asTeammate, {
+      type: "note",
+      name: "COPY",
+      fields: [{ name: "note", kind: "text", fromReference: "{{secret:Shared/SHARED_KEY}}" }],
+    });
+    expect(copied.status).toBe(403);
+    expect(JSON.stringify(copied.json)).not.toContain("shared-value-1");
+    // A copy into a vault they own stays use-only for them.
+    const moved = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}/move`,
+      asTeammate,
+      { targetVaultId: mine.json.id, mode: "copy" },
+    );
+    expect(moved.status).toBeLessThan(300);
+    expect(moved.json).toMatchObject({ useOnly: true, canReveal: false });
+    // Moving the original there is refused: it would have to be marked, which
+    // would lock out its saver after a move back.
+    const movedMine = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}/move`,
+      asTeammate,
+      { targetVaultId: mine.json.id, mode: "move" },
+    );
+    expect(movedMine.status).toBe(403);
+    expect(movedMine.json.details).toMatchObject({ reason: "use_without_reveal" });
+    const copyReveal = await call(
+      "POST",
+      revealPath(mine.json.id, moved.json.id, moved.json.fields[0].id),
+      asTeammate,
+      {},
+    );
+    expect(copyReveal.status).toBe(403);
+    // The teammate may still replace the value.
+    const replaced = await call(
+      "PATCH",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}`,
+      asTeammate,
+      {
+        expectedGeneration: sharedItem.generation,
+        fields: [{ fieldId: sharedField.id, name: "value", value: "shared-value-2" }],
+      },
+    );
+    expect(replaced.status).toBe(200);
+    expect(JSON.stringify(replaced.json)).not.toContain("shared-value-2");
+    // Nor make it use-only: that would lock out the saver and admins.
+    const lockOut = await call(
+      "PATCH",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}`,
+      asTeammate,
+      { expectedGeneration: replaced.json.generation, useOnly: true },
+    );
+    expect(lockOut.status).toBe(403);
+    // A move between shared vaults keeps the item as it is: its saver still
+    // sees it, and the teammate still can't.
+    const other = await call("POST", `${base}/vaults`, asCreator, {
+      name: "Other shared",
+      ownerKind: "workspace",
+    });
+    const sharedMove = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}/move`,
+      asTeammate,
+      { targetVaultId: other.json.id, mode: "move" },
+    );
+    expect(sharedMove.status).toBeLessThan(300);
+    expect(sharedMove.json).toMatchObject({ useOnly: false, canReveal: false });
+    const stillSeen = await call(
+      "POST",
+      revealPath(other.json.id, sharedItem.id, sharedField.id),
+      asCreator,
+      {},
+    );
+    expect(stillSeen.json.value).toBe("shared-value-2");
+    const movedBack = await call(
+      "POST",
+      `${base}/vaults/${other.json.id}/items/${sharedItem.id}/move`,
+      asCreator,
+      { targetVaultId: team.json.id, mode: "move" },
+    );
+    expect(movedBack.status).toBeLessThan(300);
+
+    // Use-only: nobody sees it, its creator and admins included.
+    const hidden = await call("POST", `${base}/vaults/${team.json.id}/items`, asCreator, {
+      type: "api_key",
+      name: "HIDDEN_KEY",
+      fields: [{ name: "value", value: "hidden-value-1" }],
+      useOnly: true,
+    });
+    expect(hidden.status).toBe(201);
+    expect(hidden.json).toMatchObject({ useOnly: true, canReveal: false });
+    const hiddenField = hidden.json.fields[0];
+    for (const who of [asCreator, asAdmin, asTeammate]) {
+      const refused = await call(
+        "POST",
+        revealPath(team.json.id, hidden.json.id, hiddenField.id),
+        who,
+        {},
+      );
+      expect(refused.status).toBe(403);
+      expect(refused.json.details).toMatchObject({ reason: "use_only" });
+    }
+    const keyToken = `vault-routes-${crypto.randomUUID()}`;
+    await createApiKey(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      name: "vault routes read",
+      prefix: "vault-routes",
+      keyHash: createHash("sha256").update(keyToken).digest("hex"),
+      permissions: ["secrets:list", "secrets:read", "secrets:write"],
+    });
+    const withRead = `Bearer ${keyToken}`;
+    const byKey = await call(
+      "POST",
+      revealPath(team.json.id, hidden.json.id, hiddenField.id),
+      withRead,
+      {},
+    );
+    expect(byKey.status).toBe(403);
+    const keyCopy = await call("POST", `${base}/vaults/${team.json.id}/items`, withRead, {
+      type: "note",
+      name: "HIDDEN_COPY",
+      fields: [{ name: "note", kind: "text", fromReference: "{{secret:Shared/HIDDEN_KEY}}" }],
+    });
+    expect(keyCopy.status).toBe(403);
+    expect(JSON.stringify(keyCopy.json)).not.toContain("hidden-value-1");
+    // A copy of a use-only item is use-only, even for its creator.
+    const hiddenCopy = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${hidden.json.id}/move`,
+      asCreator,
+      { targetVaultId: other.json.id, mode: "copy" },
+    );
+    expect(hiddenCopy.status).toBeLessThan(300);
+    expect(hiddenCopy.json).toMatchObject({ useOnly: true, canReveal: false });
+    // Its creator can still move it between shared vaults; it stays use-only.
+    const hiddenMove = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${hidden.json.id}/move`,
+      asCreator,
+      { targetVaultId: other.json.id, mode: "move", newName: "HIDDEN_KEY_MOVED" },
+    );
+    expect(hiddenMove.status).toBeLessThan(300);
+    expect(hiddenMove.json).toMatchObject({ useOnly: true, canReveal: false });
+    const hiddenBack = await call(
+      "POST",
+      `${base}/vaults/${other.json.id}/items/${hidden.json.id}/move`,
+      asCreator,
+      { targetVaultId: team.json.id, mode: "move", newName: "HIDDEN_KEY" },
+    );
+    expect(hiddenBack.status).toBeLessThan(300);
+
+    // Its values can be replaced; it can't be turned back.
+    const rotated = await call(
+      "PATCH",
+      `${base}/vaults/${team.json.id}/items/${hidden.json.id}`,
+      asCreator,
+      {
+        expectedGeneration: hiddenBack.json.generation,
+        fields: [{ fieldId: hiddenField.id, name: "value", value: "hidden-value-2" }],
+      },
+    );
+    expect(rotated.status).toBe(200);
+    expect(rotated.json.useOnly).toBe(true);
+    const unset = await call(
+      "PATCH",
+      `${base}/vaults/${team.json.id}/items/${hidden.json.id}`,
+      asCreator,
+      { expectedGeneration: rotated.json.generation, useOnly: false },
+    );
+    expect(unset.status).toBe(400);
+
+    // An existing item can be made use-only later.
+    const later = await call(
+      "PATCH",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}`,
+      asCreator,
+      { expectedGeneration: movedBack.json.generation, useOnly: true },
+    );
+    expect(later.status).toBe(200);
+    const afterLater = await call(
+      "POST",
+      revealPath(team.json.id, sharedItem.id, sharedField.id),
+      asCreator,
+      {},
+    );
+    expect(afterLater.status).toBe(403);
+
+    // Only-me secrets keep today's behaviour for their owner.
+    const own = await call("POST", `${base}/vaults/${mine.json.id}/items`, asTeammate, {
+      type: "api_key",
+      name: "OWN_KEY",
+      fields: [{ name: "value", value: "own-value" }],
+    });
+    expect(own.json.canReveal).toBe(true);
+    const ownReveal = await call(
+      "POST",
+      revealPath(mine.json.id, own.json.id, own.json.fields[0].id),
+      asTeammate,
+      {},
+    );
+    expect(ownReveal.json.value).toBe("own-value");
   });
 
   test("session vault policy: a child cannot widen its parent (422) and the view shows the narrowing", async () => {
