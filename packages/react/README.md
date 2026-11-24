@@ -1650,6 +1650,10 @@ and restore appear when it also has `getPreferenceRegistry` and
 `restoreWorkspaceSkill`. `scopes` limits what is listed and offered, and
 `canManage` decides who may change what: people who can't see the same
 page with read-only instructions.
+A relay that refuses some writes itself (a name the host's built-in Skills
+use, a scope it doesn't offer) can answer with an `error.details.code` and
+pass those codes as `refusalCodes`; the page then shows the relay's own
+sentence instead of generic advice.
 
 ```tsx
 import { SkillsPanel } from "@opengeni/react/skills";

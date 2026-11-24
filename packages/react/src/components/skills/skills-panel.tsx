@@ -64,6 +64,7 @@ import {
   apiErrorDetails,
   isApiError,
   isPermissionDenied,
+  serverRefusalText,
   userErrorText,
   userErrorTextWithoutReference,
 } from "../../ui/api-error";
@@ -171,6 +172,12 @@ export interface SkillsPanelProps {
   addMenuItems?: ReactNode | undefined;
   /** What an empty list says. */
   emptyText?: string | undefined;
+  /**
+   * `details.code` values of refusals the host's relay words for people, such
+   * as a name its own built-in Skills already use. The page shows that
+   * sentence instead of generic advice.
+   */
+  refusalCodes?: readonly string[] | undefined;
   /** Heading above the rows, with their count. Default none: the page title names them. */
   listTitle?: string | null | undefined;
   /** Filters the loaded list by name. */
@@ -231,6 +238,7 @@ export function SkillsPanel({
   renderHeader,
   addMenuItems,
   emptyText,
+  refusalCodes,
   listTitle = null,
   query = "",
   owner = "all",
@@ -251,6 +259,8 @@ export function SkillsPanel({
   );
   const withHistory = historyProp ?? Boolean(client.getPreferenceRegistry);
   const newScope = NEW_SKILL_SCOPES.find(canManage) ?? null;
+  const errorText = (cause: unknown) =>
+    (refusalCodes && serverRefusalText(cause, refusalCodes)) ?? userErrorText(cause);
   const listFilter = useMemo((): { scope?: SkillScope } => {
     const filter = skillOwnerListFilter(owner);
     const only = scopes.length === 1 ? scopes[0] : undefined;
@@ -747,7 +757,7 @@ export function SkillsPanel({
       onRemoved?.();
       return true;
     } catch (reason) {
-      if (generation.current === current) setRemovalError(userErrorText(reason));
+      if (generation.current === current) setRemovalError(errorText(reason));
       return false;
     } finally {
       if (generation.current === current) setBusy(false);
@@ -818,7 +828,7 @@ export function SkillsPanel({
       path={path}
       newPath={newPath}
       history={history}
-      error={error ? `${error.title}. ${userErrorText(error.cause)}` : null}
+      error={error ? `${error.title}. ${errorText(error.cause)}` : null}
       notice={notice}
       busy={busy}
       dirty={dirty && record.id !== draftId}
@@ -880,7 +890,7 @@ export function SkillsPanel({
         <EmptyState
           variant="page"
           title="Couldn't open this skill"
-          description={userErrorText(error.cause)}
+          description={errorText(error.cause)}
           action={
             <Button type="button" variant="outline" size="sm" onClick={back}>
               Back to {backLabel}
@@ -1072,7 +1082,8 @@ export function SkillsPanel({
                 )
               }
             >
-              {userErrorTextWithoutReference(error.cause)}
+              {(refusalCodes && serverRefusalText(error.cause, refusalCodes)) ??
+                userErrorTextWithoutReference(error.cause)}
             </ErrorMessage>
           )
         ) : null}

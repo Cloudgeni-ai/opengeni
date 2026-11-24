@@ -196,3 +196,39 @@ test("a new skill can't take a name another skill here already uses, or save a b
     await view.unmount();
   }
 });
+
+test("a refusal the host's relay words for people shows its own sentence", async () => {
+  const { OpenGeniApiError } = await import("@opengeni/sdk");
+  const { value } = client([]);
+  const sentence = "A built-in skill is already called release-notes. Choose another name.";
+  value.saveWorkspaceSkill = mock(async () => {
+    throw new OpenGeniApiError(
+      409,
+      JSON.stringify({
+        error: {
+          code: "skill_name_reserved",
+          message: sentence,
+          details: { code: "skill_name_reserved" },
+        },
+      }),
+      { mutation: true },
+    );
+  });
+  const view = await renderComponent(
+    <SkillsPanel
+      client={value}
+      workspaceId="ws"
+      canManage={() => true}
+      scopes={workspaceOnly}
+      refusalCodes={["skill_name_reserved"]}
+    />,
+  );
+  try {
+    await flush();
+    await pickFiles([new File([SKILL], "SKILL.md")]);
+    await click("Save skill");
+    expect(view.container.textContent).toContain(`Couldn't save this skill. ${sentence}`);
+  } finally {
+    await view.unmount();
+  }
+});
