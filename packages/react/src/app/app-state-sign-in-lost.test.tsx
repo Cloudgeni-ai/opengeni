@@ -178,6 +178,8 @@ describe("another account signed in from another tab", () => {
     const fixture = host([signedIn, otherPerson]);
     const rendered = await signedInApp(fixture);
     try {
+      // An unsent draft the previous person left in this tab.
+      window.sessionStorage.setItem("opengeni.composerDraft:workspace:session", "private text");
       await actRun(() => {
         fixture.signInLost("forbidden");
         fixture.signInLost("forbidden");
@@ -187,6 +189,7 @@ describe("another account signed in from another tab", () => {
       expect(fixture.sessionReads()).toBe(2);
       // A full load from the app's root: nothing held for the first person survives.
       expect(pageAssign.mock.calls).toEqual([["/", { replace: true }]]);
+      expect(window.sessionStorage.getItem("opengeni.composerDraft:workspace:session")).toBeNull();
       // The next page says why it opened.
       expect(takeRouteRecoveryNotice()).toBe("account_changed");
     } finally {
@@ -195,8 +198,11 @@ describe("another account signed in from another tab", () => {
   });
 
   test("a refusal for the same person (a real 403) changes nothing and is checked at most every few seconds", async () => {
-    const fixture = host([signedIn]);
+    const fixture = host([signedIn, signedIn, otherPerson]);
     const rendered = await signedInApp(fixture);
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
     try {
       await actRun(() => fixture.signInLost("forbidden"));
       await flush(20);
@@ -211,8 +217,14 @@ describe("another account signed in from another tab", () => {
       expect(pageAssign).not.toHaveBeenCalled();
       expect(rendered.result.current.authSession?.user.id).toBe("user-1");
       expect(rendered.result.current.appContext).toBeTruthy();
-      expect(PRINCIPAL_RECHECK_INTERVAL_MS).toBeGreaterThan(0);
+      // Once the interval has passed, the next refusal checks again.
+      now += PRINCIPAL_RECHECK_INTERVAL_MS;
+      await actRun(() => fixture.signInLost("forbidden"));
+      for (let i = 0; i < 20 && pageAssign.mock.calls.length === 0; i++) await flush(10);
+      expect(fixture.sessionReads()).toBe(3);
+      expect(pageAssign.mock.calls).toEqual([["/", { replace: true }]]);
     } finally {
+      Date.now = realNow;
       await rendered.unmount();
     }
   });
@@ -230,6 +242,31 @@ describe("another account signed in from another tab", () => {
     } finally {
       await rendered.unmount();
     }
+  });
+
+  test("the tab becoming visible again checks who is signed in", async () => {
+    const fixture = host([signedIn, otherPerson]);
+    const rendered = await signedInApp(fixture);
+    try {
+      await actRun(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      for (let i = 0; i < 20 && pageAssign.mock.calls.length === 0; i++) await flush(10);
+      expect(fixture.sessionReads()).toBe(2);
+      expect(pageAssign.mock.calls).toEqual([["/", { replace: true }]]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("after the app unmounts, focus checks nothing", async () => {
+    const fixture = host([signedIn, otherPerson]);
+    const rendered = await signedInApp(fixture);
+    await rendered.unmount();
+    window.dispatchEvent(new Event("focus"));
+    await flush(20);
+    expect(fixture.sessionReads()).toBe(1);
+    expect(pageAssign).not.toHaveBeenCalled();
   });
 
   test("a sign-out elsewhere still returns to sign-in without a reload", async () => {

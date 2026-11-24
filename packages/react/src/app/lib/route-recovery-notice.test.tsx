@@ -47,7 +47,7 @@ describe("the notice a redirect leaves for the page it opens", () => {
       "You're signed in with another account now, so we opened its workspace.",
     );
     expect(routeRecoveryNoticeText("workspace_unavailable")).toBe(
-      "You don't have access to that workspace, so we opened yours.",
+      "You don't have access to that workspace, so we opened one you can use.",
     );
   });
 });

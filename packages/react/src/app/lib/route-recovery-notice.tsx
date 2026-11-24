@@ -9,7 +9,7 @@ const STORAGE_KEY = "opengeni.routeRecoveryNotice";
 
 const NOTICE_TEXT: Readonly<Record<RouteRecoveryNotice, string>> = {
   account_changed: "You're signed in with another account now, so we opened its workspace.",
-  workspace_unavailable: "You don't have access to that workspace, so we opened yours.",
+  workspace_unavailable: "You don't have access to that workspace, so we opened one you can use.",
 };
 
 export function routeRecoveryNoticeText(notice: RouteRecoveryNotice): string {

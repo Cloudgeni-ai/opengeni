@@ -991,9 +991,15 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           invalidatePrincipalWorkspaceState();
           authPrincipalIdRef.current = current?.user.id ?? null;
           if (current) {
+            // Someone else is signed in: forget what this tab kept for the
+            // previous person (unsent drafts in session storage, recordings
+            // on this device), as a sign-out does, before loading afresh.
             cancelled = true;
-            rememberRouteRecoveryNotice("account_changed");
-            hostPage.assign("/", { replace: true });
+            forgetSignedOutBrowserData();
+            void prepareRecordingsForSignOut(null, { ask: false }).finally(() => {
+              rememberRouteRecoveryNotice("account_changed");
+              hostPage.assign("/", { replace: true });
+            });
             return;
           }
           setAuthSession(current);
