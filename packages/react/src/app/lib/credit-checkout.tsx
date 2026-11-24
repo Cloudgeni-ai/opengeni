@@ -1,4 +1,4 @@
-import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import type { BillingCheckoutStatus, BillingPlanBalance } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { PageHost } from "./navigation";
@@ -13,6 +13,12 @@ import type { PageHost } from "./navigation";
 export type CreditCheckoutClient = Pick<
   ChatClient<OpenGeniBrowserClient>,
   "createBillingCheckout" | "getBillingCheckout"
+>;
+
+/** What the page a checkout returns to reads to confirm credits or a plan. */
+export type CheckoutReturnClient = Pick<
+  ChatClient<OpenGeniBrowserClient>,
+  "getBillingCheckout" | "getBilling"
 >;
 
 /** Stripe replaces this placeholder in a success URL with the session id. */
@@ -43,6 +49,7 @@ export const CHECKOUT_RETURN_QUERY = {
   outcome: "checkoutReturn",
   account: "checkoutAccount",
   session: "checkoutSession",
+  plan: "checkoutPlan",
 } as const;
 
 /**
@@ -68,7 +75,24 @@ export function checkoutPageReturnUrl(
 
 export type CheckoutPageReturn =
   | { outcome: "success"; accountId: string; checkoutSessionId: string }
+  | { outcome: "plan"; accountId: string; planKey: string }
   | { outcome: "cancelled" };
+
+/**
+ * Where a paid plan checkout returns: the page it started from (Billing or
+ * onboarding), which says the plan is active once billing reports it. Only
+ * the success URL carries these keys: a cancelled plan checkout returns to the
+ * plain page and shows nothing new.
+ */
+export function planCheckoutReturnUrl(href: string, accountId: string, planKey: string): string {
+  const url = new URL(href);
+  url.hash = "";
+  for (const key of Object.values(CHECKOUT_RETURN_QUERY)) url.searchParams.delete(key);
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.outcome, "success");
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.account, accountId);
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.plan, planKey);
+  return url.toString();
+}
 
 /** The checkout return in a page query, or null when there is none or it is malformed. */
 export function readCheckoutPageReturn(query: URLSearchParams): CheckoutPageReturn | null {
@@ -76,6 +100,11 @@ export function readCheckoutPageReturn(query: URLSearchParams): CheckoutPageRetu
   if (outcome === "cancelled") return { outcome };
   if (outcome !== "success") return null;
   const accountId = query.get(CHECKOUT_RETURN_QUERY.account);
+  const planKey = query.get(CHECKOUT_RETURN_QUERY.plan);
+  if (planKey !== null) {
+    if (!accountId || !/^[A-Za-z0-9_-]{1,64}$/u.test(planKey)) return null;
+    return { outcome: "plan", accountId, planKey };
+  }
   const checkoutSessionId = query.get(CHECKOUT_RETURN_QUERY.session);
   if (!accountId || !checkoutSessionId || !/^cs_[A-Za-z0-9_]{1,250}$/u.test(checkoutSessionId))
     return null;
@@ -187,6 +216,45 @@ export async function waitForCheckoutCredits(
       if (status.credit.state === "granted" || status.status === "expired") return status;
     } catch {
       // Keep waiting through a dropped request; the checkout itself is unaffected.
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, interval);
+      input.signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(input.signal.reason ?? new Error("aborted"));
+        },
+        { once: true },
+      );
+    });
+  }
+}
+
+/**
+ * Poll billing until the organization is on `planKey` and the plan is active,
+ * which happens once Stripe's subscription webhook lands. Resolves with that
+ * plan, so the confirmation names the plan billing reports, never a guess;
+ * rejects only when aborted. Transient read failures keep polling.
+ */
+export async function waitForActivePlan(
+  client: Pick<CheckoutReturnClient, "getBilling">,
+  input: {
+    accountId: string;
+    planKey: string;
+    signal: AbortSignal;
+    intervalMs?: number | undefined;
+  },
+): Promise<BillingPlanBalance> {
+  const interval = input.intervalMs ?? 2_000;
+  for (;;) {
+    if (input.signal.aborted) throw input.signal.reason ?? new Error("aborted");
+    try {
+      const plan = (await client.getBilling({ accountId: input.accountId })).balance.plan;
+      if (plan?.key === input.planKey && (plan.status === "active" || plan.status === "trialing"))
+        return plan;
+    } catch {
+      // Keep waiting through a dropped request; the subscription itself is unaffected.
     }
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, interval);

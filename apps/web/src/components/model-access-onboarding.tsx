@@ -41,6 +41,7 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
 import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 import { onboardingJourney } from "@/lib/onboarding-analytics";
+import { planCheckoutReturnUrl } from "@opengeni/react/app/lib/credit-checkout";
 import {
   applyConnectedModelToNewSessionDraft,
   creditCheckoutSuccessUrl,
@@ -536,7 +537,12 @@ export function ModelAccessOnboardingPanel({
         const creditsModel = await creditsModelForCheckout(client, workspaceId);
         request = {
           idempotencyKey: crypto.randomUUID(),
-          successUrl: creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
+          // The new-chat page confirms the plan once it is active.
+          successUrl: planCheckoutReturnUrl(
+            creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
+            organizationId,
+            plan.key,
+          ),
           cancelUrl: window.location.href,
         };
         planCheckouts.current.set(plan.key, request);

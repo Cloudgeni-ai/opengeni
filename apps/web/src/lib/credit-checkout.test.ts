@@ -4,8 +4,10 @@ import {
   billingCheckoutReturnUrl,
   checkoutPageReturnUrl,
   checkoutTabReturnUrl,
+  planCheckoutReturnUrl,
   readCheckoutPageReturn,
   startCreditCheckout,
+  waitForActivePlan,
   waitForCheckoutCredits,
 } from "@opengeni/react/app/lib/credit-checkout";
 import { parseCheckoutSessionId } from "./checkout-session-id";
@@ -107,6 +109,52 @@ describe("credit checkout", () => {
     ).toBeNull();
     expect(read("checkoutReturn=success&checkoutAccount=a&checkoutSession=cs_<x>")).toBeNull();
     expect(read("checkoutReturn=other&checkoutAccount=a&checkoutSession=cs_test_1")).toBeNull();
+  });
+
+  test("a paid plan returns to the page it started from with its plan; the page reads it back", () => {
+    const success = planCheckoutReturnUrl(
+      "https://app.test/workspaces/ws/organization?section=billing&checkoutReturn=cancelled#plans",
+      "account-1",
+      "pro",
+    );
+    expect(success).toBe(
+      "https://app.test/workspaces/ws/organization?section=billing&checkoutReturn=success&checkoutAccount=account-1&checkoutPlan=pro",
+    );
+    expect(readCheckoutPageReturn(new URL(success).searchParams)).toEqual({
+      outcome: "plan",
+      accountId: "account-1",
+      planKey: "pro",
+    });
+    const read = (query: string) => readCheckoutPageReturn(new URLSearchParams(query));
+    expect(read("checkoutReturn=success&checkoutPlan=pro")).toBeNull();
+    expect(read("checkoutReturn=success&checkoutAccount=a&checkoutPlan=")).toBeNull();
+    expect(read("checkoutReturn=success&checkoutAccount=a&checkoutPlan=<b>")).toBeNull();
+  });
+
+  test("waits through another plan, an unpaid plan and dropped requests until the plan is active", async () => {
+    const reads = [
+      { key: "free", label: "Free", status: "active" },
+      null,
+      { key: "pro", label: "Pro", status: "incomplete" },
+      { key: "pro", label: "Pro", status: "active" },
+    ];
+    const getBilling = mock(async (_options: { accountId?: string }) => {
+      const plan = reads.shift();
+      if (plan === null) throw new Error("dropped");
+      return { balance: { plan } } as never;
+    });
+    const plan = await waitForActivePlan(
+      { getBilling },
+      {
+        accountId: "account-1",
+        planKey: "pro",
+        signal: new AbortController().signal,
+        intervalMs: 1,
+      },
+    );
+    expect(plan).toMatchObject({ key: "pro", label: "Pro" });
+    expect(getBilling).toHaveBeenCalledTimes(4);
+    expect(getBilling.mock.calls[0]).toEqual([{ accountId: "account-1" }]);
   });
 
   test("a code-only checkout opens in the tab the click opened", async () => {

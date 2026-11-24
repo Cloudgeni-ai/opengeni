@@ -3213,6 +3213,12 @@ describe("onboarding leads with Pro where plans are sold", () => {
       const first = createSubscriptionCheckout.mock.calls[0]![0];
       expect(first).toMatchObject({ accountId: "organization-a", planKey: "pro" });
       expect(String(first.successUrl)).toContain("/workspaces/personal-workspace/sessions");
+      // The new-chat page confirms the plan once it is active; cancelling returns plainly.
+      const success = new URL(String(first.successUrl)).searchParams;
+      expect(success.get("checkoutReturn")).toBe("success");
+      expect(success.get("checkoutAccount")).toBe("organization-a");
+      expect(success.get("checkoutPlan")).toBe("pro");
+      expect(String(first.cancelUrl)).not.toContain("checkout");
       // A retry of the same plan reuses its key; Max is its own checkout.
       await act(async () => getPro.click());
       await flush();
@@ -3225,6 +3231,7 @@ describe("onboarding leads with Pro where plans are sold", () => {
       await flush();
       const max = createSubscriptionCheckout.mock.calls[2]![0];
       expect(max).toMatchObject({ planKey: "max" });
+      expect(new URL(String(max.successUrl)).searchParams.get("checkoutPlan")).toBe("max");
       expect(max.idempotencyKey).not.toBe(first.idempotencyKey);
     } finally {
       await unmount();
