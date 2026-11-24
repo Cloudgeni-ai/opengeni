@@ -172,6 +172,10 @@
       "types": "./src/automations.ts",
       "default": "./src/automations.ts"
     },
+    "./skills": {
+      "types": "./src/skills.ts",
+      "default": "./src/skills.ts"
+    },
     "./artifacts/document": {
       "types": "./src/artifacts-document.ts",
       "default": "./src/artifacts-document.ts"
