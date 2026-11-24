@@ -685,6 +685,12 @@ way.
   `src/lib/simplified-interface-landing.ts` removes the parameter. Someone arriving with the flag
   and no appearance of their own starts in the light look. After that the account menu shows a
   "Simplified interface" switch; a browser that never arrived with the flag sees no switch.
+  Onboarding's first question sets it too: **Not an engineer** turns it on (and shows the
+  switch), **Software engineer** turns it off only if it was on, then ends on Get started's
+  guided setups (`docs/agents.md`). Like the landing URL it sets this browser only; another
+  device starts in the full console until the switch is used there. Adding agents to your own
+  product is a small link under the two cards, not a third card, left out for people who
+  arrived in the simplified interface.
 - **Reading it.** `useSimplifiedInterface()` from `@opengeni/react/app/lib/simplified-interface`
   gives `simplified` and `productName`. `<html data-og-simplified-interface>` is the hook for
   styles. Components rendered without the provider (embeds) never use it.
@@ -706,9 +712,14 @@ way.
   branching in a component. Hide from lists only; never make a route unreachable or a decision
   depend on the flag.
 - **The rail.** Capabilities, Agents and Artifacts stay at the top level. Knowledge and
-  Automations sit under a closed "Advanced" group (`advancedWorkspaceItems` in the same file),
-  which opens by itself for the page you are on and for anything waiting for you. The icon rail
+  Automations sit under a closed "Advanced" group (`groupedWorkspaceItems` in the same file),
+  which, while closed, still shows the page you are on and anything waiting for you. The icon rail
   has no room for a group and keeps both icons.
+  The full console's rail has the same shape: Agents and Apps (sites in Artifacts) at the top
+  under Inbox, and Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under
+  a closed "Setup" group. Each interface remembers its own group's open state in this browser.
+  A person's saved sidebar layout still applies; `apps` and `get_started` can be hidden like any
+  other entry.
 - **The composer.** One action is left beside the message: add photos and files, shown as a
   button instead of the "+" menu (`ComposerMobilePlus`). Voice stays. Capabilities, repositories,
   secrets, visibility, usage limit, voice model and chat settings are not offered, and a new chat

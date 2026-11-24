@@ -699,7 +699,7 @@ adds one as an ordinary agent with `templateKey` set (SDK
 `listAgentTemplates`, `createAgentFromTemplate`). They are content files in
 `packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`),
 listed in gallery order in its `index.ts`: Triage, Bug fixer, PR reviewer,
-CVE scanner, Incident responder and Dependency updater, general for any software team, with
+CVE scanner, Incident responder, Dependency updater and Product analyst, general for any software team, with
 Instructions written for autonomy with judgment (pick up work with what they
 can reach instead of asking for setup first, hand off to each other by name,
 and involve a person only when blocked or a decision needs one), suggested Can use rules
@@ -714,6 +714,7 @@ Opengeni's own GitHub tools) and suggested triggers:
 | CVE scanner | Checks lockfiles and container images against known advisories (GitHub advisories, or osv-scanner or trivy in its sandbox), ranks by reachability and severity, fixes safe upgrades in one pull request, reports the rest | PR reviewer | Every Monday at 08:00; a pull request opens or is ready for review |
 | Incident responder | Gathers logs, metrics and recent deploys from connected tools, posts the likely cause and a mitigation | Bug fixer | Any event on a webhook (`*`, for alerts from monitoring); a new message in a Slack channel |
 | Dependency updater | Batches patch and minor upgrades into one pull request a week | PR reviewer | Every Monday at 09:00 |
+| Product analyst | Reads product analytics in PostHog and writes a short weekly report of what changed and why | None | Every Monday at 09:00 |
 
 GitHub events carry no changed file paths, so CVE scanner's pull request
 trigger fires for every pull request and its run stops at once when no
@@ -721,7 +722,8 @@ lockfile, dependency manifest or Dockerfile changed. The Agents page lists
 the ones not added here yet under the workspace's agents, as **Ready-made**
 (each one click to add, then its page), for someone who can add agents; **Add
 agent** offers the same. A new ready-made agent
-is one more content file; no product code names any of them. Suggested triggers are
+is one more content file; the only product code that names any of them is the
+guided setups on the Get started page ([Guided setups](#guided-setups)). Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the same dialog filled in from the suggestion (its events,
 conditions, note and name) so the person only picks the source and, for
@@ -739,6 +741,29 @@ true (the comment @mentions Opengeni's GitHub App, as `@slug` or
 `MEMBER` or `COLLABORATOR`; the App's own comments never start it. Ready-made agents
 name no internal Skills. Each names the `team` it is for ("Engineering"); Capabilities
 **Ready-made** groups by it.
+
+### Guided setups
+
+The workspace's **Get started** page (`/workspaces/<id>/get-started`, under
+the rail's Setup group) offers three engineering setups, each three steps that
+end with an agent at work: connect a tool, add a ready-made agent, turn on one
+of its suggested triggers.
+
+| Setup | Connect | Agent | Trigger |
+| --- | --- | --- | --- |
+| Review pull requests | GitHub | PR reviewer | When a pull request opens |
+| Triage issues | Linear | Triage | When a Linear issue is created |
+| Track product analytics | PostHog | Product analyst | Every Monday morning |
+
+They are a list in `apps/web/src/components/get-started/guided-setups.ts` and
+add no machinery: Connect opens GitHub's connect page or the connector's
+Capabilities page (found by its MCP address; a deployment that doesn't offer it
+says so; so does GitHub without its app here), Add is the Agents page's
+ready-made add (for people who may start chats), and Turn on adds a one-click
+suggestion at once or opens the agent page's Add trigger dialog with it. Each
+step reads its state from the workspace, so work done elsewhere shows as done;
+a paused trigger isn't on. Onboarding's **Software engineer** choice ends on
+this page.
 
 ### Delegation by name
 

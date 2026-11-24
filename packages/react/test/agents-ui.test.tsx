@@ -2044,6 +2044,7 @@ test("Add agent offers every ready-made agent's content file not yet added here"
     "cve-scanner",
     "incident-responder",
     "dependency-updater",
+    "product-analyst",
   ];
   const templates = await Promise.all(
     keys.map(

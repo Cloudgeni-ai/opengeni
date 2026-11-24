@@ -697,6 +697,8 @@ const NAV_ENTRY_LABELS: Record<SidebarNavEntry, string> = {
   agents: "Agents",
   meetings: "Meetings",
   artifacts: "Artifacts",
+  apps: "Apps",
+  get_started: "Get started",
 };
 
 /**
