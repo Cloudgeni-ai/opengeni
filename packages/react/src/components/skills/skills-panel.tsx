@@ -59,6 +59,7 @@ import {
 import { EmptyState } from "../../ui/empty-state";
 import { ErrorMessage } from "../../ui/error-message";
 import { LogoTile } from "../../ui/logo-tile";
+import { StandaloneOverlayRoot } from "../../ui/portal-container";
 import { Skeleton } from "../../ui/skeleton";
 import {
   apiErrorDetails,
@@ -275,6 +276,8 @@ export function SkillsPanel({
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  // The panel's own root: its menus and dialogs carry its theme when it stands alone in a host page.
+  const [root, setRoot] = useState<HTMLElement | null>(null);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [record, setRecord] = useState<SkillRecord | null>(null);
@@ -1026,180 +1029,183 @@ export function SkillsPanel({
 
   return (
     <section
+      ref={setRoot}
       aria-label="Skills"
-      className={cn("skills-panel relative min-w-0 space-y-4", className)}
+      className={cn("og-root skills-panel relative min-w-0 space-y-4", className)}
       {...dragHandlers}
     >
-      {canUpload ? (
-        <>
-          <input
-            ref={fileInputRef}
-            type="file"
-            hidden
-            tabIndex={-1}
-            aria-hidden="true"
-            accept=".md,.markdown,.zip,text/markdown,application/zip"
-            onChange={(event) => onPicked(event.currentTarget)}
-          />
-          <input
-            ref={(node) => {
-              folderInputRef.current = node;
-              // Not in React's input typings; every current browser supports it.
-              node?.setAttribute("webkitdirectory", "");
-            }}
-            type="file"
-            hidden
-            multiple
-            tabIndex={-1}
-            aria-hidden="true"
-            onChange={(event) => onPicked(event.currentTarget)}
-          />
-        </>
-      ) : null}
-      <div hidden={pageInPlace} className="space-y-4">
-        {heading}
-        {error && !record ? (
-          isPermissionDenied(error.cause) ? (
-            <p className="text-sm text-fg-muted">
-              You can't see skills here. Ask a workspace admin for access.
-            </p>
-          ) : (
-            <ErrorMessage
-              variant="inline"
-              announce
-              title={`${error.title}.`}
-              {...(isApiError(error.cause) ? apiErrorDetails(error.cause) : {})}
-              action={
-                error.title === "Couldn't upload this skill" ? undefined : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => navigate(() => setReload((value) => value + 1))}
-                  >
-                    Try again
-                  </Button>
-                )
-              }
-            >
-              {(refusalCodes && serverRefusalText(error.cause, refusalCodes)) ??
-                userErrorTextWithoutReference(error.cause)}
-            </ErrorMessage>
-          )
-        ) : null}
-        {notice && !record ? (
-          <p role="status" className="text-sm text-fg">
-            {notice}
-          </p>
-        ) : null}
-        {loading ? (
-          <div role="status" aria-label="Loading skills" className="grid gap-1 sm:grid-cols-2">
-            {[0, 1].map((index) => (
-              <div key={index} className="flex items-center gap-3 px-3 py-3">
-                <Skeleton className="size-10 rounded-[10px]" />
-                <div className="grid flex-1 gap-1.5">
-                  <Skeleton className="h-3.5 w-1/3" />
-                  <Skeleton className="h-3 w-2/3" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {!loading && !error && !listed.length ? (
-          owner !== "all" ? (
-            <p className="text-sm text-fg-subtle">No skills here.</p>
-          ) : emptyText !== undefined ? (
-            <p className="text-sm text-fg-subtle">{emptyText}</p>
-          ) : (
-            <EmptyState
-              variant="page"
-              icon={<GraduationCapIcon />}
-              title="No skills yet"
-              description={
-                newScope
-                  ? "Skills are instructions agents load when a task needs them. Write one, or upload a SKILL.md, a folder or a .zip."
-                  : "Skills are instructions agents load when a task needs them. Admins add them here."
-              }
-              action={emptyAction}
+      <StandaloneOverlayRoot source={root}>
+        {canUpload ? (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              hidden
+              tabIndex={-1}
+              aria-hidden="true"
+              accept=".md,.markdown,.zip,text/markdown,application/zip"
+              onChange={(event) => onPicked(event.currentTarget)}
             />
-          )
+            <input
+              ref={(node) => {
+                folderInputRef.current = node;
+                // Not in React's input typings; every current browser supports it.
+                node?.setAttribute("webkitdirectory", "");
+              }}
+              type="file"
+              hidden
+              multiple
+              tabIndex={-1}
+              aria-hidden="true"
+              onChange={(event) => onPicked(event.currentTarget)}
+            />
+          </>
         ) : null}
-        <ConnectionInstalled
-          title={listTitle}
-          aria-label={listTitle ?? title ?? "Skills"}
-          items={rows}
-        />
-        {nextCursor ? (
-          <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
-            Load more skills
-          </Button>
-        ) : null}
-        {!loading && listed.length && newScope === null && !scopes.some(canManage) ? (
-          <p className="m-0 text-xs leading-5 text-fg-muted">
-            Only admins can add or change skills here.
-          </p>
-        ) : null}
-      </div>
-      {pageContent
-        ? portal
-          ? slot?.target && slotSkillKey
-            ? createPortal(pageContent, slot.target)
-            : null
-          : pageContent
-        : null}
-      {dragging ? (
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-[12px] border-2 border-dashed border-brand bg-bg/90 p-6 text-center"
-        >
-          <div className="grid justify-items-center gap-2">
-            <UploadIcon className="size-6 text-brand" />
-            <p className="m-0 text-sm font-medium text-fg">Drop to upload a skill</p>
-            <p className="m-0 text-xs text-fg-muted">A SKILL.md, a skill folder or a .zip</p>
-          </div>
+        <div hidden={pageInPlace} className="space-y-4">
+          {heading}
+          {error && !record ? (
+            isPermissionDenied(error.cause) ? (
+              <p className="text-sm text-fg-muted">
+                You can't see skills here. Ask a workspace admin for access.
+              </p>
+            ) : (
+              <ErrorMessage
+                variant="inline"
+                announce
+                title={`${error.title}.`}
+                {...(isApiError(error.cause) ? apiErrorDetails(error.cause) : {})}
+                action={
+                  error.title === "Couldn't upload this skill" ? undefined : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => navigate(() => setReload((value) => value + 1))}
+                    >
+                      Try again
+                    </Button>
+                  )
+                }
+              >
+                {(refusalCodes && serverRefusalText(error.cause, refusalCodes)) ??
+                  userErrorTextWithoutReference(error.cause)}
+              </ErrorMessage>
+            )
+          ) : null}
+          {notice && !record ? (
+            <p role="status" className="text-sm text-fg">
+              {notice}
+            </p>
+          ) : null}
+          {loading ? (
+            <div role="status" aria-label="Loading skills" className="grid gap-1 sm:grid-cols-2">
+              {[0, 1].map((index) => (
+                <div key={index} className="flex items-center gap-3 px-3 py-3">
+                  <Skeleton className="size-10 rounded-[10px]" />
+                  <div className="grid flex-1 gap-1.5">
+                    <Skeleton className="h-3.5 w-1/3" />
+                    <Skeleton className="h-3 w-2/3" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {!loading && !error && !listed.length ? (
+            owner !== "all" ? (
+              <p className="text-sm text-fg-subtle">No skills here.</p>
+            ) : emptyText !== undefined ? (
+              <p className="text-sm text-fg-subtle">{emptyText}</p>
+            ) : (
+              <EmptyState
+                variant="page"
+                icon={<GraduationCapIcon />}
+                title="No skills yet"
+                description={
+                  newScope
+                    ? "Skills are instructions agents load when a task needs them. Write one, or upload a SKILL.md, a folder or a .zip."
+                    : "Skills are instructions agents load when a task needs them. Admins add them here."
+                }
+                action={emptyAction}
+              />
+            )
+          ) : null}
+          <ConnectionInstalled
+            title={listTitle}
+            aria-label={listTitle ?? title ?? "Skills"}
+            items={rows}
+          />
+          {nextCursor ? (
+            <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
+              Load more skills
+            </Button>
+          ) : null}
+          {!loading && listed.length && newScope === null && !scopes.some(canManage) ? (
+            <p className="m-0 text-xs leading-5 text-fg-muted">
+              Only admins can add or change skills here.
+            </p>
+          ) : null}
         </div>
-      ) : null}
-      {children?.(record)}
-      <ConfirmDialog
-        open={removal !== null}
-        onOpenChange={(isOpen) => {
-          if (!isOpen) setRemoval(null);
-        }}
-        title={`Remove “${humanizeName(removal?.skill.title || removal?.skill.stableKey || "skill")}”?`}
-        description="This permanently deletes the skill and all its saved revisions. It cannot be undone. Existing conversations stay unchanged."
-        confirmLabel="Remove skill"
-        cancelAutoFocus
-        restoreFocusRef={removalTriggerRef}
-        restoreFocusFallbackRef={headingRef}
-        onConfirm={remove}
-      >
-        {dirty ? (
-          <p className="text-sm text-fg-muted">Unsaved changes will also be discarded.</p>
+        {pageContent
+          ? portal
+            ? slot?.target && slotSkillKey
+              ? createPortal(pageContent, slot.target)
+              : null
+            : pageContent
+          : null}
+        {dragging ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-[12px] border-2 border-dashed border-brand bg-bg/90 p-6 text-center"
+          >
+            <div className="grid justify-items-center gap-2">
+              <UploadIcon className="size-6 text-brand" />
+              <p className="m-0 text-sm font-medium text-fg">Drop to upload a skill</p>
+              <p className="m-0 text-xs text-fg-muted">A SKILL.md, a skill folder or a .zip</p>
+            </div>
+          </div>
         ) : null}
-        {removal?.skill.source ? (
-          <p className="text-sm text-fg-muted">
-            If a plugin still owns this skill, remove it from the plugin first.
-          </p>
-        ) : null}
-        {removalError ? (
-          <p role="alert" className="text-sm text-danger">
-            {removalError}
-          </p>
-        ) : null}
-      </ConfirmDialog>
-      <ConfirmDialog
-        open={discardAction !== null}
-        onOpenChange={(isOpen) => {
-          if (!isOpen) setDiscardAction(null);
-        }}
-        title="Discard unsaved skill changes?"
-        description="Your edits have not been saved. Switching will discard them."
-        confirmLabel="Discard changes"
-        cancelAutoFocus
-        onConfirm={() => {
-          discardAction?.();
-        }}
-      />
+        {children?.(record)}
+        <ConfirmDialog
+          open={removal !== null}
+          onOpenChange={(isOpen) => {
+            if (!isOpen) setRemoval(null);
+          }}
+          title={`Remove “${humanizeName(removal?.skill.title || removal?.skill.stableKey || "skill")}”?`}
+          description="This permanently deletes the skill and all its saved revisions. It cannot be undone. Existing conversations stay unchanged."
+          confirmLabel="Remove skill"
+          cancelAutoFocus
+          restoreFocusRef={removalTriggerRef}
+          restoreFocusFallbackRef={headingRef}
+          onConfirm={remove}
+        >
+          {dirty ? (
+            <p className="text-sm text-fg-muted">Unsaved changes will also be discarded.</p>
+          ) : null}
+          {removal?.skill.source ? (
+            <p className="text-sm text-fg-muted">
+              If a plugin still owns this skill, remove it from the plugin first.
+            </p>
+          ) : null}
+          {removalError ? (
+            <p role="alert" className="text-sm text-danger">
+              {removalError}
+            </p>
+          ) : null}
+        </ConfirmDialog>
+        <ConfirmDialog
+          open={discardAction !== null}
+          onOpenChange={(isOpen) => {
+            if (!isOpen) setDiscardAction(null);
+          }}
+          title="Discard unsaved skill changes?"
+          description="Your edits have not been saved. Switching will discard them."
+          confirmLabel="Discard changes"
+          cancelAutoFocus
+          onConfirm={() => {
+            discardAction?.();
+          }}
+        />
+      </StandaloneOverlayRoot>
     </section>
   );
 }
