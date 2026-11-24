@@ -8,7 +8,7 @@ import {
 import { Button } from "../../../ui/button";
 import { codexUsageResetText } from "../../lib/codex-model-switch";
 import type { PinnedAccountWait } from "../../lib/pinned-account-wait";
-import { subscriptionProviderPresentation } from "./subscription-account";
+import { subscriptionProviderPresentation } from "../../lib/subscription-provider";
 
 /** What the notice says, decided from the wait and the chat's account choice. */
 export type PinnedAccountWaitCopy = {
