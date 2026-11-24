@@ -377,7 +377,7 @@ describe("the owner is told when a schedule cannot use a connector", () => {
     const degraded = await startRun(workspace, task.id);
     const [degradedRun] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 1);
     expect(degradedRun?.degradedAccounts).toEqual([
-      { serverId: "mail", connectionId: firstAccount, reason: "account_not_visible" },
+      { serverId: "mail", connectionId: firstAccount, reason: "account_inactive" },
     ]);
     const degradedExecution = await getScheduledTaskRunAcceptedExecution(client.db, {
       workspaceId: workspace.workspaceId,
@@ -549,7 +549,7 @@ describe("the owner is told when a schedule cannot use a connector", () => {
       diagnostic: {
         version: 1,
         reason: "selected_account_unavailable",
-        accounts: [{ serverId: "mail", connectionId: account, reason: "account_not_visible" }],
+        accounts: [{ serverId: "mail", connectionId: account, reason: "account_inactive" }],
       },
     });
     expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toMatchObject(

@@ -2319,13 +2319,22 @@ export async function steerQueuedTurnInTransaction(
 /**
  * The sender's time zone is presentation context, not part of a prompt's
  * request identity: a retry that names another zone (or none) replays the
- * original turn instead of conflicting with it.
+ * original turn instead of conflicting with it. Connector accounts left out
+ * at admission are an outcome of the moment, not part of the request either.
  */
 function turnMetadataRequestIdentity(
   turnMetadata: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
-  if (!turnMetadata || !(MESSAGE_TIME_ZONE_METADATA_KEY in turnMetadata)) return turnMetadata ?? {};
-  const { [MESSAGE_TIME_ZONE_METADATA_KEY]: _timeZone, ...identity } = turnMetadata;
+  if (
+    !turnMetadata ||
+    !(MESSAGE_TIME_ZONE_METADATA_KEY in turnMetadata || "connectionAccountGaps" in turnMetadata)
+  )
+    return turnMetadata ?? {};
+  const {
+    [MESSAGE_TIME_ZONE_METADATA_KEY]: _timeZone,
+    connectionAccountGaps: _gaps,
+    ...identity
+  } = turnMetadata;
   return identity;
 }
 
@@ -3047,7 +3056,16 @@ export async function submitHumanPromptInTransaction(
   );
   const acceptedTurnMetadata =
     acceptedAccounts.gaps.length > 0
-      ? { ...input.turnMetadata, connectionAccountGaps: acceptedAccounts.gaps.slice(0, 32) }
+      ? {
+          ...input.turnMetadata,
+          // Keep gaps admission already recorded (picks that stopped working).
+          connectionAccountGaps: [
+            ...(Array.isArray(input.turnMetadata?.connectionAccountGaps)
+              ? input.turnMetadata.connectionAccountGaps
+              : []),
+            ...acceptedAccounts.gaps,
+          ].slice(0, 32),
+        }
       : input.turnMetadata;
   const effectiveModelContext =
     editedSourceModelContext !== undefined

@@ -23,6 +23,7 @@ test("no account-backed routes require no account reads and preserve intent", as
       principal: { kind: "subject", subjectId: "user:caller" },
       selections: [],
     },
+    omittedSelections: [],
   });
 });
 

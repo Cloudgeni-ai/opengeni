@@ -5820,13 +5820,6 @@
     --tw-shadow: 0 1px 2px var(--tw-shadow-color, rgb(0 0 0/0.08));
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
-:where(.og-root).shadow-\[0_6px_16px_-8px_color-mix\(in_oklch\,var\(--og-color-accent\)_70\%\,transparent\)\],:where(.og-root) .shadow-\[0_6px_16px_-8px_color-mix\(in_oklch\,var\(--og-color-accent\)_70\%\,transparent\)\] {
-    --tw-shadow: 0 6px 16px -8px var(--tw-shadow-color, var(--og-color-accent));
-    @supports (color: color-mix(in lab, red, red)) {
-      --tw-shadow: 0 6px 16px -8px var(--tw-shadow-color, color-mix(in oklch,var(--og-color-accent) 70%,transparent));
-    }
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
 :where(.og-root).shadow-\[0_8px_20px_-10px_color-mix\(in_oklch\,var\(--color-status-success\,var\(--og-color-status-idle\)\)_80\%\,transparent\)\],:where(.og-root) .shadow-\[0_8px_20px_-10px_color-mix\(in_oklch\,var\(--color-status-success\,var\(--og-color-status-idle\)\)_80\%\,transparent\)\] {
     --tw-shadow: 0 8px 20px -10px var(--tw-shadow-color, var(--color-status-success,var(--og-color-status-idle)));
     @supports (color: color-mix(in lab, red, red)) {

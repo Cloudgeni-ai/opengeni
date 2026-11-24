@@ -3410,6 +3410,10 @@ function SessionChatPane(props: {
         void modelCatalog.refresh();
       }
     },
+    // An account that stopped working since the chat loaded: send again once
+    // without it, never with another account in its place.
+    reviseRefusedAccounts: (error, input) =>
+      connectionAccounts.reviseRefusedAccounts(error, input.connectionAccounts),
   });
   // A dropped event stream (an update or brief outage) reads as "updating" in
   // the composer while it reconnects.

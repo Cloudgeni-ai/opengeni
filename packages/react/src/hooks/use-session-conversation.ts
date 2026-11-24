@@ -44,6 +44,7 @@ export type UseSessionConversationOptions = ClientOverride<ChatClient> & {
         | "onSubmitted"
         | "onSent"
         | "onDeliveryError"
+        | "reviseRefusedAccounts"
         | "initialDraft"
         | "busySend"
         | "offerQueue"
@@ -163,6 +164,7 @@ export function useSessionConversation(
       return host?.onSent?.(text, input);
     },
     onDeliveryError: host?.onDeliveryError,
+    reviseRefusedAccounts: host?.reviseRefusedAccounts,
   });
   const conversation = useMemo(
     () => conversationTimeline(feed.timeline, queue, composer),

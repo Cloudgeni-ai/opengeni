@@ -949,10 +949,7 @@ function PullRequestAction({
       type="button"
       onClick={onOpenPullRequest}
       data-workbench-pr-action="open"
-      className={cn(
-        className,
-        "bg-og-primary text-og-primary-fg shadow-[0_6px_16px_-8px_color-mix(in_oklch,var(--og-color-accent)_70%,transparent)] hover:bg-og-primary-hover",
-      )}
+      className={cn(className, "bg-og-primary text-og-primary-fg hover:bg-og-primary-hover")}
     >
       <GitPullRequestArrowIcon className="size-3.5" aria-hidden />
       {t("workbenchChanges.openPullRequest")}

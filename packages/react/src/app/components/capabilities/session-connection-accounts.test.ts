@@ -153,11 +153,14 @@ test("native refs expose matching accounts across scopes; host refs are not nati
     { ...account, id: "disconnected", status: "revoked" },
     { ...account, id: "no-authority", authorityId: undefined },
   ] as ConnectionMetadata[];
-  expect(
-    connectedAccountGroups(selectedNativeConnectorRefs([item]), accounts)[0]?.accounts.map(
-      (value) => value.id,
-    ),
-  ).toEqual(["connection", "other"]);
+  // An account that stopped working stays listed (to show it needs
+  // reconnecting) but is never one of the connector's default accounts.
+  const [group] = connectedAccountGroups(selectedNativeConnectorRefs([item]), accounts);
+  expect(group?.accounts.map((value) => value.id)).toEqual(["connection", "other", "disconnected"]);
+  expect(selectedConnectionAccounts([group!], {}).selections).toEqual([
+    { serverId: "example", connectionId: "connection" },
+    { serverId: "example", connectionId: "other" },
+  ]);
   const fixed = { ...item, connectionRef: { ...item.connectionRef!, connectionId: "other" } };
   expect(
     connectedAccountGroups(selectedNativeConnectorRefs([fixed]), accounts)[0]?.accounts.map(
