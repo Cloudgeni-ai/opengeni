@@ -8,7 +8,7 @@ import {
   catalogItemConnected,
   catalogItemFor,
   guidedSetupByKey,
-  setupTriggerOn,
+  setupTriggerTask,
 } from "./guided-setups";
 
 function item(overrides: Record<string, unknown>): CapabilityCatalogItem {
@@ -61,18 +61,22 @@ describe("guided setups", () => {
     expect(agentForSetup([agent("b", "triage", false)], setup)?.id).toBe("b");
   });
 
-  test("the trigger is on when the agent has a task named after it", () => {
-    const task = (agentId: string, name: string, status = "active") =>
-      ({ name, status, agentConfig: { agentId } }) as unknown as ScheduledTask;
+  test("finds the agent's task named after the trigger, an active one first", () => {
+    const task = (agentId: string, name: string, status = "active", id = name) =>
+      ({ id, name, status, agentConfig: { agentId } }) as unknown as ScheduledTask;
     const setup = { triggerName: "Every Monday morning" };
-    expect(setupTriggerOn([task("a", "Product analyst: Every Monday morning")], "a", setup)).toBe(
-      true,
-    );
-    expect(setupTriggerOn([task("b", "Every Monday morning")], "a", setup)).toBe(false);
-    expect(setupTriggerOn([task("a", "Something else")], "a", setup)).toBe(false);
+    const name = "Product analyst: Every Monday morning";
+    expect(setupTriggerTask([task("a", name)], "a", setup)?.status).toBe("active");
+    expect(setupTriggerTask([task("b", "Every Monday morning")], "a", setup)).toBeNull();
+    expect(setupTriggerTask([task("a", "Something else")], "a", setup)).toBeNull();
+    expect(setupTriggerTask([task("a", name, "paused")], "a", setup)?.status).toBe("paused");
     expect(
-      setupTriggerOn([task("a", "Product analyst: Every Monday morning", "paused")], "a", setup),
-    ).toBe(false);
+      setupTriggerTask(
+        [task("a", name, "paused", "p"), task("a", name, "active", "on")],
+        "a",
+        setup,
+      )?.id,
+    ).toBe("on");
   });
 
   test("connect links open the connector on Capabilities", () => {

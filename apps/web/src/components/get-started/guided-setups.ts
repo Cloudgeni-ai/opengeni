@@ -113,26 +113,9 @@ export function agentForSetup(
 }
 
 /**
- * Whether the agent has this setup's trigger, switched on: the same naming
- * rule as the agent page, which names a trigger added from a suggestion
- * after it. A paused one doesn't count.
- */
-export function setupTriggerOn(
-  tasks: readonly ScheduledTask[],
-  agentId: string,
-  setup: Pick<GuidedSetup, "triggerName">,
-): boolean {
-  return tasks.some(
-    (task) =>
-      task.status === "active" &&
-      task.agentConfig.agentId === agentId &&
-      task.name.endsWith(setup.triggerName),
-  );
-}
-
-/**
  * The agent's trigger for this setup, whatever its state: on, paused (Turn on
- * resumes it rather than adding another) or none.
+ * resumes it rather than adding another) or none. The same naming rule as the
+ * agent page, which names a trigger added from a suggestion after it.
  */
 export function setupTriggerTask(
   tasks: readonly ScheduledTask[],
