@@ -28,7 +28,7 @@ export const ONBOARDING_COMPLETIONS = {
   use_case: ["everyday", "embed", "cloud"],
   organization_name: ["created"],
   invitation: ["joined"],
-  model_access: ["start_chatting", "skipped", "connected_model", "checkout"],
+  model_access: ["start_chatting", "skipped", "connected_model", "checkout", "plan_checkout"],
   developer_setup: ["implement_with_opengeni", "copied_prompt", "skipped"],
 } as const satisfies Record<OnboardingStep, readonly string[]>;
 export type OnboardingCompletion<Step extends OnboardingStep> =

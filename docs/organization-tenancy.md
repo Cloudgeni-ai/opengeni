@@ -948,6 +948,13 @@ selectable there (client config carries no credential-readiness or policy
 signal), the step leads with starting to chat on that model and presents every
 connection or purchase as an optional upgrade. An unconfirmed or unreadable
 catalog shows the ordinary choice screen instead.
+On Stripe-billed deployments without starting credits, the step leads with the
+cheapest self-service paid plan from the runtime catalog (`GET
+/v1/billing/subscription-plans`): its price, monthly credit and seats, one
+primary checkout action, and the next plan as a secondary choice. Buying credits
+stays in the list of ways to pay but no longer opens by default. Organizations
+already on a paid plan, deployments without plans, and an unreadable catalog
+keep the ordinary choice screen.
 Connecting selects a model from the connected family (Codex, SuperGrok, or the
 provider key) in the human’s actor-private new-session draft with its expected
 revision, preserving the other draft fields, and never falls back to the free
