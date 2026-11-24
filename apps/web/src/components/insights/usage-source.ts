@@ -43,6 +43,7 @@ const ALL_CAPABILITIES: UsageResponse["capabilities"] = {
     "rootSession",
     "person",
     "schedule",
+    "agent",
     "source",
   ],
   filters: [
@@ -54,6 +55,7 @@ const ALL_CAPABILITIES: UsageResponse["capabilities"] = {
     "person",
     "rootSessionId",
     "scheduleId",
+    "agentId",
     "source",
   ],
   ranges: ["1h", "3h", "24h", "today", "week", "month", "30d", "90d", "ytd", "custom"],
@@ -158,14 +160,20 @@ export async function loadUsage(
       // list the ranges they answer; older ones answer the six presets, plus
       // custom when they also answer sources.
       const extended = Array.isArray(usage.facets?.sources);
+      // Servers that answer the agent dimension list the agents they saw.
+      const agents = Array.isArray(usage.facets?.agents);
       const ranges =
         usage.availableRanges?.filter((range): range is UsageRange =>
           (ALL_CAPABILITIES.ranges as readonly string[]).includes(range),
         ) ?? (extended ? [...CALENDAR_PRESETS, "custom" as const] : CALENDAR_PRESETS);
       const capabilities = usage.capabilities ?? {
         ...ALL_CAPABILITIES,
-        groupBy: ALL_CAPABILITIES.groupBy.filter((group) => extended || group !== "source"),
-        filters: ALL_CAPABILITIES.filters.filter((field) => extended || field !== "source"),
+        groupBy: ALL_CAPABILITIES.groupBy.filter(
+          (group) => (extended || group !== "source") && (agents || group !== "agent"),
+        ),
+        filters: ALL_CAPABILITIES.filters.filter(
+          (field) => (extended || field !== "source") && (agents || field !== "agentId"),
+        ),
         ranges,
       };
       return {

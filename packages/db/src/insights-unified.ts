@@ -56,7 +56,7 @@ export async function readInsightsResponseCacheFence(
         { accountId: scope.accountId, workspaceId: workspace.id },
         async (scoped) => {
           return await cacheMetadataRead(scoped, async (bounded) =>
-            rows<{ revision: string; projects: unknown; schedules: unknown }>(
+            rows<{ revision: string; projects: unknown; schedules: unknown; agents: unknown }>(
               await bounded.execute(sql`
           select (
               select count(*)::text || ':'
@@ -68,7 +68,9 @@ export async function readInsightsResponseCacheFence(
             (select coalesce(jsonb_agg(jsonb_build_array(c.id,c.name) order by c.id),'[]')
               from channels c where c.account_id=${scope.accountId}::uuid and c.workspace_id=${workspace.id}::uuid) projects,
             (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at) order by t.id),'[]')
-              from scheduled_tasks t where t.account_id=${scope.accountId}::uuid and t.workspace_id=${workspace.id}::uuid) schedules
+              from scheduled_tasks t where t.account_id=${scope.accountId}::uuid and t.workspace_id=${workspace.id}::uuid) schedules,
+            (select coalesce(jsonb_agg(jsonb_build_array(g.id,g.name,g.visibility,g.owner_subject_id) order by g.id),'[]')
+              from agents g where g.account_id=${scope.accountId}::uuid and g.workspace_id=${workspace.id}::uuid) agents
           `),
             ),
           );
@@ -225,6 +227,7 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootSessionId','deleted')`,
     person: sql`coalesce(payload->>'person','service')`,
     schedule: sql`coalesce(payload->>'scheduleId','service')`,
+    agent: sql`coalesce(payload->>'agentId','none')`,
   };
   const labels = {
     model: sql`payload->>'model'`,
@@ -235,6 +238,8 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootTitle','Untitled chat')`,
     person: sql`coalesce(payload->>'personName','Service')`,
     schedule: sql`coalesce(payload->>'scheduleName',case when payload->>'scheduleId' is null then 'Interactive' else 'Unavailable schedule' end)`,
+    // agentName is set only for agents the caller may see (migration 1563).
+    agent: sql`coalesce(payload->>'agentName',case when payload->>'agentId' is null then 'No agent' else 'Unavailable agent' end)`,
   };
   if (!Object.hasOwn(keys, groupBy)) {
     throw new Error("Raw Insights does not support this grouping");
@@ -245,9 +250,11 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
   const normalKind =
     groupBy === "project"
       ? sql`case when payload->>'projectId' is null then 'unfiled' else 'item' end`
-      : groupBy === "person" || groupBy === "schedule"
-        ? sql`case when ${key}='service' then 'service' else 'item' end`
-        : sql`'item'::text`;
+      : groupBy === "agent"
+        ? sql`case when payload->>'agentId' is null then 'unfiled' else 'item' end`
+        : groupBy === "person" || groupBy === "schedule"
+          ? sql`case when ${key}='service' then 'service' else 'item' end`
+          : sql`'item'::text`;
   return {
     key: sql`case when payload->>'kind' in ('private','personal') then payload->>'kind'||':'||(payload->>'person')
       when payload->>'kind'<>'item' then payload->>'kind'||case when ${groupBy}='workspace' and payload->>'workspaceId' is not null then ':'||(payload->>'workspaceId') else '' end else (${normalKind})||':'||(${key}) end`,
@@ -287,9 +294,18 @@ export async function readInsightsUsage(
       "scheduleId",
     ].includes(key),
   );
+  // insights_usage_filter predates agents and ignores agentId. Like its other
+  // fields, an agent filter matches only visible usage of those agents.
+  const agentFilter =
+    query.agentId === undefined
+      ? sql`true`
+      : sql`(payload->>'kind'='item' and payload->>'agentId' in (${sql.join(
+          query.agentId.map((id) => sql`${id}`),
+          sql`, `,
+        )}))`;
   const filter = filteredQuery
-    ? sql`opengeni_private.insights_usage_filter(payload,${queryJson}::jsonb)`
-    : sql`true`;
+    ? sql`opengeni_private.insights_usage_filter(payload,${queryJson}::jsonb) and ${agentFilter}`
+    : agentFilter;
   const details = sql`array[${sql.join(
     (input.detailsWorkspaceIds ?? []).map((id) => sql`${id}::uuid`),
     sql`, `,
@@ -379,7 +395,9 @@ export async function readInsightsUsage(
             from(select payload->>'person' as key,max(payload->>'personName') as name,bool_or(coalesce((payload->>'you')::boolean,false)) as you
               from visible where payload->>'person' is not null group by payload->>'person') v),'[]'::jsonb),
           'schedules',coalesce((select jsonb_agg(jsonb_build_object('id',id,'name',name) order by name,id)
-            from(select distinct payload->>'scheduleId' as id,payload->>'scheduleName' as name from visible where payload->>'scheduleId' is not null and payload->>'scheduleName' is not null) v),'[]'::jsonb))
+            from(select distinct payload->>'scheduleId' as id,payload->>'scheduleName' as name from visible where payload->>'scheduleId' is not null and payload->>'scheduleName' is not null) v),'[]'::jsonb),
+          'agents',coalesce((select jsonb_agg(jsonb_build_object('id',id,'name',name) order by name,id)
+            from(select distinct payload->>'agentId' as id,payload->>'agentName' as name from visible where payload->>'agentId' is not null and payload->>'agentName' is not null) v),'[]'::jsonb))
       ) as payload`);
       return {
         ...rows<{ payload: Record<string, unknown> }>(result)[0]!.payload,

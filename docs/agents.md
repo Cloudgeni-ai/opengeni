@@ -818,6 +818,16 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   workspaces at once. Controls follow the agent's `viewer` access. Choosing
   Only me in the form says it stops answering in Slack; a Slack name refusal
   shows at the name.
+- Agent page cost: people who may see Insights > Usage (workspace settings
+  authority) see one line under the header, "Last 30 days: $12.40 · $0.310 per
+  run", or "No runs in the last 30 days" (`agent-cost.tsx`). It reads
+  `.../insights/usage?range=30d&agentId=<id>&groupBy=rootSession`: the spend is
+  the Usage page's (credits charged plus the list-price estimate of usage paid
+  by plans or your own keys), a run is one root chat, and workers count toward
+  their root chat's agent. Only usage the viewer can see in Usage counts;
+  others' Only me chats stay in their private amounts. Without access, on an
+  older server or on an error it shows nothing. Insights > Usage also groups
+  and filters by **Agent** (see insights-raw-usage-api.md).
 - Form: icon, name, what it helps with, Instructions, **Remember across
   chats** (a switch, on for a new agent), **Starts when** (new agents only:
   the common triggers as switches, all off; those switched on are added after
