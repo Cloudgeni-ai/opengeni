@@ -102,7 +102,7 @@
     },
     {
       "path": ".github/workflows/publish-browser-extension.yml",
-      "sha256": "3176f27d6c0eed2e1065233b60dab28d3965fd72195512431e15bf1e85930c01"
+      "sha256": "d0653e3f0323442c9b8ea03d051159874956d3da472b4650030ee9d160bf11ad"
     },
     {
       "path": ".github/workflows/publish-canary-chart.yml",
@@ -1612,20 +1612,32 @@
     {
       "workflow": ".github/workflows/publish-browser-extension.yml",
       "job": "publish",
+      "step": "Close the failed-publish issue",
+      "sha256": "aa955b1abb9542b75311ae53b7635acc964f376adbe64e9b0ff1a6407f487bbb"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
       "step": "Install dependencies",
       "sha256": "1cd1c6c436f7ed4dc025c83963fd1c032f0b4493bc78c225fcb0d1d76c6cfae8"
     },
     {
       "workflow": ".github/workflows/publish-browser-extension.yml",
       "job": "publish",
+      "step": "Report a failed publish",
+      "sha256": "1a6a0804095d971a8df67ca120ed1b9e551b721ca51e5b5f1a24e3e31df10ea7"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
       "step": "Test publisher",
-      "sha256": "732302fc33663d81adfe2bd6efd3941c356e9074eb74252ad68a00d7494f6d7a"
+      "sha256": "5cb27507a8dbb527e9e236a879acbc830da3909e1d74fe1d62ddd78275250d65"
     },
     {
       "workflow": ".github/workflows/publish-browser-extension.yml",
       "job": "publish",
       "step": "Upload and submit",
-      "sha256": "43ac13a8054a46653f52363073da632dede951e3b2e8fc019d83c591fd071b24"
+      "sha256": "21120175510879a4541670e4173b0f7b90ae293ca21d1756e8fbf095fcefd7c7"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",

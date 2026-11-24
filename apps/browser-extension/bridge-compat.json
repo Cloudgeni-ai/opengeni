@@ -1,0 +1,32 @@
+{
+  "$comment": "Every way an installed extension reaches the machine agent. The agent must keep supporting each protocol here that is not retired (agent test: installed_extension_protocols_stay_supported), the extension must use one of them (test/bridge-compat.test.ts), and a store release waits until a released agent supports its protocol. Never delete an entry: retire it, at least 60 days after its replacement was released. See README.md, Extension and agent compatibility.",
+  "protocols": [
+    {
+      "id": "opengeni-shared-host-v1",
+      "build": "opengeni",
+      "bridgeProtocolVersion": 1,
+      "nativeHost": "shared",
+      "minimumAgent": "0.1.18",
+      "releasedOn": "2026-09-07"
+    },
+    {
+      "id": "branded-shared-host-v1",
+      "build": "branded",
+      "bridgeProtocolVersion": 1,
+      "nativeHost": "shared",
+      "minimumAgent": "0.1.117",
+      "releasedOn": "2026-10-22",
+      "retiredOn": "2026-11-20",
+      "retiredBy": "branded-own-host-v1",
+      "retiredBeforeThisRule": true
+    },
+    {
+      "id": "branded-own-host-v1",
+      "build": "branded",
+      "bridgeProtocolVersion": 1,
+      "nativeHost": "per-extension",
+      "minimumAgent": "0.1.169",
+      "releasedOn": "2026-11-20"
+    }
+  ]
+}
