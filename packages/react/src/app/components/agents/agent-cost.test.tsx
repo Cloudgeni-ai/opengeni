@@ -86,7 +86,7 @@ describe("AgentCost", () => {
   test("shows last 30 days spend and the average per run, as Usage counts spend", async () => {
     // $9.00 charged in credits plus a $3.40 plan list-price estimate, over 40 runs.
     respond = async () => usage({ chargedMicros: 9_000_000, listMicros: 3_400_000 }, 40);
-    expect(await render()).toBe("Last 30 days: $12.40 · $0.310 per run");
+    expect(await render()).toBe("Last 30 days: $12.40 · $0.31 per run");
     expect(reads).toEqual([
       {
         workspaceId,
@@ -120,7 +120,7 @@ describe("AgentCost", () => {
       "Last 30 days: $1,235 · $411.52 per run",
     );
     expect(agentCostText({ spendMicros: 50_000, runs: 2 })).toBe(
-      "Last 30 days: $0.050 · $0.025 per run",
+      "Last 30 days: $0.05 · $0.03 per run",
     );
   });
 });

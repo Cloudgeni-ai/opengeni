@@ -819,8 +819,8 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   Only me in the form says it stops answering in Slack; a Slack name refusal
   shows at the name.
 - Agent page cost: people who may see Insights > Usage (workspace settings
-  authority) see one line under the header, "Last 30 days: $12.40 · $0.310 per
-  run", or "No runs in the last 30 days" (`agent-cost.tsx`). It reads
+  authority) see it in the header's meta line, "Last 30 days: $12.40 · $0.31
+  per run", or "No runs in the last 30 days" (`agent-cost.tsx`). It reads
   `.../insights/usage?range=30d&agentId=<id>&groupBy=rootSession`: the spend is
   the Usage page's (credits charged plus the list-price estimate of usage paid
   by plans or your own keys), a run is one root chat, and workers count toward

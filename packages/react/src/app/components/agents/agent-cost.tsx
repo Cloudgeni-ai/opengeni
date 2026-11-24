@@ -14,21 +14,23 @@ import { formatUsageMoney, usageCostMicros } from "../../lib/usage-cost";
 
 type Cost = { spendMicros: number; runs: number };
 
+/** Cents from a cent up, as on a bill; Usage's finer digits below that. */
+function agentMoney(micros: number): string {
+  const value = micros / 1_000_000;
+  if (value >= 0.01 && value < 1) return `$${value.toFixed(2)}`;
+  return formatUsageMoney(micros);
+}
+
 /** "Last 30 days: $12.40 · $0.31 per run", or that it had no runs. */
 export function agentCostText(cost: Cost): string {
   if (cost.runs === 0) return "No runs in the last 30 days";
-  return `Last 30 days: ${formatUsageMoney(cost.spendMicros)} · ${formatUsageMoney(
+  return `Last 30 days: ${agentMoney(cost.spendMicros)} · ${agentMoney(
     Math.round(cost.spendMicros / cost.runs),
   )} per run`;
 }
 
-export function AgentCost({
-  agent,
-  workspaceId,
-}: {
-  agent: Pick<Agent, "id">;
-  workspaceId: string;
-}) {
+/** The agent's cost line for its page's header, or null while unknown or not shown. */
+export function useAgentCostText(agent: Pick<Agent, "id">, workspaceId: string): string | null {
   const { client, accessContext, workspaces, managedSelfContext } = useAppContext();
   const workspace = workspaces.find((row) => row.id === workspaceId) ?? null;
   // The Usage page's own gate; the API checks it again.
@@ -55,10 +57,21 @@ export function AgentCost({
     return () => controller.abort();
   }, [client, workspaceId, agent.id, allowed]);
 
-  if (!allowed || cost === null) return null;
+  return allowed && cost !== null ? agentCostText(cost) : null;
+}
+
+export function AgentCost({
+  agent,
+  workspaceId,
+}: {
+  agent: Pick<Agent, "id">;
+  workspaceId: string;
+}) {
+  const text = useAgentCostText(agent, workspaceId);
+  if (text === null) return null;
   return (
-    <p className="m-0 text-sm text-fg-muted tabular-nums" data-agent-cost="">
-      {agentCostText(cost)}
-    </p>
+    <span className="tabular-nums" data-agent-cost="">
+      {text}
+    </span>
   );
 }

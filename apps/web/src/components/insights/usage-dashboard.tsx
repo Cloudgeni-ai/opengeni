@@ -1261,7 +1261,8 @@ function BreakdownPanel(props: {
 
 function canDrillHint(groupBy: UsageGroupBy, allowed: boolean): string {
   if (!allowed) return "";
-  return `Select a ${GROUP_LABELS[groupBy].toLowerCase()} to filter everything to it.`;
+  const noun = GROUP_LABELS[groupBy].toLowerCase();
+  return `Select ${/^[aeiou]/u.test(noun) ? "an" : "a"} ${noun} to filter everything to it.`;
 }
 
 function ShareCell(props: { share: number | null }) {
