@@ -144,9 +144,11 @@ Anyone who can use a secret can send it somewhere they can read: an agent told
 to print, encode or post it, or a webhook, connection header or tool call that
 carries the reference. Agent output is not masked
 ([Agent-visible content](#agent-visible-content) forbids rewriting it). Choose
-who may use a secret accordingly, and rotate a value that leaked. During a
-rolling deploy of this change, servers still on the previous release ignore
-the rule until they are replaced.
+who may use a secret accordingly, and rotate a value that leaked. The
+database refuses to reveal or read out a use-only item too
+(`read_vault_field_ciphertext`), so it holds during a rolling deploy; servers
+still on the previous release keep the old member rule and its
+`fromReference` copies until they are replaced.
 
 **Capability.** The `secrets` capability is on by default. When an agent
 configuration switches it off, the agent gets no secret tools, prompt block or
