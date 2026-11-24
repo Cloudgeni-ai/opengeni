@@ -1,5 +1,5 @@
 // Secrets: vaults of logins, keys, notes and files that agents use by
-// reference. Values are revealed only on request ("use = reveal").
+// reference. Values are revealed only on request, to people who may see them.
 //
 //   /secrets                      the vault list   ?view=new|connect|connect-<provider>[&owner=]
 //   /secrets?connection=<id>      a password manager connection   &view=choose-vaults|replace-token
@@ -219,7 +219,8 @@ export function SecretsRoute({
   const can = (permission: string) => hasWorkspacePermission(access, workspaceId, permission);
   const canList = can("secrets:list");
   const canWrite = can("secrets:write");
-  // "use = reveal": viewers can see that an item exists, never its value.
+  // Viewers can see that an item exists, never its value; the item says
+  // whether this person may also see values (canReveal).
   const canUse = can("secrets:use");
   const workspaceGrant = access.workspaceGrants.find((grant) => grant.workspaceId === workspaceId);
   const accountId = workspaceGrant?.accountId ?? null;

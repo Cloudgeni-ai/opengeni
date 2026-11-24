@@ -26,6 +26,7 @@ import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
 import { SecretInput } from "@/components/ui/secret-field";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { Switch } from "@opengeni/react/ui/switch";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 import { fieldLabel } from "./item-page";
@@ -240,6 +241,12 @@ export function ItemEditorPage({
     })),
   );
   const [expires, setExpires] = useState(toDateInput(item?.expiresAt ?? null));
+  // One-way: a use-only item stays use-only. Hosted vaults only, since a
+  // password manager keeps its values readable there.
+  const useOnlyAllowed = vault.source === "opengeni";
+  const alreadyUseOnly = item?.useOnly === true;
+  const [useOnly, setUseOnly] = useState(alreadyUseOnly);
+  const useOnlyId = useId();
   const [drafts, setDrafts] = useState<Draft[]>(() =>
     item ? fromItem(item) : template(type, totpAllowed),
   );
@@ -387,6 +394,7 @@ export function ItemEditorPage({
           ...(showWebsites ? { websites: cleanWebsites } : {}),
           expiresAt,
           ...(fields.length ? { fields } : {}),
+          ...(useOnly && !alreadyUseOnly ? { useOnly: true as const } : {}),
         });
       } else {
         await onCreate({
@@ -396,6 +404,7 @@ export function ItemEditorPage({
           ...(showWebsites && cleanWebsites.length ? { websites: cleanWebsites } : {}),
           ...(expiresAt ? { expiresAt } : {}),
           fields,
+          ...(useOnly ? { useOnly: true as const } : {}),
         });
         submission.current = "saved";
         setCreated(true);
@@ -841,6 +850,25 @@ export function ItemEditorPage({
             className="w-48"
           />
         </Field>
+        {useOnlyAllowed ? (
+          <div className="flex items-start justify-between gap-4">
+            <label htmlFor={useOnlyId} className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm leading-5 font-medium text-fg">Use only</span>
+              <span className="text-xs leading-4.5 text-fg-muted">
+                {alreadyUseOnly
+                  ? "Values can be replaced but never shown again."
+                  : "Agents can use the values, but nobody can see them again, you included. Can't be undone."}
+              </span>
+            </label>
+            <Switch
+              id={useOnlyId}
+              checked={useOnly}
+              disabled={alreadyUseOnly}
+              disabledReason={alreadyUseOnly ? "Use only can't be turned off." : undefined}
+              onCheckedChange={setUseOnly}
+            />
+          </div>
+        ) : null}
       </FieldStack>
     </FlushFormPage>
   );

@@ -64,6 +64,7 @@ import {
   listVaultFieldVersions,
   listVaultItems,
   listSecretApprovalRules,
+  listVaultItemsUseOnly,
   listVaultsForSubject,
   listOrganizationVaults,
   vaultItemCursor,
@@ -88,7 +89,7 @@ import {
   EMPTY_VAULT_PROVIDER_REGISTRY,
   isVaultProviderError,
 } from "@opengeni/vaults";
-import { hasPermission } from "../../access";
+import { hasLiteralPermission, hasPermission } from "../../access";
 import {
   toVaultItem,
   toVaultItemSummary,
@@ -122,6 +123,7 @@ import {
   withMainSecretFieldFallback,
 } from "./secret-resolver";
 import { prepareTypedFields, standardFieldKind } from "./typed-fields";
+import { valueHiddenError, vaultItemRevealable, type RevealViewer } from "./reveal-policy";
 import type { VaultRequestActor, VaultServiceDeps } from "./types";
 
 export interface VaultService {
@@ -258,6 +260,49 @@ function createdByKind(actor: VaultRequestActor): VaultVersionCreatedByKind {
   return vaultActorIsApiKey(actor) ? "api_key" : "human";
 }
 
+/**
+ * Who a person or API key is when asking to see a value. An API key sees
+ * values only through its literal `secrets:read`; a person through having
+ * created the item or administering where it lives.
+ */
+function viewerOf(actor: VaultRequestActor): RevealViewer {
+  const apiKey = vaultActorIsApiKey(actor);
+  return {
+    subjectId: apiKey ? null : actor.grant.subjectId,
+    workspaceAdmin:
+      !apiKey &&
+      hasPermission(actor.grant.permissions, "workspace:admin", actor.grant.permissionMode),
+    accountAdmin: !apiKey && actor.accountAdmin,
+    apiKeyRead: apiKey && hasLiteralPermission(actor.grant.permissions, "secrets:read"),
+  };
+}
+
+/** Nobody: sees only what no rule hides, which is nothing shared. */
+const NO_VIEWER: RevealViewer = {
+  subjectId: null,
+  workspaceAdmin: false,
+  accountAdmin: false,
+  apiKeyRead: false,
+};
+
+/** Item input without the use-only switch, which is stored apart from the item. */
+function withoutUseOnly<T extends { useOnly?: true | undefined }>(input: T): Omit<T, "useOnly"> {
+  const { useOnly: _useOnly, ...rest } = input;
+  return rest;
+}
+
+/**
+ * Values in a connected password manager stay readable there, so Opengeni
+ * cannot promise nobody sees them again.
+ */
+function refuseUseOnlyInProvider(vault: VaultRow): never {
+  throw new VaultError(
+    "vault_operation_unsupported",
+    `${vault.name} is a connected password manager, where its values stay readable, so they can't be made use-only. Save the secret in an Opengeni vault instead.`,
+    { operation: "useOnly", vaultId: vault.id },
+  );
+}
+
 function utf8Size(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
@@ -391,13 +436,20 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         },
         raw,
         "vault_item_copy",
+        viewerOf(actor),
       );
   }
 
+  /**
+   * A copied value (`fromReference`, `secret_save`, a provider write) lands
+   * in an item its writer can see, so it needs the right to see the source:
+   * checked before the value is read.
+   */
   async function resolveTextReference(
     principal: SecretPrincipal,
     raw: string,
     toolName: string,
+    viewer?: RevealViewer,
   ): Promise<string> {
     let reference;
     try {
@@ -411,12 +463,27 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         },
       );
     }
+    const source = await agentItemByReference(principal, raw);
+    const context = principalContext(principal);
+    await assertRevealable(
+      context,
+      await getVaultItem(deps.db, context, { itemId: source.itemId }),
+      viewer ?? (await principalViewer(principal, source.actingSubjectId)),
+    );
     const resolver = createSecretResolver(deps, principal, { capabilityEnabled: true });
     const values = await resolver.resolve([reference], {
       surface: principal.kind === "attempt" ? "mcp" : "human_reveal",
       toolName,
     });
     const value = [...values.values()][0]!;
+    if (value.itemId !== source.itemId) {
+      // The reference now names another item (renamed meanwhile): its
+      // visibility was not checked, so nothing is copied.
+      throw new VaultError(
+        "vault_generation_conflict",
+        `${raw} changed while it was being copied; try again`,
+      );
+    }
     if (value.material.type === "text") return value.material.value;
     if (value.material.type === "bytes") return Buffer.from(value.material.value).toString("utf8");
     return totpCodeSync(value.material.params, clock.now());
@@ -459,6 +526,77 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
   function key(): Uint8Array | null {
     return deps.encryptionKey;
+  }
+
+  /** Whether the viewer may see this item's values (reveal-policy.ts). */
+  async function itemRevealable(
+    context: VaultDbContext,
+    item: VaultItemRow,
+    viewer: RevealViewer,
+  ): Promise<{ revealable: boolean; useOnly: boolean }> {
+    const useOnly = (await listVaultItemsUseOnly(deps.db, context, [item.id])).has(item.id);
+    return {
+      useOnly,
+      revealable: vaultItemRevealable(
+        {
+          vaultOwnerKind: item.vaultOwnerKind,
+          createdBySubjectId: item.createdBySubjectId,
+          useOnly,
+        },
+        viewer,
+      ),
+    };
+  }
+
+  /** Refuses, before any value is read, a viewer who may only use the item. */
+  async function assertRevealable(
+    context: VaultDbContext,
+    item: VaultItemRow,
+    viewer: RevealViewer,
+  ): Promise<void> {
+    const { revealable, useOnly } = await itemRevealable(context, item, viewer);
+    if (!revealable) throw valueHiddenError({ id: item.id, name: item.name, useOnly });
+  }
+
+  /** An item for a person or API key, with whether they may see its values. */
+  async function present(
+    actor: VaultRequestActor,
+    workspaceId: string,
+    row: VaultItemRow,
+  ): Promise<VaultItem> {
+    const { revealable, useOnly } = await itemRevealable(
+      subjectContext(actor, workspaceId),
+      row,
+      viewerOf(actor),
+    );
+    return { ...toVaultItem(row, key()), useOnly, canReveal: revealable };
+  }
+
+  /** The person an agent run acts for, as a viewer; agents never administer. */
+  async function principalViewer(
+    principal: SecretPrincipal,
+    actingSubjectId?: string | null,
+    permissions?: readonly string[],
+  ): Promise<RevealViewer> {
+    if (principal.kind === "human") {
+      return { ...NO_VIEWER, subjectId: principal.subjectId };
+    }
+    if (principal.kind !== "attempt") return NO_VIEWER;
+    const subjectId =
+      actingSubjectId !== undefined
+        ? actingSubjectId
+        : (
+            await resolveSecretReferenceCandidates(deps.db, principalContext(principal), {
+              refs: [],
+            })
+          ).meta.subjectId;
+    return {
+      ...NO_VIEWER,
+      subjectId,
+      workspaceAdmin:
+        permissions !== undefined &&
+        hasPermission(permissions as Parameters<typeof hasPermission>[0], "workspace:admin"),
+    };
   }
 
   /**
@@ -511,10 +649,21 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     mode: "move" | "copy";
     newName?: string | undefined;
     createdBy: VaultVersionCreatedByKind;
+    /**
+     * The caller may only use the item: a copy in a password manager would be
+     * readable there, so that is refused, and an Opengeni copy is use-only.
+     */
+    hidden: boolean;
   }): Promise<VaultItemRow | null> {
     const source = await getVaultItem(deps.db, input.context, { itemId: input.itemId });
     const target = await getVault(deps.db, input.context, { vaultId: input.targetVaultId });
     if (source.vaultSource === "opengeni" && target.source === "opengeni") return null;
+    if (input.hidden && target.source !== "opengeni") {
+      const useOnly = (await listVaultItemsUseOnly(deps.db, input.context, [source.id])).has(
+        source.id,
+      );
+      throw valueHiddenError({ id: source.id, name: source.name, useOnly });
+    }
     if (source.archivedAt !== null) {
       throw new VaultError("vault_item_not_found", "item is archived; restore it first", {
         itemId: source.id,
@@ -638,6 +787,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         ...write,
         vaultId: target.id,
         mode: "create",
+        ...(input.hidden ? { useOnly: true as const } : {}),
       });
     }
     if (input.mode === "move") {
@@ -702,10 +852,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         : "is no longer listed at the version that was read",
       { sourceChanged: true, vaultId: vault.id },
     );
-  }
-
-  function toItem(row: VaultItemRow): VaultItem {
-    return toVaultItem(row, key());
   }
 
   async function revealFromCiphertext(
@@ -833,6 +979,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     fieldId: string | null;
     fieldName: string | null;
     version: number | null;
+    /** The person the principal acts for, as the vault routines see it. */
+    actingSubjectId: string | null;
   }> {
     let reference;
     try {
@@ -877,6 +1025,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       fieldId: outcome.candidate.fieldId,
       fieldName: outcome.candidate.fieldName,
       version: outcome.candidate.version,
+      actingSubjectId: found.meta.subjectId,
     };
   }
 
@@ -1007,32 +1156,40 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async getItem(actor, workspaceId, itemId) {
-      return toItem(await getVaultItem(deps.db, subjectContext(actor, workspaceId), { itemId }));
+      return await present(
+        actor,
+        workspaceId,
+        await getVaultItem(deps.db, subjectContext(actor, workspaceId), { itemId }),
+      );
     },
 
     async createItem(actor, workspaceId, vaultId, req) {
       const context = subjectContext(actor, workspaceId);
       const vault = await getVault(deps.db, context, { vaultId });
       if (vault.source !== "opengeni") {
+        if (req.useOnly) refuseUseOnlyInProvider(vault);
         // W5: connected read-write vaults change through their provider.
         const itemId = await writeProviderVaultItem(providerWriteDeps(actor, workspaceId), {
           vault,
           existing: null,
-          change: req,
+          change: withoutUseOnly(req),
         });
-        return toItem(await getVaultItem(deps.db, context, { itemId }));
+        return await present(actor, workspaceId, await getVaultItem(deps.db, context, { itemId }));
       }
       const write = await itemWrite(
-        req,
+        withoutUseOnly(req),
         null,
         humanReferenceResolver(actor, workspaceId),
         createdByKind(actor),
       );
-      return toItem(
+      return await present(
+        actor,
+        workspaceId,
         await upsertVaultItem(deps.db, subjectContext(actor, workspaceId), {
           ...write,
           vaultId,
           mode: "create",
+          ...(req.useOnly ? { useOnly: true as const } : {}),
         }),
       );
     },
@@ -1040,9 +1197,10 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     async updateItem(actor, workspaceId, itemId, req) {
       const context = subjectContext(actor, workspaceId);
       const existing = await getVaultItem(deps.db, context, { itemId });
-      const { expectedGeneration, ...changes } = req;
+      const { expectedGeneration, useOnly, ...changes } = req;
       if (existing.vaultSource !== "opengeni") {
         const vault = await getVault(deps.db, context, { vaultId: existing.vaultId });
+        if (useOnly) refuseUseOnlyInProvider(vault);
         const updatedId = await writeProviderVaultItem(providerWriteDeps(actor, workspaceId), {
           vault,
           existing: {
@@ -1056,7 +1214,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           },
           change: changes,
         });
-        return toItem(await getVaultItem(deps.db, context, { itemId: updatedId }));
+        return await present(
+          actor,
+          workspaceId,
+          await getVaultItem(deps.db, context, { itemId: updatedId }),
+        );
       }
       const write = await itemWrite(
         changes,
@@ -1064,8 +1226,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         humanReferenceResolver(actor, workspaceId),
         createdByKind(actor),
       );
-      return toItem(
-        await upsertVaultItem(deps.db, context, { ...write, itemId, expectedGeneration }),
+      return await present(
+        actor,
+        workspaceId,
+        await upsertVaultItem(deps.db, context, {
+          ...write,
+          itemId,
+          expectedGeneration,
+          ...(useOnly ? { useOnly: true as const } : {}),
+        }),
       );
     },
 
@@ -1083,7 +1252,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     async restoreItem(actor, workspaceId, itemId) {
       const context = subjectContext(actor, workspaceId);
       await refuseForConnectedItem(context, itemId, "restoreItem");
-      return toItem(await restoreVaultItem(deps.db, context, { itemId }));
+      return await present(
+        actor,
+        workspaceId,
+        await restoreVaultItem(deps.db, context, { itemId }),
+      );
     },
 
     async deleteItemPermanently(actor, workspaceId, itemId) {
@@ -1094,34 +1267,56 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async moveItem(actor, workspaceId, itemId, req) {
+      const context = subjectContext(actor, workspaceId);
+      // Moving or copying never widens who can see a value: an item its
+      // mover may only use stays use-only wherever it goes.
+      const { revealable } = await itemRevealable(
+        context,
+        await getVaultItem(deps.db, context, { itemId }),
+        viewerOf(actor),
+      );
       const crossed = await moveAcrossProviders({
-        context: subjectContext(actor, workspaceId),
+        context,
         providerWrites: providerWriteDeps(actor, workspaceId),
         itemId,
         targetVaultId: req.targetVaultId,
         mode: req.mode,
         newName: req.newName,
         createdBy: createdByKind(actor),
+        hidden: !revealable,
       });
-      if (crossed) return toItem(crossed);
-      return toItem(
-        await moveVaultItem(deps.db, subjectContext(actor, workspaceId), {
+      if (crossed) return await present(actor, workspaceId, crossed);
+      return await present(
+        actor,
+        workspaceId,
+        await moveVaultItem(deps.db, context, {
           itemId,
           targetVaultId: req.targetVaultId,
           mode: req.mode,
           ...(req.newName !== undefined ? { newName: req.newName } : {}),
+          ...(revealable ? {} : { useOnly: true as const }),
         }),
       );
     },
 
     async revealField(actor, workspaceId, fieldId, req) {
-      const read = await readVaultFieldCiphertext(deps.db, subjectContext(actor, workspaceId), {
+      const context = subjectContext(actor, workspaceId);
+      // Checked before the audited read: a refused reveal reads nothing.
+      if (req.itemId === undefined) {
+        throw new VaultError("vault_field_not_found", "field not found", { fieldId });
+      }
+      const item = await getVaultItem(deps.db, context, { itemId: req.itemId });
+      if (!item.fields.some((field) => field.id === fieldId)) {
+        throw new VaultError("vault_field_not_found", "field not found", { fieldId });
+      }
+      await assertRevealable(context, item, viewerOf(actor));
+      const read = await readVaultFieldCiphertext(deps.db, context, {
         fieldId,
         ...(req.version !== undefined ? { version: req.version } : {}),
         purpose: "reveal",
         metadata: { viaApiKey: vaultActorIsApiKey(actor) },
       });
-      if (req.itemId !== undefined && read.itemId !== req.itemId) {
+      if (read.itemId !== req.itemId) {
         throw new VaultError("vault_field_not_found", "field not found", { fieldId });
       }
       return await revealFromCiphertext(read);
@@ -1142,7 +1337,9 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
       const field = existing.fields.find((candidate) => candidate.id === fieldId);
       if (!field) throw new VaultError("vault_field_not_found", "field not found", { fieldId });
-      return toItem(
+      return await present(
+        actor,
+        workspaceId,
         await upsertVaultItem(deps.db, context, {
           itemId,
           createdByKind: createdByKind(actor),
@@ -1437,6 +1634,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const context = principalContext(principal);
       const target = await agentItemByReference(principal, input.reference);
       const vault = await agentVault(principal, input.toVault);
+      const { revealable } = await itemRevealable(
+        context,
+        await getVaultItem(deps.db, context, { itemId: target.itemId }),
+        await principalViewer(principal, target.actingSubjectId),
+      );
       const crossed = await moveAcrossProviders({
         context,
         providerWrites: {
@@ -1450,6 +1652,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         mode: input.mode ?? "move",
         newName: input.newName,
         createdBy: "agent",
+        hidden: !revealable,
       });
       if (crossed) {
         return {
@@ -1462,6 +1665,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         targetVaultId: vault.id,
         mode: input.mode ?? "move",
         ...(input.newName !== undefined ? { newName: input.newName } : {}),
+        ...(revealable ? {} : { useOnly: true as const }),
       });
       return { item: toVaultItemSummary(row, key()), references: vaultItemReferences(row) };
     },
@@ -1506,6 +1710,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (target.fieldId === null) {
         throw new VaultError("vault_field_not_found", "the reference names no field");
       }
+      // Never more than the person the agent acts for could see themselves.
+      await assertRevealable(
+        principalContext(principal),
+        await getVaultItem(deps.db, principalContext(principal), { itemId: target.itemId }),
+        await principalViewer(principal, target.actingSubjectId, permissions),
+      );
       // A value that needs the person's approval for each use never reaches
       // an agent's context, approved or not.
       if (principal.kind !== "human") {

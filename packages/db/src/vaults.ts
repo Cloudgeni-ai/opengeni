@@ -576,14 +576,21 @@ export async function getVaultItem(
 export async function upsertVaultItem(
   db: Database,
   context: VaultDbContext,
-  input: VaultItemWrite & ({ itemId: string } | { vaultId: string; mode?: "create" | "upsert" }),
+  input: VaultItemWrite &
+    ({ itemId: string } | { vaultId: string; mode?: "create" | "upsert" }) & {
+      /** Also mark the written item use-only, in the same transaction (1563). */
+      useOnly?: true;
+    },
 ): Promise<VaultItemRow & { created: boolean }> {
-  return await inVaultContext(db, context, (scoped, principal) =>
-    one<VaultItemRow & { created: boolean }>(
+  const { useOnly, ...write } = input;
+  return await inVaultContext(db, context, async (scoped, principal) => {
+    const row = await one<VaultItemRow & { created: boolean }>(
       scoped,
-      sql`select upsert_vault_item(${JSON.stringify(input)}::jsonb, ${principal}::jsonb) as value`,
-    ),
-  );
+      sql`select upsert_vault_item(${JSON.stringify(write)}::jsonb, ${principal}::jsonb) as value`,
+    );
+    if (useOnly) await insertUseOnly(scoped, context, row.id);
+    return row;
+  });
 }
 
 export async function archiveVaultItem(
@@ -627,15 +634,78 @@ export async function deleteVaultItemPermanently(
 export async function moveVaultItem(
   db: Database,
   context: VaultDbContext,
-  input: { itemId: string; targetVaultId: string; mode: "move" | "copy"; newName?: string },
+  input: {
+    itemId: string;
+    targetVaultId: string;
+    mode: "move" | "copy";
+    newName?: string;
+    /** Also mark the moved item or the copy use-only, in the same transaction (1563). */
+    useOnly?: true;
+  },
 ): Promise<VaultItemRow> {
-  return await inVaultContext(db, context, (scoped, principal) =>
-    one<VaultItemRow>(
+  return await inVaultContext(db, context, async (scoped, principal) => {
+    const row = await one<VaultItemRow>(
       scoped,
       sql`select move_vault_item(${input.itemId}::uuid, ${input.targetVaultId}::uuid, ${input.mode},
         ${input.newName ?? null}, ${principal}::jsonb) as value`,
+    );
+    if (input.useOnly) await insertUseOnly(scoped, context, row.id);
+    return row;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Use-only items (1563)
+// ---------------------------------------------------------------------------
+
+/** Adds the mark; an existing mark is kept as it is. Marks are never removed. */
+async function insertUseOnly(
+  scoped: Database,
+  context: VaultDbContext,
+  itemId: string,
+): Promise<void> {
+  const scope = contextScope(context);
+  await scoped.execute(
+    sql`insert into vault_item_use_only (account_id, item_id, set_by_subject_id)
+      values (${scope.accountId}::uuid, ${itemId}::uuid, ${scope.subjectId})
+      on conflict do nothing`,
+  );
+}
+
+/**
+ * Marks a hosted item use-only: from then on nobody can reveal its values,
+ * its creator and admins included. The caller must already have checked that
+ * it may edit the item; there is no way to remove the mark.
+ */
+export async function markVaultItemUseOnly(
+  db: Database,
+  context: VaultDbContext,
+  input: { itemId: string },
+): Promise<void> {
+  await inVaultContext(db, context, (scoped) => insertUseOnly(scoped, context, input.itemId));
+}
+
+/** Which of these items are use-only. */
+export async function listVaultItemsUseOnly(
+  db: Database,
+  context: VaultDbContext,
+  itemIds: readonly string[],
+): Promise<Set<string>> {
+  const ids = [...new Set(itemIds)];
+  if (ids.length === 0) return new Set();
+  const scope = contextScope(context);
+  const rows = await inVaultContext(db, context, (scoped) =>
+    rawRows<{ item_id: string }>(
+      scoped,
+      sql`select item_id::text as item_id from vault_item_use_only
+        where account_id = ${scope.accountId}::uuid
+          and item_id = any(ARRAY[${sql.join(
+            ids.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )}]::uuid[])`,
     ),
   );
+  return new Set(rows.map((row) => row.item_id));
 }
 
 // ---------------------------------------------------------------------------
