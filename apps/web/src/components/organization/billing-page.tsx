@@ -32,6 +32,7 @@ import type { BillingCheckoutStatus } from "@opengeni/sdk";
 import { BillingLoadFailure } from "./billing-load-failure";
 import { useOrganizationRoutes } from "./organization-nav";
 import { BillingReceiptsSection } from "./billing-receipts";
+import { CreditOffers } from "./credit-offers";
 import { SubscriptionPlans } from "./subscription-plans";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
 
@@ -364,6 +365,9 @@ function BillingOverview({
                 error={visibleBillingError}
                 onRetry={() => void refreshBilling()}
               />
+            ) : null}
+            {accountId && canReadBilling ? (
+              <CreditOffers accountId={accountId} canManage={canManageBilling} />
             ) : null}
             {stripe && canManageBilling ? (
               <SettingRowGroup>

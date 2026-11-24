@@ -11339,6 +11339,8 @@ export type PromotionalCreditBalance = PromotionalCreditScope & {
   planCredit?: boolean | undefined;
   /** Free funding unavailable for new admission under an active promotion hold. */
   held?: boolean | undefined;
+  /** When the grant stops paying for anything (custom credit offers). */
+  expiresAt?: string | undefined;
 };
 
 export type {
@@ -11354,6 +11356,9 @@ export type {
   CreateBillingCardVerificationSessionRequest,
   CreateBillingCardVerificationSessionResponse,
   ConfirmBillingCardVerificationRequest,
+  CreditOffer,
+  CreditOfferStatus,
+  ListCreditOffersResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,

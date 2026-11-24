@@ -122,6 +122,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
   "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
+  "activate_credit_offer_v1(uuid, uuid, text)",
 ] as const;
 
 /**
@@ -177,6 +178,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * is granted, a Slack callback keeps 1538's per-workspace probe.
  * 1562 withholds the inbox notice sync for a blocked automation with no chat;
  * until it is granted, such an owner is told only on the automation's page.
+ * 1563 withholds the activation of a custom credit offer; until it is
+ * granted, operators activate offers (`bun run credits:offers activate`).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -193,6 +196,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
   "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
+  "activate_credit_offer_v1(uuid, uuid, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -368,6 +372,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "connections",
     "opengeni_private.organization_tenancy_inventory_capabilities",
   ],
+  "activate_credit_offer_v1(uuid, uuid, text)": ["credit_offers"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -2183,6 +2188,8 @@ export const FORCE_RLS_TABLES = [
   "credential_profiles",
   "credit_debit_allocations",
   "credit_ledger_entries",
+  // 1563_custom_credit_offers: operator-assigned offers; changed only by definers.
+  "credit_offers",
   "device_enrollment_requests",
   "document_authority_reclassifications",
   "document_bases",
@@ -3061,6 +3068,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_snapshots",
+  "credit_offers",
   "deployment_model_catalog",
   "document_authority_reclassifications",
   // 1406_nango_integrations: the operator integration backend switch.

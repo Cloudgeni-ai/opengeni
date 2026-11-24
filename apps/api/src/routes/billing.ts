@@ -71,10 +71,12 @@ import {
   handleCardVerificationWebhookSession,
   registerBillingCardVerificationRoutes,
 } from "./billing-card-verification";
+import { registerBillingCreditOfferRoutes } from "./billing-credit-offers";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerBillingAutoTopUpRoutes(app, deps);
   registerBillingCardVerificationRoutes(app, deps);
+  registerBillingCreditOfferRoutes(app, deps);
   registerSubscriptionRoutes(app, deps);
   app.get("/v1/billing/alerts", async (c) => {
     const context = await requireAccessContext(c, deps);

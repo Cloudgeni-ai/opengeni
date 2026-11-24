@@ -16,6 +16,7 @@ const NON_SPEND_TYPES = [
   "manual_credit_grant",
   "plan_credit_grant",
   "plan_credit_expiry",
+  "credit_offer_expiry",
   "credit_refund",
   "credit_dispute_hold",
   "credit_dispute_release",

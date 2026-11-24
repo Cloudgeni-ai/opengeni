@@ -137,6 +137,7 @@ export {
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+export * from "./credit-offers";
 export * from "./subscription-plans";
 export * from "./billing-auto-top-up";
 export * from "./card-verification";
