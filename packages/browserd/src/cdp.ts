@@ -2,7 +2,8 @@ import { WebSocket as SizedWebSocket } from "ws";
 import { isRecord } from "@opengeni/contracts/values";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
-const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+/** How long a CDP command waits for its reply when its caller sets no bound. */
+export const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 10 * 60_000;
 const MAX_PENDING_COMMANDS = 4_096;
 const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
