@@ -613,6 +613,16 @@ describe("vault routes", () => {
     );
     expect(moved.status).toBeLessThan(300);
     expect(moved.json).toMatchObject({ useOnly: true, canReveal: false });
+    // Moving the original there is refused: it would have to be marked, which
+    // would lock out its saver after a move back.
+    const movedMine = await call(
+      "POST",
+      `${base}/vaults/${team.json.id}/items/${sharedItem.id}/move`,
+      asTeammate,
+      { targetVaultId: mine.json.id, mode: "move" },
+    );
+    expect(movedMine.status).toBe(403);
+    expect(movedMine.json.details).toMatchObject({ reason: "use_without_reveal" });
     const copyReveal = await call(
       "POST",
       revealPath(mine.json.id, moved.json.id, moved.json.fields[0].id),

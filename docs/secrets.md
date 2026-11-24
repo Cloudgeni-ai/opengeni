@@ -129,9 +129,10 @@ saved or owns: admin rights don't pass to agents. A refusal is
 `vault_permission_denied` (403) with `details.reason` `use_without_reveal` or
 `use_only`, and it reads nothing, so it writes no reveal audit row. Only
 someone who can see an item may make it use-only. A copy of a use-only item is
-use-only. Copying an item you may only use, or moving it into your Only me
-vault, makes the result use-only; a move between shared vaults keeps the item
-as it is; a move or copy into a password manager is refused. One-time codes
+use-only. Copying an item you may only use makes the copy use-only; moving it
+where you would see it (your Only me vault) is refused, since a move keeps the
+item; a move between shared vaults keeps it as it is; a move or copy into a
+password manager is refused. One-time codes
 count as values: people who may only use a login don't see its codes. Items
 carry `useOnly` and `canReveal` so apps can hide what would be refused. New
 shared items are not use-only by default:

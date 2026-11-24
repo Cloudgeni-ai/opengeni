@@ -561,10 +561,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   /**
    * What a move or copy does about who can see values. `hidden`: the mover
    * may only use the source, so a password manager (where values stay
-   * readable) can't take it. `useOnly`: the result would show the mover a
-   * value they can't see now (a copy records them as its saver; a move into
-   * their Only me vault makes it theirs), so it is marked use-only. A move
-   * between shared vaults keeps the item and who saved it, so it isn't.
+   * readable) can't take it. `useOnly`: a copy would show the mover a value
+   * they can't see now (it records them as its saver), so it is marked
+   * use-only. A move keeps the item, so one that would show it to the mover
+   * (into their Only me vault) is refused: marking the item would lock out
+   * the person who saved it and the admins for good.
    */
   async function moveVisibility(
     context: VaultDbContext,
@@ -585,6 +586,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       },
       viewer,
     );
+    if (widened && mode === "move") {
+      throw new VaultError(
+        "vault_permission_denied",
+        `${source.name} can be used by reference; only the person who saved it or an admin can see its values, so it can't be moved where you would. Copy it instead.`,
+        { itemId: source.id, reason: "use_without_reveal" },
+      );
+    }
     return { hidden: true, useOnly: widened };
   }
 
