@@ -17,6 +17,11 @@ import type {
   ScheduledTaskEventsInput,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/sdk";
+import {
+  commonAgentTriggers,
+  type AgentToolPermissionRuleInput,
+  type CommonAgentTrigger,
+} from "@opengeni/contracts";
 
 import {
   automationCreateRequest,
@@ -63,6 +68,156 @@ export const AGENT_TRIGGER_SCHEDULE_MESSAGE = "Do your scheduled work.";
 /** A refused shared trigger, in words. */
 export const AGENT_TRIGGER_SHARED_DENIED =
   "You can't add automations shared with this workspace. Ask an admin for access.";
+
+/**
+ * A trigger offered on an agent before it is set up: one its ready-made
+ * template suggests (`templateIndex`), or a common one (`common`).
+ */
+export interface AgentTriggerOffer {
+  key: string;
+  suggestion: AgentTemplateTrigger;
+  templateIndex?: number | undefined;
+  common?: CommonAgentTrigger["key"] | undefined;
+}
+
+/** Whether the agent uses GitHub: the workspace has it, and its Can use doesn't block all of it. */
+export function agentUsesGitHub(
+  rules: readonly AgentToolPermissionRuleInput[],
+  githubConnected: boolean | null,
+): boolean {
+  if (githubConnected === false) return false;
+  return !rules.some(
+    (rule) =>
+      rule.connector.trim().toLowerCase() === "github.com" &&
+      (rule.tool ?? "*").trim() === "*" &&
+      rule.permission === "block",
+  );
+}
+
+/** The common triggers an agent can use, in offer order; its name narrows mentions to it. */
+export function availableCommonTriggers(options: {
+  usesGitHub: boolean;
+  agentName?: string | undefined;
+}): CommonAgentTrigger[] {
+  return commonAgentTriggers({ agentName: options.agentName }).filter(
+    (common) => common.needs === null || (common.needs === "github" && options.usesGitHub),
+  );
+}
+
+type SignatureTrigger = {
+  eventTypes: readonly string[];
+  conditions?: readonly { field: string; op: string; value?: unknown }[] | undefined;
+};
+type SignatureSchedule =
+  | { type: string; hour?: number; minute?: number; daysOfWeek?: readonly string[] }
+  | null
+  | undefined;
+
+/**
+ * What a trigger listens to: its events, the name a mention must say, and a
+ * calendar's days and time. A renamed agent's old mention trigger no longer
+ * matches, so the page offers the one for its new name.
+ */
+function listenSignature(
+  triggers: readonly SignatureTrigger[],
+  schedule: SignatureSchedule,
+): string {
+  if (triggers.length > 0) {
+    return triggers
+      .map((trigger) => {
+        const named = (trigger.conditions ?? [])
+          .filter((c) => c.field === "data.comment.body" && c.op === "contains")
+          .map((c) =>
+            String(c.value ?? "")
+              .trim()
+              .toLowerCase(),
+          )
+          .sort();
+        return [[...trigger.eventTypes].sort().join(","), ...named].join("~");
+      })
+      .sort()
+      .join("|");
+  }
+  if (!schedule || schedule.type === "manual") return "";
+  if (schedule.type === "calendar") {
+    return `calendar:${schedule.hour ?? ""}:${schedule.minute ?? ""}:${[...(schedule.daysOfWeek ?? [])].sort().join(",")}`;
+  }
+  return "schedule";
+}
+
+function eventSignature(suggestion: Pick<AgentTemplateTrigger, "schedule" | "triggers">): string {
+  return listenSignature(suggestion.triggers, suggestion.schedule as SignatureSchedule);
+}
+
+/**
+ * What an agent's page offers to turn on: its template's suggestions, then
+ * each common trigger the template doesn't already suggest (by event types).
+ * One the agent already has (its automation keeps the suggestion's name
+ * after the agent's) is not offered again.
+ */
+/** What an automation listens to, compared the way offers are. */
+function taskSignature(task: Pick<ScheduledTask, "schedule" | "events">): string {
+  return listenSignature(
+    (task.events?.triggers ?? []) as readonly SignatureTrigger[],
+    task.schedule as SignatureSchedule,
+  );
+}
+
+export function agentTriggerOffers(input: {
+  templateSuggestions: readonly AgentTemplateTrigger[];
+  usesGitHub: boolean;
+  agentName?: string | undefined;
+  /** The agent's automations; null while they load. */
+  tasks: readonly Pick<ScheduledTask, "name" | "schedule" | "events">[] | null;
+}): AgentTriggerOffer[] {
+  const fromTemplate: AgentTriggerOffer[] = input.templateSuggestions.map((suggestion, index) => ({
+    key: `template-${index}`,
+    suggestion,
+    templateIndex: index,
+  }));
+  // A common trigger the template already suggests in its own form (by event types).
+  const eventTypes = (suggestion: Pick<AgentTemplateTrigger, "schedule" | "triggers">) =>
+    suggestion.triggers.length === 0
+      ? suggestion.schedule
+        ? "schedule"
+        : ""
+      : suggestion.triggers
+          .flatMap((trigger) => trigger.eventTypes)
+          .sort()
+          .join(",");
+  const covered = new Set(
+    fromTemplate.map((offer) => eventTypes(offer.suggestion)).filter((s) => s !== ""),
+  );
+  const common: AgentTriggerOffer[] = availableCommonTriggers({
+    usesGitHub: input.usesGitHub,
+    agentName: input.agentName,
+  })
+    .filter((entry) => !covered.has(eventTypes(entry.trigger)))
+    .map((entry) => ({ key: `common-${entry.key}`, suggestion: entry.trigger, common: entry.key }));
+  return (
+    [...fromTemplate, ...common]
+      // Set up already: a template suggestion under its name, or anything
+      // listening to the same thing.
+      .filter(
+        (offer) =>
+          !input.tasks?.some(
+            (task) =>
+              (offer.common === undefined && task.name.endsWith(offer.suggestion.name)) ||
+              (taskSignature(task) !== "" &&
+                taskSignature(task) === eventSignature(offer.suggestion)),
+          ),
+      )
+      .slice(0, AGENT_TRIGGER_OFFERS_MAX)
+  );
+}
+
+/** How people start an agent from a pull request comment. */
+export function mentionHint(agentName: string, productName = "Opengeni"): string {
+  return `A comment that mentions ${productName} and says “${agentName}”`;
+}
+
+/** Offers shown at once, so the section stays to its essentials. */
+export const AGENT_TRIGGER_OFFERS_MAX = 3;
 
 /** The event field a GitHub trigger's repositories are chosen by. */
 export const AGENT_TRIGGER_REPOSITORY_FIELD = "data.repository.full_name";

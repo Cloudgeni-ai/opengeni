@@ -711,3 +711,26 @@ test("a new automation opened from an agent's page goes back there on Cancel and
   expect(scheduleFormReturnAgent({ kind: "create", returnTo: "agent" })).toBeUndefined();
   expect(scheduleFormReturnAgent({ kind: "edit", scheduleId: "task-example" })).toBeUndefined();
 });
+
+test("Open full form from a common trigger starts at its events, named for the agent", async () => {
+  const { agentTriggerTemplate } = await import("./schedule-form-page");
+  const template = agentTriggerTemplate(
+    { name: "Bug fixer", templateKey: null },
+    [],
+    undefined,
+    "mentioned_on_pull_request",
+  );
+  expect(template?.name).toBe("Bug fixer: When mentioned on a PR");
+  expect(template?.triggers.map((trigger) => trigger.eventTypes)).toEqual([
+    ["issue_comment.created"],
+    ["pull_request_review_comment.created"],
+  ]);
+  expect(template?.triggers[0]?.conditions).toContainEqual({
+    field: "data.comment.body",
+    op: "contains",
+    value: "Bug fixer",
+  });
+  expect(agentTriggerTemplate({ name: "Bug fixer", templateKey: null }, [], undefined)).toBe(
+    undefined,
+  );
+});

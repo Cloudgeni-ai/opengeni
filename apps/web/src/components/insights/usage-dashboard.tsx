@@ -357,6 +357,7 @@ const FILTER_FIELD_LABEL: Record<UsageFilterField, string> = {
   person: "Person",
   rootSessionId: "Session",
   scheduleId: "Automation",
+  agentId: "Agent",
   source: "Source",
 };
 
@@ -455,6 +456,10 @@ function FilterBar(props: {
   push(
     "scheduleId",
     facets.schedules.map((s) => ({ ids: [s.id], label: s.name })),
+  );
+  push(
+    "agentId",
+    (facets.agents ?? []).map((a) => ({ ids: [a.id], label: a.name })),
   );
   push(
     "source",
@@ -596,6 +601,7 @@ function chipFallback(field: UsageFilterField, id: string, labels: ModelLabelSou
   if (field === "payer" && (PAYER_IDS as readonly string[]).includes(id)) {
     return payerName(id as (typeof PAYER_IDS)[number]);
   }
+  if (field === "agentId") return "Agent";
   return field === "rootSessionId" ? `Session ${id.slice(0, 8)}` : id;
 }
 
@@ -1255,7 +1261,8 @@ function BreakdownPanel(props: {
 
 function canDrillHint(groupBy: UsageGroupBy, allowed: boolean): string {
   if (!allowed) return "";
-  return `Select a ${GROUP_LABELS[groupBy].toLowerCase()} to filter everything to it.`;
+  const noun = GROUP_LABELS[groupBy].toLowerCase();
+  return `Select ${/^[aeiou]/u.test(noun) ? "an" : "a"} ${noun} to filter everything to it.`;
 }
 
 function ShareCell(props: { share: number | null }) {

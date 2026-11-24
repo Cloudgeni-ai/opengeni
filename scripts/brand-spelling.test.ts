@@ -27,6 +27,7 @@ const SKIPPED_PATHS = [
 // frozen records that migration 0233 pins and installations retain.
 const AGENT_FACING_SOURCE_ROOTS = [
   "packages/runtime/src/agent-instructions",
+  "packages/runtime/src/bundled_agent_skills",
   "packages/runtime/src/bundled_artifact_skills",
   "packages/runtime/src/bundled_default_skills",
   "packages/runtime/src/bundled_management_skills",

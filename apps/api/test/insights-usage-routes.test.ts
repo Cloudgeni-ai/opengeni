@@ -243,6 +243,50 @@ describe("unified Insights route discipline", () => {
     expect((await result.json()).prior).toBeNull();
   });
 
+  test("usage accepts agent grouping and agentId filters; calls still refuse agentId", async () => {
+    const agentId = "33333333-3333-4333-8333-333333333333";
+    for (const organization of [false, true]) {
+      expect(insightsRawQuerySupported({ groupBy: "agent" }, organization, false)).toBe(true);
+      expect(insightsRawQuerySupported({ agentId, range: "30d" }, organization, false)).toBe(true);
+      expect(insightsRawQuerySupported({ agentId }, organization, true)).toBe(false);
+    }
+    const read = spyOn(core, "getInsightsUsage").mockImplementation(async (_db, input) =>
+      responseFor(input),
+    );
+    spies.push(read);
+    const app = appFor();
+    const admin = await token(["workspace:admin"]);
+    const result = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/insights/usage?range=30d&groupBy=agent&agentId=${agentId}`,
+      { headers: { authorization: admin } },
+    );
+    expect(result.status).toBe(200);
+    expect(read.mock.calls[0]![1]).toMatchObject({
+      query: { range: "30d", groupBy: "agent", agentId: [agentId] },
+    });
+    // The usage gate is unchanged: billing-only and read-only callers stay out.
+    for (const permissions of [["workspace:read"], ["sessions:read"]] as Permission[][]) {
+      const denied = await app.request(
+        `http://x/v1/workspaces/${workspaceId}/insights/usage?range=30d&agentId=${agentId}`,
+        { headers: { authorization: await token(permissions) } },
+      );
+      expect(denied.status).toBe(403);
+    }
+    expect(read).toHaveBeenCalledTimes(1);
+    for (const query of ["agentId=not-a-uuid", `agentId=${agentId},`]) {
+      const invalid = await app.request(
+        `http://x/v1/workspaces/${workspaceId}/insights/usage?${query}`,
+        { headers: { authorization: admin } },
+      );
+      expect(invalid.status).toBe(400);
+    }
+    const calls = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/insights/calls?agentId=${agentId}`,
+      { headers: { authorization: admin } },
+    );
+    expect(calls.status).toBe(400);
+  });
+
   test("malformed calls cursors return 400 in both scopes before database access", async () => {
     const app = appFor();
     const authorization = await token(["workspace:admin", "billing:read"]);

@@ -19,7 +19,7 @@
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger, ?returnTo=agent)
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger, ?agentCommonTrigger, ?returnTo=agent)
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
@@ -72,7 +72,12 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
-import { DESKTOP_APP_RETURN_PATH, OAUTH_SIGN_IN_TO_FINISH_PATH } from "@opengeni/contracts";
+import {
+  COMMON_AGENT_TRIGGER_KEYS,
+  type CommonAgentTrigger,
+  DESKTOP_APP_RETURN_PATH,
+  OAUTH_SIGN_IN_TO_FINISH_PATH,
+} from "@opengeni/contracts";
 import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
@@ -932,6 +937,7 @@ const INSIGHTS_SEARCH_KEYS = [
   "who",
   "root",
   "sched",
+  "agent",
   "src",
   "start",
   "end",
@@ -1006,6 +1012,8 @@ type NewAutomationSearch = {
   agent?: string;
   /** Start from this one of the agent's suggested triggers. */
   agentTrigger?: number;
+  /** Start from this common trigger (`commonAgentTriggers()`). */
+  agentCommonTrigger?: CommonAgentTrigger["key"];
   /** Cancel and Save go back to the agent's page. Needs `agent`. */
   returnTo?: "agent";
 };
@@ -1033,6 +1041,9 @@ function newAutomationSearch(search: Record<string, unknown>): NewAutomationSear
     Number(search.agentTrigger) >= 0 &&
     Number(search.agentTrigger) < 10
       ? { agentTrigger: Number(search.agentTrigger) }
+      : {}),
+    ...(COMMON_AGENT_TRIGGER_KEYS.some((key) => key === search.agentCommonTrigger)
+      ? { agentCommonTrigger: search.agentCommonTrigger as CommonAgentTrigger["key"] }
       : {}),
     ...(search.returnTo === "agent" ? { returnTo: "agent" as const } : {}),
   };
@@ -1712,8 +1723,16 @@ function Automations() {
 
 function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source, agent, agentTrigger, returnTo } =
-    workspaceAutomationNewRoute.useSearch();
+  const {
+    template,
+    from,
+    sourceSessionId,
+    source,
+    agent,
+    agentTrigger,
+    agentCommonTrigger,
+    returnTo,
+  } = workspaceAutomationNewRoute.useSearch();
   const agentTriggerStart = useLocation({
     select: (location) => agentTriggerStartOf(location.state.agentTriggerStart),
   });
@@ -1728,6 +1747,7 @@ function AutomationNew() {
         eventSourceId: source,
         agentId: agent,
         agentTrigger,
+        agentCommonTrigger,
         returnTo,
         ...(agent && agentTriggerStart ? { agentTriggerStart } : {}),
       }}

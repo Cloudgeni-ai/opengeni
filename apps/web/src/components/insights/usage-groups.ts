@@ -24,6 +24,7 @@ export const GROUP_LABELS: Record<UsageGroupBy, string> = {
   rootSession: "Session",
   person: "Person",
   schedule: "Automation",
+  agent: "Agent",
   source: "Source",
 };
 
@@ -37,6 +38,7 @@ export const GROUP_ORDER: readonly UsageGroupBy[] = [
   "rootSession",
   "person",
   "schedule",
+  "agent",
   "source",
 ];
 
@@ -49,6 +51,7 @@ export const FILTER_FIELD_OF: Record<UsageGroupBy, UsageFilterField> = {
   rootSession: "rootSessionId",
   person: "person",
   schedule: "scheduleId",
+  agent: "agentId",
   source: "source",
 };
 
@@ -62,6 +65,7 @@ export const DRILL_NEXT: Record<UsageGroupBy, UsageGroupBy> = {
   rootSession: "model",
   person: "rootSession",
   schedule: "model",
+  agent: "rootSession",
   source: "model",
 };
 

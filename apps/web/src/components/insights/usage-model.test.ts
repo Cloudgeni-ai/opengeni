@@ -169,6 +169,7 @@ describe("breakdown rows", () => {
     ["project", identifier],
     ["rootSession", identifier],
     ["schedule", identifier],
+    ["agent", identifier],
     ["person", "user:example-member"],
     ["provider", "example-provider"],
     ["payer", "opengeni_credits"],
@@ -440,5 +441,41 @@ describe("usage ranges", () => {
     expect(await load({ ...server, facets: { ...server.facets, sources: undefined } })).toEqual(
       presets,
     );
+  });
+
+  test("agent grouping and filters are offered only by servers that list agents", async () => {
+    const { capabilities: _, ...server } = fixtureUsage();
+    const query = { range: "week" as const, groupBy: "model" as const, filters: {} };
+    const load = async (response: object) =>
+      (
+        await loadUsage(
+          { requestJson: async () => response } as never,
+          server.scope,
+          query,
+          new AbortController().signal,
+        )
+      ).usage.capabilities;
+    const agentFacets = { ...server.facets, agents: [] };
+    const withAgents = await load({ ...server, facets: agentFacets });
+    expect(withAgents.groupBy).toContain("agent");
+    expect(withAgents.filters).toContain("agentId");
+    const older = await load({ ...server, facets: { ...server.facets, agents: undefined } });
+    expect(older.groupBy).not.toContain("agent");
+    expect(older.filters).not.toContain("agentId");
+  });
+
+  test("chats without an agent read as one unfilterable row", () => {
+    const [row] = breakdownRows({
+      groupBy: "agent",
+      groups: [
+        {
+          key: "unfiled:none",
+          kind: "unfiled",
+          label: "No agent",
+          measures: { ...emptyMeasures(), calls: 1 },
+        },
+      ],
+    });
+    expect(row).toMatchObject({ label: "No agent", filter: null });
   });
 });

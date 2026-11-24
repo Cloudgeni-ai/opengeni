@@ -35,6 +35,7 @@ const CURRENT_BUNDLED_SKILL_IDS = [
   "builtin:sites",
   "builtin:video-generation",
   "builtin:secrets",
+  "builtin:agents",
 ] as const;
 type LegacyBundledSkillId = keyof typeof LEGACY_BUNDLED_SKILL_IDS;
 
