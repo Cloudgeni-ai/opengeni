@@ -1657,6 +1657,7 @@ sentence instead of generic advice.
 
 ```tsx
 import { SkillsPanel } from "@opengeni/react/skills";
+import "@opengeni/react/connect.css";
 
 <SkillsPanel
   client={client}
@@ -1666,6 +1667,10 @@ import { SkillsPanel } from "@opengeni/react/skills";
   description="Instructions agents in this workspace load when a task needs them."
 />;
 ```
+
+The list and the skill page use the scoped `@opengeni/react/connect.css`
+styles, so import it once next to `@opengeni/react/styles.css`; without it
+the list rows lose their layout.
 
 `slot` and `controllerRef` let a host put the open Skill on its own route;
 `renderHeader`, `addMenuItems` and the `children` render prop add host

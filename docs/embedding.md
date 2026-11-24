@@ -109,10 +109,12 @@ version history and restore when the client can read them, and upload of a
 SKILL.md, a folder or a .zip. The host passes its client (or a relay that
 forwards the Skill routes as the person), the scopes it offers and who may
 change them; the server still authorizes every save and removal, so
-`canManage` only decides what the page offers.
+`canManage` only decides what the page offers. The page's list and skill view
+use `@opengeni/react/connect.css`, so the host imports it once.
 
 ```tsx
 import { SkillsPanel } from "@opengeni/react/skills";
+import "@opengeni/react/connect.css";
 
 <SkillsPanel
   client={client}
