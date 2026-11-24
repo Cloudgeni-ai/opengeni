@@ -248,6 +248,7 @@ export function RootRouteComponent() {
       pathname === "/dev/onboarding" ||
       pathname === "/dev/connect-return" ||
       pathname === "/dev/own-subscription-plan" ||
+      pathname === "/dev/subscription-plans" ||
       pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
