@@ -211,6 +211,9 @@ const RECORDING_FRAME_QUALITY = 70;
 const RECORDING_FRAME_MAX_WIDTH = 1_280;
 const RECORDING_FRAME_MAX_HEIGHT = 800;
 const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
+/** How long a viewport change waits for the page to finish its resize work
+ * before it reports the page busy instead of checking the size. */
+const VIEWPORT_LAYOUT_TIMEOUT_MS = 10_000;
 // Still captures share the target/input queue. Bound the whole read phase so
 // a renderer that stops producing pixels cannot hold it for successive CDP deadlines.
 const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
@@ -5370,18 +5373,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** Lets the page lay out and present one frame at its new size, so the next
-   * read or capture sees it. Bounded: a throttled page never blocks. */
-  private async presentFrame(state: TargetState): Promise<void> {
-    await this.sendTarget(
-      state,
-      "Runtime.evaluate",
-      {
-        expression: NEXT_PRESENTED_FRAME_EXPRESSION,
-        awaitPromise: true,
-        returnByValue: true,
-      },
-      { timeoutMs: 1_000 },
-    ).catch(() => undefined);
+   * read or capture sees it. A throttled page that draws no frames resolves
+   * this after 300 ms; only a page whose main thread stays busy (with its own
+   * resize work, say) for `timeoutMs` does not, and then this is false. */
+  private async presentFrame(state: TargetState, timeoutMs: number): Promise<boolean> {
+    try {
+      await this.sendActionTarget(
+        state,
+        "Runtime.evaluate",
+        {
+          expression: NEXT_PRESENTED_FRAME_EXPRESSION,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        { potentialEffect: false, timeoutMs },
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof CdpCommandTimeoutError) return false;
+      // A dialog the resize opened is reported as for any action.
+      if (error instanceof DialogOpenedSignal) throw error;
+      // Other failures (a document replaced meanwhile) leave the size to the
+      // check that follows.
+      return true;
+    }
   }
 
   /** Applies a viewport change with this tab's frame sampling held off: it
@@ -5624,7 +5639,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await send();
-      await this.presentFrame(state);
+      // A page still laying itself out at the new size can be read only once
+      // that is done. Sending the change again meanwhile would wait on it too.
+      if (!(await this.presentFrame(state, VIEWPORT_LAYOUT_TIMEOUT_MS)))
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          VIEWPORT_PAGE_BUSY_MESSAGE,
+        );
       // An unreadable page does not confirm the change either.
       const measured = await this.measureViewport(state);
       if (measured && took(measured)) return;
@@ -7616,6 +7637,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.applyViewportChange(
             state,
             async () => {
+              // Touch first: the page answers it only between its own tasks,
+              // and a new size starts the page's resize work, which can keep
+              // it busy for a long time. The size itself the browser applies
+              // without waiting for the page.
+              if (viewport.mobile || state.touchEmulated) {
+                await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                  enabled: viewport.mobile,
+                  ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
+                });
+                state.touchEmulated = viewport.mobile;
+              }
               await this.sendActionTarget(
                 state,
                 "Emulation.setDeviceMetricsOverride",
@@ -7635,13 +7667,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 },
               );
               if (mode === "fit") this.targetViewports.set(state.targetId, viewport);
-              if (viewport.mobile || state.touchEmulated) {
-                await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
-                  enabled: viewport.mobile,
-                  ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
-                });
-                state.touchEmulated = viewport.mobile;
-              }
               state.emulatedViewport = {
                 width: viewport.width,
                 height: viewport.height,
@@ -7672,13 +7697,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.applyViewportChange(
             state,
             async () => {
-              await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
               if (state.touchEmulated) {
                 await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
                   enabled: false,
                 });
                 state.touchEmulated = false;
               }
+              // After touch, as for a viewport change.
+              await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
               await this.redrawTab(state);
               state.emulatedViewport = undefined;
             },
@@ -13309,6 +13335,8 @@ const VIEWPORT_NOT_TAKEN_MESSAGE =
   "The viewport change was sent, but the tab did not take that size. Observe the tab to see its size now.";
 const VIEWPORT_RESET_NOT_TAKEN_MESSAGE =
   "The viewport reset was sent, but the tab did not return to its own size and scale. Observe the tab to see its size now.";
+const VIEWPORT_PAGE_BUSY_MESSAGE =
+  "The browser applied the new size, but the page was still busy laying itself out at it after 10 s, so the size could not be checked. Observe the tab again shortly to see its size; reload it only if its page is still not answering then.";
 
 /** Captures tried, and the pause between them, to have a hidden tab draw
  * before input is sent to it (see drawHiddenTabForInput). */
