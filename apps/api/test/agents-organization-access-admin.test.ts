@@ -154,12 +154,20 @@ describe("Anyone in the organization (real PostgreSQL)", () => {
         },
         body: JSON.stringify(body),
       });
+      const text = await response.text();
       return {
         status: response.status,
-        body: (await response.json().catch(() => null)) as {
+        text,
+        body: (text ? JSON.parse(text) : null) as {
           agent?: { id: string; version: number; visibility: string };
         } | null,
       };
+    };
+    // Refused for organization administration, not CSRF or a missing workspace permission.
+    const refusedForOrganizationAdmin = (result: { status: number; text: string }) => {
+      expect(result.status).toBe(403);
+      expect(result.text).toContain("missing_permission");
+      expect(result.text).toContain("account:admin");
     };
     const create = (person: Person, workspaceId: string, visibility = "organization") =>
       send(person, "POST", `/v1/workspaces/${workspaceId}/agents`, {
@@ -167,8 +175,8 @@ describe("Anyone in the organization (real PostgreSQL)", () => {
         visibility,
       });
 
-    expect((await create(member, acme.workspaceId)).status).toBe(403);
-    expect((await create(admin, other.workspaceId)).status).toBe(403);
+    refusedForOrganizationAdmin(await create(member, acme.workspaceId));
+    refusedForOrganizationAdmin(await create(admin, other.workspaceId));
     const byAdmin = await create(admin, acme.workspaceId);
     expect(byAdmin.status).toBe(201);
     expect(byAdmin.body?.agent?.visibility).toBe("organization");
@@ -182,7 +190,7 @@ describe("Anyone in the organization (real PostgreSQL)", () => {
         visibility: "organization",
       });
     };
-    expect((await widen(member)).status).toBe(403);
+    refusedForOrganizationAdmin(await widen(member));
     const widened = await widen(admin);
     expect(widened.status).toBe(200);
     expect(widened.body?.agent?.visibility).toBe("organization");
