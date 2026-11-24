@@ -496,7 +496,7 @@ test("offers put the agent's own suggestions first, skip what they cover or what
   const offers = agentTriggerOffers({
     templateSuggestions: [mention],
     usesGitHub: true,
-    taskNames: [],
+    tasks: [],
   });
   expect(offers.map((offer) => offer.suggestion.name)).toEqual([
     "Review when mentioned on a PR",
@@ -510,7 +510,13 @@ test("offers put the agent's own suggestions first, skip what they cover or what
     agentTriggerOffers({
       templateSuggestions: [SUGGESTION, mention],
       usesGitHub: true,
-      taskNames: ["Bug fixer: Review when mentioned on a PR"],
+      tasks: [
+        {
+          name: "Bug fixer: Review when mentioned on a PR",
+          schedule: { type: "manual" },
+          events: null,
+        } as never,
+      ],
     }).map((offer) => offer.suggestion.name),
   ).toEqual([
     "When an issue is labelled bug",
@@ -518,6 +524,40 @@ test("offers put the agent's own suggestions first, skip what they cover or what
     "Every weekday morning",
   ]);
   expect(
-    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, taskNames: null }),
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, tasks: null }),
   ).toHaveLength(AGENT_TRIGGER_OFFERS_MAX);
+});
+
+test("a common trigger isn't offered again when an automation already listens to its events", () => {
+  const task = {
+    name: "PRs",
+    schedule: { type: "manual" },
+    events: {
+      triggers: [{ eventTypes: ["pull_request.ready_for_review", "pull_request.opened"] }],
+    },
+  } as never;
+  expect(
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, tasks: [task] }).map(
+      (offer) => offer.common,
+    ),
+  ).toEqual(["mentioned_on_pull_request", "weekday_morning"]);
+});
+
+test("named for an agent, a PR mention must also say its name", () => {
+  const mention = availableCommonTriggers({ usesGitHub: true, agentName: " Bug fixer " }).find(
+    (entry) => entry.key === "mentioned_on_pull_request",
+  )!;
+  for (const trigger of mention.trigger.triggers) {
+    expect(trigger.conditions).toContainEqual({
+      field: "data.comment.body",
+      op: "contains",
+      value: "Bug fixer",
+    });
+  }
+  const unnamed = availableCommonTriggers({ usesGitHub: true }).find(
+    (entry) => entry.key === "mentioned_on_pull_request",
+  )!;
+  expect(
+    unnamed.trigger.triggers.flatMap((trigger) => trigger.conditions.map((c) => c.field)),
+  ).not.toContain("data.comment.body");
 });

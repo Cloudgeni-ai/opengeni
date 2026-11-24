@@ -699,8 +699,18 @@ export interface CommonAgentTrigger {
 
 const MENTION_AUTHORS = { op: "in", value: ["OWNER", "MEMBER", "COLLABORATOR"] } as const;
 
-/** The common triggers, in the order they are offered. */
-export function commonAgentTriggers(): readonly CommonAgentTrigger[] {
+/**
+ * The common triggers, in the order they are offered. Given the agent's name,
+ * "When mentioned on a PR" also needs the comment to name it, so one mention
+ * of Opengeni's GitHub App starts only the agents it names.
+ */
+export function commonAgentTriggers(
+  options: { agentName?: string | undefined } = {},
+): readonly CommonAgentTrigger[] {
+  const agentName = options.agentName?.trim();
+  const named = agentName
+    ? [{ field: "data.comment.body", op: "contains" as const, value: agentName }]
+    : [];
   return [
     {
       key: "pull_request_opened",
@@ -734,6 +744,7 @@ export function commonAgentTriggers(): readonly CommonAgentTrigger[] {
               { field: "data.issue.pull_request", op: "equals", value: true },
               { field: "data.comment.mentions_app", op: "equals", value: true },
               { field: "data.comment.author_association", ...MENTION_AUTHORS },
+              ...named,
             ],
           },
           {
@@ -742,6 +753,7 @@ export function commonAgentTriggers(): readonly CommonAgentTrigger[] {
             conditions: [
               { field: "data.comment.mentions_app", op: "equals", value: true },
               { field: "data.comment.author_association", ...MENTION_AUTHORS },
+              ...named,
             ],
           },
         ],

@@ -31,6 +31,7 @@ import {
   agentTriggerOffers,
   agentTriggerSaveError,
   agentUsesGitHub,
+  mentionHint,
   type AgentTriggerOffer,
   type AgentTriggerChat,
 } from "./agent-trigger-model";
@@ -187,7 +188,8 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
   const offers = agentTriggerOffers({
     templateSuggestions: template?.suggestedTriggers ?? [],
     usesGitHub: agentUsesGitHub(agent.toolPermissions, githubConnected),
-    taskNames: tasks?.map((task) => task.name) ?? null,
+    agentName: agent.name,
+    tasks,
   });
   // A shared agent already starts when someone asks it in Slack.
   const inSlack = agent.visibility !== "private" && agent.slack.length > 0;
@@ -251,7 +253,11 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
               data-agent-common-trigger={offer.common}
               label={offer.suggestion.name}
               description={
-                offer.suggestion.oneClick ? undefined : "Off until you choose where it listens."
+                offer.common === "mentioned_on_pull_request"
+                  ? mentionHint(agent.name)
+                  : offer.suggestion.oneClick
+                    ? undefined
+                    : "Off until you choose where it listens."
               }
               control={
                 offer.suggestion.oneClick ? (

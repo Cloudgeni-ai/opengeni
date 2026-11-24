@@ -788,20 +788,26 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   automations' Create with Opengeni). The chat follows the bundled `agents`
   Skill (`builtin:agents`, offered when the chat has `bot_template_save`): it
   drafts the name, Instructions, Can use, Skills and triggers, asks once with
-  `request_human_input` (which common triggers, then Create agent / Change
-  something), saves with `bot_template_save` (which also takes
-  `toolPermissions` and `skills`) and adds each picked trigger with
-  `scheduled_tasks_create`, named "<agent>: <trigger>". No new storage or
-  endpoint: the agent and its triggers are the ordinary ones.
+  `request_human_input` (one optional multi-select of common triggers;
+  submitting creates the agent), saves with `bot_template_save` (which also
+  takes `toolPermissions` and `skills`; left out, `toolPermissions` is the
+  form's ask-before-merging default) and adds each picked trigger with
+  `scheduled_tasks_create`, named "<agent>: <trigger>", with
+  `agentConfig: { agentId, prompt }`. The Skill spells out each trigger's
+  JSON; `agents-skill.test.ts` keeps it equal to `commonAgentTriggers()`. No
+  new storage or endpoint: the agent and its triggers are the ordinary ones.
 - Common triggers (`commonAgentTriggers()` in contracts): **When a pull
   request opens**, **When mentioned on a PR** (the same events and team-only
-  conditions as the PR reviewer's one-click trigger) and **Every weekday
+  conditions as the PR reviewer's one-click trigger, plus
+  `data.comment.body contains <agent name>`, so one mention of the GitHub App
+  starts only the agents it names; the row says so) and **Every weekday
   morning** (09:00 Monday to Friday, in the browser's time zone). GitHub ones
   are offered only when the workspace's GitHub isn't disconnected and the
   agent's Can use doesn't block GitHub. They cover every repository the GitHub
   connection reaches; the full automation form narrows them. On the agent page
   **Starts when** lists the agent's own ready-made suggestions first, then the
-  common triggers they don't already cover, at most three, as off switches
+  common triggers they don't already cover and no automation of the agent
+  already listens to (by name or by event types), at most three, as off switches
   (`agentTriggerOffers`); turning one on adds the automation at once, or opens
   the trigger dialog when its source needs setup. A shared agent in Slack shows
   a read-only "When mentioned in Slack" row: Slack mentions reach it natively,

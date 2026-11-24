@@ -94,9 +94,12 @@ export function agentUsesGitHub(
   );
 }
 
-/** The common triggers an agent can use, in offer order. */
-export function availableCommonTriggers(options: { usesGitHub: boolean }): CommonAgentTrigger[] {
-  return commonAgentTriggers().filter(
+/** The common triggers an agent can use, in offer order; its name narrows mentions to it. */
+export function availableCommonTriggers(options: {
+  usesGitHub: boolean;
+  agentName?: string | undefined;
+}): CommonAgentTrigger[] {
+  return commonAgentTriggers({ agentName: options.agentName }).filter(
     (common) => common.needs === null || (common.needs === "github" && options.usesGitHub),
   );
 }
@@ -115,10 +118,24 @@ function eventSignature(suggestion: Pick<AgentTemplateTrigger, "schedule" | "tri
  * One the agent already has (its automation keeps the suggestion's name
  * after the agent's) is not offered again.
  */
+/** What an automation listens to, compared the way offers are. */
+function taskSignature(task: Pick<ScheduledTask, "schedule" | "events">): string {
+  const triggers = task.events?.triggers ?? [];
+  if (triggers.length > 0) {
+    return triggers
+      .flatMap((trigger) => trigger.eventTypes)
+      .sort()
+      .join(",");
+  }
+  return task.schedule.type === "manual" ? "" : "schedule";
+}
+
 export function agentTriggerOffers(input: {
   templateSuggestions: readonly AgentTemplateTrigger[];
   usesGitHub: boolean;
-  taskNames: readonly string[] | null;
+  agentName?: string | undefined;
+  /** The agent's automations; null while they load. */
+  tasks: readonly Pick<ScheduledTask, "name" | "schedule" | "events">[] | null;
 }): AgentTriggerOffer[] {
   const fromTemplate: AgentTriggerOffer[] = input.templateSuggestions.map((suggestion, index) => ({
     key: `template-${index}`,
@@ -126,12 +143,32 @@ export function agentTriggerOffers(input: {
     templateIndex: index,
   }));
   const covered = new Set(fromTemplate.map((offer) => eventSignature(offer.suggestion)));
-  const common: AgentTriggerOffer[] = availableCommonTriggers({ usesGitHub: input.usesGitHub })
+  const common: AgentTriggerOffer[] = availableCommonTriggers({
+    usesGitHub: input.usesGitHub,
+    agentName: input.agentName,
+  })
     .filter((entry) => !covered.has(eventSignature(entry.trigger)))
     .map((entry) => ({ key: `common-${entry.key}`, suggestion: entry.trigger, common: entry.key }));
-  return [...fromTemplate, ...common]
-    .filter((offer) => !input.taskNames?.some((name) => name.endsWith(offer.suggestion.name)))
-    .slice(0, AGENT_TRIGGER_OFFERS_MAX);
+  return (
+    [...fromTemplate, ...common]
+      // Set up already: under its name, or listening to the same events.
+      .filter(
+        (offer) =>
+          !input.tasks?.some(
+            (task) =>
+              task.name.endsWith(offer.suggestion.name) ||
+              (offer.common !== undefined &&
+                taskSignature(task) !== "" &&
+                taskSignature(task) === eventSignature(offer.suggestion)),
+          ),
+      )
+      .slice(0, AGENT_TRIGGER_OFFERS_MAX)
+  );
+}
+
+/** How people start an agent from a pull request comment. */
+export function mentionHint(agentName: string): string {
+  return `A comment that mentions Opengeni and says “${agentName}”`;
 }
 
 /** Offers shown at once, so the section stays to its essentials. */

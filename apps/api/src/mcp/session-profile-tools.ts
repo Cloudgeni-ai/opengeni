@@ -8,6 +8,7 @@ import {
   AGENT_SKILLS_MAX,
   AGENT_TOOL_PERMISSIONS_MAX,
   CreateAgentRequest,
+  NEW_AGENT_DEFAULT_TOOL_PERMISSIONS,
   SESSION_AVATAR_ICONS,
   SESSION_DESCRIPTION_MAX_LENGTH,
   SessionAvatar,
@@ -190,7 +191,7 @@ export function registerBotTemplateTools(input: {
           .max(AGENT_TOOL_PERMISSIONS_MAX)
           .optional()
           .describe(
-            "Can use rules for its chats: connector is a provider domain such as github.com, or * for every connection; tool is one tool name or * (default). ask asks a person first; block refuses.",
+            "Can use rules for its chats: connector is a provider domain such as github.com, or * for every connection; tool is one tool name or * (default). ask asks a person first; block refuses. Omitted: it asks before merging a pull request, like new agents in Agents.",
           ),
         skills: z4
           .array(z4.string().min(1).max(200))
@@ -235,7 +236,7 @@ export function registerBotTemplateTools(input: {
         instructions: instructions ?? "",
         firstMessage: firstMessage?.trim() ? firstMessage : (setupInstructions ?? ""),
         sourceSessionId: sessionId,
-        toolPermissions: toolPermissions ?? [],
+        toolPermissions: toolPermissions ?? [...NEW_AGENT_DEFAULT_TOOL_PERMISSIONS],
         skills: (skills ?? []).map((skill) => ({ name: skill })),
       });
       if (!parsed.success) {

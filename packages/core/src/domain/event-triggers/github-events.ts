@@ -665,6 +665,7 @@ const GITHUB_TYPES: CatalogEntry[] = [
       ["data.comment.user", "Who commented"],
       ["data.comment.author_association", "OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR or NONE"],
       ["data.comment.mentions_app", "true when the comment @mentions Opengeni's GitHub App"],
+      ["data.comment.body", "The comment text"],
       ["data.pull_request.number", "The pull request number"],
     ],
   },

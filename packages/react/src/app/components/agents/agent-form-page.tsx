@@ -55,6 +55,7 @@ import {
   agentTriggerSaveError,
   agentUsesGitHub,
   availableCommonTriggers,
+  mentionHint,
 } from "./agent-trigger-model";
 
 /** Who can use it stays with whoever made the agent and admins. */
@@ -315,7 +316,12 @@ function AgentForm({
   // named so the person sets it up on its page.
   async function addPickedTriggers(created: Agent): Promise<string[]> {
     const setup: string[] = [];
-    for (const common of commonTriggers.filter((entry) => startsWhen.has(entry.key))) {
+    // Named for the agent, so a mention starts only the agents it names.
+    const picked = availableCommonTriggers({
+      usesGitHub: agentUsesGitHub(NEW_AGENT_DEFAULT_TOOL_PERMISSIONS, githubConnected),
+      agentName: created.name,
+    }).filter((entry) => startsWhen.has(entry.key));
+    for (const common of picked) {
       try {
         const outcome = await addAgentSuggestedTrigger(t, {
           client,
@@ -465,6 +471,11 @@ function AgentForm({
                   key={common.key}
                   data-agent-common-trigger={common.key}
                   label={common.trigger.name}
+                  description={
+                    common.key === "mentioned_on_pull_request"
+                      ? mentionHint(name.trim() || "its name")
+                      : undefined
+                  }
                   control={
                     <Switch
                       aria-label={common.trigger.name}

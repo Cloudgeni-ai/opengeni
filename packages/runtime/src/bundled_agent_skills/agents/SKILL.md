@@ -19,8 +19,7 @@ From what the person said, draft:
   when to involve a person, and what to save to Memory. Keep them short.
 - **Can use**: rules only make its chats stricter than the connections'
   own settings. Add the safety rules its job needs, such as asking before
-  merging (`github.com`, `merge_pull_request`, `ask`). Leave out connections
-  it simply uses.
+  merging (below). Leave out connections it simply uses.
 - **Skills** it relies on, by name, from the workspace's Skills.
 - **When it starts**: the common triggers below that fit its job.
 
@@ -31,28 +30,42 @@ setup.
 ## 2. Confirm
 
 Show the draft in one short message. Then make one `request_human_input` call
-with two questions: a `multi_select` "When should it start?" listing the common
-triggers it can use (mark the ones its job implies as recommended), and a
-`single_select` with `confirm` whose options are "Create agent" and "Change
-something". Change the draft until the person confirms.
+with one question: a `multi_select` "Create it? When should it start?" with
+`required: false`, listing the common triggers it can use (mark the ones its
+job implies as recommended). Submitting creates the agent; anything typed in
+Other is a change to make first. Change the draft and ask again until the
+person submits without changes.
 
 ## 3. Save
 
 Save with `bot_template_save`: `name`, `description`, `avatar`,
-`instructions`, `toolPermissions` and `skills`. Then add each picked trigger
-with `scheduled_tasks_create`:
+`instructions`, `toolPermissions` and `skills`. For asking before merging,
+give both GitHub merge tools:
+
+```json
+[
+  { "connector": "github.com", "tool": "merge_pull_request", "permission": "ask" },
+  { "connector": "github.com", "tool": "pull_request_merge", "permission": "ask" }
+]
+```
+
+Leaving `toolPermissions` out gives exactly these rules.
+
+Then add each picked trigger with one `scheduled_tasks_create` call:
 
 - `name`: "<agent name>: <trigger name>", exactly, so its page shows the
   trigger as on.
-- `runMode`: `new_session_per_run`, `agentConfig.agentName`: the agent's name,
-  `prompt`: the trigger's message. Leave `agentConfig.tools` out.
-- An Only me agent's trigger is Only me; any other is shared with the
-  workspace.
+- `runMode`: `"new_session_per_run"`.
+- `agentConfig`: `{ "agentId": "<the saved agent's id>", "prompt": "<the
+  trigger's message>" }`. Leave `agentConfig.tools` out.
+- `visibility`: `"private"` for an Only me agent, otherwise `"workspace"`.
+- `schedule` and `events` as below. An event trigger's `schedule` is
+  `{ "type": "manual" }`.
 
-A GitHub trigger listens on the workspace's GitHub source from
-`event_sources_list` (a `readyToAdd` one works too). If there is none, tell
-the person to turn the trigger on from the agent's page in Agents, which adds
-the source.
+A GitHub trigger listens on the workspace's GitHub source: its `sourceId`
+from `event_sources_list` (a `readyToAdd` one works too). If there is none,
+tell the person to turn the trigger on from the agent's page in Agents, which
+adds the source.
 
 Finish with what was created: the agent, its triggers, how to ask it in Slack
 (the result's `slack` field), and that its page in Agents changes any of it.
@@ -61,19 +74,49 @@ Finish with what was created: the agent, its triggers, how to ask it in Slack
 
 The agent's page offers the same list as on/off switches.
 
-- **When a pull request opens**: GitHub `pull_request.opened` and
-  `pull_request.ready_for_review`, condition `data.pull_request.draft` equals
-  false. Message: "A pull request was opened or marked ready for review.
-  Handle it."
-- **When mentioned on a PR**: two GitHub triggers, `issue_comment.created` with
-  `data.issue.pull_request` equals true, and
-  `pull_request_review_comment.created`; both with `data.comment.mentions_app`
-  equals true and `data.comment.author_association` in OWNER, MEMBER,
-  COLLABORATOR. Message: "Someone on the team mentioned you in a comment on
-  this pull request. Read their comment, do what they ask, and answer them on
-  it."
-- **Every weekday morning**: a schedule at 09:00, Monday to Friday, in the
-  person's time zone. Message: "Do your scheduled work."
+**When a pull request opens**. Message: "A pull request was opened or marked
+ready for review. Handle it."
+
+```json
+{ "triggers": [{
+  "sourceId": "<GitHub source id>",
+  "eventTypes": ["pull_request.opened", "pull_request.ready_for_review"],
+  "conditions": [{ "field": "data.pull_request.draft", "op": "equals", "value": false }]
+}] }
+```
+
+**When mentioned on a PR**: a team member's comment that mentions Opengeni's
+GitHub App and says the agent's name. One automation with two triggers.
+Message: "Someone on the team mentioned you in a comment on this pull request.
+Read their comment, do what they ask, and answer them on it."
+
+```json
+{ "triggers": [
+  { "sourceId": "<GitHub source id>",
+    "eventTypes": ["issue_comment.created"],
+    "conditions": [
+      { "field": "data.issue.pull_request", "op": "equals", "value": true },
+      { "field": "data.comment.mentions_app", "op": "equals", "value": true },
+      { "field": "data.comment.author_association", "op": "in", "value": ["OWNER", "MEMBER", "COLLABORATOR"] },
+      { "field": "data.comment.body", "op": "contains", "value": "<agent name>" }
+    ] },
+  { "sourceId": "<GitHub source id>",
+    "eventTypes": ["pull_request_review_comment.created"],
+    "conditions": [
+      { "field": "data.comment.mentions_app", "op": "equals", "value": true },
+      { "field": "data.comment.author_association", "op": "in", "value": ["OWNER", "MEMBER", "COLLABORATOR"] },
+      { "field": "data.comment.body", "op": "contains", "value": "<agent name>" }
+    ] }
+] }
+```
+
+**Every weekday morning**: no `events`. Message: "Do your scheduled work."
+
+```json
+{ "type": "calendar", "hour": 9, "minute": 0,
+  "daysOfWeek": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+  "timeZone": "<the person's time zone>" }
+```
 
 In Slack, people already reach a shared agent by mentioning it; that needs no
 trigger.
