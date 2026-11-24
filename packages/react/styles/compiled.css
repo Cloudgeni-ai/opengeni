@@ -1064,6 +1064,9 @@
 :where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
     bottom: calc(var(--spacing) * 4);
   }
+:where(.og-root).bottom-\[calc\(-1\*var\(--og-form-footer-scroll-padding\,0px\)\)\],:where(.og-root) .bottom-\[calc\(-1\*var\(--og-form-footer-scroll-padding\,0px\)\)\] {
+    bottom: calc(-1 * var(--og-form-footer-scroll-padding,0px));
+  }
 :where(.og-root).bottom-full,:where(.og-root) .bottom-full {
     bottom: 100%;
   }
