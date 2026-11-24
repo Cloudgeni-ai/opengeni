@@ -201,6 +201,38 @@ describe("HTTP rejection telemetry", () => {
     ).toMatchObject({ code: "unauthenticated", reason: "session_expired" });
   });
 
+  test("a site gateway signature refusal logs its closed sub-reason", () => {
+    const refusal = (reason: unknown) =>
+      httpRejectionFactsFromEnvelope(
+        {
+          error: {
+            code: "unauthenticated",
+            message: "This request was not signed by the app gateway",
+            details: { reason, code: "site_gateway_signature_invalid" },
+          },
+        },
+        "unauthenticated",
+      );
+    expect(refusal("missing_headers")).toMatchObject({
+      reason: "site_gateway_signature_invalid",
+      detail: "missing_headers",
+    });
+    expect(refusal("bad_signature").detail).toBe("bad_signature");
+    // Anything outside the closed set, or on another reason, is dropped.
+    expect(refusal(`free ${sentinel}`)).not.toHaveProperty("detail");
+    expect(refusal(7)).not.toHaveProperty("detail");
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { error: { code: "conflict", message: "x", details: { code: "busy", reason: "skew" } } },
+        "conflict",
+      ),
+    ).not.toHaveProperty("detail");
+    const thrown = Object.assign(new Error("unsigned"), {
+      details: { code: "site_gateway_signature_invalid", reason: "skew" },
+    });
+    expect(httpRejectionFactsFromError(thrown, "unauthenticated").detail).toBe("skew");
+  });
+
   test("reads small JSON bodies without consuming the client response", async () => {
     const response = new Response(JSON.stringify({ error: { code: "forbidden" } }), {
       status: 403,
@@ -243,12 +275,14 @@ describe("HTTP rejection telemetry", () => {
         rejectionCode: "forbidden",
         rejectionReason: "permission:stream:view",
         rejectionFingerprint: "m_0123456789",
+        rejectionDetail: "missing_headers",
       });
       observability.info("HTTP request completed", {
         status: 403,
         rejectionCode: `forbidden ${sentinel}`,
         rejectionReason: `free text ${sentinel}`,
         rejectionFingerprint: sentinel,
+        rejectionDetail: `free text ${sentinel}`,
       });
     } finally {
       console.log = original;
@@ -257,6 +291,7 @@ describe("HTTP rejection telemetry", () => {
       rejectionCode: "forbidden",
       rejectionReason: "permission:stream:view",
       rejectionFingerprint: "m_0123456789",
+      rejectionDetail: "missing_headers",
     });
     expect(lines[1]).not.toContain(sentinel);
   });

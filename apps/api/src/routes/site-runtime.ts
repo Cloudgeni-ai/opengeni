@@ -145,6 +145,7 @@ import {
   sameSha256Hex,
   verifySiteGatewayRequest,
   type SiteGatewayFields,
+  type SiteGatewayRefusalReason,
 } from "../site-publishing/gateway-signature";
 import {
   capSiteConversationUsageLimit,
@@ -586,7 +587,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const url = new URL(context.req.url);
     const method = context.req.method.toUpperCase();
     const secrets = [deps.settings.sitesGatewaySecret, deps.settings.sitesGatewaySecretPrevious];
-    const refuse = (reason: string) =>
+    const refuse = (reason: SiteGatewayRefusalReason) =>
       sitePublishingError(
         401,
         "unauthenticated",
