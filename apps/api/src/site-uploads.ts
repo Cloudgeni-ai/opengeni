@@ -281,3 +281,44 @@ export async function workspaceArtifactDownloads(
       : null,
   };
 }
+
+/**
+ * How much of a version's source artifacts_get_source returns inline. A
+ * typical app (its source JSON or HTML and its server code) fits, so an agent
+ * reads it in one call, without a sandbox or a fetch of the signed URLs.
+ */
+export const INLINE_APP_SOURCE_MAX_BYTES = 128 * 1024;
+
+/**
+ * The text of a version's source and server files, when together they fit
+ * INLINE_APP_SOURCE_MAX_BYTES: the source JSON, or the HTML of an app without
+ * one, then the server files in order. A file that does not fit, or cannot be
+ * read, is left out; its signed URL still serves it.
+ */
+export async function inlineAppSource(
+  storage: Pick<Storage, "getObjectBytes">,
+  ref: {
+    contentKey: string;
+    sourceKey: string | null;
+    version: { sizeBytes: number; sourceSizeBytes: number | null };
+  },
+  serverFiles: readonly { key: string; sizeBytes: number }[],
+): Promise<{ page: string | null; server: (string | null)[] }> {
+  let budget = INLINE_APP_SOURCE_MAX_BYTES;
+  const read = async (key: string, sizeBytes: number): Promise<string | null> => {
+    if (sizeBytes > budget) return null;
+    budget -= sizeBytes;
+    try {
+      const object = await storage.getObjectBytes(key);
+      return object ? new TextDecoder("utf-8", { fatal: true }).decode(object.bytes) : null;
+    } catch {
+      return null;
+    }
+  };
+  const page = ref.sourceKey
+    ? await read(ref.sourceKey, ref.version.sourceSizeBytes ?? Number.POSITIVE_INFINITY)
+    : await read(ref.contentKey, ref.version.sizeBytes);
+  const server: (string | null)[] = [];
+  for (const file of serverFiles) server.push(await read(file.key, file.sizeBytes));
+  return { page, server };
+}

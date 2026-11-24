@@ -45,6 +45,7 @@ import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./use
 import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
+  inlineAppSource,
   workspaceArtifactDownloads,
 } from "../site-uploads";
 import {
@@ -4609,7 +4610,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_get_source",
     {
       description:
-        "Get artifact metadata, version id, and signed download URLs for HTML, optional source JSON and the version's server code files (server, null without code). Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
+        "Get artifact metadata, version id, and the version's source: its source JSON (or HTML when source is null; edit the HTML then) and its server code files (server, null without code). Each comes with a signed download URL, and with its text in content when the whole app is small; download only what has no content, with curl or Bun. Omit versionId for the current version.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         versionId: z4.string().uuid().optional(),
@@ -4640,6 +4641,18 @@ function registerWorkspaceArtifactTools(
         workspaceArtifactDownloads(storage, ref, "sandbox"),
         getAppServerManifest(deps.db, grant.workspaceId, artifactId, ref.version.id),
       ]);
+      const inline = await inlineAppSource(
+        storage,
+        ref,
+        (serverManifest?.files ?? []).map((file) => ({
+          key: appServerObjectKey(grant.workspaceId, file.sha256),
+          sizeBytes: file.sizeBytes,
+        })),
+      );
+      if (inline.page !== null) {
+        if (downloads.source) Object.assign(downloads.source, { content: inline.page });
+        else Object.assign(downloads.html, { content: inline.page });
+      }
       // The version's server code: download each file to edit it, then upload
       // the whole bundle again ({main, files, tools, egress, secrets,
       // toolResults}); keeping toolResults keeps what env.tools.call returns.
@@ -4651,12 +4664,18 @@ function registerWorkspaceArtifactTools(
             secrets: serverManifest.secrets,
             toolResults: serverManifest.toolResults ?? "raw",
             files: await Promise.all(
-              serverManifest.files.map(async (file) => {
+              serverManifest.files.map(async (file, index) => {
                 const signed = await storage.createGetUrl({
                   key: appServerObjectKey(grant.workspaceId, file.sha256),
                   audience: "sandbox",
                 });
-                return { path: file.path, url: signed.url, expiresAt: signed.expiresAt };
+                const content = inline.server[index] ?? null;
+                return {
+                  path: file.path,
+                  url: signed.url,
+                  expiresAt: signed.expiresAt,
+                  ...(content === null ? {} : { content }),
+                };
               }),
             ),
           }
