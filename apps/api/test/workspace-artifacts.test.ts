@@ -1288,6 +1288,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(JSON.parse(sourceText.text).downloads.html.url).toStartWith(
         "https://storage.example.test/",
       );
+      // Too large to return inline: only the signed URL.
+      expect(JSON.parse(sourceText.text).downloads.html).not.toHaveProperty("content");
       expect(JSON.parse(sourceText.text).downloads.source).toBeNull();
       expect(JSON.parse(sourceText.text)).not.toHaveProperty("html");
       expect(JSON.parse(sourceText.text).artifactReference).toBe(
@@ -1313,6 +1315,20 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(JSON.parse(publishedText.text)).not.toHaveProperty("warnings");
       expect(published.version.sourceAttemptId).toBe(attempt.attemptId);
       expect(published.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
+
+      // A small app's source comes back inline, so the agent reads it in one call.
+      const smallSourceResult = await mcp.callTool({
+        name: "artifacts_get_source",
+        arguments: { artifactId: created.artifact.id },
+      });
+      const smallSourceText = smallSourceResult.content.find((item) => item.type === "text");
+      if (!smallSourceText || smallSourceText.type !== "text")
+        throw new Error("missing MCP small source result");
+      const smallSource = JSON.parse(smallSourceText.text);
+      expect(smallSource.downloads.html.content).toBe(
+        "<!doctype html><main>Published through MCP</main>",
+      );
+      expect(smallSource.downloads.html.url).toStartWith("https://storage.example.test/");
 
       const rollbackResult = await mcp.callTool({
         name: "artifacts_rollback",
