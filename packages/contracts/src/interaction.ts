@@ -2166,7 +2166,7 @@ export const BrowserObservation = /* @__PURE__ */ defineSchema(() =>
 export type BrowserObservation = z.infer<typeof BrowserObservation>;
 
 export const BrowserDiagnosticKind = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["console", "page_error", "failed_request", "download"]),
+  z.enum(["console", "page_error", "failed_request", "download", "request"]),
 );
 export type BrowserDiagnosticKind = z.infer<typeof BrowserDiagnosticKind>;
 

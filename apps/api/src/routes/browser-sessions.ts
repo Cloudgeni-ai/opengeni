@@ -6580,7 +6580,7 @@ function diagnosticKinds(
 ): Array<ReturnType<typeof BrowserDiagnosticKind.parse>> | null {
   if (value === undefined || value === "") return null;
   const raw = [...new Set(value.split(","))];
-  if (raw.length > 4 || raw.some((entry) => !entry)) {
+  if (raw.length > BrowserDiagnosticKind.options.length || raw.some((entry) => !entry)) {
     throw new HTTPException(400, { message: "invalid diagnostic kinds" });
   }
   const parsed = raw.map((entry) => BrowserDiagnosticKind.safeParse(entry));

@@ -818,8 +818,8 @@ const BrowserDebugInput = z
     browserSessionId: CurrentBrowserSessionId,
     targetId: CurrentBrowserTargetId,
     kinds: z
-      .array(z.enum(["console", "page_error", "failed_request", "download"]))
-      .max(4)
+      .array(z.enum(["console", "page_error", "failed_request", "download", "request"]))
+      .max(5)
       .optional(),
     after: z.number().int().nonnegative().optional(),
     limit: z.number().int().min(1).max(1_000).optional(),
@@ -2475,7 +2475,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "debug"],
     title: "Inspect browser diagnostics",
     description:
-      "Read bounded console errors, page errors, failed requests, and downloads for one exact browser tab.",
+      'Read bounded console errors, page errors, failed requests, and downloads for one exact browser tab. Include "request" in kinds to also list the tab\'s finished page, fetch and XHR requests with method, URL and status.',
     input: BrowserDebugInput,
     output: BrowserDiagnosticBatch,
     readOnly: true,

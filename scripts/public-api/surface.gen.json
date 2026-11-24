@@ -14698,7 +14698,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"console\\\"\",\"\\\"download\\\"\",\"\\\"failed_request\\\"\",\"\\\"page_error\\\"\"]"
+        "$": "enum=[\"\\\"console\\\"\",\"\\\"download\\\"\",\"\\\"failed_request\\\"\",\"\\\"page_error\\\"\",\"\\\"request\\\"\"]"
       }
     },
     "BrowserDialog": {
