@@ -71,6 +71,9 @@ function isApiKeyGrant(grant: AccessGrant): boolean {
 /**
  * Plaintext reveal (AX-5): API keys need the literal `secrets:read`; people
  * need `secrets:use` and a human session (agents and services are refused).
+ * This is only the outer gate: the vault service then checks the item itself
+ * (reveal-policy.ts), so a person who may only use a shared or use-only
+ * secret is still refused.
  */
 function requireRevealAuthority(grant: AccessGrant): void {
   if (isApiKeyGrant(grant)) {

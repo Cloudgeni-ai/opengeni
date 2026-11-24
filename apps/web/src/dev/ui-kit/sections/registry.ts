@@ -111,6 +111,7 @@ export const SECTION_KEYS = [
   "secret-values",
   "secret-ask-card",
   "secret-approval",
+  "secret-use-only",
   "mcp-question",
   "cadence-picker",
   // People
@@ -777,6 +778,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Mark secrets an agent may use only after the person allows each use.",
     usedOn: "Item page, chat questions, inbox and phone",
     load: () => import("./secret-approval"),
+  },
+  {
+    key: "secret-use-only",
+    group: "Forms",
+    title: "Use-only secrets",
+    purpose: "Show who can see a secret's values, and make one use-only.",
+    usedOn: "Item page and item editor",
+    load: () => import("./secret-use-only"),
   },
   {
     key: "chat-approvals",
