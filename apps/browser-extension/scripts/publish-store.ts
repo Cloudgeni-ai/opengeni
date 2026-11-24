@@ -7,6 +7,14 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BRIDGE_PROTOCOL_VERSION, nativeHostName } from "../src/protocol";
+import {
+  assertReleasedAgentSupports,
+  currentProtocol,
+  latestAgentRelease,
+  nativeHostScheme,
+  readBridgeCompat,
+} from "./bridge-compat";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -212,11 +220,34 @@ function required(name: string): string {
   return value;
 }
 
+/** The store build is Opengeni Browser itself: refuse it until a released
+ * agent supports how it reaches the agent. */
+async function assertAgentReleased(): Promise<void> {
+  const storeId = "phpmmcbeelfkcinjfbbggegjdcdmnnch";
+  const scheme = nativeHostScheme(nativeHostName(storeId), storeId);
+  const protocol =
+    scheme && currentProtocol(readBridgeCompat(), "opengeni", BRIDGE_PROTOCOL_VERSION, scheme);
+  if (!protocol) {
+    throw new Error(
+      `bridge-compat.json lists no current protocol for bridge version ${BRIDGE_PROTOCOL_VERSION} with the ${scheme ?? "unknown"} native host.`,
+    );
+  }
+  const latest = await latestAgentRelease({
+    fetch,
+    repository: required("GITHUB_REPOSITORY"),
+    token: process.env.GITHUB_TOKEN,
+    apiUrl: process.env.GITHUB_API_URL,
+  });
+  assertReleasedAgentSupports(protocol, latest);
+  console.log(`Released agent ${latest} supports ${protocol.id} (needs ${protocol.minimumAgent}).`);
+}
+
 async function main(): Promise<void> {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as {
     version: string;
   };
+  await assertAgentReleased();
   const zip = new Uint8Array(
     await readFile(resolve(root, "dist/opengeni-browser-extension-store.zip")),
   );
@@ -247,5 +278,14 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  await main();
+  try {
+    await main();
+  } catch (error) {
+    // Shown on the run's summary page, so a refused submission is not missed.
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(
+      `::error title=Chrome Web Store publish failed::${message.replace(/\r?\n/gu, " ")}`,
+    );
+    process.exit(1);
+  }
 }
