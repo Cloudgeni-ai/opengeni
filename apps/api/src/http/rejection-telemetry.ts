@@ -147,19 +147,16 @@ export function httpRejectionFactsFromError(
     error && typeof error === "object" ? (error as { details?: unknown }).details : undefined;
   const detailCode =
     details && typeof details === "object" ? (details as { code?: unknown }).code : undefined;
-  const reason =
-    permissionReason(permission) ??
-    rejectionReasonFromMessage(message) ??
-    (typeof detailCode === "string" && DETAIL_CODE.test(detailCode) ? detailCode : null) ??
-    UNCLASSIFIED_REJECTION_REASON;
+  // No `detail` here: this path logs through the failure logger, which does
+  // not carry rejection attributes; refusals reach the envelope path first.
   return {
     code: fallbackCode,
-    reason,
+    reason:
+      permissionReason(permission) ??
+      rejectionReasonFromMessage(message) ??
+      (typeof detailCode === "string" && DETAIL_CODE.test(detailCode) ? detailCode : null) ??
+      UNCLASSIFIED_REJECTION_REASON,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
-    ...closedDetail(
-      reason,
-      details && typeof details === "object" ? (details as Record<string, unknown>) : undefined,
-    ),
   };
 }
 

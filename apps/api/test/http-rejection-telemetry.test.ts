@@ -12,6 +12,7 @@ import {
   readRejectionEnvelope,
   rejectionFingerprint,
 } from "../src/http/rejection-telemetry";
+import { sitePublishingError } from "../src/site-publishing/service";
 
 const sentinel = "SECRET_REJECTION_SENTINEL_5d1c";
 
@@ -227,10 +228,21 @@ describe("HTTP rejection telemetry", () => {
         "conflict",
       ),
     ).not.toHaveProperty("detail");
-    const thrown = Object.assign(new Error("unsigned"), {
-      details: { code: "site_gateway_signature_invalid", reason: "skew" },
-    });
-    expect(httpRejectionFactsFromError(thrown, "unauthenticated").detail).toBe("skew");
+    // The refusal the site-runtime route actually throws, as the error
+    // handler serializes it into the envelope this classifier reads.
+    const thrown = sitePublishingError(
+      401,
+      "unauthenticated",
+      "site_gateway_signature_invalid",
+      "This request was not signed by the app gateway",
+      { reason: "skew" },
+    );
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { error: { code: thrown.code, message: thrown.message, details: thrown.details } },
+        "unauthenticated",
+      ),
+    ).toMatchObject({ reason: "site_gateway_signature_invalid", detail: "skew" });
   });
 
   test("reads small JSON bodies without consuming the client response", async () => {
