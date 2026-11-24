@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { ErrorCode, Permission } from "@opengeni/contracts";
+import { ErrorCode, Permission, signedDelegatedAccessTokenClaims } from "@opengeni/contracts";
+import { turnExecutionTelemetryKey } from "@opengeni/observability";
 import { SITE_GATEWAY_REFUSAL_REASONS } from "../site-publishing/gateway-signature";
 
 /**
@@ -44,6 +45,65 @@ const CLOSED_DETAIL_REASONS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
 ]);
 
 export const UNCLASSIFIED_REJECTION_REASON = "unclassified";
+
+/**
+ * Who sent a refused request, without publishing an identifier or a credential,
+ * so a client that keeps calling with a dead credential can be found:
+ *
+ * - `callerCorrelationId`: for a signed agent-attempt bearer (also an expired
+ *   one), the same hashed attempt key the worker logs as `correlationId`
+ *   (`turnExecutionTelemetryKey`), naming the turn attempt whose process is
+ *   still calling.
+ * - `callerCredentialKey`: for any other bearer, a domain-separated one-way
+ *   hash that groups requests sent with the same credential.
+ * - `callerAgent`: the first User-Agent product token, such as
+ *   `opengeni-agent/1.2.3`.
+ *
+ * Log only, never a metric label.
+ */
+export type RejectedCallerAttributes = {
+  callerCorrelationId?: string;
+  callerCredentialKey?: string;
+  callerAgent?: string;
+};
+
+const BEARER = /^Bearer ([^\s]{1,16384})$/;
+const USER_AGENT_PRODUCT =
+  /^([A-Za-z][A-Za-z0-9._-]{0,47})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=[\s;(]|$)/;
+
+export async function rejectedCallerLogAttributes(
+  headers: Headers,
+  delegationSecret: string | undefined,
+): Promise<RejectedCallerAttributes> {
+  const attributes: RejectedCallerAttributes = {};
+  const product = USER_AGENT_PRODUCT.exec(headers.get("user-agent")?.trim() ?? "");
+  if (product) attributes.callerAgent = product[2] ? `${product[1]}/${product[2]}` : product[1]!;
+  const bearer = BEARER.exec(headers.get("authorization")?.trim() ?? "")?.[1];
+  if (!bearer) return attributes;
+  const claims = delegationSecret
+    ? await signedDelegatedAccessTokenClaims(delegationSecret, bearer).catch(() => null)
+    : null;
+  if (claims?.principalKind === "agent_attempt" && claims.sessionId && claims.attemptId) {
+    attributes.callerCorrelationId = turnExecutionTelemetryKey(
+      claims.workspaceId,
+      claims.sessionId,
+      claims.attemptId,
+    );
+  } else {
+    attributes.callerCredentialKey = rejectedCredentialTelemetryKey(bearer);
+  }
+  return attributes;
+}
+
+/** Groups requests sent with one credential; the domain separator keeps it
+ * from matching any stored credential digest. */
+export function rejectedCredentialTelemetryKey(credential: string): string {
+  return `cred_${createHash("sha256")
+    .update("opengeni:rejected-credential-telemetry:v1\0")
+    .update(credential)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
 
 export function rejectionFingerprint(message: string): string {
   return `m_${createHash("sha256").update(normalizeRejectionMessage(message)).digest("hex").slice(0, 10)}`;

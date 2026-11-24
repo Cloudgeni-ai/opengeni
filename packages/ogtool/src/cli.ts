@@ -15,6 +15,7 @@ import {
   CodemodeOperationError,
   generateCodemodeDeclarations,
   materializeCodemodeImages,
+  temporaryCodemodeRefusedBearerStore,
   type AttemptToolCatalog,
   type AttemptToolCatalogEntry,
   catalogToolResolutionMessage,
@@ -73,6 +74,9 @@ function configuredClient(): CodemodeClient {
     token: directTokenConfigured
       ? async () => requiredDirectToken()
       : async () => readToken(tokenFile!),
+    // One process per call: remember a permanently refused bearer across
+    // calls, so a script that loops on `ogtool call` stops reaching the API.
+    refusedBearers: temporaryCodemodeRefusedBearerStore(),
   });
 }
 

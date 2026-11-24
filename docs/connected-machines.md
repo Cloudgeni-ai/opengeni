@@ -389,6 +389,17 @@ redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
+A process keeps the bearer it was started with, so one that outlives its turn
+(a script that calls the client in a loop) gets 403
+`agent_attempt_caller_stale`, and 401 once the bearer expires. Neither can
+clear for that bearer. The native client and `ogtool` therefore remember such
+a refusal across processes and fail later calls with the same bearer locally,
+with the same error, without contacting the API; a renewed bearer is sent
+normally. The memory is a private (0700) per-user directory
+`opengeni-codemode-refused-<uid>` in the temporary directory, holding only the
+refusal's status, code and message under a hash of the API base and bearer.
+Markers expire after 24 hours, the longest a bearer can live.
+
 Native `codemode call` accepts inline JSON (default `{}`), `-` to read one UTF-8
 JSON object from stdin through EOF, or `@path` to read it from a local file.
 Use stdin or a file for large arguments so the operating system's argv limit
