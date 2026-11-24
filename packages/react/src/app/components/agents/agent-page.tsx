@@ -36,6 +36,7 @@ import { toast } from "../../lib/toast";
 import { slackLogo } from "../new-session-starter-logos";
 import { SessionAvatar } from "../session/session-avatar";
 import { DestructiveConfirm } from "../ui/destructive-confirm";
+import { useAgentCostText } from "./agent-cost";
 import {
   AgentCanUse,
   AgentMemoryEntries,
@@ -337,6 +338,8 @@ export function AgentPage({
     onClick: () =>
       void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } }),
   };
+  // What it cost, for people who may see Usage; read before the agent loads.
+  const costText = useAgentCostText({ id: agentId }, workspaceId);
   const agent = state.agent;
   if (agent === undefined) {
     return (
@@ -373,6 +376,16 @@ export function AgentPage({
   const organizationName = workspace
     ? orgName(workspace.accountId, accessContext.accountGrants)
     : null;
+  const meta = [
+    ...(agent.description ? [agent.description] : []),
+    ...(costText
+      ? [
+          <span key="cost" className="tabular-nums" data-agent-cost="">
+            {costText}
+          </span>,
+        ]
+      : []),
+  ];
   const saved = (next: Agent) => {
     state.set(next);
     forgetSessionAgent(workspaceId, next.id);
@@ -404,7 +417,7 @@ export function AgentPage({
         chips={
           agent.visibility === "private" ? <MetaChip variant="soft">Only me</MetaChip> : undefined
         }
-        meta={agent.description ? [agent.description] : undefined}
+        meta={meta.length > 0 ? meta : undefined}
         actions={
           <>
             <Button

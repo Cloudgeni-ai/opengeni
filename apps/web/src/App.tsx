@@ -19,7 +19,7 @@
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger, ?returnTo=agent)
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger, ?agentCommonTrigger, ?returnTo=agent)
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
@@ -72,7 +72,12 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
-import { DESKTOP_APP_RETURN_PATH, OAUTH_SIGN_IN_TO_FINISH_PATH } from "@opengeni/contracts";
+import {
+  COMMON_AGENT_TRIGGER_KEYS,
+  type CommonAgentTrigger,
+  DESKTOP_APP_RETURN_PATH,
+  OAUTH_SIGN_IN_TO_FINISH_PATH,
+} from "@opengeni/contracts";
 import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
@@ -326,6 +331,10 @@ const LazyAutomationTemplatesRoute = lazyRouteComponent(
   "AutomationTemplatesRoute",
 );
 const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
+const LazyGetStartedRoute = lazyRouteComponent(
+  () => import("@/routes/get-started"),
+  "GetStartedRoute",
+);
 const LazyAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentRoute");
 const LazyNewAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "NewAgentRoute");
 const LazyEditAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "EditAgentRoute");
@@ -932,6 +941,7 @@ const INSIGHTS_SEARCH_KEYS = [
   "who",
   "root",
   "sched",
+  "agent",
   "src",
   "start",
   "end",
@@ -1006,6 +1016,8 @@ type NewAutomationSearch = {
   agent?: string;
   /** Start from this one of the agent's suggested triggers. */
   agentTrigger?: number;
+  /** Start from this common trigger (`commonAgentTriggers()`). */
+  agentCommonTrigger?: CommonAgentTrigger["key"];
   /** Cancel and Save go back to the agent's page. Needs `agent`. */
   returnTo?: "agent";
 };
@@ -1033,6 +1045,9 @@ function newAutomationSearch(search: Record<string, unknown>): NewAutomationSear
     Number(search.agentTrigger) >= 0 &&
     Number(search.agentTrigger) < 10
       ? { agentTrigger: Number(search.agentTrigger) }
+      : {}),
+    ...(COMMON_AGENT_TRIGGER_KEYS.some((key) => key === search.agentCommonTrigger)
+      ? { agentCommonTrigger: search.agentCommonTrigger as CommonAgentTrigger["key"] }
       : {}),
     ...(search.returnTo === "agent" ? { returnTo: "agent" as const } : {}),
   };
@@ -1087,6 +1102,16 @@ const workspaceAgentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agents",
   component: Agents,
+});
+// The guided setups; `?setup=` opens one by its key (the page ignores one it doesn't know).
+const workspaceGetStartedRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "get-started",
+  validateSearch: (search: Record<string, unknown>): { setup?: string } =>
+    typeof search.setup === "string" && /^[a-z][a-z0-9-]{0,39}$/u.test(search.setup)
+      ? { setup: search.setup }
+      : {},
+  component: GetStarted,
 });
 const workspaceAgentNewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1467,6 +1492,7 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
+    workspaceGetStartedRoute,
     workspaceAgentsRoute,
     workspaceAgentNewRoute,
     workspaceAgentDetailRoute,
@@ -1712,8 +1738,16 @@ function Automations() {
 
 function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source, agent, agentTrigger, returnTo } =
-    workspaceAutomationNewRoute.useSearch();
+  const {
+    template,
+    from,
+    sourceSessionId,
+    source,
+    agent,
+    agentTrigger,
+    agentCommonTrigger,
+    returnTo,
+  } = workspaceAutomationNewRoute.useSearch();
   const agentTriggerStart = useLocation({
     select: (location) => agentTriggerStartOf(location.state.agentTriggerStart),
   });
@@ -1728,6 +1762,7 @@ function AutomationNew() {
         eventSourceId: source,
         agentId: agent,
         agentTrigger,
+        agentCommonTrigger,
         returnTo,
         ...(agent && agentTriggerStart ? { agentTriggerStart } : {}),
       }}
@@ -1775,6 +1810,12 @@ function AutomationTemplates() {
 function Agents() {
   const { workspaceId } = workspaceAgentsRoute.useParams();
   return <LazyAgentsRoute workspaceId={workspaceId} />;
+}
+
+function GetStarted() {
+  const { workspaceId } = workspaceGetStartedRoute.useParams();
+  const { setup } = workspaceGetStartedRoute.useSearch();
+  return <LazyGetStartedRoute workspaceId={workspaceId} setup={setup} />;
 }
 
 function AgentNew() {

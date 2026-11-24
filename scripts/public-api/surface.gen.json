@@ -15470,7 +15470,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:event-triggers\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:agents\\\"\",\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:event-triggers\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
       }
     },
     "CancelBillingSubscriptionRequest": {
@@ -22413,6 +22413,10 @@
       ],
       "shape": {
         "$": "object",
+        "$.agents": "array?",
+        "$.agents[]": "object",
+        "$.agents[].id": "string!",
+        "$.agents[].name": "string!",
         "$.models": "array!",
         "$.models[]": "ref(InsightsModelFacet)",
         "$.payers": "array!",
@@ -22465,7 +22469,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"model\\\"\",\"\\\"payer\\\"\",\"\\\"person\\\"\",\"\\\"plan\\\"\",\"\\\"project\\\"\",\"\\\"provider\\\"\",\"\\\"rootSession\\\"\",\"\\\"schedule\\\"\",\"\\\"session\\\"\",\"\\\"source\\\"\",\"\\\"workspace\\\"\"]"
+        "$": "enum=[\"\\\"agent\\\"\",\"\\\"model\\\"\",\"\\\"payer\\\"\",\"\\\"person\\\"\",\"\\\"plan\\\"\",\"\\\"project\\\"\",\"\\\"provider\\\"\",\"\\\"rootSession\\\"\",\"\\\"schedule\\\"\",\"\\\"session\\\"\",\"\\\"source\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "InsightsUsageMeasures": {
@@ -32472,7 +32476,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agents\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
+        "$": "enum=[\"\\\"agents\\\"\",\"\\\"apps\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"get_started\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
       }
     },
     "SiteAuthAuthorizeRequest": {
@@ -36310,6 +36314,7 @@
         "$.aliases": "array!",
         "$.aliases[]": "string",
         "$.archivedAt": "string! null",
+        "$.canReveal": "boolean?",
         "$.category": "string! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string! null",
@@ -36327,6 +36332,7 @@
         "$.references": "ref(VaultItemReferences)!",
         "$.type": "ref(VaultItemType)!",
         "$.updatedAt": "string!",
+        "$.useOnly": "boolean?",
         "$.username": "string! null",
         "$.vaultId": "string!",
         "$.websites": "array!",

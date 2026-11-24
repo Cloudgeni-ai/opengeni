@@ -17,6 +17,7 @@ export const RUNTIME_SKILL_ASSET_DIRECTORY_NAMES = [
   "bundled_site_skills",
   "bundled_secret_skills",
   "bundled_video_skills",
+  "bundled_agent_skills",
   "bundled_management_skills",
 ] as const;
 

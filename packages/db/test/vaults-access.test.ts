@@ -24,8 +24,10 @@ import {
   isVaultError,
   listVaultFieldVersions,
   listVaultItems,
+  listVaultItemsUseOnly,
   listOrganizationVaults,
   listVaultsForSubject,
+  moveVaultItem,
   readVaultFieldCiphertext,
   resolveSecretReferenceCandidates,
   setSessionVaultPolicy,
@@ -506,6 +508,56 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         select count(*)::int as count from audit_events
         where action = 'vault.field.revealed' and target_id = ${memberItemId}`;
       expect(after[0]!.count - before[0]!.count).toBe(1);
+    });
+
+    test("use-only: the database refuses to reveal or read out a marked item (1563)", async () => {
+      if (!client) return;
+      const asMember = world.subject(world.member.subjectId);
+      const marked = await upsertVaultItem(world.db, asMember, {
+        vaultId: world.vaults.memberOnly.id,
+        name: "USE_ONLY_DB",
+        type: "api_key",
+        fields: [
+          {
+            name: "value",
+            kind: "concealed",
+            valueEncrypted: encryptEnvironmentValue(Buffer.alloc(32, 7), "use-only-db"),
+            valueSize: 11,
+          },
+        ],
+        useOnly: true,
+      });
+      const fieldId = marked.fields[0]!.id;
+      expect((await listVaultItemsUseOnly(world.db, asMember, [marked.id])).has(marked.id)).toBe(
+        true,
+      );
+      // Even a caller that skips the service's check (a server on an older
+      // release) is refused, and nothing is audited as revealed.
+      for (const purpose of ["reveal", "agent_read"] as const) {
+        const error = await expectVaultError(
+          readVaultFieldCiphertext(world.db, asMember, { fieldId, purpose }),
+          "vault_permission_denied",
+        );
+        expect(error.details).toMatchObject({ reason: "use_only" });
+      }
+      const audits = await world.admin<{ count: number }[]>`
+        select count(*)::int as count from audit_events
+        where action = 'vault.field.revealed' and target_id = ${marked.id}`;
+      expect(audits[0]!.count).toBe(0);
+      // Delivery by reference still reads it.
+      const used = await readVaultFieldCiphertext(world.db, asMember, {
+        fieldId,
+        purpose: "internal",
+      });
+      expect(used.valueEncrypted).toBeTruthy();
+      // A copy of a marked item is marked in the same transaction.
+      const copy = await moveVaultItem(world.db, asMember, {
+        itemId: marked.id,
+        targetVaultId: world.vaults.memberOnly.id,
+        mode: "copy",
+        newName: "USE_ONLY_DB_COPY",
+      });
+      expect((await listVaultItemsUseOnly(world.db, asMember, [copy.id])).has(copy.id)).toBe(true);
     });
 
     test("AX-8: a stale execution generation cannot resolve", async () => {

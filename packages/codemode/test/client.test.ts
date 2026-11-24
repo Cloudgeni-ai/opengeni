@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { readFile, rm } from "node:fs/promises";
-import { dirname } from "node:path";
+import { chmod, mkdtemp, readdir, readFile, rm, stat, symlink, utimes } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
+  CODEMODE_REFUSED_BEARER_DIRECTORY_PREFIX,
   CodemodeClient,
   CodemodeApprovalPendingError,
   CodemodeOperationError,
@@ -11,6 +13,8 @@ import {
   createAttemptToolEnvironment,
   environmentCodemodeClient,
   isCodemodeCallerStaleError,
+  codemodeRefusedBearerKey,
+  temporaryCodemodeRefusedBearerStore,
   type AttemptToolDefinition,
 } from "../src";
 
@@ -785,6 +789,144 @@ describe("CodemodeClient", () => {
     bearer = "renewed-attempt-bearer";
     expect((await client.catalog()).digest).toBe(catalog.digest);
     expect(requests).toHaveLength(2);
+  });
+
+  test("a bearer refused with 401 is never sent again, also from another process", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const root = await mkdtemp(join(tmpdir(), "opengeni-codemode-refusals-"));
+    try {
+      const requests: string[] = [];
+      const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const authorization = new Headers(init?.headers).get("authorization") ?? "";
+        requests.push(`${new URL(String(input)).pathname} ${authorization}`);
+        if (authorization === "Bearer live-bearer") return Response.json(catalog);
+        return Response.json(
+          {
+            error: {
+              status: 401,
+              code: "unauthenticated",
+              message: "authentication required",
+              details: { code: "credential_invalid" },
+            },
+          },
+          { status: 401 },
+        );
+      }) as typeof fetch;
+      const baseUrl = "https://api.example.test/refused-401/codemode";
+      const store = temporaryCodemodeRefusedBearerStore(root);
+      const client = new CodemodeClient({
+        baseUrl,
+        token: "expired-bearer",
+        fetch: fetchStub,
+        refusedBearers: store,
+      });
+      for (let index = 0; index < 5; index += 1) {
+        expect(await client.catalog().catch((error: unknown) => error)).toMatchObject({
+          status: 401,
+          remoteCode: "credential_invalid",
+          message: "authentication required",
+        });
+      }
+      expect(requests).toHaveLength(1);
+      const key = codemodeRefusedBearerKey(`${baseUrl}/`, "expired-bearer");
+      expect(await store.read(key)).toEqual({
+        status: 401,
+        code: "credential_invalid",
+        message: "authentication required",
+      });
+      const markerDirectory = (await readdir(root))[0]!;
+      const marker = await readFile(join(root, markerDirectory, key), "utf8");
+      expect(marker).not.toContain("expired-bearer");
+      if (process.getuid) {
+        expect((await stat(join(root, markerDirectory))).mode & 0o777).toBe(0o700);
+        expect((await stat(join(root, markerDirectory, key))).mode & 0o777).toBe(0o600);
+      }
+
+      // Another process only has the marker, not this process's memory.
+      const otherProcessKey = codemodeRefusedBearerKey(baseUrl, "other-process-bearer");
+      await store.record(otherProcessKey, {
+        status: 403,
+        code: "agent_attempt_caller_stale",
+        message: "This process's tool access belongs to a turn attempt that is no longer active.",
+      });
+      const fresh = new CodemodeClient({
+        baseUrl,
+        token: "other-process-bearer",
+        fetch: fetchStub,
+        refusedBearers: temporaryCodemodeRefusedBearerStore(root),
+      });
+      expect(isCodemodeCallerStaleError(await fresh.catalog().catch((error) => error))).toBe(true);
+      expect(requests).toHaveLength(1);
+
+      // Refusals that can clear are never remembered, and a live bearer is sent.
+      await store.record(codemodeRefusedBearerKey(baseUrl, "live-bearer"), {
+        status: 403,
+        code: "missing_permission",
+        message: "missing permission",
+      });
+      const live = new CodemodeClient({
+        baseUrl,
+        token: "live-bearer",
+        fetch: fetchStub,
+        refusedBearers: store,
+      });
+      expect((await live.catalog()).digest).toBe(catalog.digest);
+      expect(requests).toHaveLength(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the refusal memory ignores a directory or marker it does not privately own", async () => {
+    // agent/crates/opengeni-agent/src/codemode.rs pins the same vector: both
+    // command-line clients read and write the same markers.
+    expect(
+      codemodeRefusedBearerKey(
+        "https://api.example.test/v1/workspaces/ws/codemode",
+        "attempt-bearer",
+      ),
+    ).toBe("13e7038274c51ab79fbb2cb6d04668e68bd7ffbb177d983532b526691d4ae784");
+    if (!process.getuid) return;
+    const root = await mkdtemp(join(tmpdir(), "opengeni-codemode-refusals-"));
+    try {
+      const store = temporaryCodemodeRefusedBearerStore(root);
+      const key = codemodeRefusedBearerKey("https://api.example.test", "bearer");
+      const refusal = { status: 401, message: "authentication required" };
+      await store.record(key, refusal);
+      expect(await store.read(key)).toEqual(refusal);
+      const directory = join(root, (await readdir(root))[0]!);
+      await chmod(directory, 0o755);
+      expect(await store.read(key)).toBeNull();
+      await chmod(directory, 0o700);
+      // An expired marker is dropped.
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await utimes(join(directory, key), old, old);
+      expect(await store.read(key)).toBeNull();
+      expect(await readdir(directory)).toEqual([]);
+      // A symlinked directory is never trusted.
+      const elsewhere = await mkdtemp(join(tmpdir(), "opengeni-codemode-refusals-target-"));
+      const linkedRoot = await mkdtemp(join(tmpdir(), "opengeni-codemode-refusals-linked-"));
+      try {
+        await chmod(elsewhere, 0o700);
+        await symlink(
+          elsewhere,
+          join(linkedRoot, `${CODEMODE_REFUSED_BEARER_DIRECTORY_PREFIX}${process.getuid()}`),
+        );
+        const linked = temporaryCodemodeRefusedBearerStore(linkedRoot);
+        await linked.record(key, refusal);
+        expect(await readdir(elsewhere)).toEqual([]);
+        expect(await linked.read(key)).toBeNull();
+      } finally {
+        await rm(elsewhere, { recursive: true, force: true });
+        await rm(linkedRoot, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("calls the exact catalog identity through a lazy namespace without parsing wire names", async () => {

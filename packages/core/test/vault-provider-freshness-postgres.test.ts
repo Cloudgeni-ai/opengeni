@@ -431,12 +431,16 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       expect(await read()).toEqual({ type: "text", value: "company-secret" });
       expect(w.controls.epochs.at(-1)).toBe(String(epoch));
       const card = await w.item(w.company, "Company card");
-      await w.service.revealField(w.actor, w.workspaceId, card.fields[0]!.id, {});
+      await w.service.revealField(w.actor, w.workspaceId, card.fields[0]!.id, { itemId: card.id });
       expect(w.controls.epochs.at(-1)).toBe(String(epoch));
-      await w.service.readForAgent(w.principal, { reference: "Company/Company card/value" }, [
-        "secrets:read",
-      ]);
-      expect(w.controls.epochs.at(-1)).toBe(String(epoch));
+      // Agents use connected values but never see them: refused before any read.
+      const readsBefore = w.calls("readFields");
+      await expect(
+        w.service.readForAgent(w.principal, { reference: "Company/Company card/value" }, [
+          "secrets:read",
+        ]),
+      ).rejects.toMatchObject({ code: "vault_permission_denied" });
+      expect(w.calls("readFields")).toBe(readsBefore);
       await syncLinkedProviderVault({
         db: w.db,
         context: w.context,
@@ -1003,12 +1007,21 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       expect((await w.host.listItems(direct, "company")).map((item) => item.name)).not.toContain(
         "Company card",
       );
-      const copiedValue = await w.service.readForAgent(
-        w.principal,
-        { reference: "Team/Company card/value" },
-        ["secrets:read"],
-      );
-      expect(copiedValue.value).toBe("company-secret");
+      // The agent couldn't see the connected item, so what it moved is use-only.
+      await expect(
+        w.service.readForAgent(w.principal, { reference: "Team/Company card/value" }, [
+          "secrets:read",
+        ]),
+      ).rejects.toMatchObject({ details: expect.objectContaining({ reason: "use_only" }) });
+      const [copied] = [
+        ...(
+          await w.resolver().resolve([reference("Team/Company card/value")], {
+            surface: "browser",
+            toolName: "browser_act",
+          })
+        ).values(),
+      ];
+      expect(copied!.material).toEqual({ type: "text", value: "company-secret" });
     });
 
     test("restore, permanent deletion and field history are never sent to a provider", async () => {

@@ -347,6 +347,8 @@ async function resetOnePasswordFakeProvidersForTests() {
   onePassword.resetOnePasswordFakeProvidersForTests();
 }
 
+const REVEALER: Permission[] = ["secrets:list", "secrets:write", "secrets:use", "workspace:admin"];
+
 async function call(
   workspace: Workspace,
   method: string,
@@ -444,7 +446,8 @@ describe("provider vault link, sync and managed vaults", () => {
       workspace,
       "POST",
       `/vaults/${linked.body.id}/items/${github.id}/fields/${password.id}/reveal`,
-      { body: {} },
+      // Connected items have no saver in Opengeni: only an admin sees their values.
+      { body: {}, permissions: [...REVEALER] },
     );
     expect(revealed.status).toBe(200);
     expect(typeof revealed.body.value).toBe("string");
@@ -453,7 +456,7 @@ describe("provider vault link, sync and managed vaults", () => {
       workspace,
       "POST",
       `/vaults/${linked.body.id}/items/${github.id}/fields/${otp.id}/reveal`,
-      { body: {} },
+      { body: {}, permissions: [...REVEALER] },
     );
     expect(code.body.totp.code).toMatch(/^\d{6}$/);
 
@@ -873,7 +876,7 @@ describe("provider vault link, sync and managed vaults", () => {
       workspace,
       "POST",
       `${vaultPath}/items/${created.body.id}/fields/${password.id}/reveal`,
-      { body: {} },
+      { body: {}, permissions: [...REVEALER] },
     );
     expect(revealed.body.value).toHaveLength(24);
     expect((await call(workspace, "GET", vaultPath)).body.itemCount).toBe(7);

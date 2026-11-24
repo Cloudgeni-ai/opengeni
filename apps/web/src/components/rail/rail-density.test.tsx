@@ -138,57 +138,38 @@ async function render(node: ReactNode) {
   return { container, root };
 }
 
-function moreDisclosure(container: HTMLElement): HTMLButtonElement {
+function setupDisclosure(container: HTMLElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "More",
+    (candidate) => candidate.textContent?.trim() === "Setup",
   );
-  if (!button) throw new Error("Missing More disclosure");
-  return button;
-}
-
-function lessButton(container: HTMLElement): HTMLButtonElement {
-  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Less",
-  );
-  if (!button) throw new Error("Missing Less control");
+  if (!button) throw new Error("Missing Setup group");
   return button;
 }
 
 describe("session-first rail density", () => {
-  test("shows all shortcuts on tall screens regardless of the saved compact choice", async () => {
+  test("shows the shortcuts and a closed Setup group, ignoring the old compact choice", async () => {
     window.localStorage.setItem("opengeni.rail.nav", "false");
+    window.localStorage.removeItem("opengeni.rail.setup");
     const rendered = await render(<PrimaryNav />);
     try {
       expect(rendered.container.textContent).not.toContain("For you");
-      expect(rendered.container.textContent).toContain("Capabilities");
+      expect(rendered.container.textContent).toContain("Apps");
+      // Everything else is one closed Setup group.
+      expect(rendered.container.textContent).not.toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        6,
+        2,
       );
-      expect(rendered.container.querySelector("button[aria-expanded]")).toBeNull();
+      const setup = setupDisclosure(rendered.container);
+      expect(setup.getAttribute("aria-expanded")).toBe("false");
+      await act(async () => setup.click());
+      expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
+        8,
+      );
+      expect(rendered.container.textContent).toContain("Capabilities");
+      expect(window.localStorage.getItem("opengeni.rail.setup")).toBe("true");
     } finally {
+      window.localStorage.removeItem("opengeni.rail.setup");
       await act(async () => rendered.root.unmount());
-    }
-  });
-
-  test("offers More and Less on short screens and remembers the compact-screen choice", async () => {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
-    const first = await render(<PrimaryNav />);
-    try {
-      expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
-      await act(async () => moreDisclosure(first.container).click());
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(6);
-      expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
-      await act(async () => lessButton(first.container).click());
-      expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
-    } finally {
-      await act(async () => first.root.unmount());
-    }
-    const persisted = await render(<PrimaryNav />);
-    try {
-      expect(moreDisclosure(persisted.container).getAttribute("aria-expanded")).toBe("false");
-    } finally {
-      await act(async () => persisted.root.unmount());
     }
   });
 
@@ -209,8 +190,9 @@ describe("session-first rail density", () => {
     const workspace = await render(<WorkspaceShortcutLinks />);
     try {
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        6,
+        2,
       );
+      expect(setupDisclosure(workspace.container).getAttribute("aria-expanded")).toBe("false");
       expect(railShell).toMatch(
         /id=\{`\$\{mobileNavId\}-panel-workspace`\}[\s\S]*?\{mobileWorkspacePanel\}/,
       );
@@ -224,19 +206,15 @@ describe("session-first rail density", () => {
     }
   });
 
-  test("identifies an active shortcut when the compact disclosure hides its link", async () => {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
-    window.localStorage.setItem("opengeni.rail.nav", "false");
+  test("keeps the shortcuts on short screens and shows the current Setup page while closed", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
     pathname = "/workspaces/workspace-1/plugins";
     const rendered = await render(<PrimaryNav />);
     try {
-      const disclosure = moreDisclosure(rendered.container);
-      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-      expect(disclosure.getAttribute("data-active")).toBe("true");
-      expect(disclosure.getAttribute("aria-label")).toBe("More, current section Capabilities");
-      expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        0,
-      );
+      expect(rendered.container.textContent).not.toContain("More");
+      expect(setupDisclosure(rendered.container).getAttribute("aria-expanded")).toBe("false");
+      expect(rendered.container.textContent).toContain("Capabilities");
+      expect(rendered.container.textContent).not.toContain("Meetings");
     } finally {
       await act(async () => rendered.root.unmount());
       rendered.container.remove();

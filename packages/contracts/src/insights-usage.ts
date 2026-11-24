@@ -89,6 +89,8 @@ export const InsightsUsageGroupBy = /* @__PURE__ */ defineSchema(() =>
     "person",
     "schedule",
     "source",
+    /** The agent each chat was started for; a worker's usage counts toward its root chat's agent. */
+    "agent",
   ]),
 );
 export type InsightsUsageGroupBy = z.infer<typeof InsightsUsageGroupBy>;
@@ -364,6 +366,8 @@ export const WorkspaceInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       ...Filters,
+      /** The agent a chat was started for, by its root chat; matches only usage the caller may see. */
+      agentId: repeated(Identifier),
       groupBy: InsightsUsageGroupBy.default("model"),
       seriesGroups: QueryBoolean.optional(),
       limit: queryLimit(200),
@@ -378,6 +382,8 @@ export const OrganizationInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       ...Filters,
+      /** The agent a chat was started for, by its root chat; matches only usage the caller may see. */
+      agentId: repeated(Identifier),
       groupBy: InsightsUsageGroupBy.default("model"),
       seriesGroups: QueryBoolean.optional(),
       limit: queryLimit(200),
@@ -656,6 +662,11 @@ export const InsightsUsageFacets = /* @__PURE__ */ defineSchema(() =>
           .strict(),
       ),
       schedules: z.array(z.object({ id: Identifier, name: primitives.string }).strict()),
+      /**
+       * Agents the caller may see that have usage in the range. Capability
+       * marker: servers that answer groupBy=agent and agentId send it.
+       */
+      agents: z.array(z.object({ id: Identifier, name: primitives.string }).strict()).optional(),
     })
     .strict(),
 );

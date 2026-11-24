@@ -5,6 +5,7 @@ import cveScanner from "./cve-scanner.agent.json";
 import dependencyUpdater from "./dependency-updater.agent.json";
 import incidentResponder from "./incident-responder.agent.json";
 import prReviewer from "./pr-reviewer.agent.json";
+import productAnalyst from "./product-analyst.agent.json";
 import triage from "./triage.agent.json";
 
 /**
@@ -22,6 +23,7 @@ const AGENT_TEMPLATE_FILES: readonly unknown[] = [
   cveScanner,
   incidentResponder,
   dependencyUpdater,
+  productAnalyst,
 ];
 
 let parsed: readonly AgentTemplate[] | undefined;

@@ -340,6 +340,7 @@ export function fixtureUsage(
         { key: "person-2", name: "Ada Lovelace", you: false },
       ],
       schedules: [{ id: "55555555-0000-4000-8000-000000000001", name: "Nightly triage" }],
+      agents: [{ id: "66666666-0000-4000-8000-000000000001", name: "PR reviewer" }],
       sources: ["web", "api", "slack", "schedule", "agent"],
     },
     capabilities: {
@@ -352,6 +353,7 @@ export function fixtureUsage(
         "rootSession",
         "person",
         "schedule",
+        "agent",
         "source",
       ],
       filters: [
@@ -363,6 +365,7 @@ export function fixtureUsage(
         "person",
         "rootSessionId",
         "scheduleId",
+        "agentId",
         "source",
       ],
       ranges: ["1h", "3h", "24h", "today", "week", "month", "30d", "90d", "ytd", "custom"],

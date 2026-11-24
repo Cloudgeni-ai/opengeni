@@ -10,6 +10,7 @@ describe("ready-made agents", () => {
       "cve-scanner",
       "incident-responder",
       "dependency-updater",
+      "product-analyst",
     ]);
   });
 

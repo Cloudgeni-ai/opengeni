@@ -1067,7 +1067,7 @@
     {
       "type": "timeseries",
       "title": "Node memory and I/O PSI stall ratio",
-      "description": "Fraction of wall time all runnable work was stalled on memory reclaim/swap or I/O. Sustained values above 0.10 indicate host-wide contention rather than an isolated service failure.",
+      "description": "Fraction of wall time runnable work was stalled on memory reclaim/swap or I/O, plus how busy the disk behind the OS, kubelet and container-runtime filesystems is. Sustained memory PSI above 0.10 indicates host-wide contention. I/O PSI is host-wide only while the system disk is busy too; I/O PSI with an idle system disk usually means one pod is waiting on its own attached volume.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1111,6 +1111,17 @@
           "refId": "B",
           "expr": "opengeni:node_io_psi_stall_ratio and on (node) opengeni:workload_node:present",
           "legendFormat": "{{node}} I/O",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "opengeni:node_system_disk_busy_ratio and on (node) opengeni:workload_node:present",
+          "legendFormat": "{{node}} system disk busy",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
