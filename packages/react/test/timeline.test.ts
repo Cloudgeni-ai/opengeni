@@ -452,7 +452,6 @@ describe("buildTimeline", () => {
 
   test.each([
     [{ waitReason: "no_eligible_capacity" }],
-    [{ waitReason: "pinned_account_unavailable" }],
     [{ waitReason: "compaction_provider_locked" }],
     [{ code: "claude_account_rate_limited", provider: "claude" }],
   ] as const)(
@@ -469,6 +468,33 @@ describe("buildTimeline", () => {
       }
     },
   );
+
+  test("a wait on the chat's pinned account keeps its explanation, not the model-switch line", () => {
+    reset();
+    const explanation =
+      "This chat is pinned to the Claude account “Team”, which has no capacity right now. It continues by itself when that account has room again, or sooner on another account once the chat is switched back to automatic account choice.";
+    const [claude] = buildTimeline(englishText, [
+      event("turn.capacity_waiting", {
+        provider: "claude-subscription",
+        waitReason: "pinned_account_unavailable",
+        error: explanation,
+        detail: "internal note",
+      }),
+    ]);
+    expect(claude).toMatchObject({
+      text: explanation,
+      capacityWait: { label: "Waiting", detail: explanation },
+    });
+    expect(JSON.stringify(claude)).not.toContain("another model");
+    // Codex records its readable sentence as `detail`.
+    const [codex] = buildTimeline(englishText, [
+      event("codex.capacity.waiting", {
+        waitReason: "pinned_account_unavailable",
+        detail: explanation,
+      }),
+    ]);
+    expect(codex).toMatchObject({ text: explanation });
+  });
 
   test("a capacity wait row has no clock; approval and agent waits keep theirs", () => {
     reset();

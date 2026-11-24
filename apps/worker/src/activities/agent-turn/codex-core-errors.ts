@@ -5,7 +5,7 @@ import {
 } from "@opengeni/db";
 import type {
   ProviderCapacityWaitReason,
-  SubscriptionReconnectAccount,
+  SubscriptionWaitAccount,
 } from "@opengeni/contracts/subscription-capacity-wait";
 import type { WaitReason } from "@opengeni/subscriptions";
 import { productLabelForModelId } from "@opengeni/config";
@@ -75,9 +75,10 @@ export class SubscriptionCoreCodexTurnError extends Error {
 
 const WAIT_COPY = (
   name: string,
+  account?: SubscriptionWaitAccount,
 ): Partial<Record<SubscriptionCapacityWaitReason, string>> & Record<WaitReason, string> => ({
   pinned_account_disabled: `The ${name} account pinned to this chat is turned off. Turn it back on, choose another account, or switch the chat to automatic. Waiting alone will not fix this.`,
-  pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. Send a new message once it is available again, or switch the session back to automatic.`,
+  pinned_account_unavailable: `This chat is pinned to the ${name} account${account ? ` ${account.label}` : ""}, which has no capacity right now. Switch the chat back to automatic account choice to continue on another account, or send a new message once that account has room again.`,
   pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. Choose another account or switch the session back to automatic.`,
   no_eligible_capacity: `No ${name} subscription has capacity for this turn right now. Send a new message once an account is available again.`,
   model_not_allowed: `This model is not allowed for the ${name} subscriptions available here.`,
@@ -96,7 +97,7 @@ export function subscriptionCoreCapacityWaitPayload(
   reason: SubscriptionCapacityWaitReason,
   earliestResetAt: Date | null,
   displayName: string = DEFAULT_DISPLAY_NAME,
-  account?: SubscriptionReconnectAccount,
+  account?: SubscriptionWaitAccount,
 ): Record<string, unknown> {
   return {
     error: subscriptionCapacityWaitReasonText(reason, displayName, account),
@@ -151,12 +152,12 @@ export function subscriptionCoreCapacityFailure(
   reason: SubscriptionCapacityWaitReason,
   earliestResetAt: Date | null,
   displayName: string = DEFAULT_DISPLAY_NAME,
-  account?: SubscriptionReconnectAccount,
+  account?: SubscriptionWaitAccount,
 ): SubscriptionCoreCodexTurnError {
   return new SubscriptionCoreCodexTurnError(
     {
       error:
-        WAIT_COPY(displayName)[reason] ??
+        WAIT_COPY(displayName, account)[reason] ??
         subscriptionCapacityWaitReasonText(reason, displayName, account)!,
       code: "subscription_capacity_unavailable",
       retryable: false,

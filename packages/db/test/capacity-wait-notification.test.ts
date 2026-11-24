@@ -46,22 +46,38 @@ describe("the person's capacity-wait notification", () => {
       provider: "codex",
       resetsAt,
       waitReason,
-      reconnectAccount: { label: "“Primary”", personal: false },
+      waitAccount: { label: "“Primary”", personal: false },
     });
     expect(body).toStartWith(text);
     expect(body).not.toContain("busy");
   });
 
-  test("a wait with another reason keeps its own explanation", () => {
+  test("a chat pinned to an account names it and offers automatic account choice, not a model", () => {
     const pinned = capacityWaitNotificationPayload({
       turnId,
+      provider: "claude",
+      resetsAt: new Date("2026-11-28T18:00:00.000Z"),
+      waitReason: "pinned_account_unavailable",
+      waitAccount: { label: "“Team Max”", personal: false },
+    });
+    expect(pinned.title).toBe("Chat waiting for its pinned Claude account");
+    expect(pinned.body).toBe(
+      "This chat is pinned to the Claude account “Team Max”, which has no capacity until about 2026-11-28 18:00 UTC. It continues by itself then, or sooner on another account once the chat is switched back to automatic account choice.",
+    );
+    expect(pinned.body).not.toContain("model");
+    // Unnamed (no label, or only an email) and with no known reset.
+    const unnamed = capacityWaitNotificationPayload({
+      turnId,
       provider: "codex",
-      resetsAt: new Date("2026-11-14T08:46:34.000Z"),
+      resetsAt: null,
       waitReason: "pinned_account_unavailable",
     });
-    expect(pinned.body).toBe(
-      "The Codex account chosen for this session is unavailable right now. This turn continues automatically once it is available again. Expected around 2026-11-14 08:46 UTC. To continue sooner, switch the chat to another model; its waiting turn continues on that model.",
+    expect(unnamed.body).toBe(
+      "This chat is pinned to the Codex account, which has no capacity right now. It continues by itself when that account has room again, or sooner on another account once the chat is switched back to automatic account choice.",
     );
+  });
+
+  test("a wait with another reason keeps its own explanation", () => {
     // A wait only a person can end says how, and promises nothing by itself.
     const disabled = capacityWaitNotificationPayload({
       turnId,
@@ -72,5 +88,6 @@ describe("the person's capacity-wait notification", () => {
     expect(disabled.body).toBe(
       "The Codex account pinned to this chat is turned off. Turn it back on, choose another account, or switch the chat to automatic. Waiting alone will not fix this.",
     );
+    expect(disabled.title).toBe("Chat waiting for its pinned Codex account");
   });
 });

@@ -74,10 +74,7 @@ export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
-import {
-  isProviderCapacityWaitReason,
-  type SubscriptionReconnectAccount,
-} from "@opengeni/contracts/subscription-capacity-wait";
+import type { SubscriptionWaitAccount } from "@opengeni/contracts/subscription-capacity-wait";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -1363,6 +1360,7 @@ import {
   capacityWaitNotificationPayload,
   readCapacityWaitNotice,
   subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitHasOwnExplanation,
   subscriptionCapacityWaitReasonText,
   withoutCapacityWaitNotice,
 } from "./capacity-wait-attention";
@@ -28046,7 +28044,7 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
   goalId?: string | null;
   goalVersion?: number | null;
   waitReason: string;
-  reconnectAccount?: SubscriptionReconnectAccount;
+  waitAccount?: SubscriptionWaitAccount;
   earliestResetAt: Date | null;
   healthRetryAt?: Date | null;
   /** From a fresh failover-aware accepted-turn evaluation; never caller authority.
@@ -28214,8 +28212,8 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
-        const explanation = isProviderCapacityWaitReason(input.waitReason)
-          ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.reconnectAccount) ??
+        const explanation = subscriptionCapacityWaitHasOwnExplanation(input.waitReason)
+          ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.waitAccount) ??
             undefined)
           : undefined;
         const attention = capacityWaitAttention({
@@ -28232,7 +28230,7 @@ export async function armSubscriptionCoreCapacityWait(
                   provider,
                   resetsAt: attention.resetsAt,
                   waitReason: input.waitReason,
-                  ...(input.reconnectAccount ? { reconnectAccount: input.reconnectAccount } : {}),
+                  ...(input.waitAccount ? { waitAccount: input.waitAccount } : {}),
                 }),
               )
             : null;
@@ -28475,6 +28473,7 @@ export async function armSubscriptionCoreCapacityWait(
             provider,
             nextCheckAt,
             resetsAt: attention.resetsAt,
+            waitReason: input.waitReason,
             ...(explanation ? { explanation } : {}),
           });
         }
@@ -28500,7 +28499,7 @@ export type SubscriptionCoreCodexWaitEvaluation =
   | {
       kind: "wait";
       waitReason: string;
-      reconnectAccount?: SubscriptionReconnectAccount;
+      waitAccount?: SubscriptionWaitAccount;
       earliestResetAt: Date | null;
       healthRetryAt: Date | null;
       /** Entire freshly derived candidate set, not a union with stored hints. */
@@ -28790,9 +28789,9 @@ export async function reconcileSubscriptionCoreCapacityWait(
           const reasonText = subscriptionCapacityWaitReasonText(
             waitEvaluation.waitReason,
             vocabulary.label,
-            waitEvaluation.reconnectAccount,
+            waitEvaluation.waitAccount,
           );
-          const explanation = isProviderCapacityWaitReason(waitEvaluation.waitReason)
+          const explanation = subscriptionCapacityWaitHasOwnExplanation(waitEvaluation.waitReason)
             ? (reasonText ?? undefined)
             : undefined;
           // Whoever was told when the wait ends (a top-level chat's person,
@@ -28850,8 +28849,8 @@ export async function reconcileSubscriptionCoreCapacityWait(
                     provider: waiter.provider,
                     resetsAt: attention!.resetsAt,
                     waitReason: waitEvaluation.waitReason,
-                    ...(waitEvaluation.reconnectAccount
-                      ? { reconnectAccount: waitEvaluation.reconnectAccount }
+                    ...(waitEvaluation.waitAccount
+                      ? { waitAccount: waitEvaluation.waitAccount }
                       : {}),
                   }),
                   // Same key: the open notification is updated in place, silently.
@@ -28942,6 +28941,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
               provider: waiter.provider,
               nextCheckAt,
               resetsAt: attention!.resetsAt,
+              waitReason: waitEvaluation.waitReason,
               restatement,
               ...(explanation ? { explanation } : {}),
             });
@@ -95575,6 +95575,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
+    waitReason: string;
     explanation?: string;
     restatement?: { restatedResetsAt: string | null; restatedReasonSequence?: number };
   },
@@ -95596,7 +95597,9 @@ async function enqueueChildWaitingCapacityOutboxTx(
     }),
     kind: "child_waiting_capacity",
     classification: "info",
-    summary: childWaitingCapacitySummary(session.id, payload, input.explanation),
+    summary: childWaitingCapacitySummary(session.id, payload, input.explanation, {
+      waitReason: input.waitReason,
+    }),
     payload,
     lineage: { turnId: input.turnId },
   });
