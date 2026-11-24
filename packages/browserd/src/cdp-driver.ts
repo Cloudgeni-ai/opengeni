@@ -658,9 +658,13 @@ type ActionBudget = {
 };
 const actionBudget = new AsyncLocalStorage<ActionBudget>();
 
-/** An action's page reads used up its time; see ACTION_REPLY_MARGIN_MS. */
+/** An action's page reads used up its time; see ACTION_REPLY_MARGIN_MS.
+ * `sent` is false when the command was refused before it reached the page. */
 class ActionBudgetSpentError extends InteractionControllerError {
-  constructor(readonly seconds: number) {
+  constructor(
+    readonly seconds: number,
+    readonly sent = true,
+  ) {
     super("tab_not_responding", `the page did not answer within the action's ${seconds} seconds`);
     this.name = "ActionBudgetSpentError";
   }
@@ -687,7 +691,7 @@ function budgetedConnection(
           if (!budget.active || options?.sessionId === undefined || method.startsWith("Input."))
             return await target.send<T>(method, params, options);
           const remaining = budget.deadlineAt - Date.now();
-          if (remaining <= 0) throw new ActionBudgetSpentError(budget.seconds);
+          if (remaining <= 0) throw new ActionBudgetSpentError(budget.seconds, false);
           try {
             return await target.send<T>(method, params, {
               ...options,
@@ -9801,15 +9805,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeScroll;
       throw scrollRefusal(error.message) ?? error;
     }
-    const boxAfter =
-      boxBefore === null ? null : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
-    const unscrolled =
-      scrollBefore !== null
-        ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
-        : boxBefore !== null &&
-          boxAfter !== null &&
-          Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
-    state.actionEffectCount = effectsBeforeScroll;
+    let unscrolled: boolean;
+    try {
+      const boxAfter =
+        boxBefore === null
+          ? null
+          : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
+      unscrolled =
+        scrollBefore !== null
+          ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+          : boxBefore !== null &&
+            boxAfter !== null &&
+            Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
+    } finally {
+      // The scroll is not input, also when measuring it fails (a page that
+      // stops answering, an action out of time): no input was sent yet.
+      state.actionEffectCount = effectsBeforeScroll;
+    }
     // The page reacts to a scroll on its next frames (a sticky header that
     // shrinks once the page scrolls, and the content it moves), so after one
     // the target is measured only once it has stopped moving.
@@ -11776,7 +11788,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * time must answer now, so the settle waits end at once instead of at their
    * bound. */
   private keepsSettling(state: TargetState): boolean {
-    return this.states.get(state.targetId) === state && !actionBudgetSpent();
+    return this.attached(state) && !actionBudgetSpent();
+  }
+
+  /** Whether `state` is still this tab's attachment. A tab that closed (a
+   * popup its page closed, say) or lost its attachment has nothing left to
+   * settle. */
+  private attached(state: TargetState): boolean {
+    return this.states.get(state.targetId) === state;
   }
 
   /**
@@ -12041,8 +12060,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.sessionId,
       );
     });
-    if (options.potentialEffect !== false && method !== "Page.getNavigationHistory")
-      state.actionEffectCount += 1;
+    const effect = options.potentialEffect !== false && method !== "Page.getNavigationHistory";
+    if (effect) state.actionEffectCount += 1;
     const command = connection.send<T>(method, params, {
       sessionId: options.sessionId ?? this.commandSession(state, method),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -12058,6 +12077,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new DialogOpenedSignal("browser action opened a JavaScript dialog");
       }
       return result.value;
+    } catch (error) {
+      // Refused at the action's deadline before it was sent: no effect.
+      if (effect && error instanceof ActionBudgetSpentError && !error.sent)
+        state.actionEffectCount -= 1;
+      throw error;
     } finally {
       unsubscribe();
     }
