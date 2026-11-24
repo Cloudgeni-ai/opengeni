@@ -17,7 +17,7 @@ import { Hono } from "hono";
 import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 
-// Usage by agent (migration 1563): per-agent totals come from the same model
+// Usage by agent (migration 1564): per-agent totals come from the same model
 // call facts and credit debits as every other grouping, attributed by the
 // ROOT chat's agent, and an agent's name shows only to people who may see it.
 const secret = "insights-usage-agents-postgres";

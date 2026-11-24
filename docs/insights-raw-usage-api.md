@@ -34,7 +34,7 @@ facets contain only visible metadata. Deleted and restricted usage are distinct.
 Call details are visible-only, with filtering before cursor and limit.
 
 Usage groups by agent (`groupBy=agent`) and filters by `agentId` (migration
-1563). A row's agent is its ROOT chat's `sessions.agent_id`, so child workers
+1564). A row's agent is its ROOT chat's `sessions.agent_id`, so child workers
 count toward the agent of the chat that started them. Only visible rows carry
 `agentId`; `agentName` is set only for a shared agent or an Only me agent the
 caller (or the person a turn acts for) owns, otherwise the group reads

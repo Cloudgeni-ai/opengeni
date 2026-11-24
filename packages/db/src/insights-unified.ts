@@ -239,7 +239,7 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootTitle','Untitled chat')`,
     person: sql`coalesce(payload->>'personName','Service')`,
     schedule: sql`coalesce(payload->>'scheduleName',case when payload->>'scheduleId' is null then 'Interactive' else 'Unavailable schedule' end)`,
-    // agentName is set only for agents the caller may see (migration 1563).
+    // agentName is set only for agents the caller may see (migration 1564).
     agent: sql`coalesce(payload->>'agentName',case when payload->>'agentId' is null then 'No agent' else 'Unavailable agent' end)`,
   };
   if (!Object.hasOwn(keys, groupBy)) {
