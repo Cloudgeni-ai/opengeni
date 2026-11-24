@@ -164,6 +164,13 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   popup_option_without_text: "unsupported",
 };
 
+/** CUA codes for a request refused before anything ran, reported as an
+ * error rather than as a refused effect. macOS launch_app names no installed
+ * app this way: nothing was launched or activated. */
+const refusedBeforeEffect: Record<string, ComputerBackendErrorCode> = {
+  APP_NOT_INSTALLED: "invalid_action",
+};
+
 /** A failure CUA reported itself, with CUA's own code, so the backend can
  * recognize a refusal without reading CUA's wording. */
 export class CuaFailure extends ComputerBackendError {
@@ -476,15 +483,18 @@ export async function callDesktop(
     effect === "suspected_noop"
   ) {
     // A write CUA reports as not applied changed nothing, like a refusal.
-    const refused = effect === "refused" || effect === "not_applied";
     const code = refusal.success
       ? refusal.data.code
       : error.success
         ? error.data.code
         : typeof data.code === "string"
           ? data.code
-          : result.errorCode;
-    const mapped = code ? errorCodes[code] : undefined;
+          : typeof data.error === "string"
+            ? data.error
+            : result.errorCode;
+    const refusedEarly = code ? refusedBeforeEffect[code] : undefined;
+    const refused = effect === "refused" || effect === "not_applied" || refusedEarly !== undefined;
+    const mapped = code ? (refusedEarly ?? errorCodes[code]) : undefined;
     const reason = cuaFailureReason(result, data);
     throw new CuaFailure(
       mutation && !refused ? "outcome_unknown" : (mapped ?? "driver_failed"),

@@ -2981,14 +2981,19 @@ export function createInteractionAttemptToolDefinitions(
       }
       if (!includeScreenshot)
         return notes.length ? new InteractionExecutionResult(result, notes) : result;
-      // With a launched app, its window; otherwise the screen.
-      const target = appWindow ?? openedScreenshotTarget(opened.targets);
+      // With a launched app, its window; otherwise the screen. A named app
+      // with no observed window gets the screen only: another app's window
+      // would pass for the app's.
+      const target =
+        appWindow ?? openedScreenshotTarget(opened.targets, { screenOnly: Boolean(applicationId) });
       if (!target)
         return new InteractionExecutionResult(result, [
           ...notes,
           {
             type: "text" as const,
-            text: "The computer opened, but it has no screen or window to capture a screenshot of.",
+            text: applicationId
+              ? `No screenshot: no window of ${applicationId} was observed. Check computer_targets for its window.`
+              : "The computer opened, but it has no screen or window to capture a screenshot of.",
           },
         ]);
       try {
@@ -5108,8 +5113,10 @@ function lockedScreenText(message: string): string {
 /**
  * Find `applicationId` already open in a computer `computer_open` just opened,
  * or launch it. A macOS launch finds a running app exactly, so there it is
- * always launched. Windows and Linux start another copy, so a listed window of
- * the app is observed instead. A launch acts on no window's contents, so any listed
+ * launched first; only when macOS refuses it, as for an app run from a folder
+ * it does not know (a downloaded app opened in place), is a listed window of
+ * the running app observed. Windows and Linux start another copy, so a listed
+ * window of the app is observed first. A launch acts on no window's contents, so any listed
  * target carries it (see launchCarrier). Its receipt observes the app's window,
  * and names that window as its target: the carrier is an implementation detail,
  * and naming another app's window would read as having acted on it. A launch
@@ -5132,15 +5139,17 @@ async function launchOpenedComputerApp(
   | { existing: z.input<typeof ComputerObservation> }
   | { note: string }
 > {
-  const open =
-    opened.session.platform === "macos"
-      ? null
-      : openComputerAppWindow(opened.targets, applicationId);
-  if (open) {
-    const existing = await Promise.resolve()
+  const openWindow = async (): Promise<z.input<typeof ComputerObservation> | null> => {
+    const open = openComputerAppWindow(opened.targets, applicationId);
+    if (!open) return null;
+    return await Promise.resolve()
       .then(() => transport.observeComputerTarget(workspaceId, opened.session.id, open.id))
       .catch(() => null);
+  };
+  const macos = opened.session.platform === "macos";
+  if (!macos) {
     // A window that cannot be read (closed meanwhile) is launched as usual.
+    const existing = await openWindow();
     if (existing) return { existing };
   }
   const carrier = launchCarrier(opened.targets);
@@ -5153,31 +5162,41 @@ async function launchOpenedComputerApp(
     context.operationId,
     opened.session.id,
   );
+  // macOS refused the launch and ran nothing: the app may still be running.
+  const refusedOnMac = async <T>(
+    fallback: T,
+  ): Promise<T | { existing: z.input<typeof ComputerObservation> }> => {
+    if (!macos) return fallback;
+    const existing = await openWindow();
+    return existing ? { existing } : fallback;
+  };
   try {
-    return {
-      launch: launchReceiptOnAppWindow(
-        await transport.actInComputer(workspaceId, opened.session.id, {
-          operationId,
-          targetId: carrier.id,
-          expectedTargetGeneration: carrier.targetGeneration,
-          expectedObservationId: null,
-          expectedFrameId: null,
-          action: { type: "launch", applicationId },
-        }),
-      ),
-    };
+    const launch = launchReceiptOnAppWindow(
+      await transport.actInComputer(workspaceId, opened.session.id, {
+        operationId,
+        targetId: carrier.id,
+        expectedTargetGeneration: carrier.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: null,
+        action: { type: "launch", applicationId },
+      }),
+    );
+    return launch.state === "failed" ? await refusedOnMac({ launch }) : { launch };
   } catch (error) {
     const recorded = await Promise.resolve()
       .then(() => transport.getComputerActionReceipt(workspaceId, opened.session.id, operationId))
       .catch(() => null);
-    if (recorded) return { launch: launchReceiptOnAppWindow(recorded) };
+    if (recorded) {
+      const launch = launchReceiptOnAppWindow(recorded);
+      return launch.state === "failed" ? await refusedOnMac({ launch }) : { launch };
+    }
     if (error instanceof OpenGeniApiError && error.outcomeUnknown)
       return {
         note: `${launchMayHaveRunNote(applicationId)} (${screenshotFailureReason(error)})`,
       };
-    return {
+    return await refusedOnMac({
       note: `The computer opened, but ${applicationId} could not be launched: ${screenshotFailureReason(error)}`,
-    };
+    });
   }
 }
 
@@ -6373,7 +6392,10 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
 /** The screen computer_open includes a screenshot of: the one this computer
  * works in, else the focused one, else the one showing the focused window;
  * with no screen, the window it works in, else the focused one. */
-function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTarget | undefined {
+function openedScreenshotTarget(
+  targets: readonly ComputerTarget[],
+  { screenOnly = false }: { screenOnly?: boolean } = {},
+): ComputerTarget | undefined {
   const screens = targets.filter((target) => target.kind === "screen");
   const windows = targets.filter((target) => target.kind === "window");
   const focusedWindow = windows.find((target) => target.focused)?.bounds;
@@ -6381,7 +6403,7 @@ function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTar
     x: focusedWindow.x + focusedWindow.width / 2,
     y: focusedWindow.y + focusedWindow.height / 2,
   };
-  return (
+  const shownScreen =
     screens.find((screen) => screen.current) ??
     screens.find((screen) => screen.focused) ??
     (centre &&
@@ -6393,7 +6415,9 @@ function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTar
           centre.y >= bounds.y &&
           centre.y < bounds.y + bounds.height,
       )) ??
-    screens[0] ??
+    screens[0];
+  if (shownScreen || screenOnly) return shownScreen;
+  return (
     windows.find((window) => window.current) ??
     windows.find((window) => window.focused) ??
     windows[0]
