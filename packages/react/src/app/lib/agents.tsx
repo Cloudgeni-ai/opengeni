@@ -413,3 +413,17 @@ export function duplicateAgentNames(agents: readonly Pick<AgentSummary, "name">[
   }
   return [...seen.values()].filter((entry) => entry.count > 1).map((entry) => entry.name);
 }
+
+/**
+ * The first message of a "Create with chat" chat: what the person asked for,
+ * and their time zone for schedules. The bundled `agents` Skill does the rest.
+ */
+export function agentChatOpeningMessage(request: string, timeZone: string): string {
+  return [
+    "Help me create an agent in this workspace.",
+    "",
+    request.trim(),
+    "",
+    `My time zone is ${timeZone}.`,
+  ].join("\n");
+}

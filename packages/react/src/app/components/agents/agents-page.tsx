@@ -4,7 +4,14 @@
  * land here, with a one-time note saying so.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BotIcon, ChevronDownIcon, FilePlusIcon, PlusIcon, UploadIcon } from "lucide-react";
+import {
+  BotIcon,
+  ChevronDownIcon,
+  FilePlusIcon,
+  MessageSquarePlusIcon,
+  PlusIcon,
+  UploadIcon,
+} from "lucide-react";
 import {
   agentInitialsAvatar,
   type Agent,
@@ -71,10 +78,13 @@ export function duplicateNamesText(names: readonly string[]): string {
 export function AgentsPage({
   workspaceId,
   after,
+  onCreateWithChat,
 }: {
   workspaceId: string;
   /** More sections under the workspace's own agents (the app's "Managed in Console" list). */
   after?: ReactNode | undefined;
+  /** Opens "Create with chat": describe the agent, and a chat drafts and saves it. */
+  onCreateWithChat?: (() => void) | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
@@ -154,6 +164,7 @@ export function AgentsPage({
         workspaceId={workspaceId}
         readyMade={readyMade}
         showReadyMade={!readyMadeSection}
+        onChat={canAdd ? onCreateWithChat : undefined}
         onBlank={create}
         onImport={() => fileInput.current?.click()}
       />
@@ -397,14 +408,16 @@ function ReadyMadeAgents({
 }
 
 /**
- * The one way to add an agent: ready-made agents first (each added as an
- * ordinary agent the person then sets up on its page; one already added here
- * is not offered), then a blank agent or one imported from a file.
+ * The one way to add an agent: by chat (when the host offers it), ready-made
+ * agents (each added as an ordinary agent the person then sets up on its
+ * page; one already added here is not offered), then a new agent from the
+ * form or one imported from a file.
  */
 function AddAgentMenu({
   workspaceId,
   readyMade,
   showReadyMade,
+  onChat,
   onBlank,
   onImport,
 }: {
@@ -412,6 +425,7 @@ function AddAgentMenu({
   readyMade: ReadyMadeAgentsState;
   /** False while the page's own Ready-made section lists them. */
   showReadyMade: boolean;
+  onChat?: (() => void) | undefined;
   onBlank: () => void;
   onImport: () => void;
 }) {
@@ -432,6 +446,15 @@ function AddAgentMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">
+        {onChat ? (
+          <>
+            <DropdownMenuItem onSelect={onChat} data-agent-create-with-chat="">
+              <MessageSquarePlusIcon />
+              Create with chat
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
         {showReadyMade && offered.length > 0 ? (
           <>
             <DropdownMenuLabel>Ready-made</DropdownMenuLabel>
@@ -459,7 +482,7 @@ function AddAgentMenu({
         ) : null}
         <DropdownMenuItem onSelect={onBlank}>
           <FilePlusIcon />
-          Blank agent
+          New agent
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onImport} title="Import an .agent.json or .bot.json file">
           <UploadIcon />

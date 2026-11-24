@@ -9,9 +9,12 @@ import {
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   AGENT_INSTRUCTIONS_SOFT_LIMIT,
   AGENT_NAME_MAX_LENGTH,
+  NEW_AGENT_DEFAULT_INSTRUCTIONS,
+  NEW_AGENT_DEFAULT_TOOL_PERMISSIONS,
   slackAgentOpenDisclosure,
   type Agent,
   type AgentVisibility,
+  type CommonAgentTrigger,
   type UpdateAgentRequest,
 } from "@opengeni/contracts";
 import type { SessionAvatar as SessionAvatarValue } from "@opengeni/sdk";
@@ -26,6 +29,8 @@ import { SettingRow } from "../../../ui/setting-row";
 import { Switch } from "../../../ui/switch";
 import { useAppContext } from "../../app-context";
 import { agentErrorCode, useAgent } from "../../lib/agents";
+import { t } from "../../lib/console-text";
+import { githubConnectedOf } from "../../lib/github-connect";
 import { useNavigate } from "../../lib/navigation";
 import { forgetSessionAgent } from "../../lib/session-agent";
 import { toast } from "../../lib/toast";
@@ -45,6 +50,12 @@ import {
   organizationPeopleLabel,
   workspacePeopleLabel,
 } from "./agent-page";
+import {
+  addAgentSuggestedTrigger,
+  agentTriggerSaveError,
+  agentUsesGitHub,
+  availableCommonTriggers,
+} from "./agent-trigger-model";
 
 /** Who can use it stays with whoever made the agent and admins. */
 const SHARING_MANAGERS_ONLY = "Only whoever made it, or a workspace admin, can change this.";
@@ -74,6 +85,9 @@ const EMPTY: AgentFormValues = {
   memoryEnabled: true,
   visibility: "workspace",
 };
+
+/** A blank new agent starts from short working rules instead of an empty box. */
+const NEW_AGENT: AgentFormValues = { ...EMPTY, instructions: NEW_AGENT_DEFAULT_INSTRUCTIONS };
 
 export const ONLY_ME_UNAVAILABLE = "Only me chats aren't available here.";
 export const ORGANIZATION_ACCESS_ADMIN_ONLY = "Only an organization admin can choose this.";
@@ -181,9 +195,11 @@ function AgentForm({
   /** The chat it is made from, for the back link. */
   sourceTitle?: string | undefined;
   onClose: () => void;
-  onSaved: (agent: Agent) => void;
+  /** `setup`: the triggers picked here that still need setting up on its page. */
+  onSaved: (agent: Agent, setup?: readonly string[]) => void;
 }) {
-  const { client, workspaces, accessContext } = useAppContext();
+  const context = useAppContext();
+  const { client, workspaces, accessContext } = context;
   const privateChats = usePrivateChatsAvailable(workspaceId);
   const seedKey = agent?.id ?? sourceSessionId ?? "new-agent";
   const [name, setName] = useState(initial.name);
@@ -191,6 +207,16 @@ function AgentForm({
   const [instructions, setInstructions] = useState(initial.instructions);
   const [memoryEnabled, setMemoryEnabled] = useState(initial.memoryEnabled);
   const [visibility, setVisibility] = useState<AgentVisibility>(initial.visibility);
+  // New agents: the common triggers it can use, each off until picked.
+  const githubConnected = githubConnectedOf(context.githubStatus?.status);
+  const commonTriggers = agent
+    ? []
+    : availableCommonTriggers({
+        usesGitHub: agentUsesGitHub(NEW_AGENT_DEFAULT_TOOL_PERMISSIONS, githubConnected),
+      });
+  const [startsWhen, setStartsWhen] = useState<ReadonlySet<CommonAgentTrigger["key"]>>(
+    () => new Set(),
+  );
   // Someone who may edit the agent but not manage it keeps who can use it.
   const sharingLocked = agent !== undefined && !agentViewerCanManage(agent);
   const lockedOut = (value: AgentVisibility) => sharingLocked && value !== visibility;
@@ -259,18 +285,18 @@ function AgentForm({
         onSaved(await client.updateAgent(workspaceId, agent.id, change));
         return true;
       }
-      onSaved(
-        await client.createAgent(workspaceId, {
-          name: current.name.trim(),
-          description: current.description.trim(),
-          avatar: current.avatar,
-          visibility: current.visibility,
-          editAccess: "everyone",
-          instructions: current.instructions.trim(),
-          memoryEnabled: current.memoryEnabled,
-          sourceSessionId: sourceSessionId ?? null,
-        }),
-      );
+      const created = await client.createAgent(workspaceId, {
+        name: current.name.trim(),
+        description: current.description.trim(),
+        avatar: current.avatar,
+        visibility: current.visibility,
+        editAccess: "everyone",
+        instructions: current.instructions.trim(),
+        memoryEnabled: current.memoryEnabled,
+        sourceSessionId: sourceSessionId ?? null,
+        toolPermissions: [...NEW_AGENT_DEFAULT_TOOL_PERMISSIONS],
+      });
+      onSaved(created, await addPickedTriggers(created));
       return true;
     } catch (error) {
       // Its name is how people ask it in Slack: say so at the name.
@@ -283,6 +309,34 @@ function AgentForm({
       if (text) throw new Error(text, { cause: error });
       throw error;
     }
+  }
+
+  // The agent exists either way; a trigger that can't be added here is
+  // named so the person sets it up on its page.
+  async function addPickedTriggers(created: Agent): Promise<string[]> {
+    const setup: string[] = [];
+    for (const common of commonTriggers.filter((entry) => startsWhen.has(entry.key))) {
+      try {
+        const outcome = await addAgentSuggestedTrigger(t, {
+          client,
+          workspaceId,
+          agent: created,
+          suggestion: common.trigger,
+          githubConnected,
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          now: new Date(),
+        });
+        if (outcome.kind === "needs_setup") setup.push(common.trigger.name);
+      } catch (error) {
+        toast.error(`Couldn't add “${common.trigger.name}”`, {
+          description: agentTriggerSaveError(
+            error,
+            created.visibility === "private" ? "private" : "workspace",
+          ),
+        });
+      }
+    }
+    return setup;
   }
 
   return (
@@ -403,6 +457,33 @@ function AgentForm({
             />
           }
         />
+        {commonTriggers.length > 0 ? (
+          <Field label="Starts when" group hint="Also when someone starts a chat with it.">
+            <div data-agent-form-triggers="">
+              {commonTriggers.map((common) => (
+                <SettingRow
+                  key={common.key}
+                  data-agent-common-trigger={common.key}
+                  label={common.trigger.name}
+                  control={
+                    <Switch
+                      aria-label={common.trigger.name}
+                      checked={startsWhen.has(common.key)}
+                      onCheckedChange={(on) =>
+                        setStartsWhen((current) => {
+                          const next = new Set(current);
+                          if (on) next.add(common.key);
+                          else next.delete(common.key);
+                          return next;
+                        })
+                      }
+                    />
+                  }
+                />
+              ))}
+            </div>
+          </Field>
+        ) : null}
         <Field
           label="Who can use it"
           group
@@ -465,11 +546,13 @@ export function NewAgentPage({
 }) {
   const { client } = useAppContext();
   const navigate = useNavigate();
-  const [initial, setInitial] = useState<AgentFormValues | null>(sourceSessionId ? null : EMPTY);
+  const [initial, setInitial] = useState<AgentFormValues | null>(
+    sourceSessionId ? null : NEW_AGENT,
+  );
   const [sourceTitle, setSourceTitle] = useState<string | undefined>(undefined);
   useEffect(() => {
     if (!sourceSessionId) {
-      setInitial(EMPTY);
+      setInitial(NEW_AGENT);
       return;
     }
     let live = true;
@@ -520,8 +603,12 @@ export function NewAgentPage({
       sourceSessionId={sourceSessionId}
       sourceTitle={sourceTitle}
       onClose={close}
-      onSaved={(agent) => {
-        toast.success(`Created ${agent.name}`);
+      onSaved={(agent, setup) => {
+        toast.success(`Created ${agent.name}`, {
+          ...(setup && setup.length > 0
+            ? { description: `Set up on its page: ${setup.join(", ")}.` }
+            : {}),
+        });
         void navigate({
           to: "/workspaces/$workspaceId/agents/$agentId",
           params: { workspaceId, agentId: agent.id },

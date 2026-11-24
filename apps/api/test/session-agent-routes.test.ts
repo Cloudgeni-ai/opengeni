@@ -367,6 +367,8 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
     const saved = await callMcpTool(server, "bot_template_save", {
       name: "Release notes",
       instructions: "Write the release notes.",
+      toolPermissions: [{ connector: "github.com", tool: "merge_pull_request", permission: "ask" }],
+      skills: ["release-notes"],
     });
     expect(saved.isError).not.toBe(true);
     const agentId = (JSON.parse(saved.text) as { agent: { id: string } }).agent.id;
@@ -376,7 +378,12 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
         { accountId: grant.accountId, workspaceId: grant.workspaceId },
         agentId,
       ),
-    ).toMatchObject({ memoryEnabled: true, memoryCollectionId: expect.any(String) });
+    ).toMatchObject({
+      memoryEnabled: true,
+      memoryCollectionId: expect.any(String),
+      toolPermissions: [{ connector: "github.com", tool: "merge_pull_request", permission: "ask" }],
+      skills: [{ name: "release-notes" }],
+    });
   });
 });
 

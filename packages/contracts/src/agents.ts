@@ -681,6 +681,105 @@ export const AgentTemplateTrigger = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentTemplateTrigger = z.output<typeof AgentTemplateTrigger>;
 
+/** What a common trigger listens on: GitHub events, or a schedule that needs nothing. */
+export type CommonAgentTriggerNeed = "github" | null;
+
+/**
+ * A common trigger: an on/off choice offered for every agent (in the new
+ * agent form and on its page) when the agent can use what it listens on. It
+ * saves as an ordinary automation that starts a chat with the agent, so the
+ * full trigger form can change it later. The create-an-agent chat offers the
+ * same list (the bundled `agents` Skill names each by its event types).
+ */
+export interface CommonAgentTrigger {
+  key: "pull_request_opened" | "mentioned_on_pull_request" | "weekday_morning";
+  needs: CommonAgentTriggerNeed;
+  trigger: AgentTemplateTrigger;
+}
+
+const MENTION_AUTHORS = { op: "in", value: ["OWNER", "MEMBER", "COLLABORATOR"] } as const;
+
+/** The common triggers, in the order they are offered. */
+export function commonAgentTriggers(): readonly CommonAgentTrigger[] {
+  return [
+    {
+      key: "pull_request_opened",
+      needs: "github",
+      trigger: AgentTemplateTrigger.parse({
+        name: "When a pull request opens",
+        instructions: "A pull request was opened or marked ready for review. Handle it.",
+        oneClick: true,
+        triggers: [
+          {
+            source: { kind: "github" },
+            eventTypes: ["pull_request.opened", "pull_request.ready_for_review"],
+            conditions: [{ field: "data.pull_request.draft", op: "equals", value: false }],
+          },
+        ],
+      }),
+    },
+    {
+      key: "mentioned_on_pull_request",
+      needs: "github",
+      trigger: AgentTemplateTrigger.parse({
+        name: "When mentioned on a PR",
+        instructions:
+          "Someone on the team mentioned you in a comment on this pull request. Read their comment, do what they ask, and answer them on it.",
+        oneClick: true,
+        triggers: [
+          {
+            source: { kind: "github" },
+            eventTypes: ["issue_comment.created"],
+            conditions: [
+              { field: "data.issue.pull_request", op: "equals", value: true },
+              { field: "data.comment.mentions_app", op: "equals", value: true },
+              { field: "data.comment.author_association", ...MENTION_AUTHORS },
+            ],
+          },
+          {
+            source: { kind: "github" },
+            eventTypes: ["pull_request_review_comment.created"],
+            conditions: [
+              { field: "data.comment.mentions_app", op: "equals", value: true },
+              { field: "data.comment.author_association", ...MENTION_AUTHORS },
+            ],
+          },
+        ],
+      }),
+    },
+    {
+      key: "weekday_morning",
+      needs: null,
+      trigger: AgentTemplateTrigger.parse({
+        name: "Every weekday morning",
+        instructions: "Do your scheduled work.",
+        oneClick: true,
+        schedule: {
+          type: "calendar",
+          hour: 9,
+          minute: 0,
+          daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+        },
+      }),
+    },
+  ];
+}
+
+/**
+ * Where a new agent starts in Opengeni's own form: short working rules
+ * people can keep or replace, and Can use that asks a person before merging.
+ */
+export const NEW_AGENT_DEFAULT_INSTRUCTIONS = [
+  "Work on your own until the job is done. Check Memory for how this team works before you start.",
+  "Ask a person before anything risky or hard to undo, such as deleting data, deploying, or messaging customers.",
+  "When you finish, say in a few lines what you did and what is left.",
+].join("\n");
+
+export const NEW_AGENT_DEFAULT_TOOL_PERMISSIONS: readonly AgentToolPermissionRule[] = [
+  { connector: "github.com", tool: "merge_pull_request", permission: "ask" },
+  { connector: "github.com", tool: "pull_request_merge", permission: "ask" },
+];
+
 /** The team a piece of ready-made content is for, as people say it: "Engineering", "Sales". */
 export const ReadyMadeTeam = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(60));
 

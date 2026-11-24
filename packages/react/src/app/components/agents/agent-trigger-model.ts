@@ -17,6 +17,11 @@ import type {
   ScheduledTaskEventsInput,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/sdk";
+import {
+  commonAgentTriggers,
+  type AgentToolPermissionRuleInput,
+  type CommonAgentTrigger,
+} from "@opengeni/contracts";
 
 import {
   automationCreateRequest,
@@ -63,6 +68,74 @@ export const AGENT_TRIGGER_SCHEDULE_MESSAGE = "Do your scheduled work.";
 /** A refused shared trigger, in words. */
 export const AGENT_TRIGGER_SHARED_DENIED =
   "You can't add automations shared with this workspace. Ask an admin for access.";
+
+/**
+ * A trigger offered on an agent before it is set up: one its ready-made
+ * template suggests (`templateIndex`), or a common one (`common`).
+ */
+export interface AgentTriggerOffer {
+  key: string;
+  suggestion: AgentTemplateTrigger;
+  templateIndex?: number | undefined;
+  common?: CommonAgentTrigger["key"] | undefined;
+}
+
+/** Whether the agent uses GitHub: the workspace has it, and its Can use doesn't block all of it. */
+export function agentUsesGitHub(
+  rules: readonly AgentToolPermissionRuleInput[],
+  githubConnected: boolean | null,
+): boolean {
+  if (githubConnected === false) return false;
+  return !rules.some(
+    (rule) =>
+      rule.connector.trim().toLowerCase() === "github.com" &&
+      (rule.tool ?? "*").trim() === "*" &&
+      rule.permission === "block",
+  );
+}
+
+/** The common triggers an agent can use, in offer order. */
+export function availableCommonTriggers(options: { usesGitHub: boolean }): CommonAgentTrigger[] {
+  return commonAgentTriggers().filter(
+    (common) => common.needs === null || (common.needs === "github" && options.usesGitHub),
+  );
+}
+
+function eventSignature(suggestion: Pick<AgentTemplateTrigger, "schedule" | "triggers">): string {
+  if (suggestion.triggers.length === 0) return suggestion.schedule ? "schedule" : "";
+  return suggestion.triggers
+    .flatMap((trigger) => trigger.eventTypes)
+    .sort()
+    .join(",");
+}
+
+/**
+ * What an agent's page offers to turn on: its template's suggestions, then
+ * each common trigger the template doesn't already suggest (by event types).
+ * One the agent already has (its automation keeps the suggestion's name
+ * after the agent's) is not offered again.
+ */
+export function agentTriggerOffers(input: {
+  templateSuggestions: readonly AgentTemplateTrigger[];
+  usesGitHub: boolean;
+  taskNames: readonly string[] | null;
+}): AgentTriggerOffer[] {
+  const fromTemplate: AgentTriggerOffer[] = input.templateSuggestions.map((suggestion, index) => ({
+    key: `template-${index}`,
+    suggestion,
+    templateIndex: index,
+  }));
+  const covered = new Set(fromTemplate.map((offer) => eventSignature(offer.suggestion)));
+  const common: AgentTriggerOffer[] = availableCommonTriggers({ usesGitHub: input.usesGitHub })
+    .filter((entry) => !covered.has(eventSignature(entry.trigger)))
+    .map((entry) => ({ key: `common-${entry.key}`, suggestion: entry.trigger, common: entry.key }));
+  return [...fromTemplate, ...common]
+    .filter((offer) => !input.taskNames?.some((name) => name.endsWith(offer.suggestion.name)))
+    .slice(0, AGENT_TRIGGER_OFFERS_MAX);
+}
+
+/** Offers shown at once, so the section stays to its essentials. */
+export const AGENT_TRIGGER_OFFERS_MAX = 3;
 
 /** The event field a GitHub trigger's repositories are chosen by. */
 export const AGENT_TRIGGER_REPOSITORY_FIELD = "data.repository.full_name";

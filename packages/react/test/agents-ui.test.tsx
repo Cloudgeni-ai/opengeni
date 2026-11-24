@@ -1,7 +1,11 @@
 import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ReactNode } from "react";
-import { agentInitialsAvatar } from "@opengeni/contracts";
+import {
+  agentInitialsAvatar,
+  NEW_AGENT_DEFAULT_INSTRUCTIONS,
+  NEW_AGENT_DEFAULT_TOOL_PERMISSIONS,
+} from "@opengeni/contracts";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -310,7 +314,7 @@ test("Yours asks for the reader's own agents and New agent opens the form", asyn
   await flush();
   expect(client.calls).toContainEqual(["listAgents", WORKSPACE_ID, { filter: "yours" }]);
   expect(container.textContent).toContain("You haven't made an agent here yet.");
-  await act(async () => button(container, "Blank agent").click());
+  await act(async () => button(container, "New agent").click());
   expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/new`);
 });
 
@@ -579,6 +583,91 @@ test("browsing the icon picker's tabs and colours chooses nothing", async () => 
     | Record<string, unknown>
     | undefined;
   expect(created?.avatar ?? null).toBeNull();
+});
+
+test("a new agent starts with Instructions, asks before merging, and adds the triggers switched on", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client, { githubStatus: { status: "bound" } })}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const instructions = container.querySelector<HTMLTextAreaElement>("textarea")!;
+  expect(instructions.value).toBe(NEW_AGENT_DEFAULT_INSTRUCTIONS);
+  const rows = [...container.querySelectorAll<HTMLElement>("[data-agent-common-trigger]")];
+  expect(rows.map((row) => row.getAttribute("data-agent-common-trigger"))).toEqual([
+    "pull_request_opened",
+    "mentioned_on_pull_request",
+    "weekday_morning",
+  ]);
+  // Every trigger starts off.
+  expect(
+    rows.every(
+      (row) => row.querySelector("[role='switch']")?.getAttribute("aria-checked") === "false",
+    ),
+  ).toBe(true);
+  const weekday = rows[2]!.querySelector<HTMLElement>("[role='switch']")!;
+  await act(async () => weekday.click());
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Standup"));
+  await act(async () => button(container, "Create agent").click());
+  await flush();
+  const created = client.calls.find((call) => call[0] === "createAgent")?.[2] as Record<
+    string,
+    any
+  >;
+  expect(created.instructions).toBe(NEW_AGENT_DEFAULT_INSTRUCTIONS);
+  expect(created.toolPermissions).toEqual([...NEW_AGENT_DEFAULT_TOOL_PERMISSIONS]);
+  const tasks = client.calls.filter((call) => call[0] === "createScheduledTask");
+  expect(tasks).toHaveLength(1);
+  expect((tasks[0]![2] as Record<string, any>).name).toBe("Standup: Every weekday morning");
+});
+
+test("without GitHub, a new agent offers only the weekday trigger", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client, { githubStatus: { status: "unbound" } })}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  expect(
+    [...container.querySelectorAll("[data-agent-common-trigger]")].map((row) =>
+      row.getAttribute("data-agent-common-trigger"),
+    ),
+  ).toEqual(["weekday_morning"]);
+});
+
+test("Add agent offers Create with chat first", async () => {
+  const client = fakeAgentsClient([]);
+  let opened = 0;
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} onCreateWithChat={() => (opened += 1)} />
+    </AgentsTestHost>,
+  );
+  const items = [...container.querySelectorAll<HTMLElement>("[role='menuitem']")];
+  expect(items[0]?.textContent).toBe("Create with chat");
+  const item = items[0]!;
+  await act(async () => item.click());
+  expect(opened).toBe(1);
+});
+
+test("a common trigger switched on in the agent page is added at once", async () => {
+  const agent = makeAgent({ name: "Standup" });
+  const client = fakeAgentsClient([agent]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client, { githubStatus: { status: "unbound" } })}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLElement>(
+    "[data-agent-common-trigger='weekday_morning']",
+  )!;
+  await act(async () => row.querySelector<HTMLElement>("[role='switch']")!.click());
+  await flush();
+  expect(createdTask(client)?.name).toBe("Standup: Every weekday morning");
+  expect(container.querySelector("[data-agent-common-trigger='weekday_morning']")).toBeNull();
+  expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
 });
 
 test("a name is the only required field", async () => {
@@ -1253,6 +1342,8 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   const suggested = [...container.querySelectorAll("[data-agent-suggested-trigger]")];
   expect(suggested.map((row) => row.textContent)).toEqual([
     expect.stringContaining("When a Linear issue is created"),
+    expect.stringContaining("When a pull request opens"),
+    expect.stringContaining("When mentioned on a PR"),
   ]);
   // Set up opens the light dialog at the suggestion; the full form stays one link away.
   await act(async () => button(container, "Set up").click());
@@ -1418,7 +1509,11 @@ test("a suggested trigger is set up in place: its source is filled in and no mes
     [...document.body.querySelectorAll("[data-agent-suggested-trigger]")].map(
       (row) => row.textContent,
     ),
-  ).toEqual([expect.stringContaining("When a Linear issue is created")]);
+  ).toEqual([
+    expect.stringContaining("When a Linear issue is created"),
+    expect.stringContaining("When a pull request opens"),
+    expect.stringContaining("When mentioned on a PR"),
+  ]);
 });
 
 test("a suggestion's GitHub source is added on save once GitHub is connected", async () => {

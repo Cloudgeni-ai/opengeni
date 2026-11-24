@@ -79,6 +79,7 @@ export type BundledSkillId =
   | "builtin:sites"
   | "builtin:video-generation"
   | "builtin:secrets"
+  | "builtin:agents"
   | LegacyBundledSkillId;
 /**
  * @deprecated Renamed to the neutral ids above; still accepted and resolved to them.

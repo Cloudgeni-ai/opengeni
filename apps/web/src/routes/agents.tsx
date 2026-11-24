@@ -18,17 +18,31 @@ import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { AgentSlackIntroPage } from "@/components/agents/agent-slack-intro-page";
 import { AgentSlackSection } from "@/components/agents/agent-slack-section";
 import { ManagedInConsoleAgents } from "@/components/agents/managed-in-console-agents";
+import { useStartChatDialog } from "@/components/start-chat-dialog";
+import { agentChatOpeningMessage } from "@opengeni/react/app/lib/agents";
 
 /** Detail pages draw their own 960px frame, back link and padding. */
 const PAGE_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
 
 export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
+  // Create with chat: describe the agent, and a chat drafts and saves it.
+  const chat = useStartChatDialog(workspaceId, {
+    title: "Create an agent with chat",
+    description:
+      "A chat drafts its name, instructions, tools and triggers, and saves it once you confirm.",
+    fieldLabel: "What should the agent do?",
+    placeholder: "Fix new PostHog errors on its own and open a pull request for each",
+    emptyError: "Say what the agent should do.",
+    openingMessage: agentChatOpeningMessage,
+  });
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
       <AgentsPage
         workspaceId={workspaceId}
+        onCreateWithChat={chat.open}
         after={<ManagedInConsoleAgents workspaceId={workspaceId} />}
       />
+      {chat.dialog}
     </ContentPage>
   );
 }

@@ -782,6 +782,30 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   repeat.
 - Agents page: **Add an agent** lists ready-made agents not yet added here,
   each with **Add**, which opens the new agent's page.
+- Agents page: **Add agent ▾** starts with **Create with chat**. It asks
+  "What should the agent do?" and opens a new chat with that request
+  (`agentChatOpeningMessage`, the dialog in `apps/web` shared with
+  automations' Create with Opengeni). The chat follows the bundled `agents`
+  Skill (`builtin:agents`, offered when the chat has `bot_template_save`): it
+  drafts the name, Instructions, Can use, Skills and triggers, asks once with
+  `request_human_input` (which common triggers, then Create agent / Change
+  something), saves with `bot_template_save` (which also takes
+  `toolPermissions` and `skills`) and adds each picked trigger with
+  `scheduled_tasks_create`, named "<agent>: <trigger>". No new storage or
+  endpoint: the agent and its triggers are the ordinary ones.
+- Common triggers (`commonAgentTriggers()` in contracts): **When a pull
+  request opens**, **When mentioned on a PR** (the same events and team-only
+  conditions as the PR reviewer's one-click trigger) and **Every weekday
+  morning** (09:00 Monday to Friday, in the browser's time zone). GitHub ones
+  are offered only when the workspace's GitHub isn't disconnected and the
+  agent's Can use doesn't block GitHub. They cover every repository the GitHub
+  connection reaches; the full automation form narrows them. On the agent page
+  **Starts when** lists the agent's own ready-made suggestions first, then the
+  common triggers they don't already cover, at most three, as off switches
+  (`agentTriggerOffers`); turning one on adds the automation at once, or opens
+  the trigger dialog when its source needs setup. A shared agent in Slack shows
+  a read-only "When mentioned in Slack" row: Slack mentions reach it natively,
+  so there is no Slack trigger to add.
 - Agent page: **Chat** (`/sessions?agent=<id>`), **Export** (an `.agent.json`
   file with its name, icon, description, Instructions and Memory switch; no
   ids, chats, Memory contents or Slack; an older file's First message joins
@@ -795,12 +819,19 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   Only me in the form says it stops answering in Slack; a Slack name refusal
   shows at the name.
 - Form: icon, name, what it helps with, Instructions, **Remember across
-  chats** (a switch, on for a new agent) and who can use it: Only me, people
+  chats** (a switch, on for a new agent), **Starts when** (new agents only:
+  the common triggers as switches, all off; those switched on are added after
+  the agent is created, and any that need setup are named in the success
+  message) and who can use it: Only me, people
   in the workspace, or anyone in the organization (offered for an
   organization's workspaces, chosen only by an organization admin, with a hint
   saying what it opens). Only the name is required. Lengths are checked on save with a count
   near each limit, never cut while typing. **Only me** is off with a reason
   where Only me chats aren't available.
+  A new agent starts with three short working rules as its Instructions
+  (`NEW_AGENT_DEFAULT_INSTRUCTIONS`) and Can use that asks before merging a
+  GitHub pull request (`NEW_AGENT_DEFAULT_TOOL_PERMISSIONS`); Skills start
+  empty. API creates keep their own defaults (empty).
 - Composer: an agent chip ("Opengeni ▾" with a **Chat with** list and
   **Browse agents**) sets `?agent=<id>`; `?botTemplateId=` still works. The
   agent is selected and the composer is left as it is (empty for a new chat);

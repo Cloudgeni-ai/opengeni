@@ -19,6 +19,10 @@ import {
   agentTriggerWithSources,
   agentTriggerRepositoryEvents,
   addAgentSuggestedTrigger,
+  agentTriggerOffers,
+  agentUsesGitHub,
+  availableCommonTriggers,
+  AGENT_TRIGGER_OFFERS_MAX,
 } from "../src/app/components/agents/agent-trigger-model";
 import {
   eventConditionFromDraft,
@@ -462,4 +466,58 @@ test("chosen repositories narrow only GitHub triggers; none chosen covers every 
   expect(several.triggers[0]!.conditions.map(eventConditionFromDraft)).toEqual([
     { field: "data.repository.full_name", op: "in", value: ["acme/api", "acme/web"] },
   ]);
+});
+
+test("common triggers need GitHub unless its connection is off or the agent blocks it", () => {
+  expect(agentUsesGitHub([], null)).toBe(true);
+  expect(agentUsesGitHub([], false)).toBe(false);
+  expect(
+    agentUsesGitHub(
+      [{ connector: "github.com", tool: "merge_pull_request", permission: "ask" }],
+      true,
+    ),
+  ).toBe(true);
+  expect(agentUsesGitHub([{ connector: "GitHub.com", permission: "block" }], true)).toBe(false);
+  expect(availableCommonTriggers({ usesGitHub: false }).map((entry) => entry.key)).toEqual([
+    "weekday_morning",
+  ]);
+});
+
+test("offers put the agent's own suggestions first, skip what they cover or what is set up, and stop at three", () => {
+  const mention: AgentTemplateTrigger = {
+    name: "Review when mentioned on a PR",
+    instructions: "Review it.",
+    schedule: null,
+    oneClick: true,
+    triggers: availableCommonTriggers({ usesGitHub: true }).find(
+      (entry) => entry.key === "mentioned_on_pull_request",
+    )!.trigger.triggers,
+  };
+  const offers = agentTriggerOffers({
+    templateSuggestions: [mention],
+    usesGitHub: true,
+    taskNames: [],
+  });
+  expect(offers.map((offer) => offer.suggestion.name)).toEqual([
+    "Review when mentioned on a PR",
+    "When a pull request opens",
+    "Every weekday morning",
+  ]);
+  expect(offers[0]!.templateIndex).toBe(0);
+  expect(offers[1]!.common).toBe("pull_request_opened");
+  // A trigger already added under its name isn't offered again.
+  expect(
+    agentTriggerOffers({
+      templateSuggestions: [SUGGESTION, mention],
+      usesGitHub: true,
+      taskNames: ["Bug fixer: Review when mentioned on a PR"],
+    }).map((offer) => offer.suggestion.name),
+  ).toEqual([
+    "When an issue is labelled bug",
+    "When a pull request opens",
+    "Every weekday morning",
+  ]);
+  expect(
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, taskNames: null }),
+  ).toHaveLength(AGENT_TRIGGER_OFFERS_MAX);
 });
