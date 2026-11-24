@@ -349,6 +349,10 @@ SKILL.md).
 - Desktop and mobile interactions were exercised in the sandbox-local preview.
 - Reading text, controls and tables follow the chosen readable type scale;
   mobile and 200% text scaling do not clip or shrink primary content.
+- A new or restyled app follows `references/design.md`: the first screen
+  leads with the thing people come for, empty, loading and error states are
+  designed, and nothing from its "Signs of a generated page" list remains
+  unasked.
 - Exercise live tools and SDK operations locally through `/__opengeni/site-tools/*`
   wherever the attempt's Codemode authority permits. Report remaining
   viewer-only checks explicitly; those do not by themselves block publication.

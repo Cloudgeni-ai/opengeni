@@ -507,7 +507,8 @@ matches it and changes without a reload. (Safari doesn't pass a frame's
 system's theme; that differs only when Opengeni's appearance is set to the
 other one.) An app takes Opengeni's own look with one tag; the bundled
 `sites` Skill gives every new app this look unless a design comes first (the
-person's, the workspace's, or the product the app is about):
+person's, the workspace's, the product the app is about, or a design of its
+own for a page shown to others, such as a landing page or a menu):
 
 ```html
 <link rel="stylesheet" href="/__opengeni/ui.css">
@@ -551,6 +552,14 @@ nothing on its own; it defines:
 
 `@opengeni/sdk/site-ui` exports the stylesheet (`SITE_UI_CSS`), its path and
 `resolveSiteUiStylesheet(html)` for hosts that embed Sites themselves.
+
+The stylesheet is a kit, not a design. The Skill's `references/design.md` is
+the design guidance an agent reads, in the same `skill_read` as `SKILL.md`,
+before it writes a new app or restyles one: what the first screen leads with,
+how to compose a tool in the Opengeni look, how to design a page of its own
+from system fonts and a small palette, the states every app needs, and the
+generated-page habits to leave out. A person's or workspace's own design, and
+an installed design Skill, still come first.
 
 ### Dashboards
 
