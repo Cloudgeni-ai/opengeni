@@ -12,6 +12,7 @@ import { Section } from "@opengeni/react/ui/section";
 import { UsageMeter } from "@opengeni/react/ui/usage-meter";
 import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import { planCheckoutReturnUrl } from "@opengeni/react/app/lib/credit-checkout";
 import {
   planDate,
   planSeats,
@@ -90,7 +91,8 @@ export function SubscriptionPlans({
         const result = await client.createSubscriptionCheckout({
           ...request,
           ...(code ? { promotionCode: code } : {}),
-          successUrl: returnUrl,
+          // Back on Billing, the app confirms the plan once it is active.
+          successUrl: planCheckoutReturnUrl(returnUrl, accountId, selection.target.key),
           cancelUrl: returnUrl,
         });
         if (live.current) window.location.assign(result.url);

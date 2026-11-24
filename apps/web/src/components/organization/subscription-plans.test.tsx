@@ -138,7 +138,10 @@ test("checkout retries retain one UUID even after closing and reopening confirma
   expect(client.createSubscriptionCheckout.mock.calls[0]![0]).toMatchObject({
     accountId: "org-a",
     planKey: "pro",
-    successUrl: "https://console.example.test/workspaces/a/organization?section=billing",
+    // Only success returns with the plan, which the app confirms once active.
+    successUrl:
+      "https://console.example.test/workspaces/a/organization?section=billing&checkoutReturn=success&checkoutAccount=org-a&checkoutPlan=pro",
+    cancelUrl: "https://console.example.test/workspaces/a/organization?section=billing",
   });
 });
 
