@@ -326,6 +326,10 @@ const LazyAutomationTemplatesRoute = lazyRouteComponent(
   "AutomationTemplatesRoute",
 );
 const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
+const LazyGetStartedRoute = lazyRouteComponent(
+  () => import("@/routes/get-started"),
+  "GetStartedRoute",
+);
 const LazyAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentRoute");
 const LazyNewAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "NewAgentRoute");
 const LazyEditAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "EditAgentRoute");
@@ -1088,6 +1092,16 @@ const workspaceAgentsRoute = createRoute({
   path: "agents",
   component: Agents,
 });
+// The guided setups; `?setup=` opens one by its key (the page ignores one it doesn't know).
+const workspaceGetStartedRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "get-started",
+  validateSearch: (search: Record<string, unknown>): { setup?: string } =>
+    typeof search.setup === "string" && /^[a-z][a-z0-9-]{0,39}$/u.test(search.setup)
+      ? { setup: search.setup }
+      : {},
+  component: GetStarted,
+});
 const workspaceAgentNewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agents/new",
@@ -1467,6 +1481,7 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
+    workspaceGetStartedRoute,
     workspaceAgentsRoute,
     workspaceAgentNewRoute,
     workspaceAgentDetailRoute,
@@ -1775,6 +1790,12 @@ function AutomationTemplates() {
 function Agents() {
   const { workspaceId } = workspaceAgentsRoute.useParams();
   return <LazyAgentsRoute workspaceId={workspaceId} />;
+}
+
+function GetStarted() {
+  const { workspaceId } = workspaceGetStartedRoute.useParams();
+  const { setup } = workspaceGetStartedRoute.useSearch();
+  return <LazyGetStartedRoute workspaceId={workspaceId} setup={setup} />;
 }
 
 function AgentNew() {

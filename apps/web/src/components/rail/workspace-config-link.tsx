@@ -2,6 +2,7 @@
 // rail Workspace menu and the settings Browse strip.
 import { Link } from "@tanstack/react-router";
 import {
+  AppWindowIcon,
   AudioLinesIcon,
   BotIcon,
   BoxIcon,
@@ -11,6 +12,7 @@ import {
   LockKeyholeIcon,
   PanelsTopLeftIcon,
   PlugIcon,
+  RocketIcon,
   ServerCogIcon,
   SettingsIcon,
   ZapIcon,
@@ -37,6 +39,8 @@ const WORKSPACE_CONFIG_ICONS = {
   bot: BotIcon,
   "audio-lines": AudioLinesIcon,
   "panels-top-left": PanelsTopLeftIcon,
+  "app-window": AppWindowIcon,
+  rocket: RocketIcon,
   settings: SettingsIcon,
 } as const satisfies Record<WorkspaceConfigIcon, LucideIcon>;
 
@@ -73,7 +77,7 @@ export function WorkspaceConfigLink(props: {
       <Link
         to={item.to}
         params={{ workspaceId }}
-        search={props.needsReview ? { review: true } : {}}
+        search={{ ...item.search, ...(props.needsReview ? { review: true } : {}) }}
         {...(active === undefined
           ? { activeProps: { "data-active": "true" as const } }
           : { "data-active": active ? ("true" as const) : undefined })}
@@ -142,6 +146,7 @@ export function WorkspaceConfigLink(props: {
       <Link
         to={item.to}
         params={{ workspaceId }}
+        search={item.search ?? {}}
         data-active={active ? "true" : undefined}
         title={description}
         className={cn(
@@ -161,6 +166,7 @@ export function WorkspaceConfigLink(props: {
     <Link
       to={item.to}
       params={{ workspaceId }}
+      search={item.search ?? {}}
       title={description}
       className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
       onClick={onNavigate}

@@ -26,7 +26,9 @@ export type SidebarNavEntry =
   | "automations"
   | "agents"
   | "meetings"
-  | "artifacts";
+  | "artifacts"
+  | "apps"
+  | "get_started";
 
 /** Navigation options as set; unset ones keep today's behaviour (or follow the default). */
 export type SidebarLayoutOptions = {

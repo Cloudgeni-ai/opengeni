@@ -39,7 +39,7 @@ default sets them for everyone and a person's own value wins:
 | Option             | Effect                                                                                     |
 | ------------------ | ------------------------------------------------------------------------------------------ |
 | `sessionsShowApps` | `false`: project apps don't show as rows of their own in the Sessions list; their chats show as ordinary chats. Default `true`. |
-| `hiddenNavEntries` | Built-in rail entries left out: any of `inbox`, `capabilities`, `knowledge`, `automations`, `agents`, `meetings`, `artifacts`. An entry still shows while it is the current page or has something waiting (a Knowledge review, an Inbox item, a recording). Default none. |
+| `hiddenNavEntries` | Built-in rail entries left out: any of `inbox`, `capabilities`, `knowledge`, `automations`, `agents`, `meetings`, `artifacts`, `apps`, `get_started`. An entry still shows while it is the current page or has something waiting (a Knowledge review, an Inbox item, a recording). Default none. |
 | `settingsMore`     | Settings rail entry ids (`workspace:general`, `organization:members`, ...) moved under one collapsed **More**, which opens while it holds the current page; every other entry, including new ones, stays at the top. Settings search still finds everything. Default unset: every entry at the top. |
 
 Item ids are 1 to 64 letters, digits, `-` or `_`; the server makes one when a

@@ -61,6 +61,7 @@ import {
   rememberPendingDeveloperSetup,
 } from "@/lib/pending-developer-setup";
 import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-set";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { personalOrganizationName } from "@/lib/personal-organization-name";
 
 /**
@@ -157,9 +158,17 @@ export function OrganizationOnboardingPanel({
   const [useCase, setUseCaseState] = useState<OnboardingUseCase | null>(
     () => initialUseCase ?? (previewState ? null : storedOnboardingUseCase()),
   );
+  const { simplified, setSimplified } = useSimplifiedInterface();
   const setUseCase = (choice: OnboardingUseCase | null) => {
     if (!previewState) storeOnboardingUseCase(choice);
     setUseCaseState(choice);
+  };
+  // "Not an engineer" gets the simplified interface; "Software engineer" the
+  // full console with its guided setups. Either can be switched back from the
+  // account menu.
+  const applyInterfaceFor = (choice: OnboardingUseCase) => {
+    if (choice === "everyday") setSimplified(true);
+    else if (simplified) setSimplified(false);
   };
   // A changed answer after the organization exists is saved on the server; the
   // app's first load after onboarding waits for it so the new chat follows it.
@@ -589,6 +598,15 @@ export function OrganizationOnboardingPanel({
     const effectiveStartingCredits =
       startingCredits !== undefined ? startingCredits : (live?.startingCredits ?? null);
     const developerSetup = useCase === "embed";
+    // A software engineer goes on to the guided setups in their workspace.
+    const afterModelStep =
+      useCase === "cloud"
+        ? () =>
+            finishOnboarding({
+              workspaceId: createdSetup.personalWorkspaceId,
+              page: "get-started",
+            })
+        : () => finishOnboarding();
     if (developerSetup && modelStepDone)
       return frame(
         <DeveloperSetupStep
@@ -630,7 +648,7 @@ export function OrganizationOnboardingPanel({
             </div>
           ) : undefined
         }
-        onComplete={developerSetup ? () => setModelStepDone(true) : () => finishOnboarding()}
+        onComplete={developerSetup ? () => setModelStepDone(true) : afterModelStep}
       />,
     );
   }
@@ -657,6 +675,7 @@ export function OrganizationOnboardingPanel({
       <OnboardingUseCaseStep
         onChoose={(choice) => {
           if (!previewState) onboardingJourney().completed("use_case", choice);
+          applyInterfaceFor(choice);
           // Back from the model step: the organization exists, so the new
           // answer becomes the person's current one on the server (the
           // new-chat suggestions follow it on every device), and the developer

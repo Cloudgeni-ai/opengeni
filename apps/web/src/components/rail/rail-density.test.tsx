@@ -146,6 +146,14 @@ function moreDisclosure(container: HTMLElement): HTMLButtonElement {
   return button;
 }
 
+function setupDisclosure(container: HTMLElement): HTMLButtonElement {
+  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    (candidate) => candidate.textContent?.trim() === "Setup",
+  );
+  if (!button) throw new Error("Missing Setup group");
+  return button;
+}
+
 function lessButton(container: HTMLElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
     (candidate) => candidate.textContent?.trim() === "Less",
@@ -155,17 +163,28 @@ function lessButton(container: HTMLElement): HTMLButtonElement {
 }
 
 describe("session-first rail density", () => {
-  test("shows all shortcuts on tall screens regardless of the saved compact choice", async () => {
+  test("shows the shortcuts and the Setup group on tall screens regardless of the saved compact choice", async () => {
     window.localStorage.setItem("opengeni.rail.nav", "false");
+    window.localStorage.removeItem("opengeni.rail.setup");
     const rendered = await render(<PrimaryNav />);
     try {
       expect(rendered.container.textContent).not.toContain("For you");
-      expect(rendered.container.textContent).toContain("Capabilities");
+      expect(rendered.container.textContent).toContain("Apps");
+      // Everything else is one closed Setup group.
+      expect(rendered.container.textContent).not.toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        6,
+        2,
       );
-      expect(rendered.container.querySelector("button[aria-expanded]")).toBeNull();
+      const setup = setupDisclosure(rendered.container);
+      expect(setup.getAttribute("aria-expanded")).toBe("false");
+      await act(async () => setup.click());
+      expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
+        8,
+      );
+      expect(rendered.container.textContent).toContain("Capabilities");
+      expect(window.localStorage.getItem("opengeni.rail.setup")).toBe("true");
     } finally {
+      window.localStorage.removeItem("opengeni.rail.setup");
       await act(async () => rendered.root.unmount());
     }
   });
@@ -177,7 +196,7 @@ describe("session-first rail density", () => {
       expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
       await act(async () => moreDisclosure(first.container).click());
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(6);
+      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(2);
       expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
       await act(async () => lessButton(first.container).click());
       expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
@@ -209,8 +228,9 @@ describe("session-first rail density", () => {
     const workspace = await render(<WorkspaceShortcutLinks />);
     try {
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        6,
+        2,
       );
+      expect(setupDisclosure(workspace.container).getAttribute("aria-expanded")).toBe("false");
       expect(railShell).toMatch(
         /id=\{`\$\{mobileNavId\}-panel-workspace`\}[\s\S]*?\{mobileWorkspacePanel\}/,
       );

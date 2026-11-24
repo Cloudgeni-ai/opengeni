@@ -32472,7 +32472,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agents\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
+        "$": "enum=[\"\\\"agents\\\"\",\"\\\"apps\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"get_started\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
       }
     },
     "SiteAuthAuthorizeRequest": {

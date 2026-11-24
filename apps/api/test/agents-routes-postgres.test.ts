@@ -146,6 +146,7 @@ describe("agents through the API (real PostgreSQL)", () => {
       "cve-scanner",
       "incident-responder",
       "dependency-updater",
+      "product-analyst",
     ]);
     const missing = await call(alice, "POST", `${root}/agent-templates/nope/agents`, {});
     expect(missing.status).toBe(404);

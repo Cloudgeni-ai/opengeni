@@ -2,18 +2,21 @@
 // (docs/sidebar-layout.md, `hiddenNavEntries`). The page you are on, and an
 // entry with something waiting for you, still shows.
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
-import type { WorkspaceConfigTarget } from "./workspace-nav-data";
+import { APPS_WORKSPACE_ITEM, navItemKey, type WorkspaceConfigTarget } from "./workspace-nav-data";
 
-const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget>> = {
+/** Each entry's rail key (`navItemKey`): Apps and Artifacts share a page. */
+const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = {
   capabilities: "/workspaces/$workspaceId/plugins",
   knowledge: "/workspaces/$workspaceId/state",
   automations: "/workspaces/$workspaceId/automations",
   agents: "/workspaces/$workspaceId/agents",
   meetings: "/workspaces/$workspaceId/meetings",
   artifacts: "/workspaces/$workspaceId/artifacts",
+  apps: navItemKey(APPS_WORKSPACE_ITEM),
+  get_started: "/workspaces/$workspaceId/get-started",
 };
 
-/** The entries this person hides: the inbox, and the rail destinations by route. */
+/** The entries this person hides: the inbox, and the rail destinations by `navItemKey`. */
 export function hiddenNavEntries(hidden: readonly string[]): {
   inbox: boolean;
   targets: ReadonlySet<string>;
