@@ -24,6 +24,9 @@ mock.module("../../lib/toast", () => ({
     loading: record("loading"),
     success: record("success"),
     error: record("error"),
+    dismiss: (id?: string) => {
+      toasts.push(`dismiss: ${id}`);
+    },
   }),
 }));
 
@@ -69,9 +72,15 @@ function status(
   } as unknown as BillingCheckoutStatus;
 }
 
-function billing(key: "free" | "pro" | "max", planStatus: string): BillingSummary {
+function billing(
+  key: "free" | "pro" | "max",
+  planStatus: string,
+  creditGrantedMicros = 100_000_000,
+): BillingSummary {
   const label = { free: "Free", pro: "Pro", max: "Max" }[key];
-  return { balance: { plan: { key, label, status: planStatus } } } as unknown as BillingSummary;
+  return {
+    balance: { plan: { key, label, status: planStatus, creditGrantedMicros } },
+  } as unknown as BillingSummary;
 }
 
 async function settle(ms = 30): Promise<void> {
@@ -204,13 +213,15 @@ describe("back from checkout on the page it started from", () => {
     const onChanged = (event: Event) =>
       refreshed.push((event as CustomEvent<{ accountId: string }>).detail.accountId);
     window.addEventListener("credit-balance-changed", onChanged);
-    // Back before the webhook: still Free, then Pro not yet paid, then Pro active.
+    // Back before the webhooks: still Free, then Pro not yet paid, then Pro
+    // active before its paid invoice granted the plan credit, then both.
     getBilling
       .mockImplementationOnce(async () => billing("free", "active"))
       .mockImplementationOnce(async () => {
         throw new Error("dropped");
       })
       .mockImplementationOnce(async () => billing("pro", "incomplete"))
+      .mockImplementationOnce(async () => billing("pro", "active", 0))
       .mockImplementationOnce(async () => billing("pro", "active"));
     const checkout = { outcome: "plan" as const, accountId: "account-plan", planKey: "pro" };
     followCheckoutPageReturn(client, checkout, { intervalMs: 1 });
@@ -219,7 +230,7 @@ describe("back from checkout on the page it started from", () => {
     window.removeEventListener("credit-balance-changed", onChanged);
     expect(toasts).toEqual(["loading: Activating your plan…", "success: Pro is active"]);
     expect(new Set(toastIds)).toEqual(new Set(["checkout-plan-account-plan-pro"]));
-    expect(getBilling).toHaveBeenCalledTimes(4);
+    expect(getBilling).toHaveBeenCalledTimes(5);
     expect(getBilling.mock.calls[0]).toEqual([{ accountId: "account-plan" }]);
     expect(getBillingCheckout).not.toHaveBeenCalled();
     expect(refreshed).toEqual(["account-plan"]);
@@ -237,6 +248,52 @@ describe("back from checkout on the page it started from", () => {
       "loading: Activating your plan…",
       "info: Your payment is still processing | Your plan starts as soon as it completes.",
     ]);
+  });
+
+  test("a plan link billing refuses (a foreign or stale account) stops at once and says nothing", async () => {
+    getBilling.mockImplementation(async () => {
+      throw Object.assign(new Error("forbidden"), { status: 403 });
+    });
+    followCheckoutPageReturn(
+      client,
+      { outcome: "plan", accountId: "account-foreign", planKey: "pro" },
+      { intervalMs: 1 },
+    );
+    await settle();
+    expect(getBilling).toHaveBeenCalledTimes(1);
+    expect(toasts).toEqual([
+      "loading: Activating your plan…",
+      "dismiss: checkout-plan-account-foreign-pro",
+    ]);
+  });
+
+  test("a return the address lost before the app was ready (a redirect, a setup step) is still confirmed", async () => {
+    const { rememberCheckoutPageReturn, rememberedCheckoutPageReturn } =
+      await import("../../lib/credit-checkout");
+    rememberCheckoutPageReturn(
+      "?checkoutReturn=success&checkoutAccount=account-launch&checkoutPlan=pro",
+    );
+    address = new URLSearchParams("draft=1");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <CreditRequiredGate
+          creditRequired={null}
+          setCreditRequired={() => undefined}
+          accessContext={null}
+        />,
+      ),
+    );
+    await settle(50);
+    expect(getBilling.mock.calls[0]).toEqual([{ accountId: "account-launch" }]);
+    expect(toasts).toEqual(["loading: Activating your plan…", "success: Pro is active"]);
+    // The address no longer had the keys; the page's own query is left alone.
+    expect(replaced).toEqual([]);
+    expect(rememberedCheckoutPageReturn()).toBeNull();
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   test("the gate confirms a plan return from Billing or onboarding and removes its keys", async () => {

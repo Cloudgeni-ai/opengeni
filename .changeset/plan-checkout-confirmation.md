@@ -1,5 +1,5 @@
 ---
-"@opengeni/react": patch
+"@opengeni/react": minor
 ---
 
-Paying for a plan through Stripe checkout now confirms it on return, from Billing or onboarding: a short toast says the plan is activating until billing reports it active, then names it (for example "Pro is active"). A cancelled plan checkout shows nothing new. Adds `planCheckoutReturnUrl` and `waitForActivePlan` beside the credit checkout helpers.
+Paying for a plan through Stripe checkout now confirms it when you return, from Billing or from onboarding. A short message says your plan is activating, then names it once it's active, for example "Pro is active". A cancelled plan checkout shows nothing new. A checkout return is still confirmed when a redirect or an unfinished setup step changes the address first.

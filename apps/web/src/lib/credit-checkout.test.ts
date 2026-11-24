@@ -131,12 +131,13 @@ describe("credit checkout", () => {
     expect(read("checkoutReturn=success&checkoutAccount=a&checkoutPlan=<b>")).toBeNull();
   });
 
-  test("waits through another plan, an unpaid plan and dropped requests until the plan is active", async () => {
+  test("waits through another plan, an unpaid plan and dropped requests until the plan and its credit land", async () => {
     const reads = [
-      { key: "free", label: "Free", status: "active" },
+      { key: "free", label: "Free", status: "active", creditGrantedMicros: 10_000_000 },
       null,
-      { key: "pro", label: "Pro", status: "incomplete" },
-      { key: "pro", label: "Pro", status: "active" },
+      { key: "pro", label: "Pro", status: "incomplete", creditGrantedMicros: 0 },
+      { key: "pro", label: "Pro", status: "active", creditGrantedMicros: 0 },
+      { key: "pro", label: "Pro", status: "active", creditGrantedMicros: 100_000_000 },
     ];
     const getBilling = mock(async (_options: { accountId?: string }) => {
       const plan = reads.shift();
@@ -153,8 +154,61 @@ describe("credit checkout", () => {
       },
     );
     expect(plan).toMatchObject({ key: "pro", label: "Pro" });
-    expect(getBilling).toHaveBeenCalledTimes(4);
+    expect(getBilling).toHaveBeenCalledTimes(5);
     expect(getBilling.mock.calls[0]).toEqual([{ accountId: "account-1" }]);
+  });
+
+  test("a plan without credit is ready after the grace period; a refused read ends the wait", async () => {
+    const creditless = { key: "team", label: "Team", status: "active", creditGrantedMicros: 0 };
+    const plan = await waitForActivePlan(
+      { getBilling: async () => ({ balance: { plan: creditless } }) as never },
+      {
+        accountId: "account-1",
+        planKey: "team",
+        signal: new AbortController().signal,
+        intervalMs: 1,
+        creditGraceMs: 5,
+      },
+    );
+    expect(plan).toMatchObject({ key: "team" });
+    const refused = mock(async () => {
+      throw Object.assign(new Error("forbidden"), { status: 403 });
+    });
+    expect(
+      await waitForActivePlan(
+        { getBilling: refused },
+        { accountId: "x", planKey: "pro", signal: new AbortController().signal, intervalMs: 1 },
+      ),
+    ).toBeNull();
+    expect(refused).toHaveBeenCalledTimes(1);
+  });
+
+  test("polling leaves no abort listener behind on its signal", async () => {
+    const controller = new AbortController();
+    let listening = 0;
+    const add = controller.signal.addEventListener.bind(controller.signal);
+    const remove = controller.signal.removeEventListener.bind(controller.signal);
+    controller.signal.addEventListener = ((...args: Parameters<typeof add>) => {
+      listening += 1;
+      add(...args);
+    }) as typeof add;
+    controller.signal.removeEventListener = ((...args: Parameters<typeof remove>) => {
+      listening -= 1;
+      remove(...args);
+    }) as typeof remove;
+    const reads = ["free", "free", "free", "pro"];
+    await waitForActivePlan(
+      {
+        getBilling: async () =>
+          ({
+            balance: {
+              plan: { key: reads.shift(), label: "x", status: "active", creditGrantedMicros: 1 },
+            },
+          }) as never,
+      },
+      { accountId: "a", planKey: "pro", signal: controller.signal, intervalMs: 1 },
+    );
+    expect(listening).toBe(0);
   });
 
   test("a code-only checkout opens in the tab the click opened", async () => {

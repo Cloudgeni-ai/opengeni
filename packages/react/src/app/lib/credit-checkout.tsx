@@ -190,6 +190,21 @@ export async function startCreditCheckout(
   return { checkoutSessionId: session.checkoutSessionId, url: session.url, inNewTab };
 }
 
+/** Wait `ms`, or reject as soon as `signal` aborts, without leaving a listener behind. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const aborted = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", aborted, { once: true });
+  });
+}
+
 /**
  * Poll one checkout until its credits are granted or it expires. Resolves with
  * the final status; rejects only when aborted. Transient read failures keep
@@ -217,25 +232,25 @@ export async function waitForCheckoutCredits(
     } catch {
       // Keep waiting through a dropped request; the checkout itself is unaffected.
     }
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, interval);
-      input.signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(input.signal.reason ?? new Error("aborted"));
-        },
-        { once: true },
-      );
-    });
+    await pause(interval, input.signal);
   }
 }
 
+/** A refusal that waiting can't change: a bad, foreign or unreadable account. */
+function refusedRead(error: unknown): boolean {
+  const status =
+    typeof error === "object" && error !== null && "status" in error ? error.status : null;
+  return status === 400 || status === 401 || status === 403 || status === 404;
+}
+
 /**
- * Poll billing until the organization is on `planKey` and the plan is active,
- * which happens once Stripe's subscription webhook lands. Resolves with that
- * plan, so the confirmation names the plan billing reports, never a guess;
- * rejects only when aborted. Transient read failures keep polling.
+ * Poll billing until the organization is on `planKey`, the plan is active and
+ * its plan credit has landed. Stripe sends the subscription (the plan) and the
+ * paid invoice (its credit) as separate webhooks in no fixed order; a plan
+ * that stays creditless past `creditGraceMs` counts as ready, for plans
+ * without credit. Resolves with that plan, so the confirmation names the plan
+ * billing reports, never a guess; null when billing refuses the read. Rejects
+ * only when aborted. Transient read failures keep polling.
  */
 export async function waitForActivePlan(
   client: Pick<CheckoutReturnClient, "getBilling">,
@@ -244,28 +259,52 @@ export async function waitForActivePlan(
     planKey: string;
     signal: AbortSignal;
     intervalMs?: number | undefined;
+    creditGraceMs?: number | undefined;
   },
-): Promise<BillingPlanBalance> {
+): Promise<BillingPlanBalance | null> {
   const interval = input.intervalMs ?? 2_000;
+  const creditGrace = input.creditGraceMs ?? 60_000;
+  let activeSince: number | null = null;
   for (;;) {
     if (input.signal.aborted) throw input.signal.reason ?? new Error("aborted");
     try {
       const plan = (await client.getBilling({ accountId: input.accountId })).balance.plan;
-      if (plan?.key === input.planKey && (plan.status === "active" || plan.status === "trialing"))
+      const active =
+        plan?.key === input.planKey && (plan.status === "active" || plan.status === "trialing");
+      activeSince = active ? (activeSince ?? Date.now()) : null;
+      if (
+        plan &&
+        activeSince !== null &&
+        (plan.creditGrantedMicros > 0 || Date.now() - activeSince >= creditGrace)
+      )
         return plan;
-    } catch {
+    } catch (error) {
+      if (refusedRead(error)) return null;
       // Keep waiting through a dropped request; the subscription itself is unaffected.
     }
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, interval);
-      input.signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(input.signal.reason ?? new Error("aborted"));
-        },
-        { once: true },
-      );
-    });
+    await pause(interval, input.signal);
   }
+}
+
+/** The checkout return in the address the app opened with, until the page reads it. */
+let launchCheckoutReturn: URLSearchParams | null = null;
+
+/**
+ * Remember a checkout return from the address the app opened with, before a
+ * route, a host redirect or an unfinished setup step rewrites the address.
+ * The page that confirms checkouts reads it once it mounts.
+ */
+export function rememberCheckoutPageReturn(search: string): void {
+  const query = new URLSearchParams(search);
+  launchCheckoutReturn = query.has(CHECKOUT_RETURN_QUERY.outcome) ? query : null;
+}
+
+/** The remembered launch return, if it hasn't been confirmed yet. */
+export function rememberedCheckoutPageReturn(): URLSearchParams | null {
+  return launchCheckoutReturn;
+}
+
+/** Forget the launch return once a page has handled it. */
+export function forgetCheckoutPageReturn(): void {
+  launchCheckoutReturn = null;
 }

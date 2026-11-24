@@ -89,6 +89,11 @@ function followPlanCheckoutReturn(
     intervalMs: wait.intervalMs,
   })
     .then((plan) => {
+      // Billing refused the read (a stale or foreign link): nothing to confirm.
+      if (!plan) {
+        toast.dismiss(toastId);
+        return;
+      }
       // Plan credit changes the balance; Billing refreshes its plan with it.
       notifyCreditBalanceChanged(accountId);
       toast.success(`${plan.label} is active`, { id: toastId, duration: 10_000 });
