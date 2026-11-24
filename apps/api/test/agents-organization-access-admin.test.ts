@@ -184,9 +184,9 @@ describe("Anyone in the organization (real PostgreSQL)", () => {
 
     // Widening an existing shared agent takes the same: an admin can, a member can't.
     const widen = async (person: Person) => {
-      const shared = (await create(person, acme.workspaceId, "workspace")).body!.agent!;
-      return send(person, "PATCH", `/v1/workspaces/${acme.workspaceId}/agents/${shared.id}`, {
-        expectedVersion: shared.version,
+      const agent = (await create(person, acme.workspaceId, "workspace")).body!.agent!;
+      return send(person, "PATCH", `/v1/workspaces/${acme.workspaceId}/agents/${agent.id}`, {
+        expectedVersion: agent.version,
         visibility: "organization",
       });
     };
