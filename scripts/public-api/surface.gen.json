@@ -16213,6 +16213,7 @@
         "$.analytics.providers.reo": "object?",
         "$.analytics.providers.reo.clientId": "string!",
         "$.apiContractRevision": "const!=[\"\\\"2026-09-plugins-and-skills-v1\\\"\"]",
+        "$.artifactExport": "boolean?",
         "$.artifacts": "object?",
         "$.artifacts.cachePartition": "object!",
         "$.artifacts.cachePartition.accountId": "string!",

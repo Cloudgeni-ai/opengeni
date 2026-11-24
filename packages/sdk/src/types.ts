@@ -6537,6 +6537,11 @@ export type ClientConfig = {
   /** Whether people can connect their own computers; absent on older servers. */
   connectedMachines?: boolean | undefined;
   /**
+   * Whether this deployment can export an editable artifact as an Office file;
+   * absent on older servers.
+   */
+  artifactExport?: boolean | undefined;
+  /**
    * The Chrome extension people add to connect their own Chrome, and its
    * Chrome Web Store page; absent on older servers (Opengeni Browser).
    */
