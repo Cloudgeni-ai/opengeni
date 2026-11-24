@@ -1202,17 +1202,18 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
   const suggested = [...container.querySelectorAll("[data-agent-suggested-trigger]")];
   expect(suggested.map((row) => row.textContent)).toEqual([
+    expect.stringContaining("When someone writes +triage on GitHub"),
     expect.stringContaining("When a Linear issue is created"),
   ]);
   // Set up opens the light dialog at the suggestion; the full form stays one link away.
-  await act(async () => button(container, "Set up").click());
+  await act(async () => button(suggested[1] as HTMLElement, "Set up").click());
   await flush();
   const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
   expect(dialog.textContent).toContain("When a Linear issue is created");
   await act(async () => button(dialog, "Open full form").click());
   await flush();
   expect(path).toBe(
-    `/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1&returnTo=agent`,
+    `/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=2&returnTo=agent`,
   );
   // Can use lists only connections with a rule: Opengeni's own GitHub tools,
   // whose row holds the ready-made agent's github.com rule, and not Gmail.
@@ -1368,7 +1369,35 @@ test("a suggested trigger is set up in place: its source is filled in and no mes
     [...document.body.querySelectorAll("[data-agent-suggested-trigger]")].map(
       (row) => row.textContent,
     ),
-  ).toEqual([expect.stringContaining("When a Linear issue is created")]);
+  ).toEqual([
+    expect.stringContaining("When someone writes +triage on GitHub"),
+    expect.stringContaining("When a Linear issue is created"),
+  ]);
+});
+
+test("an agent without a ready-made template still suggests its GitHub mention", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    agent: { name: "Data team", templateKey: null },
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When someone writes +data-team on GitHub",
+  });
+  // No template is read for it.
+  expect(client.calls.some((call) => call[0] === "listAgentTemplates")).toBe(false);
+  expect(dialog.textContent).toContain("When someone writes +data-team on GitHub");
+  expect(dialog.textContent).toContain("Acme GitHub");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.name).toBe("Data team: When someone writes +data-team on GitHub");
+  expect(request.events.triggers).toEqual([
+    expect.objectContaining({
+      sourceId: "source-gh",
+      eventTypes: ["issue_comment.created", "pull_request_review_comment.created"],
+      conditions: [{ field: "data.comment.body", op: "contains", value: "+data-team" }],
+    }),
+  ]);
+  // Once set up it isn't offered again.
+  expect(document.body.querySelector("[data-agent-suggested-trigger]")).toBeNull();
 });
 
 test("a suggestion's GitHub source is added on save once GitHub is connected", async () => {

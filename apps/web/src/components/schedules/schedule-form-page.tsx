@@ -69,6 +69,7 @@ import {
 } from "@/lib/scheduled-tasks";
 import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
 import { listAgentChats } from "@opengeni/react/app/lib/agent-chats";
+import { agentSuggestedTriggers } from "@opengeni/react/app/components/agents/agent-setup-sections";
 import { useAgents } from "@opengeni/react/app/lib/agents";
 import {
   ComposerAgentChip,
@@ -158,13 +159,14 @@ export function agentTriggerTemplate(
   templates: readonly AgentTemplate[],
   index: number | undefined,
 ): AutomationTemplate | undefined {
-  if (index === undefined || !agent.templateKey) return undefined;
-  const suggestion = templates.find((entry) => entry.key === agent.templateKey)?.suggestedTriggers[
-    index
-  ];
+  if (index === undefined) return undefined;
+  const template = agent.templateKey
+    ? templates.find((entry) => entry.key === agent.templateKey)
+    : undefined;
+  const suggestion = agentSuggestedTriggers(agent, template)[index];
   if (!suggestion) return undefined;
   return {
-    id: `agent-${agent.templateKey}-${index}`,
+    id: `agent-${agent.templateKey ?? "suggestion"}-${index}`,
     name: `${agent.name}: ${suggestion.name}`,
     description: suggestion.name,
     instructions: suggestion.instructions,

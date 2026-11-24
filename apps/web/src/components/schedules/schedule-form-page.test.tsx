@@ -711,3 +711,37 @@ test("a new automation opened from an agent's page goes back there on Cancel and
   expect(scheduleFormReturnAgent({ kind: "create", returnTo: "agent" })).toBeUndefined();
   expect(scheduleFormReturnAgent({ kind: "edit", scheduleId: "task-example" })).toBeUndefined();
 });
+
+test("an agent's suggested trigger starts the full form, with or without a ready-made template", async () => {
+  const { agentTriggerTemplate } = await import("./schedule-form-page");
+  const template = {
+    key: "triage",
+    suggestedTriggers: [
+      {
+        name: "When a GitHub issue opens",
+        instructions: "Triage it.",
+        schedule: null,
+        triggers: [],
+      },
+    ],
+  } as unknown as Parameters<typeof agentTriggerTemplate>[1][number];
+  // Position 0 is the GitHub mention every agent has, template or not.
+  const custom = agentTriggerTemplate({ name: "Data team", templateKey: null }, [], 0);
+  expect(custom?.name).toBe("Data team: When someone writes +data-team on GitHub");
+  expect(custom?.triggers[0]?.conditions).toEqual([
+    { field: "data.comment.body", op: "contains", value: "+data-team" },
+  ]);
+  // The template's own follow it.
+  expect(agentTriggerTemplate({ name: "Triage", templateKey: "triage" }, [template], 1)).toEqual(
+    expect.objectContaining({
+      name: "Triage: When a GitHub issue opens",
+      instructions: "Triage it.",
+    }),
+  );
+  expect(
+    agentTriggerTemplate({ name: "Triage", templateKey: "triage" }, [template], 2),
+  ).toBeUndefined();
+  expect(
+    agentTriggerTemplate({ name: "Triage", templateKey: null }, [], undefined),
+  ).toBeUndefined();
+});

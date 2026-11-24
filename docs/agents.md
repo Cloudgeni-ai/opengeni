@@ -708,6 +708,19 @@ at the suggestion (`?agent=<id>&agentTrigger=<n>&returnTo=agent`). Ready-made ag
 name no internal Skills. Each names the `team` it is for ("Engineering"); Capabilities
 **Ready-made** groups by it.
 
+Every agent, ready-made or not, also suggests **When someone writes
+`+<handle>` on GitHub** (`agentMentionSuggestion` in `agent-trigger-model.ts`),
+listed first: GitHub `issue_comment.created` and
+`pull_request_review_comment.created` with a `data.comment.body` `contains`
+condition on `+<handle>`, the handle Slack takes (`slackAgentHandle`, so
+PR reviewer is `+pr-reviewer`). It is `+` rather than `@` because many short
+handles (`@triage`, `@pr-reviewer`) are GitHub accounts that a mention would
+notify. Opengeni's own bot never starts it, so the agent's replies don't. The
+condition keeps the handle it was saved with; after a rename the new one is
+suggested again. `agentSuggestedTriggers` gives the page and the automation
+form the same list, so `agentTrigger=<n>` is 0 for the mention and `n` for the
+template's suggestion `n - 1`, whether or not the template has loaded.
+
 ### Delegation by name
 
 An agent hands work to another agent of the same workspace by name or id:

@@ -4,6 +4,9 @@ import {
   AGENT_TRIGGER_EVENT_MESSAGE,
   AGENT_TRIGGER_SCHEDULE_MESSAGE,
   AGENT_TRIGGER_SHARED_DENIED,
+  agentGitHubMention,
+  agentMentionSuggestion,
+  agentSuggestedTriggers,
   agentTriggerChatWords,
   agentTriggerCreateRequest,
   agentTriggerDraftForPick,
@@ -306,6 +309,44 @@ test("it saves as a new chat with the agent each run, shared like the agent", ()
   expect(personal.visibility).toBe("private");
   expect(personal.agentConfig.prompt).toBe(AGENT_TRIGGER_SCHEDULE_MESSAGE);
   expect(personal.schedule.type).toBe("calendar");
+});
+
+test("every agent suggests starting when its handle is written on GitHub, before its template's", () => {
+  // `+`, as in Slack: `@bug-fixer` would notify a GitHub account of that name.
+  expect(agentGitHubMention({ name: "Bug fixer" })).toBe("+bug-fixer");
+  expect(agentGitHubMention({ name: "  Data  Team " })).toBe("+data-team");
+  const mention = agentMentionSuggestion(AGENT);
+  expect(mention.name).toBe("When someone writes +bug-fixer on GitHub");
+  expect(agentSuggestedTriggers(AGENT, undefined)).toEqual([mention]);
+  expect(agentSuggestedTriggers(AGENT, { suggestedTriggers: [SUGGESTION] })).toEqual([
+    mention,
+    SUGGESTION,
+  ]);
+  // It saves as a GitHub trigger on comments that contain the handle, in the chosen repositories.
+  const draft = agentTriggerDraftFromSuggestion(mention, { sources: [GITHUB] });
+  const request = agentTriggerCreateRequest(t, {
+    agent: { ...AGENT, visibility: "workspace" },
+    suggestion: mention,
+    draft: {
+      ...draft,
+      events: agentTriggerRepositoryEvents(draft.events, () => true, ["acme/api"]),
+    },
+    sources: [GITHUB],
+    now: NOW,
+  }) as Record<string, any>;
+  expect(request.name).toBe("Bug fixer: When someone writes +bug-fixer on GitHub");
+  expect(request.agentConfig.prompt).toBe(mention.instructions);
+  expect(request.events.triggers).toEqual([
+    expect.objectContaining({
+      sourceId: "source-gh",
+      eventTypes: ["issue_comment.created", "pull_request_review_comment.created"],
+      includeOwnEvents: false,
+      conditions: [
+        { field: "data.comment.body", op: "contains", value: "+bug-fixer" },
+        { field: "data.repository.full_name", op: "equals", value: "acme/api" },
+      ],
+    }),
+  ]);
 });
 
 test("a trigger's runs can keep one chat or continue one of the agent's chats", () => {
