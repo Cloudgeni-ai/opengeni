@@ -41,6 +41,7 @@ import {
   listWorkspaceActivityEventsForSource,
   markEventOccurrenceStarted,
   markScheduledTaskRunFailedIfQueued,
+  recordScheduledTaskAdmissionRefusal,
   pruneEventIntake,
   recordEventDelivery,
   recordEventOccurrenceStartFailure,
@@ -1019,13 +1020,17 @@ describe("a blocked automation with no chat tells its owner in the inbox (migrat
     automation: ScheduledTask,
     state: "paused" | "notified",
   ): Promise<string> {
-    const failed = await run(automation, "event", `scheduled-task-event:${crypto.randomUUID()}`);
-    await markScheduledTaskRunFailedIfQueued(
-      client.db,
-      space.workspaceId,
-      failed.id,
-      "scheduled_agent_unavailable",
-    );
+    // A refused occurrence, as dispatch records it (no accepted execution).
+    const failed = await recordScheduledTaskAdmissionRefusal(client.db, {
+      workspaceId: space.workspaceId,
+      taskId: automation.id,
+      taskAuthorityRevision: automation.authorityRevision,
+      taskExecutionDigest: automation.executionDigest,
+      triggerType: "event",
+      producerKey: `scheduled-task-event:${crypto.randomUUID()}`,
+      reason: "scheduled_authority_unavailable",
+      retryable: false,
+    });
     await reviewScheduledTaskBlockers(client.db, space.workspaceId, automation.id, () => ({
       kind: "block",
       state,
@@ -1072,13 +1077,14 @@ describe("a blocked automation with no chat tells its owner in the inbox (migrat
     try {
       const space = await workspace();
       const automation = await task(space, { owner: space.subjectId });
-      const first = await blockWith(space, automation, "paused");
+      // Refusals are recorded only while it is active, so the paused episode comes last.
+      const first = await blockWith(space, automation, "notified");
       const [notice] = await inbox(automation.id);
       expect(notice).toMatchObject({
         status: "open",
-        title: "Automation paused itself",
+        title: "Automation needs attention",
         subtitle: "When something happens",
-        body: "Its agent was deleted or is no longer shared. It stays paused until someone resumes it.",
+        body: "Its agent was deleted or is no longer shared.",
         recipient_subject_id: space.subjectId,
         source_key: `scheduled-task-blocker:${automation.id}:${first}`,
         link: {
@@ -1087,13 +1093,17 @@ describe("a blocked automation with no chat tells its owner in the inbox (migrat
         },
       });
       // A new blocked episode replaces it; the earlier one is settled.
-      const second = await blockWith(space, automation, "notified");
+      const second = await blockWith(space, automation, "paused");
       expect(
         (await inbox(automation.id)).map((row) => [row.source_key.split(":").at(-1), row.status]),
       ).toEqual([
         [first, "resolved"],
         [second, "open"],
       ]);
+      expect((await inbox(automation.id)).at(-1)).toMatchObject({
+        title: "Automation paused itself",
+        body: "Its agent was deleted or is no longer shared. It stays paused until someone resumes it.",
+      });
       await reviewScheduledTaskBlockers(client.db, space.workspaceId, automation.id, () => ({
         kind: "clear",
         reviewedRunId: null,
