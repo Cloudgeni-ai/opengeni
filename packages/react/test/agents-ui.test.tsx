@@ -1102,6 +1102,51 @@ test("Anyone in the organization takes an organization admin, and says who can t
   expect(created?.visibility).toBe("organization");
 });
 
+test("an organization admin (not only the owner) can choose Anyone in the organization", async () => {
+  const optionDisabled = async (clientConfig: unknown) => {
+    const container = await render(
+      <AgentsTestHost
+        context={appContext(fakeAgentsClient([]), {
+          clientConfig,
+          accessContext: {
+            subjectId: "user-me",
+            subjectLabel: "Maja",
+            workspaceGrants: [],
+            accountGrants: [
+              {
+                accountId: "account-1",
+                subjectId: "user-me",
+                role: "admin",
+                // An admin's account permissions: no owner-only account:admin.
+                permissions: ["account:read", "members:manage", "workspace:create", "billing:read"],
+                metadata: { accountName: "Acme" },
+              },
+            ],
+          },
+        })}
+      >
+        <NewAgentPage workspaceId={WORKSPACE_ID} />
+      </AgentsTestHost>,
+    );
+    const option = [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
+      (element) => element.textContent?.trim() === "Anyone in Acme",
+    );
+    expect(option).toBeDefined();
+    const disabled =
+      option!.getAttribute("aria-disabled") === "true" || option!.hasAttribute("disabled");
+    const current = mounted!;
+    await act(async () => current.unmount());
+    current.container.remove();
+    return disabled;
+  };
+  // Signed in as themselves: the API's organization administration.
+  expect(
+    await optionDisabled({ auth: { mode: "managedSession" }, productAccessMode: "managed" }),
+  ).toBe(false);
+  // No signed-in session (an embedder's key): the role alone doesn't count.
+  expect(await optionDisabled(undefined)).toBe(true);
+});
+
 test("Only me is off with a reason where Only me chats aren't available", async () => {
   const container = await render(
     <AgentsTestHost context={appContext(fakeAgentsClient([], { canCreatePrivate: false }))}>

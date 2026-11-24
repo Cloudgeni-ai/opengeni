@@ -241,8 +241,9 @@ and other integrations (Teams) read the same way.
 
 - Choosing it, through the form, `POST`/`PATCH /agents` or the older `open`
   field of `PUT /agents/:id/slack/:connectionId` and the Slack agents API,
-  needs an organization admin (the request's verified `account:admin`), as
-  the switch did. Narrowing it back needs only the usual edit rights. Making
+  needs organization administration: the organization's owner or one of its
+  admins, signed in as themselves (or a literal `account:admin`). Narrowing it
+  back needs only the usual edit rights. Making
   an agent Only me turns it off. Personal workspaces don't offer it, and an
   imported `.agent.json` is never opened on its own.
 - Who may use it from an integration is unchanged from Slack's open agents

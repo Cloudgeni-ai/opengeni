@@ -44,7 +44,7 @@ import {
   sessionAvatarSeedHue,
 } from "../session/session-avatar-picker";
 import { orgName } from "../../lib/org";
-import { hasAccountPermission } from "../../lib/permissions";
+import { canAdministerOrganization } from "../../lib/workspaces";
 import {
   AGENT_VERSION_CONFLICT,
   agentViewerCanManage,
@@ -242,9 +242,14 @@ function AgentForm({
   const organizationName = workspace
     ? orgName(workspace.accountId, accessContext.accountGrants)
     : null;
+  // The organization's owner or one of its admins, as the API decides it.
   const organizationAdmin =
     workspace !== undefined &&
-    hasAccountPermission(accessContext, workspace.accountId, "account:admin");
+    canAdministerOrganization({
+      accessContext,
+      clientConfig: context.clientConfig,
+      accountId: workspace.accountId,
+    });
   const inSlack = (agent?.slack.length ?? 0) > 0;
   const long = instructions.length > AGENT_INSTRUCTIONS_SOFT_LIMIT;
   // Unchanged Instructions are never sent, so only changed ones must fit.
