@@ -8231,6 +8231,7 @@ describe("interaction attempt tools", () => {
             capturedAt: now,
             data: image,
             inexactScrollbars: true,
+            hiddenScrolledHeight: 1604,
           };
         },
       }),
@@ -8251,7 +8252,7 @@ describe("interaction attempt tools", () => {
       mediaType: "image/jpeg",
       width: 120,
       height: 200,
-      note: "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.",
+      note: "This image leaves out content that scrolls inside the page's own areas: one holds 1604 CSS px below what it shows. To capture it, scroll within that area and take more screenshots, or, if the area grows with the window, set the viewport 1604 px taller and capture again. Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.",
     });
     expect(result.content[1]).toEqual({
       type: "image",

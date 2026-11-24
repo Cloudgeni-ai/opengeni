@@ -23,6 +23,10 @@ export type BrowserImageFrame = Readonly<{
   /** A full-page capture could not keep some scrollbars' space, so content
    * next to them may be up to a scrollbar's width off. Not frame metadata. */
   inexactScrollbars?: true;
+  /** A full-page capture leaves out content the page scrolls inside its own
+   * areas: the most, in CSS px, that one such area holds below what it shows.
+   * Not frame metadata. */
+  hiddenScrolledHeight?: number;
 }>;
 
 export type BrowserScreenshotOptions = Readonly<{

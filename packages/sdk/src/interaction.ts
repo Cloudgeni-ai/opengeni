@@ -2846,6 +2846,12 @@ export type BrowserFrame = BrowserFrameMetadata & {
    * may be offset by up to a scrollbar's width.
    */
   inexactScrollbars?: true;
+  /**
+   * Set when a full-page capture left out content the page scrolls inside its
+   * own areas (an app's main pane, a table): the most CSS px that one such
+   * area holds below what it shows.
+   */
+  hiddenScrolledHeight?: number;
 };
 
 export type BrowserScreenshotOptions = {

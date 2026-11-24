@@ -293,6 +293,12 @@ const SCROLLBAR_STYLE_TIMEOUT_MS = 2_000;
 /** What a full-page capture changed to keep its scrollbar gutters, and how to undo it. */
 type ScrollbarLayout = {
   viewportWidth: number | null;
+  /** The viewport hides content past its right edge, so the page cannot be
+   * scrolled sideways to it. */
+  clipsSideways: boolean;
+  /** The most content, in CSS px, that one of the page's own scrolling areas
+   * holds below what it shows; a full-page capture does not include it. */
+  hiddenScrolledHeight: number;
   inexact: boolean;
   restore: () => Promise<void>;
 };
@@ -325,6 +331,25 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
   };
   const refresh = new Set();
   let overflow = false;
+  // Content scrolled inside an element is not part of the document's size,
+  // so a capture beyond the viewport leaves it out.
+  let hidden = 0;
+  const scrolls = (value) => value === "auto" || value === "scroll" || value === "overlay";
+  // The viewport takes the root's overflow, or the body's when the root's is
+  // visible; hidden or clip there means the page never scrolls sideways.
+  const rootStyle = getComputedStyle(root);
+  const body = document.body;
+  // The body's own overflow then belongs to the viewport, so it scrolls the
+  // document itself (the capture includes it) and the body never scrolls.
+  const propagated = rootStyle.overflowX === "visible" && rootStyle.overflowY === "visible" && body;
+  const sideways = propagated ? getComputedStyle(body).overflowX : rootStyle.overflowX;
+  const clipsSideways = sideways === "hidden" || sideways === "clip";
+  // On the captured page: not an off-canvas drawer or a box moved out of it.
+  const captured = (element) => {
+    const box = element.getBoundingClientRect();
+    return box.right > -scrollX && box.left < innerWidth - scrollX &&
+      box.bottom > -scrollY && box.top < root.scrollHeight - scrollY;
+  };
   if (innerWidth - root.clientWidth >= 1) pin(":root", root, getComputedStyle(root));
   if (innerHeight - root.clientHeight >= 1) refresh.add(":root");
   // Changing a rule restyles every element its last compound could match, so
@@ -364,6 +389,13 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
         element.scrollWidth <= width
       ) continue;
       const style = getComputedStyle(element);
+      if (
+        scrolls(style.overflowY) &&
+        !(propagated && element === body) &&
+        element.scrollHeight - height > hidden &&
+        style.visibility === "visible" &&
+        captured(element)
+      ) hidden = element.scrollHeight - height;
       const vertical = wide - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth) >= 1;
       const horizontal = tall - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth) >= 1;
       if (!vertical && !horizontal) continue;
@@ -376,7 +408,15 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
     }
   };
   visit(document, null);
-  return { viewportWidth: innerWidth, pinned, own, refresh: overflow ? [":root"] : [...refresh] };
+  return {
+    viewportWidth: innerWidth,
+    clipsSideways,
+    // Less than a row of text is no content left out.
+    hiddenScrolledHeight: hidden >= 16 ? Math.floor(hidden) : 0,
+    pinned,
+    own,
+    refresh: overflow ? [":root"] : [...refresh],
+  };
 })()`;
 /** Lays the page out, which re-evaluates the scrollbars of restyled scrollers. */
 const LAYOUT_READ_EXPRESSION =
@@ -2429,7 +2469,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 layout = await this.keepScrollbarLayout(state, deadline);
                 // The capture keeps the page's own layout width, scrollbar
                 // gutter included, so the image is as wide as the tab's viewport.
-                cssWidth = Math.max(metrics.content.width, layout?.viewportWidth ?? 0);
+                // Content past the right edge widens it only when the page can
+                // be scrolled sideways to it.
+                cssWidth =
+                  layout.clipsSideways && layout.viewportWidth !== null
+                    ? layout.viewportWidth
+                    : Math.max(metrics.content.width, layout.viewportWidth ?? 0);
                 cssHeight = metrics.content.height;
                 scrollX = 0;
                 scrollY = 0;
@@ -2563,7 +2608,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 scrollX,
                 scrollY,
               });
-              return layout?.inexact ? { ...frame, inexactScrollbars: true as const } : frame;
+              return {
+                ...frame,
+                ...(layout?.inexact ? { inexactScrollbars: true as const } : {}),
+                ...(layout && layout.hiddenScrolledHeight > 0
+                  ? { hiddenScrolledHeight: layout.hiddenScrolledHeight }
+                  : {}),
+              };
             } finally {
               await layout?.restore();
             }
@@ -2588,7 +2639,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     deadline: number,
   ): Promise<ScrollbarLayout> {
-    const unchanged = { viewportWidth: null, inexact: false, restore: async () => {} };
+    const unchanged = {
+      viewportWidth: null,
+      clipsSideways: false,
+      hiddenScrolledHeight: 0,
+      inexact: false,
+      restore: async () => {},
+    };
     let found: unknown;
     try {
       found = await this.screenshotRead(
@@ -2613,12 +2670,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return unchanged;
     }
     const viewportWidth = found.viewportWidth;
+    const clipsSideways = found.clipsSideways === true;
+    const hiddenScrolledHeight =
+      typeof found.hiddenScrolledHeight === "number" &&
+      Number.isSafeInteger(found.hiddenScrolledHeight) &&
+      found.hiddenScrolledHeight > 0
+        ? found.hiddenScrolledHeight
+        : 0;
     const pinned = found.pinned;
     const own = found.own;
     const refresh = found.refresh;
     const inexact = refresh.length > 0;
     if (pinned.length + own.length === 0 && !inexact) {
-      return { viewportWidth, inexact, restore: async () => {} };
+      return {
+        viewportWidth,
+        clipsSideways,
+        hiddenScrolledHeight,
+        inexact,
+        restore: async () => {},
+      };
     }
     // Every step stays within the capture's own deadline.
     const stepTimeout = () =>
@@ -2699,7 +2769,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         }
       });
     };
-    return { viewportWidth, inexact, restore };
+    return { viewportWidth, clipsSideways, hiddenScrolledHeight, inexact, restore };
   }
 
   /** Evaluates a read-only expression where page scripts cannot see or replace it. */
