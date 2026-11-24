@@ -36,7 +36,6 @@ const legacyBrowserUnusedMethods = [
   "getLatestEventResult",
   "getLatestStartedTurn",
   // Shared Insights methods are adopted by the separately owned Insights UI.
-  "getWorkspaceInsightsUsage",
   "getOrganizationInsightsUsage",
   // The overloaded Insights call-list API predates this boundary too. Erasing
   // type signatures must not mistake its overloads for runtime consumers.
