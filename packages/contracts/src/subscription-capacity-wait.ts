@@ -4,7 +4,14 @@ export type ProviderCapacityWaitReason =
   | "codex_plan_no_capacity"
   | "codex_rate_limited";
 
-export type SubscriptionReconnectAccount = { label: string; personal: boolean };
+/**
+ * The one account a capacity wait is about, named for people and agents: the
+ * account that needs a new sign-in, or the account the chat is pinned to.
+ * `label` is display text that is never an email address.
+ */
+export type SubscriptionWaitAccount = { label: string; personal: boolean };
+/** @deprecated Use `SubscriptionWaitAccount`. */
+export type SubscriptionReconnectAccount = SubscriptionWaitAccount;
 
 export function isProviderCapacityWaitReason(reason: string): reason is ProviderCapacityWaitReason {
   return (
@@ -18,7 +25,7 @@ export function isProviderCapacityWaitReason(reason: string): reason is Provider
  * These are new audit events only; never rewrite an earlier model request. */
 export function providerCapacityWaitReasonText(
   reason: ProviderCapacityWaitReason,
-  account?: SubscriptionReconnectAccount,
+  account?: SubscriptionWaitAccount,
 ): string {
   const messages: Record<ProviderCapacityWaitReason, string> = {
     codex_relogin_required: `The Codex account${account ? ` ${account.label}` : ""} needs a new sign-in. ${account?.personal ? "Its owner" : "An admin"} must reconnect it.`,

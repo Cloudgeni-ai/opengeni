@@ -1746,6 +1746,37 @@ describe("child lifecycle notices", () => {
     ).toBe(false);
   });
 
+  test("a worker waiting on its pinned account tells the parent to return it to automatic account choice", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "claude work" });
+    const resetsAt = new Date(Date.now() + 4 * 86_400_000);
+    const armed = await armSubscriptionCoreCapacityWait(client.db, "claude", {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      turnId: child.turn.id,
+      attemptId: child.attemptId,
+      waitReason: "pinned_account_unavailable",
+      waitAccount: { label: "“Team Max”", personal: false },
+      earliestResetAt: resetsAt,
+      failurePayload: {},
+    });
+    if (armed.action !== "waiting") throw new Error("expected a parked child");
+    const notice = await outbox(
+      grant,
+      childWaitingCapacityDedupeKey({
+        childSessionId: child.session.id,
+        waiterId: armed.waiter.waiterId,
+      }),
+    );
+    const reset = `${resetsAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    expect(notice?.summary).toBe(
+      `Worker ${child.session.id} is blocked. This chat is pinned to the Claude account “Team Max”, which has no capacity right now. It continues by itself when that account has room again, or sooner on another account once the chat is switched back to automatic account choice. That account is expected to have room again around ${reset}. To switch the worker back to automatic account choice, call the setSessionModelAccount action for it with connectionId null and provider claude; its waiting turn then continues on another account.`,
+    );
+    expect(notice?.summary).not.toContain("session_set_model");
+  });
+
   test("a changed Codex blocker appends a new parent notice without rewriting the first", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
@@ -1778,7 +1809,7 @@ describe("child lifecycle notices", () => {
         evaluation: {
           kind: "wait",
           waitReason: "codex_relogin_required",
-          reconnectAccount: { label: "“Primary”", personal: false },
+          waitAccount: { label: "“Primary”", personal: false },
           earliestResetAt: null,
           healthRetryAt: null,
         },

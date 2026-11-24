@@ -302,7 +302,7 @@ export async function selectCoreSubscriptionTurnCapacity(
           placement.reason,
           placement.earliestResetAt,
           provider.displayName,
-          placement.reconnectAccount,
+          placement.waitAccount,
         );
       case "run":
         break;
@@ -418,7 +418,7 @@ export async function parkCoreSubscriptionTurn(
       waitReason: wait.reason,
       earliestResetAt: wait.earliestResetAt,
       healthRetryAt: wait.healthRetryAt,
-      ...(wait.reconnectAccount ? { reconnectAccount: wait.reconnectAccount } : {}),
+      ...(wait.waitAccount ? { waitAccount: wait.waitAccount } : {}),
       ...(wait.candidateProviders !== undefined
         ? { candidateProviders: wait.candidateProviders }
         : {}),
@@ -426,7 +426,7 @@ export async function parkCoreSubscriptionTurn(
         wait.reason,
         wait.earliestResetAt,
         displayName,
-        wait.reconnectAccount,
+        wait.waitAccount,
       ),
     });
   } catch (error) {

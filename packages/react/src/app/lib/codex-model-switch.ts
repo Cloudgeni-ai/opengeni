@@ -73,13 +73,13 @@ const USAGE_WAIT_REASONS: ReadonlySet<string> = new Set([
   "no_eligible_capacity",
   "codex_rate_limited",
   "compaction_provider_locked",
-  // The chat's pinned account is out of usage until its reset.
-  "pinned_account_unavailable",
 ]);
 
 /**
  * Whether the newest capacity wait is a usage wait, not one that needs a
  * person to act (a turned-off or ineligible account, a model not allowed).
+ * A wait on the chat's pinned account is not one either: its own notice
+ * names the account and offers automatic account choice.
  */
 export function codexWaitIsUsageLimit(events: readonly SessionEvent[]): boolean {
   let latest: SessionEvent | null = null;
