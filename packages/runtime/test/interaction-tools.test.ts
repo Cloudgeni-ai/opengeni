@@ -3712,6 +3712,48 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("a computer that failed to start reports why instead of an opened computer", async () => {
+    const failedId = randomUUID();
+    const opened = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+        createComputerSession: async () =>
+          ({
+            session: {
+              ...discoveredComputerSession(failedId, sessionId),
+              lifecycle: "failed",
+              failureCode: "driver_failed",
+            },
+            operation: {
+              state: "failed",
+              error: {
+                code: "driver_failed",
+                message: "The desktop driver could not start on this machine.",
+                retryable: false,
+              },
+            },
+          }) as never,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    })[0]!.execute(
+      { mode: "new" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:fixture" } },
+    );
+
+    // As for a browser that did not start, the start error is the result.
+    await expect(opened).rejects.toMatchObject({
+      status: 502,
+      code: "driver_failed",
+      retryable: false,
+      message: expect.stringContaining(
+        `ComputerSession ${failedId} did not start: The desktop driver could not start`,
+      ),
+    });
+  });
+
   test("any tool refused for something the person can fix posts the same setup card", async () => {
     const posted: Array<{ code: string; toolName: string }> = [];
     const refuse = (code: string) =>
