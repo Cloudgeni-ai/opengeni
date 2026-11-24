@@ -6674,6 +6674,20 @@ export function browserTabDiagnosisError(error: unknown): unknown {
     failure.cause = error;
     return failure;
   }
+  // A page that did not load in time is the website's or its network path's
+  // failure, not the workspace's. As a plain 504 it would reach the agent as
+  // "the workspace is temporarily unavailable", so keep the controller's own
+  // fixed sentence, which names no page or host.
+  if (code === "timeout" && error.status >= 500 && isBrowserNavigationTimeout(error)) {
+    const failure = new ApiHttpError(504, {
+      code: "upstream_unavailable",
+      message: error.error.message,
+      retryable: error.retryable,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (code !== "tab_not_responding" && code !== "tab_crashed") return error;
   const failure = new ApiHttpError(409, {
     code,
@@ -6683,6 +6697,19 @@ export function browserTabDiagnosisError(error: unknown): unknown {
   });
   failure.cause = error;
   return failure;
+}
+
+/** The controller's fixed sentences for a navigation that did not load in
+ * time: the server never answered, the page never committed, or the document
+ * never became ready. */
+const BROWSER_NAVIGATION_TIMEOUT_MESSAGES = [
+  /^browser could not load the requested URL: its server did not respond within \d+ seconds$/u,
+  /^browser navigation did not commit a new page in time and was stopped(?:; the tab still shows its previous page)?$/u,
+  /^browser navigation timed out$/u,
+];
+
+function isBrowserNavigationTimeout(error: BrowserControlRequestError): boolean {
+  return BROWSER_NAVIGATION_TIMEOUT_MESSAGES.some((pattern) => pattern.test(error.error.message));
 }
 
 /** Keep a definite read timeout useful without publishing driver diagnostics. */
