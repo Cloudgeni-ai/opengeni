@@ -18114,6 +18114,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.editAccess": "ref(AgentEditAccess)?",
         "$.name": "string?",
         "$.visibility": "ref(AgentVisibility)?"
       }

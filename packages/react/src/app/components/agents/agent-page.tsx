@@ -102,6 +102,7 @@ function EditAccessRow({
 }) {
   const { client } = useAppContext();
   const [pending, setPending] = useState<Agent["editAccess"] | null>(null);
+  const canManage = agentViewerCanManage(agent);
   return (
     <SettingRow
       label="Who can edit"
@@ -111,8 +112,10 @@ function EditAccessRow({
         <RowSelect
           options={AGENT_EDIT_ACCESS_OPTIONS}
           value={pending ?? agent.editAccess}
-          disabled={!agentViewerCanManage(agent) || pending !== null}
-          disabledReason="Only whoever made it, or a workspace admin, can change this."
+          disabled={!canManage || pending !== null}
+          {...(canManage
+            ? {}
+            : { disabledReason: "Only whoever made it, or a workspace admin, can change this." })}
           onValueChange={(next) => {
             if (next === agent.editAccess) return;
             setPending(next);

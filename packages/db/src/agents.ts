@@ -481,7 +481,7 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
         ${input.avatar === null ? sql`null` : sql`${JSON.stringify(input.avatar)}::jsonb`},
         ${input.memoryEnabled},
         ${input.visibility === "workspace" && input.organizationAccess === true},
-        ${input.editAccess ?? "everyone"},
+        ${input.editAccess ?? "creator_and_admins"},
         ${JSON.stringify(input.toolPermissions ?? [])}::jsonb, ${JSON.stringify(input.skills ?? [])}::jsonb,
         ${input.templateKey ?? null}, 1,
         ${input.origin}, ${input.sourceSessionId}::uuid,

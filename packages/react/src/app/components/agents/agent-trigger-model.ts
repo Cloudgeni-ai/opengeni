@@ -516,6 +516,7 @@ export async function addAgentSuggestedTrigger(
   });
   const missing = agentTriggerMissingSource(draft, sources);
   if (missing) {
+    // Unknown status leaves it to the server, as the dialog's source step does.
     if (missing.kind !== "github" || input.githubConnected === false)
       return { kind: "needs_setup" };
     const { source } = await input.client.createEventSource(

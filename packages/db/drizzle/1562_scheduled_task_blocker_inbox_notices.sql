@@ -13,14 +13,16 @@
 --   opens one inbox notice for the automation's owner while its blocker
 --   review holds a blocker with no chat notice (one per blocked episode,
 --   keyed by the blocked run), and resolves it once the review clears, a
---   chat notice takes over, or the automation is deleted. The notice is a
+--   chat notice takes over, or the automation is deleted. A new owner gets
+--   the notice instead of the old one. The notice is a
 --   chat-less inbox item (1503) linking to the automation. Everything it says
 --   comes from the review and the automation as stored, so a caller can only
 --   make it tell the truth; it reads both through their workspace policies,
 --   so it sees only the workspace the calling transaction is scoped to.
--- * An AFTER trigger on scheduled_task_blocker_reviews calls it whenever a
---   review is written with a new state, blocked run or chat notice. It is an
---   ordinary (invoker) trigger: the runtime role's EXECUTE on the sync is
+-- * AFTER triggers call it whenever a review is written with a new state,
+--   blocked run or chat notice, or deleted (with its automation), and
+--   whenever an automation is deleted (`deleted_at`) or changes owner. They run an
+--   ordinary (invoker) trigger function: the runtime role's EXECUTE on the sync is
 --   withheld for one release (DEFERRED_RUNTIME_PRIVATE_ROUTINES), because the
 --   previous release refuses a runtime grant on a definer it doesn't know.
 --   Until a later migration grants it, a review writes no inbox notice, as
@@ -72,14 +74,16 @@ BEGIN
           AND item.source_key LIKE v_prefix || '%%';
         RETURN 0;
       END IF;
-      -- One notice per blocked episode; an earlier episode's is settled.
+      -- One notice per blocked episode, to its current owner; an earlier
+      -- episode's, or an earlier owner's, is settled.
       v_key := v_prefix || v_review.blocked_run_id::text;
       UPDATE opengeni_private.inbox_items item
       SET status = 'resolved', resolved_at = now(), updated_at = now()
       WHERE item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
-        AND item.source_key LIKE v_prefix || '%%' AND item.source_key <> v_key;
+        AND item.source_key LIKE v_prefix || '%%'
+        AND (item.source_key <> v_key OR item.recipient_subject_id <> v_task.owner_subject_id);
       v_title := CASE WHEN v_review.state = 'paused'
-        THEN 'Schedule paused itself' ELSE 'Schedule needs attention' END;
+        THEN 'Automation paused itself' ELSE 'Automation needs attention' END;
       v_body := v_review.message || CASE WHEN v_review.state = 'paused'
         THEN ' It stays paused until someone resumes it.' ELSE '' END;
       INSERT INTO opengeni_private.inbox_items AS item (
@@ -88,7 +92,7 @@ BEGIN
       ) VALUES (
         v_review.account_id, v_review.workspace_id, NULL, v_task.owner_subject_id,
         'notification', v_key, v_title,
-        left(coalesce(nullif(btrim(v_task.name), ''), 'Scheduled task'), 120),
+        left(coalesce(nullif(btrim(v_task.name), ''), 'Automation'), 120),
         left(v_body, 2000),
         jsonb_build_object(
           'url', '/workspaces/' || v_review.workspace_id::text || '/automations?taskId='
@@ -110,18 +114,28 @@ BEGIN
     LANGUAGE plpgsql
     SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
+    DECLARE
+      v_task_id uuid;
     BEGIN
+      -- Separate statements: each row type has only its own fields.
+      IF TG_TABLE_NAME = 'scheduled_tasks' THEN
+        v_task_id := NEW.id;
+      ELSIF TG_OP = 'DELETE' THEN
+        v_task_id := OLD.task_id;
+      ELSE
+        v_task_id := NEW.task_id;
+      END IF;
       -- Runs as the writing role, which may sync the notice once its
-      -- EXECUTE is granted; until then a review tells nobody new, as before.
+      -- EXECUTE is granted; until then nobody is told anything new, as before.
       IF pg_catalog.has_function_privilege(
         'opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1(uuid)', 'EXECUTE')
       THEN
-        PERFORM opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1(NEW.task_id);
+        PERFORM opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1(v_task_id);
       END IF;
       RETURN NULL;
     EXCEPTION WHEN OTHERS THEN
-      -- Telling the owner never decides the review.
-      RAISE WARNING 'scheduled task blocker inbox notice skipped for %%: %%', NEW.task_id, SQLERRM;
+      -- Telling the owner never decides the write.
+      RAISE WARNING 'scheduled task blocker inbox notice skipped for %%: %%', v_task_id, SQLERRM;
       RETURN NULL;
     END
     $body$
@@ -145,3 +159,14 @@ CREATE TRIGGER scheduled_task_blocker_reviews_inbox_notice_update_trg
     OR NEW.notice_session_id IS DISTINCT FROM OLD.notice_session_id)
   EXECUTE FUNCTION opengeni_private.scheduled_task_blocker_inbox_notice();
 
+CREATE TRIGGER scheduled_task_blocker_reviews_inbox_notice_delete_trg
+  AFTER DELETE ON scheduled_task_blocker_reviews
+  FOR EACH ROW
+  EXECUTE FUNCTION opengeni_private.scheduled_task_blocker_inbox_notice();
+
+CREATE TRIGGER scheduled_tasks_blocker_inbox_notice_update_trg
+  AFTER UPDATE OF deleted_at, owner_subject_id ON scheduled_tasks
+  FOR EACH ROW
+  WHEN (NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
+    OR NEW.owner_subject_id IS DISTINCT FROM OLD.owner_subject_id)
+  EXECUTE FUNCTION opengeni_private.scheduled_task_blocker_inbox_notice();

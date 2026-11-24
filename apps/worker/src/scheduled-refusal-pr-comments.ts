@@ -12,9 +12,13 @@
  * through that installation, must resolve the event's `owner/name` to that
  * id. Test events (no sender) never comment. At most one comment per pull
  * request and cause within {@link REFUSED_RUN_COMMENT_WINDOW_MS}, found by a
- * hidden marker on the App's own comments. Best effort: a failure is logged
- * and never changes the run.
+ * hidden marker on the App's own comments; concurrent refusals for the same
+ * pull request and cause take a transaction advisory lock, and the one that
+ * doesn't get it leaves the comment to the one that did. Best effort: a
+ * failure is logged and never changes the run, and the caller doesn't wait
+ * for it.
  */
+import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
 import type { InboundEvent, ScheduledTask, ScheduledTaskRun } from "@opengeni/contracts";
 import {
@@ -37,6 +41,10 @@ export const REFUSED_RUN_COMMENT_WINDOW_MS = 24 * 60 * 60 * 1_000;
 export const REFUSED_RUN_COMMENT_LIMIT = 3;
 const GITHUB_API = "https://api.github.com";
 const GITHUB_TIMEOUT_MS = 10_000;
+/** The longest an automation's name is quoted in a comment. */
+const AUTOMATION_NAME_MAX = 80;
+/** Pages of recent comments read for an earlier one (100 each). */
+const COMMENT_PAGES_MAX = 3;
 const FULL_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 
 export type RefusedPullRequest = {
@@ -103,7 +111,11 @@ export function refusedRunPullRequests(
   return [...found.values()];
 }
 
-/** Why each refusal stops a run, as the comment says it. */
+/**
+ * Why each refusal stops a run, as the comment says it. Billing causes stay
+ * neutral: the people on a pull request may be outside the workspace.
+ */
+const USAGE_LIMIT = "the workspace it runs in has reached a usage limit";
 const CAUSE_TEXT: Record<string, string> = {
   scheduled_run_authority_proof_rejected:
     "the access its owner saved it with has changed, so its owner needs to open it in Opengeni and save it again",
@@ -113,15 +125,27 @@ const CAUSE_TEXT: Record<string, string> = {
     "the access its owner saved it with has changed, so its owner needs to open it in Opengeni and save it again",
   scheduled_authority_exhausted:
     "the access its owner saved it with has run out, so its owner needs to open it in Opengeni and save it again",
+  scheduled_rig_authority_changed:
+    "the access its owner saved it with has changed, so its owner needs to open it in Opengeni and save it again",
+  scheduled_slack_authority_changed:
+    "the Slack access its owner saved it with has changed, so its owner needs to open it in Opengeni and save it again",
+  scheduled_slack_authority_unavailable:
+    "the Slack access its owner saved it with has changed, so its owner needs to open it in Opengeni and save it again",
   scheduled_agent_unavailable: "its agent was deleted or is no longer shared",
+  scheduled_target_session_unavailable: "the chat it runs in is no longer available",
+  scheduled_generated_session_binding_missing: "the chat it runs in is no longer available",
+  scheduled_generated_session_changed: "the chat it runs in is no longer available",
+  scheduled_machine_unavailable: "the machine it runs on is no longer available",
   scheduled_model_unavailable: "its model is no longer available",
   scheduled_session_spawn_denied: "the workspace doesn't allow it to start chats right now",
   scheduled_workspace_paused: "agent activity in the workspace is paused",
   connection_account_unavailable: "a connected account it needs can no longer be used",
-  insufficient_credits: "the workspace is out of credits",
-  allowance_exhausted: "the workspace's usage allowance is used up",
-  monthly_model_cost_limit: "the workspace reached its monthly model cost limit",
-  monthly_agent_run_limit: "the workspace reached its monthly run limit",
+  insufficient_credits: USAGE_LIMIT,
+  allowance_exhausted: USAGE_LIMIT,
+  monthly_model_cost_limit: USAGE_LIMIT,
+  monthly_agent_run_limit: USAGE_LIMIT,
+  api_credits_required: USAGE_LIMIT,
+  byok_paid_credit_required: USAGE_LIMIT,
   session_usage_limit: "it reached its usage limit",
   machine_target_unavailable: "the machine it runs on is no longer available",
   machine_enrollment_inactive: "the machine it runs on is disconnected",
@@ -149,11 +173,28 @@ export function refusedRunCommentMarker(cause: string): string {
   return `<!-- opengeni:automation-refused:${cause.replace(/[^a-z0-9_]/gu, "")} -->`;
 }
 
+/**
+ * An automation's name as the comment quotes it: one line, at most
+ * {@link AUTOMATION_NAME_MAX} characters, in a code span so it can't
+ * mention anyone, link anywhere or forge a marker.
+ */
+export function quotedAutomationName(name: string): string | null {
+  const plain = name
+    .replace(/[`<>\\]/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!plain) return null;
+  const short =
+    plain.length > AUTOMATION_NAME_MAX ? `${plain.slice(0, AUTOMATION_NAME_MAX - 1)}…` : plain;
+  return `\`${short}\``;
+}
+
 /** The comment: what couldn't run, why, and that its owner was told. */
 export function refusedRunCommentBody(input: { cause: string; automation: string | null }): string {
-  const what = input.automation ? `“${input.automation}”` : "an automation";
+  const quoted = input.automation ? quotedAutomationName(input.automation) : null;
+  const what = quoted ? `the automation ${quoted}` : "an automation";
   const why = CAUSE_TEXT[input.cause] ?? "it was refused before it started";
-  return `Opengeni couldn't run ${what} on this pull request: ${why}. Its owner has been told in Opengeni.\n\n${refusedRunCommentMarker(input.cause)}`;
+  return `Opengeni couldn't run ${what} on this pull request: ${why}. Its owner can see why in Opengeni.\n\n${refusedRunCommentMarker(input.cause)}`;
 }
 
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -166,8 +207,27 @@ export type RefusedRunCommentDependencies = {
   now?: () => Date;
   /** Mints a token for one repository; the real App by default. */
   mintToken?: (input: { installationId: number; repositoryId: number }) => Promise<string>;
+  /**
+   * Runs `work` alone for `key` across workers, or returns null without
+   * running it when another worker holds `key`. A transaction advisory lock
+   * by default.
+   */
+  exclusive?: <T>(key: string, work: () => Promise<T>) => Promise<T | null>;
   warn?: (message: string, fields: Record<string, string | number>) => void;
 };
+
+/** {@link RefusedRunCommentDependencies.exclusive} on Postgres. */
+export function advisoryExclusive(db: Database) {
+  return async <T>(key: string, work: () => Promise<T>): Promise<T | null> =>
+    await db.transaction(async (tx) => {
+      const rows = (await tx.execute(
+        sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as locked`,
+      )) as unknown as { locked: boolean }[] | { rows: { locked: boolean }[] };
+      const first = Array.isArray(rows) ? rows[0] : rows.rows[0];
+      if (!first?.locked) return null;
+      return await work();
+    });
+}
 
 function headers(token: string): HeadersInit {
   return {
@@ -250,7 +310,7 @@ async function commentOnRefusedPullRequestsUnsafe(
   }
 
   return await postRefusedRunComments(
-    deps,
+    { ...deps, exclusive: deps.exclusive ?? advisoryExclusive(deps.db) },
     {
       taskId: input.taskId,
       cause,
@@ -268,7 +328,10 @@ async function commentOnRefusedPullRequestsUnsafe(
  * said so for this cause within the window.
  */
 export async function postRefusedRunComments(
-  deps: Pick<RefusedRunCommentDependencies, "settings" | "lookup" | "fetch" | "now" | "mintToken">,
+  deps: Pick<
+    RefusedRunCommentDependencies,
+    "settings" | "lookup" | "fetch" | "now" | "mintToken" | "exclusive"
+  >,
   input: {
     taskId: string;
     cause: string;
@@ -294,68 +357,104 @@ export async function postRefusedRunComments(
           timeoutMs: GITHUB_TIMEOUT_MS,
         })
       ).token);
-  const marker = refusedRunCommentMarker(cause);
-  const ownLogin = `${slug}[bot]`;
   let posted = 0;
   for (const pullRequest of pullRequests) {
-    const installationId = installationFor.get(pullRequest.repositoryId);
-    if (installationId === undefined) continue;
-    const found = await deps.lookup({
-      installationId,
-      owner: pullRequest.owner,
-      name: pullRequest.name,
-    });
-    // The event's name must be the allowlisted repository's, as GitHub says now.
-    if (!found || found.id !== pullRequest.repositoryId) continue;
-    const token = await mint({
-      installationId,
-      repositoryId: pullRequest.repositoryId,
-    });
-    const path = `${GITHUB_API}/repos/${encodeURIComponent(pullRequest.owner)}/${encodeURIComponent(
-      pullRequest.name,
-    )}/issues/${pullRequest.number}/comments`;
-    const since = new Date(now.getTime() - REFUSED_RUN_COMMENT_WINDOW_MS).toISOString();
-    const listed = await fetcher(`${path}?since=${encodeURIComponent(since)}&per_page=100`, {
-      headers: headers(token),
-      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
-    });
+    // One pull request failing leaves the others to try.
+    try {
+      const installationId = installationFor.get(pullRequest.repositoryId);
+      if (installationId === undefined) continue;
+      const found = await deps.lookup({
+        installationId,
+        owner: pullRequest.owner,
+        name: pullRequest.name,
+      });
+      // The event's name must be the allowlisted repository's, as GitHub says now.
+      if (!found || found.id !== pullRequest.repositoryId) continue;
+      const token = await mint({
+        installationId,
+        repositoryId: pullRequest.repositoryId,
+      });
+      const comment = () =>
+        commentOnce({
+          fetcher,
+          token,
+          pullRequest,
+          cause,
+          automation,
+          ownLogin: `${slug}[bot]`,
+          since: new Date(now.getTime() - REFUSED_RUN_COMMENT_WINDOW_MS),
+          taskId: input.taskId,
+          warn,
+        });
+      const key = `scheduled-refusal-pr-comment:${pullRequest.repositoryId}:${pullRequest.number}:${cause}`;
+      const done = deps.exclusive ? await deps.exclusive(key, comment) : await comment();
+      if (done) posted += 1;
+    } catch (error) {
+      warn("Commenting on a refused run's pull request failed", {
+        taskId: input.taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return posted;
+}
+
+/** Read the window's comments and post unless the App already said so. */
+async function commentOnce(input: {
+  fetcher: Fetch;
+  token: string;
+  pullRequest: RefusedPullRequest;
+  cause: string;
+  automation: string | null;
+  ownLogin: string;
+  since: Date;
+  taskId: string;
+  warn: (message: string, fields: Record<string, string | number>) => void;
+}): Promise<boolean> {
+  const { fetcher, token, pullRequest, cause, warn } = input;
+  const marker = refusedRunCommentMarker(cause);
+  const path = `${GITHUB_API}/repos/${encodeURIComponent(pullRequest.owner)}/${encodeURIComponent(
+    pullRequest.name,
+  )}/issues/${pullRequest.number}/comments`;
+  for (let page = 1; page <= COMMENT_PAGES_MAX; page += 1) {
+    const listed = await fetcher(
+      `${path}?since=${encodeURIComponent(input.since.toISOString())}&per_page=100&page=${page}`,
+      { headers: headers(token), signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) },
+    );
     if (!listed.ok) {
       warn("Reading a refused run's pull request comments failed", {
         taskId: input.taskId,
         status: listed.status,
       });
-      continue;
+      return false;
     }
     const comments = (await listed.json()) as unknown;
-    const told =
-      Array.isArray(comments) &&
-      comments.some((comment) => {
-        const entry = record(comment);
-        const login = record(entry?.user)?.login;
-        return (
-          typeof login === "string" &&
-          login.toLowerCase() === ownLogin &&
-          typeof entry?.body === "string" &&
-          entry.body.includes(marker)
-        );
-      });
-    if (told) continue;
-    const created = await fetcher(path, {
-      method: "POST",
-      headers: { ...headers(token), "content-type": "application/json" },
-      body: JSON.stringify({
-        body: refusedRunCommentBody({ cause, automation }),
-      }),
-      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    if (!Array.isArray(comments)) return false;
+    const told = comments.some((comment) => {
+      const entry = record(comment);
+      const login = record(entry?.user)?.login;
+      return (
+        typeof login === "string" &&
+        login.toLowerCase() === input.ownLogin &&
+        typeof entry?.body === "string" &&
+        entry.body.includes(marker)
+      );
     });
-    if (!created.ok) {
-      warn("Commenting on a refused run's pull request failed", {
-        taskId: input.taskId,
-        status: created.status,
-      });
-      continue;
-    }
-    posted += 1;
+    if (told) return false;
+    if (comments.length < 100) break;
   }
-  return posted;
+  const created = await fetcher(path, {
+    method: "POST",
+    headers: { ...headers(token), "content-type": "application/json" },
+    body: JSON.stringify({ body: refusedRunCommentBody({ cause, automation: input.automation }) }),
+    signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+  });
+  if (!created.ok) {
+    warn("Commenting on a refused run's pull request failed", {
+      taskId: input.taskId,
+      status: created.status,
+    });
+    return false;
+  }
+  return true;
 }

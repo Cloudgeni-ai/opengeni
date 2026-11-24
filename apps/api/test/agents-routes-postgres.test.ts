@@ -357,8 +357,22 @@ describe("agents through the API (real PostgreSQL)", () => {
     const base = `/v1/workspaces/${workspace.workspaceId}/agents`;
     const templates = `/v1/workspaces/${workspace.workspaceId}/bot-templates`;
 
-    // New shared agents: everyone in the workspace can edit them.
-    const created = (await call(alice, "POST", base, { name: "Release helper" })).json.agent;
+    // A create request that leaves it out keeps the rule from before it,
+    // for the API and a ready-made agent alike.
+    const omitted = (await call(alice, "POST", base, { name: "Quiet helper" })).json.agent;
+    expect(omitted.editAccess).toBe("creator_and_admins");
+    const readyMade = await call(
+      alice,
+      "POST",
+      `/v1/workspaces/${workspace.workspaceId}/agent-templates/pr-reviewer/agents`,
+      { name: "Reviewer", editAccess: "everyone" },
+    );
+    expect(readyMade.status).toBe(201);
+    expect(readyMade.json.agent.editAccess).toBe("everyone");
+    // New agents from Opengeni's apps: everyone in the workspace can edit them.
+    const created = (
+      await call(alice, "POST", base, { name: "Release helper", editAccess: "everyone" })
+    ).json.agent;
     expect(created.editAccess).toBe("everyone");
     const asBob = (await call(bob, "GET", `${base}/${created.id}`)).json.agent;
     expect(asBob.viewer).toMatchObject({ canEdit: true, canManage: false });

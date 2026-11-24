@@ -48,6 +48,7 @@ import {
   resolveEventIngressRoute,
   retireExhaustedScheduledTask,
   reviewScheduledTaskBlockers,
+  deleteScheduledTask,
   setScheduledTaskEvents,
   updateEventSource,
   updateScheduledTask,
@@ -1065,7 +1066,7 @@ describe("a blocked automation with no chat tells its owner in the inbox (migrat
       const [notice] = await inbox(automation.id);
       expect(notice).toMatchObject({
         status: "open",
-        title: "Schedule paused itself",
+        title: "Automation paused itself",
         subtitle: "When something happens",
         body: "Its agent was deleted or is no longer shared. It stays paused until someone resumes it.",
         recipient_subject_id: space.subjectId,
@@ -1092,6 +1093,23 @@ describe("a blocked automation with no chat tells its owner in the inbox (migrat
       const unowned = await task(space);
       await blockWith(space, unowned, "paused");
       expect(await inbox(unowned.id)).toEqual([]);
+      // A new owner is told instead of the old one; deleting it settles it.
+      const moved = await task(space, { owner: space.subjectId });
+      await blockWith(space, moved, "notified");
+      const heir = `${space.subjectId}-heir`;
+      await withWorkspaceRls(client.db, space.workspaceId, (scoped) =>
+        scoped.execute(
+          sql`update scheduled_tasks set owner_subject_id = ${heir} where id = ${moved.id}`,
+        ),
+      );
+      expect(
+        (await inbox(moved.id)).map((row) => [row.recipient_subject_id, row.status, row.title]),
+      ).toEqual([
+        [space.subjectId, "resolved", "Automation needs attention"],
+        [heir, "open", "Automation needs attention"],
+      ]);
+      await deleteScheduledTask(client.db, space.workspaceId, moved.id);
+      expect((await inbox(moved.id)).every((row) => row.status === "resolved")).toBe(true);
     } finally {
       await shared!.admin.unsafe(`revoke execute on function ${sync} from opengeni_app`);
     }

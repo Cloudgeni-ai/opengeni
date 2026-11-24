@@ -374,8 +374,8 @@ export const AGENT_BUILT_IN_GITHUB_CONNECTOR = "github.com";
 export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /**
-     * Rename it, change its Instructions, Memory, Can use, Skills and
-     * triggers: whoever made it, an admin of its workspace, or, when its
+     * Rename it, change its Instructions, Remember across chats, Can use and Skills:
+     * whoever made it, an admin of its workspace, or, when its
      * `editAccess` is `everyone`, anyone in its workspace who can start chats.
      */
     canEdit: z.boolean(),
@@ -471,8 +471,11 @@ export const CreateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       avatar: SessionAvatar.nullable().default(null),
       /** Only a person can keep an agent to themselves. */
       visibility: AgentVisibility.default("workspace"),
-      /** Who can edit it when shared; omitted, everyone in the workspace. */
-      editAccess: AgentEditAccess.default("everyone"),
+      /**
+       * Who can edit it when shared. Omitted, its creator and admins, as
+       * before this field; Opengeni's own apps send `everyone`.
+       */
+      editAccess: AgentEditAccess.default("creator_and_admins"),
       instructions: AgentInstructions.default(""),
       /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.default(""),
@@ -713,6 +716,8 @@ export const CreateAgentFromTemplateRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       name: AgentName.optional(),
       visibility: AgentVisibility.optional(),
+      /** Who can edit it when shared; omitted, its creator and admins. */
+      editAccess: AgentEditAccess.optional(),
     })
     .strict(),
 );

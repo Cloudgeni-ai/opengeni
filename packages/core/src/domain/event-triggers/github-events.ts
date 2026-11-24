@@ -510,13 +510,17 @@ export function readGitHubDelivery(input: {
 
 /**
  * Whether a comment @mentions Opengeni's own GitHub App (`@slug` or
- * `@slug[bot]`), read from the whole body before it is shortened. Null when
- * the delivery carries no comment.
+ * `@slug[bot]`), read from the whole body before it is shortened. A mention
+ * in code or a quoted reply doesn't count, so quoting a request doesn't ask
+ * again. Null when the delivery carries no comment.
  */
 function commentMentionsOwnApp(payload: Json, ownLogins: ReadonlySet<string>): boolean | null {
   const found = object(payload.comment);
   if (!found) return null;
-  const said = text(found.body) ?? "";
+  const said = (text(found.body) ?? "")
+    .replace(/^ {0,3}(```|~~~)[^\n]*\n[\s\S]*?(^ {0,3}\1[^\n]*$|(?![\s\S]))/gmu, "")
+    .replace(/`+[^`]*`+/gu, "")
+    .replace(/^ {0,3}>.*$/gmu, "");
   for (const own of ownLogins) {
     const slug = own.endsWith("[bot]") ? own.slice(0, -"[bot]".length) : own;
     if (!slug) continue;

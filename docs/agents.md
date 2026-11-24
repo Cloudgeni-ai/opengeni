@@ -140,15 +140,22 @@ path is the agent's home.
 A shared agent's **Who can edit** (`editAccess`, migration
 `1561_agent_edit_access.sql`) is `creator_and_admins` (whoever made it and the
 workspace's admins) or `everyone` (also anyone in its workspace who can start
-chats there). New agents default to `everyone`; agents made before it keep
+chats there). Agents made in Opengeni's own apps and by agent tools start as
+`everyone`; a create request that leaves it out (`POST /agents`, a ready-made
+agent's `POST /agent-templates/:key/agents`, `/bot-templates`) gets
+`creator_and_admins`, as before the setting, and agents made before it keep
 `creator_and_admins`, today's rule. It governs every edit of the agent: its
-name, icon, Instructions, Memory, Can use and Skills, through `/agents`,
-`/bot-templates`, the SDK and agent tools. Who can use it, Who can edit and
+name, icon, Instructions, Remember across chats, Can use and Skills, through
+`/agents`, `/bot-templates`, the SDK and agent tools; with `everyone`, that
+includes the Instructions and Can use its automations run with. What it
+remembers is Knowledge, governed by Knowledge's own permissions. Who can use it, Who can edit and
 deleting it stay with whoever made it and admins (`viewer.canManage`). Each
 edit rechecks the setting under the agent's row lock, so a concurrent change
 to it can't be raced. An Only me agent stays its owner's whatever the setting
 says. The agent page shows it as one row under Who can use it, read-only for
-people who can't manage the agent.
+people who can't manage the agent. Triggers aren't agent edits: an automation
+runs as its own owner, so anyone who may create automations can point one at
+an agent they can use.
 
 - Limits: name 1 to 120 characters, description up to 280, Instructions up
   to 20,000 (an older client's `firstMessage` too, which joins them). Validation is lenient (trimmed, clear

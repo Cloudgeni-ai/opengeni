@@ -186,6 +186,11 @@ describe("GitHub webhook deliveries", () => {
     expect(said("@opengeni-agent-two look").mentions_app).toBe(false);
     expect(said("mail me at a@opengeni-agent.com").mentions_app).toBe(false);
     expect(said("opengeni-agent please review").mentions_app).toBe(false);
+    // Nor one in code or a quoted reply.
+    expect(said("Run `@opengeni-agent review` to ask").mentions_app).toBe(false);
+    expect(said("```\n@opengeni-agent review\n```\nlike that").mentions_app).toBe(false);
+    expect(said("> @opengeni-agent please review\n\nDone, see above.").mentions_app).toBe(false);
+    expect(said("> quoted\n\n@opengeni-agent again please").mentions_app).toBe(true);
     // Read from the whole body, not the shortened one.
     expect(said(`${"x".repeat(20_000)} @opengeni-agent`).mentions_app).toBe(true);
     const catalog = githubEventTypeCatalog([], null).find(

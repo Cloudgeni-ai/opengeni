@@ -496,6 +496,8 @@ test("Make this an agent starts from the chat's name and links the new agent to 
     description: "Weekly release review",
     sourceSessionId: sessionId,
     visibility: "workspace",
+    // Opengeni's own form makes it editable by the whole workspace.
+    editAccess: "everyone",
     memoryEnabled: true,
   });
   expect(path).toMatch(new RegExp(`/workspaces/${WORKSPACE_ID}/agents/[0-9a-f-]{36}$`));

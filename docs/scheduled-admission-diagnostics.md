@@ -126,14 +126,18 @@ page, as before.
 When a GitHub pull request event (a pull request, its review, review comment
 or comment) starts a run that is refused or fails before its chat starts, the
 worker also says so on that pull request: one short comment through the
-workspace's GitHub App naming the automation (only when it is shared), why in
-plain words, and that its owner was told in Opengeni
+workspace's GitHub App naming the automation (only when it is shared, quoted
+as code so it can't mention or link), why in plain words (billing causes only
+as "a usage limit"), and that its owner can see why in Opengeni
 (`apps/worker/src/scheduled-refusal-pr-comments.ts`). The pull request is
 trusted only as an event run's repositories are: the allowlist must offer its
 repository through one of the workspace's installations and GitHub must
 resolve its name to the same id. Test events never comment. A hidden marker
 on the App's comments keeps it to one comment per pull request and cause
-within 24 hours. It is best effort and never changes the run.
+within 24 hours, and a transaction advisory lock per pull request and cause
+keeps concurrent refusals from both posting. It is best effort: dispatch
+doesn't wait for it, and it never changes the run. A run whose dispatch
+activity fails outright, rather than being refused, doesn't comment.
 
 Agents cover what the platform cannot see, a run that starts but cannot do its
 job: each new scheduled occurrence tells the agent to try to fix a blocker,

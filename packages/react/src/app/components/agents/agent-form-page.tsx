@@ -265,6 +265,7 @@ function AgentForm({
           description: current.description.trim(),
           avatar: current.avatar,
           visibility: current.visibility,
+          editAccess: "everyone",
           instructions: current.instructions.trim(),
           memoryEnabled: current.memoryEnabled,
           sourceSessionId: sourceSessionId ?? null,

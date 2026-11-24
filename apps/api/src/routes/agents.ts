@@ -367,6 +367,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       description: template.description,
       avatar: template.avatar,
       visibility: overrides.visibility ?? "workspace",
+      ...(overrides.editAccess ? { editAccess: overrides.editAccess } : {}),
       instructions: template.instructions,
       memoryEnabled: template.memoryEnabled,
       toolPermissions: template.toolPermissions,

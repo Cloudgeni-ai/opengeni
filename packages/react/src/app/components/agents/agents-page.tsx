@@ -120,7 +120,10 @@ export function AgentsPage({
       const request = onlyMeUnavailable
         ? { ...parsed.request, visibility: "workspace" as const }
         : parsed.request;
-      const created = await client.createAgent(workspaceId, request);
+      const created = await client.createAgent(workspaceId, {
+        ...request,
+        editAccess: request.editAccess ?? "everyone",
+      });
       state.replace((current) => [created, ...current]);
       toast.success("Agent imported", {
         description: onlyMeUnavailable
@@ -336,7 +339,9 @@ function useReadyMadeAgents(
     if (adding !== null) return;
     setAdding(template.key);
     try {
-      const agent = await client.createAgentFromTemplate(workspaceId, template.key);
+      const agent = await client.createAgentFromTemplate(workspaceId, template.key, {
+        editAccess: "everyone",
+      });
       setAddedHere((current) => (current ? new Set(current).add(template.key) : current));
       toast.success(`Added ${agent.name}`);
       onAdded(agent);

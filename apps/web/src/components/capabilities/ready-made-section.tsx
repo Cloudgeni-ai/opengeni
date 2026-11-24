@@ -246,7 +246,9 @@ export function ReadyMadeSection({
     try {
       if (entry.kind === "agent") {
         // The same add path as the Agents page.
-        const agent = await client.createAgentFromTemplate(workspaceId, key);
+        const agent = await client.createAgentFromTemplate(workspaceId, key, {
+          editAccess: "everyone",
+        });
         setAddedAgents((current) => new Map(current).set(key, agent.id));
       } else if (entry.kind === "app") {
         const template = appTemplates?.find((each) => each.key === key);
