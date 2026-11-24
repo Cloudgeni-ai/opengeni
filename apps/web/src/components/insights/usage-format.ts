@@ -1,3 +1,4 @@
+import { formatUsageMoney, usageCostMicros, usageUsd } from "@opengeni/react/app/lib/usage-cost";
 import type {
   UsageBucket,
   UsageMeasures,
@@ -156,13 +157,7 @@ export const PAYER_IDS: readonly UsagePayerId[] = ["opengeni_credits", "subscrip
  * count their list-price estimate, since nothing was charged here.
  */
 export function costMicros(measures: UsageMeasures): number {
-  const payers = measures.byPayer;
-  if (payers) {
-    const credits = payers.opengeni_credits;
-    const external = (payers.subscription?.listMicros ?? 0) + (payers.own_key?.listMicros ?? 0);
-    return (credits?.chargedMicros ?? 0) + external;
-  }
-  return Math.max(measures.chargedMicros, measures.listMicros);
+  return usageCostMicros(measures);
 }
 
 /** True when any part of costMicros is a list-price estimate. */
@@ -178,21 +173,11 @@ export function costUnknown(measures: UsageMeasures): boolean {
 }
 
 export function usd(micros: number): number {
-  return micros / 1_000_000;
+  return usageUsd(micros);
 }
 
 export function formatMoney(micros: number, options: { compact?: boolean } = {}): string {
-  const value = usd(micros);
-  const abs = Math.abs(value);
-  if (abs > 0 && abs < 0.0001) return "<$0.0001";
-  if (options.compact && abs >= 10_000) {
-    return `$${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value)}`;
-  }
-  const digits = abs === 0 || abs >= 1 ? 2 : abs >= 0.01 ? 3 : 4;
-  return `$${value.toLocaleString("en-US", {
-    minimumFractionDigits: abs >= 1000 ? 0 : digits,
-    maximumFractionDigits: abs >= 1000 ? 0 : digits,
-  })}`;
+  return formatUsageMoney(micros, options);
 }
 
 export function formatMoneyAxis(micros: number): string {

@@ -932,6 +932,7 @@ const INSIGHTS_SEARCH_KEYS = [
   "who",
   "root",
   "sched",
+  "agent",
   "src",
   "start",
   "end",

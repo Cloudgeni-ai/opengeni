@@ -30,6 +30,7 @@ export type UsageSearch = {
   who?: string;
   root?: string;
   sched?: string;
+  agent?: string;
   src?: string;
   /**
    * Custom range (`from` is taken by the back link): UTC instants such as
@@ -49,6 +50,7 @@ const FILTER_KEYS: Record<UsageFilterField, keyof UsageSearch> = {
   person: "who",
   rootSessionId: "root",
   scheduleId: "sched",
+  agentId: "agent",
   source: "src",
 };
 
@@ -73,6 +75,7 @@ const GROUPS: readonly UsageGroupBy[] = [
   "rootSession",
   "person",
   "schedule",
+  "agent",
   "source",
 ];
 const PAYERS: readonly UsagePayerId[] = ["opengeni_credits", "subscription", "own_key"];

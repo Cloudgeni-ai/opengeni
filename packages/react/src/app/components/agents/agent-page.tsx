@@ -36,6 +36,7 @@ import { toast } from "../../lib/toast";
 import { slackLogo } from "../new-session-starter-logos";
 import { SessionAvatar } from "../session/session-avatar";
 import { DestructiveConfirm } from "../ui/destructive-confirm";
+import { AgentCost } from "./agent-cost";
 import {
   AgentCanUse,
   AgentMemoryEntries,
@@ -438,6 +439,7 @@ export function AgentPage({
         }
       />
       <DetailPageBody>
+        <AgentCost agent={agent} workspaceId={workspaceId} />
         <DetailSection title="Instructions">
           <Prose text={agent.instructions} empty="None. It works like an ordinary chat." />
         </DetailSection>
