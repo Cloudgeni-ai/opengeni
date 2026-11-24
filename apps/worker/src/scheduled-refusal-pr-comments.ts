@@ -243,9 +243,32 @@ function headers(token: string): HeadersInit {
   };
 }
 
+/** At most this many refused runs comment at once on one worker. */
+export const REFUSED_RUN_COMMENTS_IN_FLIGHT = 2;
+let inFlight = 0;
+const waiting: (() => void)[] = [];
+
 /**
- * Comment on the pull requests a refused event run was about. Returns how
- * many comments it posted. Never throws.
+ * Run `work` once fewer than {@link REFUSED_RUN_COMMENTS_IN_FLIGHT} others
+ * are running on this worker, so a burst of refusals can't take the
+ * database pool's connections.
+ */
+export async function oneOfFewAtOnce<T>(work: () => Promise<T>): Promise<T> {
+  if (inFlight >= REFUSED_RUN_COMMENTS_IN_FLIGHT) {
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  }
+  inFlight += 1;
+  try {
+    return await work();
+  } finally {
+    inFlight -= 1;
+    waiting.shift()?.();
+  }
+}
+
+/**
+ * Comment on the pull requests a refused event run was about, a few runs at
+ * a time per worker. Returns how many comments it posted. Never throws.
  */
 export async function commentOnRefusedPullRequests(
   deps: RefusedRunCommentDependencies,
@@ -255,7 +278,7 @@ export async function commentOnRefusedPullRequests(
     deps.warn ??
     ((message: string, fields: Record<string, string | number>) => console.warn(message, fields));
   try {
-    return await commentOnRefusedPullRequestsUnsafe(deps, input, warn);
+    return await oneOfFewAtOnce(() => commentOnRefusedPullRequestsUnsafe(deps, input, warn));
   } catch (error) {
     warn("Commenting on a refused run's pull request failed", {
       taskId: input.taskId,

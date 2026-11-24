@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   githubEventPullRequest,
+  oneOfFewAtOnce,
+  REFUSED_RUN_COMMENTS_IN_FLIGHT,
   postRefusedRunComments,
   quotedAutomationName,
   refusedRunCause,
@@ -268,6 +270,22 @@ describe("refused pull request runs", () => {
       ),
     ).toBe(1);
     expect(warnings).toEqual(["Commenting on a refused run's pull request failed"]);
+  });
+
+  test("only a few refused runs comment at once on a worker", async () => {
+    let running = 0;
+    let most = 0;
+    const jobs = Array.from({ length: 5 }, (_, index) =>
+      oneOfFewAtOnce(async () => {
+        running += 1;
+        most = Math.max(most, running);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        running -= 1;
+        return index;
+      }),
+    );
+    expect(await Promise.all(jobs)).toEqual([0, 1, 2, 3, 4]);
+    expect(most).toBe(REFUSED_RUN_COMMENTS_IN_FLIGHT);
   });
 
   test("reads further pages before deciding it hasn't said so", async () => {

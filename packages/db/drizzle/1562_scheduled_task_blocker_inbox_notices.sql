@@ -53,25 +53,37 @@ BEGIN
       v_title text;
       v_body text;
       v_item uuid;
+      v_account uuid;
     BEGIN
       SELECT review.account_id, review.workspace_id, review.state, review.message,
           review.blocked_run_id, review.notice_session_id
         INTO v_review
       FROM scheduled_task_blocker_reviews review
       WHERE review.task_id = p_task_id;
-      SELECT task.name, task.owner_subject_id, task.deleted_at
+      SELECT task.account_id, task.name, task.owner_subject_id, task.deleted_at
         INTO v_task
       FROM scheduled_tasks task
       WHERE task.id = p_task_id;
+      -- Its account narrows the notices to resolve to that account's inbox;
+      -- with the automation and its review both gone there is none to use.
+      v_account := coalesce(v_task.account_id, v_review.account_id);
       IF v_review.state IS NULL OR v_review.state = 'clear' OR v_review.message IS NULL
         OR v_review.blocked_run_id IS NULL OR v_review.notice_session_id IS NOT NULL
         OR v_task.owner_subject_id IS NULL OR v_task.deleted_at IS NOT NULL
       THEN
         -- Nothing blocks it, its chat carries the notice, or it is gone.
-        UPDATE opengeni_private.inbox_items item
-        SET status = 'resolved', resolved_at = now(), updated_at = now()
-        WHERE item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
-          AND item.source_key LIKE v_prefix || '%%';
+        IF v_account IS NOT NULL THEN
+          UPDATE opengeni_private.inbox_items item
+          SET status = 'resolved', resolved_at = now(), updated_at = now()
+          WHERE item.account_id = v_account
+            AND item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
+            AND item.source_key LIKE v_prefix || '%%';
+        ELSE
+          UPDATE opengeni_private.inbox_items item
+          SET status = 'resolved', resolved_at = now(), updated_at = now()
+          WHERE item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
+            AND item.source_key LIKE v_prefix || '%%';
+        END IF;
         RETURN 0;
       END IF;
       -- One notice per blocked episode, to its current owner; an earlier
@@ -79,7 +91,8 @@ BEGIN
       v_key := v_prefix || v_review.blocked_run_id::text;
       UPDATE opengeni_private.inbox_items item
       SET status = 'resolved', resolved_at = now(), updated_at = now()
-      WHERE item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
+      WHERE item.account_id = v_account
+        AND item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
         AND item.source_key LIKE v_prefix || '%%'
         AND (item.source_key <> v_key OR item.recipient_subject_id <> v_task.owner_subject_id);
       v_title := CASE WHEN v_review.state = 'paused'
