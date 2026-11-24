@@ -464,7 +464,7 @@ function AgentForm({
           }
         />
         {commonTriggers.length > 0 ? (
-          <Field label="Starts when" group hint="Also when someone starts a chat with it.">
+          <Field label="Starts when" group>
             <div data-agent-form-triggers="">
               {commonTriggers.map((common) => (
                 <SettingRow

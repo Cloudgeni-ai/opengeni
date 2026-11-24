@@ -809,7 +809,9 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   common triggers they don't already cover and no automation of the agent
   already listens to (by name or by event types), at most three, as off switches
   (`agentTriggerOffers`); turning one on adds the automation at once, or opens
-  the trigger dialog when its source needs setup. A shared agent in Slack shows
+  the trigger dialog when its source needs setup. That dialog's Open full form
+  passes `?agentCommonTrigger=<key>`, so the automation form starts from the
+  trigger's events. A shared agent in Slack shows
   a read-only "When mentioned in Slack" row: Slack mentions reach it natively,
   so there is no Slack trigger to add.
 - Agent page: **Chat** (`/sessions?agent=<id>`), **Export** (an `.agent.json`

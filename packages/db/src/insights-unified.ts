@@ -227,7 +227,8 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootSessionId','deleted')`,
     person: sql`coalesce(payload->>'person','service')`,
     schedule: sql`coalesce(payload->>'scheduleId','service')`,
-    agent: sql`coalesce(payload->>'agentId','none')`,
+    // Agents the caller may not see share one row, so their ids stay hidden.
+    agent: sql`case when payload->>'agentId' is null then 'none' when payload->>'agentName' is null then 'unavailable' else payload->>'agentId' end`,
   };
   const labels = {
     model: sql`payload->>'model'`,
@@ -251,7 +252,7 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     groupBy === "project"
       ? sql`case when payload->>'projectId' is null then 'unfiled' else 'item' end`
       : groupBy === "agent"
-        ? sql`case when payload->>'agentId' is null then 'unfiled' else 'item' end`
+        ? sql`case when payload->>'agentId' is null or payload->>'agentName' is null then 'unfiled' else 'item' end`
         : groupBy === "person" || groupBy === "schedule"
           ? sql`case when ${key}='service' then 'service' else 'item' end`
           : sql`'item'::text`;

@@ -28,8 +28,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   // Create with chat: describe the agent, and a chat drafts and saves it.
   const chat = useStartChatDialog(workspaceId, {
     title: "Create an agent with chat",
-    description:
-      "A chat drafts its name, instructions, tools and triggers, and saves it once you confirm.",
+    description: "You check the draft before it's saved.",
     fieldLabel: "What should the agent do?",
     placeholder: "Fix new PostHog errors on its own and open a pull request for each",
     emptyError: "Say what the agent should do.",

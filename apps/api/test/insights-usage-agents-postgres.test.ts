@@ -201,8 +201,10 @@ test("usage groups and filters by the root chat's agent and hides names the view
       listMicros: Number(facts!.list),
     },
   });
-  expect(group(`item:${othersOnlyMe}`)).toMatchObject({
-    kind: "item",
+  // An agent the viewer can't see shares one row: its id never shows.
+  expect(byAgent.groups.some((row) => row.key.includes(othersOnlyMe))).toBe(false);
+  expect(group("unfiled:unavailable")).toMatchObject({
+    kind: "unfiled",
     label: "Unavailable agent",
     measures: { calls: 1, chargedMicros: 200, listMicros: 5_000 },
   });

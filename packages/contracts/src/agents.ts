@@ -691,8 +691,14 @@ export type CommonAgentTriggerNeed = "github" | null;
  * full trigger form can change it later. The create-an-agent chat offers the
  * same list (the bundled `agents` Skill names each by its event types).
  */
+export const COMMON_AGENT_TRIGGER_KEYS = [
+  "pull_request_opened",
+  "mentioned_on_pull_request",
+  "weekday_morning",
+] as const;
+
 export interface CommonAgentTrigger {
-  key: "pull_request_opened" | "mentioned_on_pull_request" | "weekday_morning";
+  key: (typeof COMMON_AGENT_TRIGGER_KEYS)[number];
   needs: CommonAgentTriggerNeed;
   trigger: AgentTemplateTrigger;
 }

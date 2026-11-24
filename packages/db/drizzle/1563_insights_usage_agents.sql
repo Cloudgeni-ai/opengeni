@@ -16,6 +16,9 @@
 -- stay aggregates per kind, person, payer and workspace, so which agent a
 -- hidden chat used is never revealed.
 --
+-- Only the root chats of visible rows are looked up, so other groupings pay
+-- little for it.
+--
 -- The function is patched in place at two exact anchors (as 1030 does), so
 -- its signature, owner, grants, SECURITY DEFINER and SET options are
 -- unchanged and no new routine needs EXECUTE. sessions.agent_id (1244) and
@@ -44,7 +47,8 @@ DECLARE
 BEGIN
   join_replacement := pg_catalog.format($new$task.account_id=a AND task.workspace_id=w.id
               LEFT JOIN(SELECT sa.id,sa.agent_id FROM %1$I.sessions sa
-                WHERE sa.account_id=a AND sa.workspace_id=w.id AND sa.agent_id IS NOT NULL) agent_root
+                WHERE sa.account_id=a AND sa.workspace_id=w.id AND sa.agent_id IS NOT NULL
+                  AND sa.id IN(SELECT c.root_session_id FROM classified c WHERE c.kind='item')) agent_root
                 ON f.kind='item' AND agent_root.id=f.root_session_id
               LEFT JOIN %1$I.agents agent ON agent.id=agent_root.agent_id AND agent.account_id=a$new$, data_schema);
   IF (pg_catalog.length(definition) - pg_catalog.length(pg_catalog.replace(definition, field_anchor, '')))
