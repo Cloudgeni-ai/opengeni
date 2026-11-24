@@ -561,3 +561,41 @@ test("named for an agent, a PR mention must also say its name", () => {
     unnamed.trigger.triggers.flatMap((trigger) => trigger.conditions.map((c) => c.field)),
   ).not.toContain("data.comment.body");
 });
+
+test("after a rename, the PR mention for the new name is offered again", () => {
+  const old = availableCommonTriggers({ usesGitHub: true, agentName: "Reviewer" }).find(
+    (entry) => entry.key === "mentioned_on_pull_request",
+  )!;
+  const task = {
+    name: "Reviewer: When mentioned on a PR",
+    schedule: { type: "manual" },
+    events: { triggers: old.trigger.triggers },
+  } as never;
+  const offered = (agentName: string) =>
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, agentName, tasks: [task] }).map(
+      (offer) => offer.common,
+    );
+  expect(offered("reviewer")).not.toContain("mentioned_on_pull_request");
+  expect(offered("Critic")).toContain("mentioned_on_pull_request");
+});
+
+test("only the same calendar hides the weekday offer", () => {
+  const offered = (schedule: unknown) =>
+    agentTriggerOffers({
+      templateSuggestions: [],
+      usesGitHub: false,
+      tasks: [{ name: "Report", schedule, events: null } as never],
+    }).map((offer) => offer.common);
+  expect(offered({ type: "calendar", hour: 9, minute: 0, daysOfMonth: [1] })).toContain(
+    "weekday_morning",
+  );
+  expect(
+    offered({
+      type: "calendar",
+      hour: 9,
+      minute: 0,
+      daysOfWeek: ["FRIDAY", "MONDAY", "THURSDAY", "TUESDAY", "WEDNESDAY"],
+      timeZone: "Europe/Oslo",
+    }),
+  ).not.toContain("weekday_morning");
+});

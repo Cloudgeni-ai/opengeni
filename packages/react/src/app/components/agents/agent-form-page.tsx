@@ -29,6 +29,7 @@ import { SettingRow } from "../../../ui/setting-row";
 import { Switch } from "../../../ui/switch";
 import { useAppContext } from "../../app-context";
 import { agentErrorCode, useAgent } from "../../lib/agents";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { t } from "../../lib/console-text";
 import { githubConnectedOf } from "../../lib/github-connect";
 import { useNavigate } from "../../lib/navigation";
@@ -202,6 +203,7 @@ function AgentForm({
   const context = useAppContext();
   const { client, workspaces, accessContext } = context;
   const privateChats = usePrivateChatsAvailable(workspaceId);
+  const { productName } = useSimplifiedInterface();
   const seedKey = agent?.id ?? sourceSessionId ?? "new-agent";
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
@@ -473,7 +475,7 @@ function AgentForm({
                   label={common.trigger.name}
                   description={
                     common.key === "mentioned_on_pull_request"
-                      ? mentionHint(name.trim() || "its name")
+                      ? mentionHint(name.trim() || "its name", productName)
                       : undefined
                   }
                   control={

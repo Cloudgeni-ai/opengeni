@@ -25,6 +25,7 @@ import { toast } from "../../lib/toast";
 import { AgentCanUse as AgentCanUseSection } from "./agent-can-use";
 import { AgentSkills as AgentSkillsSection } from "./agent-skills";
 import { AgentTriggerDialog } from "./agent-trigger-dialog";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { githubConnectedOf } from "../../lib/github-connect";
 import {
   addAgentSuggestedTrigger,
@@ -60,6 +61,7 @@ export function agentTriggers(tasks: readonly ScheduledTask[], agentId: string):
 
 export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
   const context = useAppContext();
+  const { productName } = useSimplifiedInterface();
   const { client } = context;
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<ScheduledTask[] | null>(null);
@@ -255,7 +257,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
               label={offer.suggestion.name}
               description={
                 offer.common === "mentioned_on_pull_request"
-                  ? mentionHint(agent.name)
+                  ? mentionHint(agent.name, productName)
                   : offer.suggestion.oneClick
                     ? undefined
                     : "Off until you choose where it listens."

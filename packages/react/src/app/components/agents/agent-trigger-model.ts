@@ -104,12 +104,49 @@ export function availableCommonTriggers(options: {
   );
 }
 
+type SignatureTrigger = {
+  eventTypes: readonly string[];
+  conditions?: readonly { field: string; op: string; value?: unknown }[] | undefined;
+};
+type SignatureSchedule =
+  | { type: string; hour?: number; minute?: number; daysOfWeek?: readonly string[] }
+  | null
+  | undefined;
+
+/**
+ * What a trigger listens to: its events, the name a mention must say, and a
+ * calendar's days and time. A renamed agent's old mention trigger no longer
+ * matches, so the page offers the one for its new name.
+ */
+function listenSignature(
+  triggers: readonly SignatureTrigger[],
+  schedule: SignatureSchedule,
+): string {
+  if (triggers.length > 0) {
+    return triggers
+      .map((trigger) => {
+        const named = (trigger.conditions ?? [])
+          .filter((c) => c.field === "data.comment.body" && c.op === "contains")
+          .map((c) =>
+            String(c.value ?? "")
+              .trim()
+              .toLowerCase(),
+          )
+          .sort();
+        return [[...trigger.eventTypes].sort().join(","), ...named].join("~");
+      })
+      .sort()
+      .join("|");
+  }
+  if (!schedule || schedule.type === "manual") return "";
+  if (schedule.type === "calendar") {
+    return `calendar:${schedule.hour ?? ""}:${schedule.minute ?? ""}:${[...(schedule.daysOfWeek ?? [])].sort().join(",")}`;
+  }
+  return "schedule";
+}
+
 function eventSignature(suggestion: Pick<AgentTemplateTrigger, "schedule" | "triggers">): string {
-  if (suggestion.triggers.length === 0) return suggestion.schedule ? "schedule" : "";
-  return suggestion.triggers
-    .flatMap((trigger) => trigger.eventTypes)
-    .sort()
-    .join(",");
+  return listenSignature(suggestion.triggers, suggestion.schedule as SignatureSchedule);
 }
 
 /**
@@ -120,14 +157,10 @@ function eventSignature(suggestion: Pick<AgentTemplateTrigger, "schedule" | "tri
  */
 /** What an automation listens to, compared the way offers are. */
 function taskSignature(task: Pick<ScheduledTask, "schedule" | "events">): string {
-  const triggers = task.events?.triggers ?? [];
-  if (triggers.length > 0) {
-    return triggers
-      .flatMap((trigger) => trigger.eventTypes)
-      .sort()
-      .join(",");
-  }
-  return task.schedule.type === "manual" ? "" : "schedule";
+  return listenSignature(
+    (task.events?.triggers ?? []) as readonly SignatureTrigger[],
+    task.schedule as SignatureSchedule,
+  );
 }
 
 export function agentTriggerOffers(input: {
@@ -142,23 +175,35 @@ export function agentTriggerOffers(input: {
     suggestion,
     templateIndex: index,
   }));
-  const covered = new Set(fromTemplate.map((offer) => eventSignature(offer.suggestion)));
+  // A common trigger the template already suggests in its own form (by event types).
+  const eventTypes = (suggestion: Pick<AgentTemplateTrigger, "schedule" | "triggers">) =>
+    suggestion.triggers.length === 0
+      ? suggestion.schedule
+        ? "schedule"
+        : ""
+      : suggestion.triggers
+          .flatMap((trigger) => trigger.eventTypes)
+          .sort()
+          .join(",");
+  const covered = new Set(
+    fromTemplate.map((offer) => eventTypes(offer.suggestion)).filter((s) => s !== ""),
+  );
   const common: AgentTriggerOffer[] = availableCommonTriggers({
     usesGitHub: input.usesGitHub,
     agentName: input.agentName,
   })
-    .filter((entry) => !covered.has(eventSignature(entry.trigger)))
+    .filter((entry) => !covered.has(eventTypes(entry.trigger)))
     .map((entry) => ({ key: `common-${entry.key}`, suggestion: entry.trigger, common: entry.key }));
   return (
     [...fromTemplate, ...common]
-      // Set up already: under its name, or listening to the same events.
+      // Set up already: a template suggestion under its name, or anything
+      // listening to the same thing.
       .filter(
         (offer) =>
           !input.tasks?.some(
             (task) =>
-              task.name.endsWith(offer.suggestion.name) ||
-              (offer.common !== undefined &&
-                taskSignature(task) !== "" &&
+              (offer.common === undefined && task.name.endsWith(offer.suggestion.name)) ||
+              (taskSignature(task) !== "" &&
                 taskSignature(task) === eventSignature(offer.suggestion)),
           ),
       )
@@ -167,8 +212,8 @@ export function agentTriggerOffers(input: {
 }
 
 /** How people start an agent from a pull request comment. */
-export function mentionHint(agentName: string): string {
-  return `A comment that mentions Opengeni and says “${agentName}”`;
+export function mentionHint(agentName: string, productName = "Opengeni"): string {
+  return `A comment that mentions ${productName} and says “${agentName}”`;
 }
 
 /** Offers shown at once, so the section stays to its essentials. */

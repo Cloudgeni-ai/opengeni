@@ -34,7 +34,7 @@ with one question: a `multi_select` "Create it? When should it start?" with
 `required: false`, listing the common triggers it can use (mark the ones its
 job implies as recommended). Submitting creates the agent; anything typed in
 Other is a change to make first. Change the draft and ask again until the
-person submits without changes.
+person submits without changes. If they skip or dismiss it, save nothing.
 
 ## 3. Save
 
