@@ -1,5 +1,66 @@
 # @opengeni/worker-bundle
 
+## 6.38.0
+
+### Patch Changes
+
+- bfe5398: A chat pinned to one subscription account now says so when it waits for that account. The chat keeps honouring the pin: its turn still waits for the chosen account and never moves to another one by itself. But the wait no longer tells people to switch the chat to another model, which did not help, because the pin holds whatever the model.
+
+  - The composer shows "This chat is pinned to the Claude account “Team”, which is out of capacity. Resets Sat 18:00." with one button, **Use automatic account choice**. It switches the chat back to automatic account choice through the existing session account choice (`connectionId: null`), which applies to the waiting turn, so it continues at once on another account. People who can't manage the chat are told who can. A turned-off or no-longer-eligible pinned account gets the same notice and button.
+  - The timeline keeps the wait's own explanation instead of the generic "switch to another model" line.
+  - The person's inbox notification is titled "Chat waiting for its pinned Claude account", names the account and when it has room again, and offers automatic account choice instead of a model switch. It is still sent once per waiting turn and updated in place when what it said changes.
+  - A worker's parent agent is told the same, with the `setSessionModelAccount` action (`connectionId: null`) as the way to let the worker continue, instead of `session_set_model`.
+
+  The account is named by its label only when the label is not an email address. The internal wait field that named an account needing a new sign-in is now `waitAccount` (type `SubscriptionWaitAccount`; `SubscriptionReconnectAccount` remains as a deprecated alias) and also names a pinned account.
+
+- c05ba68: Automations that run an agent with Memory are no longer refused when they start. Microsoft Teams chats with an agent now get its Memory, as Slack and app chats do.
+  An automation whose agent was deleted or is no longer shared now stops with a clear reason instead of retrying.
+- Updated dependencies [f1289fa]
+- Updated dependencies [969cb9b]
+- Updated dependencies [f9b646c]
+- Updated dependencies [14d9e24]
+- Updated dependencies [020a5df]
+- Updated dependencies [3e41dc8]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [bd4550b]
+- Updated dependencies [b193d0c]
+- Updated dependencies [66afd96]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [c05ba68]
+- Updated dependencies [b76dd79]
+- Updated dependencies [47f4951]
+- Updated dependencies [d1ecb10]
+- Updated dependencies [b902e4e]
+- Updated dependencies [262c8b2]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+  - @opengeni/capabilities@6.38.0
+  - @opengeni/runtime@6.38.0
+  - @opengeni/db@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/subscriptions@6.38.0
+  - @opengeni/core@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/decisions@6.38.0
+  - @opengeni/documents@6.38.0
+  - @opengeni/events@6.38.0
+  - @opengeni/github@6.38.0
+  - @opengeni/interaction@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/storage@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+  - @opengeni/vaults@6.38.0
+  - @opengeni/vaults-bitwarden@6.38.0
+  - @opengeni/vaults-keeper@6.38.0
+  - @opengeni/vaults-onepassword@6.38.0
+  - @opengeni/vaults-protonpass@6.38.0
+  - @opengeni/jev@6.38.0
+  - @opengeni/agent-proto@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

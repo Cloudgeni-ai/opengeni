@@ -1,5 +1,48 @@
 # @opengeni/runtime
 
+## 6.38.0
+
+### Patch Changes
+
+- 969cb9b: A tool search that mentions Opengeni itself, as app chats often do ("the Opengeni app"), no longer shows a Connected Machine card. The platform's own domain no longer counts as naming its built-in integrations; their own names still do.
+- 14d9e24: A default `browser_open` (no `browserSessionId`, default reuse) no longer fails on a browser that can never be continued. When the browser it picks for reuse is refused and inspecting its working copy shows it can never be continued (its last launch left no record of a browser process, it was launched under another controller, or its working directory is missing), the open starts a new browser instead and its result says which browser was replaced and why. The old browser is kept, and an open that names it by ID still reports why it cannot continue. A copy that can be adopted, an adoption still settling, or a copy a process may still use are not replaced.
+- 020a5df: `computer_open` with `applicationId` now works for a macOS app run from a folder macOS doesn't know, such as a downloaded app opened in place.
+
+  - When macOS can't find such an app to launch, the launch fails definitely instead of reporting an unknown outcome, since nothing ran.
+  - If the app is already running, the open then observes its listed window.
+  - When no window of the named app was observed, the screenshot shows only a screen, never another app's window. When there is no screen, it says why no screenshot was taken.
+
+- 3e41dc8: `computer_open` now reports a computer that failed to start as an error with the controller's reason (`ComputerSession <id> did not start: …`), as `browser_open` already does, instead of an opened computer with no screens.
+- 5b2cd0d: A full-page browser screenshot now says when it leaves out content that scrolls inside the page's own areas (an app's main pane or a table), and by how many CSS pixels, with how to capture the rest. It is also exactly as wide as the viewport when the page hides content past its right edge, instead of widening to content no one can scroll to.
+- 66afd96: A browser or computer request that fails because its Connected Machine is offline now says what to do instead of the generic "resolve the reported issue": wait for the machine to reconnect, or open a new browser or computer on another online machine from `sandboxes_list`.
+- 47f4951: Apps get dashboard building blocks: `/__opengeni/ui.css` adds KPI cards, number cells, good and bad tones, chart colours per theme, details and empty states, and `/__opengeni/charts.js` (`SITE_CHARTS_JS`, inlined by `resolveSiteUiStylesheet`) draws formatted KPIs, bars, line and scatter charts and sortable tables. The `sites` Skill sends dashboards to a short `references/dashboards.md`.
+- d1ecb10: New apps look designed instead of generic. The bundled `sites` Skill now carries design guidance (`references/design.md`) that the agent reads before it writes a new app or restyles one: what the first screen leads with, how to compose a tool in the Opengeni look, how to design a page of its own, the states every app needs, and the generated-page habits to leave out. A page shown to others (a landing page, invitation, menu, portfolio) now gets a design of its own instead of the Opengeni look. A person's or workspace's own design still comes first.
+- 262c8b2: Pause, terminal Cancel and an explicit stop now stop an unsupervised session background command's process group. Before, such a command was only marked stopping and kept running, so a process that ignored interrupts could still write after it should have stopped. Slow turn settlements and Steer handovers are now logged with the time spent in each phase.
+- Updated dependencies [f1289fa]
+- Updated dependencies [969cb9b]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+  - @opengeni/capabilities@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/decisions@6.38.0
+  - @opengeni/interaction@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+  - @opengeni/vaults@6.38.0
+  - @opengeni/jev@6.38.0
+  - @opengeni/agent-proto@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

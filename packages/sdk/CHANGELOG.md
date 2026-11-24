@@ -1,5 +1,29 @@
 # @opengeni/sdk
 
+## 6.38.0
+
+### Minor Changes
+
+- b193d0c: Editable artifacts no longer show a Download button on a deployment that cannot export them. The client configuration now reports `artifactExport` (whether the artifact materializer is deployed), and the web console offers Download only when it is not `false`. Before, the button was always shown: each click saved a named version, then failed with "Download failed. Try again."
+
+### Patch Changes
+
+- f1289fa: Shared agents have a **Who can edit** setting: "Creator and admins" or "Everyone in workspace". Agents made in Opengeni's apps start as everyone in the workspace; existing agents, and API creates that leave it out, keep today's rule (creator and admins). Agents gain `editAccess` and `viewer.canManage`, and `createAgent`, `createAgentFromTemplate` and `updateAgent` accept `editAccess`. The ready-made PR reviewer can now be set to review a pull request in one click when someone on the team mentions it there. When a pull request event's automation run is refused before it starts, Opengeni says why in a comment on that pull request.
+- 5b2cd0d: A full-page browser screenshot now says when it leaves out content that scrolls inside the page's own areas (an app's main pane or a table), and by how many CSS pixels, with how to capture the rest. It is also exactly as wide as the viewport when the page hides content past its right edge, instead of widening to content no one can scroll to.
+- 47f4951: Apps get dashboard building blocks: `/__opengeni/ui.css` adds KPI cards, number cells, good and bad tones, chart colours per theme, details and empty states, and `/__opengeni/charts.js` (`SITE_CHARTS_JS`, inlined by `resolveSiteUiStylesheet`) draws formatted KPIs, bars, line and scatter charts and sortable tables. The `sites` Skill sends dashboards to a short `references/dashboards.md`.
+- b902e4e: Steer on the collapsed queue now steers every queued message, including ones still being sent, in one command: the agent gets them in the order sent, with one interruption. The button shows the count when more than one message waits. Steer on a row in the open queue still steers just that message.
+
+  `steerQueueItem` accepts an optional `together` list of other waiting prompts (`{ turnId, expectedTurnVersion }`) to steer in the same command, and `useTurnQueue` adds `steerTurns`.
+
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/connect@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

@@ -1,5 +1,30 @@
 # @opengeni/browserd
 
+## 0.4.60
+
+### Patch Changes
+
+- 741e273: In a person's own Chrome, clicking a login field and typing into it in one batch now completes when a password manager's inline menu ends the tab's debugging under the click. The click is finished on the new attachment once its press is known to have reached the field, and the rest of the batch runs there. Actions that all ran before such a detach are reported completed.
+- 87db5e9: A browser action on a page that keeps its main thread busy now answers within the time its caller waits, and says whether input was sent. Nearly every page read an action makes (finding its element, scrolling it into view, checking what is under the pointer) waits for the page's main thread, so on such a page one click's few dozen reads could take minutes. The caller gave up at its deadline with "may still be running", although the click often went through later. The action now keeps to that same deadline, less ten seconds for the reply. If the page was too slow before any input, it fails with `tab_not_responding` and says nothing was sent. If the input was already sent, it reports an unknown outcome that says so. Input events themselves keep their own bound, so a pressed button always gets its release.
+- c27dce8: A click or other action that opens a page whose website never answers now ends within the navigation deadline: the browser stops loading that page, the tab keeps the page the action ran on, and the action says the website did not answer. Before, Chromium held every read of the tab while it waited, so the action and the next observation timed out and reported the tab as not responding.
+- 1de0d24: A browser clipboard paste without text now fails when the BrowserSession clipboard is empty, and the error says that a page's own Copy button does not fill it. Before, the paste typed nothing and reported success.
+- 020a5df: `computer_open` with `applicationId` now works for a macOS app run from a folder macOS doesn't know, such as a downloaded app opened in place.
+
+  - When macOS can't find such an app to launch, the launch fails definitely instead of reporting an unknown outcome, since nothing ran.
+  - If the app is already running, the open then observes its listed window.
+  - When no window of the named app was observed, the screenshot shows only a screen, never another app's window. When there is no screen, it says why no screenshot was taken.
+
+- 5b2cd0d: A full-page browser screenshot now says when it leaves out content that scrolls inside the page's own areas (an app's main pane or a table), and by how many CSS pixels, with how to capture the rest. It is also exactly as wide as the viewport when the page hides content past its right edge, instead of widening to content no one can scroll to.
+- ff8e126: A viewport change on a page that stays busy with its own resize work now reports that within 10 s, instead of waiting 30 s and calling a working tab unresponsive. Touch emulation is sent before the new size, so it no longer waits behind the page's resize work, and a busy page is no longer sent the change a second time.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/interaction@6.38.0
+
 ## 0.4.59
 
 ### Patch Changes
