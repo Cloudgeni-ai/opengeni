@@ -69,7 +69,7 @@ ${sentences(
     : (skillsReadable(context) || hasSandbox(context)) && "Do not narrate Skill reads or waits.",
 )}
 
-Do not use a progress update as the final response or as a blocking clarification. ${
+Text you write before a tool call is a progress update; only the message after your last tool call is the final response, so do follow-up tool work, such as saving notes, before you write it. Do not use a progress update as the final response or as a blocking clarification. ${
       waitForInput
         ? "The final response must be fully self-contained; a turn that ends with `wait_for_input` has none: its `reply` carries any answer, and its reason is the user-visible status."
         : "The final response must be fully self-contained."
