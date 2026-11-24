@@ -35,6 +35,7 @@ function Harness({
   canReadConnections = true,
   items = catalog,
   transientRetry,
+  staleAfterMs,
 }: {
   client: ChatClient<OpenGeniBrowserClient>;
   id?: string | undefined;
@@ -45,6 +46,7 @@ function Harness({
   transientRetry?:
     | { delaysMs?: readonly number[] | undefined; reconnectIntervalMs?: number | undefined }
     | undefined;
+  staleAfterMs?: number | undefined;
 }) {
   state = useConnectionAccounts(
     client,
@@ -53,6 +55,7 @@ function Harness({
     canReadConnections,
     {},
     transientRetry,
+    staleAfterMs,
   );
   return null;
 }
@@ -107,7 +110,7 @@ test("defaults attach all accounts; explicit narrowing survives inventory refres
   expect(state.selections).toEqual([]);
 });
 
-test("a default connector with no eligible accounts does not block; an explicit stale choice still does", async () => {
+test("a default connector with no eligible accounts does not block; a lapsed pick sends; a vanished pick still blocks", async () => {
   let inventory: ConnectionMetadata[] = [];
   const client = clientFor(async () => inventory);
   await act(async () => root.render(<Harness client={client} />));
@@ -119,6 +122,18 @@ test("a default connector with no eligible accounts does not block; an explicit 
   inventory = accounts;
   await act(async () => state.refresh());
   await act(async () => state.selectAccount("mail", ["two"]));
+  // The picked account stopped working: it is still sent as picked (the
+  // server leaves it out) and Send stays enabled.
+  inventory = accounts.map((account) =>
+    account.id === "two" ? { ...account, status: "needs_reauth" as const } : account,
+  );
+  await act(async () => state.refresh());
+  expect(state.requiresAccountChoice).toBe(false);
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+  expect(state.accountGroups[0]!.accounts.map((account) => account.status)).toContain(
+    "needs_reauth",
+  );
+  // A pick no longer listed at all (disconnected) still needs review.
   inventory = [];
   await act(async () => state.refresh());
   expect(state.requiresAccountChoice).toBe(true);
@@ -399,4 +414,26 @@ test("a longer outage marks the inventory unavailable, blocks Send, and reconnec
   expect(state.unavailable).toBe(false);
   expect(state.error).toBeNull();
   expect(state.selections).toHaveLength(2);
+});
+
+test("returning to a chat left open re-reads an old account list, so an expired account is not sent", async () => {
+  let inventory = accounts;
+  let reads = 0;
+  const client = clientFor(async () => {
+    reads += 1;
+    return inventory;
+  });
+  await act(async () => root.render(<Harness client={client} staleAfterMs={30} />));
+  expect(reads).toBe(1);
+  expect(state.selections).toHaveLength(2);
+  // A quick return does not re-read a fresh list.
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(reads).toBe(1);
+  // While the chat sat open, account "one" stopped working.
+  inventory = [{ ...accounts[0]!, status: "needs_reauth" }, accounts[1]!];
+  await wait(40);
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await wait(10);
+  expect(reads).toBe(2);
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
 });

@@ -6,6 +6,7 @@ import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
 } from "../browser-ephemeral";
+import { logStalledBrowserFrames } from "../browser-frame-health";
 import { createHash, randomUUID } from "node:crypto";
 import {
   environmentsEncryptionKeyBytes,
@@ -2572,6 +2573,9 @@ export function registerBrowserSessionRoutes(
         "browser.read",
         async ({ sessionClient, binding }) => {
           await sessionClient.listTargets();
+          // Live views send this heartbeat while they are open, so a view
+          // whose picture stopped is recorded here with the reason.
+          await logStalledBrowserFrames(sessionClient, browserSessionId);
           return BrowserSessionHeartbeatResponse.parse({
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
@@ -6670,6 +6674,20 @@ export function browserTabDiagnosisError(error: unknown): unknown {
     failure.cause = error;
     return failure;
   }
+  // A page that did not load in time is the website's or its network path's
+  // failure, not the workspace's. As a plain 504 it would reach the agent as
+  // "the workspace is temporarily unavailable", so keep the controller's own
+  // fixed sentence, which names no page or host.
+  if (code === "timeout" && error.status >= 500 && isBrowserNavigationTimeout(error)) {
+    const failure = new ApiHttpError(504, {
+      code: "upstream_unavailable",
+      message: error.error.message,
+      retryable: error.retryable,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (code !== "tab_not_responding" && code !== "tab_crashed") return error;
   const failure = new ApiHttpError(409, {
     code,
@@ -6679,6 +6697,19 @@ export function browserTabDiagnosisError(error: unknown): unknown {
   });
   failure.cause = error;
   return failure;
+}
+
+/** The controller's fixed sentences for a navigation that did not load in
+ * time: the server never answered, the page never committed, or the document
+ * never became ready. */
+const BROWSER_NAVIGATION_TIMEOUT_MESSAGES = [
+  /^browser could not load the requested URL: its server did not respond within \d+ seconds$/u,
+  /^browser navigation did not commit a new page in time and was stopped(?:; the tab still shows its previous page)?$/u,
+  /^browser navigation timed out$/u,
+];
+
+function isBrowserNavigationTimeout(error: BrowserControlRequestError): boolean {
+  return BROWSER_NAVIGATION_TIMEOUT_MESSAGES.some((pattern) => pattern.test(error.error.message));
 }
 
 /** Keep a definite read timeout useful without publishing driver diagnostics. */
@@ -6732,7 +6763,10 @@ export function browserScreenshotError(error: unknown): unknown {
 }
 
 export function browserScreenshotResponse(
-  frame: Pick<BrowserControlFrame, "data" | "mediaType" | "metadataHeader" | "inexactScrollbars">,
+  frame: Pick<
+    BrowserControlFrame,
+    "data" | "mediaType" | "metadataHeader" | "inexactScrollbars" | "hiddenScrolledHeight"
+  >,
 ): Response {
   // Node Buffers can be views into a larger backing allocation. Copy exactly
   // the image bytes before constructing the Response.
@@ -6743,6 +6777,9 @@ export function browserScreenshotResponse(
       "content-type": frame.mediaType,
       "x-opengeni-browser-frame": frame.metadataHeader,
       ...(frame.inexactScrollbars ? { "x-opengeni-browser-frame-note": "inexact-scrollbars" } : {}),
+      ...(frame.hiddenScrolledHeight
+        ? { "x-opengeni-browser-frame-hidden-scrolled-height": String(frame.hiddenScrolledHeight) }
+        : {}),
       ...USER_CONTENT_SECURITY_HEADERS,
     },
   });

@@ -752,10 +752,10 @@ function json(value: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
-/** A browser-only action: say why, and that the person has to do it. */
+/** A browser-only action: say why, and what an agent can do instead, else that the person has to. */
 function browserOnly(entry: ActionCatalogEntry): CallToolResult {
   return failure(
-    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the web app in a browser.`,
+    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. ${entry.agentAlternative ?? "The person has to do it in the web app in a browser."}`,
   );
 }
 

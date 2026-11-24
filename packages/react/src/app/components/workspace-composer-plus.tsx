@@ -272,12 +272,15 @@ export function WorkspaceComposerPlus(
       `/workspaces/${encodeURIComponent(workspaceId)}/plugins${item ? `?suggested_capability=${encodeURIComponent(item.id)}` : ""}`,
     );
   };
-  const reconnect = async (serverId: string) => {
+  const reconnect = async (serverId: string, account?: ConnectionMetadata) => {
     const generation = lifecycle.generation;
     const deniedRevision = lifecycle.deniedConnectionsRevision;
     const item = current?.items.find((candidate) => candidate.runtime.mcpServerId === serverId);
+    // A named account (a pick that stopped working) reconnects that account.
     const health = item
-      ? connectionHealth(item, current?.connections ?? [], current?.connections !== null)
+      ? account
+        ? connectionHealth(item, [account], true)
+        : connectionHealth(item, current?.connections ?? [], current?.connections !== null)
       : null;
     const plan = item && health ? capabilityReconnectPlan(item, health) : null;
     // Reuse a surviving OAuth connection. A missing credential or API key uses
@@ -353,7 +356,7 @@ export function WorkspaceComposerPlus(
       )}
       connectorActions={{
         ...props.connectorActions,
-        onReconnect: (id) => void reconnect(id),
+        onReconnect: (id, account) => void reconnect(id, account),
         // Rows already on screen refresh in place; only a first load shows rows loading.
         loading: loading && !current,
         error: canReadConnections === false ? deniedMessage : current ? error : null,

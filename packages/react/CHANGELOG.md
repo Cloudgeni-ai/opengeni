@@ -1,5 +1,37 @@
 # @opengeni/react
 
+## 6.37.3
+
+### Patch Changes
+
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- d12b623: Keep formatted chat history from re-parsing and re-typesetting on unrelated interface updates while preserving live Markdown and link behavior.
+- d12b623: Open long chats at the newest messages without rendering several screens of scrollback first. Older messages remain available by scrolling or using Find in conversation.
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/sdk@6.37.3
+  - @opengeni/connect@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/connect@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- 601f949: The browser viewer no longer shows a frozen picture as live. A live view whose connection stays open but stops sending frames for 15 seconds opens a new stream; after the automatic retries it says the browser stopped sending its picture and offers to reconnect.
+- a102af1: Keep the host's model and reasoning choice on every new chat. The draft uses the first available level as a fallback without changing the order of the level picker.
+  - @opengeni/connect@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/sdk@6.37.1
+
 ## 6.37.0
 
 ### Minor Changes

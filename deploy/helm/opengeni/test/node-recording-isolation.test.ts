@@ -43,6 +43,14 @@ const nodeAlerts = [
   "OpenGeniNodeContainerRuntimeErrors",
   "OpenGeniNodeNotReady",
 ];
+const runtimeFaultOperations = [
+  "create_container",
+  "start_container",
+  "stop_container",
+  "pull_image",
+  "run_podsandbox",
+  "stop_podsandbox",
+];
 // The value each node alert renders into its notification annotations at the
 // 5m evaluation below: stall ratios, swap-out pages/s and the runtime-error
 // increase (NotReady renders no value).
@@ -171,25 +179,30 @@ test.skipIf(!promtool)(
             }),
             values: "1+0x13",
           },
-          {
+          ...runtimeFaultOperations.map((operation_type) => ({
             series: series("kubelet_runtime_operations_errors_total", {
               job: "kubelet",
               instance: `${node}:10250`,
-              operation_type: "create_container",
+              operation_type,
             }),
             // Errors keep recurring on node-a, so the runtime alert holds and
-            // fires after its 10m `for`.
-            values: node === "node-a" ? "0+1x13" : "0+0x13",
-          },
+            // fires after its 10m `for`. One start failure on node-b clears.
+            values:
+              node === "node-a"
+                ? "0+1x13"
+                : operation_type === "start_container"
+                  ? "0 1+0x12"
+                  : "0+0x13",
+          })),
           {
-            // One rollout burst (kubelet retrying a removal the runtime is
-            // already doing) on node-b never pages.
+            // One status lookup failure every four minutes on a Ready node
+            // (15/hour) satisfies the old 5m window for the full 10m hold.
             series: series("kubelet_runtime_operations_errors_total", {
               job: "kubelet",
               instance: `${node}:10250`,
-              operation_type: "remove_container",
+              operation_type: "container_status",
             }),
-            values: node === "node-b" ? "0+0x1 2+0x12" : "0+0x13",
+            values: node === "node-b" ? "0 1+0x3 2+0x3 3+0x3 4" : "0+0x13",
           },
           {
             // Exec probes failing against containers that are starting or
@@ -289,28 +302,30 @@ test.skipIf(!promtool)(
                   ? []
                   : selected
                       .filter((scope) => scope.node === "node-a")
-                      .map((scope) => ({
-                        exp_labels: {
-                          ...identity(scope),
-                          node: scope.node,
-                          severity:
-                            alertname === "OpenGeniNodeContainerRuntimeErrors"
-                              ? "warning"
-                              : "critical",
-                          ...(alertname === "OpenGeniNodeContainerRuntimeErrors"
-                            ? { operation_type: "create_container" }
-                            : {}),
-                        },
-                        exp_annotations: expandAlertAnnotations(
-                          groups[deployments.indexOf(scope)]!.rules.find(
-                            (rule) => rule.alert === alertname,
-                          )!.annotations!,
-                          {
-                            value: nodeAlertValues[alertname]!,
-                            labels: { node: scope.node, operation_type: "create_container" },
+                      .flatMap((scope) => {
+                        const runtimeAlert = alertname === "OpenGeniNodeContainerRuntimeErrors";
+                        return (runtimeAlert ? runtimeFaultOperations : [undefined]).map(
+                          (operation_type) => {
+                            const nodeLabels = {
+                              node: scope.node,
+                              ...(operation_type ? { operation_type } : {}),
+                            };
+                            return {
+                              exp_labels: {
+                                ...identity(scope),
+                                ...nodeLabels,
+                                severity: runtimeAlert ? "warning" : "critical",
+                              },
+                              exp_annotations: expandAlertAnnotations(
+                                groups[deployments.indexOf(scope)]!.rules.find(
+                                  (rule) => rule.alert === alertname,
+                                )!.annotations!,
+                                { value: nodeAlertValues[alertname]!, labels: nodeLabels },
+                              ),
+                            };
                           },
-                        ),
-                      })),
+                        );
+                      }),
             })),
           ),
         };

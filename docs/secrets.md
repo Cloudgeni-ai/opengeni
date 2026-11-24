@@ -500,7 +500,10 @@ transaction as the answer; the agent receives only the reference, username and
 vault name.
 
 - Only hosted vaults can be the target. Saving to Only me needs a signed-in
-  human answering for their own turn. The card shows only destinations the
+  human answering for their own turn. A verified external person using an
+  embedding host's `asUser()` can do the same with `secrets:write`. This saves
+  in that external person's own vault, not a linked native user's vault or
+  a vault belonging to the host. The card shows only destinations the
   person can save to and the asking turn can read. If saved logins are off
   for the chat, the answer stays in This task.
 - `itemType` may be `login`, `api_key`, `note`, `card`, `identity` or

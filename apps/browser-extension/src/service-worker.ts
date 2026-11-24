@@ -114,6 +114,7 @@ const CONTROLLED_TAB_RELEASE_MS = 2_000;
 // every control, so the next run puts those tabs back as they were.
 const TAB_GROUP_KEY = "tabGroup";
 const TAB_ICON_KEY = "tabIcon";
+const TAB_GROUPS_PERMISSION: chrome.permissions.Permissions = { permissions: ["tabGroups"] };
 // The agent's cursor as a tab icon. Pages load it from the extension because
 // many sites' Content-Security-Policy refuses data: images as icons. Its URL
 // is dynamic (manifest), so a site cannot probe for the extension; a page it
@@ -147,15 +148,17 @@ const agentCreatedTabs = new Set<number>();
 // The tabs an agent controls sit in a grey tab group named after the product,
 // neutral like the ink cursor they show as their icon. Chromium browsers
 // without tab groups go without the group.
-const tabGroup =
-  chrome.tabGroups && typeof chrome.tabs.group === "function"
-    ? new TabGroup(chrome as never, {
-        title: BRAND.product,
-        color: "grey",
-        releaseDelayMs: CONTROLLED_TAB_RELEASE_MS,
-        onChange: (state) => recordControlledTabs(TAB_GROUP_KEY, state),
-      })
-    : null;
+//
+// Only while the person allows it: `tabGroups` is an optional permission.
+// Chrome warns about it, and an update that adds a required permission Chrome
+// warns about turns the extension off for everyone who has it until they
+// accept, so the group must never be what keeps the extension from working.
+// The person turns it on in the extension menu.
+let tabGroup: TabGroup | null = null;
+// Set once this run carried on with the controlled tabs: until then the
+// group's record is not read, so a tab group allowed meanwhile waits for it.
+let controlledTabsResumed = false;
+let tabGroupPermission: Promise<void> = Promise.resolve();
 const tabIcon = chrome.scripting
   ? new TabIcon(chrome as never, {
       icon: async () => chrome.runtime.getURL(AGENT_CURSOR_PATH),
@@ -292,10 +295,46 @@ function recordLiveState(): Promise<void> {
  * attached by the time the record is read keep them, the others get their
  * place and icon back. */
 function resumeControlledTabs(): void {
-  const recorded = async (key: string) => (await chrome.storage.local.get(key))[key];
-  const controlled = () => attachedDebuggerTabs.keys();
-  void tabGroup?.resume(recorded(TAB_GROUP_KEY).then(parseTabGroupState), controlled);
-  void tabIcon?.resume(recorded(TAB_ICON_KEY).then(parseTabIconState), controlled);
+  controlledTabsResumed = true;
+  void followTabGroupPermission();
+  void tabIcon?.resume(recordedControlledTabs(TAB_ICON_KEY).then(parseTabIconState), () =>
+    attachedDebuggerTabs.keys(),
+  );
+}
+
+async function recordedControlledTabs(key: string): Promise<unknown> {
+  return (await chrome.storage.local.get(key))[key];
+}
+
+/** Use the tab group while the person allows it. Once allowed, it carries on
+ * from its record, so the controlled tabs join it right away. */
+function followTabGroupPermission(): Promise<void> {
+  tabGroupPermission = tabGroupPermission.then(async () => {
+    const allowed = await tabGroupsAllowed();
+    if (!allowed) {
+      tabGroup = null;
+      return;
+    }
+    if (tabGroup || !chrome.tabGroups || typeof chrome.tabs.group !== "function") return;
+    tabGroup = new TabGroup(chrome as never, {
+      title: BRAND.product,
+      color: "grey",
+      releaseDelayMs: CONTROLLED_TAB_RELEASE_MS,
+      onChange: (state) => recordControlledTabs(TAB_GROUP_KEY, state),
+    });
+    void tabGroup.resume(recordedControlledTabs(TAB_GROUP_KEY).then(parseTabGroupState), () =>
+      attachedDebuggerTabs.keys(),
+    );
+  });
+  return tabGroupPermission;
+}
+
+async function tabGroupsAllowed(): Promise<boolean> {
+  try {
+    return (await chrome.permissions?.contains(TAB_GROUPS_PERMISSION)) === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Record the controlled tabs' groups or icons for the next run, in order. */
@@ -1507,6 +1546,13 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
 chrome.tabs.onCreated.addListener((tab) => {
   if (tab.id !== undefined) tabGroup?.opened(tab.id);
 });
+
+// The person allowed or removed tab groups, in the menu or on chrome://extensions.
+const followTabGroupChange = () => {
+  if (controlledTabsResumed) void followTabGroupPermission();
+};
+chrome.permissions?.onAdded?.addListener(followTabGroupChange);
+chrome.permissions?.onRemoved?.addListener(followTabGroupChange);
 
 function appendDebuggerEvent(event: Omit<BridgeDebuggerEvent, "sequence">): void {
   debuggerSequence = debuggerSequence >= Number.MAX_SAFE_INTEGER ? 1 : debuggerSequence + 1;

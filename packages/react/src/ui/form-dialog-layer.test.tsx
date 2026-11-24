@@ -22,10 +22,11 @@ test("aboveOtherDialogs raises the overlay and the dialog, and is off by default
   const root = createRoot(container);
   const layers = () => {
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-    const overlay = dialog.previousElementSibling as HTMLElement;
+    const overlay = dialog.parentElement!;
+    expect(overlay.parentElement).toBe(document.body);
     return [overlay.style.zIndex, dialog.style.zIndex];
   };
-  const render = (aboveOtherDialogs: boolean) =>
+  const render = (aboveOtherDialogs?: boolean) =>
     act(async () =>
       root.render(
         <FormDialog
@@ -38,7 +39,7 @@ test("aboveOtherDialogs raises the overlay and the dialog, and is off by default
       ),
     );
   try {
-    await render(false);
+    await render();
     expect(layers()).toEqual(["", ""]);
     await render(true);
     expect(layers()).toEqual(["1100", "1100"]);

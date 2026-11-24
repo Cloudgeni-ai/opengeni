@@ -6,9 +6,11 @@ import {
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  markOrganizationAnthropicApiKeyCreditRefused,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
+import { OpenGeniClient } from "@opengeni/sdk";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -87,7 +89,13 @@ function fullApp(): Hono {
   } as unknown as ApiRouteDeps) as unknown as Hono;
 }
 
-type Human = { subjectId: string; email: string; cookie: string; accountId: string };
+type Human = {
+  subjectId: string;
+  email: string;
+  cookie: string;
+  accountId: string;
+  workspaceId: string;
+};
 
 async function signIn(label: string, bootstrap: boolean): Promise<Human> {
   const userId = `anthropic-api-keys-${label}-${crypto.randomUUID()}`;
@@ -98,6 +106,7 @@ async function signIn(label: string, bootstrap: boolean): Promise<Human> {
   await shared!.admin`insert into auth_identities (id, user_id, provider_id, account_id)
     values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
   let accountId = "";
+  let workspaceId = "";
   if (bootstrap) {
     const access = await ensureManagedAccessForUserWithOrganizationMemberships(client!.db, {
       userId,
@@ -105,7 +114,9 @@ async function signIn(label: string, bootstrap: boolean): Promise<Human> {
       name: label,
       emailVerified: true,
     });
-    accountId = access.accessContext.workspaceGrants[0]!.accountId;
+    const grant = access.accessContext.workspaceGrants[0]!;
+    accountId = grant.accountId;
+    workspaceId = grant.workspaceId;
   }
   const identity = await synchronizeCanonicalHumanLoginBindings(client!.db, userId);
   await shared!.admin`insert into auth_sessions (
@@ -116,7 +127,7 @@ async function signIn(label: string, bootstrap: boolean): Promise<Human> {
     )`;
   const cookie = `session=${authSessionId}`;
   signedIn.set(cookie, { authSessionId, userId, email });
-  return { subjectId: `user:${userId}`, email, cookie, accountId };
+  return { subjectId: `user:${userId}`, email, cookie, accountId, workspaceId };
 }
 
 /** A plain member of `owner`'s organization, through the real invitation lifecycle. */
@@ -164,6 +175,18 @@ async function call(
 
 const keysPath = (organizationId: string) =>
   `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys`;
+
+function browserClient(who: Human, browserHeaders: Record<string, string>) {
+  return new OpenGeniClient({
+    baseUrl: ORIGIN,
+    fetch: async (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.set("cookie", who.cookie);
+      for (const [name, value] of Object.entries(browserHeaders)) headers.set(name, value);
+      return app!.request(input, { ...init, headers });
+    },
+  });
+}
 
 let owner: Human;
 let member: Human;
@@ -277,17 +300,44 @@ describe.skipIf(!realDb)("organization Anthropic API key routes", () => {
       label: "Renamed",
     });
     expect(renamed).toMatchObject({ status: 200, json: { id: second, label: "Renamed" } });
-    const again = await call(owner, "POST", `${keysPath(owner.accountId)}/${second}/serve-again`);
-    expect(again).toMatchObject({ status: 200, json: { id: second, creditRefusedAt: null } });
+    const refusedAt = new Date("2026-01-01T00:00:00Z");
     expect(
-      (await call(owner, "POST", `${keysPath(owner.accountId)}/missing/serve-again`)).status,
-    ).toBe(404);
-    expect((await call(owner, "DELETE", `${keysPath(owner.accountId)}/primary-v1`)).status).toBe(
-      409,
+      await markOrganizationAnthropicApiKeyCreditRefused(client!.db, {
+        accountId: owner.accountId,
+        workspaceId: owner.workspaceId,
+        keyId: second,
+        at: refusedAt,
+      }),
+    ).toBe(true);
+
+    const crossSite = browserClient(owner, {
+      origin: "https://other.example.test",
+      "sec-fetch-site": "cross-site",
+    });
+    const originless = browserClient(owner, { "sec-fetch-site": "same-origin" });
+    await expect(
+      crossSite.serveOrganizationAnthropicApiKeyAgain(owner.accountId, second),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      originless.removeOrganizationAnthropicApiKey(owner.accountId, second),
+    ).rejects.toMatchObject({ status: 403 });
+
+    const browser = browserClient(owner, { origin: ORIGIN, "sec-fetch-site": "same-origin" });
+    expect((await browser.listOrganizationAnthropicApiKeys(owner.accountId)).keys[1]).toMatchObject(
+      {
+        id: second,
+        creditRefusedAt: refusedAt.toISOString(),
+      },
     );
-    expect((await call(owner, "DELETE", `${keysPath(owner.accountId)}/${second}`)).status).toBe(
-      204,
-    );
+    const again = await browser.serveOrganizationAnthropicApiKeyAgain(owner.accountId, second);
+    expect(again).toMatchObject({ id: second, creditRefusedAt: null });
+    await expect(
+      browser.serveOrganizationAnthropicApiKeyAgain(owner.accountId, "missing"),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      browser.removeOrganizationAnthropicApiKey(owner.accountId, "primary-v1"),
+    ).rejects.toMatchObject({ status: 409 });
+    await browser.removeOrganizationAnthropicApiKey(owner.accountId, second);
     const after = await call(owner, "GET", keysPath(owner.accountId));
     expect((after.json.keys as { id: string }[]).map((key) => key.id)).toEqual(["primary-v1"]);
   });

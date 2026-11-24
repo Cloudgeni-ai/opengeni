@@ -2,9 +2,23 @@ import {
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   type AccessGrant,
   type AgentErrorCode,
+  type FirstPartyMcpToolName,
+  type Permission,
 } from "@opengeni/contracts";
-import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
-import { resolveWorkspaceAgentRef, type AgentRecord } from "@opengeni/db";
+import { resolveFirstPartyMcpToolPolicy, resolveSessionFirstPartyMcpTools } from "@opengeni/config";
+import {
+  AGENT_LIST_CHATS_TOOL,
+  agentListChatsToolPermitted,
+  agentMemoryAccess,
+  agentMemoryGuidance,
+  type ApiRouteDeps,
+} from "@opengeni/core";
+import {
+  getSession,
+  requireWorkspace,
+  resolveWorkspaceAgentRef,
+  type AgentRecord,
+} from "@opengeni/db";
 import * as z4 from "zod/v4";
 
 import { isOpenSlackAgentSubject } from "./integrations/slack-open-agents";
@@ -104,9 +118,49 @@ export async function resolveDelegationAgent(
 }
 
 /**
+ * Whether the delegated chat will have `slack_agent_chats`. A chat created
+ * from a chat is its child: it sees only what its parent sees (its explicit
+ * list may only narrow the parent's effective selection) under the parent's
+ * permission ceiling, so it has the tool only when its parent does. A chat
+ * created without a calling chat follows the defaults, where session creation
+ * adds the tool as an app chat's addition, unless the request names its own
+ * list without it.
+ */
+export async function delegatedChatHasListChatsTool(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    callerSessionId: string | null;
+    requestedTools: readonly FirstPartyMcpToolName[] | undefined;
+    requestedPermissions: readonly Permission[] | undefined;
+  },
+): Promise<boolean> {
+  if (!resolveFirstPartyMcpToolPolicy(deps.settings).allowed.includes(AGENT_LIST_CHATS_TOOL)) {
+    return false;
+  }
+  const requested = input.requestedTools?.includes(AGENT_LIST_CHATS_TOOL) ?? true;
+  if (input.callerSessionId === null) {
+    return requested && agentListChatsToolPermitted(input.requestedPermissions);
+  }
+  const parent = await getSession(deps.db, input.workspaceId, input.callerSessionId);
+  if (!parent) return false;
+  const parentTools = resolveSessionFirstPartyMcpTools(
+    deps.settings,
+    parent,
+    (await requireWorkspace(deps.db, input.workspaceId)).settings,
+  );
+  return (
+    requested &&
+    parentTools.includes(AGENT_LIST_CHATS_TOOL) &&
+    agentListChatsToolPermitted(input.requestedPermissions ?? parent.firstPartyMcpPermissions)
+  );
+}
+
+/**
  * The delegated chat's Memory guidance, joined to its own instructions, the
- * way an app chat with the agent gets it. Unchanged when Memory is off or
- * there is no room: the knowledge tools still enforce the rules.
+ * way an app chat with the agent gets it. The `slack_agent_chats` sentence is
+ * left out when the chat won't have that tool. Unchanged when Memory is off
+ * or there is no room: the knowledge tools still enforce the rules.
  */
 export function delegatedChatInstructions(
   agent: AgentRecord,
@@ -116,6 +170,7 @@ export function delegatedChatInstructions(
     private: boolean;
     slackDm?: boolean;
     memoryOff?: boolean;
+    listChatsTool: boolean;
   },
 ): string | undefined {
   if (!agent.memoryEnabled) return input.instructions;
@@ -126,6 +181,7 @@ export function delegatedChatInstructions(
       memoryOff: input.memoryOff ?? false,
       slackDm: input.slackDm ?? false,
     }),
+    { listChatsTool: input.listChatsTool },
   );
   if (!guidance) return input.instructions;
   const own = input.instructions?.trim() ?? "";

@@ -309,6 +309,8 @@ test("a Site view conversation's context names its Site and the version shown", 
   expect(context).toContain("“Spend dashboard” (App id site-1)");
   expect(context).toContain("at version 7 (version id version-7)");
   expect(context).toContain("publish the change as a new version of this app");
+  // A question about what it shows is answered from its source and the data it reads.
+  expect(context).toContain("read the source and call the tools or data it reads");
   // Bounded, and never empty, whatever the title.
   const long = siteConversationContext({
     siteId: "s",

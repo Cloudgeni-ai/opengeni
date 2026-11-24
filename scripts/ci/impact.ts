@@ -285,6 +285,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/codex-account.browser.e2e.ts": ["opengeni-web", "@opengeni/sdk", "@opengeni/testing"],
   "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/modal-layer.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/workspace-pause-timers.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",

@@ -108,7 +108,7 @@ mock.module("../lib/navigation", () => ({
   useSearch: () => ({}),
   useStringifySearch: () => () => "",
   // The window bar's module imports these; its title never calls them.
-  usePage: () => ({ opensBeside: false }),
+  usePage: () => ({ opensBeside: false, origin: () => "https://console.example" }),
   useRouter: () => ({ state: { location: { pathname: "/", state: routerLocationState } } }),
   useRouterState: () => undefined,
   Link: ({
@@ -179,6 +179,10 @@ mock.module("../../artifacts", () => ({
       </div>
     );
   },
+}));
+// The same frame, as an app opened as a page draws it.
+mock.module("../../components/artifacts/site-view", () => ({
+  SiteView: (props: { siteId: string }) => <div data-site-view={props.siteId} />,
 }));
 // The Site's own publish form and its management, as the Settings tab uses
 // them; the form's own behaviour is tested with it.
@@ -681,6 +685,29 @@ test("the chat opens as a full chat in one click, and the app's menu opens its s
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-archived-message")).toBe(
     "This app is archived. Restore it from its settings.",
   );
+});
+
+test("the chat panel copies a link to its conversation", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const written: string[] = [];
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => void written.push(text) },
+  });
+  try {
+    const { container } = await render();
+    const copy = panel(container).querySelectorAll<HTMLElement>("[data-site-chat-copy-link]");
+    expect(copy).toHaveLength(1);
+    expect(copy[0]!.getAttribute("aria-label")).toBe("Copy link to this chat");
+    await act(async () => copy[0]!.click());
+    expect(written).toEqual([
+      `https://console.example/workspaces/${workspaceId}/sessions/${id(1)}`,
+    ]);
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
 });
 
 test("an archived app links to its details, where it can be restored", async () => {
@@ -1504,4 +1531,136 @@ test("the app's menu pins and archives through the sidebar's own actions", async
   } finally {
     act(() => withdraw());
   }
+});
+
+// An app opened as a page from the sidebar (app-page-view.tsx): the app alone,
+// with one corner button for the same chat panel.
+async function renderAppPage() {
+  const { AppPage } = await import("./app-page-view");
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(<AppPage workspaceId={workspaceId} appId={siteId} siteHref="/" active />);
+  });
+  await settle();
+  return container;
+}
+const chatButton = (container: HTMLElement) =>
+  container.querySelector<HTMLButtonElement>("[data-app-page-chat-show]");
+/** Opens the page's chat and waits for its panel, loaded on first open. */
+async function openAppPageChat(container: HTMLElement) {
+  await act(async () => chatButton(container)!.click());
+  for (let tries = 0; tries < 50 && !container.querySelector("aside[aria-label='Chat']"); tries++)
+    await settle();
+  await settle();
+}
+
+test("an app opened as a page offers its chat from one button above it, and hides it again", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const container = await renderAppPage();
+  expect(container.querySelector("[data-site-view]")?.getAttribute("data-site-view")).toBe(siteId);
+  // Only the app and one icon button; the chat isn't loaded until asked for.
+  expect([...container.querySelectorAll("button")]).toHaveLength(1);
+  const show = chatButton(container)!;
+  expect(show.getAttribute("aria-label")).toBe("Open chat");
+  expect(show.getAttribute("aria-expanded")).toBe("false");
+  expect(show.textContent).toBe("");
+  // In its own slim row above the app, never drawn over the app's frame,
+  // so it can't cover the app's own controls.
+  const row = show.closest("[data-app-page-chat-row]")!;
+  expect(row).not.toBeNull();
+  expect(row.contains(container.querySelector("[data-site-view]"))).toBe(false);
+  expect(row.nextElementSibling?.hasAttribute("data-site-view")).toBe(true);
+  expect(container.querySelector("aside")).toBeNull();
+  expect(listCalls).toHaveLength(0);
+
+  await openAppPageChat(container);
+  // The Site view's own panel: its newest conversation, New, Copy link and
+  // Open as a full chat.
+  expect(panel(container).hidden).toBe(false);
+  expect(openConversation(container)).toBe(id(1));
+  expect(heading(container)).toBe("Time filters across all graphs");
+  expect(button(container, "New")).toBeDefined();
+  expect(panel(container).querySelector("[data-site-chat-copy-link]")).not.toBeNull();
+  expect(
+    [...panel(container).querySelectorAll("a")].map((a) => a.getAttribute("aria-label")),
+  ).toEqual(["Open as a full chat"]);
+  // The row stays, empty, while the chat is open, so the app keeps its size.
+  expect(chatButton(container)).toBeNull();
+  expect(container.querySelector("[data-app-page-chat-row]")?.childElementCount).toBe(0);
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide chat");
+
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  await settle();
+  // Hidden, not unmounted: the conversation keeps its place.
+  expect(panel(container).hidden).toBe(true);
+  expect(openConversation(container)).toBe(id(1));
+  expect(document.activeElement).toBe(chatButton(container));
+  // The page's address stays the app's own throughout.
+  expect(navigations).toEqual([]);
+});
+
+test("on a phone the app page's chat button sits in the top strip, not over the app", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  // The shell's top strip on a phone (menu and brand), with room at its end.
+  const strip = document.createElement("header");
+  const stripEnd = document.createElement("div");
+  stripEnd.setAttribute("data-canvas-strip-end", "");
+  strip.append(stripEnd);
+  document.body.append(strip);
+  const container = await renderAppPage();
+  const show = chatButton(document.body)!;
+  expect(show.parentElement).toBe(stripEnd);
+  expect(container.querySelector("[data-app-page-chat-row]")).toBeNull();
+  expect(container.contains(show)).toBe(false);
+  await openAppPageChat(document.body);
+  expect(panel(container).hidden).toBe(false);
+  expect(stripEnd.childElementCount).toBe(0);
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  await settle();
+  expect(document.activeElement).toBe(chatButton(document.body));
+  expect(chatButton(document.body)!.parentElement).toBe(stripEnd);
+});
+
+test("a chat started from an app page opens in its panel, and the address stays the app's", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  fullSessions = { [id(99)]: conversation(99, "Why did spend rise?", 0) };
+  const container = await renderAppPage();
+  await openAppPageChat(container);
+  await act(async () => button(container, "New")!.click());
+  await settle();
+  const composer = container.querySelector<HTMLButtonElement>("[data-composer]")!;
+  expect(composer.getAttribute("data-composer")).toBe("Ask about Opengeni usage");
+  await act(async () => {
+    composer.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  await settle();
+  // Created as the app's own chat, as from the Site view.
+  expect(requests[0]!.init?.headers).toEqual({
+    "x-opengeni-site-id": siteId,
+    "x-opengeni-site-version": "version-4",
+  });
+  expect(openConversation(container)).toBe(id(99));
+  expect(navigations).toEqual([]);
+});
+
+test("an app page offers no chat to people who can't start one, or for an archived app", async () => {
+  permissions = [];
+  let container = await renderAppPage();
+  expect(container.querySelector("[data-site-view]")).not.toBeNull();
+  expect(chatButton(container)).toBeNull();
+  act(() => root?.unmount());
+  permissions = ["sessions:create"];
+  siteDetails = async () => ({
+    ...siteAt(4),
+    artifact: { ...siteAt(4).artifact, status: "archived" },
+  });
+  container = await renderAppPage();
+  expect(chatButton(container)).toBeNull();
 });

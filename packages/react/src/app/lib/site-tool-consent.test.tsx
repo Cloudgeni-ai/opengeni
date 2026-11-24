@@ -426,6 +426,49 @@ describe("App tool failures in the Opengeni frame", () => {
     }
   });
 
+  test("Your GitHub opens its own settings, then Try again", async () => {
+    const { view, host } = await mount();
+    const opens: string[] = [];
+    const original = window.open;
+    window.open = ((url?: string | URL) => {
+      opens.push(String(url));
+      return null;
+    }) as typeof window.open;
+    try {
+      let answer: boolean | undefined;
+      await actRun(() => {
+        void recover(
+          host(),
+          failure({
+            code: "site_tool_reconnect_required",
+            system: "Your GitHub",
+            message: "Sign in to Your GitHub again.",
+            reconnect: {
+              connectionId: "connection",
+              capabilityId: "api:github-personal",
+              name: "Your GitHub",
+              shared: false,
+            },
+            retryable: false,
+          }),
+        ).then((value) => {
+          answer = value;
+        });
+      });
+      await opened();
+      expect(dialog()?.textContent).toContain("All my repositories");
+      await actRun(() => button("Open GitHub settings").click());
+      expect(opens).toHaveLength(1);
+      expect(opens[0]).toContain("/workspaces/workspace/plugins?open=integration%3Agithub");
+      await actRun(() => button("Try again").click());
+      await closed();
+      expect(answer).toBe(true);
+    } finally {
+      window.open = original;
+      await view.unmount();
+    }
+  });
+
   test("an app that stops waiting withdraws the message", async () => {
     const { view, host } = await mount();
     try {

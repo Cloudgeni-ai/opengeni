@@ -5,12 +5,13 @@ import {
   AppServerFetchRequest,
   isAppServerEgressHost,
   isAppServerModulePath,
-  type AppServerManifest,
+  AppServerManifest,
 } from "@opengeni/contracts";
 import {
   AppServerError,
   appServerManifestOf,
   appServerOutboundFetch,
+  appServerToolValue,
   appServerViewerMayUse,
   routeAppServerTool,
   type AppServerDeps,
@@ -93,6 +94,12 @@ describe("app server bundle", () => {
     const withTools = appServerManifestOf({ ...base, tools: ["linear/list_issues"] })!;
     expect(withTools.manifest.tools).toEqual(["linear/list_issues"]);
     expect(withTools.manifest.digest).not.toBe(one.manifest.digest);
+    // New uploads get unwrapped tool results; stored manifests without the field stay raw.
+    expect(one.manifest.toolResults).toBe("value");
+    const { toolResults: _dropped, ...stored } = one.manifest;
+    expect(AppServerManifest.parse(stored).toolResults).toBe("raw");
+    // A bundle downloaded with "raw" keeps it on the way back up.
+    expect(appServerManifestOf({ ...base, toolResults: "raw" })!.manifest.toolResults).toBe("raw");
     expect(() =>
       appServerManifestOf({
         main: "index.js",
@@ -104,6 +111,44 @@ describe("app server bundle", () => {
   test("page requests need a path starting with /", () => {
     expect(AppServerFetchRequest.safeParse({ path: "/issues?x=1" }).success).toBe(true);
     expect(AppServerFetchRequest.safeParse({ path: "https://evil.example/" }).success).toBe(false);
+  });
+});
+
+describe("app server tool results", () => {
+  test("unwrap to the tool's JSON value, as app syncs read it", () => {
+    const issues = { issues: [{ id: "ENG-1" }] };
+    expect(
+      appServerToolValue({
+        content: [{ type: "text", text: "ignored" }],
+        structuredContent: issues,
+      }),
+    ).toEqual(issues);
+    expect(
+      appServerToolValue({
+        content: [
+          { type: "image", data: "x" },
+          { type: "text", text: "not json" },
+          { type: "text", text: JSON.stringify(issues) },
+        ],
+      }),
+    ).toEqual(issues);
+    expect(appServerToolValue({ content: [{ type: "text", text: "Done." }] })).toBe("Done.");
+    expect(appServerToolValue({ content: [] })).toBeNull();
+    // A result that isn't MCP-shaped passes through.
+    expect(appServerToolValue(issues)).toEqual(issues);
+    expect(appServerToolValue([1, 2])).toEqual([1, 2]);
+  });
+
+  test("a tool error throws with the tool's message", () => {
+    let caught: unknown;
+    try {
+      appServerToolValue({ isError: true, content: [{ type: "text", text: "Team not found" }] });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AppServerError);
+    expect((caught as AppServerError).message).toBe("Team not found");
+    expect((caught as AppServerError).details).toEqual({ reason: "tool_error" });
   });
 });
 

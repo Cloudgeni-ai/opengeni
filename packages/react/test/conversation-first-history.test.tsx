@@ -835,7 +835,10 @@ describe("conversation-first session history", () => {
       for (let index = 0; index < 2500; index += 1) call(index);
       const queued = sequence;
       store.push(at(sequence++, "turn.queued", { turnId: "T2" }, "T2"));
-      for (let index = 2500; index < 3007; index += 1) call(index);
+      // The queue row + 284 calls + two closing rows fill the opening
+      // window and its boundary page (32 + 255 conversation rows).
+      const calls = 2500 + 284;
+      for (let index = 2500; index < calls; index += 1) call(index);
       store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
       store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
       const { client } = historyClient({ store: () => store, withPages: true });
@@ -854,7 +857,7 @@ describe("conversation-first session history", () => {
         }
         expect(marker().state).toBe("complete");
         const steps = stepEvents(hook.result.current.events);
-        expect(steps).toHaveLength(3007 * 2);
+        expect(steps).toHaveLength(calls * 2);
         expect(steps[0]!.sequence).toBe(103);
       } finally {
         await hook.unmount();
@@ -944,6 +947,9 @@ describe("conversation-first session history", () => {
           store.push(at(sequence + 3, "agent.toolCall.output", { id, output: "ok" }, "T1"));
           sequence += 4;
         }
+        // The extra visible receipt aligns the oldest row of the 32 + 255
+        // window with a turnless queue change when those rows are kept.
+        store.push(receipt(sequence++, "T1"));
         store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
         store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
         const { client } = historyClient({ store: () => store, withPages: true });
@@ -989,7 +995,7 @@ describe("conversation-first session history", () => {
     "a turn read to a guessed lower bound offers earlier steps once its start loads",
     async () => {
       // A late row of the previous turn sits inside T1 and is the window's
-      // oldest event (the first read and its boundary page hold 510 rows): the
+      // oldest event (the first read and its boundary page hold 287 rows): the
       // first reads stop at it, above T1's earliest steps.
       const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
       store.push(
@@ -1007,7 +1013,8 @@ describe("conversation-first session history", () => {
       for (let index = 0; index < 2500; index += 1) call(index);
       const late = sequence;
       store.push(receipt(sequence++, "T0"));
-      for (let index = 2500; index < 3007; index += 1) call(index);
+      const callsAfterLateRow = 284;
+      for (let index = 2500; index < 2500 + callsAfterLateRow; index += 1) call(index);
       store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
       store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
       const { client } = historyClient({ store: () => store, withPages: true });
@@ -1028,7 +1035,7 @@ describe("conversation-first session history", () => {
         expect(hook.result.current.events[0]!.sequence).toBe(late);
         await loadAll();
         expect(marker().state).toBe("complete");
-        expect(stepEvents(hook.result.current.events)).toHaveLength(507 * 2);
+        expect(stepEvents(hook.result.current.events)).toHaveLength(callsAfterLateRow * 2);
 
         for (let page = 0; page < 10; page += 1) {
           if (hook.result.current.events.some((event) => event.type === "turn.started")) break;
@@ -1047,7 +1054,7 @@ describe("conversation-first session history", () => {
         const steps = stepEvents(hook.result.current.events).filter(
           (event) => event.turnId === "T1",
         );
-        expect(steps).toHaveLength(3007 * 2);
+        expect(steps).toHaveLength((2500 + callsAfterLateRow) * 2);
         expect(steps[0]!.sequence).toBe(103);
       } finally {
         await hook.unmount();
@@ -2323,7 +2330,7 @@ describe("turn bookkeeping in conversation history", () => {
       try {
         await settle();
         expect(reads).toEqual([
-          expect.objectContaining({ ...V2_READ, before: Number.MAX_SAFE_INTEGER, limit: 255 }),
+          expect.objectContaining({ ...V2_READ, before: Number.MAX_SAFE_INTEGER, limit: 32 }),
         ]);
         const window = hook.result.current.events;
         expect(hook.result.current.hasOlder).toBe(false);
@@ -2712,6 +2719,7 @@ describe("rejoining the live tip after a reconnect or a sleep", () => {
         await settle(60);
         expect(server.opened).toEqual([40]);
         expect(hook.result.current.events.at(-1)!.sequence).toBe(40);
+        const oldWindow = hook.result.current.events.map((event) => event.sequence);
 
         for (let index = 10; index < 610; index += 1) store.push(...exchange(index));
         gate = new Promise<void>((resolve) => {
@@ -2725,8 +2733,7 @@ describe("rejoining the live tip after a reconnect or a sleep", () => {
         );
         await settle(30);
         // The replacement is in flight: the reader still sees the old window.
-        expect(hook.result.current.events[0]!.sequence).toBe(1);
-        expect(hook.result.current.events.at(-1)!.sequence).toBe(40);
+        expect(hook.result.current.events.map((event) => event.sequence)).toEqual(oldWindow);
         expect(server.opened).toEqual([40]);
 
         openGate();

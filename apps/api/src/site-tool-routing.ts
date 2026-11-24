@@ -18,7 +18,15 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import { ApiHttpError } from "./http/api-error";
+import {
+  PERSONAL_GITHUB_TOOLS_SERVER_ID,
+  personalGitHubToolsOffered,
+  personalGitHubToolsServerConfig,
+  readPersonalGitHubReconnectAccount,
+  readPersonalGitHubToolsAuthority,
+} from "./personal-github-tools";
 import { exactAgentAttemptClaims } from "./sandbox/agent-fleet-context";
 import { allGatewayToolRefs } from "./workspace-tool-gateway";
 
@@ -235,6 +243,27 @@ export async function readSiteToolAccountInventory(
       },
     ];
   });
+  // Your GitHub runs on each viewer's own connection: a connector whose one
+  // account is theirs (All my repositories), or Connect when they have none.
+  if (personalGitHubToolsOffered(deps.settings) && !servers.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)) {
+    const config = personalGitHubToolsServerConfig();
+    servers.set(PERSONAL_GITHUB_TOOLS_SERVER_ID, { ...(config.url ? { url: config.url } : {}) });
+    canonical.set(PERSONAL_GITHUB_TOOLS_SERVER_ID, {
+      capabilityId: PERSONAL_GITHUB_CAPABILITY_ID,
+      name: "Your GitHub",
+      providerDomain: "github.com",
+    });
+    const personalGitHub = await readPersonalGitHubToolsAuthority(deps.db, deps.settings, grant);
+    if (personalGitHub)
+      accounts.push({
+        serverId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+        connector: "Your GitHub",
+        account: personalGitHub.login,
+        canonicalServerId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+        connectionId: personalGitHub.connectionId,
+        shared: false,
+      });
+  }
   return {
     canonical,
     plain,
@@ -283,13 +312,27 @@ export async function readSiteToolReconnectAccounts(
   // Only a sign-in that must be renewed; `error` is any other failure, which
   // signing in again would not fix.
   const stale = connections.filter((connection) => connection.status === "needs_reauth");
-  if (stale.length === 0) return [];
+  const wanted = new Set(canonicalServerIds);
+  // Your GitHub: the viewer's own connection GitHub stopped accepting.
+  const personalGitHub = wanted.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)
+    ? await readPersonalGitHubReconnectAccount(deps.db, deps.settings, grant)
+    : null;
+  const personal: SiteToolReconnectAccount[] = personalGitHub
+    ? [
+        {
+          canonicalServerId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+          connectionId: personalGitHub.connectionId,
+          account: personalGitHub.login ?? "Your GitHub",
+          shared: false,
+        },
+      ]
+    : [];
+  if (stale.length === 0) return personal;
   const base = deps.catalogSourceSettings ?? deps.settings;
   const settings = await settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, base, {
     subjectId: grant.subjectId,
   });
-  const wanted = new Set(canonicalServerIds);
-  return mcpAccountBindingsFromVisibleConnections({
+  const mcp = mcpAccountBindingsFromVisibleConnections({
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
@@ -302,6 +345,7 @@ export async function readSiteToolReconnectAccounts(
     account: accountName(binding.accountLabel),
     shared: binding.subjectScope === "workspace",
   }));
+  return [...mcp, ...personal];
 }
 
 /**

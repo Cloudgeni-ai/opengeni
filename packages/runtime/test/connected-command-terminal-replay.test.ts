@@ -3,7 +3,7 @@
 // other command's, so on a slow link they can arrive long after the attach.
 
 import { describe, expect, test } from "bun:test";
-import { ErrorCode, ExecRequest } from "@opengeni/agent-proto";
+import { ControlResponse, ErrorCode, ExecRequest, OpFrame, OpState } from "@opengeni/agent-proto";
 import { SelfhostedControlError } from "../src/sandbox/selfhosted/control-rpc";
 import { OpStreamExecClient } from "../src/sandbox/selfhosted/op-stream";
 import {
@@ -11,7 +11,7 @@ import {
   InMemoryOpStreamTransport,
   type FakeOpScript,
 } from "../src/sandbox/selfhosted/op-testing";
-import { OpStreamUnavailableError } from "../src/sandbox/selfhosted/op-transport";
+import { opFrameSubject, OpStreamUnavailableError } from "../src/sandbox/selfhosted/op-transport";
 import {
   ConnectedCommandCollectionError,
   connectedCommandFailureReason,
@@ -79,6 +79,51 @@ async function completedCommand(
 }
 
 describe("connected command terminal replay", () => {
+  test("observes a gap-heal failure even while the initial attach is awaiting its reply", async () => {
+    const opId = "early-gap:0";
+    const transport = new InMemoryOpStreamTransport();
+    const refusal = new SelfhostedControlError({
+      message: "gap heal refused",
+      code: ErrorCode.ERROR_CODE_STREAM,
+      reason: null,
+      retryable: false,
+    });
+    let attaches = 0;
+    const client = new OpStreamExecClient({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION,
+      epoch: 0,
+      rpcSubject: RPC_SUBJECT,
+      transport,
+      controlTimeoutMs: 1000,
+      controlRpc: {
+        async request(_subject, request) {
+          expect(request.op?.$case).toBe("opAttach");
+          if (++attaches === 2) throw refusal;
+          // Replay frames can reach the subscriber before the first RPC
+          // answer. A gap starts a second attach while that answer is pending.
+          transport.deliver(
+            opFrameSubject(WORKSPACE, AGENT, opId, CONNECTION),
+            OpFrame.encode(OpFrame.fromPartial({ opId, seq: "2" })).finish(),
+          );
+          await Bun.sleep(20); // Allow the rejection checkpoint before replying.
+          return ControlResponse.fromPartial({
+            result: {
+              $case: "opStatus",
+              opStatus: { state: OpState.OP_STATE_RUNNING, nextSeq: "3" },
+            },
+          });
+        },
+      },
+    });
+
+    // The outer read owns the error. There must not also be an unhandled
+    // rejection on the inner settlement promise (which would fail this test).
+    await expect(client.readExisting(opId, 500, async () => {})).rejects.toBe(refusal);
+    expect(attaches).toBe(2);
+  });
+
   test("follows one attachment until output queued behind a slow link arrives", async () => {
     // Longer than the five seconds a terminal replay used to wait before it
     // gave up, attached again and left the command for a later retry.

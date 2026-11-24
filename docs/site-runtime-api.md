@@ -543,6 +543,12 @@ nothing on its own; it defines:
   `og-button-danger`), `og-input` (inputs, selects and textareas),
   `og-label`, `og-badge` (with `-success`, `-warning`, `-danger`),
   `og-table` and `og-link`.
+- Dashboard tokens and classes: `--og-series-1` to `--og-series-6` and
+  `--og-series-muted` (chart colours per theme); `og-grid`, `og-kpis`,
+  `og-kpi` (`-label`, `-value`, `-delta`, `-note`), `og-num`, `og-good`,
+  `og-bad`, `og-warn`, `og-flat`, `og-strong`, `og-empty`, `og-details`,
+  `og-table-wrap`, `og-hide-narrow`, and a selected look for an `og-button`
+  with `aria-pressed="true"` or `aria-selected="true"`.
 
 `@opengeni/sdk/site-ui` exports the stylesheet (`SITE_UI_CSS`), its path and
 `resolveSiteUiStylesheet(html)` for hosts that embed Sites themselves.
@@ -554,6 +560,19 @@ how to compose a tool in the Opengeni look, how to design a page of its own
 from system fonts and a small palette, the states every app needs, and the
 generated-page habits to leave out. A person's or workspace's own design, and
 an installed design Skill, still come first.
+
+### Dashboards
+
+`<script src="/__opengeni/charts.js"></script>` defines `window.og`: number
+and date formats (`og.fmt`), KPI cards (`og.kpis`), horizontal bars
+(`og.bars`), line and scatter charts (`og.line`, `og.scatter`) and a sortable
+table (`og.table`). They draw with the classes above, size themselves to their
+container, follow the theme and show an empty state for empty data. The path
+is reserved and served like the stylesheet; inside Opengeni
+`resolveSiteUiStylesheet` replaces the tag with the script inline
+(`SITE_CHARTS_JS`). A bundler can't resolve the tag, so a built app adds it to
+its built HTML. The bundled `sites` Skill points dashboards at it
+(`references/dashboards.md`).
 
 ## Limits and metering
 

@@ -1259,6 +1259,9 @@
 :where(.og-root).-my-1,:where(.og-root) .-my-1 {
     margin-block: calc(var(--spacing) * -1);
   }
+:where(.og-root).-my-3,:where(.og-root) .-my-3 {
+    margin-block: calc(var(--spacing) * -3);
+  }
 :where(.og-root).my-1,:where(.og-root) .my-1 {
     margin-block: calc(var(--spacing) * 1);
   }
@@ -1300,6 +1303,9 @@
   }
 :where(.og-root).-mt-\[7px\],:where(.og-root) .-mt-\[7px\] {
     margin-top: calc(7px * -1);
+  }
+:where(.og-root).mt-0,:where(.og-root) .mt-0 {
+    margin-top: calc(var(--spacing) * 0);
   }
 :where(.og-root).mt-0\.5,:where(.og-root) .mt-0\.5 {
     margin-top: calc(var(--spacing) * 0.5);
@@ -3845,6 +3851,12 @@
       background-color: color-mix(in oklab, var(--color-bg) 35%, transparent);
     }
   }
+:where(.og-root).bg-bg\/90,:where(.og-root) .bg-bg\/90 {
+    background-color: var(--color-bg);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-bg) 90%, transparent);
+    }
+  }
 :where(.og-root).bg-black,:where(.og-root) .bg-black {
     background-color: var(--color-black);
   }
@@ -3888,12 +3900,6 @@
     background-color: color-mix(in srgb, #000 70%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-black) 70%, transparent);
-    }
-  }
-:where(.og-root).bg-black\/90,:where(.og-root) .bg-black\/90 {
-    background-color: color-mix(in srgb, #000 90%, transparent);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-black) 90%, transparent);
     }
   }
 :where(.og-root).bg-border,:where(.og-root) .bg-border {
@@ -5826,13 +5832,6 @@
     --tw-shadow: 0 1px 2px var(--tw-shadow-color, rgb(0 0 0/0.08));
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
-:where(.og-root).shadow-\[0_6px_16px_-8px_color-mix\(in_oklch\,var\(--og-color-accent\)_70\%\,transparent\)\],:where(.og-root) .shadow-\[0_6px_16px_-8px_color-mix\(in_oklch\,var\(--og-color-accent\)_70\%\,transparent\)\] {
-    --tw-shadow: 0 6px 16px -8px var(--tw-shadow-color, var(--og-color-accent));
-    @supports (color: color-mix(in lab, red, red)) {
-      --tw-shadow: 0 6px 16px -8px var(--tw-shadow-color, color-mix(in oklch,var(--og-color-accent) 70%,transparent));
-    }
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
 :where(.og-root).shadow-\[0_8px_20px_-10px_color-mix\(in_oklch\,var\(--color-status-success\,var\(--og-color-status-idle\)\)_80\%\,transparent\)\],:where(.og-root) .shadow-\[0_8px_20px_-10px_color-mix\(in_oklch\,var\(--color-status-success\,var\(--og-color-status-idle\)\)_80\%\,transparent\)\] {
     --tw-shadow: 0 8px 20px -10px var(--tw-shadow-color, var(--color-status-success,var(--og-color-status-idle)));
     @supports (color: color-mix(in lab, red, red)) {
@@ -6097,11 +6096,6 @@
     -webkit-backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
     backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
   }
-:where(.og-root).backdrop-blur-\[2px\],:where(.og-root) .backdrop-blur-\[2px\] {
-    --tw-backdrop-blur: blur(2px);
-    -webkit-backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
-    backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
-  }
 :where(.og-root).backdrop-blur-md,:where(.og-root) .backdrop-blur-md {
     --tw-backdrop-blur: blur(var(--blur-md));
     -webkit-backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
@@ -6348,6 +6342,12 @@
     @supports (color: color-mix(in lab, red, red)) {
       --og-diff-separator: color-mix(in oklch,var(--og-color-fg) 4%,transparent);
     }
+  }
+:where(.og-root).\[--og-modal-exit-duration\:200ms\],:where(.og-root) .\[--og-modal-exit-duration\:200ms\] {
+    --og-modal-exit-duration: 200ms;
+  }
+:where(.og-root).\[--og-modal-exit-duration\:300ms\],:where(.og-root) .\[--og-modal-exit-duration\:300ms\] {
+    --og-modal-exit-duration: 300ms;
   }
 :where(.og-root).\[-webkit-app-region\:no-drag\],:where(.og-root) .\[-webkit-app-region\:no-drag\] {
     -webkit-app-region: no-drag;
@@ -7020,10 +7020,22 @@
       text-transform: none;
     }
   }
+:where(.og-root).before\:pointer-events-none,:where(.og-root) .before\:pointer-events-none {
+    &::before {
+      content: var(--tw-content);
+      pointer-events: none;
+    }
+  }
 :where(.og-root).before\:absolute,:where(.og-root) .before\:absolute {
     &::before {
       content: var(--tw-content);
       position: absolute;
+    }
+  }
+:where(.og-root).before\:inset-0,:where(.og-root) .before\:inset-0 {
+    &::before {
+      content: var(--tw-content);
+      inset: calc(var(--spacing) * 0);
     }
   }
 :where(.og-root).before\:inset-x-0,:where(.og-root) .before\:inset-x-0 {
@@ -7161,6 +7173,22 @@
         --tw-shadow: inset 0 1px 0 var(--tw-shadow-color, color-mix(in oklch,var(--og-color-fg) 7%,transparent)), 0 0 0 1px var(--tw-shadow-color, color-mix(in oklch,var(--og-color-fg) 6%,transparent));
       }
       box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    }
+  }
+:where(.og-root).before\:backdrop-blur-\(--og-lightbox-blur\),:where(.og-root) .before\:backdrop-blur-\(--og-lightbox-blur\) {
+    &::before {
+      content: var(--tw-content);
+      --tw-backdrop-blur: blur(var(--og-lightbox-blur));
+      -webkit-backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
+      backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
+    }
+  }
+:where(.og-root).before\:backdrop-blur-\[2px\],:where(.og-root) .before\:backdrop-blur-\[2px\] {
+    &::before {
+      content: var(--tw-content);
+      --tw-backdrop-blur: blur(2px);
+      -webkit-backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
+      backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
     }
   }
 :where(.og-root).before\:transition-colors,:where(.og-root) .before\:transition-colors {
@@ -10518,6 +10546,11 @@
       max-width: var(--container-sm);
     }
   }
+:where(.og-root).sm\:max-w-xs,:where(.og-root) .sm\:max-w-xs {
+    @media (width >= 40rem) {
+      max-width: var(--container-xs);
+    }
+  }
 :where(.og-root).sm\:flex-1,:where(.og-root) .sm\:flex-1 {
     @media (width >= 40rem) {
       flex: 1;
@@ -10526,6 +10559,11 @@
 :where(.og-root).sm\:shrink-0,:where(.og-root) .sm\:shrink-0 {
     @media (width >= 40rem) {
       flex-shrink: 0;
+    }
+  }
+:where(.og-root).sm\:basis-auto,:where(.og-root) .sm\:basis-auto {
+    @media (width >= 40rem) {
+      flex-basis: auto;
     }
   }
 :where(.og-root).sm\:-translate-x-1\/2,:where(.og-root) .sm\:-translate-x-1\/2 {
@@ -11841,6 +11879,11 @@
     @starting-style {
       --tw-translate-x: 100%;
       translate: var(--tw-translate-x) var(--tw-translate-y);
+    }
+  }
+:where(.og-root).starting\:bg-transparent,:where(.og-root) .starting\:bg-transparent {
+    @starting-style {
+      background-color: transparent;
     }
   }
 :where(.og-root).starting\:opacity-0,:where(.og-root) .starting\:opacity-0 {
@@ -13768,6 +13811,23 @@
 @media (pointer:coarse) {
   :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button,:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
     min-height: 44px;
+  }
+}
+:where(.og-root).og-modal-overlay-fade,:where(.og-root) .og-modal-overlay-fade {
+  transition: background-color 150ms;
+}
+@starting-style {
+  :where(.og-root).og-modal-overlay-fade,:where(.og-root) .og-modal-overlay-fade {
+    background-color: transparent;
+  }
+}
+:where(.og-root).og-modal-overlay-fade[data-state="closed"],:where(.og-root) .og-modal-overlay-fade[data-state="closed"] {
+  background-color: transparent;
+  animation: og-modal-overlay-exit var(--og-modal-exit-duration, 150ms);
+}
+@keyframes og-modal-overlay-exit {
+  from, to {
+    --og-modal-overlay-present: 1;
   }
 }
 :where(.og-root).og-preview-loading,:where(.og-root) .og-preview-loading {
@@ -15714,6 +15774,9 @@
 }
 :where(.og-root).og-capability-catalog-row[data-row-status="attention"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-row-status="attention"] .og-capability-catalog-status-line {
   color: var(--og-color-status-waiting, var(--og-color-fg-muted, inherit));
+}
+:where(.og-root).og-capability-catalog-row[data-status-tone="description"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-status-tone="description"] .og-capability-catalog-status-line {
+  color: var(--og-color-fg-muted, inherit);
 }
 :where(.og-root).og-connection-type-picker,:where(.og-root) .og-connection-type-picker {
   display: flex;
@@ -17712,7 +17775,7 @@
 }
 @keyframes og-tc-fade {
   from {
-    opacity: 0;
+    background-color: transparent;
   }
 }
 @keyframes og-tc-rise {

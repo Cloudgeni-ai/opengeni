@@ -31,7 +31,7 @@ import {
   CapabilityPage,
   OutcomeList,
   TechnicalDetails,
-} from "@/components/capabilities/capability-page";
+} from "@opengeni/react/ui/capability-page";
 import {
   ConnectorToolPermissions,
   hasConnectorToolPermissionTarget,

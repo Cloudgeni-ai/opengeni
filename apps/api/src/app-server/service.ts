@@ -79,7 +79,13 @@ import {
   ResponseBodyLimitError,
 } from "@opengeni/network";
 import { retryWhileMissing } from "@opengeni/storage";
-import { callAppSyncToolThroughGateway, type AppSyncToolCaller } from "../app-sync/service";
+import {
+  callAppSyncToolThroughGateway,
+  readToolResultJson,
+  toolResultTexts,
+  type AppSyncToolCaller,
+} from "../app-sync/service";
+import { PERSONAL_GITHUB_TOOLS_SERVER_ID } from "../personal-github-tools";
 import { writeSiteDataWithAccess } from "../site-data/operations";
 import {
   meterSiteData,
@@ -136,7 +142,9 @@ export type AppServerErrorCode =
   | "forbidden"
   | "rate_limited"
   | "unavailable"
-  | "conflict";
+  | "conflict"
+  /** The tool itself reported an error. */
+  | "tool_failed";
 
 export class AppServerError extends Error {
   constructor(
@@ -182,7 +190,9 @@ function sha256(value: string | Uint8Array): string {
 }
 
 /** The digest that names one version's code: main, files, egress, secrets and tools. */
-export function appServerDigest(manifest: Omit<AppServerManifest, "digest">): string {
+export function appServerDigest(
+  manifest: Omit<AppServerManifest, "digest" | "toolResults">,
+): string {
   return sha256(
     JSON.stringify([
       manifest.main,
@@ -219,9 +229,34 @@ export function appServerManifestOf(bundle: AppServerBundle): {
     tools: [...new Set(bundle.tools ?? [])].sort(),
   };
   return {
-    manifest: AppServerManifest.parse({ ...base, digest: appServerDigest(base) }),
+    manifest: AppServerManifest.parse({
+      ...base,
+      toolResults: bundle.toolResults ?? "value",
+      digest: appServerDigest(base),
+    }),
     files: files.map((file) => ({ sha256: file.sha256, bytes: file.bytes })),
   };
+}
+
+/**
+ * A tool result as server code reads it: JSON as app syncs read it
+ * (`readToolResultJson`), else the text itself. A tool error throws with the
+ * tool's message. A result that isn't MCP-shaped passes through.
+ */
+export function appServerToolValue(result: unknown): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const raw = result as { structuredContent?: unknown; content?: unknown; isError?: unknown };
+  const texts = toolResultTexts(result);
+  if (raw.isError === true)
+    throw new AppServerError(
+      "tool_failed",
+      texts.join("\n").slice(0, 1000) || "The tool returned an error.",
+      { reason: "tool_error" },
+    );
+  const read = readToolResultJson(result);
+  if (read.found) return read.value;
+  if (!Array.isArray(raw.content)) return result;
+  return texts.length > 0 ? texts.join("\n") : null;
 }
 
 function refuseUpload(message: string): never {
@@ -1092,6 +1127,12 @@ export function routeAppServerTool(
       .sort((left, right) => left.serverId.localeCompare(right.serverId));
     if (shared) return { serverId: shared.serverId, toolName: tool.toolName };
     const name = inventory.canonical.get(canonicalServerId)?.name ?? "this tool's connector";
+    // Your GitHub is only ever a person's own account, never shared.
+    if (canonicalServerId === PERSONAL_GITHUB_TOOLS_SERVER_ID)
+      throw forbidden(
+        `Server code can't use ${name}: it runs only on each person's own GitHub account. Call it from the app's page instead.`,
+        { reason: "tool_acts_as_person", connector: name },
+      );
     throw forbidden(
       `Server code uses only the workspace's shared accounts, and no shared ${name} account is connected. A workspace admin can connect one and share it with the workspace.`,
       { reason: "shared_account_required", connector: name },
@@ -1494,8 +1535,11 @@ export async function handleAppServerHostCall(
             identity,
             arguments: args as Record<string, unknown>,
           });
-          return { result };
+          // Code published before results were unwrapped keeps the raw MCP result.
+          const raw = deployment.manifest.toolResults !== "value" || call.input.raw === true;
+          return { result: raw ? result : appServerToolValue(result) };
         } catch (error) {
+          if (error instanceof AppServerError) throw error;
           const status = (error as { status?: unknown }).status;
           const message = error instanceof Error ? error.message : "";
           if (status === 409 || message.includes("approval_required"))

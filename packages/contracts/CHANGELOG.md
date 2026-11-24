@@ -1,5 +1,19 @@
 # @opengeni/contracts
 
+## 6.37.3
+
+### Patch Changes
+
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+
+## 6.37.2
+
+### Patch Changes
+
+- c78d62c: An agent redeems a ChatGPT usage-limit reset with one call and one approval in the chat, which works however long the person takes to approve it. The web app's prepare step is no longer offered to agents.
+
+## 6.37.1
+
 ## 6.37.0
 
 ### Minor Changes

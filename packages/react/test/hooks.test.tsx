@@ -998,6 +998,65 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
+  test("steerTurns steers several waiting prompts in one command, in queue order", async () => {
+    const first = fakeTurn({ id: "11111111-aaaa-4aaa-8aaa-111111111111", version: 2 });
+    const second = fakeTurn({ id: "22222222-bbbb-4bbb-8bbb-222222222222", version: 4 });
+    const third = fakeTurn({ id: "33333333-cccc-4ccc-8ccc-333333333333", version: 1 });
+    let current = queueSnapshot([first, second, third], { version: 5 });
+    const calls: Array<{ turnId: string; request: Record<string, unknown> }> = [];
+    const client = fakeClient({
+      getQueue: async () => current,
+      steerQueueItem: async (_ws, _session, turnId, request) => {
+        calls.push({ turnId, request: request as Record<string, unknown> });
+        const steered = (turn: SessionTurn) => ({
+          ...turn,
+          version: turn.version + 1,
+          metadata: { ...turn.metadata, delivery: "steer" },
+        });
+        current = queueSnapshot([steered(first), steered(third), second], { version: 6 });
+        return {
+          receipt: {
+            id: crypto.randomUUID(),
+            action: "queue.steer",
+            operationKey: request.clientEventId,
+            targetSessionId: SESSION_ID,
+            targetTurnId: turnId,
+            appliedControlRevision: null,
+            appliedQueueVersion: 6,
+            appliedTurnVersion: null,
+            appliedDraftRevision: null,
+            createdAt: new Date().toISOString(),
+          },
+          snapshot: current,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    // Asked out of order: the queue's order is the delivery order.
+    await flushing(async () =>
+      expect(await hook.result.current.steerTurns!([third.id, first.id])).toBe(true),
+    );
+    expect(calls).toHaveLength(1);
+    // The oldest is the target, so a server without `together` keeps the order.
+    expect(calls[0]!.turnId).toBe(first.id);
+    expect(calls[0]!.request).toMatchObject({
+      expectedTurnVersion: 2,
+      together: [{ turnId: third.id, expectedTurnVersion: 1 }],
+    });
+    expect(hook.result.current.acceptedSteers?.map((steer) => [steer.turnId, steer.state])).toEqual(
+      [
+        [first.id, "queued"],
+        [third.id, "queued"],
+      ],
+    );
+    expect(hook.result.current.mutating).toBe(false);
+    await hook.unmount();
+  });
+
   test.each(["turn.started", "turn.superseded"])(
     "queue Steer stays bridged into chat until %s",
     async (terminalType) => {

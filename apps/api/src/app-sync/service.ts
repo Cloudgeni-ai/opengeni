@@ -220,21 +220,39 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** The text parts of an MCP tool result, in order. */
+export function toolResultTexts(result: unknown): string[] {
+  const content = isObject(result) ? result.content : undefined;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) =>
+    isObject(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : [],
+  );
+}
+
+/**
+ * How app syncs and app server code read a tool result as JSON: its
+ * structured content, or else the first text part that parses. `found` is
+ * false when neither gives a value.
+ */
+export function readToolResultJson(
+  result: unknown,
+): { found: true; value: unknown } | { found: false } {
+  const structured = isObject(result) ? result.structuredContent : undefined;
+  if (structured !== undefined && structured !== null) return { found: true, value: structured };
+  for (const text of toolResultTexts(result)) {
+    try {
+      return { found: true, value: JSON.parse(text) };
+    } catch {
+      continue;
+    }
+  }
+  return { found: false };
+}
+
 /** The tool result as JSON: structured content, or else the first text part that parses. */
 export function toolResultValue(result: ToolGatewayResult): unknown {
-  const structured = (result as { structuredContent?: unknown }).structuredContent;
-  if (structured !== undefined && structured !== null) return structured;
-  const content = (result as { content?: unknown }).content;
-  if (Array.isArray(content))
-    for (const part of content) {
-      if (isObject(part) && part.type === "text" && typeof part.text === "string") {
-        try {
-          return JSON.parse(part.text);
-        } catch {
-          continue;
-        }
-      }
-    }
+  const read = readToolResultJson(result);
+  if (read.found) return read.value;
   throw invalid("The tool didn't return JSON data the sync can read.");
 }
 

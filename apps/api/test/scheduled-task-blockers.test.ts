@@ -144,6 +144,18 @@ describe("decideScheduledTaskBlocker", () => {
     expect(decision.message).toContain("open it and save it");
   });
 
+  test("a deleted or no longer shared agent pauses at once and says to choose another", () => {
+    const refused = run("failed", { error: "scheduled_agent_unavailable" });
+    const decision = decideScheduledTaskBlocker(facts([run("succeeded"), refused]));
+    expect(decision).toMatchObject({
+      kind: "block",
+      state: "paused",
+      reason: "scheduled_agent_unavailable",
+      message:
+        "Its agent was deleted or is no longer shared. Choose another agent, then resume the schedule.",
+    });
+  });
+
   test("one ended chat does not block a schedule that starts a new chat each run", () => {
     const ended = run("skipped", { error: "session_cancelled", sessionId: chatId });
     expect(

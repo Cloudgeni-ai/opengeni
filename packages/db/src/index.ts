@@ -74,10 +74,7 @@ export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
-import {
-  isProviderCapacityWaitReason,
-  type SubscriptionReconnectAccount,
-} from "@opengeni/contracts/subscription-capacity-wait";
+import type { SubscriptionWaitAccount } from "@opengeni/contracts/subscription-capacity-wait";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -1363,6 +1360,7 @@ import {
   capacityWaitNotificationPayload,
   readCapacityWaitNotice,
   subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitHasOwnExplanation,
   subscriptionCapacityWaitReasonText,
   withoutCapacityWaitNotice,
 } from "./capacity-wait-attention";
@@ -28046,7 +28044,7 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
   goalId?: string | null;
   goalVersion?: number | null;
   waitReason: string;
-  reconnectAccount?: SubscriptionReconnectAccount;
+  waitAccount?: SubscriptionWaitAccount;
   earliestResetAt: Date | null;
   healthRetryAt?: Date | null;
   /** From a fresh failover-aware accepted-turn evaluation; never caller authority.
@@ -28214,8 +28212,8 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
-        const explanation = isProviderCapacityWaitReason(input.waitReason)
-          ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.reconnectAccount) ??
+        const explanation = subscriptionCapacityWaitHasOwnExplanation(input.waitReason)
+          ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.waitAccount) ??
             undefined)
           : undefined;
         const attention = capacityWaitAttention({
@@ -28232,7 +28230,7 @@ export async function armSubscriptionCoreCapacityWait(
                   provider,
                   resetsAt: attention.resetsAt,
                   waitReason: input.waitReason,
-                  ...(input.reconnectAccount ? { reconnectAccount: input.reconnectAccount } : {}),
+                  ...(input.waitAccount ? { waitAccount: input.waitAccount } : {}),
                 }),
               )
             : null;
@@ -28475,6 +28473,7 @@ export async function armSubscriptionCoreCapacityWait(
             provider,
             nextCheckAt,
             resetsAt: attention.resetsAt,
+            waitReason: input.waitReason,
             ...(explanation ? { explanation } : {}),
           });
         }
@@ -28500,7 +28499,7 @@ export type SubscriptionCoreCodexWaitEvaluation =
   | {
       kind: "wait";
       waitReason: string;
-      reconnectAccount?: SubscriptionReconnectAccount;
+      waitAccount?: SubscriptionWaitAccount;
       earliestResetAt: Date | null;
       healthRetryAt: Date | null;
       /** Entire freshly derived candidate set, not a union with stored hints. */
@@ -28790,9 +28789,9 @@ export async function reconcileSubscriptionCoreCapacityWait(
           const reasonText = subscriptionCapacityWaitReasonText(
             waitEvaluation.waitReason,
             vocabulary.label,
-            waitEvaluation.reconnectAccount,
+            waitEvaluation.waitAccount,
           );
-          const explanation = isProviderCapacityWaitReason(waitEvaluation.waitReason)
+          const explanation = subscriptionCapacityWaitHasOwnExplanation(waitEvaluation.waitReason)
             ? (reasonText ?? undefined)
             : undefined;
           // Whoever was told when the wait ends (a top-level chat's person,
@@ -28850,8 +28849,8 @@ export async function reconcileSubscriptionCoreCapacityWait(
                     provider: waiter.provider,
                     resetsAt: attention!.resetsAt,
                     waitReason: waitEvaluation.waitReason,
-                    ...(waitEvaluation.reconnectAccount
-                      ? { reconnectAccount: waitEvaluation.reconnectAccount }
+                    ...(waitEvaluation.waitAccount
+                      ? { waitAccount: waitEvaluation.waitAccount }
                       : {}),
                   }),
                   // Same key: the open notification is updated in place, silently.
@@ -28942,6 +28941,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
               provider: waiter.provider,
               nextCheckAt,
               resetsAt: attention!.resetsAt,
+              waitReason: waitEvaluation.waitReason,
               restatement,
               ...(explanation ? { explanation } : {}),
             });
@@ -44996,8 +44996,10 @@ export async function acceptSessionHumanInputResponse(
     requestId: string;
     response: unknown;
     respondedBy: string;
-    /** API-owned verified managed/local browser stamp, never a submitted principal shape. */
+    /** API-owned sign-in proof for Skill review and existing native secret answers. */
     canonicalHumanSession?: boolean;
+    /** API-owned proof for saving a secret answer to Only me. Not a proof for any other card. */
+    privateSecretAnswerAuthorized?: boolean;
     /**
      * API-owned: the response comes from the person's own Opengeni sign-in
      * (browser, desktop or phone app), not an agent, personal key or
@@ -45354,7 +45356,8 @@ export async function acceptSessionHumanInputResponse(
         if (response.outcome === "answered" && secretAnswers.length > 0) {
           if (
             secretAnswers.some((answer) => answer.saveTo === "user") &&
-            input.canonicalHumanSession !== true
+            input.canonicalHumanSession !== true &&
+            input.privateSecretAnswerAuthorized !== true
           ) {
             throw new HumanInputResponseValidationError(
               "HUMAN_AUTH_REQUIRED",
@@ -45700,6 +45703,8 @@ export async function adoptManagedSessionBackgroundCommand(
     processId: string;
     expected: SandboxRetainedProcessIdentity;
     command: string;
+    /** Turn shell marker path of an unsupervised command (migration 1560). */
+    processGroupMarker?: string | undefined;
   },
 ) {
   return await withRlsContext(
@@ -45753,6 +45758,7 @@ export async function adoptManagedSessionBackgroundCommand(
           commandId: input.processId,
           retainedProcessId: input.processId,
           command: input.command,
+          processGroupMarker: input.processGroupMarker,
           turnId: input.turnId,
           attemptId: input.attemptId,
           executionGeneration: input.executionGeneration,
@@ -80658,6 +80664,15 @@ export type InitializeSessionStartInput = {
    */
   initialOpeningTools?: readonly string[];
   /**
+   * Picked connector accounts the first message runs without because they
+   * stopped working, recorded on the initial turn like any other turn's gaps.
+   */
+  initialConnectionAccountGaps?: ReadonlyArray<{
+    serverId: string;
+    connectionId: string | null;
+    reason: string;
+  }>;
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -80716,7 +80731,10 @@ export type InitializeSessionStartResult = {
 
 /** Trusted per-message facts the create request froze for the initial turn. */
 function initialTurnMetadata(
-  input: Pick<InitializeSessionStartInput, "initialTimeZone" | "initialOpeningTools">,
+  input: Pick<
+    InitializeSessionStartInput,
+    "initialTimeZone" | "initialOpeningTools" | "initialConnectionAccountGaps"
+  >,
 ): Record<string, unknown> {
   const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
   const openingTools = openingToolsFromTurnMetadata({
@@ -80725,6 +80743,9 @@ function initialTurnMetadata(
   return {
     ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
     ...(openingTools.length ? { [OPENING_TOOLS_METADATA_KEY]: openingTools } : {}),
+    ...(input.initialConnectionAccountGaps?.length
+      ? { connectionAccountGaps: input.initialConnectionAccountGaps.slice(0, 32) }
+      : {}),
   };
 }
 
@@ -91802,12 +91823,83 @@ export type ApplySessionTurnSettlementResult =
       events: [];
     };
 
+/**
+ * Where one settlement spent its time, in milliseconds. Phases describe the
+ * last transaction attempt; `admissionMs` also covers earlier retried attempts.
+ * `validateMs`, `writeMs` and `commitMs` pass while the session row is locked.
+ */
+export type SessionTurnSettlementTiming = {
+  action: ApplySessionTurnSettlementResult["action"];
+  attempts: number;
+  /** From the call until the row locks were requested (pool, BEGIN, RLS setup). */
+  admissionMs: number;
+  /** Waiting for the control, workspace, session, turn and attempt row locks. */
+  lockWaitMs: number;
+  /** Fence checks, reads and run-state writes after the locks, before the turn writes. */
+  validateMs: number | null;
+  /** Settlement writes and their triggers. */
+  writeMs: number | null;
+  /** From the transaction body's return until COMMIT was acknowledged. */
+  commitMs: number;
+  totalMs: number;
+};
+
 export type ApplySessionTurnSettlementHooks = {
   /** Test-only failure injection after terminal projection but before commit. */
   afterRealtimeDelegationProjection?:
     | ((projection: { entryId: string; turnId: string }) => void | Promise<void>)
     | undefined;
+  /** Observes where a resolved settlement spent its time. A throw or a
+   * rejected promise is ignored. */
+  onTiming?: ((timing: SessionTurnSettlementTiming) => unknown) | undefined;
 };
+
+type SessionTurnSettlementPhases = {
+  startedAt: number;
+  attempts: number;
+  lockRequestedAt: number | null;
+  lockedAt: number | null;
+  writeStartedAt: number | null;
+  bodyReturnedAt: number | null;
+};
+
+function markSessionTurnSettlementPhase(
+  phase: SessionTurnSettlementPhases,
+  mark: "lockRequestedAt" | "lockedAt" | "writeStartedAt" | "bodyReturnedAt",
+): void {
+  phase[mark] = performance.now();
+}
+
+function reportSessionTurnSettlementTiming(
+  onTiming: ApplySessionTurnSettlementHooks["onTiming"],
+  phase: SessionTurnSettlementPhases,
+  action: SessionTurnSettlementTiming["action"],
+): void {
+  if (!onTiming) return;
+  const finishedAt = performance.now();
+  const span = (from: number | null, to: number | null) =>
+    from === null || to === null ? null : Math.max(0, Math.round(to - from));
+  // An early (stale) return leaves later marks unset: its remaining time is
+  // reported as commit, during which the row locks were still held.
+  const bodyEnd = phase.bodyReturnedAt ?? phase.lockedAt ?? finishedAt;
+  const timing: SessionTurnSettlementTiming = {
+    action,
+    attempts: phase.attempts,
+    admissionMs: span(phase.startedAt, phase.lockRequestedAt ?? finishedAt) ?? 0,
+    lockWaitMs: span(phase.lockRequestedAt, phase.lockedAt ?? finishedAt) ?? 0,
+    validateMs: span(phase.lockedAt, phase.writeStartedAt ?? phase.bodyReturnedAt),
+    writeMs: span(phase.writeStartedAt, phase.bodyReturnedAt),
+    commitMs: span(bodyEnd, finishedAt) ?? 0,
+    totalMs: span(phase.startedAt, finishedAt) ?? 0,
+  };
+  // Timing is diagnostic; neither a throw nor a rejection from the observer
+  // changes the settlement's outcome or escapes as an unhandled rejection.
+  try {
+    void Promise.resolve(onTiming(timing)).catch(() => {});
+  } catch {
+    // Ignored, as above.
+  }
+}
 
 function attemptOutcomeForTurnStatus(status: SessionTurnStatus): SessionTurnAttemptOutcome | null {
   switch (status) {
@@ -92150,7 +92242,17 @@ export async function applySessionTurnSettlement(
         input.runState.pendingApprovals,
       )
     : null;
-  return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+  const phase: SessionTurnSettlementPhases = {
+    startedAt: performance.now(),
+    attempts: 0,
+    lockRequestedAt: null,
+    lockedAt: null,
+    writeStartedAt: null,
+    bodyReturnedAt: null,
+  };
+  const settled = await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+    phase.attempts += 1;
+    phase.lockRequestedAt = phase.lockedAt = phase.writeStartedAt = phase.bodyReturnedAt = null;
     // A terminal settlement cancels the turn's still-pending human-input rows.
     // Their parent resolution notices need the parent locked with the child,
     // so peek (unlocked) for such rows first; they are created only by this
@@ -92176,6 +92278,7 @@ export async function applySessionTurnSettlement(
           .limit(1)
       ).length > 0;
     return await scopedDb.transaction(async (tx) => {
+      markSessionTurnSettlementPhase(phase, "lockRequestedAt");
       const locks =
         input.turnStatus === "failed" ||
         input.turnStatus === "requires_action" ||
@@ -92192,6 +92295,7 @@ export async function applySessionTurnSettlement(
               turnIds: [input.turnId],
               attemptIds: [input.attemptId],
             });
+      markSessionTurnSettlementPhase(phase, "lockedAt");
       const session = locks.sessions.find((row) => row.id === input.sessionId);
       const turn = locks.turns.find((row) => row.id === input.turnId);
       const attempt = locks.attempts.find((row) => row.id === input.attemptId);
@@ -92606,6 +92710,7 @@ export async function applySessionTurnSettlement(
         });
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
+      markSessionTurnSettlementPhase(phase, "writeStartedAt");
       const now = new Date();
       const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       const attemptOutcome = attemptOutcomeForTurnStatus(input.turnStatus);
@@ -93168,6 +93273,7 @@ export async function applySessionTurnSettlement(
           });
         }
       }
+      markSessionTurnSettlementPhase(phase, "bodyReturnedAt");
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -93176,6 +93282,8 @@ export async function applySessionTurnSettlement(
       };
     });
   });
+  reportSessionTurnSettlementTiming(hooks.onTiming, phase, settled.action);
+  return settled;
 }
 
 import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";
@@ -95467,6 +95575,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
+    waitReason: string;
     explanation?: string;
     restatement?: { restatedResetsAt: string | null; restatedReasonSequence?: number };
   },
@@ -95488,7 +95597,9 @@ async function enqueueChildWaitingCapacityOutboxTx(
     }),
     kind: "child_waiting_capacity",
     classification: "info",
-    summary: childWaitingCapacitySummary(session.id, payload, input.explanation),
+    summary: childWaitingCapacitySummary(session.id, payload, input.explanation, {
+      waitReason: input.waitReason,
+    }),
     payload,
     lineage: { turnId: input.turnId },
   });

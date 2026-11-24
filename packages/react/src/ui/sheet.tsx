@@ -5,12 +5,13 @@ import { Dialog as SheetPrimitive } from "radix-ui";
 import { SectionFrameReset } from "./section-variant";
 import { WindowBarTitleBoundary } from "./window-bar-title";
 import { cn } from "../lib/cn";
+import { DialogModalRoot, ModalLayer, useDialogModal } from "../lib/modal-layer";
 import { containedPortal } from "./portal-container";
 
 const SheetContainedPortal = containedPortal(SheetPrimitive.Portal);
 
 function Sheet({ ...props }: React.ComponentPropsWithoutRef<typeof SheetPrimitive.Root>) {
-  return <SheetPrimitive.Root data-slot="sheet" {...props} />;
+  return <DialogModalRoot data-slot="sheet" {...props} />;
 }
 
 const SheetTrigger = /* @__PURE__ */ React.forwardRef<
@@ -31,23 +32,6 @@ function SheetPortal({ ...props }: React.ComponentPropsWithoutRef<typeof SheetPr
   return <SheetContainedPortal data-slot="sheet-portal" {...props} />;
 }
 
-const SheetOverlay = /* @__PURE__ */ React.forwardRef<
-  React.ComponentRef<typeof SheetPrimitive.Overlay>,
-  React.ComponentPropsWithoutRef<typeof SheetPrimitive.Overlay>
->(function SheetOverlay({ className, ...props }, ref) {
-  return (
-    <SheetPrimitive.Overlay
-      data-slot="sheet-overlay"
-      className={cn(
-        "fixed inset-0 z-50 bg-black/50 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
-        className,
-      )}
-      ref={ref}
-      {...props}
-    />
-  );
-});
-
 const SheetContent = /* @__PURE__ */ React.forwardRef<
   React.ComponentRef<typeof SheetPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content> & {
@@ -58,37 +42,43 @@ const SheetContent = /* @__PURE__ */ React.forwardRef<
   { className, children, side = "right", showCloseButton = true, ...props },
   ref,
 ) {
+  const modal = useDialogModal();
   return (
     <SheetPortal>
-      <SheetOverlay />
-      <SheetPrimitive.Content
-        data-slot="sheet-content"
-        data-window-layer={side === "left" || side === "right" || undefined}
-        className={cn(
-          "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition ease-in-out data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:animate-in data-[state=open]:duration-500",
-          side === "right" &&
-            "inset-y-0 right-0 h-full w-3/4 max-w-[85vw] border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-sm",
-          side === "left" &&
-            "inset-y-0 left-0 h-full w-3/4 max-w-[85vw] border-r data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left sm:max-w-sm",
-          side === "top" &&
-            "inset-x-0 top-0 h-auto border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
-          side === "bottom" &&
-            "inset-x-0 bottom-0 h-auto border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
-          className,
-        )}
-        ref={ref}
-        {...props}
+      <ModalLayer
+        modal={modal}
+        data-slot="sheet-overlay"
+        className="og-modal-overlay-fade fixed inset-0 z-50 bg-black/50 [--og-modal-exit-duration:300ms]"
       >
-        <SectionFrameReset>
-          <WindowBarTitleBoundary>{children}</WindowBarTitleBoundary>
-        </SectionFrameReset>
-        {showCloseButton && (
-          <SheetPrimitive.Close className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-secondary">
-            <XIcon className="size-4" />
-            <span className="sr-only">Close</span>
-          </SheetPrimitive.Close>
-        )}
-      </SheetPrimitive.Content>
+        <SheetPrimitive.Content
+          data-slot="sheet-content"
+          data-window-layer={side === "left" || side === "right" || undefined}
+          className={cn(
+            "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition ease-in-out data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:animate-in data-[state=open]:duration-500",
+            side === "right" &&
+              "inset-y-0 right-0 h-full w-3/4 max-w-[85vw] border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-sm",
+            side === "left" &&
+              "inset-y-0 left-0 h-full w-3/4 max-w-[85vw] border-r data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left sm:max-w-sm",
+            side === "top" &&
+              "inset-x-0 top-0 h-auto border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
+            side === "bottom" &&
+              "inset-x-0 bottom-0 h-auto border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
+            className,
+          )}
+          ref={ref}
+          {...props}
+        >
+          <SectionFrameReset>
+            <WindowBarTitleBoundary>{children}</WindowBarTitleBoundary>
+          </SectionFrameReset>
+          {showCloseButton && (
+            <SheetPrimitive.Close className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-secondary">
+              <XIcon className="size-4" />
+              <span className="sr-only">Close</span>
+            </SheetPrimitive.Close>
+          )}
+        </SheetPrimitive.Content>
+      </ModalLayer>
     </SheetPortal>
   );
 });

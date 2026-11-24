@@ -437,6 +437,68 @@ for (const gutter of ["stable", "stable both-edges"]) {
 }
 
 e2e(
+  "a full-page capture of an app whose list scrolls inside it says how much it leaves out",
+  async () => {
+    // The document is one screen tall; the rows scroll inside <main>.
+    const rows = Array.from({ length: 60 }, (_, index) => `<div class="row">Row ${index}</div>`);
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Approvals</title><style>
+html,body{margin:0;height:100%;overflow:hidden;font:14px sans-serif}
+.app{display:flex;flex-direction:column;height:100vh}
+header{height:48px;flex:none;background:#eef}
+main{flex:1;min-height:0;overflow:auto}
+.row{height:40px;border-bottom:1px solid #ccc;box-sizing:border-box}
+.drawer{position:fixed;top:0;left:-300px;width:280px;height:200px;overflow:auto}
+</style></head><body><div class="app"><header>Approvals</header><main>${rows.join("")}</main></div>
+<div class="drawer"><div style="height:9000px">Closed menu</div></div></body></html>`;
+    await withPage(html, { deviceScaleFactor: 1 }, async ({ driver, observation, evaluate }) => {
+      const hidden = (await evaluate(
+        "(() => { const main = document.querySelector('main'); return main.scrollHeight - main.clientHeight; })()",
+      )) as number;
+      expect(hidden).toBeGreaterThan(1500);
+      const frame = await driver.captureScreenshot(observation.target.id, {
+        fullPage: true,
+        format: "png",
+      });
+      near(frame.height, 844);
+      // The rows below <main>'s edge are not in the image, and the capture
+      // says how many CSS px; the closed drawer off the page does not count.
+      expect(frame.hiddenScrolledHeight).toBe(hidden);
+      // A viewport capture claims no whole page, so it says nothing.
+      const viewportFrame = await driver.captureScreenshot(observation.target.id, {
+        format: "png",
+      });
+      expect(viewportFrame.hiddenScrolledHeight).toBeUndefined();
+    });
+  },
+  120_000,
+);
+
+e2e(
+  "a full-page capture is as wide as the viewport when the page hides content past its right edge",
+  async () => {
+    // The body's overflow belongs to the viewport: the document scrolls
+    // down, never sideways, so the wide banner's right part is never seen.
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Feed</title><style>
+body{margin:0;height:100%;overflow-x:hidden;overflow-y:auto;font:14px sans-serif}
+</style></head><body><div style="width:400px;height:40px;background:#36c">Banner</div>
+<div style="height:2400px">Feed</div></body></html>`;
+    await withPage(html, { deviceScaleFactor: 1 }, async ({ driver, observation, evaluate }) => {
+      expect(await evaluate("document.documentElement.scrollWidth")).toBe(400);
+      const frame = await driver.captureScreenshot(observation.target.id, {
+        fullPage: true,
+        format: "png",
+      });
+      near(frame.width, observation.viewport!.width);
+      expect(frame.height).toBeGreaterThan(2400);
+      // The body only passes its scrolling on to the document, which the
+      // image shows whole.
+      expect(frame.hiddenScrolledHeight).toBeUndefined();
+    });
+  },
+  120_000,
+);
+
+e2e(
   "a page too tall to capture whole fails before any style changes",
   async () => {
     const html = page(VERTICAL_PANES).replace("height:2400px", "height:40000px");

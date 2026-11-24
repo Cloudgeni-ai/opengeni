@@ -530,8 +530,13 @@ request. `opengeni_diagnostic_exports_total{outcome}` reports export outcomes an
 `disabled` captures when no protected endpoint is configured. Fatal API capture
 occurs before bounded flush and required exit(1). Session-event persistence
 capture occurs before failure-settlement DB recovery work, so a second DB error
-cannot prevent its enqueue. Startup failures before an observer is attached
-still have only the existing safe fallback diagnostic.
+cannot prevent its enqueue. The fatal process log line, including the startup
+fallback and deployments without an exporter, includes the same correlation ID,
+the top-level cause's reviewed class and code and up to three reviewed
+`source:line:column` locations. Unknown codes, files, function names, and raw
+stack text are not copied. In a bundled API, split chunks are recognized only
+if present beside the process entrypoint at startup. Non-Error rejections
+retain only their value kind.
 
 
 ### Platform versus customer-provider failures

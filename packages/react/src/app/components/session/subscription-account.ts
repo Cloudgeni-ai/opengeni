@@ -15,7 +15,7 @@ import {
   type SubscriptionLimit,
   type SubscriptionWindow,
 } from "../../lib/subscription-accounts";
-import type { BillingClass } from "../billing-class-mark";
+import { subscriptionProviderPresentation } from "../../lib/subscription-provider";
 import type {
   SubscriptionAccountMenuRow,
   SubscriptionAccountMenuUsage,
@@ -83,18 +83,7 @@ export type SubscriptionAccountState = {
   mutationError: string | null;
 };
 
-const PROVIDER: Record<string, { name: string; billingClass: BillingClass }> = {
-  codex: { name: "Codex", billingClass: "codex_subscription" },
-  claude: { name: "Claude", billingClass: "claude_subscription" },
-  xai: { name: "SuperGrok", billingClass: "supergrok_subscription" },
-};
-
-export function subscriptionProviderPresentation(provider: string): {
-  name: string;
-  billingClass: BillingClass;
-} {
-  return PROVIDER[provider] ?? { name: "Subscription", billingClass: "external" };
-}
+export { subscriptionProviderPresentation };
 
 const REFUSAL_COPY: Record<ModelAccountChoiceRefusal, string> = {
   inactive: "Unavailable",

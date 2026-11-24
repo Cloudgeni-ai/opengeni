@@ -62,7 +62,10 @@ runs from before the last edit or resume do not count):
   (`admissionDiagnostic`), any non-retryable refusal above, a paused chat
   (`scheduled_session_paused`), a chat that ended or no longer exists
   (`session_cancelled` outside new-chat-per-run mode,
-  `scheduled_target_session_unavailable`), an unavailable model, and an owner
+  `scheduled_target_session_unavailable`), an unavailable model, an agent
+  that was deleted or became Only me where the run isn't its owner's Only me
+  chat (`scheduled_agent_unavailable`, on a fresh start or a recovered run),
+  and an owner
   whose saved access no longer holds: the database admission or claim fence
   refused the run because the organization membership revision the task
   revision was saved under changed (`scheduled_run_authority_proof_rejected`,
@@ -104,6 +107,37 @@ in, else its most recent run's chat. It is withdrawn when a later run succeeds o
 a person resumes, pauses or deletes the schedule. `GET /scheduled-tasks` and
 `GET /scheduled-tasks/:id` return the current `blocker` (`state` `paused` or
 `notified`, `reason`, `message`, `runId`, `since`), and the schedule page shows it.
+
+### Owner notices
+
+An automation whose runs were all refused before their chats started (a pull
+request reviewer refused on its first run) has no chat for the notice. Its
+owner is told instead by a chat-less inbox notice linking to the automation
+(migration `1562_scheduled_task_blocker_inbox_notices.sql`): one per blocked
+episode, resolved when the review clears, a chat notice takes over, or the
+automation is deleted. A trigger on `scheduled_task_blocker_reviews` opens it
+through `opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1`, whose
+runtime EXECUTE is withheld for one release (rolling safety); until a later
+migration grants it, such an owner sees the blocker only on the automation's
+page, as before.
+
+### Refused pull request runs
+
+When a GitHub pull request event (a pull request, its review, review comment
+or comment) starts a run that is refused or fails before its chat starts, the
+worker also says so on that pull request: one short comment through the
+workspace's GitHub App naming the automation (only when it is shared, quoted
+as code so it can't mention or link), why in plain words (billing causes only
+as "a usage limit"), and that its owner can see why in Opengeni
+(`apps/worker/src/scheduled-refusal-pr-comments.ts`). The pull request is
+trusted only as an event run's repositories are: the allowlist must offer its
+repository through one of the workspace's installations and GitHub must
+resolve its name to the same id. Test events never comment. A hidden marker
+on the App's comments keeps it to one comment per pull request and cause
+within 24 hours, and a transaction advisory lock per pull request and cause
+keeps concurrent refusals from both posting. It is best effort: dispatch
+doesn't wait for it, and it never changes the run. A run whose dispatch
+activity fails outright, rather than being refused, doesn't comment.
 
 Agents cover what the platform cannot see, a run that starts but cannot do its
 job: each new scheduled occurrence tells the agent to try to fix a blocker,

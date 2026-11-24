@@ -1746,6 +1746,37 @@ describe("child lifecycle notices", () => {
     ).toBe(false);
   });
 
+  test("a worker waiting on its pinned account tells the parent to return it to automatic account choice", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "claude work" });
+    const resetsAt = new Date(Date.now() + 4 * 86_400_000);
+    const armed = await armSubscriptionCoreCapacityWait(client.db, "claude", {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      turnId: child.turn.id,
+      attemptId: child.attemptId,
+      waitReason: "pinned_account_unavailable",
+      waitAccount: { label: "“Team Max”", personal: false },
+      earliestResetAt: resetsAt,
+      failurePayload: {},
+    });
+    if (armed.action !== "waiting") throw new Error("expected a parked child");
+    const notice = await outbox(
+      grant,
+      childWaitingCapacityDedupeKey({
+        childSessionId: child.session.id,
+        waiterId: armed.waiter.waiterId,
+      }),
+    );
+    const reset = `${resetsAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    expect(notice?.summary).toBe(
+      `Worker ${child.session.id} is blocked. This chat is pinned to the Claude account “Team Max”, which has no capacity right now. It continues by itself when that account has room again, or sooner on another account once the chat is switched back to automatic account choice. That account is expected to have room again around ${reset}. To switch the worker back to automatic account choice, call the setSessionModelAccount action for it with connectionId null and provider claude; its waiting turn then continues on another account.`,
+    );
+    expect(notice?.summary).not.toContain("session_set_model");
+  });
+
   test("a changed Codex blocker appends a new parent notice without rewriting the first", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
@@ -1778,7 +1809,7 @@ describe("child lifecycle notices", () => {
         evaluation: {
           kind: "wait",
           waitReason: "codex_relogin_required",
-          reconnectAccount: { label: "“Primary”", personal: false },
+          waitAccount: { label: "“Primary”", personal: false },
           earliestResetAt: null,
           healthRetryAt: null,
         },
@@ -2486,5 +2517,82 @@ describe("a sub-agent's question goes to the agent that started it first", () =>
     await freezeChild(grant, root);
     expect(await held(root.session.id)).toEqual([false]);
     expect(await inboxQuestions(root.session.id)).toEqual(["open"]);
+  });
+
+  test("a question whose agent won't wake (its goal is paused) reaches the person", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleIdle(grant, parent);
+    await setSessionGoalStatus(client.db, grant.workspaceId, parent.session.id, {
+      status: "paused",
+      rationale: "waiting on the person",
+    });
+    await freezeChild(grant, child);
+    const delivered = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // The paused parent is not woken, so no agent turn will ever see it.
+    expect(delivered.shouldWake).toBe(false);
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+    expect(await attention(grant, parent.session.id)).toBe(1);
+  });
+
+  test("a question delivered while its agent is busy, which then pauses its goal, is seen by its next turn and then reaches the person", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await freezeChild(grant, child);
+    const delivered = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // Busy: the running turn may still see it, so it stays with the agent.
+    expect(delivered.shouldWake).toBe(false);
+    expect(await held(child.session.id)).toEqual([true]);
+    // That turn pauses its goal and ends before draining the notice.
+    await setSessionGoalStatus(client.db, grant.workspaceId, parent.session.id, {
+      status: "paused",
+      rationale: "waiting on the person",
+    });
+    await settleIdle(grant, parent);
+    // The session workflow peeks again after every turn: the pending notice
+    // is work despite the paused goal, so the agent gets another turn.
+    expect(await held(child.session.id)).toEqual([true]);
+    expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn not claimed");
+    expect(await inboxQuestions(child.session.id)).toEqual([]);
+    // That turn ends without answering: the person gets the question.
+    await settleIdle(grant, { session: parent.session, turn: claim.turn, attemptId });
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+    expect(await attention(grant, parent.session.id)).toBe(1);
   });
 });

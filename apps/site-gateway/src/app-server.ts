@@ -186,7 +186,10 @@ function appEnv(context, run) {
     app: Object.freeze({ id: context.appId, versionId: context.versionId }),
     trigger: context.trigger,
     runId: context.runId,
-    tools: Object.freeze({ call: (tool, args = {}) => run.call("tools.call", { tool, arguments: args }) }),
+    tools: Object.freeze({
+      call: (tool, args = {}, options = {}) =>
+        run.call("tools.call", { tool, arguments: args, ...(options && options.raw === true ? { raw: true } : {}) }),
+    }),
     data,
     fetch: (input, init) => run.fetch(input, init),
   });

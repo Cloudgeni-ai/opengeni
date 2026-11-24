@@ -914,11 +914,12 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
       backend: ResolvedActiveBackend;
       process: RoutingRetainedProcess;
       command?: string | undefined;
+      processGroupMarker?: string | undefined;
     }) => Promise<void>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!fence) return undefined;
-  return async ({ backend, process, command }) => {
+  return async ({ backend, process, command, processGroupMarker }) => {
     const durable = await getRetainedProcess(services.db, {
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -946,6 +947,7 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
       processId: process.id,
       expected: retainedProcessSettlementIdentity(durable),
       command: command ?? "Background command",
+      ...(processGroupMarker ? { processGroupMarker } : {}),
     });
   };
 }

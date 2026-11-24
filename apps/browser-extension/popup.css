@@ -43,7 +43,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 small { display: block; margin-top: 9px; color: var(--subtle); font-size: 11px; }
 
 /* Site permissions agents set: in the popup, and on their own page. */
-.site-permissions { margin-bottom: 20px; padding-top: 18px; border-top: 1px solid var(--border); font-size: 13px; }
+.site-permissions, .tab-group { margin-bottom: 20px; padding-top: 18px; border-top: 1px solid var(--border); font-size: 13px; }
 .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 h2 { margin: 0; font-size: 12px; font-weight: 500; }
 /* About three changes; more scroll inside the list, not the whole popup. */

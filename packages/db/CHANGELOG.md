@@ -1,5 +1,54 @@
 # @opengeni/db
 
+## 6.37.3
+
+### Patch Changes
+
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/subscriptions@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- 8ee5e81: Let verified users of an embedding host save secure-question answers to their own Only me vault when the host acts as them with `secrets:write` and their asking turn can use the vault.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/subscriptions@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- 3595193: Distinguish proven Codex model entitlement refusals from waits for capacity, so an entirely plan-blocked pool can fail a turn promptly.
+- e71502d: A sub-agent's question held for the agent that started it now reaches the person when that agent isn't woken by it (its goal is paused, the chat is paused or its admission is blocked), instead of waiting silently with no inbox item, push or list hint.
+- bc538e2: Deliver already accepted scheduled work when a shared connector has lapsed, without letting that work use the stale credential or a different account.
+- e71502d: Keep app data restricted when a manager resets it while server code or a sync is writing shared-account tool data to a target it marked long before: marking again right before a write restarts the mark's reset grace.
+- Updated dependencies [17783d3]
+  - @opengeni/config@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/subscriptions@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes

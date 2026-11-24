@@ -166,6 +166,15 @@ every catalog read, session create, approval-policy read and worker claim.
   **From <workspace>**; it is managed in the origin workspace. Its owner can
   still set its approvals in Personal, stored for the Personal workspace like
   any of its own connectors.
+- When the owner's account behind it stops working (`needs_reauth`, `error`
+  or `revoked`), the catalog keeps listing it, through the listing-only
+  `includeLapsed` opt-in, as not runnable (`runtime.available: false`,
+  readiness `attention`), so it shows as needing reconnecting rather than
+  vanishing, and is never a default tool or offered as ready. Nothing runs or
+  binds it. A new chat or tool-policy change that still names it is accepted
+  and keeps it chosen but not run until it is reconnected; a new chat's first
+  turn records an `account_inactive` gap for it. Any other unknown connector id
+  is still refused.
 
 API Integrations follow the same rules
 (`personalWorkspaceExtensionApiIntegrations`): a curated definition (for
@@ -759,6 +768,12 @@ Updating an installed direct Skill requires that optimistic-concurrency
 version; omission is rejected and a stale version returns `409`, so two
 administrators cannot silently overwrite each other's accepted source
 revision.
+
+GitHub reads are anonymous unless the deployment sets
+`OPENGENI_SKILL_IMPORT_GITHUB_TOKEN`, which moves them from GitHub's shared
+per-IP limit to the token's own. The token is only sent to `api.github.com`,
+and with it every read first confirms the repository is public, so a token that
+can see private repositories still imports only public Skills.
 
 The authoritative persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under

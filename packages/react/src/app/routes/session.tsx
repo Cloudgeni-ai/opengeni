@@ -308,6 +308,8 @@ import {
   ModelSwitchHeadsUp,
   type CodexUsageChoice,
 } from "../components/session/codex-usage-notice";
+import { PinnedAccountWaitNotice } from "../components/session/pinned-account-wait-notice";
+import { pinnedAccountWait } from "../lib/pinned-account-wait";
 import { isCodexProductModel } from "../lib/session-model";
 import { useCodexUsageModelSwitch } from "../lib/use-codex-usage-model-switch";
 import {
@@ -3410,6 +3412,10 @@ function SessionChatPane(props: {
         void modelCatalog.refresh();
       }
     },
+    // An account that stopped working since the chat loaded: send again once
+    // without it, never with another account in its place.
+    reviseRefusedAccounts: (error, input) =>
+      connectionAccounts.reviseRefusedAccounts(error, input.connectionAccounts),
   });
   // A dropped event stream (an update or brief outage) reads as "updating" in
   // the composer while it reconnects.
@@ -4114,6 +4120,22 @@ function SessionChatPane(props: {
     codexUsageChoice && props.session.status !== "failed" && !terminal ? (
       <CodexUsageNotice choice={codexUsageChoice} />
     ) : null;
+  // A turn waiting on the account a person pinned this chat to: name the
+  // account and offer automatic account choice, the change that lets it
+  // continue elsewhere (a model switch would not: the pin holds).
+  const pinnedWait = useMemo(
+    () => (terminal ? null : pinnedAccountWait(props.session, props.events)),
+    [terminal, props.session, props.events],
+  );
+  const pinnedAccountWaitNotice = pinnedWait ? (
+    <PinnedAccountWaitNotice
+      workspaceId={props.session.workspaceId}
+      sessionId={props.session.id}
+      wait={pinnedWait}
+      events={props.events}
+      canChoose={workspacePermissions.includes("sessions:control")}
+    />
+  ) : null;
   // The chosen model is about to rebuild a chat Codex compacted.
   const chosenModelHeadsUp = !terminal
     ? switchHeadsUp(model, selectedPolicyRow?.label ?? unavailableModelName(model))
@@ -4291,6 +4313,10 @@ function SessionChatPane(props: {
     ),
     [props.session.workspaceId],
   );
+  const artifactHref = useCallback(
+    (id: string) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`,
+    [props.session.workspaceId],
+  );
 
   const renderMessageText = useCallback(
     (
@@ -4314,7 +4340,7 @@ function SessionChatPane(props: {
       return (
         <div data-testid="assistant-markdown">
           <MarkdownText
-            artifactHref={(id) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`}
+            artifactHref={artifactHref}
             text={text}
             searchTarget={renderContext.searchTarget}
             softLineBreaks
@@ -4327,6 +4353,7 @@ function SessionChatPane(props: {
       );
     },
     [
+      artifactHref,
       context.accessContext.subjectId,
       context.client,
       props.onOpenSandboxFile,
@@ -5027,6 +5054,7 @@ function SessionChatPane(props: {
                 header={
                   ownLoginsHeadsUp ||
                   unavailableModelNotice ||
+                  pinnedAccountWaitNotice ||
                   codexUsageNotice ||
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
@@ -5054,6 +5082,7 @@ function SessionChatPane(props: {
                         />
                       ) : null}
                       {unavailableModelNotice}
+                      {pinnedAccountWaitNotice}
                       {codexUsageNotice}
                       {modelSwitchHeadsUp}
                       {usageLimitNotice}

@@ -75,7 +75,7 @@ import {
   TargetIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { ComposerOptimisticMessage, ComposerState } from "../hooks/use-composer";
 import type { UseGoalResult } from "../hooks/use-goal";
@@ -396,21 +396,27 @@ export function countOptimisticQueuedMessages(
   ).length;
 }
 
+/** Another change that takes a queued message out of Steer-all; a move does not. */
+function actedOn(kind: ReturnType<UseTurnQueueResult["mutationFor"]>): boolean {
+  return kind !== null && kind !== "move";
+}
+
 /**
- * Steer on a just-sent message the chip shows before the server has confirmed
- * it. Steer needs the queued turn's id and version, which arrive with the next
- * queue read, so the click is taken at once and carried out when that exact
- * message lands in the queue. It is dropped, never retargeted, when the send
- * fails, is withdrawn or dismissed, the agent starts the message first, or
- * something else (an edit, Up recall or another Steer) already acts on it.
- * Each just-sent message keeps its own request, so steering a newer one never
- * cancels an earlier one.
+ * The chip's Steer: every message waiting when it is clicked, in one command,
+ * so the agent gets them in order with one interruption. Just-sent
+ * messages the server has not confirmed yet need their queued turn's id and
+ * version, which arrive with the next queue read, so the click is taken at
+ * once and carried out when all of them have landed. A message is dropped,
+ * never retargeted, when its send fails, it is withdrawn or dismissed, the
+ * agent starts it first, or something else (an edit, Up recall, delete or
+ * another Steer) already acts on it; a move in progress is waited for.
  */
-function useDeferredQueuedSteer({
+function useSteerAllQueued({
   messages,
   optimisticQueued,
   queuedTurnIds,
   steerTurn,
+  steerTurns,
   mutationFor,
   mutating,
   enabled,
@@ -419,34 +425,47 @@ function useDeferredQueuedSteer({
   optimisticQueued: readonly ComposerOptimisticMessage[];
   queuedTurnIds: ReadonlySet<string>;
   steerTurn: UseTurnQueueResult["steerTurn"];
+  steerTurns: UseTurnQueueResult["steerTurns"];
   mutationFor: UseTurnQueueResult["mutationFor"];
   mutating: boolean;
   enabled: boolean;
 }) {
-  // clientEventId -> the message's turn id once known.
-  const [pending, setPending] = useState<ReadonlyMap<string, string | null>>(() => new Map());
-  const steerRef = useRef(steerTurn);
-  steerRef.current = steerTurn;
+  // Confirmed turns, then just-sent clientEventId -> turn id once known.
+  const [request, setRequest] = useState<{
+    turnIds: readonly string[];
+    pending: ReadonlyMap<string, string | null>;
+  } | null>(null);
+  const steerRef = useRef({ steerTurn, steerTurns });
+  steerRef.current = { steerTurn, steerTurns };
+  const fire = useCallback((turnIds: readonly string[]) => {
+    if (turnIds.length === 0) return;
+    const { steerTurn: one, steerTurns: many } = steerRef.current;
+    if (turnIds.length === 1 || !many) void one(turnIds[turnIds.length - 1]!);
+    else void many(turnIds);
+  }, []);
   useEffect(() => {
-    if (pending.size === 0) return;
+    if (!request) return;
+    if (!enabled) {
+      setRequest(null);
+      return;
+    }
     const next = new Map<string, string | null>();
-    const fire: string[] = [];
-    for (const [clientEventId, knownTurnId] of pending) {
+    const landed: string[] = [];
+    let placing = false;
+    // An edit, Up recall, delete or Steer already acting on one of them wins
+    // for it; a move is waited for below so the order stays as sent.
+    const turnIds = request.turnIds.filter((turnId) => !actedOn(mutationFor(turnId)));
+    for (const [clientEventId, knownTurnId] of request.pending) {
       const message = (messages ?? []).find(
         (candidate) => candidate.clientEventId === clientEventId,
       );
       // Gone means the turn started or was withdrawn; failed means nothing waits.
-      if (!enabled || !message || message.state === "failed") continue;
+      if (!message || message.state === "failed") continue;
       const turnId = message.turnId ?? knownTurnId;
       if (turnId && queuedTurnIds.has(turnId)) {
-        // An edit, Up recall or Steer already acting on it wins.
-        if (mutationFor(turnId) !== null) continue;
-        // Another queue change is applying: steer right after it.
-        if (mutating) {
-          next.set(clientEventId, turnId);
-          continue;
-        }
-        fire.push(turnId);
+        if (actedOn(mutationFor(turnId))) continue;
+        landed.push(turnId);
+        next.set(clientEventId, turnId);
         continue;
       }
       const stillPlacing = optimisticQueued.some(
@@ -454,24 +473,38 @@ function useDeferredQueuedSteer({
       );
       // The queue read caught up without it waiting there: already started.
       if (!stillPlacing) continue;
+      placing = true;
       next.set(clientEventId, turnId);
     }
-    const changed =
-      next.size !== pending.size ||
-      [...next].some(([clientEventId, turnId]) => pending.get(clientEventId) !== turnId);
-    if (changed) setPending(next);
-    for (const turnId of fire) void steerRef.current(turnId);
-  }, [enabled, messages, mutating, mutationFor, optimisticQueued, pending, queuedTurnIds]);
+    // Wait for every just-sent message to land, and for another queue change
+    // that is applying, so one command carries them all.
+    if (placing || mutating) {
+      const changed =
+        turnIds.length !== request.turnIds.length ||
+        next.size !== request.pending.size ||
+        [...next].some(([clientEventId, turnId]) => request.pending.get(clientEventId) !== turnId);
+      if (changed) setRequest({ turnIds, pending: next });
+      return;
+    }
+    setRequest(null);
+    fire([...new Set([...turnIds, ...landed])].filter((turnId) => queuedTurnIds.has(turnId)));
+  }, [enabled, fire, messages, mutating, mutationFor, optimisticQueued, queuedTurnIds, request]);
   return {
-    request: (clientEventId: string) =>
-      setPending((current) => {
-        if (current.has(clientEventId)) return current;
-        const next = new Map(current);
-        next.set(clientEventId, null);
-        return next;
-      }),
-    isPending: (clientEventId: string) => pending.has(clientEventId),
-    isPendingTurn: (turnId: string) => [...pending.values()].includes(turnId),
+    /** Steer `turnIds` (queue order) and then `pendingClientEventIds` (sent order). */
+    request: (turnIds: readonly string[], pendingClientEventIds: readonly string[]) => {
+      if (pendingClientEventIds.length === 0 && !mutating) {
+        fire(turnIds.filter((turnId) => !actedOn(mutationFor(turnId))));
+        return;
+      }
+      setRequest(
+        (current) =>
+          current ?? {
+            turnIds,
+            pending: new Map(pendingClientEventIds.map((id) => [id, null] as const)),
+          },
+      );
+    },
+    pending: request !== null,
   };
 }
 
@@ -700,11 +733,12 @@ function SessionChromeView({
   const canMutateQueue = !readOnly && composer !== undefined;
   // One Send: nothing to choose, so waiting messages offer no Steer.
   const canSteerQueued = canMutateQueue && composer?.singleSend !== true;
-  const deferredSteer = useDeferredQueuedSteer({
+  const steerAll = useSteerAllQueued({
     messages: composer?.optimisticMessages,
     optimisticQueued,
     queuedTurnIds,
     steerTurn: queue.steerTurn,
+    steerTurns: queue.steerTurns,
     mutationFor: queue.mutationFor,
     mutating: queue.mutating,
     enabled: canSteerQueued,
@@ -1060,38 +1094,30 @@ function SessionChromeView({
 
   const open = active !== null;
   // Collapsed queue chip shows the latest queued message so a Send that lands
-  // in the queue is visible without opening the list. Steer on a message the
-  // server has not confirmed yet is taken at once and carried out when it lands.
+  // in the queue is visible without opening the list. Its Steer sends every
+  // waiting message, including ones the server has not confirmed yet.
   const latestOptimisticQueued = optimisticQueued[optimisticQueued.length - 1];
   const latestQueuedTurn = queuedTurns[queuedTurns.length - 1];
   const queuePeek: {
     text: string | null;
-    turnId: string | null;
-    /** Unconfirmed send shown in the chip; Steer on it is deferred. */
-    pending: ComposerOptimisticMessage | null;
   } | null =
     queueLoadError || queue.mutationError
       ? null
       : latestOptimisticQueued
-        ? {
-            text: latestOptimisticQueued.text.trim() || null,
-            turnId: null,
-            pending: latestOptimisticQueued,
-          }
+        ? { text: latestOptimisticQueued.text.trim() || null }
         : latestQueuedTurn
-          ? {
-              text: queuedTurnPresentation(t, latestQueuedTurn).text.trim() || null,
-              turnId: latestQueuedTurn.id,
-              pending: null,
-            }
+          ? { text: queuedTurnPresentation(t, latestQueuedTurn).text.trim() || null }
           : null;
-  const queuePeekSteering = queuePeek
-    ? queuePeek.pending
-      ? deferredSteer.isPending(queuePeek.pending.clientEventId)
-      : queuePeek.turnId !== null &&
-        (queue.mutationFor(queuePeek.turnId) === "steer" ||
-          deferredSteer.isPendingTurn(queuePeek.turnId))
-    : false;
+  const steerableTurnIds = queuedTurns
+    .filter((turn) => !actedOn(queue.mutationFor(turn.id)))
+    .map((turn) => turn.id);
+  const steerablePending = optimisticQueued.filter((message) => message.state !== "failed");
+  // A host queue without `steerTurns` keeps the earlier one-message Steer.
+  const steerAllCount = queue.steerTurns
+    ? steerableTurnIds.length + steerablePending.length
+    : Math.min(1, steerableTurnIds.length + steerablePending.length);
+  const queuePeekSteering =
+    steerAll.pending || turns.some((turn) => queue.mutationFor(turn.id) === "steer");
 
   if (signals.length === 0 && !stopping) return null;
 
@@ -1387,23 +1413,26 @@ function SessionChromeView({
                       {signal.id === "queue" && canSteerQueued && queuePeek && !selected ? (
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
                           <IconAction
-                            label={t("sessionChrome.steerLatestQueuedMessage")}
-                            analyticsAction="steer"
-                            text={t("sessionChrome.steer")}
-                            tip={<QueueSteerTip />}
-                            disabled={
-                              queuePeek.pending
-                                ? queuePeek.pending.state === "failed" || queuePeekSteering
-                                : !queuePeek.turnId ||
-                                  queue.mutating ||
-                                  Boolean(queue.mutationFor(queuePeek.turnId))
+                            label={
+                              steerAllCount > 1
+                                ? t("sessionChrome.steerAllQueuedMessages", {
+                                    count: steerAllCount,
+                                  })
+                                : t("sessionChrome.steerLatestQueuedMessage")
                             }
+                            analyticsAction="steer"
+                            text={
+                              steerAllCount > 1
+                                ? t("sessionChrome.steerCount", { count: steerAllCount })
+                                : t("sessionChrome.steer")
+                            }
+                            tip={<QueueSteerTip several={steerAllCount > 1} />}
+                            disabled={queuePeekSteering || steerAllCount === 0}
                             onClick={() => {
-                              if (queuePeek.pending) {
-                                deferredSteer.request(queuePeek.pending.clientEventId);
-                              } else if (queuePeek.turnId) {
-                                void queue.steerTurn(queuePeek.turnId);
-                              }
+                              steerAll.request(
+                                steerableTurnIds,
+                                steerablePending.map((message) => message.clientEventId),
+                              );
                             }}
                           >
                             {queuePeekSteering ? (
@@ -2202,12 +2231,14 @@ function GoalPanel({
   );
 }
 
-function QueueSteerTip() {
+function QueueSteerTip({ several = false }: { several?: boolean } = {}) {
   const t = useOpenGeniText();
   return (
     <span className="flex flex-col gap-0.5 text-left">
       <span className="font-medium">{t("sessionChrome.steer")}</span>
-      <span className="opacity-80">{t("sessionChrome.steerTip")}</span>
+      <span className="opacity-80">
+        {t(several ? "sessionChrome.steerAllTip" : "sessionChrome.steerTip")}
+      </span>
     </span>
   );
 }

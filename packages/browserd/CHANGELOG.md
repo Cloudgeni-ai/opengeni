@@ -1,5 +1,30 @@
 # @opengeni/browserd
 
+## 0.4.59
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/interaction@6.37.3
+
+## 0.4.58
+
+### Patch Changes
+
+- 9b5daaa: Record why a browser live view stopped getting frames. The browser controller now reports the state of its frame streams and live-view sockets (states, counts and times, never page content), and the API logs `browser.frame_stream.stalled` with that report when an open view's heartbeat finds a stream or view without a frame for ten seconds, so the reason survives the controller's sandbox stopping.
+- 953bbd7: An address typed into a new Chrome tab in the background now loads when Return is pressed. A Chromium window in the background reports no focused element until it is the key window, and the CUA driver checked for the browser's own field before making the window key, so right after `cmd+T` the address bar was missed: the text went in through accessibility, the bar showed it, and Return loaded nothing while every step reported success. The pinned driver now decides this once the window is key and types the address as keystrokes.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/interaction@6.37.2
+
+## 0.4.57
+
+### Patch Changes
+
+- @opengeni/contracts@6.37.1
+- @opengeni/interaction@6.37.1
+
 ## 0.4.56
 
 ### Patch Changes

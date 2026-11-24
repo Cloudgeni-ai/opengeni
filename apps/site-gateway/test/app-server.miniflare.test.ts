@@ -213,23 +213,24 @@ describe("app server code in the gateway", () => {
     const result = await run(
       runRequest(SITE_A, VERSION_B, {
         "index.js":
-          "export default { async fetch(request, env) { const tool = await env.tools.call({ serverId: 's', toolName: 't' }, { q: 1 }); const up = await fetch('https://api.example.com/x', { method: 'POST', body: 'hi' }); return Response.json({ tool, up: up.status, upBody: await up.text(), header: up.headers.get('x-up') }); } };",
+          "export default { async fetch(request, env) { const tool = await env.tools.call({ serverId: 's', toolName: 't' }, { q: 1 }); const raw = await env.tools.call('s/t', {}, { raw: true }); const up = await fetch('https://api.example.com/x', { method: 'POST', body: 'hi' }); return Response.json({ tool, raw, up: up.status, upBody: await up.text(), header: up.headers.get('x-up') }); } };",
       }),
     );
     expect(result.error).toBeNull();
     expect(JSON.parse(text(result))).toEqual({
       tool: { echoed: { tool: { serverId: "s", toolName: "t" }, arguments: { q: 1 } } },
+      raw: { echoed: { tool: "s/t", arguments: {}, raw: true } },
       up: 201,
       upBody: "upstream",
       header: "1",
     });
-    expect(hostCalls).toHaveLength(2);
+    expect(hostCalls).toHaveLength(3);
     for (const hostCall of hostCalls) {
       expect(hostCall.path).toBe(`/v1/site-runtime/app-server/${SITE_A}/${VERSION_B}/host`);
       expect(hostCall.token).toBe(`token-for-${SITE_A}`);
       expect(hostCall.signed).toBe(true);
     }
-    expect(hostCalls[1]!.body).toMatchObject({
+    expect(hostCalls[2]!.body).toMatchObject({
       op: "fetch",
       input: { url: "https://api.example.com/x", method: "POST", bodyBase64: btoa("hi") },
     });

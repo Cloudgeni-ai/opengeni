@@ -255,9 +255,11 @@ export async function listSubscriptionConnectionsForPlacement(
       kind: row.kind,
       ownership,
       health,
+      // Display only: a wait names the account it is about (never eligibility).
+      label: row.label,
       ...(subscriptionCoreProviderIds().includes(row.provider) &&
       subscriptionCoreProvider(row.provider).projectWait
-        ? { label: row.label, planType: row.plan_type }
+        ? { planType: row.plan_type }
         : {}),
       extraCreditsEnabled: row.extra_credits_enabled,
       allocatorEnabled: row.allocator_enabled,

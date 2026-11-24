@@ -11,6 +11,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Dialog } from "radix-ui";
+import { ModalLayer } from "../lib/modal-layer";
 import type { IntegrationExperienceIcon } from "../integration-presentation";
 import { containedPortal } from "../ui/portal-container";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
@@ -243,41 +244,42 @@ export function SessionCapabilityFrame({
         }}
       >
         <DialogContainedPortal>
-          <Dialog.Overlay className="og-root og-session-capability-overlay" style={portalStyle} />
-          <Dialog.Content
-            className="og-root og-session-capability-dialog"
-            style={portalStyle}
-            onEscapeKeyDown={(event) => {
-              if (busy) event.preventDefault();
-            }}
-            onInteractOutside={(event) => {
-              if (busy) event.preventDefault();
-            }}
-            onCloseAutoFocus={(event) => {
-              event.preventDefault();
-              const target = buttonRef.current?.isConnected
-                ? buttonRef.current
-                : sectionRef.current;
-              // Keep the view where the conversation is; focus alone must not scroll.
-              if (target?.isConnected) target.focus({ preventScroll: true });
-            }}
-          >
-            <div className="og-session-capability-dialog-header">
-              <Mark src={logo} name={name} icon={icon} />
-              <div>
-                <Dialog.Title>{name}</Dialog.Title>
-                <Dialog.Description>
-                  {[typeLabel, shownSubtitle].filter(Boolean).join(" · ")}
-                </Dialog.Description>
+          <ModalLayer className="og-root og-session-capability-overlay" style={portalStyle}>
+            <Dialog.Content
+              className="og-root og-session-capability-dialog"
+              style={portalStyle}
+              onEscapeKeyDown={(event) => {
+                if (busy) event.preventDefault();
+              }}
+              onInteractOutside={(event) => {
+                if (busy) event.preventDefault();
+              }}
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                const target = buttonRef.current?.isConnected
+                  ? buttonRef.current
+                  : sectionRef.current;
+                // Keep the view where the conversation is; focus alone must not scroll.
+                if (target?.isConnected) target.focus({ preventScroll: true });
+              }}
+            >
+              <div className="og-session-capability-dialog-header">
+                <Mark src={logo} name={name} icon={icon} />
+                <div>
+                  <Dialog.Title>{name}</Dialog.Title>
+                  <Dialog.Description>
+                    {[typeLabel, shownSubtitle].filter(Boolean).join(" · ")}
+                  </Dialog.Description>
+                </div>
+                {!busy ? (
+                  <Dialog.Close aria-label={t("sessionCapabilityFrame.closeConnectionSetup")}>
+                    <XIcon size={18} />
+                  </Dialog.Close>
+                ) : null}
               </div>
-              {!busy ? (
-                <Dialog.Close aria-label={t("sessionCapabilityFrame.closeConnectionSetup")}>
-                  <XIcon size={18} />
-                </Dialog.Close>
-              ) : null}
-            </div>
-            <div className="og-session-capability-dialog-body">{children}</div>
-          </Dialog.Content>
+              <div className="og-session-capability-dialog-body">{children}</div>
+            </Dialog.Content>
+          </ModalLayer>
         </DialogContainedPortal>
       </Dialog.Root>
     </div>

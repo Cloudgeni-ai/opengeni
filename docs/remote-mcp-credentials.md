@@ -144,6 +144,23 @@ eligible accounts. The web composer keeps these controls inside Connectors and
 blocks an explicit empty selection until an account is attached or the connector
 is disabled.
 
+A new message (a follow-up or a session's first message) is sent without a
+picked account that stopped working since the sender's account list was
+loaded, for example one whose sign-in expired and could not be refreshed
+(`needs_reauth`, `revoked` or `error`). The pick is never replaced: that
+connector keeps only the sender's other picks that still work, and with none
+it runs without an account for the turn. The left-out pick is recorded in the
+turn's internal `connectionAccountGaps` metadata, logged, and an expired
+sign-in posts the account's reconnect notice on the chat. The turn's account
+intent keeps every pick, so work continuing it narrows the same way. A pick the
+sender can't see (an unknown, deleted or another person's account), one that
+names another connector's account (whatever its status), or one for a connector
+the turn doesn't use is still refused with the typed 422
+`connection_account_selection_unavailable`. Personal GitHub and social account
+picks keep their strict contract, because a repository or post can't be
+attached without that account. The web composer keeps showing a lapsed pick as
+"Reconnect required" and still sends.
+
 The chat account list only controls attachments. Adding or connecting accounts
 uses the connector's Capabilities page or a prepared inline Connect card.
 
@@ -373,9 +390,13 @@ exactly as that person's next message with the same picks would be resolved
 now (a compaction-only turn has a few exceptions of its own, described under
 manual compaction in `docs/context-compaction.md`). A reconnected or newly
 connected account is therefore used, and a revoked one is not. A picked account that can no longer
-be used is never replaced by another account: that connector is left out of the
-continued turn and recorded in the turn's internal `connectionAccountGaps`
-metadata. A carried intent that names someone other than the continued turn's
+be used is never replaced by another account: the connector keeps the person's
+other picks that still work, as a new message would. A connector whose picks
+all stopped working (`needs_reauth`, `revoked` or `error`) stays in the
+continued turn with no account bound; one whose picks can no longer be found
+or used for another reason (for example the account was deleted) is left out
+of it. Each left-out pick or connector is recorded in
+the turn's internal `connectionAccountGaps` metadata. A carried intent that names someone other than the continued turn's
 person resolves shared accounts only. A child session carries its parent turn's
 intent, so its own continuations resolve for the parent's person. Messages and
 Steers from another agent still act with the sender's accepted accounts, and a
@@ -388,7 +409,11 @@ scheduled occurrences. New empty sets mean no authenticated account routes;
 historical absent/null sets retain the legacy execution path. Scheduled tasks
 never save resolved accounts: each fresh occurrence resolves the execution
 owner's current accounts when it is accepted, and that accepted set is then
-fixed for the occurrence and its retries. Only a person can pin accounts
+fixed for the occurrence and its retries. Delivery copies the exact accepted
+receipt even if a shared account has since lapsed. Credential resolution and
+provider requests still reject an inactive or different account generation;
+the stale receipt cannot block later inputs or authorize a replacement account.
+Only a person can pin accounts
 (`pinnedAccounts`) on a schedule that starts its own session; a pin narrows
 only its own connector. Removing an MCP tool also removes its pins. Pins for
 unselected tools are rejected. When a pinned account can no longer be used, the

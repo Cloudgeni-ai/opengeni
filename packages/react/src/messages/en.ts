@@ -553,6 +553,7 @@ export const englishMessages = {
     "The access it was saved with has changed. Its owner can save it again to approve it with their current access. If they've left, it can't run as them again.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
+  "automations.run.error.agentUnavailable": "Its agent was deleted or is no longer shared.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
   "automations.run.error.automationInactive":
     "The automation was paused or deleted before the run started.",
@@ -1916,6 +1917,8 @@ export const englishMessages = {
     "The latest question is changing queue state. Try again.",
   "hooks.latestQuestion.theLatestQuestionIsIn": "The latest question is in the prompt queue.",
   "hooks.useBrowserFrameStream.browserViewLostConnection": "Browser view lost connection.",
+  "hooks.useBrowserFrameStream.browserPictureStopped":
+    "The browser stopped sending its picture. Reconnect to see the page as it is now.",
   "hooks.useBrowserSession.noBrowserTabIsSelected": "No browser tab is selected.",
   "hooks.useBrowserSession.theBrowserPageChangedOpen":
     "The browser page changed. Open the options again.",
@@ -4962,6 +4965,12 @@ export const englishMessages = {
   "sessionChrome.singleSendWaitingUnavailable": "Waiting messages unavailable",
   "sessionChrome.singleSendWaitingUnavailableSentence": "Waiting messages unavailable.",
   "sessionChrome.steer": "Steer",
+  "sessionChrome.steerAllQueuedMessages_one": "Steer {count} queued message",
+  "sessionChrome.steerAllQueuedMessages_other": "Steer {count} queued messages",
+  "sessionChrome.steerAllTip":
+    "The agent reads these messages together, in order, as soon as it can. Running tools aren't cut off.",
+  "sessionChrome.steerCount_one": "Steer {count}",
+  "sessionChrome.steerCount_other": "Steer {count}",
   "sessionChrome.steerLatestQueuedMessage": "Steer latest queued message",
   "sessionChrome.steerQueuedPromptIndex": "Steer queued prompt {index}",
   "sessionChrome.steerTip":
@@ -5193,6 +5202,10 @@ export const englishMessages = {
   "sessionStatusModel.running": "Working",
   "sessionStatusModel.stuck": "Stuck",
   "sessionStatusModel.waitingOnYou": "Waiting on you",
+  "siteToolPersonalGitHub.description":
+    "This app runs on your own GitHub account with All my repositories. Connect or reconnect it and turn on All my repositories in GitHub settings, then try again.",
+  "siteToolPersonalGitHub.open": "Open GitHub settings",
+  "siteToolPersonalGitHub.title": "Use your own GitHub",
   "siteToolRecover.askSiteOwner": "Ask the app owner to publish it again.",
   "siteToolRecover.askWhoeverManages": "Ask whoever manages your {system} access.",
   "siteToolRecover.close": "Close",

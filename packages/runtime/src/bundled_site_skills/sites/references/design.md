@@ -5,7 +5,9 @@ before a restyle someone asked for. A small edit keeps the app's look.
 
 "Look" in SKILL.md decides which look the app takes; this file is how to make
 it good. A design the person or the workspace gave you wins over anything
-here, and an installed design Skill such as `frontend-design` adds to it.
+here, and an installed design Skill such as `frontend-design` adds to it. A
+dashboard or a page with charts also reads `references/dashboards.md`, which
+wins over this file where they differ.
 
 ## Decide before writing markup
 

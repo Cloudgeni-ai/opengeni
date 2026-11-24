@@ -67,6 +67,32 @@ test("reports a full-page capture that could not keep every scrollbar", async ()
   expect(frame.inexactScrollbars).toBe(true);
 });
 
+test("reports content a full-page capture left out inside the page's scrolling areas", async () => {
+  for (const [value, expected] of [
+    ["1604", 1604],
+    ["0", undefined],
+    ["-3", undefined],
+    ["12px", undefined],
+  ] as const) {
+    const sdk = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        const response = frameResponse();
+        response.headers.set("x-opengeni-browser-frame-hidden-scrolled-height", value);
+        return response;
+      },
+    });
+    const frame = await sdk.captureBrowserTarget(
+      workspaceId,
+      browserSessionId,
+      targetId,
+      {},
+      { fullPage: true },
+    );
+    expect(frame.hiddenScrolledHeight).toBe(expected);
+  }
+});
+
 test("forwards explicit full-page and encoding options without changing request-options position", async () => {
   let requestedUrl = "";
   const controller = new AbortController();

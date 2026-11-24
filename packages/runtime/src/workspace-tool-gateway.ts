@@ -22,6 +22,8 @@ export {
 } from "./index";
 // A call that needs one of the account's values chosen; nothing was sent.
 export { isMcpAccountParameterChoiceError } from "./mcp-account-parameters";
+// A server's namespace: the `server` in its tools' `<server>__<tool>` names.
+export { mcpServerNamespace } from "./mcp-model-tool-name";
 // Execution-time `{{secret:…}}` argument resolution for gateway tool calls;
 // the same resolver model execution applies after approval.
 export {

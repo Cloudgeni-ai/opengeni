@@ -1,5 +1,77 @@
 # @opengeni/runtime
 
+## 6.37.3
+
+### Patch Changes
+
+- e93d6d4: Include a bounded error class, code, and reviewed source locations in API fatal logs even when protected diagnostics are disabled. Exception messages and unreviewed paths are never copied to the log. Keep an early Connected Machine replay failure attached to its caller instead of leaking an unhandled rejection while the initial attach is still in progress.
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- 556abe5: A custom MCP server that can't be reached no longer fails calls to other tools. Tool calls without a remembered catalog, approvals, the MCP endpoints, the MCP sign-in consent screen and app tool calls now leave that server out, as the tool list already does. A call to that server's own tool still reports its failure.
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/tool-gateway@6.37.3
+  - @opengeni/capabilities@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/decisions@6.37.3
+  - @opengeni/interaction@6.37.3
+  - @opengeni/sdk@6.37.3
+  - @opengeni/vaults@6.37.3
+  - @opengeni/jev@6.37.3
+  - @opengeni/agent-proto@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- 9b5daaa: Record why a browser live view stopped getting frames. The browser controller now reports the state of its frame streams and live-view sockets (states, counts and times, never page content), and the API logs `browser.frame_stream.stalled` with that report when an open view's heartbeat finds a stream or view without a frame for ten seconds, so the reason survives the controller's sandbox stopping.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/decisions@6.37.2
+  - @opengeni/interaction@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/jev@6.37.2
+  - @opengeni/agent-proto@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: App server code: publishing refuses tool names that aren't tools in the workspace and names the id to use, and an agent's `app_server_run` and run logs act for the person whose turn it is.
+- e71502d: Require Node.js 22.19 or later (`engines.node`) for the packages that load `@opengeni/runtime`, whose `e2b` dependency requires it; installers that enforce engines refused them on 22.15.
+- 1d7c08a: Restore streamed remote workspace archives that contain symlinks. A save stores the workspace's symlinks, but the streamed restore refused them, so any workspace with one could be saved and never restored. A failed hydration now logs why.
+- Updated dependencies [17783d3]
+  - @opengeni/config@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/jev@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/sdk@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes

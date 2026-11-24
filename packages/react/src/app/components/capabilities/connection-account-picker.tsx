@@ -1,3 +1,4 @@
+import { RefreshCwIcon } from "lucide-react";
 import { connectionAccountLabel as accountLabel } from "@opengeni/contracts/connection-account-label";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import { useOptionalAppContext } from "../../app-context";
@@ -9,6 +10,7 @@ import type {
   ConnectedAccountGroup,
   ConnectionAccountChoices,
 } from "./session-connection-accounts";
+import { defaultConnectionAccountIds, isLapsedAccount } from "./session-connection-accounts";
 
 export function connectionAccountLabel(account: ConnectionMetadata, fallback: string): string {
   return accountLabel(account, fallback);
@@ -26,6 +28,8 @@ export type ConnectionAccountPickerProps = {
   workspaceId?: string | undefined;
   /** The workspaces the person can see. Defaults to the console's list. */
   workspaces?: readonly AccountOriginWorkspace[] | undefined;
+  /** Reconnect an account that stopped working. */
+  onReconnect?: ((serverId: string, account: ConnectionMetadata) => void) | undefined;
 };
 
 export type ConnectionAccountControls = ConnectionAccountPickerProps & {
@@ -39,7 +43,7 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
   const context = useOptionalAppContext();
   const workspaceId = props.workspaceId ?? context?.workspaceStateOwnerId ?? null;
   return props.groups.map((group) => {
-    const chosen = props.choices[group.serverId] ?? group.accounts.map((account) => account.id);
+    const chosen = props.choices[group.serverId] ?? defaultConnectionAccountIds(group);
     const missing = chosen.filter((id) => !group.accounts.some((account) => account.id === id));
     const rows = connectionAccountRows(group.accounts, {
       fallbackName: group.name,
@@ -56,6 +60,7 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
           const row = rows.get(account.id)!;
           const label = row.label;
           const ownership = row.scope;
+          const lapsed = isLapsedAccount(account);
           const onToggle = () =>
             props.onChoose(
               group.serverId,
@@ -66,41 +71,57 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
               <span className="min-w-0 flex-1">
                 <span className="block break-words text-sm">{label}</span>
                 <span className="block text-xs text-fg-muted">{ownership}</span>
+                {lapsed ? (
+                  <span className="block text-2xs text-status-waiting">Reconnect required</span>
+                ) : null}
               </span>
               <ComposerMenuSwitchIndicator checked={checked} />
             </>
           );
           const className =
             "flex min-h-11 w-full items-center gap-3 rounded-md px-2 py-2 text-left outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
-          return props.presentation === "menu" ? (
-            <DropdownMenuItem
-              key={account.id}
-              role="menuitemcheckbox"
-              aria-checked={checked}
-              aria-label={`${label}, ${ownership}`}
-              disabled={props.disabled}
-              className={className}
-              onSelect={(event) => {
-                event.preventDefault();
-                onToggle();
-              }}
-            >
-              {content}
-            </DropdownMenuItem>
-          ) : (
-            <button
-              key={account.id}
-              type="button"
-              role="switch"
-              aria-checked={checked}
-              aria-label={`${label}, ${ownership}`}
-              disabled={props.disabled}
-              className={className}
-              onClick={onToggle}
-            >
-              {content}
-            </button>
-          );
+          const accessibleLabel = `${label}, ${ownership}${lapsed ? ", reconnect required" : ""}`;
+          const reconnect =
+            lapsed && props.onReconnect ? (
+              <ReconnectAccountAction
+                key={`${account.id}:reconnect`}
+                presentation={props.presentation}
+                label={`Reconnect ${label}`}
+                disabled={props.disabled}
+                onReconnect={() => props.onReconnect?.(group.serverId, account)}
+              />
+            ) : null;
+          const toggle =
+            props.presentation === "menu" ? (
+              <DropdownMenuItem
+                key={account.id}
+                role="menuitemcheckbox"
+                aria-checked={checked}
+                aria-label={accessibleLabel}
+                disabled={props.disabled}
+                className={className}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  onToggle();
+                }}
+              >
+                {content}
+              </DropdownMenuItem>
+            ) : (
+              <button
+                key={account.id}
+                type="button"
+                role="switch"
+                aria-checked={checked}
+                aria-label={accessibleLabel}
+                disabled={props.disabled}
+                className={className}
+                onClick={onToggle}
+              >
+                {content}
+              </button>
+            );
+          return reconnect ? [toggle, reconnect] : toggle;
         })}
         {missing.map((id, index) => {
           const label = `Remove disconnected account${missing.length > 1 ? ` ${index + 1}` : ""}`;
@@ -145,4 +166,40 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
       </div>
     );
   });
+}
+
+function ReconnectAccountAction(props: {
+  presentation?: "menu" | "dialog" | undefined;
+  label: string;
+  disabled?: boolean | undefined;
+  onReconnect: () => void;
+}) {
+  const className =
+    "flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-left text-xs font-medium outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
+  const content = (
+    <>
+      <RefreshCwIcon aria-hidden="true" className="size-3.5 text-fg-muted" />
+      Reconnect
+    </>
+  );
+  return props.presentation === "menu" ? (
+    <DropdownMenuItem
+      aria-label={props.label}
+      disabled={props.disabled}
+      className={className}
+      onSelect={props.onReconnect}
+    >
+      {content}
+    </DropdownMenuItem>
+  ) : (
+    <button
+      type="button"
+      aria-label={props.label}
+      disabled={props.disabled}
+      className={className}
+      onClick={props.onReconnect}
+    >
+      {content}
+    </button>
+  );
 }

@@ -281,6 +281,9 @@ describe("organization MCP action catalog", () => {
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+        // The web app's confirmation step: an agent redeems a reset in one call.
+        "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
+        "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/prepare",
       ].sort(),
     );
     // Every rule still names a real action.

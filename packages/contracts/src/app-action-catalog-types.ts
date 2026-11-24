@@ -12,10 +12,13 @@ export type ActionCatalogEntry = {
   query?: string[];
   response: string[];
   /**
-   * Why no MCP caller can complete this action: it needs the person's own
-   * Opengeni browser session. Set only on such actions; the server hides them.
+   * Why no MCP caller uses this action: it needs the person's own Opengeni
+   * browser session, or is the web app's own step of a flow an agent does in
+   * one action. Set only on such actions; the server hides them.
    */
   browserOnly?: string;
+  /** What an agent uses instead of a browser-only action, when there is something. */
+  agentAlternative?: string;
   /**
    * Where the action carries a key, password, token or other secret: field
    * paths ("request.apiKey", "response.token") or a route reason, derived by

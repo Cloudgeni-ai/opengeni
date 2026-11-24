@@ -1,5 +1,119 @@
 # @opengeni/worker-bundle
 
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/runtime@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/db@6.37.3
+  - @opengeni/core@6.37.3
+  - @opengeni/tool-gateway@6.37.3
+  - @opengeni/capabilities@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/decisions@6.37.3
+  - @opengeni/documents@6.37.3
+  - @opengeni/events@6.37.3
+  - @opengeni/github@6.37.3
+  - @opengeni/interaction@6.37.3
+  - @opengeni/sdk@6.37.3
+  - @opengeni/storage@6.37.3
+  - @opengeni/vaults@6.37.3
+  - @opengeni/vaults-bitwarden@6.37.3
+  - @opengeni/vaults-keeper@6.37.3
+  - @opengeni/vaults-onepassword@6.37.3
+  - @opengeni/vaults-protonpass@6.37.3
+  - @opengeni/jev@6.37.3
+  - @opengeni/agent-proto@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/subscriptions@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [3fc742f]
+- Updated dependencies [9b5daaa]
+- Updated dependencies [c78d62c]
+- Updated dependencies [8ee5e81]
+  - @opengeni/runtime@6.37.2
+  - @opengeni/contracts@6.37.2
+  - @opengeni/db@6.37.2
+  - @opengeni/core@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/decisions@6.37.2
+  - @opengeni/documents@6.37.2
+  - @opengeni/events@6.37.2
+  - @opengeni/github@6.37.2
+  - @opengeni/interaction@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/storage@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/vaults-bitwarden@6.37.2
+  - @opengeni/vaults-keeper@6.37.2
+  - @opengeni/vaults-onepassword@6.37.2
+  - @opengeni/vaults-protonpass@6.37.2
+  - @opengeni/jev@6.37.2
+  - @opengeni/agent-proto@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/subscriptions@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: Require Node.js 22.15 or later (`engines.node`) for the packages that load `@opengeni/storage`, which uses zlib's zstd streams; on older Node versions the import fails.
+- e71502d: Require Node.js 22.19 or later (`engines.node`) for the packages that load `@opengeni/runtime`, whose `e2b` dependency requires it; installers that enforce engines refused them on 22.15.
+- Updated dependencies [ae9c227]
+- Updated dependencies [3595193]
+- Updated dependencies [e71502d]
+- Updated dependencies [ae9c227]
+- Updated dependencies [e71502d]
+- Updated dependencies [bc538e2]
+- Updated dependencies [1d7c08a]
+- Updated dependencies [17783d3]
+- Updated dependencies [e71502d]
+  - @opengeni/runtime@6.37.1
+  - @opengeni/db@6.37.1
+  - @opengeni/core@6.37.1
+  - @opengeni/storage@6.37.1
+  - @opengeni/documents@6.37.1
+  - @opengeni/config@6.37.1
+  - @opengeni/events@6.37.1
+  - @opengeni/github@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/jev@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/sdk@6.37.1
+  - @opengeni/subscriptions@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/vaults-bitwarden@6.37.1
+  - @opengeni/vaults-keeper@6.37.1
+  - @opengeni/vaults-onepassword@6.37.1
+  - @opengeni/vaults-protonpass@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
 ## 6.37.0
 
 ### Patch Changes

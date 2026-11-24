@@ -15,12 +15,20 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
+  connectionProviderName,
   connectionNeedsReauthNoticeKey,
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
   postConnectionNeedsReauthNotice,
 } from "../src/domain/connections-needing-reconnect";
+
+test("reconnect notices name the service, not its endpoint host", () => {
+  expect(connectionProviderName("mcp.atlassian.com")).toBe("Atlassian");
+  expect(connectionProviderName("MCP.Atlassian.com")).toBe("Atlassian");
+  expect(connectionProviderName("gmailmcp.googleapis.com")).toBe("Gmail");
+  expect(connectionProviderName("github.com")).toBe("Github");
+});
 
 /* A connection that exists but stopped working is named to the agent (which
    account, since when) and its owner is told once, on their inbox. */
@@ -274,9 +282,10 @@ describe("connections that need reconnecting", () => {
     expect(notices[0]!.payload).toMatchObject({
       key: connectionNeedsReauthNoticeKey(broken.id),
       title: "Mail needs reconnecting",
-      subtitle: "ada@example.test",
       urgency: "normal",
     });
+    // Everyone in a shared chat sees it: it names the service, not the account.
+    expect(JSON.stringify(notices[0]!.payload)).not.toContain("ada@example.test");
     const inbox = (await listInboxItems(db, { accountId: scope.accountId, subjectId: ada })).filter(
       (item) => item.sessionId === session.id && item.kind === "notification",
     );

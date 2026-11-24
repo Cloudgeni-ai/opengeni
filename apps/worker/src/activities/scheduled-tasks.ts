@@ -3,9 +3,9 @@ import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
   canonicalSecretPermissions,
-  type AgentRecord,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
+import { commentOnRefusedPullRequests } from "../scheduled-refusal-pr-comments";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
 export { scheduledTaskSessionTitle } from "./scheduled-task-title";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
@@ -41,6 +41,8 @@ import {
   type ToolRef,
   type TurnInitiator,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  AGENT_INSTRUCTIONS_MAX_CHARACTERS,
+  type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 import {
   openGeniSlackBotMetadata,
@@ -122,6 +124,7 @@ import {
   requireSession,
   requireWorkspace,
   settleScheduledTaskRunInTransaction,
+  SessionAgentNotFoundError,
   SessionSpawnDeniedDbError,
   updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
@@ -147,6 +150,9 @@ import {
 } from "./common";
 import { withFirstPartyTools } from "./goals";
 import {
+  AGENT_LIST_CHATS_TOOL,
+  agentListChatsToolAvailable,
+  agentListChatsToolPermitted,
   agentMemoryAccess,
   agentMemoryGuidance,
   agentRunAdmissionDenial,
@@ -762,6 +768,17 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // accepted execution so retries and recovery never resolve again.
       let resolvedAgentConfig: ResolvedAgentConfig | null = null;
       let resolvedAgentInstructions: string | undefined;
+      // Built-in tools an agent's run gets on top of the defaults it follows
+      // (its Memory's `slack_agent_chats`), kept on the chat like an app
+      // chat's additions.
+      let agentFirstPartyAdditions: FirstPartyMcpToolName[] = [];
+      // A task saved before the secret permission names were unified may still
+      // hold their retired aliases. The chat a run creates stores the canonical
+      // names, so the accepted run must name the same set or the database
+      // refuses the chat as an authority change.
+      const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
+        ? canonicalSecretPermissions(creatorPolicy.firstPartyMcpPermissions)
+        : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
       const generatedTarget =
         task.runMode === "new_session_per_run" ||
         (task.runMode === "reusable_session" && task.reusableSessionId === null);
@@ -781,6 +798,23 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         );
       }
       if (generatedTarget) {
+        // An agent's run is a chat with that agent: its Memory guidance and
+        // tools are part of what the run accepts, which the database checks
+        // the run's chat against when the run binds it.
+        const runAgent = task.agentConfig.agentId
+          ? await getAgent(
+              db,
+              { accountId: task.accountId, workspaceId: task.workspaceId },
+              task.agentConfig.agentId,
+            )
+          : null;
+        const runMemoryAccess = runAgent?.memoryEnabled
+          ? agentMemoryAccess(runAgent, {
+              private: task.visibility === "private",
+              ownerSubjectId: task.ownerSubjectId,
+              memoryOff: false,
+            })
+          : null;
         try {
           const agentResolution = resolveSessionAgentConfigForCreate({
             settings,
@@ -792,7 +826,23 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             goal: task.agentConfig.goal !== undefined,
           });
           resolvedAgentConfig = agentResolution.config;
-          resolvedAgentInstructions = agentResolution.instructions;
+          // As in an app chat with the agent, the list-chats tool joins a
+          // selection that follows the defaults, under the deployment's
+          // ceiling, when the run's permissions can admit it; an explicit
+          // creator selection stays as chosen. The agent's Can use still
+          // narrows it below. A run whose owner can't be reached keeps an
+          // exact list instead of following the defaults (see
+          // `unreachableHuman`); the tool is in that list under the same
+          // ceiling and narrowing, since listing chats notifies nobody.
+          if (
+            runMemoryAccess?.listChats &&
+            !creatorPolicy?.firstPartyMcpTools &&
+            resolveFirstPartyMcpToolPolicy(settings).allowed.includes(AGENT_LIST_CHATS_TOOL) &&
+            agentListChatsToolPermitted(firstPartyMcpPermissions)
+          ) {
+            agentFirstPartyAdditions = [AGENT_LIST_CHATS_TOOL];
+            firstPartyMcpTools = [...new Set([...firstPartyMcpTools, AGENT_LIST_CHATS_TOOL])];
+          }
           const written = applySessionAgentConfigWriteThrough({
             config: resolvedAgentConfig,
             firstPartyMcpTools,
@@ -807,6 +857,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             firstPartyMcpTools,
             settings.mcpServers,
           );
+          // The guidance names the list-chats tool only when the chat has it.
+          resolvedAgentInstructions = runMemoryAccess
+            ? scheduledAgentRunInstructions(
+                agentResolution.instructions,
+                agentMemoryGuidance(runMemoryAccess, {
+                  listChatsTool: agentListChatsToolAvailable(
+                    firstPartyMcpTools,
+                    firstPartyMcpPermissions,
+                  ),
+                }),
+              )
+            : agentResolution.instructions;
         } catch (error) {
           const status =
             error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
@@ -818,13 +880,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           );
         }
       }
-      // A task saved before the secret permission names were unified may still
-      // hold their retired aliases. The chat a run creates stores the canonical
-      // names, so the accepted run must name the same set or the database
-      // refuses the chat as an authority change.
-      const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
-        ? canonicalSecretPermissions(creatorPolicy.firstPartyMcpPermissions)
-        : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
       // A fresh occurrence resolves the immutable owner's current accounts.
       // Retry/recovery above uses the already accepted occurrence snapshot.
       const connectionSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -1462,6 +1517,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         : [];
       const executeDispatch = async (dispatchDb: Database, deferPublications: boolean) => {
         const admittedRunId = crypto.randomUUID();
+        const generatedFirstPartyAdditions = [
+          ...new Set([
+            ...(scheduledSlackBotConnectionId(task.agentConfig)
+              ? SCHEDULED_SLACK_BOT_POSTING_TOOLS
+              : []),
+            ...agentFirstPartyAdditions,
+          ]),
+        ];
         const generatedSessionBinding = generatedTarget
           ? {
               toolPolicy: {
@@ -1470,8 +1533,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 ...(!creatorPolicy?.firstPartyMcpTools && !unreachableHuman
                   ? {
                       firstPartyMode: "workspace_default" as const,
-                      ...(scheduledSlackBotConnectionId(task.agentConfig)
-                        ? { firstPartyAdditions: [...SCHEDULED_SLACK_BOT_POSTING_TOOLS] }
+                      ...(generatedFirstPartyAdditions.length
+                        ? { firstPartyAdditions: generatedFirstPartyAdditions }
                         : {}),
                     }
                   : {}),
@@ -1501,12 +1564,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedTools: taskTools,
           resolvedFirstPartyMcpTools: firstPartyMcpTools,
           resolvedFirstPartyMcpPermissions: firstPartyMcpPermissions,
-          ...(resolvedAgentConfig
-            ? {
-                resolvedAgentConfig,
-                ...(resolvedAgentInstructions !== undefined ? { resolvedAgentInstructions } : {}),
-              }
-            : {}),
+          ...(resolvedAgentConfig ? { resolvedAgentConfig } : {}),
+          ...(resolvedAgentInstructions !== undefined ? { resolvedAgentInstructions } : {}),
           resolvedVariableSet: null,
           resolvedRig: acceptedRig?.activeVersion
             ? {
@@ -1746,19 +1805,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             // An agent's "Starts when": the run is a chat with that agent,
             // with its Instructions, Memory and Can use, checked as the
             // task's owner when the session binds.
-            const runAgent = task.agentConfig.agentId
-              ? await getAgent(
-                  dispatchDb,
-                  { accountId: task.accountId, workspaceId: task.workspaceId },
-                  task.agentConfig.agentId,
-                )
-              : null;
-            const runInstructions = runAgent
-              ? scheduledAgentRunInstructions(runAgent, resolvedAgentInstructions, {
-                  private: task.visibility === "private",
-                  ownerSubjectId: task.ownerSubjectId,
-                })
-              : resolvedAgentInstructions;
             try {
               const sessionInput: Parameters<typeof createSession>[1] = {
                 accountId: task.accountId,
@@ -1773,7 +1819,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
                 ...(resolvedAgentConfig ? { agentConfig: resolvedAgentConfig } : {}),
-                ...(runInstructions !== undefined ? { instructions: runInstructions } : {}),
+                ...(resolvedAgentInstructions !== undefined
+                  ? { instructions: resolvedAgentInstructions }
+                  : {}),
                 ...(task.agentConfig.agentId
                   ? {
                       agent: {
@@ -2473,6 +2521,33 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const result = await retryScheduledTaskAdmission(() =>
         activities.dispatchScheduledTaskRun(input),
       );
+      // A pull request event's run that was refused before its chat started
+      // says so on the pull request (scheduled-refusal-pr-comments.ts). Best
+      // effort and not awaited: GitHub's latency never holds up dispatch.
+      if (input.triggerType === "event" && result.action === "blocked") {
+        let producerKey: string | null = null;
+        try {
+          producerKey = scheduledTaskRunProducerKey(input);
+        } catch {
+          producerKey = null;
+        }
+        if (producerKey) {
+          const key = producerKey;
+          void services()
+            .then(({ db, settings, observability }) =>
+              commentOnRefusedPullRequests(
+                {
+                  db,
+                  settings,
+                  lookup: eventRepositoryLookup(settings),
+                  warn: (message, fields) => observability.warn(message, fields),
+                },
+                { workspaceId: input.workspaceId, taskId: input.taskId, producerKey: key },
+              ),
+            )
+            .catch(() => undefined);
+        }
+      }
       // A one-time event automation (such as a Linked panel wake) woke an
       // existing chat that started in a Slack thread: its answer goes back to
       // that thread. Recurring automations into the chat don't. Best effort;
@@ -2584,6 +2659,11 @@ function scheduledRunRecoveryTerminalError(
   }
   if (error instanceof SessionSpawnDeniedDbError) {
     return new ScheduledRunTerminalAuthorityError("scheduled_session_spawn_denied", error.message);
+  }
+  // The run's agent was deleted, or made Only me where this run is not its
+  // owner's Only me chat. Every attempt would be refused the same way.
+  if (error instanceof SessionAgentNotFoundError) {
+    return new ScheduledRunTerminalAuthorityError("scheduled_agent_unavailable", error.message);
   }
   if (error instanceof Error && error.message.startsWith("Session not found:")) {
     return new ScheduledRunTerminalAuthorityError(
@@ -3086,6 +3166,12 @@ async function recoverBoundScheduledTaskDispatch(input: {
         : {}),
       ...(input.acceptedExecution.resolvedAgentInstructions !== undefined
         ? { instructions: input.acceptedExecution.resolvedAgentInstructions }
+        : {}),
+      // The same agent as the first attempt, from the accepted task snapshot:
+      // without it the chat would lose the agent's Instructions, Can use and
+      // Memory tools while keeping its Memory guidance.
+      ...(task.agentConfig.agentId
+        ? { agent: { id: task.agentConfig.agentId, subjectId: task.ownerSubjectId } }
         : {}),
       ...scheduledGeneratedChatSettings(
         task.agentConfig,
@@ -3723,18 +3809,17 @@ export function scheduledGeneratedChatSettings(
 
 /**
  * A run with an agent gets that agent's Memory guidance after the task's own
- * instructions, as an app chat with the agent does. Unchanged when Memory is
- * off or there is no room (the knowledge tools still enforce the rules).
+ * instructions, as an app chat with the agent does. Unchanged without
+ * guidance or without room within both the session's and the accepted
+ * snapshot's limits (the knowledge tools still enforce the rules).
  */
 function scheduledAgentRunInstructions(
-  agent: AgentRecord,
   instructions: string | undefined,
-  chat: { private: boolean; ownerSubjectId: string | null },
+  guidance: string | null,
 ): string | undefined {
-  if (!agent.memoryEnabled) return instructions;
-  const guidance = agentMemoryGuidance(agentMemoryAccess(agent, { ...chat, memoryOff: false }));
   if (!guidance) return instructions;
   const own = instructions?.trim() ?? "";
   const combined = own ? `${own}\n\n${guidance}` : guidance;
-  return combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS ? combined : instructions;
+  const limit = Math.min(SESSION_INSTRUCTIONS_MAX_CHARACTERS, AGENT_INSTRUCTIONS_MAX_CHARACTERS);
+  return combined.length <= limit ? combined : instructions;
 }

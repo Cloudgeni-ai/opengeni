@@ -179,6 +179,23 @@ release. While it is off, the replace route refuses to turn the mode on (409),
 admission, branch listing, the catalog and the pickers ignore a stored mode;
 the person can still keep or turn off a stored mode.
 
+### In apps and direct tool calls
+
+Outside a chat (an app's page tools, its published address, or a person's own
+call through the workspace tool gateway), the `github_personal` tools run on the
+caller's own connection when it has All my repositories, exactly as a new chat
+of theirs would receive it (`apps/api/src/personal-github-tools.ts`). An app
+declares `{ serverId: "github_personal", toolName }`; each viewer is ready as
+**Your GitHub** with their login, or offered Connect (`api:github-personal`)
+when they have none. It never runs on another member's connection. Only a
+person qualifies: services, API keys, delegated bearers and agent attempts don't
+(a turn gets the tools from the worker). Every provider request re-reads the
+connection and the mode, and the person's GitHub action choices apply. Stored
+app data that came from these tools is readable only by members who have them
+(the stored tool data rule in [app server code](app-server-code.md)). An app
+sync runs as a person too: a shared sync on its owner's connection, a personal
+sync on each opted-in person's own.
+
 ## Read tools
 
 These `github_personal__*` tools work in chats without a sandbox, as the

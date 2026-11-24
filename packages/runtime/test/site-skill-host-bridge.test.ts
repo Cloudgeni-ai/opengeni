@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { SITE_UI_CSS } from "@opengeni/sdk/site-ui";
+import { SITE_CHARTS_JS, SITE_UI_CSS } from "@opengeni/sdk/site-ui";
 
 const skill = readFileSync(
   new URL("../src/bundled_site_skills/sites/SKILL.md", import.meta.url),
@@ -13,12 +13,27 @@ const reference = (name: string) =>
   );
 
 describe("Sites skill single-file path", () => {
-  test("keeps the main file small: a single-file Site needs nothing else", () => {
-    // The main file is all a single-file Site reads; app material lives in references.
+  test("keeps the main file small: a single-file Site needs nothing else but dashboards", () => {
+    // The main file is all a single-file Site reads, except the dashboard
+    // reference for pages with charts; app material lives in references.
     expect(Buffer.byteLength(skill)).toBeLessThan(16 * 1024);
-    expect(skill).toContain(
-      'Follow "Single-file app" below; besides `references/design.md`,\n  nothing else in this Skill is needed.',
-    );
+    const section = skill.slice(skill.indexOf("## Single-file app"), skill.indexOf("## Look"));
+    expect(section).toContain("A dashboard or chart: read\n   `references/dashboards.md` first.");
+  });
+
+  test("the dashboard reference stays short and names only what the host ships", () => {
+    const guide = reference("dashboards.md");
+    expect(Buffer.byteLength(guide)).toBeLessThan(6 * 1024);
+    expect(guide).toContain('<script src="/__opengeni/charts.js"></script>');
+    for (const name of new Set(guide.match(/(?<![\w-])og-[a-z0-9-]+/g) ?? []))
+      expect(SITE_UI_CSS).toContain(`.${name}`);
+    for (const token of new Set(guide.match(/--og-[a-z0-9-]+/g) ?? []))
+      expect(SITE_UI_CSS).toContain(`${token}:`);
+    for (const call of new Set(guide.match(/\bog\.(?:fmt\.)?[a-z]+/g) ?? [])) {
+      const name = call.split(".").pop()!;
+      if (name === "fmt") continue;
+      expect(SITE_CHARTS_JS).toMatch(new RegExp(`\\b${name}: (?:function|${name})\\b`));
+    }
   });
 
   test("sends every new app to the design reference in the first read", () => {
@@ -51,6 +66,8 @@ describe("Sites skill single-file path", () => {
     // The person's or workspace's design, and an installed design Skill, win.
     expect(design).toContain("A design the person or the workspace gave you wins");
     expect(design).toContain("`frontend-design`");
+    // Dashboards and charts have their own guide, and it wins for those pages.
+    expect(design).toContain("`references/dashboards.md`, which\nwins over this file");
     expect(design).toContain("A small edit keeps the app's look.");
     // Nothing may load beside the app, fonts included.
     expect(design).toContain("Nothing may load from a font or CSS CDN");

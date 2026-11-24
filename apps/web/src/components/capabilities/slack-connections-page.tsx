@@ -22,7 +22,7 @@ import { RowList, ListRow } from "@opengeni/react/ui/list-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { Notice } from "@opengeni/react/ui/notice";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
-import { CapabilityPage, CapabilityMark } from "./capability-page";
+import { CapabilityPage, CapabilityMark } from "@opengeni/react/ui/capability-page";
 import { SlackChannelRoutingDialogBody } from "./slack-channel-routing-dialog";
 import { SlackBotAccessSection } from "./slack-bot-access-section";
 import { SlackAgentUpdatesSection } from "./slack-agent-updates-section";

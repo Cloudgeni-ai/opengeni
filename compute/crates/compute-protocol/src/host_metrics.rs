@@ -207,7 +207,7 @@ const fn by(metric: Metric, labels: &'static [Label]) -> Metric {
 
 /// Every metric a host exports: its own, and its process's as
 /// OpenTelemetry's semantic conventions name them.
-pub const METRICS: [Metric; 44] = [
+pub const METRICS: [Metric; 46] = [
     by(
         sum(
             "compute.step.count",
@@ -416,6 +416,16 @@ pub const METRICS: [Metric; 44] = [
         "compute.host.zswap.original",
         "By",
         "Memory zswap holds, before compression.",
+    ),
+    gauge(
+        "compute.host.swap.total",
+        "By",
+        "Swap on the host: zswap's slots, one per page it holds at its original size.",
+    ),
+    gauge(
+        "compute.host.swap.free",
+        "By",
+        "Free swap slots: with none left zswap takes no more pages and running sandboxes are no longer compressed.",
     ),
     gauge(
         "compute.host.hugepages.free",

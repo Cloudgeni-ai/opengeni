@@ -49,6 +49,8 @@ import type { ConnectionAccountReads } from "./connection-account-reads";
 import {
   mcpAccountBindingsFromVisibleConnections,
   personalDelegationsForAccountBindings,
+  resolveMcpAccountBindings,
+  type OmittedMcpAccountSelection,
 } from "./mcp-account-bindings";
 
 export type PersonalConnectionDelegationSource =
@@ -228,7 +230,18 @@ export type PersonalWorkspaceOriginConnections = {
  */
 export async function personalWorkspaceOwnerOriginConnections(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    /**
+     * Also the owner's connections that stopped working (`needs_reauth`,
+     * `revoked`, `error`), so a listing keeps showing their connectors as
+     * needing reconnecting. Only for listings: anything that binds or runs a
+     * connector reads active connections only.
+     */
+    includeLapsed?: boolean;
+  },
   /** One resolution's shared reads (see `ConnectionAccountReads`). */
   reads?: ConnectionAccountReads,
 ): Promise<PersonalWorkspaceOriginConnections[]> {
@@ -237,17 +250,19 @@ export async function personalWorkspaceOwnerOriginConnections(
     ? await reads.isOwnPersonalWorkspace(ownerOf(input))
     : await isSubjectOwnPersonalWorkspace(db, input);
   if (!personalWorkspace) return [];
+  const { includeLapsed, ...owner } = input;
   const byOrigin = new Map<string, ConnectionMetadata[]>();
   for (const connection of await listOwnConnectionMetadata(db, {
-    ...input,
+    ...owner,
     reach: "anywhere",
+    ...(includeLapsed ? { includeInactive: true } : {}),
     ...(reads ? { reads } : {}),
   })) {
     if (
       connection.workspaceId === input.workspaceId ||
       connection.accountId !== input.accountId ||
       connection.subjectId !== input.subjectId ||
-      connection.status !== "active"
+      (connection.status !== "active" && !includeLapsed)
     )
       continue;
     byOrigin.set(connection.workspaceId, [
@@ -1058,6 +1073,17 @@ async function connectAutoConnectLoginsBeforeTurn(input: {
   if (timer) clearTimeout(timer);
 }
 
+/** A picked account a turn runs without because it stopped working. */
+export type OmittedConnectionAccount = OmittedMcpAccountSelection & {
+  account: {
+    /** Where the connection is held (a personal account may live elsewhere). */
+    workspaceId: string;
+    subjectId: string | null;
+    providerDomain: string;
+    status: ConnectionMetadata["status"];
+  };
+};
+
 export async function freezeConnectionAccounts(
   input: Parameters<typeof freezePersonalConnectionDelegations>[0] & {
     accountId: string;
@@ -1066,6 +1092,15 @@ export async function freezeConnectionAccounts(
      * it may use (docs/integrations-design.md, "Auto-connect").
      */
     autoConnect?: { settings: Settings; fetchImpl?: typeof fetch | undefined } | undefined;
+    /**
+     * A new message's picked connector accounts come from a list the sender
+     * loaded earlier, and one may have stopped working since (its sign-in
+     * expired). "omit" sends the message without such an account rather than
+     * refusing it; its connector is never given another account instead (see
+     * `resolveMcpAccountBindings`). A pick the sender can't see, or another
+     * connector's account, is still refused. Defaults to "reject".
+     */
+    unusableSelections?: "reject" | "omit";
   },
 ): Promise<{
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
@@ -1077,6 +1112,8 @@ export async function freezeConnectionAccounts(
    * predates intent).
    */
   connectionAccountIntent: ConnectionAccountIntent | null;
+  /** Picked accounts left out because they stopped working ("omit" only). */
+  omittedSelections: OmittedConnectionAccount[];
 }> {
   const selectedIds = new Set(input.tools.map((tool) => tool.id));
   const servers = input.settings.mcpServers.filter(
@@ -1088,6 +1125,7 @@ export async function freezeConnectionAccounts(
   const serverIds = new Set(servers.map((server) => server.id));
   let mcpAccountBindings: McpConnectionAccountBinding[];
   let connectionAccountIntent: ConnectionAccountIntent | null;
+  let omittedSelections: OmittedConnectionAccount[] = [];
   if (input.source.kind === "turn") {
     if (input.authoritySelections?.length) {
       throw new ConnectionAccountSelectionError(
@@ -1112,10 +1150,14 @@ export async function freezeConnectionAccounts(
         mcpAccountBindings: null,
         personalConnectionDelegations: await freezePersonalConnectionDelegations(input),
         connectionAccountIntent,
+        omittedSelections,
       };
     }
     mcpAccountBindings = inherited.filter((binding) => serverIds.has(binding.canonicalServerId));
   } else {
+    // The intent keeps every pick, including any left out below: a later
+    // continuation re-resolves it and must narrow to the same accounts,
+    // never widen to the connector's defaults.
     connectionAccountIntent = {
       version: 1,
       principal:
@@ -1134,7 +1176,20 @@ export async function freezeConnectionAccounts(
         subjectId: input.source.subjectId,
         servers,
       });
-    mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
+    const connections =
+      servers.length === 0
+        ? []
+        : await visibleMcpAccountConnections(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            source: input.source,
+            ...(input.reads ? { reads: input.reads } : {}),
+            // The sender's own accounts that stopped working are read too,
+            // so a pick of one is known to be inactive rather than unknown.
+            // Only active accounts bind.
+            ...(input.authoritySelections?.length ? { includeInactive: true } : {}),
+          });
+    const resolved = resolveMcpAccountBindings({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
@@ -1142,15 +1197,7 @@ export async function freezeConnectionAccounts(
       // No generic MCP route can consume these accounts without a selected
       // connection-backed server. Dedicated repository/social authority is
       // still resolved by freezePersonalConnectionDelegations below.
-      connections:
-        servers.length === 0
-          ? []
-          : await visibleMcpAccountConnections(input.db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              source: input.source,
-              ...(input.reads ? { reads: input.reads } : {}),
-            }),
+      connections,
       ...(input.authoritySelections
         ? {
             selections: input.authoritySelections.filter((selection) =>
@@ -1158,6 +1205,24 @@ export async function freezeConnectionAccounts(
             ),
           }
         : {}),
+      unusableSelections: input.unusableSelections ?? "reject",
+    });
+    mcpAccountBindings = resolved.bindings;
+    omittedSelections = resolved.omitted.flatMap((omitted) => {
+      const connection = connections.find((candidate) => candidate.id === omitted.connectionId);
+      return connection
+        ? [
+            {
+              ...omitted,
+              account: {
+                workspaceId: connection.workspaceId,
+                subjectId: connection.subjectId,
+                providerDomain: connection.providerDomain,
+                status: connection.status,
+              },
+            },
+          ]
+        : [];
     });
   }
   // Dedicated first-party repository/social surfaces keep their
@@ -1183,6 +1248,7 @@ export async function freezeConnectionAccounts(
       ...special,
     ],
     connectionAccountIntent,
+    omittedSelections,
   };
 }
 
@@ -1195,6 +1261,8 @@ export async function visibleMcpAccountConnections(
     source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
     /** One resolution's shared reads (see `ConnectionAccountReads`). */
     reads?: ConnectionAccountReads;
+    /** Also the owner's own accounts that stopped working (shared ones always are). */
+    includeInactive?: boolean;
   },
 ): Promise<ConnectionMetadata[]> {
   const personal =
@@ -1213,6 +1281,7 @@ export async function visibleMcpAccountConnections(
           workspaceId: input.workspaceId,
           subjectId: input.source.subjectId,
           reach: "turned_on_here",
+          ...(input.includeInactive ? { includeInactive: true } : {}),
           ...(input.reads ? { reads: input.reads } : {}),
         })
       : [];

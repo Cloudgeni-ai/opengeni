@@ -41,6 +41,7 @@ import {
   listWorkspaceActivityEventsForSource,
   markEventOccurrenceStarted,
   markScheduledTaskRunFailedIfQueued,
+  recordScheduledTaskAdmissionRefusal,
   pruneEventIntake,
   recordEventDelivery,
   recordEventOccurrenceStartFailure,
@@ -48,6 +49,8 @@ import {
   resolveEventIngressRoute,
   retireExhaustedScheduledTask,
   reviewScheduledTaskBlockers,
+  deleteScheduledTask,
+  getScheduledTaskRevisionAuthority,
   setScheduledTaskEvents,
   updateEventSource,
   updateScheduledTask,
@@ -215,6 +218,15 @@ async function inboxStatuses(space: Space, taskId: string) {
 
 async function run(value: ScheduledTask, triggerType: "scheduled" | "event", producerKey: string) {
   const depth = await getNestedAgentDepthDeploymentPolicy(client.db);
+  // A person's automation runs with the authority its owner saved it with.
+  const causalHumanAuthority = value.ownerSubjectId
+    ? await getScheduledTaskRevisionAuthority(client.db, {
+        accountId: value.accountId,
+        workspaceId: value.workspaceId,
+        taskId: value.id,
+        taskAuthorityRevision: value.authorityRevision,
+      })
+    : null;
   const runId = crypto.randomUUID();
   return createScheduledTaskRun(client.db, {
     runId,
@@ -247,8 +259,8 @@ async function run(value: ScheduledTask, triggerType: "scheduled" | "event", pro
       },
       personalConnectionDelegations: [],
       personalResourceAuthoritySubjectId: null,
-      causalHumanSubjectId: null,
-      causalHumanAuthority: null,
+      causalHumanSubjectId: causalHumanAuthority?.subjectId ?? null,
+      causalHumanAuthority,
       xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
       claudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
       claudeAuthoritySubjectId: null,
@@ -997,6 +1009,119 @@ describe("dispatch", () => {
     expect((await getScheduledTaskEvents(client.db, space.workspaceId, [automation.id])).size).toBe(
       0,
     );
+  });
+});
+
+describe("a blocked automation with no chat tells its owner in the inbox (migration 1562)", () => {
+  const sync = "opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1(uuid)";
+
+  async function blockWith(
+    space: Space,
+    automation: ScheduledTask,
+    state: "paused" | "notified",
+  ): Promise<string> {
+    // A refused occurrence, as dispatch records it (no accepted execution).
+    const failed = await recordScheduledTaskAdmissionRefusal(client.db, {
+      workspaceId: space.workspaceId,
+      taskId: automation.id,
+      taskAuthorityRevision: automation.authorityRevision,
+      taskExecutionDigest: automation.executionDigest,
+      triggerType: "event",
+      producerKey: `scheduled-task-event:${crypto.randomUUID()}`,
+      reason: "scheduled_authority_unavailable",
+      retryable: false,
+    });
+    await reviewScheduledTaskBlockers(client.db, space.workspaceId, automation.id, () => ({
+      kind: "block",
+      state,
+      reason: "scheduled_agent_unavailable",
+      message: "Its agent was deleted or is no longer shared.",
+      blockedRunId: failed.id,
+      blockedSince: new Date(),
+      reviewedRunId: failed.id,
+      notice: null,
+    }));
+    return failed.id;
+  }
+
+  async function inbox(taskId: string) {
+    const rows = await shared!.admin<
+      {
+        status: string;
+        title: string;
+        subtitle: string;
+        body: string;
+        link: { url: string; label: string };
+        recipient_subject_id: string;
+        source_key: string;
+      }[]
+    >`select status, title, subtitle, body, link, recipient_subject_id, source_key
+      from opengeni_private.inbox_items
+      where session_id is null and source_key like ${`scheduled-task-blocker:${taskId}:%`}
+      order by created_at, source_key`;
+    return [...rows];
+  }
+
+  test("until the runtime may sync, a review tells nobody new and still succeeds", async () => {
+    const [grant] = await shared!.admin<{ allowed: boolean }[]>`
+      select has_function_privilege('opengeni_app', ${sync}, 'EXECUTE') as allowed`;
+    expect(grant!.allowed).toBe(false);
+    const space = await workspace();
+    const automation = await task(space, { owner: space.subjectId });
+    await blockWith(space, automation, "paused");
+    expect(await inbox(automation.id)).toEqual([]);
+  });
+
+  test("once it may, the owner is told once per blocked episode, and it resolves when cleared", async () => {
+    await shared!.admin.unsafe(`grant execute on function ${sync} to opengeni_app`);
+    try {
+      const space = await workspace();
+      const automation = await task(space, { owner: space.subjectId });
+      // Refusals are recorded only while it is active, so the paused episode comes last.
+      const first = await blockWith(space, automation, "notified");
+      const [notice] = await inbox(automation.id);
+      expect(notice).toMatchObject({
+        status: "open",
+        title: "Automation needs attention",
+        subtitle: "When something happens",
+        body: "Its agent was deleted or is no longer shared.",
+        recipient_subject_id: space.subjectId,
+        source_key: `scheduled-task-blocker:${automation.id}:${first}`,
+        link: {
+          url: `/workspaces/${space.workspaceId}/automations?taskId=${automation.id}`,
+          label: "Open automation",
+        },
+      });
+      // A new blocked episode replaces it; the earlier one is settled.
+      const second = await blockWith(space, automation, "paused");
+      expect(
+        (await inbox(automation.id)).map((row) => [row.source_key.split(":").at(-1), row.status]),
+      ).toEqual([
+        [first, "resolved"],
+        [second, "open"],
+      ]);
+      expect((await inbox(automation.id)).at(-1)).toMatchObject({
+        title: "Automation paused itself",
+        body: "Its agent was deleted or is no longer shared. It stays paused until someone resumes it.",
+      });
+      await reviewScheduledTaskBlockers(client.db, space.workspaceId, automation.id, () => ({
+        kind: "clear",
+        reviewedRunId: null,
+      }));
+      expect((await inbox(automation.id)).every((row) => row.status === "resolved")).toBe(true);
+      // An automation no person owns tells nobody.
+      const unowned = await task(space);
+      await blockWith(space, unowned, "paused");
+      expect(await inbox(unowned.id)).toEqual([]);
+      // Deleting the automation settles its notice.
+      const moved = await task(space, { owner: space.subjectId });
+      await blockWith(space, moved, "notified");
+      expect((await inbox(moved.id)).map((row) => row.status)).toEqual(["open"]);
+      await deleteScheduledTask(client.db, space.workspaceId, moved.id);
+      expect((await inbox(moved.id)).every((row) => row.status === "resolved")).toBe(true);
+    } finally {
+      await shared!.admin.unsafe(`revoke execute on function ${sync} from opengeni_app`);
+    }
   });
 });
 

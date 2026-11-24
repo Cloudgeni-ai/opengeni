@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  agentListChatsToolAvailable,
+  agentListChatsToolPermitted,
   agentMemoryAccess,
   agentMemoryGuidance,
   agentMemoryReadOnlyMessage,
@@ -133,5 +135,28 @@ describe("an agent's Memory", () => {
     )!;
     expect(pending).toContain("slack_agent_chats");
     expect(pending).not.toContain("knowledge_search");
+  });
+
+  test("a chat without the list-chats tool is not told about it", () => {
+    const writer = agentMemoryGuidance(agentMemoryAccess(shared, chat()), {
+      listChatsTool: false,
+    })!;
+    expect(writer).toContain(`groupId ${COLLECTION}`);
+    expect(writer).toContain("say so when you rely on an unreviewed entry).");
+    expect(writer).not.toContain("slack_agent_chats");
+    // Before its collection exists there is nothing else to say.
+    expect(
+      agentMemoryGuidance(agentMemoryAccess({ ...shared, memoryCollectionId: null }, chat()), {
+        listChatsTool: false,
+      }),
+    ).toBeNull();
+  });
+
+  test("the list-chats tool needs to be selected and admitted by the ceiling", () => {
+    expect(agentListChatsToolAvailable(["slack_agent_chats"], null)).toBe(true);
+    expect(agentListChatsToolAvailable(["knowledge_search"], null)).toBe(false);
+    expect(agentListChatsToolAvailable(["slack_agent_chats"], ["workspace:read"])).toBe(false);
+    expect(agentListChatsToolAvailable(["slack_agent_chats"], ["sessions:read"])).toBe(true);
+    expect(agentListChatsToolPermitted(["workspace:admin"])).toBe(true);
   });
 });

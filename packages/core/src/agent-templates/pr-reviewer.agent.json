@@ -43,6 +43,43 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Review when mentioned on a PR",
+      "instructions": "Someone on the team mentioned you in a comment on this pull request. Read their comment, review the pull request, and answer them on it.",
+      "schedule": null,
+      "oneClick": true,
+      "triggers": [
+        {
+          "source": {
+            "kind": "github"
+          },
+          "eventTypes": ["issue_comment.created"],
+          "conditions": [
+            { "field": "data.issue.pull_request", "op": "equals", "value": true },
+            { "field": "data.comment.mentions_app", "op": "equals", "value": true },
+            {
+              "field": "data.comment.author_association",
+              "op": "in",
+              "value": ["OWNER", "MEMBER", "COLLABORATOR"]
+            }
+          ]
+        },
+        {
+          "source": {
+            "kind": "github"
+          },
+          "eventTypes": ["pull_request_review_comment.created"],
+          "conditions": [
+            { "field": "data.comment.mentions_app", "op": "equals", "value": true },
+            {
+              "field": "data.comment.author_association",
+              "op": "in",
+              "value": ["OWNER", "MEMBER", "COLLABORATOR"]
+            }
+          ]
+        }
+      ]
     }
   ]
 }

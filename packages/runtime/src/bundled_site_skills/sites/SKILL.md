@@ -21,8 +21,7 @@ app on the web is built in (see "Publish to the web").
   short report), or a small personal tool that keeps the viewer's own entries
   (a blood-pressure or habit log, a reading list, a form that collects
   answers). No workspace tools, no AI, no data that several people edit
-  together. Follow "Single-file app" below; besides `references/design.md`,
-  nothing else in this Skill is needed.
+  together. Follow "Single-file app" below.
 - **Full app**: needs React or a build, workspace tools, AI or chat, data several
   people share or edit, app SQL, or several views with their own state.
   Follow "Full apps" below and read only the reference files the app needs.
@@ -42,8 +41,9 @@ tool calls.
    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
    follow "Look" below and let content reflow into one column on a phone.
    Use text, inline SVG or small data-URL images such as icons and logos, so
-   nothing else has to load beside the file (draw a chart as inline SVG).
-   Photos and video go outside the HTML (see "Keep the page small").
+   nothing else has to load beside the file. A dashboard or chart: read
+   `references/dashboards.md` first. Photos and video go outside the HTML
+   (see "Keep the page small").
 3. To keep entries, load the host client with this exact tag before your own
    script, and use app data:
 
@@ -111,8 +111,7 @@ one optional phone-width look. For a full app, before publishing, inspect actual
 paragraphs, labels, inputs, buttons, table cells and empty/error states at
 desktop and narrow mobile widths, then with text enlarged to 200%. Check
 computed sizes and look for clipped or overlapping text; fix layout pressure
-rather than making the content smaller. A fixture can demonstrate a type
-scale, but does not prove every generated app follows it.
+rather than making the content smaller.
 
 ## Edit an existing app
 
@@ -262,6 +261,7 @@ Read the references the app needs with `skill_read`, for example
 | The app | Read |
 | --- | --- |
 | Every full app: packages, build, local preview with live tools, pages and addresses (`/admin`, `?t=` links), requested tools, the completion gate | `references/build-and-preview.md` |
+| Dashboards, charts, KPIs or tables of numbers | `references/dashboards.md` |
 | Inline AI results, an embedded conversation, Opengeni UI components or the typed client | `references/ai-and-chat.md` |
 | Saves or reacts to records or files (app data, syncs, webhooks) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (app SQL) | `references/site-sql.md` |
