@@ -36,10 +36,13 @@ const USE_CASES: Array<{
  */
 export function OnboardingUseCaseStep({
   onChoose,
+  offerEmbed = true,
 }: {
   onChoose: (useCase: OnboardingUseCase) => void;
+  /** Whether to offer the developer path; not to people who arrived in the simplified interface. */
+  offerEmbed?: boolean;
 }) {
-  const { simplified, productName } = useSimplifiedInterface();
+  const { productName } = useSimplifiedInterface();
   return (
     <section className="og-page-glow flex flex-1 items-center justify-center px-4 py-8">
       <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
@@ -67,9 +70,7 @@ export function OnboardingUseCaseStep({
             </li>
           ))}
         </ul>
-        {/* The simplified interface is for people using the product, not
-            building on it, so it leaves out the developer path. */}
-        {simplified ? null : (
+        {offerEmbed ? (
           <p className="mt-5 mb-0 text-center text-xs text-fg-muted">
             <button
               type="button"
@@ -79,7 +80,7 @@ export function OnboardingUseCaseStep({
               Adding agents to your own product?
             </button>
           </p>
-        )}
+        ) : null}
       </div>
     </section>
   );

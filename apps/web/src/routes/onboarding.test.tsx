@@ -132,6 +132,8 @@ const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-toke
 const { clearPendingDeveloperSetup, pendingDeveloperSetupFor } =
   await import("@/lib/pending-developer-setup");
 const { signupStarterSet } = await import("@opengeni/react/app/lib/signup-starter-set");
+const { SimplifiedInterfaceProvider } =
+  await import("@opengeni/react/app/lib/simplified-interface");
 const VALID_FRAGMENT_SETUP_TOKEN = "A".repeat(43);
 const VALID_QUERY_SETUP_TOKEN = "B".repeat(43);
 
@@ -1947,6 +1949,43 @@ describe("organization onboarding UI", () => {
       expect(onComplete).toHaveBeenCalledTimes(1);
       expect(createOrganizationApiKey).not.toHaveBeenCalled();
     } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Not an engineer turns the simplified interface on in this browser, and keeps the product link", async () => {
+    window.localStorage.removeItem("opengeni.simplifiedInterface");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <SimplifiedInterfaceProvider>
+            <OrganizationOnboardingPanel
+              client={setupClient as never}
+              billingMode="stripe"
+              activeName="Anna Berg"
+              activeEmail="anna@example.test"
+              onComplete={() => undefined}
+            />
+          </SimplifiedInterfaceProvider>,
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain("Adding agents to your own product?");
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Not an engineer"))!
+          .click(),
+      );
+      await flush();
+      expect(window.localStorage.getItem("opengeni.simplifiedInterface")).toBe("on");
+    } finally {
+      window.localStorage.removeItem("opengeni.simplifiedInterface");
+      window.localStorage.removeItem("opengeni.signupUseCase.v1");
+      window.sessionStorage.clear();
       await act(async () => root.unmount());
       container.remove();
     }

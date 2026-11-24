@@ -9,12 +9,17 @@ import { ChartLineIcon, GitPullRequestIcon, ListChecksIcon, RocketIcon } from "l
 import type { Agent, AgentSummary, AgentTemplate, CapabilityCatalogItem } from "@opengeni/sdk";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { AgentTriggerDialog } from "@opengeni/react/app/components/agents/agent-trigger-dialog";
+import {
+  addAgentSuggestedTrigger,
+  AgentTriggerDialog,
+  agentTriggerSaveError,
+} from "@opengeni/react/app/components/agents/agent-trigger-dialog";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { githubConnectedOf, githubConnectHref } from "@opengeni/react/app/lib/github-connect";
 import { useNavigate } from "@opengeni/react/app/lib/navigation";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { toast } from "@opengeni/react/app/lib/toast";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { Button } from "@opengeni/react/ui/button";
 import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
@@ -43,7 +48,8 @@ const SETUP_ICONS: Record<GuidedSetup["icon"], ReactNode> = {
 
 /** What the page knows about the workspace; null while it reads. */
 type SetupState = {
-  agents: AgentSummary[];
+  /** Null when they can't be read: then nothing offers to add another. */
+  agents: AgentSummary[] | null;
   /** The setups whose trigger is on, by key. */
   triggersOn: Set<string>;
   /** The connector catalog; null when it can't be read. */
@@ -60,7 +66,7 @@ function useSetupState(workspaceId: string) {
     void (async () => {
       // Each read degrades on its own: a step it can't read shows as not done.
       const [agents, catalog] = await Promise.all([
-        client.listAgents(workspaceId).catch(() => [] as AgentSummary[]),
+        client.listAgents(workspaceId).catch(() => null),
         client
           .listCapabilities(workspaceId)
           .then((response) => response.items)
@@ -69,7 +75,7 @@ function useSetupState(workspaceId: string) {
       const triggersOn = new Set<string>();
       await Promise.all(
         GUIDED_SETUPS.map(async (setup) => {
-          const agent = agentForSetup(agents, setup);
+          const agent = agents ? agentForSetup(agents, setup) : null;
           if (!agent) return;
           const tasks = await client
             .listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 })
@@ -169,14 +175,15 @@ function GuidedSetupSteps({
   onBack: () => void;
 }) {
   const context = useAppContext();
-  const { client } = context;
+  const { client, accessContext } = context;
   const navigate = useNavigate();
   const [adding, setAdding] = useState(false);
+  const [turningOn, setTurningOn] = useState(false);
   const [template, setTemplate] = useState<AgentTemplate | null>(null);
   const [agent, setAgent] = useState<Agent | null>(null);
   const [triggerOpen, setTriggerOpen] = useState(false);
 
-  const summary = state ? agentForSetup(state.agents, setup) : null;
+  const summary = state?.agents ? agentForSetup(state.agents, setup) : null;
   const agentId = agent?.id ?? summary?.id ?? null;
   // The full agent, for the Add trigger dialog.
   useEffect(() => {
@@ -194,7 +201,8 @@ function GuidedSetupSteps({
   useEffect(() => {
     let live = true;
     client.listAgentTemplates(workspaceId).then(
-      (list) => live && setTemplate(list.find((t) => t.key === setup.agentTemplateKey) ?? null),
+      (list) =>
+        live && setTemplate(list.find((entry) => entry.key === setup.agentTemplateKey) ?? null),
       () => undefined,
     );
     return () => {
@@ -209,21 +217,27 @@ function GuidedSetupSteps({
     connection.kind === "catalog" && state?.catalog
       ? catalogItemFor(state.catalog, connection.mcpUrl)
       : null;
+  const githubStatus = context.githubStatus?.status;
   const connected =
     connection.kind === "github"
-      ? githubConnectedOf(context.githubStatus?.status) === true
+      ? githubConnectedOf(githubStatus) === true
       : catalogItemConnected(catalogItem);
+  // A connector this deployment doesn't offer, or GitHub without its app here.
   const notOffered =
-    connection.kind === "catalog" && state?.catalog != null && catalogItem === null;
+    connection.kind === "github"
+      ? githubStatus === "disabled"
+      : state?.catalog != null && catalogItem === null;
   const connect = () =>
     void navigate({
       href:
         connection.kind === "github"
           ? githubConnectHref(workspaceId)
-          : catalogConnectHref(workspaceId, catalogItem!.id),
+          : catalogConnectHref(workspaceId, catalogItem?.id ?? null),
     });
 
   // Step 2: the agent.
+  const canAdd = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
+  const agentsUnknown = state !== null && state.agents === null && !agent;
   const addAgent = async () => {
     if (adding) return;
     setAdding(true);
@@ -251,6 +265,47 @@ function GuidedSetupSteps({
   // Step 3: the trigger.
   const triggerOn = state?.triggersOn.has(setup.key) ?? false;
   const ready = Boolean(agentId) && triggerOn;
+  const canEditAgent = agent?.viewer.canEdit !== false;
+  // A one-click suggestion is added as it is; anything it lacks opens the dialog.
+  const turnOn = async () => {
+    if (!agent || !suggestion || turningOn) return;
+    if (!suggestion.oneClick) {
+      setTriggerOpen(true);
+      return;
+    }
+    setTurningOn(true);
+    try {
+      const outcome = await addAgentSuggestedTrigger(t, {
+        client,
+        workspaceId,
+        agent,
+        suggestion,
+        githubConnected: githubConnectedOf(githubStatus),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        now: new Date(),
+      });
+      if (outcome.kind === "needs_setup") {
+        setTriggerOpen(true);
+        return;
+      }
+      toast.success("Trigger added", { description: outcome.task.name });
+      reload();
+    } catch (error) {
+      toast.error("Couldn't add the trigger", {
+        description: agentTriggerSaveError(
+          error,
+          agent.visibility === "private" ? "private" : "workspace",
+        ),
+      });
+    } finally {
+      setTurningOn(false);
+    }
+  };
+  const triggerDescription = !agentId
+    ? `Add ${setup.agentName} first.`
+    : !canEditAgent
+      ? `Needs edit access to ${setup.agentName}.`
+      : undefined;
 
   return (
     <DetailPage back={{ label: "Get started", onClick: onBack }}>
@@ -260,15 +315,7 @@ function GuidedSetupSteps({
         meta={[setup.description]}
       />
       {ready ? (
-        <Notice
-          tone="success"
-          className="mt-6"
-          action={
-            <Button type="button" size="sm" variant="outline" onClick={openAgent}>
-              Open {setup.agentName}
-            </Button>
-          }
-        >
+        <Notice tone="success" className="mt-6">
           {setup.ready}
         </Notice>
       ) : null}
@@ -280,9 +327,7 @@ function GuidedSetupSteps({
             <SettingRow
               data-guided-step="connect"
               label={`1. Connect ${connection.name}`}
-              description={
-                notOffered ? `${connection.name} isn't offered here.` : `So the agent can use it.`
-              }
+              description={notOffered ? `${connection.name} isn't offered here.` : undefined}
               control={
                 connected ? (
                   <DoneBadge>Connected</DoneBadge>
@@ -294,28 +339,36 @@ function GuidedSetupSteps({
             <SettingRow
               data-guided-step="agent"
               label={`2. Add ${setup.agentName}`}
-              description={template?.description ?? undefined}
+              description={
+                agentsUnknown
+                  ? "Couldn't check your agents."
+                  : !agentId && !canAdd
+                    ? "Ask a workspace admin to add it."
+                    : (template?.description ?? undefined)
+              }
               control={
                 agentId ? (
                   <RowButton onClick={openAgent}>Open</RowButton>
-                ) : (
+                ) : agentsUnknown ? (
+                  <RowButton onClick={reload}>Retry</RowButton>
+                ) : canAdd ? (
                   <RowButton disabled={adding} onClick={() => void addAgent()}>
                     Add
                   </RowButton>
-                )
+                ) : undefined
               }
             />
             <SettingRow
               data-guided-step="trigger"
               label={`3. ${setup.triggerLabel}`}
-              description={agentId ? undefined : `Add ${setup.agentName} first.`}
+              description={triggerDescription}
               control={
                 triggerOn ? (
                   <DoneBadge>On</DoneBadge>
                 ) : (
                   <RowButton
-                    disabled={!agent || !suggestion || agent.viewer.canEdit === false}
-                    onClick={() => setTriggerOpen(true)}
+                    disabled={!agent || !suggestion || !canEditAgent || turningOn}
+                    onClick={() => void turnOn()}
                   >
                     Turn on
                   </RowButton>

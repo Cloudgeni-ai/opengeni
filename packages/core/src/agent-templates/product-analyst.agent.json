@@ -26,6 +26,7 @@
   "suggestedTriggers": [
     {
       "name": "Every Monday morning",
+      "oneClick": true,
       "instructions": "Write this week's product analytics report.",
       "schedule": {
         "type": "calendar",

@@ -292,11 +292,6 @@ export function groupedWorkspaceItems(simplified: boolean): {
     : { label: "Setup", items: [GET_STARTED_WORKSPACE_ITEM, ...itemsFor(FULL_SETUP_TARGETS)] };
 }
 
-/** The rail destinations the interface folds under its group. */
-export function advancedWorkspaceItems(simplified: boolean): WorkspaceConfigItem[] {
-  return groupedWorkspaceItems(simplified).items;
-}
-
 export function filterWorkspaceConfigGroups(
   groups: WorkspaceConfigGroup[],
   canReadInsights: boolean,
@@ -334,8 +329,9 @@ export function isConfigItemActive(
 
 /**
  * Whether a rail entry is the page you are on. Apps and Artifacts share the
- * Artifacts page: Apps is its Apps tab and an app's own view (`/sites/…`),
- * Artifacts the rest of it.
+ * Artifacts page: Apps is its Apps tab, an app opened from it (`?kind=site`
+ * stays on the address) and an app's own view (`/sites/…`), Artifacts the
+ * rest of it.
  */
 export function isNavItemActive(
   location: { pathname: string; kind?: string | undefined },
@@ -344,9 +340,11 @@ export function isNavItemActive(
 ): boolean {
   if (item.to !== "/workspaces/$workspaceId/artifacts")
     return isConfigItemActive(location.pathname, workspaceId, item.to);
+  const artifacts = `/workspaces/${workspaceId}/artifacts`;
   const onApps =
     location.pathname.startsWith(`/workspaces/${workspaceId}/sites/`) ||
-    (location.pathname === `/workspaces/${workspaceId}/artifacts` && location.kind === "site");
+    ((location.pathname === artifacts || location.pathname.startsWith(`${artifacts}/`)) &&
+      location.kind === "site");
   return item.search
     ? onApps
     : !onApps && isConfigItemActive(location.pathname, workspaceId, item.to);

@@ -159,14 +159,20 @@ export function OrganizationOnboardingPanel({
     () => initialUseCase ?? (previewState ? null : storedOnboardingUseCase()),
   );
   const { simplified, setSimplified } = useSimplifiedInterface();
+  // Whether this browser arrived in the simplified interface, before any answer
+  // here changed it: that, not the answer, decides whether to offer the
+  // developer path.
+  const [arrivedSimplified] = useState(simplified);
   const setUseCase = (choice: OnboardingUseCase | null) => {
     if (!previewState) storeOnboardingUseCase(choice);
     setUseCaseState(choice);
   };
   // "Not an engineer" gets the simplified interface; "Software engineer" the
   // full console with its guided setups. Either can be switched back from the
-  // account menu.
+  // account menu. It applies at once, so the next steps already fit (one
+  // credits model), and never from the preview page.
   const applyInterfaceFor = (choice: OnboardingUseCase) => {
+    if (previewState) return;
     if (choice === "everyday") setSimplified(true);
     else if (simplified) setSimplified(false);
   };
@@ -673,6 +679,7 @@ export function OrganizationOnboardingPanel({
   if (useCase === null) {
     return frame(
       <OnboardingUseCaseStep
+        offerEmbed={!arrivedSimplified}
         onChoose={(choice) => {
           if (!previewState) onboardingJourney().completed("use_case", choice);
           applyInterfaceFor(choice);

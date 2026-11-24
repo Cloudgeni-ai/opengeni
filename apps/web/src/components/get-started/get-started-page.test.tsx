@@ -18,9 +18,17 @@ const template = {
 };
 let agents: unknown[] = [];
 let tasks: unknown[] = [];
+let catalogFails = false;
+let agentsFail = false;
 const client = {
-  listAgents: mock(async () => agents),
-  listCapabilities: mock(async () => ({ items: [] })),
+  listAgents: mock(async () => {
+    if (agentsFail) throw new Error("offline");
+    return agents;
+  }),
+  listCapabilities: mock(async () => {
+    if (catalogFails) throw new Error("offline");
+    return { items: [] };
+  }),
   listScheduledTasks: mock(async () => tasks),
   listAgentTemplates: mock(async () => [template]),
   getAgent: mock(async (_workspaceId: string, id: string) => ({
@@ -35,7 +43,13 @@ const client = {
     return { id: "agent-1", name: "PR reviewer", viewer: { canEdit: true } };
   }),
 };
-const context = { client, githubStatus: { status: { connected: true } } };
+const context: Record<string, unknown> = {
+  client,
+  githubStatus: { status: "bound" },
+  accessContext: {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
+  },
+};
 const navigations: unknown[] = [];
 
 mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
@@ -43,11 +57,9 @@ mock.module("@opengeni/react/app/lib/navigation", () => ({
   useNavigate: () => (options: unknown) => navigations.push(options),
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
-mock.module("@opengeni/react/app/lib/github-connect", () => ({
-  githubConnectedOf: (status: { connected?: boolean } | undefined) => status?.connected ?? null,
-  githubConnectHref: () => "/github/connect",
-}));
 mock.module("@opengeni/react/app/components/agents/agent-trigger-dialog", () => ({
+  addAgentSuggestedTrigger: mock(async () => ({ kind: "needs_setup" })),
+  agentTriggerSaveError: () => "error",
   AgentTriggerDialog: ({ open }: { open: boolean }) =>
     open ? <div data-testid="trigger-dialog" /> : null,
 }));
@@ -75,6 +87,12 @@ afterAll(() => {
 beforeEach(() => {
   agents = [];
   tasks = [];
+  catalogFails = false;
+  agentsFail = false;
+  context.githubStatus = { status: "bound" };
+  context.accessContext = {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
+  };
   navigations.length = 0;
   document.body.innerHTML = "";
 });
@@ -145,9 +163,45 @@ test("shows ready once the agent's trigger is on", async () => {
   agents = [
     { id: "agent-1", name: "PR reviewer", templateKey: "pr-reviewer", viewer: { canEdit: true } },
   ];
-  tasks = [{ name: "PR reviewer: When a pull request opens", agentConfig: { agentId: "agent-1" } }];
+  tasks = [
+    {
+      name: "PR reviewer: When a pull request opens",
+      status: "active",
+      agentConfig: { agentId: "agent-1" },
+    },
+  ];
   const { container, root } = await render("pr-reviews");
   expect(step(container, "trigger").textContent).toContain("On");
   expect(container.textContent).toContain("PR reviewer reviews each new pull request.");
+  root.unmount();
+});
+
+test("connect still goes to Capabilities when the connector list can't be read", async () => {
+  catalogFails = true;
+  const { container, root } = await render("issue-triage");
+  const connect = step(container, "connect").querySelector("button");
+  expect(connect?.textContent).toBe("Connect");
+  await act(async () => {
+    connect?.click();
+  });
+  expect(navigations.at(-1)).toEqual({ href: "/workspaces/workspace-a/plugins" });
+  root.unmount();
+});
+
+test("says when GitHub isn't offered, and offers no Add without permission", async () => {
+  context.githubStatus = { status: "disabled" };
+  context.accessContext = { workspaceGrants: [] };
+  const { container, root } = await render("pr-reviews");
+  expect(step(container, "connect").textContent).toContain("GitHub isn't offered here.");
+  expect(step(container, "connect").querySelector("button")).toBeNull();
+  expect(step(container, "agent").textContent).toContain("Ask a workspace admin to add it.");
+  expect(step(container, "agent").querySelector("button")).toBeNull();
+  root.unmount();
+});
+
+test("a failed agent list offers Retry, not Add", async () => {
+  agentsFail = true;
+  const { container, root } = await render("pr-reviews");
+  expect(step(container, "agent").querySelector("button")?.textContent).toBe("Retry");
   root.unmount();
 });

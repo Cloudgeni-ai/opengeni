@@ -16,14 +16,19 @@ const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = 
   get_started: "/workspaces/$workspaceId/get-started",
 };
 
-/** The entries this person hides: the inbox, and the rail destinations by `navItemKey`. */
+/**
+ * The entries this person hides: the inbox, and the rail destinations by
+ * `navItemKey`. Hiding Artifacts hides Apps too, its tab, so a rail trimmed
+ * before Apps existed stays as it was.
+ */
 export function hiddenNavEntries(hidden: readonly string[]): {
   inbox: boolean;
   targets: ReadonlySet<string>;
 } {
+  const entries = hidden.includes("artifacts") ? [...hidden, "apps"] : hidden;
   return {
     inbox: hidden.includes("inbox"),
-    targets: new Set(hidden.flatMap((entry) => ENTRY_TARGETS[entry] ?? [])),
+    targets: new Set(entries.flatMap((entry) => ENTRY_TARGETS[entry] ?? [])),
   };
 }
 

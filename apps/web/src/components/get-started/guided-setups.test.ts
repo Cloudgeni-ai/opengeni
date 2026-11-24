@@ -62,19 +62,23 @@ describe("guided setups", () => {
   });
 
   test("the trigger is on when the agent has a task named after it", () => {
-    const task = (agentId: string, name: string) =>
-      ({ name, agentConfig: { agentId } }) as unknown as ScheduledTask;
+    const task = (agentId: string, name: string, status = "active") =>
+      ({ name, status, agentConfig: { agentId } }) as unknown as ScheduledTask;
     const setup = { triggerName: "Every Monday morning" };
     expect(setupTriggerOn([task("a", "Product analyst: Every Monday morning")], "a", setup)).toBe(
       true,
     );
     expect(setupTriggerOn([task("b", "Every Monday morning")], "a", setup)).toBe(false);
     expect(setupTriggerOn([task("a", "Something else")], "a", setup)).toBe(false);
+    expect(
+      setupTriggerOn([task("a", "Product analyst: Every Monday morning", "paused")], "a", setup),
+    ).toBe(false);
   });
 
   test("connect links open the connector on Capabilities", () => {
     expect(catalogConnectHref("w 1", "item-1")).toBe(
       "/workspaces/w%201/plugins?open=item%3Aitem-1",
     );
+    expect(catalogConnectHref("w", null)).toBe("/workspaces/w/plugins");
   });
 });

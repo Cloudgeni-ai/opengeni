@@ -9,7 +9,6 @@ import {
   isConfigItemActive,
   isWorkspaceConfigPath,
   itemDescription,
-  advancedWorkspaceItems,
   groupedWorkspaceItems,
   isNavItemActive,
   navItemKey,
@@ -88,7 +87,6 @@ describe("simplified interface navigation", () => {
       "Artifacts",
       "Meetings",
     ]);
-    expect(advancedWorkspaceItems(false)).toEqual(setup.items);
     // Nothing is left out: every destination is up front or under Setup.
     const listed = new Set([...primaryWorkspaceItems(false), ...setup.items].map(navItemKey));
     for (const item of PRIMARY_WORKSPACE_ITEMS) expect(listed.has(navItemKey(item))).toBe(true);
@@ -136,7 +134,7 @@ describe("simplified interface navigation", () => {
       "Agents",
       "Artifacts",
     ]);
-    expect(advancedWorkspaceItems(true).map((item) => item.label)).toEqual([
+    expect(groupedWorkspaceItems(true).items.map((item) => item.label)).toEqual([
       "Knowledge",
       "Automations",
     ]);

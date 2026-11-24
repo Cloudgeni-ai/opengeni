@@ -113,8 +113,9 @@ export function agentForSetup(
 }
 
 /**
- * Whether the agent already has this setup's trigger: the same rule as the
- * agent page, which names a trigger added from a suggestion after it.
+ * Whether the agent has this setup's trigger, switched on: the same naming
+ * rule as the agent page, which names a trigger added from a suggestion
+ * after it. A paused one doesn't count.
  */
 export function setupTriggerOn(
   tasks: readonly ScheduledTask[],
@@ -122,11 +123,18 @@ export function setupTriggerOn(
   setup: Pick<GuidedSetup, "triggerName">,
 ): boolean {
   return tasks.some(
-    (task) => task.agentConfig.agentId === agentId && task.name.endsWith(setup.triggerName),
+    (task) =>
+      task.status === "active" &&
+      task.agentConfig.agentId === agentId &&
+      task.name.endsWith(setup.triggerName),
   );
 }
 
-/** Where Capabilities opens a catalog connector's page, with its Connect button. */
-export function catalogConnectHref(workspaceId: string, itemId: string): string {
-  return `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=${encodeURIComponent(`item:${itemId}`)}`;
+/**
+ * Where Capabilities opens a catalog connector's page, with its Connect
+ * button; Capabilities itself when the catalog couldn't be read.
+ */
+export function catalogConnectHref(workspaceId: string, itemId: string | null): string {
+  const page = `/workspaces/${encodeURIComponent(workspaceId)}/plugins`;
+  return itemId ? `${page}?open=${encodeURIComponent(`item:${itemId}`)}` : page;
 }

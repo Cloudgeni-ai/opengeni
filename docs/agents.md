@@ -758,10 +758,12 @@ of its suggested triggers.
 They are a list in `apps/web/src/components/get-started/guided-setups.ts` and
 add no machinery: Connect opens GitHub's connect page or the connector's
 Capabilities page (found by its MCP address; a deployment that doesn't offer it
-says so), Add is the Agents page's ready-made add, and Turn on opens the agent
-page's Add trigger dialog with the suggestion. Each step reads its state from
-the workspace, so work done elsewhere shows as done. Onboarding's **Software
-engineer** choice ends on this page.
+says so; so does GitHub without its app here), Add is the Agents page's
+ready-made add (for people who may start chats), and Turn on adds a one-click
+suggestion at once or opens the agent page's Add trigger dialog with it. Each
+step reads its state from the workspace, so work done elsewhere shows as done;
+a paused trigger isn't on. Onboarding's **Software engineer** choice ends on
+this page.
 
 ### Delegation by name
 
