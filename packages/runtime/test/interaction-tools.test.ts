@@ -1836,6 +1836,130 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  describe("a browser the default open would reuse but that can never be continued", () => {
+    const replacementId = randomUUID();
+    const unavailable = () =>
+      new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            code: "conflict",
+            message:
+              "Current browser is unavailable: its last launch has no completed record of a browser process, so its working copy cannot be continued. Its browser record and recovery state are preserved",
+            retryable: false,
+          },
+        }),
+      );
+    const scenario = (refusal: string | null) => {
+      const dead = discoveredBrowserSession(browserSessionId, sessionId);
+      dead.lifecycle = "active";
+      dead.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const replacement = discoveredBrowserSession(replacementId, sessionId);
+      replacement.lifecycle = "active";
+      replacement.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-2",
+        placementInstanceId: "placement-1",
+      };
+      const target = { ...browserTarget(), browserSessionId: replacementId };
+      const creates: Array<{ operationId: string }> = [];
+      const ended: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            getBrowserSession: async () => dead,
+            listBrowserSessions: async () => ({ revision: 1, sessions: [dead] }),
+            listBrowserTargets: async (_workspaceId, id) => {
+              if (id === browserSessionId) throw unavailable();
+              return {
+                browserSessionId: id,
+                controllerGeneration: "controller-2",
+                targets: [target],
+              };
+            },
+            observeBrowserTarget: async () => browserObservation(target),
+            createBrowserSession: async (_workspaceId, request) => {
+              creates.push(request as unknown as { operationId: string });
+              return { session: replacement } as never;
+            },
+            controlBrowserSessionLifecycle: async (_workspaceId, id) => {
+              ended.push(id);
+              throw new Error("the old browser must be kept");
+            },
+          }),
+          inspectBrowserSessionWorkingCopy: async () =>
+            ({
+              browserSessionId,
+              controllerGeneration: "controller-1",
+              adoptable: refusal === null,
+              refusal,
+              explanation: "synthetic",
+              manifest: null,
+              platformSupported: true,
+              profileIdentityMatches: null,
+              profileInUse: false,
+              receipt: null,
+              freshness: { status: "unknown", latestCheckpointAt: null },
+              activeAdoption: null,
+            }) as never,
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const operationId = randomUUID();
+      const open = async (input: Record<string, unknown>) =>
+        await definitions[0]!.execute(input, {
+          operationId,
+          caller: { kind: "model", subjectId: "model:test" },
+        });
+      return { open, creates, ended, operationId };
+    };
+    const text = (result: { content: Array<{ type: string; text?: string }> }) =>
+      result.content.flatMap((part) => (part.type === "text" ? [part.text!] : [])).join("\n");
+
+    test("is replaced by a new browser, and the result says so", async () => {
+      const { open, creates, ended, operationId } = scenario("receipt_not_adoptable");
+      const result = await open({});
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        session: { id: replacementId, lifecycle: "active" },
+      });
+      expect(creates).toHaveLength(1);
+      // Its own operation, not the one this call's ID names.
+      expect(creates[0]!.operationId).not.toBe(operationId);
+      expect(ended).toEqual([]);
+      expect(text(result as never)).toContain(
+        `BrowserSession ${browserSessionId} cannot be continued (its last launch left no record of a running browser), so this opened a new browser, BrowserSession ${replacementId}, without its sign-ins and tabs. The old one is kept; use the new ID from now on.`,
+      );
+    });
+
+    test.each([
+      ["a copy that can be adopted", null],
+      ["a copy a process may still use", "process_state_unknown"],
+    ])("is not replaced over %s", async (_label, refusal) => {
+      const { open, creates } = scenario(refusal);
+      const result = await open({});
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "conflict" } },
+      });
+      expect(creates).toEqual([]);
+    });
+
+    test("named by its ID, it is not replaced", async () => {
+      const { open, creates } = scenario("receipt_not_adoptable");
+      const result = await open({ browserSessionId });
+      expect(result).toMatchObject({ isError: true });
+      expect(creates).toEqual([]);
+    });
+  });
+
   describe("a stopped browser whose working directory was moved, copied or restored", () => {
     const digest = "ab".repeat(32);
     const inspection = (overrides: Record<string, unknown> = {}) => ({
