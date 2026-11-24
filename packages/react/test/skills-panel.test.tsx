@@ -232,3 +232,52 @@ test("a refusal the host's relay words for people shows its own sentence", async
     await view.unmount();
   }
 });
+
+test("versions are numbered within the skill, not by the shared revision counter", async () => {
+  const { value } = client();
+  const revision = (id: string, number: number) => ({
+    id,
+    preferenceId: existing.id,
+    revision: number,
+    contentHash: "a".repeat(64),
+    title: "release-notes",
+    description: "Use when writing release notes.",
+    precedence: "workspace",
+    provenance: "manual",
+    expiresAt: null,
+    correctsRevisionId: null,
+    createdBySubjectId: "user:1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+  const getPreferenceRegistry = mock(async () => ({
+    revisions: [
+      revision(existing.activeRevisionId!, 412),
+      revision("33333333-3333-4333-8333-333333333333", 360),
+    ],
+  }));
+  const view = await renderComponent(
+    <SkillsPanel
+      client={{ ...value, getPreferenceRegistry } as never}
+      workspaceId="ws"
+      canManage={() => true}
+      scopes={workspaceOnly}
+    />,
+  );
+  try {
+    await flush();
+    await act(async () => {
+      (view.container.querySelector(".og-capability-catalog-row") as HTMLButtonElement).click();
+    });
+    await flush();
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Version 2");
+    expect(text).not.toContain("Version 412");
+    const options = [...view.container.querySelectorAll('select[aria-label="History"] option')];
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Version 2 - active",
+      "Version 1",
+    ]);
+  } finally {
+    await view.unmount();
+  }
+});

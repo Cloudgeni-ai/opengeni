@@ -150,7 +150,7 @@ export function SkillPage({
     </>
   ) : undefined;
 
-  const activeVersion = history.find((revision) => revision.id === record.activeRevisionId);
+  const activeVersion = skillVersionNumber(history, record.activeRevisionId);
   const scopeChoices = ALL_SCOPES.filter(
     (scope) => scope === record.scope || (scopes.includes(scope) && canManage(scope)),
   );
@@ -167,7 +167,7 @@ export function SkillPage({
       meta={[
         scopes.length > 1 ? scopeLabel(record.scope) : null,
         isNew ? null : record.source ? "Installed from a source" : "Written in this workspace",
-        activeVersion ? `Version ${activeVersion.revision}` : null,
+        activeVersion ? `Version ${activeVersion}` : null,
       ]}
       actions={
         <>
@@ -375,7 +375,7 @@ export function SkillPage({
                     >
                       {history.map((revision) => (
                         <option key={revision.id} value={revision.id}>
-                          Version {revision.revision}
+                          Version {skillVersionNumber(history, revision.id)}
                           {revision.id === record.activeRevisionId ? " - active" : ""}
                           {record.pendingRevisionIds.includes(revision.id) ? " - pending" : ""}
                         </option>
@@ -402,4 +402,18 @@ export function SkillPage({
       ) : null}
     </CapabilityPage>
   );
+}
+
+/**
+ * A revision's place in this skill's own history, counting from 1. The stored
+ * revision number comes from a sequence shared by every preference, so a new
+ * skill's first version can carry a large number.
+ */
+export function skillVersionNumber(
+  history: readonly PreferenceRegistryRevisionSummary[],
+  revisionId: string | null,
+): number | null {
+  const target = history.find((revision) => revision.id === revisionId);
+  if (!target) return null;
+  return history.filter((revision) => revision.revision <= target.revision).length;
 }
