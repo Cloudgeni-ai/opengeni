@@ -20,7 +20,9 @@ let agents: unknown[] = [];
 let tasks: unknown[] = [];
 let catalogFails = false;
 let agentsFail = false;
+let tasksFail = false;
 const client = {
+  resumeScheduledTask: mock(async () => ({})),
   listAgents: mock(async () => {
     if (agentsFail) throw new Error("offline");
     return agents;
@@ -29,7 +31,10 @@ const client = {
     if (catalogFails) throw new Error("offline");
     return { items: [] };
   }),
-  listScheduledTasks: mock(async () => tasks),
+  listScheduledTasks: mock(async () => {
+    if (tasksFail) throw new Error("offline");
+    return tasks;
+  }),
   listAgentTemplates: mock(async () => [template]),
   getAgent: mock(async (_workspaceId: string, id: string) => ({
     id,
@@ -89,6 +94,7 @@ beforeEach(() => {
   tasks = [];
   catalogFails = false;
   agentsFail = false;
+  tasksFail = false;
   context.githubStatus = { status: "bound" };
   context.accessContext = {
     workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
@@ -204,4 +210,32 @@ test("a failed agent list offers Retry, not Add", async () => {
   const { container, root } = await render("pr-reviews");
   expect(step(container, "agent").querySelector("button")?.textContent).toBe("Retry");
   root.unmount();
+});
+
+test("a paused trigger is turned back on, and a failed trigger read offers Retry", async () => {
+  agents = [
+    { id: "agent-1", name: "PR reviewer", templateKey: "pr-reviewer", viewer: { canEdit: true } },
+  ];
+  tasks = [
+    {
+      id: "task-1",
+      name: "PR reviewer: When a pull request opens",
+      status: "paused",
+      agentConfig: { agentId: "agent-1" },
+    },
+  ];
+  const paused = await render("pr-reviews");
+  const turnOn = step(paused.container, "trigger").querySelector("button");
+  expect(turnOn?.textContent).toBe("Turn on");
+  await act(async () => {
+    turnOn?.click();
+  });
+  expect(client.resumeScheduledTask).toHaveBeenCalledWith("workspace-a", "task-1");
+  paused.root.unmount();
+
+  tasksFail = true;
+  const failed = await render("pr-reviews");
+  expect(step(failed.container, "trigger").querySelector("button")?.textContent).toBe("Retry");
+  expect(step(failed.container, "trigger").textContent).toContain("Couldn't check its triggers.");
+  failed.root.unmount();
 });

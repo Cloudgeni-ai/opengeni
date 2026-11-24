@@ -131,6 +131,21 @@ export function setupTriggerOn(
 }
 
 /**
+ * The agent's trigger for this setup, whatever its state: on, paused (Turn on
+ * resumes it rather than adding another) or none.
+ */
+export function setupTriggerTask(
+  tasks: readonly ScheduledTask[],
+  agentId: string,
+  setup: Pick<GuidedSetup, "triggerName">,
+): ScheduledTask | null {
+  const matches = tasks.filter(
+    (task) => task.agentConfig.agentId === agentId && task.name.endsWith(setup.triggerName),
+  );
+  return matches.find((task) => task.status === "active") ?? matches[0] ?? null;
+}
+
+/**
  * Where Capabilities opens a catalog connector's page, with its Connect
  * button; Capabilities itself when the catalog couldn't be read.
  */

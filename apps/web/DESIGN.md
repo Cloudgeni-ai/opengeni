@@ -713,7 +713,7 @@ way.
   depend on the flag.
 - **The rail.** Capabilities, Agents and Artifacts stay at the top level. Knowledge and
   Automations sit under a closed "Advanced" group (`groupedWorkspaceItems` in the same file),
-  which opens by itself for the page you are on and for anything waiting for you. The icon rail
+  which, while closed, still shows the page you are on and anything waiting for you. The icon rail
   has no room for a group and keeps both icons.
   The full console's rail has the same shape: Agents and Apps (sites in Artifacts) at the top
   under Inbox, and Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under

@@ -36,7 +36,7 @@ import {
   catalogItemConnected,
   catalogItemFor,
   guidedSetupByKey,
-  setupTriggerOn,
+  setupTriggerTask,
   type GuidedSetup,
 } from "./guided-setups";
 
@@ -46,12 +46,19 @@ const SETUP_ICONS: Record<GuidedSetup["icon"], ReactNode> = {
   "chart-line": <ChartLineIcon />,
 };
 
+/** One setup's trigger: on, paused (with its task), none, or unknown when it can't be read. */
+type TriggerState =
+  | { kind: "on" }
+  | { kind: "paused"; taskId: string }
+  | { kind: "off" }
+  | { kind: "unknown" };
+
 /** What the page knows about the workspace; null while it reads. */
 type SetupState = {
   /** Null when they can't be read: then nothing offers to add another. */
   agents: AgentSummary[] | null;
-  /** The setups whose trigger is on, by key. */
-  triggersOn: Set<string>;
+  /** Each setup's trigger, by key; absent while it has no agent. */
+  triggers: Map<string, TriggerState>;
   /** The connector catalog; null when it can't be read. */
   catalog: CapabilityCatalogItem[] | null;
 };
@@ -72,18 +79,28 @@ function useSetupState(workspaceId: string) {
           .then((response) => response.items)
           .catch(() => null),
       ]);
-      const triggersOn = new Set<string>();
+      const triggers = new Map<string, TriggerState>();
       await Promise.all(
         GUIDED_SETUPS.map(async (setup) => {
           const agent = agents ? agentForSetup(agents, setup) : null;
           if (!agent) return;
           const tasks = await client
             .listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 })
-            .catch(() => []);
-          if (setupTriggerOn(tasks, agent.id, setup)) triggersOn.add(setup.key);
+            .catch(() => null);
+          const task = tasks ? setupTriggerTask(tasks, agent.id, setup) : null;
+          triggers.set(
+            setup.key,
+            !tasks
+              ? { kind: "unknown" }
+              : !task
+                ? { kind: "off" }
+                : task.status === "active"
+                  ? { kind: "on" }
+                  : { kind: "paused", taskId: task.id },
+          );
         }),
       );
-      if (live) setState({ agents, triggersOn, catalog });
+      if (live) setState({ agents, triggers, catalog });
     })();
     return () => {
       live = false;
@@ -139,7 +156,7 @@ export function GetStartedPage({
                 title={entry.title}
                 description={entry.description}
                 status={
-                  state.triggersOn.has(entry.key) ? (
+                  state.triggers.get(entry.key)?.kind === "on" ? (
                     <StatusBadge status="ready" variant="dot" />
                   ) : undefined
                 }
@@ -263,9 +280,21 @@ function GuidedSetupSteps({
   };
 
   // Step 3: the trigger.
-  const triggerOn = state?.triggersOn.has(setup.key) ?? false;
+  const trigger = state?.triggers.get(setup.key) ?? null;
+  const triggerOn = trigger?.kind === "on";
   const ready = Boolean(agentId) && triggerOn;
   const canEditAgent = agent?.viewer.canEdit !== false;
+  const resume = async (taskId: string) => {
+    setTurningOn(true);
+    try {
+      await client.resumeScheduledTask(workspaceId, taskId);
+      reload();
+    } catch (error) {
+      toast.error("Couldn't turn on the trigger", { description: userErrorText(error) });
+    } finally {
+      setTurningOn(false);
+    }
+  };
   // A one-click suggestion is added as it is; anything it lacks opens the dialog.
   const turnOn = async () => {
     if (!agent || !suggestion || turningOn) return;
@@ -303,9 +332,11 @@ function GuidedSetupSteps({
   };
   const triggerDescription = !agentId
     ? `Add ${setup.agentName} first.`
-    : !canEditAgent
-      ? `Needs edit access to ${setup.agentName}.`
-      : undefined;
+    : trigger?.kind === "unknown"
+      ? "Couldn't check its triggers."
+      : !canEditAgent
+        ? `Needs edit access to ${setup.agentName}.`
+        : undefined;
 
   return (
     <DetailPage back={{ label: "Get started", onClick: onBack }}>
@@ -365,6 +396,15 @@ function GuidedSetupSteps({
               control={
                 triggerOn ? (
                   <DoneBadge>On</DoneBadge>
+                ) : trigger?.kind === "unknown" ? (
+                  <RowButton onClick={reload}>Retry</RowButton>
+                ) : trigger?.kind === "paused" ? (
+                  <RowButton
+                    disabled={!canEditAgent || turningOn}
+                    onClick={() => void resume(trigger.taskId)}
+                  >
+                    Turn on
+                  </RowButton>
                 ) : (
                   <RowButton
                     disabled={!agent || !suggestion || !canEditAgent || turningOn}

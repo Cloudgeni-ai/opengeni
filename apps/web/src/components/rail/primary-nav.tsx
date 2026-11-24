@@ -120,12 +120,12 @@ export function WorkspaceShortcutLinks({
       onNavigate={() => rail.setDrawerOpen(false)}
     />
   );
-  // The page you are on, and anything waiting for you, is never folded away.
-  const groupOpen =
-    groupExpanded ||
-    grouped.some(
-      (item) => active(item) || needsReview(item) || needsAttention(item) || recordingHere(item),
-    );
+  // The group opens and closes only when asked. Closed, it still shows the
+  // page you are on and anything waiting for you, so nothing is folded away.
+  const groupOpen = groupExpanded;
+  const surfaced = grouped.filter(
+    (item) => active(item) || needsReview(item) || needsAttention(item) || recordingHere(item),
+  );
 
   return (
     <div className={cn("grid gap-0.5", className)}>
@@ -150,7 +150,9 @@ export function WorkspaceShortcutLinks({
               className={cn("size-3.5 shrink-0 transition-transform", groupOpen && "rotate-180")}
             />
           </Button>
-          {groupOpen ? <div className="grid gap-0.5 pl-3">{grouped.map(link)}</div> : null}
+          {groupOpen || surfaced.length > 0 ? (
+            <div className="grid gap-0.5 pl-3">{(groupOpen ? grouped : surfaced).map(link)}</div>
+          ) : null}
         </>
       )}
     </div>

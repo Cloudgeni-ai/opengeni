@@ -206,14 +206,15 @@ describe("session-first rail density", () => {
     }
   });
 
-  test("keeps the shortcuts on short screens and opens Setup for its current page", async () => {
+  test("keeps the shortcuts on short screens and shows the current Setup page while closed", async () => {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
     pathname = "/workspaces/workspace-1/plugins";
     const rendered = await render(<PrimaryNav />);
     try {
       expect(rendered.container.textContent).not.toContain("More");
-      expect(setupDisclosure(rendered.container).getAttribute("aria-expanded")).toBe("true");
+      expect(setupDisclosure(rendered.container).getAttribute("aria-expanded")).toBe("false");
       expect(rendered.container.textContent).toContain("Capabilities");
+      expect(rendered.container.textContent).not.toContain("Meetings");
     } finally {
       await act(async () => rendered.root.unmount());
       rendered.container.remove();
