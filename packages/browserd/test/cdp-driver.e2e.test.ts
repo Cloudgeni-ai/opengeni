@@ -2590,3 +2590,81 @@ chromiumE2e(
   },
   60_000,
 );
+
+chromiumE2e(
+  "pasting an empty browser clipboard after a page's own Copy button fails instead of typing nothing",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-empty-paste-");
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    try {
+      let page = await driver.start(
+        dataUrl(`<!doctype html><title>Code</title>
+          <p id="code">CODE-1234</p>
+          <button onclick="navigator.clipboard.writeText('CODE-1234').catch(() => {})">Copy code</button>
+          <label>Code field <input id="field"></label>`),
+      );
+      // A website's Copy button writes to the browser's own clipboard, which
+      // this BrowserSession's clipboard never reads.
+      page = await driver.dispatch(
+        command(page, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Copy code", exact: true },
+        }),
+      );
+      expect(driver.readClipboard()).toMatchObject({ revision: 0, text: "" });
+      const paste = driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "paste",
+          locator: { kind: "label", text: "Code field" },
+        }),
+      );
+      await expect(paste).rejects.toMatchObject({ code: "invalid_action" });
+      await expect(paste).rejects.toThrow("browser clipboard is empty, so nothing was pasted");
+      // The supported route: copy the page's text, then paste it.
+      page = await driver.observe(page.target.id);
+      page = await driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "copy",
+          locator: { kind: "css", selector: "#code" },
+          content: "text",
+        }),
+      );
+      page = await driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "paste",
+          locator: { kind: "label", text: "Code field" },
+        }),
+      );
+      // The field holds the pasted text, not only the clipboard.
+      page = await driver.dispatch(command(page, { type: "clipboard", operation: "clear" }));
+      const field = await driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "copy",
+          locator: { kind: "label", text: "Code field" },
+          content: "value",
+        }),
+      );
+      expect(field.target.id).toBe(page.target.id);
+      expect(driver.readClipboard().text).toBe("CODE-1234");
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);

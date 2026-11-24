@@ -8495,6 +8495,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
     const text = action.text ?? this.clipboardText;
+    // This clipboard holds only what clipboard actions put there. A page's
+    // own Copy button writes to the browser's clipboard instead, which this
+    // one never reads, so pasting it here would type nothing and look done.
+    if (action.text === undefined && text === "") {
+      throw new InteractionDefiniteDriverError("invalid_action", EMPTY_CLIPBOARD_PASTE);
+    }
     if (action.text !== undefined) this.setClipboard(text, "paste", state.targetId);
     if (action.locator) {
       const node = await this.resolveActionLocator(state, action.locator);
@@ -12691,6 +12697,11 @@ function closedTargetListFailure(error: unknown): unknown {
     false,
   );
 }
+
+/** A paste with nothing on this BrowserSession's clipboard, and what pastes
+ * instead. */
+export const EMPTY_CLIPBOARD_PASTE =
+  "browser clipboard is empty, so nothing was pasted. It holds only text from clipboard write and copy actions, not what a page's own Copy button copied: copy that text with a clipboard copy action and a locator on it, or paste with text";
 
 /** Why a clipboard copy found nothing to copy, and what copies instead. */
 export function clipboardCopyFailure(reason: string, fromElement: boolean): string {
