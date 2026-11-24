@@ -1556,7 +1556,7 @@ async function openAppPageChat(container: HTMLElement) {
   await settle();
 }
 
-test("an app opened as a page offers its chat from one corner button, and hides it again", async () => {
+test("an app opened as a page offers its chat from one button above it, and hides it again", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const container = await renderAppPage();
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-site-view")).toBe(siteId);
@@ -1566,6 +1566,12 @@ test("an app opened as a page offers its chat from one corner button, and hides 
   expect(show.getAttribute("aria-label")).toBe("Open chat");
   expect(show.getAttribute("aria-expanded")).toBe("false");
   expect(show.textContent).toBe("");
+  // In its own slim row above the app, never drawn over the app's frame,
+  // so it can't cover the app's own controls.
+  const row = show.closest("[data-app-page-chat-row]")!;
+  expect(row).not.toBeNull();
+  expect(row.contains(container.querySelector("[data-site-view]"))).toBe(false);
+  expect(row.nextElementSibling?.hasAttribute("data-site-view")).toBe(true);
   expect(container.querySelector("aside")).toBeNull();
   expect(listCalls).toHaveLength(0);
 
@@ -1580,7 +1586,9 @@ test("an app opened as a page offers its chat from one corner button, and hides 
   expect(
     [...panel(container).querySelectorAll("a")].map((a) => a.getAttribute("aria-label")),
   ).toEqual(["Open as a full chat"]);
+  // The row goes with the button while the chat is open.
   expect(chatButton(container)).toBeNull();
+  expect(container.querySelector("[data-app-page-chat-row]")).toBeNull();
   expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide chat");
 
   await act(async () =>
@@ -1593,6 +1601,30 @@ test("an app opened as a page offers its chat from one corner button, and hides 
   expect(document.activeElement).toBe(chatButton(container));
   // The page's address stays the app's own throughout.
   expect(navigations).toEqual([]);
+});
+
+test("on a phone the app page's chat button sits in the top strip, not over the app", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  // The shell's top strip on a phone (menu and brand), with room at its end.
+  const strip = document.createElement("header");
+  const stripEnd = document.createElement("div");
+  stripEnd.setAttribute("data-canvas-strip-end", "");
+  strip.append(stripEnd);
+  document.body.append(strip);
+  const container = await renderAppPage();
+  const show = chatButton(document.body)!;
+  expect(show.parentElement).toBe(stripEnd);
+  expect(container.querySelector("[data-app-page-chat-row]")).toBeNull();
+  expect(container.contains(show)).toBe(false);
+  await openAppPageChat(document.body);
+  expect(panel(container).hidden).toBe(false);
+  expect(stripEnd.childElementCount).toBe(0);
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  await settle();
+  expect(document.activeElement).toBe(chatButton(document.body));
+  expect(chatButton(document.body)!.parentElement).toBe(stripEnd);
 });
 
 test("a chat started from an app page opens in its panel, and the address stays the app's", async () => {
