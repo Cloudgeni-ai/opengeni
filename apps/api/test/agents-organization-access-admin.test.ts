@@ -143,27 +143,29 @@ describe("Anyone in the organization (real PostgreSQL)", () => {
     }
     await joinWorkspace(other.accountId, other.workspaceId, admin);
 
-    const create = async (person: Person, workspaceId: string) => {
-      const response = await app.request(`/v1/workspaces/${workspaceId}/agents`, {
-        method: "POST",
+    const send = async (person: Person, method: string, path: string, body: unknown) => {
+      const response = await app.request(path, {
+        method,
         headers: {
           cookie: person.cookie,
           origin,
           "sec-fetch-site": "same-origin",
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          name: `Desk ${crypto.randomUUID().slice(0, 8)}`,
-          visibility: "organization",
-        }),
+        body: JSON.stringify(body),
       });
       return {
         status: response.status,
         body: (await response.json().catch(() => null)) as {
-          agent?: { visibility: string };
+          agent?: { id: string; version: number; visibility: string };
         } | null,
       };
     };
+    const create = (person: Person, workspaceId: string, visibility = "organization") =>
+      send(person, "POST", `/v1/workspaces/${workspaceId}/agents`, {
+        name: `Desk ${crypto.randomUUID().slice(0, 8)}`,
+        visibility,
+      });
 
     expect((await create(member, acme.workspaceId)).status).toBe(403);
     expect((await create(admin, other.workspaceId)).status).toBe(403);
@@ -171,5 +173,18 @@ describe("Anyone in the organization (real PostgreSQL)", () => {
     expect(byAdmin.status).toBe(201);
     expect(byAdmin.body?.agent?.visibility).toBe("organization");
     expect((await create(owner, acme.workspaceId)).status).toBe(201);
+
+    // Widening an existing shared agent takes the same: an admin can, a member can't.
+    const widen = async (person: Person) => {
+      const shared = (await create(person, acme.workspaceId, "workspace")).body!.agent!;
+      return send(person, "PATCH", `/v1/workspaces/${acme.workspaceId}/agents/${shared.id}`, {
+        expectedVersion: shared.version,
+        visibility: "organization",
+      });
+    };
+    expect((await widen(member)).status).toBe(403);
+    const widened = await widen(admin);
+    expect(widened.status).toBe(200);
+    expect(widened.body?.agent?.visibility).toBe("organization");
   });
 });

@@ -1131,8 +1131,9 @@ test("an organization admin (not only the owner) can choose Anyone in the organi
     const option = [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
       (element) => element.textContent?.trim() === "Anyone in Acme",
     );
+    expect(option).toBeDefined();
     const disabled =
-      (option?.getAttribute("aria-disabled") ?? option?.getAttribute("disabled")) !== null;
+      option!.getAttribute("aria-disabled") === "true" || option!.hasAttribute("disabled");
     const current = mounted!;
     await act(async () => current.unmount());
     current.container.remove();
