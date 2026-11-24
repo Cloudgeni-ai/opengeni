@@ -53,6 +53,7 @@ const baseRequiredRules = [
   "opengeni:kubelet_instance:info",
   "opengeni:node_memory_psi_stall_ratio",
   "opengeni:node_io_psi_stall_ratio",
+  "opengeni:node_system_disk_busy_ratio",
   "opengeni:node_swap_out_pages_per_second",
   "OpenGeniSandboxCreateFailureRatio",
   "OpenGeniSandboxInventoryProjectionStale",

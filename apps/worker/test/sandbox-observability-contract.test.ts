@@ -215,6 +215,7 @@ describe("sandbox observability contract", () => {
       "opengeni_turn_worker_memory_guard_process_rss_ratio",
       "opengeni:node_memory_psi_stall_ratio",
       "opengeni:node_io_psi_stall_ratio",
+      "opengeni:node_system_disk_busy_ratio",
       "opengeni:node_swap_out_pages_per_second",
       "kubelet_runtime_operations_errors_total",
       "kube_node_status_condition",
@@ -234,6 +235,7 @@ describe("sandbox observability contract", () => {
       "opengeni:kubelet_instance:info",
       "opengeni:node_memory_psi_stall_ratio",
       "opengeni:node_io_psi_stall_ratio",
+      "opengeni:node_system_disk_busy_ratio",
       "opengeni:node_swap_out_pages_per_second",
       "OpenGeniTurnWorkerMemoryHeadroomLow",
       "OpenGeniTurnWorkerMemoryEmergency",
@@ -264,6 +266,8 @@ describe("sandbox observability contract", () => {
     );
     expect(source).toContain("node_pressure_memory_stalled_seconds_total");
     expect(source).toContain("node_pressure_io_stalled_seconds_total");
+    expect(source).toContain("node_disk_io_time_seconds_total");
+    expect(source).toContain("node_filesystem_size_bytes");
     expect(source).toContain("node_vmstat_pswpout");
     expect(source).toContain("kubelet_runtime_operations_errors_total");
     expect(source).toContain('kubelet_node_name{metrics_path="/metrics"}');
