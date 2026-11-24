@@ -122,4 +122,26 @@ describe("FormPage footer", () => {
       }, 180_000);
     }
   }
+
+  test("the footer follows its scroller's padding when it changes", async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await page.goto(`${url}?view=consent`);
+    await page.locator("form footer button[type=submit]").waitFor({ timeout: 90_000 });
+    for (const padding of ["96px", "0px", "24px"]) {
+      await page.locator(".og-page-glow").evaluate((scroller, value) => {
+        (scroller as HTMLElement).style.paddingBottom = value;
+      }, padding);
+      // The ResizeObserver delivers before the next frame paints.
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+      const result = await layout(page, "top");
+      expect({ padding, below: result.below }).toEqual({ padding, below: [] });
+      expect({ padding, bottom: Math.round(result.footerBottom) }).toEqual({
+        padding,
+        bottom: Math.round(result.visibleBottom),
+      });
+    }
+    await page.close();
+  }, 120_000);
 });

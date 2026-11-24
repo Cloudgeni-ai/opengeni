@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type ElementType,
@@ -557,7 +558,8 @@ export function FormFrame({
  * page is placed. At the end of the form it still sits right after the fields.
  */
 function usePageFooterAtScrollportEdge(footerRef: RefObject<HTMLElement | null>, enabled: boolean) {
-  useEffect(() => {
+  // Before paint, so a stuck footer never shows a frame at the old height.
+  useIsomorphicLayoutEffect(() => {
     const footer = footerRef.current;
     if (!enabled || !footer) return;
     const scroller = scrollContainerOf(footer);
@@ -578,9 +580,19 @@ function usePageFooterAtScrollportEdge(footerRef: RefObject<HTMLElement | null>,
   }, [footerRef, enabled]);
 }
 
-/** The nearest ancestor a sticky element sticks within, if any. */
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/**
+ * The nearest ancestor a sticky element sticks within, if any. Not <body> or
+ * <html>: when the page itself scrolls, the viewport is the scroller, whatever
+ * overflow the body reports.
+ */
 function scrollContainerOf(element: HTMLElement): HTMLElement | null {
-  for (let node = element.parentElement; node; node = node.parentElement) {
+  for (
+    let node = element.parentElement;
+    node && node !== document.body && node !== document.documentElement;
+    node = node.parentElement
+  ) {
     const style = getComputedStyle(node);
     if (/auto|scroll|hidden|overlay/.test(`${style.overflowX} ${style.overflowY}`)) return node;
   }
