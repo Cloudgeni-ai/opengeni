@@ -182,6 +182,18 @@ export const AgentVisibility = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentVisibility = z.infer<typeof AgentVisibility>;
 
+/**
+ * Who can edit a shared agent: `creator_and_admins` (whoever made it, or an
+ * admin of its workspace) or `everyone` in its workspace who can start chats
+ * there. Who can use or edit it, and deleting it, stay with its creator and
+ * admins either way. An Only me agent is only ever its owner's. Clients must
+ * tolerate values added later.
+ */
+export const AgentEditAccess = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["creator_and_admins", "everyone"]),
+);
+export type AgentEditAccess = z.infer<typeof AgentEditAccess>;
+
 /** Shared with its workspace, and maybe beyond: anything but Only me. */
 export function agentVisibilityIsShared(visibility: AgentVisibility): boolean {
   return visibility !== "private";
@@ -362,10 +374,17 @@ export const AGENT_BUILT_IN_GITHUB_CONNECTOR = "github.com";
 export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /**
-     * Rename it, change its Instructions, First message, Memory and who can
-     * use it, or delete it: whoever made it, or an admin of its workspace.
+     * Rename it, change its Instructions, Remember across chats, Can use and Skills:
+     * whoever made it, an admin of its workspace, or, when its
+     * `editAccess` is `everyone`, anyone in its workspace who can start chats.
      */
     canEdit: z.boolean(),
+    /**
+     * Change who can use or edit it, or delete it: whoever made it, or an
+     * admin of its workspace. Absent from older servers, where `canEdit`
+     * covered it.
+     */
+    canManage: z.boolean().optional(),
     /** Make it available in Slack, or not: an admin of its workspace. */
     canManageSlack: z.boolean(),
     /**
@@ -390,6 +409,8 @@ export const AgentSummary = /* @__PURE__ */ defineSchema(() =>
     visibility: AgentVisibility,
     /** Whose Only me agent it is; null for a shared one. */
     ownerSubjectId: z.string().nullable(),
+    /** Who can edit it when shared. Absent from older servers, whose rule was `creator_and_admins`. */
+    editAccess: AgentEditAccess.default("creator_and_admins"),
     origin: AgentOrigin,
     /** The chat it was made from, when it was made from one. */
     sourceSessionId: Uuid.nullable(),
@@ -450,6 +471,11 @@ export const CreateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       avatar: SessionAvatar.nullable().default(null),
       /** Only a person can keep an agent to themselves. */
       visibility: AgentVisibility.default("workspace"),
+      /**
+       * Who can edit it when shared. Omitted, its creator and admins, as
+       * before this field; Opengeni's own apps send `everyone`.
+       */
+      editAccess: AgentEditAccess.default("creator_and_admins"),
       instructions: AgentInstructions.default(""),
       /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.default(""),
@@ -474,6 +500,8 @@ export const UpdateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       description: AgentDescription.optional(),
       avatar: SessionAvatar.nullable().optional(),
       visibility: AgentVisibility.optional(),
+      /** Who can edit it when shared: its creator or an admin may change this. */
+      editAccess: AgentEditAccess.optional(),
       instructions: AgentInstructions.optional(),
       /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.optional(),
@@ -644,6 +672,11 @@ export const AgentTemplateTrigger = /* @__PURE__ */ defineSchema(() =>
     /** Null: it runs only on its events. */
     schedule: AutomationTemplateSchedule.nullable().default(null),
     triggers: z.array(AutomationTemplateTrigger).default([]),
+    /**
+     * Added in one click from the agent page, with no form: it needs no
+     * choices beyond the workspace's GitHub connection.
+     */
+    oneClick: z.boolean().optional(),
   }),
 );
 export type AgentTemplateTrigger = z.output<typeof AgentTemplateTrigger>;
@@ -683,6 +716,8 @@ export const CreateAgentFromTemplateRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       name: AgentName.optional(),
       visibility: AgentVisibility.optional(),
+      /** Who can edit it when shared; omitted, its creator and admins. */
+      editAccess: AgentEditAccess.optional(),
     })
     .strict(),
 );

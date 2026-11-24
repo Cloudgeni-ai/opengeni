@@ -12308,6 +12308,7 @@
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string! null",
         "$.description": "string!",
+        "$.editAccess": "enum!=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]",
         "$.firstMessage": "string!",
         "$.hasFirstMessage": "boolean!",
         "$.id": "string!",
@@ -12457,6 +12458,14 @@
         "$.renderer": "ref(AgentRenderer)?",
         "$.titleInstructions": "string? null",
         "$.vaultPolicy": "ref(VaultPolicy)?"
+      }
+    },
+    "AgentEditAccess": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]"
       }
     },
     "AgentEffectiveTools": {
@@ -12780,6 +12789,7 @@
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string! null",
         "$.description": "string!",
+        "$.editAccess": "enum!=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]",
         "$.hasFirstMessage": "boolean!",
         "$.id": "string!",
         "$.memory": "ref(AgentMemory)!",
@@ -12831,6 +12841,7 @@
         "$": "object",
         "$.instructions": "string!",
         "$.name": "string!",
+        "$.oneClick": "boolean?",
         "$.schedule": "ref(AutomationTemplateSchedule)! null",
         "$.triggers": "array!",
         "$.triggers[]": "ref(AutomationTemplateTrigger)"
@@ -12922,6 +12933,7 @@
       "shape": {
         "$": "object",
         "$.canEdit": "boolean!",
+        "$.canManage": "boolean?",
         "$.canManageSlack": "boolean!",
         "$.canOpenInSlack": "boolean!"
       }
@@ -18102,6 +18114,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.editAccess": "ref(AgentEditAccess)?",
         "$.name": "string?",
         "$.visibility": "ref(AgentVisibility)?"
       }
@@ -18114,6 +18127,7 @@
         "$": "object",
         "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
+        "$.editAccess": "enum?=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]",
         "$.firstMessage": "string?",
         "$.instructions": "string?",
         "$.memoryEnabled": "boolean?",
@@ -34940,6 +34954,7 @@
         "$": "object",
         "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
+        "$.editAccess": "ref(AgentEditAccess)?",
         "$.expectedVersion": "integer!",
         "$.firstMessage": "string?",
         "$.instructions": "string?",

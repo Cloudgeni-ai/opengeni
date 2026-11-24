@@ -256,6 +256,8 @@ export function registerBotTemplateTools(input: {
           firstMessage: request.firstMessage,
           // New agents remember by default, wherever they are made.
           memoryEnabled: true,
+          // Opengeni's own new agents are editable by the whole workspace.
+          editAccess: "everyone",
           origin: "app",
           sourceSessionId: sessionId,
           createdBySubjectId: viewer.subjectId,

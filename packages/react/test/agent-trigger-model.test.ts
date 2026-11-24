@@ -18,6 +18,7 @@ import {
   agentTriggerSaveError,
   agentTriggerWithSources,
   agentTriggerRepositoryEvents,
+  addAgentSuggestedTrigger,
 } from "../src/app/components/agents/agent-trigger-model";
 import {
   eventConditionFromDraft,
@@ -84,6 +85,111 @@ test("a suggestion starts with its events, conditions and message on the person'
       githubConnected: true,
     }),
   ).toBe("add_source");
+});
+
+const MENTIONED: AgentTemplateTrigger = {
+  name: "Review when mentioned on a PR",
+  instructions: "Someone mentioned you on this pull request. Review it.",
+  schedule: null,
+  oneClick: true,
+  triggers: [
+    {
+      source: { kind: "github" },
+      eventTypes: ["issue_comment.created"],
+      conditions: [
+        { field: "data.issue.pull_request", op: "equals", value: true },
+        { field: "data.comment.mentions_app", op: "equals", value: true },
+        {
+          field: "data.comment.author_association",
+          op: "in",
+          value: ["OWNER", "MEMBER", "COLLABORATOR"],
+        },
+      ],
+    },
+    {
+      source: { kind: "github" },
+      eventTypes: ["pull_request_review_comment.created"],
+      conditions: [{ field: "data.comment.mentions_app", op: "equals", value: true }],
+    },
+  ] as AgentTemplateTrigger["triggers"],
+};
+
+function oneClickClient(sources: EventSource[]) {
+  const calls: [string, unknown][] = [];
+  return {
+    calls,
+    async listEventSources() {
+      return sources;
+    },
+    async createEventSource(_workspaceId: string, request: unknown) {
+      calls.push(["createEventSource", request]);
+      return { source: { ...GITHUB, id: "source-new" } as EventSource };
+    },
+    async createScheduledTask(_workspaceId: string, request: any) {
+      calls.push(["createScheduledTask", request]);
+      return { id: "task-1", name: request.name } as any;
+    },
+  };
+}
+
+test("a one-click suggestion is added as it is, on the person's GitHub source", async () => {
+  const client = oneClickClient([GITHUB]);
+  const outcome = await addAgentSuggestedTrigger(t, {
+    client,
+    workspaceId: "ws",
+    agent: { ...AGENT, visibility: "workspace" },
+    suggestion: MENTIONED,
+    githubConnected: true,
+    now: NOW,
+  });
+  expect(outcome.kind).toBe("created");
+  expect(client.calls.map(([name]) => name)).toEqual(["createScheduledTask"]);
+  const request = client.calls[0]![1] as any;
+  expect(request.name).toBe("Bug fixer: Review when mentioned on a PR");
+  expect(request.visibility).toBe("workspace");
+  expect(request.agentConfig.agentId).toBe(AGENT.id);
+  expect(request.agentConfig.prompt).toBe(MENTIONED.instructions);
+  const triggers = request.events.triggers;
+  expect(triggers.map((entry: any) => [entry.sourceId, entry.eventTypes])).toEqual([
+    ["source-gh", ["issue_comment.created"]],
+    ["source-gh", ["pull_request_review_comment.created"]],
+  ]);
+  expect(triggers[0].conditions).toContainEqual({
+    field: "data.comment.author_association",
+    op: "in",
+    value: ["OWNER", "MEMBER", "COLLABORATOR"],
+  });
+});
+
+test("a one-click suggestion adds the GitHub source it lacks, or asks to set up", async () => {
+  const client = oneClickClient([]);
+  const added = await addAgentSuggestedTrigger(t, {
+    client,
+    workspaceId: "ws",
+    agent: { ...AGENT, visibility: "workspace" },
+    suggestion: MENTIONED,
+    githubConnected: true,
+    now: NOW,
+  });
+  expect(added.kind).toBe("created");
+  expect(client.calls.map(([name]) => name)).toEqual(["createEventSource", "createScheduledTask"]);
+  expect(
+    (client.calls[1]![1] as any).events.triggers.every(
+      (entry: any) => entry.sourceId === "source-new",
+    ),
+  ).toBe(true);
+
+  const unconnected = oneClickClient([]);
+  const waiting = await addAgentSuggestedTrigger(t, {
+    client: unconnected,
+    workspaceId: "ws",
+    agent: { ...AGENT, visibility: "workspace" },
+    suggestion: MENTIONED,
+    githubConnected: false,
+    now: NOW,
+  });
+  expect(waiting.kind).toBe("needs_setup");
+  expect(unconnected.calls).toEqual([]);
 });
 
 test("a pasted webhook waiting for its secret can be picked, and a short secret is refused", () => {
