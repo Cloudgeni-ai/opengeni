@@ -41,9 +41,13 @@ import { orgName } from "../../lib/org";
 import { hasAccountPermission } from "../../lib/permissions";
 import {
   AGENT_VERSION_CONFLICT,
+  agentViewerCanManage,
   organizationPeopleLabel,
   workspacePeopleLabel,
 } from "./agent-page";
+
+/** Who can use it stays with whoever made the agent and admins. */
+const SHARING_MANAGERS_ONLY = "Only whoever made it, or a workspace admin, can change this.";
 
 export const INSTRUCTIONS_HINT =
   "What it does and how. Applies in every chat. Put long reference material in Memory.";
@@ -187,6 +191,9 @@ function AgentForm({
   const [instructions, setInstructions] = useState(initial.instructions);
   const [memoryEnabled, setMemoryEnabled] = useState(initial.memoryEnabled);
   const [visibility, setVisibility] = useState<AgentVisibility>(initial.visibility);
+  // Someone who may edit the agent but not manage it keeps who can use it.
+  const sharingLocked = agent !== undefined && !agentViewerCanManage(agent);
+  const lockedOut = (value: AgentVisibility) => sharingLocked && value !== visibility;
   // An agent's own image (one made for it, in its workspace) stays its icon
   // until another is picked. A new agent starts from a chat's emoji, icon or
   // letters only: a chat's image is that chat's file.
@@ -413,17 +420,26 @@ function AgentForm({
               {
                 value: "private",
                 label: "Only me",
-                disabled: visibility !== "private" && privateChats === false,
-                disabledReason: ONLY_ME_UNAVAILABLE,
+                disabled: lockedOut("private") || (visibility !== "private" && privateChats === false),
+                disabledReason: lockedOut("private") ? SHARING_MANAGERS_ONLY : ONLY_ME_UNAVAILABLE,
               },
-              { value: "workspace", label: workspacePeopleLabel(workspaceName) },
+              {
+                value: "workspace",
+                label: workspacePeopleLabel(workspaceName),
+                disabled: lockedOut("workspace"),
+                disabledReason: SHARING_MANAGERS_ONLY,
+              },
               ...(organizationOption || visibility === "organization"
                 ? [
                     {
                       value: "organization",
                       label: organizationPeopleLabel(organizationName),
-                      disabled: visibility !== "organization" && !organizationAdmin,
-                      disabledReason: ORGANIZATION_ACCESS_ADMIN_ONLY,
+                      disabled:
+                        lockedOut("organization") ||
+                        (visibility !== "organization" && !organizationAdmin),
+                      disabledReason: lockedOut("organization")
+                        ? SHARING_MANAGERS_ONLY
+                        : ORGANIZATION_ACCESS_ADMIN_ONLY,
                     },
                   ]
                 : []),

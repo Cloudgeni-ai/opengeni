@@ -32,7 +32,10 @@ import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
  * also use from chat integrations; choosing it needs an organization admin,
  * decided by the caller from the request. Whoever made an agent and the admins
  * of its workspace may change it (a workspace-level caller without a person
- * may too, as with bot templates).
+ * may too, as with bot templates); a shared agent whose "Who can edit" is
+ * everyone in the workspace may be edited by anyone there who can start
+ * chats. Who can use or edit it, and deleting it, stay with its creator and
+ * admins.
  */
 
 /**
@@ -61,8 +64,11 @@ export function agentVisibleTo(
   );
 }
 
-/** Whether the viewer may change or delete the agent: its creator or an admin. */
-export function agentEditableBy(
+/**
+ * Whether the viewer may change who can use or edit the agent, or delete it:
+ * its creator, its Only me owner, an admin, or a workspace-level caller.
+ */
+export function agentManageableBy(
   viewer: AgentViewer,
   agent: Pick<AgentRecord, "visibility" | "ownerSubjectId" | "createdBySubjectId">,
 ): boolean {
@@ -76,6 +82,26 @@ export function agentEditableBy(
 }
 
 /**
+ * Whether the viewer may edit the agent (its name, Instructions, Memory, Can
+ * use, Skills, triggers): whoever may manage it, and on a shared agent whose
+ * "Who can edit" is everyone, anyone in its workspace who can start chats.
+ */
+export function agentEditableBy(
+  viewer: AgentViewer,
+  agent: Pick<AgentRecord, "visibility" | "ownerSubjectId" | "createdBySubjectId"> & {
+    editAccess?: AgentRecord["editAccess"];
+  },
+): boolean {
+  if (agentManageableBy(viewer, agent)) return true;
+  return (
+    agentVisibleTo(viewer, agent) &&
+    viewer.contributor &&
+    agent.visibility === "workspace" &&
+    agent.editAccess === "everyone"
+  );
+}
+
+/**
  * Whether the viewer may make the agent Only me. It then belongs to the
  * person who made it, so only they or an admin may take a shared one away
  * from everyone; an agent no person made has nobody to keep it.
@@ -84,7 +110,7 @@ export function agentViewerCanMakePrivate(
   viewer: AgentViewer,
   agent: Pick<AgentRecord, "visibility" | "ownerSubjectId" | "createdBySubjectId">,
 ): boolean {
-  if (agent.visibility === "private") return agentEditableBy(viewer, agent);
+  if (agent.visibility === "private") return agentManageableBy(viewer, agent);
   if (
     agent.createdBySubjectId === null ||
     agent.createdBySubjectId.startsWith("slack-agent:") ||
@@ -92,7 +118,7 @@ export function agentViewerCanMakePrivate(
   ) {
     return false;
   }
-  if (!agentEditableBy(viewer, agent)) return false;
+  if (!agentManageableBy(viewer, agent)) return false;
   return viewer.admin || viewer.subjectId === agent.createdBySubjectId;
 }
 
@@ -227,6 +253,7 @@ export function agentSummaryView(agent: AgentRecord, context: AgentViewContext):
     avatar: avatar.success ? avatar.data : null,
     visibility: agentVisibilityValue(agent),
     ownerSubjectId: agent.ownerSubjectId,
+    editAccess: agent.editAccess,
     origin: agent.origin,
     sourceSessionId: agent.sourceSessionId,
     createdBySubjectId: agent.createdBySubjectId,
@@ -246,6 +273,7 @@ export function agentSummaryView(agent: AgentRecord, context: AgentViewContext):
       .map((install) => slackAvailability(agent, install, context.slackTeamNames)),
     viewer: {
       canEdit,
+      canManage: agentManageableBy(context.viewer, agent),
       canManageSlack: context.viewer.admin && agent.visibility === "workspace",
       canOpenInSlack:
         context.viewer.admin &&

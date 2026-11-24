@@ -418,6 +418,54 @@ test("readers who can't edit see no Edit or Delete, and Memory is read-only", as
   expect(memory?.getAttribute("aria-disabled")).toBe("true");
 });
 
+test("Who can edit: its creator changes it; an editor who can't manage sees it read-only", async () => {
+  const agent = makeAgent({ editAccess: "everyone" });
+  const client = fakeAgentsClient([agent]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLElement>("[data-agent-edit-access]")!;
+  expect(row.textContent).toContain("Who can edit");
+  expect(row.textContent).toContain("Everyone in workspace");
+  const offered = await chooseFrom(row, "Everyone in workspace", "Creator and admins");
+  expect(offered).toEqual(["Creator and admins", "Everyone in workspace"]);
+  expect(client.calls).toContainEqual([
+    "updateAgent",
+    WORKSPACE_ID,
+    agent.id,
+    { expectedVersion: 1, editAccess: "creator_and_admins" },
+  ]);
+  await act(async () => mounted!.unmount());
+  mounted = null;
+
+  const editor = makeAgent({
+    editAccess: "everyone",
+    viewer: { canEdit: true, canManage: false, canManageSlack: false, canOpenInSlack: false },
+  });
+  const other = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([editor]))}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={editor.id} />
+    </AgentsTestHost>,
+  );
+  const locked = other.querySelector<HTMLElement>("[data-agent-edit-access] [role='combobox']");
+  expect(locked?.hasAttribute("disabled") || locked?.getAttribute("aria-disabled") === "true").toBe(
+    true,
+  );
+  expect(other.textContent).not.toContain("Delete agent");
+});
+
+test("an Only me agent has no Who can edit", async () => {
+  const agent = makeAgent({ visibility: "private", ownerSubjectId: "user-kari" });
+  const container = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([agent]))}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  expect(container.querySelector("[data-agent-edit-access]")).toBeNull();
+});
+
 // --- Form ----------------------------------------------------------------------
 
 test("Make this an agent starts from the chat's name and links the new agent to it", async () => {

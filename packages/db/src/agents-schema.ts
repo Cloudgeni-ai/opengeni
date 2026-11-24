@@ -45,6 +45,14 @@ export const agents = pgTable(
      * together with `agent_slack_installs.open` until the contract step.
      */
     organizationAccess: boolean("organization_access").notNull().default(false),
+    /**
+     * Who can edit a shared agent (1561): `creator_and_admins` (the default,
+     * and every agent made before it) or `everyone` in its workspace.
+     */
+    editAccess: text("edit_access")
+      .$type<"creator_and_admins" | "everyone">()
+      .notNull()
+      .default("creator_and_admins"),
     /** Can use rules (1517): [{connector, tool, permission}]. */
     toolPermissions: jsonb("tool_permissions").$type<unknown[]>().notNull().default([]),
     /** Skills listed on the agent page (1517): [{name}]. Display only. */
