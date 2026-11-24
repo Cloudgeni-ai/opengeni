@@ -173,6 +173,13 @@ import type {
   Workspace,
 } from "./types";
 import { errorMessage } from "@opengeni/contracts/values";
+import { rememberRouteRecoveryNotice } from "./lib/route-recovery-notice";
+
+/**
+ * The least time between two "who is signed in?" checks caused by a refused
+ * request or the tab coming back to the front. A 401 still checks at once.
+ */
+export const PRINCIPAL_RECHECK_INTERVAL_MS = 5_000;
 
 /**
  * Transport and sign-in functions the app state calls. Pass one stable object
@@ -220,9 +227,12 @@ export type AppStateHost = Readonly<{
   /**
    * Calls the listener when an API request is refused because the page's
    * sign-in is gone (a 401 that says the sign-in was missing or expired);
-   * absent: the app only learns of a lapsed sign-in when it next loads.
+   * `"forbidden"` for a 403, which may mean another tab signed in someone
+   * else. Absent: the app only learns of a lapsed sign-in when it next loads.
    */
-  subscribeSignInLost?: ((listener: () => void) => () => void) | undefined;
+  subscribeSignInLost?:
+    | ((listener: (reason?: "signed_out" | "forbidden") => void) => () => void)
+    | undefined;
   configureManagedActorEpoch: (epoch: string | null) => void;
   getStoredAccessKey: () => string | null;
   setStoredAccessKey: (value: string) => void;
@@ -944,14 +954,30 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   // once: its pages unmount, so their polling and streams stop, and the
   // sign-in surface shows (inside the desktop app it renews the window's
   // sign-in first). A refusal while the session is still live changes nothing.
+  //
+  // With one sign-in cookie per browser, another tab can sign in a different
+  // person while this one still shows the first person's workspace: every
+  // read is then refused with 403, not 401. A 403 or the tab coming back to
+  // the front checks the session too (at most every few seconds). When
+  // someone else is signed in, nothing this tab holds is theirs: it loads
+  // their own workspace from scratch, which drops every in-memory cache, and
+  // says why once it lands.
   useEffect(() => {
     if (!subscribeSignInLost || !managedAuthRequired || !authSession) return;
     const signedInUserId = authSession.user.id;
     const acceptedPrincipal = principalTransitionIdentity.current;
+    const checksPrincipal = !browserAccountsConfigured;
     let cancelled = false;
     let checking = false;
-    const unsubscribe = subscribeSignInLost(() => {
+    let lastPrincipalCheckAt = 0;
+    const check = (reason: "signed_out" | "forbidden" | "visible") => {
       if (cancelled || checking) return;
+      if (reason !== "signed_out") {
+        if (!checksPrincipal) return;
+        const now = Date.now();
+        if (now - lastPrincipalCheckAt < PRINCIPAL_RECHECK_INTERVAL_MS) return;
+        lastPrincipalCheckAt = now;
+      }
       checking = true;
       void fetchAuthSession()
         .then((current) => {
@@ -964,6 +990,18 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           }
           invalidatePrincipalWorkspaceState();
           authPrincipalIdRef.current = current?.user.id ?? null;
+          if (current) {
+            // Someone else is signed in: forget what this tab kept for the
+            // previous person (unsent drafts in session storage, recordings
+            // on this device), as a sign-out does, before loading afresh.
+            cancelled = true;
+            forgetSignedOutBrowserData();
+            void prepareRecordingsForSignOut(null, { ask: false }).finally(() => {
+              rememberRouteRecoveryNotice("account_changed");
+              hostPage.assign("/", { replace: true });
+            });
+            return;
+          }
           setAuthSession(current);
         })
         // Unreachable right now: the next refused request asks again.
@@ -971,10 +1009,23 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         .finally(() => {
           checking = false;
         });
-    });
+    };
+    const unsubscribe = subscribeSignInLost((reason) => check(reason ?? "signed_out"));
+    const onVisible = () => {
+      if (document.visibilityState === "visible") check("visible");
+    };
+    const onFocus = () => check("visible");
+    if (checksPrincipal && typeof window !== "undefined") {
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("visibilitychange", onVisible);
+    }
     return () => {
       cancelled = true;
       unsubscribe();
+      if (checksPrincipal && typeof window !== "undefined") {
+        window.removeEventListener("focus", onFocus);
+        document.removeEventListener("visibilitychange", onVisible);
+      }
     };
   }, [
     subscribeSignInLost,
@@ -982,6 +1033,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     authSession,
     fetchAuthSession,
     invalidatePrincipalWorkspaceState,
+    browserAccountsConfigured,
+    hostPage,
   ]);
 
   useEffect(() => {
