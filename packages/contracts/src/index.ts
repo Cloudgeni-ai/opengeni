@@ -11268,6 +11268,21 @@ export const SteerSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
      * already-waiting Steer into an immediate one.
      */
     interrupt: primitives.optionalBoolean,
+    /**
+     * Other waiting prompts to Steer with this one. All of them keep their
+     * queue order and reach the agent together, with no extra interruption.
+     * Prompts that already left the queue (this one included) or wait for a
+     * personal machine's owner are skipped; a changed one refuses the command.
+     */
+    together: z
+      .array(
+        z.object({
+          turnId: primitives.uuid,
+          expectedTurnVersion: primitives.positiveInteger,
+        }),
+      )
+      .max(200)
+      .optional(),
   }),
 );
 export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
@@ -14276,7 +14291,11 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       resolvedFirstPartyMcpPermissions: z.array(Permission),
       /** Agent configuration resolved for generated sessions; absent = legacy. */
       resolvedAgentConfig: ResolvedAgentConfig.optional(),
-      /** Effective instructions from the `agent.instructions` alias, when set. */
+      /**
+       * The generated chat's effective instructions: the `agent.instructions`
+       * alias, followed by the bound agent's Memory guidance when it has
+       * Memory on. The chat is created with exactly these.
+       */
       resolvedAgentInstructions: primitives.nonEmptyString
         .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
         .optional(),
@@ -24407,6 +24426,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Console agents (organization agents) are on for the caller's organization.
     // Absent on older servers and when off.
     orgAgents: primitives.optionalBoolean,
+    // Whether this deployment can export an editable artifact as an Office
+    // file (it runs the artifact materializer). Absent on older servers:
+    // clients then treat it as unknown.
+    artifactExport: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z

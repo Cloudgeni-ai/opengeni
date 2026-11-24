@@ -53,6 +53,11 @@ import {
   isRetryableDevicePollError,
   pollSuperGrokDeviceLogin,
 } from "@/components/supergrok-device-poll";
+import {
+  OnboardingPlanOfferCard,
+  useOnboardingPlanOffer,
+  type OnboardingPlan,
+} from "@/components/onboarding-plan-offer";
 
 type ProviderKey = "vercel" | "openrouter" | "opper";
 
@@ -177,10 +182,33 @@ export function ModelAccessOnboardingPanel({
   const { simplified, productName } = useSimplifiedInterface();
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<DevicePending | null>(null);
-  // The row whose connect step is open: a provider, or buying credits.
-  const [open, setOpen] = useState<ModelProviderId | "credits" | null>(
-    !startingCredits && !includedModel && billingMode === "stripe" ? "credits" : null,
+  // A paid plan (Pro) leads where the catalog sells one; buying credits stays
+  // one row among the other ways to pay. Starting credits never show it.
+  const planOffer = useOnboardingPlanOffer(
+    client,
+    organizationId,
+    billingMode === "stripe" && !startingCredits,
   );
+  const [subscribingPlan, setSubscribingPlan] = useState<string | null>(null);
+  // Per plan, the key and return URLs of its first attempt, so a retry
+  // replays exactly the same checkout request.
+  const planCheckouts = useRef(
+    new Map<string, { idempotencyKey: string; successUrl: string; cancelUrl: string }>(),
+  );
+  // The row whose connect step is open: a provider, or buying credits.
+  // Undefined until the person opens or closes one. Without a plan to offer,
+  // the choice screen opens buying credits, as before.
+  const [openChoice, setOpen] = useState<ModelProviderId | "credits" | null | undefined>(undefined);
+  const open =
+    openChoice !== undefined
+      ? openChoice
+      : !startingCredits &&
+          !includedModel &&
+          billingMode === "stripe" &&
+          planOffer.loaded &&
+          !planOffer.offer
+        ? "credits"
+        : null;
   // The "Use your own provider account" group, open to its provider rows.
   const [providerAccountsOpen, setProviderAccountsOpen] = useState(false);
   const keyProvider: ProviderKey | null =
@@ -213,10 +241,19 @@ export function ModelAccessOnboardingPanel({
     workspaceId,
   );
 
-  const variant = startingCredits ? "credits" : includedModel ? "included" : "choose";
+  // "plan" is the choice screen led by a paid plan. Its view waits for the
+  // plan read, so the event names the screen the person actually saw.
+  const variant = startingCredits
+    ? "credits"
+    : includedModel
+      ? "included"
+      : planOffer.offer
+        ? "plan"
+        : "choose";
+  const variantKnown = variant === "credits" || variant === "included" || planOffer.loaded;
   useEffect(() => {
-    onboardingJourney().viewed("model_access", variant);
-  }, [variant]);
+    if (variantKnown) onboardingJourney().viewed("model_access", variant);
+  }, [variant, variantKnown]);
 
   useEffect(() => {
     cancelled.current = false;
@@ -238,7 +275,7 @@ export function ModelAccessOnboardingPanel({
     stopDeviceLogin();
     onboardingJourney().completed(
       "model_access",
-      variant === "choose" && !won ? "skipped" : "start_chatting",
+      (variant === "choose" || variant === "plan") && !won ? "skipped" : "start_chatting",
     );
     onComplete();
   }
@@ -485,8 +522,50 @@ export function ModelAccessOnboardingPanel({
     stopDeviceLogin();
     setApiKey("");
     providerKeyOperation.current = null;
-    setOpen((current) => (current === row ? null : row));
+    setOpen(open === row ? null : row);
   }
+
+  async function subscribeToPlan(plan: OnboardingPlan): Promise<void> {
+    if (!client || busy) return;
+    setBusy(true);
+    setSubscribingPlan(plan.key);
+    try {
+      let request = planCheckouts.current.get(plan.key);
+      if (!request) {
+        // Plan credit pays for the same credits model as a purchase.
+        const creditsModel = await creditsModelForCheckout(client, workspaceId);
+        request = {
+          idempotencyKey: crypto.randomUUID(),
+          successUrl: creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
+          cancelUrl: window.location.href,
+        };
+        planCheckouts.current.set(plan.key, request);
+      }
+      const session = await client.createSubscriptionCheckout({
+        accountId: organizationId,
+        planKey: plan.key,
+        ...request,
+      });
+      onboardingJourney().completed("model_access", "plan_checkout", plan.key);
+      window.location.assign(session.url);
+    } catch (error) {
+      toast.error("Checkout failed", { description: userErrorText(error) });
+      setBusy(false);
+      setSubscribingPlan(null);
+    }
+  }
+
+  const planOfferCard = (quiet: boolean) =>
+    planOffer.offer ? (
+      <OnboardingPlanOfferCard
+        offer={planOffer.offer}
+        ownSubscriptions={!simplified && (codexEnabled || supergrokEnabled)}
+        busyPlanKey={subscribingPlan}
+        disabled={!client || busy || !!pending}
+        quiet={quiet}
+        onSubscribe={(plan) => void subscribeToPlan(plan)}
+      />
+    ) : null;
 
   async function celebrateCheckout(status: BillingCheckoutStatus): Promise<void> {
     setBusy(true);
@@ -884,10 +963,12 @@ export function ModelAccessOnboardingPanel({
           <div className="mt-8 border-t border-border pt-6">
             <h2 className="text-sm font-medium">Want a more capable model? (optional)</h2>
             <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              Connect a subscription or API key you already have
-              {billingMode === "stripe" ? ", or add Opengeni credits" : ""}. You can also do this
-              later.
+              {planOffer.offer
+                ? `Get ${planOffer.offer.primary.label}, or connect a subscription or API key you already have.`
+                : `Connect a subscription or API key you already have${billingMode === "stripe" ? ", or add Opengeni credits" : ""}.`}{" "}
+              You can also do this later.
             </p>
+            {planOffer.offer ? <div className="mt-3">{planOfferCard(true)}</div> : null}
             <div className="mt-3">{connectOptions}</div>
             {selectionRetryNotice}
             {coupon ? <div className="mt-4 text-center">{coupon}</div> : null}
@@ -898,20 +979,39 @@ export function ModelAccessOnboardingPanel({
     );
   }
 
+  // Wait for the plan read before choosing what leads, so the step doesn't
+  // switch from credits to Pro under the person.
+  if (!planOffer.loaded)
+    return (
+      <section className="flex min-h-0 flex-1 items-center justify-center" role="status">
+        <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
+        <span className="sr-only">Loading your options</span>
+      </section>
+    );
+
   return (
     <section className="flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
       <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
         <h1 className="text-xl font-semibold tracking-tight">
-          {creditsOnly ? "Add credits to start" : "Choose how to power your chats"}
+          {planOffer.offer
+            ? `Start with ${planOffer.offer.primary.label}`
+            : creditsOnly
+              ? "Add credits to start"
+              : "Choose how to power your chats"}
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-          {creditsOnly
-            ? "Chats are paid with credits as you go. There is nothing else to set up."
-            : billingMode === "stripe"
-              ? "Opengeni credits are the simplest way to start. You can also use a plan or provider account you already have."
-              : "Connect a plan or provider account you already have."}
+          {planOffer.offer
+            ? creditsOnly
+              ? "Or pay as you go with credits."
+              : "Or pay as you go, or use a subscription or provider account you already have."
+            : creditsOnly
+              ? "Chats are paid with credits as you go. There is nothing else to set up."
+              : billingMode === "stripe"
+                ? "Opengeni credits are the simplest way to start. You can also use a plan or provider account you already have."
+                : "Connect a plan or provider account you already have."}
         </p>
 
+        {planOffer.offer ? <div className="mt-6">{planOfferCard(false)}</div> : null}
         <div className="mt-6">{connectOptions}</div>
         {selectionRetryNotice}
         {coupon ? <div className="mt-4 text-center">{coupon}</div> : null}

@@ -476,6 +476,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/form-page-footer.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/signed-out-page.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/capability-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/plugin-discovery.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],

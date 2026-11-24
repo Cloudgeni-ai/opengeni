@@ -5477,11 +5477,16 @@ export class OpenGeniClient {
     ) {
       throw invalidApiResponseError("browser frame evidence does not match its request");
     }
+    const hiddenScrolled =
+      response.headers.get("x-opengeni-browser-frame-hidden-scrolled-height") ?? "";
     return {
       ...metadata,
       data,
       ...(response.headers.get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
         ? { inexactScrollbars: true as const }
+        : {}),
+      ...(/^[1-9][0-9]{0,8}$/.test(hiddenScrolled)
+        ? { hiddenScrolledHeight: Number(hiddenScrolled) }
         : {}),
     };
   }

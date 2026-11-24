@@ -3059,6 +3059,36 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a macOS launch of an app it cannot find is a definite failure", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) =>
+      name === "launch_app"
+        ? {
+            ...result({ error: "APP_NOT_INSTALLED", bundle_id: "com.example.portable" }, true),
+            text: "No installed macOS app found for bundle_id 'com.example.portable'.",
+          }
+        : await original(name, json);
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      // macOS refused it before launching anything: a definite failure.
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "launch", applicationId: "com.example.portable" },
+        }),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "CUA launch_app refused the operation: No installed macOS app found for bundle_id 'com.example.portable'.",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("a launch observes the launched app's window, once it appears", async () => {
     // The launched app's window shows up in the second listing after launch.
     class LaunchFixture extends Fixture {

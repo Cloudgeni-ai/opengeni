@@ -1,5 +1,19 @@
 # @opengeni/capabilities
 
+## 6.38.0
+
+### Patch Changes
+
+- 969cb9b: A tool search that mentions Opengeni itself, as app chats often do ("the Opengeni app"), no longer shows a Connected Machine card. The platform's own domain no longer counts as naming its built-in integrations; their own names still do.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/network@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

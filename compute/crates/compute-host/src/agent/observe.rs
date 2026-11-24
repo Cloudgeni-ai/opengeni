@@ -323,6 +323,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let host = crate::host_memory::host_gauges();
         gauges.zswap_stored = host.zswap_stored;
         gauges.zswap_original = host.zswap_original;
+        gauges.swap_total = host.swap_total;
+        gauges.swap_free = host.swap_free;
         gauges.huge_pages_free = host.huge_pages_free;
         gauges.pressure = host.pressure;
         if let Some((_, lanes)) = self.store.chunks() {

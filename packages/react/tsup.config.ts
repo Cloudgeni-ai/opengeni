@@ -70,6 +70,7 @@ export default defineConfig({
     "src/meetings.ts",
     "src/meetings-recorder.ts",
     "src/automations.ts",
+    "src/skills.ts",
     "src/artifacts.ts",
     "src/artifacts-spreadsheet.ts",
     "src/artifacts-document.ts",

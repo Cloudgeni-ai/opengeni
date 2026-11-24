@@ -123,6 +123,8 @@ mock.module("@tanstack/react-router", () => ({
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
 const { ModelAccessOnboardingPanel } = await import("@/components/model-access-onboarding");
+const { onboardingPlanOffer, PLAN_OFFER_TIMEOUT_MS } =
+  await import("@/components/onboarding-plan-offer");
 const { DirectModelProviderForm } = await import("@/components/direct-model-provider-connection");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
@@ -3107,6 +3109,237 @@ describe("organization onboarding UI", () => {
     } finally {
       await act(async () => settledRoot.unmount());
       settledContainer.remove();
+    }
+  });
+});
+
+describe("onboarding leads with Pro where plans are sold", () => {
+  const M = 1_000_000;
+  const catalogPlan = (
+    key: string,
+    label: string,
+    price: number | null,
+    credit: number,
+    seats: number | null,
+  ) => ({
+    key,
+    label,
+    stripePriceId: price ? `price_${key}` : null,
+    monthlyPriceMicros: price === null ? null : price * M,
+    monthlyCreditMicros: credit * M,
+    seatLimit: seats,
+    freeCredit: key === "free",
+    selfService: Boolean(price),
+  });
+  const catalog = {
+    accountId: "organization-a",
+    revision: 38,
+    plans: [
+      catalogPlan("free", "Free", 0, 10, 3),
+      catalogPlan("pro", "Pro", 20, 100, 5),
+      catalogPlan("max", "Max", 100, 500, 10),
+      catalogPlan("enterprise", "Enterprise", null, 0, null),
+    ],
+    plan: null,
+  };
+
+  async function renderChoice(client: Record<string, unknown>) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <ModelAccessOnboardingPanel
+          client={client as never}
+          organizationId="organization-a"
+          workspaceId="personal-workspace"
+          billingMode="stripe"
+          codexEnabled
+          supergrokEnabled
+          onComplete={() => undefined}
+        />,
+      ),
+    );
+    await flush();
+    return {
+      container,
+      unmount: async () => {
+        await act(async () => root.unmount());
+        container.remove();
+      },
+    };
+  }
+
+  test("Pro is the primary action with its price and what it includes; top-up is not prompted", async () => {
+    const getBillingSubscriptionPlans = mock(async () => catalog);
+    const createSubscriptionCheckout = mock(async (_request: Record<string, unknown>) => {
+      throw new Error("Stripe is unavailable in this test");
+    });
+    const { container, unmount } = await renderChoice({
+      getBillingSubscriptionPlans,
+      createSubscriptionCheckout,
+      getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
+    });
+    try {
+      expect(getBillingSubscriptionPlans).toHaveBeenCalledWith({ accountId: "organization-a" });
+      expect(container.querySelector("h1")!.textContent).toBe("Start with Pro");
+      const offer = container.querySelector("[data-testid=onboarding-plan-offer]")!;
+      expect(offer.textContent).toContain("$20");
+      expect(offer.textContent).toContain("$100 in credit every month");
+      expect(offer.textContent).toContain("Use your own AI subscriptions, no fee");
+      expect(offer.textContent).toContain("5 seats");
+      const getPro = Array.from(offer.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Get Pro",
+      )!;
+      expect(getPro.getAttribute("data-analytics-action")).toBe("upgrade_plan");
+      // Buying credits is still one row away, but closed and after Pro.
+      const credits = providerRow(container, "Opengeni credits")!;
+      expect(credits).not.toBeNull();
+      expect(
+        getPro.compareDocumentPosition(credits) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        Array.from(container.querySelectorAll("button")).some((button) =>
+          button.textContent?.includes("in credits"),
+        ),
+      ).toBe(false);
+      expect(container.textContent).not.toContain("Opengeni credits are the simplest way to start");
+
+      const page = window as unknown as { happyDOM: { setURL(url: string): void } };
+      page.happyDOM.setURL("https://app.example.test/onboarding");
+      await act(async () => getPro.click());
+      await flush();
+      expect(createSubscriptionCheckout).toHaveBeenCalledTimes(1);
+      const first = createSubscriptionCheckout.mock.calls[0]![0];
+      expect(first).toMatchObject({ accountId: "organization-a", planKey: "pro" });
+      expect(String(first.successUrl)).toContain("/workspaces/personal-workspace/sessions");
+      // A retry of the same plan reuses its key; Max is its own checkout.
+      await act(async () => getPro.click());
+      await flush();
+      expect(createSubscriptionCheckout.mock.calls[1]![0].idempotencyKey).toBe(
+        first.idempotencyKey,
+      );
+      expect(createSubscriptionCheckout.mock.calls[1]![0].successUrl).toBe(first.successUrl);
+      expect(createSubscriptionCheckout.mock.calls[1]![0].cancelUrl).toBe(first.cancelUrl);
+      await clickButton(container, "Or Max for $100 / month");
+      await flush();
+      const max = createSubscriptionCheckout.mock.calls[2]![0];
+      expect(max).toMatchObject({ planKey: "max" });
+      expect(max.idempotencyKey).not.toBe(first.idempotencyKey);
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("without subscription plans the step keeps opening credits", async () => {
+    const { container, unmount } = await renderChoice({
+      getBillingSubscriptionPlans: mock(async () => {
+        throw Object.assign(new Error("subscription plans are not enabled"), { status: 404 });
+      }),
+    });
+    try {
+      expect(container.querySelector("[data-testid=onboarding-plan-offer]")).toBeNull();
+      expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
+      expect(
+        Array.from(container.querySelectorAll("button")).some((button) =>
+          button.textContent?.includes("in credits"),
+        ),
+      ).toBe(true);
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("a slow plan read shows the usual screen, and a late answer doesn't switch it", async () => {
+    let answer: (value: typeof catalog) => void = () => undefined;
+    const realSetTimeout = globalThis.setTimeout;
+    const fallbacks: (() => void)[] = [];
+    globalThis.setTimeout = ((handler: () => void, ms?: number) => {
+      if (ms === PLAN_OFFER_TIMEOUT_MS) {
+        fallbacks.push(handler);
+        return 0;
+      }
+      return realSetTimeout(handler, ms);
+    }) as typeof setTimeout;
+    try {
+      const { container, unmount } = await renderChoice({
+        getBillingSubscriptionPlans: mock(
+          () => new Promise<typeof catalog>((resolve) => (answer = resolve)),
+        ),
+      });
+      try {
+        expect(container.querySelector("h1")).toBeNull();
+        await act(async () => fallbacks.forEach((fallback) => fallback()));
+        await flush();
+        expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
+        await act(async () => answer(catalog));
+        await flush();
+        expect(container.querySelector("[data-testid=onboarding-plan-offer]")).toBeNull();
+      } finally {
+        await unmount();
+      }
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+  });
+
+  test("an organization that already has a paid plan is not offered one", async () => {
+    const { container, unmount } = await renderChoice({
+      getBillingSubscriptionPlans: mock(async () => ({
+        ...catalog,
+        plan: { key: "pro", label: "Pro", status: "active" },
+      })),
+    });
+    try {
+      expect(container.querySelector("[data-testid=onboarding-plan-offer]")).toBeNull();
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("the offer follows Billing's checkout rule for the current plan", () => {
+    const free = { key: "free", label: "Free", status: "active", cancelAtPeriodEnd: false };
+    expect(onboardingPlanOffer({ ...catalog, plan: free as never })?.primary.key).toBe("pro");
+    expect(onboardingPlanOffer({ ...catalog, plan: null })?.alternative?.key).toBe("max");
+    for (const plan of [
+      { ...free, status: "past_due" },
+      { ...free, cancelAtPeriodEnd: true },
+      { ...free, key: "enterprise", label: "Enterprise" },
+      { ...free, key: "max", label: "Max" },
+    ])
+      expect(onboardingPlanOffer({ ...catalog, plan: plan as never })).toBeNull();
+    expect(
+      onboardingPlanOffer({ ...catalog, plans: [catalog.plans[0]!, catalog.plans[3]!] }),
+    ).toBeNull();
+  });
+
+  test("starting credits keep their screen and never read plans", async () => {
+    const getBillingSubscriptionPlans = mock(async () => catalog);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={{ getBillingSubscriptionPlans } as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            billingMode="stripe"
+            startingCredits={{
+              balance: { balanceMicros: 10_000_000, currency: "usd" },
+              model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
+      expect(getBillingSubscriptionPlans).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 });

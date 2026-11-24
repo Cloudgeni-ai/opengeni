@@ -11,6 +11,11 @@ import {
   ConnectionAccountPicker,
   type ConnectionAccountControls,
 } from "./capabilities/connection-account-picker";
+import {
+  defaultConnectionAccountIds,
+  lapsedConnectionAccount,
+} from "./capabilities/session-connection-accounts";
+import type { ConnectionMetadata } from "@opengeni/sdk";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "./capabilities/capability-logo";
 import { ConnectorAction } from "../../ui/composer-menu-action";
@@ -40,7 +45,8 @@ export type SessionConnectorsMenuProps = {
   customizing?: boolean | undefined;
   onCustomizingChange?: ((customizing: boolean) => void) | undefined;
   leading?: ReactNode | undefined;
-  onReconnect?: ((serverId: string) => void) | undefined;
+  /** Reconnect a connector; with an account, that account (one that stopped working). */
+  onReconnect?: ((serverId: string, account?: ConnectionMetadata) => void) | undefined;
   loading?: boolean | undefined;
   error?: string | null | undefined;
   busyId?: string | null | undefined;
@@ -103,6 +109,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
             }}
             presentation={props.presentation}
             disabled={accounts.disabled || accounts.loading || Boolean(accounts.error)}
+            onReconnect={props.onReconnect}
           />
           {accounts.error ? (
             <p role="alert" className={cn(MENU_NOTE_CLASS, "text-status-failed")}>
@@ -174,12 +181,18 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         ) : null}
         {connectors.map((server) => {
           const selected = props.selection.mcpServerIds.has(server.id);
-          const repair = server.connectionStatus === "reconnect";
+          const accountGroup = accounts?.groups.find((group) => group.serverId === server.id);
+          // An account this chat would use stopped working: it keeps being
+          // sent as picked, and the connector says so until it is reconnected
+          // or turned off.
+          const lapsed = selected
+            ? lapsedConnectionAccount(accountGroup, accounts?.choices[server.id])
+            : null;
+          const repair = server.connectionStatus === "reconnect" || lapsed !== null;
           const connect = server.connectionStatus === "connect";
           const unavailable = server.connectionStatus === "unavailable";
           const busy = props.busyId === server.id;
           const setupAction = (connect || repair || unavailable) && !(customizing && selected);
-          const accountGroup = accounts?.groups.find((group) => group.serverId === server.id);
           const setupLabel = connect
             ? `Connect your ${server.name} account`
             : repair
@@ -245,13 +258,14 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   className="connector-control flex size-11 shrink-0 items-center justify-center rounded-md p-2"
                   onAction={() => {
                     if (setupAction) {
-                      props.onReconnect?.(server.id);
+                      if (lapsed) props.onReconnect?.(server.id, lapsed);
+                      else props.onReconnect?.(server.id);
                       return;
                     }
                     if (!selected && accounts?.choices[server.id]?.length === 0) {
                       accounts.onChoose(
                         server.id,
-                        accountGroup?.accounts.map((account) => account.id) ?? [],
+                        accountGroup ? defaultConnectionAccountIds(accountGroup) : [],
                       );
                     }
                     changeConnector(server.id, !selected);

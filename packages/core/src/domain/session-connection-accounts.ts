@@ -92,10 +92,12 @@ export type ContinuedConnectionAccountGap = {
  * current accounts. Nothing from an earlier turn's accounts is copied.
  *
  * A picked account that can no longer be used is never replaced by another
- * account: its connector is left out of this turn. The same applies to a
- * connector whose account can no longer be chosen automatically (for example
- * several accounts now match and none was picked). Every other connector is
- * unaffected.
+ * account. The connector keeps the person's other picks that still work, as a
+ * new message with the same picks would; with none left it is left out of
+ * this turn. The same applies to a connector whose account can no longer be
+ * chosen automatically (for example several accounts now match and none was
+ * picked). Every other connector is unaffected. Each left-out pick or
+ * connector is recorded as a gap.
  *
  * `db` is the claim transaction, so every read runs one at a time. The
  * resolution shares its reads (`ConnectionAccountReads`): membership, the
@@ -183,11 +185,21 @@ export async function resolveContinuedConnectionAccounts(input: {
         targetSessionId: sessionId,
         authoritySelections: selections,
         reads,
+        // A pick that stopped working is left out exactly as on a new message:
+        // its connector keeps only the other picks that still work.
+        unusableSelections: "omit",
       });
       return {
         mcpAccountBindings: resolved.mcpAccountBindings,
         personalConnectionDelegations: resolved.personalConnectionDelegations,
-        gaps,
+        gaps: [
+          ...gaps,
+          ...resolved.omittedSelections.map((account) => ({
+            serverId: account.serverId,
+            connectionId: account.connectionId,
+            reason: account.reason,
+          })),
+        ],
       };
     } catch (error) {
       if (!(error instanceof ConnectionAccountSelectionError)) throw error;
@@ -207,8 +219,7 @@ export async function resolveContinuedConnectionAccounts(input: {
           : error.diagnostic.reason === "owner_access_unavailable"
             ? selections.map((selection) => ({ ...selection, reason: error.diagnostic.reason }))
             : [];
-      const dropped = new Set(unusable.map((account) => account.serverId));
-      if (dropped.size === 0 || round > intent.selections.length + tools.length + 2) throw error;
+      if (unusable.length === 0 || round > intent.selections.length + tools.length + 2) throw error;
       gaps.push(
         ...unusable.map((account) => ({
           serverId: account.serverId,
@@ -216,7 +227,22 @@ export async function resolveContinuedConnectionAccounts(input: {
           reason: account.reason,
         })),
       );
-      selections = selections.filter((selection) => !dropped.has(selection.serverId));
+      // Drop only the unusable picks while the connector has another pick
+      // left; drop the connector when none remain (no pick would mean its
+      // defaults, which would widen the person's choice).
+      const unusablePick = (selection: McpConnectionAccountSelection) =>
+        unusable.some(
+          (account) =>
+            account.serverId === selection.serverId &&
+            (account.connectionId === null || account.connectionId === selection.connectionId),
+        );
+      const kept = selections.filter((selection) => !unusablePick(selection));
+      const dropped = new Set(
+        unusable
+          .map((account) => account.serverId)
+          .filter((serverId) => !kept.some((selection) => selection.serverId === serverId)),
+      );
+      selections = kept.filter((selection) => !dropped.has(selection.serverId));
       tools = tools.filter((tool) => !(tool.kind === "mcp" && dropped.has(tool.id)));
       if (dropped.has(PERSONAL_GITHUB_CONNECTION_SURFACE_ID)) {
         resources = withoutPersonalRepositories(resources);

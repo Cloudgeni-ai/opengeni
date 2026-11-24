@@ -1904,6 +1904,7 @@ export function createAppComposition(
           : {}),
         connectedMachines: deps.settings.sandboxSelfhostedEnabled,
         ...(orgAgentsEnabled ? { orgAgents: true } : {}),
+        artifactExport: deps.settings.artifactMaterializerDeployed,
         browserExtension: browserExtension(deps.settings),
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),

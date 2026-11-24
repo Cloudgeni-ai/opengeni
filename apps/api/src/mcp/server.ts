@@ -13,6 +13,7 @@ import {
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  AGENT_LIST_CHATS_TOOL,
   assertGoalResumeAllowed,
   createGitHubPersonalEventSource,
   MissingPermissionRefusal,
@@ -44,6 +45,7 @@ import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./use
 import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
+  inlineAppSource,
   workspaceArtifactDownloads,
 } from "../site-uploads";
 import {
@@ -710,6 +712,7 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   agentRefToolInput,
+  delegatedChatHasListChatsTool,
   delegatedChatInstructions,
   resolveDelegationAgent,
   delegationAgentSubject,
@@ -4607,7 +4610,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_get_source",
     {
       description:
-        "Get artifact metadata, version id, and signed download URLs for HTML, optional source JSON and the version's server code files (server, null without code). Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
+        "Get artifact metadata, version id, and the version's source: its source JSON (or HTML when source is null; edit the HTML then) and its server code files (server, null without code). Each comes with a signed download URL, and with its text in content when the whole app is small; download only what has no content, with curl or Bun. Omit versionId for the current version.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         versionId: z4.string().uuid().optional(),
@@ -4638,6 +4641,18 @@ function registerWorkspaceArtifactTools(
         workspaceArtifactDownloads(storage, ref, "sandbox"),
         getAppServerManifest(deps.db, grant.workspaceId, artifactId, ref.version.id),
       ]);
+      const inline = await inlineAppSource(
+        storage,
+        ref,
+        (serverManifest?.files ?? []).map((file) => ({
+          key: appServerObjectKey(grant.workspaceId, file.sha256),
+          sizeBytes: file.sizeBytes,
+        })),
+      );
+      if (inline.page !== null) {
+        if (downloads.source) Object.assign(downloads.source, { content: inline.page });
+        else Object.assign(downloads.html, { content: inline.page });
+      }
       // The version's server code: download each file to edit it, then upload
       // the whole bundle again ({main, files, tools, egress, secrets,
       // toolResults}); keeping toolResults keeps what env.tools.call returns.
@@ -4649,12 +4664,18 @@ function registerWorkspaceArtifactTools(
             secrets: serverManifest.secrets,
             toolResults: serverManifest.toolResults ?? "raw",
             files: await Promise.all(
-              serverManifest.files.map(async (file) => {
+              serverManifest.files.map(async (file, index) => {
                 const signed = await storage.createGetUrl({
                   key: appServerObjectKey(grant.workspaceId, file.sha256),
                   audience: "sandbox",
                 });
-                return { path: file.path, url: signed.url, expiresAt: signed.expiresAt };
+                const content = inline.server[index] ?? null;
+                return {
+                  path: file.path,
+                  url: signed.url,
+                  expiresAt: signed.expiresAt,
+                  ...(content === null ? {} : { content }),
+                };
               }),
             ),
           }
@@ -7347,6 +7368,11 @@ function registerWorkspaceOrchestrationTools(
           const { machineTarget, title, projectId, agentName, ...request } = args;
           // Delegation by name: the child is a chat with that agent.
           let delegated: { agentId: string; instructions?: string } | null = null;
+          // Its Memory's `slack_agent_chats`, added like an app chat's
+          // addition. Only a chat created without a calling chat follows the
+          // defaults and takes additions; a child sees only what its parent
+          // sees.
+          let delegatedFirstPartyAdditions: FirstPartyMcpToolName[] = [];
           // Whose agents the child may run, when not the grant's subject.
           let agentAccessSubjectId: string | undefined;
           if (agentName !== undefined) {
@@ -7369,13 +7395,29 @@ function registerWorkspaceOrchestrationTools(
               caller,
             );
             if (!resolved.ok) return agentDelegationFailureResult(resolved.code, resolved.message);
+            const createRequest = request as {
+              firstPartyMcpTools?: FirstPartyMcpToolName[];
+              firstPartyMcpPermissions?: Permission[];
+            };
+            const listChatsTool =
+              resolved.agent.memoryEnabled &&
+              (await delegatedChatHasListChatsTool(deps, {
+                workspaceId: grant.workspaceId,
+                callerSessionId,
+                requestedTools: createRequest.firstPartyMcpTools,
+                requestedPermissions: createRequest.firstPartyMcpPermissions,
+              }));
             const instructions = delegatedChatInstructions(resolved.agent, {
               instructions: request.instructions,
               ownerSubjectId: caller?.ownerSubjectId ?? grant.subjectId ?? null,
               private: caller?.private ?? false,
               slackDm: caller?.slackDm ?? false,
               memoryOff: request.memoryScope === "off" || (caller?.memoryOff ?? false),
+              listChatsTool,
             });
+            if (listChatsTool && callerSessionId === null) {
+              delegatedFirstPartyAdditions = [AGENT_LIST_CHATS_TOOL];
+            }
             delegated = {
               agentId: resolved.agent.id,
               ...(instructions !== undefined ? { instructions } : {}),
@@ -7410,7 +7452,12 @@ function registerWorkspaceOrchestrationTools(
             rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
-            agentAccessSubjectId ? { agentAccessSubjectId } : {},
+            {
+              ...(agentAccessSubjectId ? { agentAccessSubjectId } : {}),
+              ...(delegatedFirstPartyAdditions.length
+                ? { firstPartyMcpToolAdditions: delegatedFirstPartyAdditions }
+                : {}),
+            },
           );
           return json(
             sessionCreateMutationReceipt(

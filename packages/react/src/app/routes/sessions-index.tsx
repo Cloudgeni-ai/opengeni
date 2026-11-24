@@ -136,7 +136,10 @@ import {
   isPaymentRequiredError,
   type CreditRefusalRecord,
 } from "../lib/model-access";
-import { composerSubmissionErrorMessage } from "../../lib/format";
+import {
+  composerSubmissionErrorMessage,
+  isConnectionAccountSubmissionError,
+} from "../../lib/format";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -1488,58 +1491,95 @@ function SessionsIndexRouteContent({
             let draftConflict = false;
             let draftChangedElsewhere = false;
             let outcomeUnknown = false;
-            const created = await context.startSession(
-              workspaceId,
-              {
-                text,
-                resources: submittedResources,
-                tools: submittedSnapshot.tools,
-                model,
-                reasoningEffort,
-                latencyMode,
-                ...submission.extras,
-                connectionAccounts: connectionAccounts.selections,
-              },
-              {
-                targetSandboxId: submission.options.targetSandboxId,
-                workingDir: submission.options.workingDir,
-                channelId: selectedChannelId,
-                omitWorkspaceResources: submission.omitWorkspaceResources,
-                installedSkillIds: launch.skillCapabilityId
-                  ? [launch.skillCapabilityId]
-                  : undefined,
-                agent: newSessionAgent,
-                expectedNewSessionDraftRevision: flushed.revision,
-                newSessionDraftToolPolicy: persistedToolPolicy,
-                agentLearning: draft.agentLearning,
-                usageLimitMicros,
-                visibility: newSessionCreateVisibility(
-                  personalWorkspace,
-                  submission.options.visibility ?? "workspace",
-                  tenancyCapabilities?.canCreatePrivate === true,
-                ),
-                onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
-                  // Only an older server still refuses a Send over its draft.
-                  draftConflict = newSessionDraft.captureConflict(error);
-                  if (draftConflict) {
-                    draftChangedElsewhere =
-                      newSessionDraftConflictRevision(error) !== flushed.revision;
-                  }
-                  outcomeUnknown = uncertain;
-                  recoverPersonalResourceAttachment(error, request);
-                  connectionAccounts.onSelectionError(error);
-                  // A brief outage shows the updating notice, not a toast.
-                  // An unconfirmed create keeps its idempotency key, so the
-                  // person's next Send cannot start a second session.
-                  return (
-                    draftConflict ||
-                    newSessionDraft.reportUnavailable(error) ||
-                    noteCreditRefusal(error, request) ||
-                    noteCreateFailure(error, sentSignature)
-                  );
+            // A first refusal over connector accounts is held back: the send
+            // goes again once without accounts that stopped working, and only
+            // a refusal that stands is shown.
+            let accountRefusal: { error: Error; request: unknown } | null = null;
+            const sentAccounts = connectionAccounts.selections;
+            const create = (accounts: typeof sentAccounts, retrying: boolean) =>
+              context.startSession(
+                workspaceId,
+                {
+                  text,
+                  resources: submittedResources,
+                  tools: submittedSnapshot.tools,
+                  model,
+                  reasoningEffort,
+                  latencyMode,
+                  ...submission.extras,
+                  connectionAccounts: accounts,
                 },
-              },
-            );
+                {
+                  targetSandboxId: submission.options.targetSandboxId,
+                  workingDir: submission.options.workingDir,
+                  channelId: selectedChannelId,
+                  omitWorkspaceResources: submission.omitWorkspaceResources,
+                  installedSkillIds: launch.skillCapabilityId
+                    ? [launch.skillCapabilityId]
+                    : undefined,
+                  agent: newSessionAgent,
+                  expectedNewSessionDraftRevision: flushed.revision,
+                  newSessionDraftToolPolicy: persistedToolPolicy,
+                  agentLearning: draft.agentLearning,
+                  usageLimitMicros,
+                  visibility: newSessionCreateVisibility(
+                    personalWorkspace,
+                    submission.options.visibility ?? "workspace",
+                    tenancyCapabilities?.canCreatePrivate === true,
+                  ),
+                  onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                    // Only an older server still refuses a Send over its draft.
+                    draftConflict = newSessionDraft.captureConflict(error);
+                    if (draftConflict) {
+                      draftChangedElsewhere =
+                        newSessionDraftConflictRevision(error) !== flushed.revision;
+                    }
+                    outcomeUnknown = uncertain;
+                    if (
+                      !retrying &&
+                      !draftConflict &&
+                      !uncertain &&
+                      isConnectionAccountSubmissionError(error)
+                    ) {
+                      accountRefusal = { error, request };
+                      return true;
+                    }
+                    recoverPersonalResourceAttachment(error, request);
+                    connectionAccounts.onSelectionError(error);
+                    // A brief outage shows the updating notice, not a toast.
+                    // An unconfirmed create keeps its idempotency key, so the
+                    // person's next Send cannot start a second session.
+                    return (
+                      draftConflict ||
+                      newSessionDraft.reportUnavailable(error) ||
+                      noteCreditRefusal(error, request) ||
+                      noteCreateFailure(error, sentSignature)
+                    );
+                  },
+                },
+              );
+            let created = await create(sentAccounts, false);
+            const refused = accountRefusal as { error: Error; request: unknown } | null;
+            if (!created && refused) {
+              const revised = await connectionAccounts.reviseRefusedAccounts(
+                refused.error,
+                sentAccounts,
+              );
+              if (revised) {
+                created = await create(revised, true);
+              } else {
+                recoverPersonalResourceAttachment(
+                  refused.error,
+                  refused.request as Parameters<typeof recoverPersonalResourceAttachment>[1],
+                );
+                connectionAccounts.onSelectionError(refused.error);
+                if (!noteCreateFailure(refused.error, sentSignature)) {
+                  toast.error("Failed to start session", {
+                    description: composerSubmissionErrorMessage(t, refused.error),
+                  });
+                }
+              }
+            }
             if (!created) {
               if (draftConflict) {
                 await preserveNewerLocalDraft();

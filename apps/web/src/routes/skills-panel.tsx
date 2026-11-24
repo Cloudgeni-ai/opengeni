@@ -1,93 +1,38 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { GraduationCapIcon, LinkIcon, PlusIcon } from "lucide-react";
-import { ConnectionInstalled } from "@opengeni/react/connect";
-import "@opengeni/react/connect.css";
-import type {
-  SkillRecord,
-  RemoveWorkspaceSkillRequest,
-  SkillScope,
-  SkillSummary,
-  PreferenceRegistryRevisionSummary,
-} from "@opengeni/sdk";
-import { CatalogHeader } from "@/components/capabilities/catalog-header";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { LinkIcon } from "lucide-react";
+import type { SkillRecord, SkillScope, SkillSummary } from "@opengeni/sdk";
 import {
-  CapabilitySlotPage,
-  useCapabilityPageSlot,
-} from "@/components/capabilities/capability-page-slot";
-import { humanizeName } from "@/components/capabilities/skill-copy";
-import { SkillPage, skillStatus } from "@/components/capabilities/skill-page";
+  SkillsPanel as SharedSkillsPanel,
+  type SkillOwnerFilter,
+  type SkillsPanelController,
+} from "@opengeni/react/skills";
+import { humanizeName } from "@opengeni/react/app/lib/skill-names";
+import { CatalogHeader } from "@/components/capabilities/catalog-header";
+import { useCapabilityPageSlot } from "@/components/capabilities/capability-page-slot";
 import {
   OrganizationReachDialog,
   organizationReachSummary,
 } from "@/components/organization-reach-dialog";
 import { useOrganizationNameFrom } from "@/lib/use-organization-name";
-import { Button } from "@opengeni/react/ui/button";
-import { LogoTile } from "@opengeni/react/ui/logo-tile";
-import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
-import { DetailPage } from "@opengeni/react/ui/detail-page";
-import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
-import { EmptyState } from "@opengeni/react/ui/empty-state";
-import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
-import { MoreMenu } from "@opengeni/react/ui/page-actions";
 import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
-import {
-  apiErrorDetails,
-  isPermissionDenied,
-  userErrorText,
-  userErrorTextWithoutReference,
-} from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
-/** What failed, and the error behind it: the UI shows advice, never the raw API string. */
-type SkillsFailure = { title: string; cause: unknown };
+/*
+ * The console's Skills tab: the shared Skills page from @opengeni/react/skills
+ * with what only the console adds: the Capabilities toolbar and page slot,
+ * personal and organization Skills, where an organization Skill works, and
+ * import from a URL.
+ */
 
-/** Both product destinations use this catalog and the same folder write API. */
+export {
+  SKILL_OWNER_FILTER_OPTIONS,
+  skillOwnerListFilter,
+  type SkillOwnerFilter,
+} from "@opengeni/react/skills";
 
-/** Whose a skill is, on its status line: "Installed · Workspace". */
-const SKILL_SCOPE_LABEL: Record<SkillScope, string> = {
-  workspace: "Workspace",
-  organization: "Organization",
-  user: "Yours",
-};
-
-/** Whose Skills the list shows, picked next to the Capabilities search. */
-export type SkillOwnerFilter = "all" | "mine" | "workspace" | "organization";
-
-export const SKILL_OWNER_FILTER_OPTIONS: ReadonlyArray<{
-  value: SkillOwnerFilter;
-  label: string;
-}> = [
-  { value: "all", label: "All" },
-  { value: "mine", label: SKILL_SCOPE_LABEL.user },
-  { value: "workspace", label: SKILL_SCOPE_LABEL.workspace },
-  { value: "organization", label: SKILL_SCOPE_LABEL.organization },
-];
-
-/** The server-side list filter for a choice; the list is paged, so the server filters. */
-export function skillOwnerListFilter(owner: SkillOwnerFilter): { scope?: SkillScope } {
-  if (owner === "mine") return { scope: "user" };
-  if (owner === "workspace" || owner === "organization") return { scope: owner };
-  return {};
-}
-
-function matchesOwner(skill: SkillSummary, owner: SkillOwnerFilter): boolean {
-  const { scope } = skillOwnerListFilter(owner);
-  return !scope || skill.scope === scope;
-}
-
-export function SkillsPanel({
-  workspaceId,
-  query = "",
-  owner = "all",
-  onFindSkill,
-  onImportSkill,
-  refreshRevision = 0,
-  onSkillsChange,
-  onRemoved,
-  openSkillRef,
-}: {
+type SkillsPanelProps = {
   workspaceId: string;
   query?: string;
   owner?: SkillOwnerFilter;
@@ -97,21 +42,10 @@ export function SkillsPanel({
   onSkillsChange?: (skills: SkillSummary[]) => void;
   onRemoved?: () => void;
   openSkillRef?: RefObject<((id: string) => void) | null>;
-}) {
-  return (
-    <SkillsPanelContent
-      context={useAppContext()}
-      workspaceId={workspaceId}
-      query={query}
-      owner={owner}
-      onFindSkill={onFindSkill}
-      onImportSkill={onImportSkill}
-      refreshRevision={refreshRevision}
-      {...(onSkillsChange ? { onSkillsChange } : {})}
-      {...(onRemoved ? { onRemoved } : {})}
-      {...(openSkillRef ? { openSkillRef } : {})}
-    />
-  );
+};
+
+export function SkillsPanel(props: SkillsPanelProps) {
+  return <SkillsPanelContent context={useAppContext()} {...props} />;
 }
 
 export function SkillsPanelContent({
@@ -125,30 +59,12 @@ export function SkillsPanelContent({
   onSkillsChange,
   onRemoved,
   openSkillRef,
-}: {
-  context: AppContextValue;
-  workspaceId: string;
-  query?: string;
-  owner?: SkillOwnerFilter;
-  onFindSkill?: (() => void) | undefined;
-  onImportSkill?: (() => void) | undefined;
-  refreshRevision?: number;
-  onSkillsChange?: (skills: SkillSummary[]) => void;
-  onRemoved?: () => void;
-  openSkillRef?: RefObject<((id: string) => void) | null>;
-}) {
+}: SkillsPanelProps & { context: AppContextValue }) {
   const { client } = context;
-  const listFilter = useMemo(() => skillOwnerListFilter(owner), [owner]);
-  // The refresh below reads the current filter without re-running on a filter change.
-  const listFilterRef = useRef(listFilter);
-  listFilterRef.current = listFilter;
   // Inside Capabilities a skill opens as its own page in the route's page slot
   // (`?open=skill:<id>`); elsewhere the page replaces the list in place.
   const slot = useCapabilityPageSlot();
-  const openerRef = useRef<HTMLElement | null>(null);
-  const removalTriggerRef = useRef<HTMLElement | null>(null);
-  const newSkillRef = useRef<HTMLButtonElement | null>(null);
-  const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const controllerRef = useRef<SkillsPanelController | null>(null);
   const grant = context.accessContext.workspaceGrants.find(
     (entry) => entry.workspaceId === workspaceId,
   );
@@ -174,692 +90,91 @@ export function SkillsPanelContent({
   const organizationId = grant?.accountId ?? "";
   const organizationName =
     useOrganizationNameFrom(context, organizationId, canManageOrganization) ?? "your organization";
-  const [reachOpen, setReachOpen] = useState(false);
-  const [skills, setSkills] = useState<SkillSummary[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [record, setRecord] = useState<SkillRecord | null>(null);
-  const [files, setFiles] = useState<SkillRecord["files"]>([]);
-  const [path, setPath] = useState("SKILL.md");
-  const [newPath, setNewPath] = useState("");
-  const [history, setHistory] = useState<PreferenceRegistryRevisionSummary[]>([]);
-  const [error, setError] = useState<SkillsFailure | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [reload, setReload] = useState(0);
-  const [removal, setRemoval] = useState<{
-    skill: SkillRecord;
-    request: RemoveWorkspaceSkillRequest;
-  } | null>(null);
-  const [removalError, setRemovalError] = useState<string | null>(null);
-  const [discardAction, setDiscardAction] = useState<(() => void) | null>(null);
-  // The id of a skill created on this page and not saved yet.
-  const [draftId, setDraftId] = useState<string | null>(null);
-  // The skill a page open is loading, so the URL sync does not load it twice.
-  const openingRef = useRef<string | null>(null);
-  const generation = useRef(0);
-  const inventoryGeneration = useRef(0);
-  const dirty = Boolean(
-    record &&
-    (files.length !== record.files.length ||
-      files.some(
-        (file, index) =>
-          file.path !== record.files[index]?.path || file.content !== record.files[index]?.content,
-      )),
-  );
+  const [reachFor, setReachFor] = useState<string | null>(null);
 
-  useEffect(() => {
-    generation.current++;
-    openingRef.current = null;
-    const current = ++inventoryGeneration.current;
-    setLoading(true);
-    setBusy(false);
-    setRecord(null);
-    setHistory([]);
-    setNotice(null);
-    setDiscardAction(null);
-    setRemoval(null);
-    setRemovalError(null);
-    setSkills([]);
-    setNextCursor(null);
-    setError(null);
-    void client
-      .listWorkspaceSkills(workspaceId, listFilter)
-      .then((result) => {
-        if (inventoryGeneration.current === current) {
-          setLoading(false);
-          setSkills(result.skills);
-          setNextCursor(result.nextCursor ?? null);
-        }
-      })
-      .catch((reason) => {
-        if (inventoryGeneration.current === current)
-          setError({ title: "Couldn't load skills", cause: reason });
-      })
-      .finally(() => {
-        if (inventoryGeneration.current === current) setLoading(false);
-      });
-    return () => {
-      // Invalidate every request started since this effect, not only its initial list.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      generation.current++;
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      inventoryGeneration.current++;
-    };
-  }, [client, workspaceId, reload, listFilter]);
-
-  useEffect(() => {
-    onSkillsChange?.(
-      skills.filter(
-        (skill) =>
-          (skill.availableHere !== false || canManageOrganization) && matchesOwner(skill, owner),
-      ),
-    );
-  }, [skills, onSkillsChange, canManageOrganization, owner]);
-  useEffect(() => {
-    if (!refreshRevision) return;
-    let live = true;
-    const current = ++inventoryGeneration.current;
-    void client
-      .listWorkspaceSkills(workspaceId, listFilterRef.current)
-      .then((result) => {
-        if (live && current === inventoryGeneration.current) {
-          setLoading(false);
-          setSkills(result.skills);
-          setNextCursor(result.nextCursor ?? null);
-        }
-      })
-      .catch((reason) => {
-        if (live && current === inventoryGeneration.current)
-          setError({ title: "Couldn't refresh skills", cause: reason });
-      })
-      .finally(() => {
-        if (live && current === inventoryGeneration.current) setLoading(false);
-      });
-    return () => {
-      live = false;
-    };
-  }, [client, workspaceId, refreshRevision]);
   useEffect(() => {
     if (!openSkillRef) return;
-    openSkillRef.current = (id) => navigate(() => void open(id));
+    openSkillRef.current = (id) => controllerRef.current?.open(id);
     return () => {
       openSkillRef.current = null;
     };
   });
 
-  // Keep the open page and the URL in step: Back, Forward and shared links.
-  const slotKey = slot?.openKey ?? null;
-  useEffect(() => {
-    if (!slot) return;
-    if (slotKey?.startsWith("skill:")) {
-      const id = slotKey.slice("skill:".length);
-      if (id === "new") {
-        if (record && record.id === draftId) return;
-        const scope = (["workspace", "organization"] as const).find(canManage);
-        if (scope) create(scope);
-        else slot.close({ replace: true });
-        return;
-      }
-      if (record?.id === id || openingRef.current === id) return;
-      void open(id);
-      return;
-    }
-    if (record) {
-      generation.current++;
-      setRecord(null);
-      setDraftId(null);
-      setBusy(false);
-    }
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- follows the URL and a reloaded inventory
-  }, [slotKey, loading]);
-
-  useEffect(() => {
-    if (!dirty) return;
-    const beforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [dirty]);
-
-  function navigate(action: () => void) {
-    if (dirty) setDiscardAction(() => action);
-    else action();
-  }
-
-  const loadMore = useCallback(async () => {
-    if (!nextCursor || busy) return;
-    const current = generation.current;
-    const inventoryRequest = ++inventoryGeneration.current;
-    setBusy(true);
-    setError(null);
-    try {
-      const page = await client.listWorkspaceSkills(workspaceId, {
-        ...listFilter,
-        cursor: nextCursor,
-      });
-      if (inventoryGeneration.current !== inventoryRequest) return;
-      setSkills((previous) => [
-        ...new Map([...previous, ...page.skills].map((skill) => [skill.id, skill])).values(),
-      ]);
-      setNextCursor(page.nextCursor);
-    } catch (reason) {
-      if (generation.current === current)
-        setError({ title: "Couldn't load more skills", cause: reason });
-    } finally {
-      if (generation.current === current) setBusy(false);
-    }
-  }, [nextCursor, busy, client, workspaceId, listFilter]);
-
-  useEffect(() => {
-    if (query.trim() && nextCursor && !busy && !error) void loadMore();
-  }, [query, nextCursor, busy, error, loadMore]);
-
-  function show(next: SkillRecord) {
-    setRecord(next);
-    setFiles(next.files);
-    setPath("SKILL.md");
-    setNewPath("");
-  }
-  async function open(skillId: string, revisionId?: string) {
-    if (!record) openerRef.current = document.activeElement as HTMLElement | null;
-    openingRef.current = skillId;
-    if (slot && slot.openKey !== `skill:${skillId}`) slot.open(`skill:${skillId}`);
-    const current = ++generation.current;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const [next, detail] = await Promise.all([
-        client.readWorkspaceSkill(workspaceId, skillId, revisionId),
-        client.getPreferenceRegistry(workspaceId, skillId),
-      ]);
-      if (generation.current !== current) return;
-      setDraftId(null);
-      show(next);
-      setHistory(detail.revisions);
-    } catch (reason) {
-      if (generation.current === current)
-        setError({ title: "Couldn't open this skill", cause: reason });
-    } finally {
-      if (generation.current === current) {
-        setBusy(false);
-        openingRef.current = null;
-      }
-    }
-  }
-  function closePage() {
-    generation.current++;
-    setRecord(null);
-    setDraftId(null);
-    setError(null);
-    setNotice(null);
-    setBusy(false);
-    if (slot?.openKey?.startsWith("skill:")) slot.close();
-    const opener = openerRef.current;
-    openerRef.current = null;
-    queueMicrotask(() => {
-      if (opener?.isConnected && !opener.matches(":disabled")) opener.focus();
-      else headingRef.current?.focus();
-    });
-  }
-  function create(scope: SkillScope) {
-    openerRef.current = newSkillRef.current;
-    generation.current++;
-    setHistory([]);
-    setError(null);
-    setNotice(null);
-    const id = crypto.randomUUID();
-    setDraftId(id);
-    if (slot && slot.openKey !== "skill:new") slot.open("skill:new");
-    show({
-      id,
-      stableKey: "",
-      scope,
-      scopeVersion: 1,
-      activationMode: "workspace_managed",
-      pendingRevisionIds: [],
-      status: "proposed",
-      activeRevisionId: null,
-      revisionId: null,
-      title: "",
-      description: "",
-      contentHash: null,
-      source: null,
-      files: [
-        {
-          path: "SKILL.md",
-          content: "---\nname: my-skill\ndescription: When to use this Skill\n---\n\n",
-        },
-      ],
-    });
-  }
-  async function changeScope(scope: SkillScope) {
-    if (!record || scope === record.scope) return;
-    if (!record.revisionId) {
-      setRecord({ ...record, scope });
-      return;
-    }
-    const current = ++generation.current;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await client.changePreferenceRegistryScope(workspaceId, record.id, {
-        scope,
-        expectedScopeVersion: record.scopeVersion,
-        reason: "Change skill scope",
-      });
-      if (generation.current !== current) return;
-      const inventoryRequest = ++inventoryGeneration.current;
-      const [updated, inventory] = await Promise.all([
-        client.readWorkspaceSkill(workspaceId, record.id, record.revisionId),
-        client.listWorkspaceSkills(workspaceId, listFilter),
-      ]);
-      if (inventoryGeneration.current === inventoryRequest) {
-        setSkills(inventory.skills);
-        setNextCursor(inventory.nextCursor ?? null);
-      }
-      if (generation.current !== current) return;
-      // Keep any unsaved file edits while refreshing scope/version metadata.
-      setRecord(updated);
-
-      setNotice("Skill scope updated.");
-    } catch (reason) {
-      if (generation.current === current)
-        setError({ title: "Couldn't change who can use this skill", cause: reason });
-    } finally {
-      if (generation.current === current) setBusy(false);
-    }
-  }
-  async function mutate(operation: "save" | "approve" | "restore") {
-    if (!record) return;
-    const current = ++generation.current;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const version = {
-        ...(operation === "approve" && record.removalOperationId
-          ? { removalOperationId: record.removalOperationId }
-          : {}),
-        operationId: crypto.randomUUID(),
-        expectedRevisionId: record.activeRevisionId,
-        expectedScopeVersion: record.scopeVersion,
-        reason: operation === "save" ? "Save Skill files" : `${operation} Skill revision`,
-      };
-      const receipt =
-        operation === "save"
-          ? await client.saveWorkspaceSkill(workspaceId, {
-              ...version,
-              skillId: record.id,
-              scope: record.scope,
-              stableKey: record.stableKey || `authored-${record.id.replaceAll("-", "")}`,
-              files,
-              deletions: record.files
-                .filter((file) => !files.some((next) => next.path === file.path))
-                .map((file) => file.path),
-            })
-          : await (
-              operation === "approve"
-                ? client.approveWorkspaceSkill.bind(client)
-                : client.restoreWorkspaceSkill.bind(client)
-            )(workspaceId, record.id, { ...version, revisionId: record.revisionId! });
-      if (generation.current !== current) return;
-      if (receipt.removed) {
-        setRecord(null);
-        if (slot?.openKey?.startsWith("skill:")) slot.close({ replace: true });
-        setSkills((await client.listWorkspaceSkills(workspaceId, listFilter)).skills);
-        setNotice("Skill and all stored revisions permanently deleted.");
-        return;
-      }
-      const inventoryRequest = ++inventoryGeneration.current;
-      const [updated, inventory, detail] = await Promise.all([
-        client.readWorkspaceSkill(workspaceId, receipt.skillId),
-        client.listWorkspaceSkills(workspaceId, listFilter),
-        client.getPreferenceRegistry(workspaceId, receipt.skillId),
-      ]);
-      if (inventoryGeneration.current === inventoryRequest) {
-        setSkills(inventory.skills);
-        setNextCursor(inventory.nextCursor ?? null);
-      }
-      if (generation.current !== current) return;
-      show(updated);
-      if (draftId) {
-        setDraftId(null);
-        if (slot) slot.open(`skill:${updated.id}`, { replace: true });
-      }
-
-      setHistory(detail.revisions);
-      setNotice(
-        receipt.outcome === "pending"
-          ? "Saved for approval; not active yet."
-          : receipt.outcome === "preserved"
-            ? "Your customized Skill was preserved."
-            : "Skill saved and active.",
-      );
-    } catch (reason) {
-      if (generation.current === current)
-        setError({
-          title:
-            operation === "save"
-              ? "Couldn't save this skill"
-              : operation === "approve"
-                ? "Couldn't approve this revision"
-                : "Couldn't restore this revision",
-          cause: reason,
-        });
-    } finally {
-      if (generation.current === current) setBusy(false);
-    }
-  }
-  async function remove(): Promise<boolean> {
-    if (!removal || busy) return false;
-    const current = ++generation.current;
-    setBusy(true);
-    setRemovalError(null);
-    try {
-      const receipt = await client.removeWorkspaceSkill(
-        workspaceId,
-        removal.skill.id,
-        removal.request,
-      );
-      if (generation.current !== current) return false;
-      if (!receipt.removed) throw new Error("The skill was not removed. Reload and try again.");
-      // Invalidate outstanding inventory reads before removing the row locally.
-      inventoryGeneration.current++;
-      setSkills((previous) => previous.filter((skill) => skill.id !== removal.skill.id));
-      setRecord(null);
-      setHistory([]);
-      setDraftId(null);
-      setNotice("Skill and all stored revisions permanently deleted.");
-      if (slot?.openKey?.startsWith("skill:")) slot.close({ replace: true });
-      onRemoved?.();
-      return true;
-    } catch (reason) {
-      if (generation.current === current)
-        setRemovalError(reason instanceof Error ? reason.message : "Could not remove skill");
-      return false;
-    } finally {
-      if (generation.current === current) setBusy(false);
-    }
-  }
-  const editable =
-    record &&
-    canManage(record.scope) &&
-    (record.revisionId === record.activeRevisionId || record.revisionId === null);
-  const matchingSkills = skills.filter(
-    (skill) =>
-      (skill.availableHere !== false || canManageOrganization) &&
-      matchesOwner(skill, owner) &&
-      `${skill.title} ${skill.stableKey}`.toLowerCase().includes(query.trim().toLowerCase()),
-  );
-
-  const backLabel = slot ? "Capabilities" : "Skills";
-  const back = () => navigate(() => closePage());
-  const slotSkillKey = slot?.openKey?.startsWith("skill:") ? slot.openKey : null;
-  const pageContent = record ? (
-    <SkillPage
-      record={record}
-      files={files}
-      path={path}
-      newPath={newPath}
-      history={history}
-      error={error ? `${error.title}. ${userErrorText(error.cause)}` : null}
-      notice={notice}
-      busy={busy}
-      dirty={dirty}
-      isNew={record.id === draftId}
-      editable={Boolean(editable)}
-      canManage={canManage}
-      backLabel={backLabel}
-      onBack={back}
-      onPathChange={setPath}
-      onNewPathChange={setNewPath}
-      onContentChange={(content) =>
-        setFiles((current) =>
-          current.map((file) => (file.path === path ? { ...file, content } : file)),
-        )
-      }
-      onAddFile={() => {
-        setFiles((current) => [...current, { path: newPath, content: "" }]);
-        setPath(newPath);
-        setNewPath("");
-      }}
-      onRemoveFile={() => {
-        setFiles((current) => current.filter((file) => file.path !== path));
-        setPath("SKILL.md");
-      }}
-      onRemove={() => {
-        removalTriggerRef.current = document.activeElement as HTMLElement | null;
-        setRemovalError(null);
-        setRemoval({
-          skill: record,
-          request: {
-            operationId: crypto.randomUUID(),
-            expectedRevisionId: record.activeRevisionId,
-            expectedScopeVersion: record.scopeVersion,
-            reason: "Remove skill from the Skills editor",
-          },
-        });
-      }}
-      onSave={() => void mutate("save")}
-      onDiscard={() => {
-        setFiles(record.files);
-        setPath("SKILL.md");
-      }}
-      onReviewRevision={(operation) => void mutate(operation)}
-      onChangeScope={(scope) => void changeScope(scope)}
-      onOpenRevision={(revisionId) => navigate(() => void open(record.id, revisionId))}
-      reachSummary={record.reach ? organizationReachSummary(record.reach) : undefined}
-      onChangeReach={
-        record.scope === "organization" && record.reach && canManageOrganization
-          ? () => setReachOpen(true)
-          : undefined
-      }
-    />
-  ) : slotSkillKey ? (
-    <DetailPage back={{ label: backLabel, onClick: back }}>
-      {error ? (
-        <EmptyState
-          variant="page"
-          title="Couldn't open this skill"
-          description={userErrorText(error.cause)}
-          action={
-            <Button type="button" variant="outline" size="sm" onClick={back}>
-              Back to Capabilities
-            </Button>
-          }
-        />
-      ) : (
-        <DetailSkeleton />
-      )}
-    </DetailPage>
-  ) : null;
-  const pageInPlace = !slot && record !== null;
-
   return (
-    <section aria-label="Skills" className="skills-panel space-y-4">
-      <div hidden={pageInPlace} className="space-y-4">
+    <SharedSkillsPanel
+      client={client}
+      workspaceId={workspaceId}
+      canManage={canManage}
+      query={query}
+      owner={owner}
+      showUnavailable={canManageOrganization}
+      refreshRevision={refreshRevision}
+      onSkillsChange={onSkillsChange}
+      onRemoved={onRemoved}
+      controllerRef={controllerRef}
+      slot={slot}
+      backLabel={slot ? "Capabilities" : "Skills"}
+      listTitle="Your skills"
+      emptyText={
+        onFindSkill
+          ? "No skills installed yet. Browse the catalog below or add your own."
+          : "No skills yet. Create one to give your agent reusable instructions."
+      }
+      renderHeader={(header) => (
         <CatalogHeader
-          title="Skills"
-          headingRef={headingRef}
-          hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
-          action={
-            <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
-              {(["workspace", "organization"] as const)
-                .filter(canManage)
-                .slice(0, 1)
-                .map((scope) => (
-                  // One primary (write a skill), the other way in behind the ⋯:
-                  // the catalog to browse is right below.
-                  <Fragment key={scope}>
-                    <Button
-                      ref={newSkillRef}
-                      variant="default"
-                      disabled={busy}
-                      onClick={() => navigate(() => create(scope))}
-                    >
-                      <PlusIcon aria-hidden="true" />
-                      New skill
-                    </Button>
-                    {onImportSkill ? (
-                      <MoreMenu label="More ways to add a skill" disabled={busy}>
-                        <DropdownMenuItem onSelect={onImportSkill}>
-                          <LinkIcon />
-                          Import from URL
-                        </DropdownMenuItem>
-                      </MoreMenu>
-                    ) : null}
-                  </Fragment>
-                ))}
-            </div>
-          }
+          title={header.title}
+          headingRef={header.headingRef}
+          hidden={header.hidden}
+          action={header.action}
         />
-        {error && !record ? (
-          isPermissionDenied(error.cause) ? (
-            <p className="text-sm text-fg-muted">
-              You can't see skills here. Ask a workspace admin for access.
-            </p>
-          ) : (
-            <ErrorMessage
-              variant="inline"
-              announce
-              title={`${error.title}.`}
-              {...apiErrorDetails(error.cause)}
-              action={
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => navigate(() => setReload((value) => value + 1))}
-                >
-                  Try again
-                </Button>
-              }
-            >
-              {userErrorTextWithoutReference(error.cause)}
-            </ErrorMessage>
-          )
-        ) : null}
-        {notice && !record ? (
-          <p role="status" className="text-sm">
-            {notice}
-          </p>
-        ) : null}
-        {loading ? <p role="status">Loading Skills…</p> : null}
-        {!loading && !error && !skills.length && owner !== "all" ? (
-          <p className="text-sm text-fg-subtle">No skills here.</p>
-        ) : !loading && !error && !skills.length ? (
-          <p className="text-sm text-fg-subtle">
-            {onFindSkill
-              ? "No skills installed yet. Browse the catalog below or add your own."
-              : "No skills yet. Create one to give your agent reusable instructions."}
-          </p>
-        ) : null}
-        <ConnectionInstalled
-          title="Your skills"
-          items={matchingSkills.map((skill) => {
-            const name = humanizeName(skill.title || skill.stableKey);
-            return {
-              id: skill.id,
-              name,
-              icon: <LogoTile name={name} icon={<GraduationCapIcon />} />,
-              status: `${skill.availableHere === false ? "Not used here" : skillStatus(skill)} · ${SKILL_SCOPE_LABEL[skill.scope]}`,
-              needsAttention: Boolean(skill.pendingRevisionIds.length),
-              disabled: busy,
-              onOpen: () => {
-                if (!busy) navigate(() => void open(skill.id));
-              },
-            };
-          })}
-        />
-        {nextCursor ? (
-          <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
-            Load more Skills
-          </Button>
-        ) : null}
-      </div>
-      {pageContent ? (
-        slot ? (
-          <CapabilitySlotPage pageKey={slotSkillKey ?? ""}>{pageContent}</CapabilitySlotPage>
-        ) : (
-          pageContent
-        )
-      ) : null}
-      {record?.scope === "organization" && record.reach && canManageOrganization ? (
-        <OrganizationReachDialog
-          open={reachOpen}
-          onOpenChange={setReachOpen}
-          client={client}
-          noun="Skill"
-          name={humanizeName(record.title || record.stableKey)}
-          reach={record.reach}
-          organizationId={organizationId}
-          organizationName={organizationName}
-          managedBy="Organization owners and admins manage it."
-          hereId={workspaceId}
-          save={async (next) => (await client.updateSkillReach(workspaceId, record.id, next)).reach}
-          onSaved={(reach) => {
-            setReachOpen(false);
-            const skillId = record.id;
-            setRecord((value) => (value?.id === skillId ? { ...value, reach } : value));
-            // Whether this workspace's agents still use it is the server's call.
-            void client
-              .readWorkspaceSkill(workspaceId, skillId)
-              .then((fresh) => {
-                const placed = { reach: fresh.reach ?? reach, availableHere: fresh.availableHere };
-                setRecord((value) => (value?.id === skillId ? { ...value, ...placed } : value));
-                setSkills((list) =>
-                  list.map((skill) => (skill.id === skillId ? { ...skill, ...placed } : skill)),
-                );
-              })
-              .catch(() => undefined);
-          }}
-        />
-      ) : null}
-      <ConfirmDialog
-        open={removal !== null}
-        onOpenChange={(isOpen) => {
-          if (!isOpen) setRemoval(null);
-        }}
-        title={`Remove “${humanizeName(removal?.skill.title || removal?.skill.stableKey || "skill")}”?`}
-        description="This permanently deletes the skill and all its saved revisions. It cannot be undone. Existing conversations stay unchanged."
-        confirmLabel="Remove skill"
-        cancelAutoFocus
-        restoreFocusRef={removalTriggerRef}
-        restoreFocusFallbackRef={headingRef}
-        onConfirm={remove}
-      >
-        {dirty ? (
-          <p className="text-sm text-fg-muted">Unsaved changes will also be discarded.</p>
-        ) : null}
-        {removal?.skill.source ? (
-          <p className="text-sm text-fg-muted">
-            If a plugin still owns this skill, remove it from the plugin first.
-          </p>
-        ) : null}
-        {removalError ? (
-          <p role="alert" className="text-sm text-danger">
-            {removalError}
-          </p>
-        ) : null}
-      </ConfirmDialog>
-      <ConfirmDialog
-        open={discardAction !== null}
-        onOpenChange={(isOpen) => {
-          if (!isOpen) setDiscardAction(null);
-        }}
-        title="Discard unsaved Skill changes?"
-        description="Your edits have not been saved. Switching will discard them."
-        confirmLabel="Discard changes"
-        cancelAutoFocus
-        onConfirm={() => {
-          discardAction?.();
-        }}
-      />
-    </section>
+      )}
+      addMenuItems={
+        onImportSkill ? (
+          <DropdownMenuItem onSelect={onImportSkill}>
+            <LinkIcon />
+            From a URL
+          </DropdownMenuItem>
+        ) : undefined
+      }
+      reach={{
+        summary: (skill) => (skill.reach ? organizationReachSummary(skill.reach) : undefined),
+        onChange: canManageOrganization ? (skill) => setReachFor(skill.id) : undefined,
+      }}
+    >
+      {(record: SkillRecord | null) =>
+        record?.scope === "organization" && record.reach && canManageOrganization ? (
+          <OrganizationReachDialog
+            open={reachFor === record.id}
+            onOpenChange={(isOpen) => setReachFor(isOpen ? record.id : null)}
+            client={client}
+            noun="Skill"
+            name={humanizeName(record.title || record.stableKey)}
+            reach={record.reach}
+            organizationId={organizationId}
+            organizationName={organizationName}
+            managedBy="Organization owners and admins manage it."
+            hereId={workspaceId}
+            save={async (next) =>
+              (await client.updateSkillReach(workspaceId, record.id, next)).reach
+            }
+            onSaved={(reach) => {
+              setReachFor(null);
+              const skillId = record.id;
+              controllerRef.current?.update(skillId, { reach });
+              // Whether this workspace's agents still use it is the server's call.
+              void client
+                .readWorkspaceSkill(workspaceId, skillId)
+                .then((fresh) =>
+                  controllerRef.current?.update(skillId, {
+                    reach: fresh.reach ?? reach,
+                    availableHere: fresh.availableHere,
+                  }),
+                )
+                .catch(() => undefined);
+            }}
+          />
+        ) : null
+      }
+    </SharedSkillsPanel>
   );
 }

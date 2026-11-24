@@ -34,11 +34,15 @@ try {
   })), custody);
   let writes = 0;
   await publishPreparedCanaries(cohort, custody, "synthetic-token", (name, _request, _base, options) => {
-    assert.equal(options?.receiptVersion, undefined, "the publish job never waits for visibility");
-    return readRegistryPackage(name, async (_url, init) => {
+    // The pre-publish check reads the tags and the one version, never the
+    // full packument (which outgrows the custody bound across the cohort).
+    assert.equal(options?.receiptVersion, version, "the pre-publish read is version-bounded");
+    return readRegistryPackage(name, async (url, init) => {
       assert.equal(init?.method, "GET");
       assert.ok(init?.signal instanceof AbortSignal);
-      return Response.json({ "dist-tags": { latest: "1.0.0" }, versions: {} });
+      if (String(url).includes("/dist-tags")) return Response.json({ latest: "1.0.0" });
+      assert.ok(String(url).endsWith(`/${version}?write=true`), "only the canary version is read");
+      return new Response(null, { status: 404 });
     }, "https://registry.example.test", options);
   }, async (manifest, packed, options) => {
     assert.equal(manifest.name, cohort[writes]!.name);

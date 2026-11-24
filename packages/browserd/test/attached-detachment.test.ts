@@ -1341,6 +1341,211 @@ for (const holds of [true, false])
     }
   });
 
+/** A click on element 42 at (10, 10) whose hit-target guard is `guard`. */
+function clickableElement(
+  driver: AgentBrowserDriver,
+  guard: { verdicts: Array<null>; before?: () => Promise<void> },
+) {
+  const internals = driver as unknown as Record<string, unknown>;
+  internals.resolveActionLocator = async () => ({ backendDOMNodeId: 42 });
+  internals.chooseDropdownOption = async () => false;
+  internals.callOnNode = async () => false;
+  internals.actionPoint = async (state: unknown) => {
+    await guard.before?.();
+    // A read of the page before any input, as a real click makes.
+    await (internals.sendTarget as (s: unknown, m: string) => Promise<unknown>).call(
+      driver,
+      state,
+      "Page.getLayoutMetrics",
+    );
+    return { x: 10, y: 10 };
+  };
+  internals.clickInput = async () => ({ x: 10, y: 10 });
+  internals.hiddenWithoutFocusEmulation = async () => false;
+  internals.installHitTargetGuard = async () => ({
+    objectId: "guard",
+    reported: true,
+    verdicts: guard.verdicts,
+    stopReports: () => undefined,
+  });
+  internals.settleHitTargetGuard = async () => null;
+}
+
+function mouseEvents(bridge: DetachmentBridge, type: string) {
+  return bridge.commands.filter(
+    (c) =>
+      c.method === "Input.dispatchMouseEvent" &&
+      (c.params as Record<string, unknown>).type === type,
+  );
+}
+
+function keyDowns(bridge: DetachmentBridge) {
+  return bridge.commands.filter(
+    (c) =>
+      c.method === "Input.dispatchKeyEvent" &&
+      (c.params as Record<string, unknown>).type === "keyDown",
+  );
+}
+
+for (const reached of [true, false])
+  test(`a click whose press ends the tab's debugging ${reached ? "is finished on the new attachment and the batch goes on" : "stays unknown when the press is not known to have reached the element"}`, async () => {
+    // The click focuses a login field, a password manager adds its inline
+    // menu frame, and Chrome ends the attachment under the press: the page
+    // got the press but never the release.
+    const bridge = new NotAttachedBridge();
+    const { connection, driver } = await fixture(bridge);
+    const guard = { verdicts: [] as Array<null> };
+    clickableElement(driver, guard);
+    try {
+      const observation = await driver.observe("7");
+      bridge.beforeCommandReply = async (method) => {
+        if (
+          method !== "Input.dispatchMouseEvent" ||
+          mouseEvents(bridge, "mousePressed").length !== 1
+        )
+          return;
+        if (mouseEvents(bridge, "mouseReleased").length > 0) return;
+        // The guard's report that the press reached the element.
+        if (reached) guard.verdicts.push(null);
+        bridge.detach("7", "target_closed");
+        await drainDetach(bridge);
+        throw new AttachedBrowserBridgeError(
+          "driver_rejected",
+          "Detached while handling command.",
+          false,
+        );
+      };
+      const receipt = await controllerFor(driver, observation).run({
+        protocolVersion: 1,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        operationId: randomUUID(),
+        browserSessionId: observation.browserSessionId,
+        controllerGeneration: observation.target.controllerGeneration,
+        targetId: "7",
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId,
+        action: {
+          type: "batch",
+          actions: [
+            { type: "click", locator: { kind: "css", selector: "#email" } },
+            { type: "press", key: "End" },
+          ],
+        },
+      });
+      // The press went out once and was never sent again.
+      expect(mouseEvents(bridge, "mousePressed")).toHaveLength(1);
+      if (reached) {
+        expect(receipt.state).toBe("completed");
+        expect(receipt.observation?.target.id).toBe("7");
+        // The release went out on the new attachment, then the key.
+        const released = mouseEvents(bridge, "mouseReleased");
+        expect(released).toHaveLength(1);
+        expect(released[0]!.attachment).not.toBe(
+          mouseEvents(bridge, "mousePressed")[0]!.attachment,
+        );
+        expect(keyDowns(bridge)).toHaveLength(1);
+      } else {
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error?.message).toContain("The tab disconnected while browser input");
+        expect(mouseEvents(bridge, "mouseReleased")).toHaveLength(0);
+        expect(keyDowns(bridge)).toHaveLength(0);
+      }
+    } finally {
+      connection.close();
+    }
+  });
+
+test("a batch whose tab's debugging ends before its next action sent input goes on from that action on a new attachment", async () => {
+  const bridge = new NotAttachedBridge();
+  const { connection, driver } = await fixture(bridge);
+  const guard = {
+    verdicts: [] as Array<null>,
+    // Chrome ends the attachment after the key, before the click sends
+    // anything.
+    before: async () => {
+      if (bridge.commands.some((c) => c.type === "debugger.attach" && c !== firstAttach)) return;
+      bridge.detach("7", "target_closed");
+      await drainDetach(bridge);
+    },
+  };
+  let firstAttach: Readonly<Record<string, unknown>> | undefined;
+  clickableElement(driver, guard);
+  try {
+    const observation = await driver.observe("7");
+    firstAttach = bridge.commands.find((c) => c.type === "debugger.attach");
+    bridge.beforeCommandReply = async (method) => {
+      if (method === "Input.dispatchMouseEvent" && mouseEvents(bridge, "mousePressed").length === 1)
+        guard.verdicts.push(null);
+    };
+    const receipt = await controllerFor(driver, observation).run({
+      protocolVersion: 1,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      operationId: randomUUID(),
+      browserSessionId: observation.browserSessionId,
+      controllerGeneration: observation.target.controllerGeneration,
+      targetId: "7",
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration!,
+      expectedFrameId: observation.frameId,
+      action: {
+        type: "batch",
+        actions: [
+          { type: "press", key: "A" },
+          { type: "click", locator: { kind: "css", selector: "#email" } },
+        ],
+      },
+    });
+    expect(receipt.state).toBe("completed");
+    expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
+    // The key that ran is not sent again; the click runs once.
+    expect(keyDowns(bridge)).toHaveLength(1);
+    expect(mouseEvents(bridge, "mousePressed")).toHaveLength(1);
+    expect(mouseEvents(bridge, "mouseReleased")).toHaveLength(1);
+  } finally {
+    connection.close();
+  }
+});
+
+test("actions that all ran before the tab's debugging ended are completed, and the page is read on a new attachment", async () => {
+  const bridge = new NotAttachedBridge();
+  const { connection, driver } = await fixture(bridge);
+  try {
+    const observation = await driver.observe("7");
+    let keys = 0;
+    bridge.beforeCommandReply = async (method) => {
+      if (method !== "Input.dispatchKeyEvent" || ++keys !== 2) return;
+      // The key's release went through; Chrome ends the attachment before
+      // the page is read and reports it only later.
+      const ended = bridge.detachSilently("7");
+      setTimeout(() => {
+        bridge.event("7", "OpenGeni.debuggerDetached", {
+          reason: "target_closed",
+          attachment: ended,
+        });
+      }, 20);
+    };
+    const receipt = await controllerFor(driver, observation).run({
+      protocolVersion: 1,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      operationId: randomUUID(),
+      browserSessionId: observation.browserSessionId,
+      controllerGeneration: observation.target.controllerGeneration,
+      targetId: "7",
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration!,
+      expectedFrameId: observation.frameId,
+      action: { type: "press", key: "A" },
+    });
+    expect(receipt.state).toBe("completed");
+    expect(receipt.observation?.target.id).toBe("7");
+    expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
+    expect(keyDowns(bridge)).toHaveLength(1);
+  } finally {
+    connection.close();
+  }
+});
+
 test("commands Chrome refuses while the tab holds another extension's frame fail plainly, without leaving the tab uncertain", async () => {
   // Chrome can keep a tab attached while another extension's page is a frame
   // of it, and then refuses every command without running it. The first

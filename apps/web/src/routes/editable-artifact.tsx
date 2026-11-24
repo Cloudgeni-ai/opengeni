@@ -78,8 +78,13 @@ function EditableArtifactContent({
           context.accessContext,
         ])}
         showHeader={!embedded}
-        downloadArtifact={(opened, signal) =>
-          downloadEditableArtifact(editableArtifactClient, workspaceId, opened, signal)
+        // No Download on a deployment that reports it cannot export: the
+        // request would only pin a version and then be refused.
+        downloadArtifact={
+          context.clientConfig.artifactExport === false
+            ? undefined
+            : (opened, signal) =>
+                downloadEditableArtifact(editableArtifactClient, workspaceId, opened, signal)
         }
         describeError={(error): ArtifactLoadErrorView =>
           isArtifactReadDenied(error, context.accessContext, workspaceId)

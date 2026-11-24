@@ -243,7 +243,9 @@ async function resolveTarget(input: Input) {
     !item.enabled ||
     item.kind !== "mcp" ||
     !item.runtime.mcpServerId ||
-    item.source === "built_in"
+    item.source === "built_in" ||
+    // A carried connector whose account stopped working is listed, not run.
+    (item.metadata.personalExtension !== undefined && !item.runtime.available)
   ) {
     throw new HTTPException(404, { message: "Connected MCP connector not found" });
   }

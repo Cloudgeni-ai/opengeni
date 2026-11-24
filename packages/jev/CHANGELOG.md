@@ -1,5 +1,11 @@
 # @opengeni/jev
 
+## 6.38.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

@@ -40,6 +40,36 @@ describe("ready-made agents", () => {
     }
   });
 
+  test("PR reviewer adds, in one click, a review when someone on the team mentions it on a PR", () => {
+    const reviewer = agentTemplateByKey("pr-reviewer");
+    const mentioned = reviewer?.suggestedTriggers.find(
+      (suggestion) => suggestion.name === "Review when mentioned on a PR",
+    );
+    expect(mentioned?.oneClick).toBe(true);
+    expect(mentioned?.schedule).toBeNull();
+    const team = {
+      field: "data.comment.author_association",
+      op: "in",
+      value: ["OWNER", "MEMBER", "COLLABORATOR"],
+    };
+    const mention = { field: "data.comment.mentions_app", op: "equals", value: true };
+    expect(mentioned?.triggers.map((trigger) => [trigger.source, trigger.eventTypes])).toEqual([
+      [{ kind: "github" }, ["issue_comment.created"]],
+      [{ kind: "github" }, ["pull_request_review_comment.created"]],
+    ]);
+    // Issue comments only on pull requests; review comments always are.
+    expect(mentioned?.triggers[0]?.conditions).toEqual([
+      { field: "data.issue.pull_request", op: "equals", value: true },
+      mention,
+      team,
+    ]);
+    expect(mentioned?.triggers[1]?.conditions).toEqual([mention, team]);
+    // Its own comments never start it.
+    expect(mentioned?.triggers.every((trigger) => !trigger.includeOwnEvents)).toBe(true);
+    // The others still open the form.
+    expect(reviewer?.suggestedTriggers[0]?.oneClick).toBeUndefined();
+  });
+
   test("they stay general: no Opengeni-internal skills or names", () => {
     for (const template of agentTemplates()) {
       const text = JSON.stringify(template).toLowerCase();

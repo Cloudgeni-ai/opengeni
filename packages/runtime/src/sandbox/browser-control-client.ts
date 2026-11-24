@@ -293,6 +293,9 @@ export type BrowserControlFrame = {
   metadata: BrowserFrameMetadata;
   /** Set when a full-page capture could not keep every scrollbar's space. */
   inexactScrollbars?: true;
+  /** CSS px a full-page capture left out inside one of the page's own
+   * scrolling areas (the most of any such area). */
+  hiddenScrolledHeight?: number;
 };
 
 export type BrowserControlScreenshotOptions = {
@@ -3126,7 +3129,16 @@ function browserControlFrame(
     ...(get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
       ? { inexactScrollbars: true as const }
       : {}),
+    ...hiddenScrolledHeightHeader(get("x-opengeni-browser-frame-hidden-scrolled-height")),
   };
+}
+
+/** Ignores an absent or malformed value: the note only adds detail. */
+function hiddenScrolledHeightHeader(value: string | null | undefined): {
+  hiddenScrolledHeight?: number;
+} {
+  if (!value || !/^[1-9][0-9]{0,8}$/.test(value)) return {};
+  return { hiddenScrolledHeight: Number(value) };
 }
 
 function computerControlFrame(

@@ -1,10 +1,18 @@
-import { SESSION_INSTRUCTIONS_MAX_CHARACTERS, type AccessGrant } from "@opengeni/contracts";
 import {
+  FirstPartyMcpToolName,
+  Permission,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  type AccessGrant,
+} from "@opengeni/contracts";
+import {
+  AGENT_LIST_CHATS_TOOL,
+  agentListChatsToolPermitted,
   agentMemoryAccess,
   agentMemoryGuidance,
   type ApiRouteDeps,
   type SessionCreateRequestOptions,
 } from "@opengeni/core";
+import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import { getAgent } from "@opengeni/db";
 
 /**
@@ -13,7 +21,9 @@ import { getAgent } from "@opengeni/db";
  * on, the chat is told its collection and whether it may save to it, and gets
  * `slack_agent_chats` to read the agent's other shared chats. Slack agent
  * chats get the same guidance from their Slack instructions. An unknown or
- * unusable agent is left to session creation, which refuses it.
+ * unusable agent is left to session creation, which refuses it. A chat that
+ * won't have the tool (an explicit built-in list without it, permissions that
+ * can't admit it, or a deployment that turns it off) is not told about it.
  */
 export async function prepareAgentChatCreate(
   deps: ApiRouteDeps,
@@ -35,7 +45,17 @@ export async function prepareAgentChatCreate(
     ownerSubjectId: grant.subjectId,
     memoryOff: request["memoryScope"] === "off",
   });
-  const guidance = agentMemoryGuidance(access);
+  // Session creation adds the tool only to a selection that follows the
+  // defaults; an explicit list is kept as given.
+  const explicitTools = FirstPartyMcpToolName.array().safeParse(request["firstPartyMcpTools"]);
+  const explicitPermissions = Permission.array().safeParse(request["firstPartyMcpPermissions"]);
+  const listChatsTool =
+    access.listChats &&
+    resolveFirstPartyMcpToolPolicy(deps.settings).allowed.includes(AGENT_LIST_CHATS_TOOL) &&
+    (request["firstPartyMcpTools"] === undefined ||
+      (explicitTools.success && explicitTools.data.includes(AGENT_LIST_CHATS_TOOL))) &&
+    agentListChatsToolPermitted(explicitPermissions.success ? explicitPermissions.data : null);
+  const guidance = agentMemoryGuidance(access, { listChatsTool });
   if (guidance) {
     const own = typeof request["instructions"] === "string" ? request["instructions"].trim() : "";
     const combined = own ? `${own}\n\n${guidance}` : guidance;
@@ -43,5 +63,5 @@ export async function prepareAgentChatCreate(
     // out, and the knowledge tools still enforce the rules.
     if (combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS) request["instructions"] = combined;
   }
-  return access.listChats ? { firstPartyMcpToolAdditions: ["slack_agent_chats"] } : undefined;
+  return listChatsTool ? { firstPartyMcpToolAdditions: [AGENT_LIST_CHATS_TOOL] } : undefined;
 }

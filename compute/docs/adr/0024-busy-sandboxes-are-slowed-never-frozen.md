@@ -9,6 +9,8 @@ the guarantee is kept by `memory.min`, not `memory.low`. Amended
 2026-11-14 by
 [44](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md):
 the guarantee is kept by `memory.min`, not `memory.low`.
+Amended 2026-11-23: the swap device is sized to the sandboxes' memory, its
+free slots are reported and alert, and a smaller one is made anew at boot.
 
 ## Context
 
@@ -49,9 +51,22 @@ samples once a second.
   guaranteed all of its memory never borrows, so it keeps zswap closed
   while it runs, as under 14. zswap still takes a swap slot per page at
   its original size, and stops taking pages while its pool is full, so the
-  agent warns on swap under a quarter of memory and a pool under 20 %.
+  agent warns on swap smaller than the sandboxes' memory and a pool under
+  20 %.
   Elsewhere the rule below does nothing and the host behaves as before,
   minus step 3.
+- **The slots run out before the pool** (amended 2026-11-23). Guest memory
+  compresses several times over: one host held 12.3 GB of a sandbox's
+  memory in 1.7 GB of pool, about 7:1. Its 16 GiB swap file, a quarter of
+  its 61 GiB of sandbox memory, was full with the pool a tenth used; three
+  sandboxes in use then grew past their requests together, the kernel
+  could compress none of them, and it ended four VMs at the wall. So the
+  swap device should be at least as large as the sandboxes' memory, which
+  host-setup's default already is: the agent warns at start below that,
+  `compute.host.swap.total` and `compute.host.swap.free` report the slots,
+  and a host with under 15 % of them free for five minutes alerts. A swap
+  file an earlier setting left smaller than host-setup would make now is
+  made anew at the next boot, before any VM runs, when it holds nothing.
 - **The guarantee is kept by the kernel.** The kernel charges a VM's
   compressed pages to its group, and `memory.low` protects an amount, not
   pages. So the agent keeps each running VM's `memory.low` at its request

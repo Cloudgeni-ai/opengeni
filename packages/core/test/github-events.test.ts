@@ -160,6 +160,47 @@ describe("GitHub webhook deliveries", () => {
     expect(comment({ login: "octocat", type: "User" }).kind).toBe("person");
   });
 
+  test("a comment carries its author's association and whether it mentions Opengeni's App", () => {
+    const said = (body: string, event = "issue_comment") => {
+      const data = only(
+        readGitHubDelivery(
+          delivery(event, {
+            action: "created",
+            repository,
+            sender: { login: "octocat", type: "User" },
+            issue: { number: 7, title: "Add cache", pull_request: { url: "x" } },
+            pull_request: { number: 7, title: "Add cache" },
+            comment: { body, user: { login: "octocat" }, author_association: "MEMBER" },
+          }),
+        ),
+      ).data as { comment: Record<string, unknown> };
+      return data.comment;
+    };
+    expect(said("@opengeni-agent please review")).toMatchObject({
+      author_association: "MEMBER",
+      mentions_app: true,
+    });
+    expect(said("cc @Opengeni-Agent[bot], thoughts?").mentions_app).toBe(true);
+    expect(said("Thanks @lens!", "pull_request_review_comment").mentions_app).toBe(true);
+    // Not a mention: another login that starts the same, an email, or no @.
+    expect(said("@opengeni-agent-two look").mentions_app).toBe(false);
+    expect(said("mail me at a@opengeni-agent.com").mentions_app).toBe(false);
+    expect(said("opengeni-agent please review").mentions_app).toBe(false);
+    // Nor one in code or a quoted reply.
+    expect(said("Run `@opengeni-agent review` to ask").mentions_app).toBe(false);
+    expect(said("```\n@opengeni-agent review\n```\nlike that").mentions_app).toBe(false);
+    expect(said("> @opengeni-agent please review\n\nDone, see above.").mentions_app).toBe(false);
+    expect(said("> quoted\n\n@opengeni-agent again please").mentions_app).toBe(true);
+    // Read from the whole body, not the shortened one.
+    expect(said(`${"x".repeat(20_000)} @opengeni-agent`).mentions_app).toBe(true);
+    const catalog = githubEventTypeCatalog([], null).find(
+      (entry) => entry.type === "issue_comment.created",
+    );
+    expect(catalog?.fields?.map((field) => field.field)).toEqual(
+      expect.arrayContaining(["data.comment.author_association", "data.comment.mentions_app"]),
+    );
+  });
+
   test("ignores pings and installation changes, and refuses unreadable deliveries", () => {
     expect(readGitHubDelivery(delivery("ping", { zen: "hi" })).kind).toBe("ignored");
     expect(readGitHubDelivery(delivery("installation", { action: "created" })).kind).toBe(

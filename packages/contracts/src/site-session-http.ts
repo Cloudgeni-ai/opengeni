@@ -47,6 +47,7 @@ export function siteConversationContext(site: SiteConversationSite): string {
   const title = site.title.replace(/\s+/gu, " ").trim().slice(0, 200) || "Untitled app";
   return [
     `The person is working on the Opengeni app “${title}” (App id ${site.siteId}), shown beside this chat at version ${site.revision} (version id ${site.versionId}).`,
+    "Its source says what it shows and where that comes from: to answer about what it shows, read the source and call the tools or data it reads.",
     "When they ask for a change to “the app”, “this page” or a part of it, they mean this app: read its current source, then publish the change as a new version of this app.",
     "A published version goes live immediately and the preview beside this chat reloads; earlier versions can be restored.",
   ].join(" ");

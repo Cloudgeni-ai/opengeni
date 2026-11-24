@@ -8,12 +8,20 @@ import { errorMessage } from "@opengeni/contracts/values";
 import {
   getConnectionMetadata,
   listConnectionsMetadata,
+  getSessionTurn,
+  getSessionTurnInitiatingHumanSubjectId,
+  getSessionVisibility,
+  isSubjectOwnPersonalWorkspace,
+  listSessionEvents,
   type ConnectionNeedsReauth,
   type Database,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
-import { listOwnConnectionMetadata } from "./personal-connection-delegations";
+import {
+  listOwnConnectionMetadata,
+  type OmittedConnectionAccount,
+} from "./personal-connection-delegations";
 import {
   catalogProviderDomain,
   INTEGRATION_BACKEND_PROJECTION_KEY,
@@ -151,9 +159,11 @@ const PROVIDER_NAMES: Record<string, string> = {
   "gmailmcp.googleapis.com": "Gmail",
   "drivemcp.googleapis.com": "Google Drive",
   "calendarmcp.googleapis.com": "Google Calendar",
+  "mcp.atlassian.com": "Atlassian",
 };
 
-function providerName(providerDomain: string): string {
+/** The service a connection's provider domain names, for notices ("Atlassian"). */
+export function connectionProviderName(providerDomain: string): string {
   const host = providerDomain
     .trim()
     .toLowerCase()
@@ -191,21 +201,56 @@ export type ConnectionNeedsReauthNoticeDeps = {
  */
 export async function postConnectionNeedsReauthNotice(
   deps: ConnectionNeedsReauthNoticeDeps,
-  broken: ConnectionNeedsReauth,
+  broken: Omit<ConnectionNeedsReauth, "httpStatus" | "use"> & {
+    /**
+     * The chat to carry it, and the turn whose person it is for. Without a
+     * turn the inbox addresses it to the chat's owner.
+     */
+    use?: {
+      workspaceId: string;
+      sessionId: string;
+      turnId?: string | undefined;
+      attemptId?: string | undefined;
+      executionGeneration?: number | undefined;
+    };
+    /**
+     * Leave it alone when this chat already shows the notice to the same
+     * person since the connection last changed (posted, not withdrawn).
+     */
+    skipWhenShown?: boolean;
+  },
 ): Promise<void> {
   const use = broken.use;
   if (!use) return;
   try {
+    const key = connectionNeedsReauthNoticeKey(broken.connectionId);
     const connection = await getConnectionMetadata(
       deps.db,
       broken.workspaceId,
       broken.connectionId,
       broken.subjectId,
     );
-    const service = providerName(broken.providerDomain);
-    const account = connection ? connectionAccountLabel(connection, "") : "";
+    if (
+      broken.skipWhenShown &&
+      (await noticeShown(deps.db, use, key, connection?.updatedAt ?? null))
+    )
+      return;
+    const service = connectionProviderName(broken.providerDomain);
+    // Others may see a chat's notices: name whose account it is only in a
+    // private chat or in the account owner's own Personal workspace. Any other
+    // or unknown visibility names only the service.
+    const showAccount =
+      !!connection &&
+      ((await getSessionVisibility(deps.db, use.workspaceId, use.sessionId)) === "user_private" ||
+        (!!connection.subjectId &&
+          (await isSubjectOwnPersonalWorkspace(deps.db, {
+            accountId: connection.accountId,
+            workspaceId: use.workspaceId,
+            subjectId: connection.subjectId,
+          }))));
+    const account = connection && showAccount ? connectionAccountLabel(connection, "") : "";
     const payload = SessionNotificationPostedPayload.parse({
-      key: connectionNeedsReauthNoticeKey(broken.connectionId),
+      key,
       title: `${service} needs reconnecting`,
       ...(account ? { subtitle: clip(account, NOTIFICATION_SUBTITLE_MAX_CHARS) } : {}),
       body: `${service} stopped accepting ${
@@ -218,9 +263,13 @@ export async function postConnectionNeedsReauthNotice(
       {
         type: "session.notification.posted",
         payload,
-        turnId: use.turnId,
-        turnGeneration: use.executionGeneration,
-        turnAttemptId: use.attemptId,
+        ...(use.turnId !== undefined ? { turnId: use.turnId } : {}),
+        ...(use.turnId !== undefined && use.executionGeneration !== undefined
+          ? { turnGeneration: use.executionGeneration }
+          : {}),
+        ...(use.turnId !== undefined && use.attemptId !== undefined
+          ? { turnAttemptId: use.attemptId }
+          : {}),
       },
     ] as Parameters<typeof appendAndPublishEvents>[4]);
   } catch (error) {
@@ -228,6 +277,100 @@ export async function postConnectionNeedsReauthNotice(
     deps.observability?.warn("Connection reconnect notice was not posted", {
       connectionId: broken.connectionId,
       error: errorMessage(error),
+    });
+  }
+}
+
+/** Notification events read back to find a notice's latest state. */
+const NOTICE_LOOKBACK = 200;
+
+/**
+ * Whether the chat already shows this notice to the person `use.turnId` is
+ * for: its latest event for the key posted it (not withdrew it), on a turn of
+ * that same person, after the connection last changed (so a later break of a
+ * reconnected account is told again).
+ */
+async function noticeShown(
+  db: Database,
+  use: { workspaceId: string; sessionId: string; turnId?: string | undefined },
+  key: string,
+  changedAt: string | null,
+): Promise<boolean> {
+  const events = await listSessionEvents(db, use.workspaceId, use.sessionId, {
+    includeTypes: ["session.notification.posted", "session.notification.withdrawn"],
+    direction: "before",
+    limit: NOTICE_LOOKBACK,
+  });
+  let latest: (typeof events)[number] | undefined;
+  for (let index = events.length - 1; index >= 0 && !latest; index -= 1) {
+    const payload = events[index]!.payload as { key?: unknown } | null;
+    if (payload?.key === key) latest = events[index];
+  }
+  if (!latest || latest.type !== "session.notification.posted") return false;
+  if (changedAt && Date.parse(latest.occurredAt) < Date.parse(changedAt)) return false;
+  if (!use.turnId || !latest.turnId) return false;
+  if (latest.turnId === use.turnId) return true;
+  const [shownTo, sender] = [
+    await getSessionTurnInitiatingHumanSubjectId(db, use.workspaceId, latest.turnId),
+    await getSessionTurnInitiatingHumanSubjectId(db, use.workspaceId, use.turnId),
+  ];
+  return shownTo !== null && shownTo === sender;
+}
+
+/**
+ * A new message was accepted without picked accounts that stopped working
+ * (see `freezeConnectionAccounts`, "omit"). Log each, and for one whose
+ * sign-in the provider refused, post its reconnect notice on the chat the
+ * person sent from, on their turn so it reaches them rather than the chat's
+ * owner. A chat already showing that connection's notice gets no new one, so a
+ * dismissed notice stays dismissed while the account stays broken.
+ */
+export async function reportOmittedConnectionAccounts(
+  deps: Omit<ConnectionNeedsReauthNoticeDeps, "observability"> & {
+    observability?: Pick<Observability, "info" | "warn"> | undefined;
+  },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    /** The accepted turn the omission belongs to. */
+    turnId: string | null;
+    turnGeneration?: number | undefined;
+    omitted: readonly OmittedConnectionAccount[];
+  },
+): Promise<void> {
+  // A new chat's first turn: its generation, so the notice is on that exact turn.
+  let turnGeneration = input.turnGeneration;
+  if (
+    input.turnId &&
+    turnGeneration === undefined &&
+    input.omitted.some((omitted) => omitted.account.status === "needs_reauth")
+  )
+    turnGeneration =
+      (await getSessionTurn(deps.db, input.workspaceId, input.turnId).catch(() => null))
+        ?.executionGeneration ?? undefined;
+  for (const omitted of input.omitted) {
+    deps.observability?.info("Picked connector account left out of an accepted message", {
+      sessionId: input.sessionId,
+      serverId: omitted.serverId,
+      connectionId: omitted.connectionId,
+      reason: omitted.reason,
+      status: omitted.account.status,
+    });
+    if (omitted.account.status !== "needs_reauth") continue;
+    await postConnectionNeedsReauthNotice(deps, {
+      workspaceId: omitted.account.workspaceId,
+      connectionId: omitted.connectionId,
+      subjectId: omitted.account.subjectId,
+      providerDomain: omitted.account.providerDomain,
+      use: {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        ...(input.turnId ? { turnId: input.turnId } : {}),
+        ...(input.turnId && turnGeneration !== undefined
+          ? { executionGeneration: turnGeneration }
+          : {}),
+      },
+      skipWhenShown: true,
     });
   }
 }

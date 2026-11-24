@@ -553,6 +553,7 @@ export const englishMessages = {
     "The access it was saved with has changed. Its owner can save it again to approve it with their current access. If they've left, it can't run as them again.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
+  "automations.run.error.agentUnavailable": "Its agent was deleted or is no longer shared.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
   "automations.run.error.automationInactive":
     "The automation was paused or deleted before the run started.",
@@ -4964,6 +4965,12 @@ export const englishMessages = {
   "sessionChrome.singleSendWaitingUnavailable": "Waiting messages unavailable",
   "sessionChrome.singleSendWaitingUnavailableSentence": "Waiting messages unavailable.",
   "sessionChrome.steer": "Steer",
+  "sessionChrome.steerAllQueuedMessages_one": "Steer {count} queued message",
+  "sessionChrome.steerAllQueuedMessages_other": "Steer {count} queued messages",
+  "sessionChrome.steerAllTip":
+    "The agent reads these messages together, in order, as soon as it can. Running tools aren't cut off.",
+  "sessionChrome.steerCount_one": "Steer {count}",
+  "sessionChrome.steerCount_other": "Steer {count}",
   "sessionChrome.steerLatestQueuedMessage": "Steer latest queued message",
   "sessionChrome.steerQueuedPromptIndex": "Steer queued prompt {index}",
   "sessionChrome.steerTip":

@@ -225,7 +225,7 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("a 401 that says the sign-in is gone tells the app, other refusals do not", async () => {
+  test("a 401 that says the sign-in is gone tells the app, a 403 asks it to check who is signed in", async () => {
     const originalFetch = globalThis.fetch;
     const refusal = (status: number, code: string, reason?: string) =>
       new Response(
@@ -243,11 +243,13 @@ describe("web API auth helpers", () => {
     const heard = jest.fn();
     const unsubscribe = subscribeSignInLost(heard);
     const cases = [
-      [refusal(401, "unauthenticated", "session_missing"), 1],
-      [refusal(401, "unauthenticated", "session_expired"), 1],
-      [refusal(401, "unauthenticated", "credential_invalid"), 0],
-      [refusal(401, "unauthenticated"), 0],
-      [refusal(403, "forbidden", "missing_permission"), 0],
+      [refusal(401, "unauthenticated", "session_missing"), "signed_out"],
+      [refusal(401, "unauthenticated", "session_expired"), "signed_out"],
+      [refusal(401, "unauthenticated", "credential_invalid"), null],
+      [refusal(401, "unauthenticated"), null],
+      // With one sign-in cookie per browser, another tab may have signed in someone else.
+      [refusal(403, "forbidden", "missing_permission"), "forbidden"],
+      [refusal(404, "not_found"), null],
     ] as const;
     try {
       for (const [response, expected] of cases) {
@@ -255,7 +257,7 @@ describe("web API auth helpers", () => {
         globalThis.fetch = (async () => response) as unknown as typeof fetch;
         await expect(createOpenGeniClient().getAccessContext()).rejects.toThrow();
         await Bun.sleep(0);
-        expect(heard).toHaveBeenCalledTimes(expected);
+        expect(heard.mock.calls).toEqual(expected === null ? [] : [[expected]]);
       }
       unsubscribe();
       heard.mockClear();

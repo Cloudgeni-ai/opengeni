@@ -9,9 +9,11 @@ import type {
   Agent,
   AgentTemplateTrigger,
   AutomationTemplateEventSource,
+  CreateEventSourceRequest,
   CreateScheduledTaskRequest,
   EventSource,
   ResourceRef,
+  ScheduledTask,
   ScheduledTaskEventsInput,
   ScheduledTaskScheduleSpec,
 } from "@opengeni/sdk";
@@ -32,6 +34,7 @@ import {
   withTemplateSources,
 } from "../../../components/automations/automation-template-model";
 import {
+  createEventSourceRequest,
   eventSourceChoiceOf,
   eventSourceStatusBadge,
   isAppWebhookChoice,
@@ -208,7 +211,10 @@ export function agentTriggerOptions(
       const badge = eventSourceStatusBadge(t, source);
       if (agentTriggerAwaitsSecret(source) && source.viewerAccess === "use")
         return { ...option, unavailable: "Its owner pastes the secret." };
-      return { ...option, unavailable: badge?.reason ?? badge?.label ?? "Unavailable" };
+      return {
+        ...option,
+        unavailable: badge?.reason ?? badge?.label ?? "Unavailable",
+      };
     });
   const fresh = input.choices
     .filter((meta) => meta.setup === "paste" || meta.choice === "mcp" || !have.has(meta.choice))
@@ -219,7 +225,9 @@ export function agentTriggerOptions(
         pick,
         label: meta.choice === "webhook" ? "Create a webhook" : meta.name,
         subject: eventSourceSubjectOfChoice(t, meta.choice),
-        setup: agentTriggerNewSetup(meta.choice, { githubConnected: input.githubConnected }),
+        setup: agentTriggerNewSetup(meta.choice, {
+          githubConnected: input.githubConnected,
+        }),
       };
     });
   return [schedule, ...existing, ...fresh];
@@ -236,7 +244,9 @@ export function agentTriggerDraftForPick(
   const note = options.note ?? "";
   if (pick.kind === "schedule") {
     return {
-      ...newAutomationDraft({ cadence: defaultAutomationCadence(options.timeZone) }),
+      ...newAutomationDraft({
+        cadence: defaultAutomationCadence(options.timeZone),
+      }),
       instructions: note,
     };
   }
@@ -253,7 +263,10 @@ export function agentTriggerDraftForPick(
 /** A suggested trigger's draft: its events, conditions, schedule and instructions. */
 export function agentTriggerDraftFromSuggestion(
   suggestion: AgentTemplateTrigger,
-  options: { sources?: readonly EventSource[] | undefined; timeZone?: string | undefined } = {},
+  options: {
+    sources?: readonly EventSource[] | undefined;
+    timeZone?: string | undefined;
+  } = {},
 ): AutomationDraft {
   return automationDraftFromTemplate(
     {
@@ -380,7 +393,10 @@ export function agentTriggerName(
   t: OpenGeniText,
   agent: Pick<Agent, "name">,
   suggestion: Pick<AgentTemplateTrigger, "name"> | undefined,
-  request: { schedule: ScheduledTaskScheduleSpec; events?: ScheduledTaskEventsInput | undefined },
+  request: {
+    schedule: ScheduledTaskScheduleSpec;
+    events?: ScheduledTaskEventsInput | undefined;
+  },
   sources: readonly Pick<EventSource, "id" | "name">[],
   now: Date,
 ): string {
@@ -406,7 +422,9 @@ export type AgentTriggerChat =
   | { mode: "reusable_session" }
   | { mode: "existing_session"; sessionId: string };
 
-export const AGENT_TRIGGER_NEW_CHAT: AgentTriggerChat = { mode: "new_session_per_run" };
+export const AGENT_TRIGGER_NEW_CHAT: AgentTriggerChat = {
+  mode: "new_session_per_run",
+};
 
 /** What the dialog says each run does, for the chat picked. */
 export function agentTriggerChatWords(agent: Pick<Agent, "name">, chat: AgentTriggerChat): string {
@@ -460,4 +478,78 @@ export function agentTriggerSaveError(error: unknown, visibility: "private" | "w
   if (apiErrorFacts(error).status === 403 && visibility !== "private")
     return AGENT_TRIGGER_SHARED_DENIED;
   return userErrorText(error);
+}
+
+/**
+ * Adds a one-click suggestion (`oneClick`) with no form: its GitHub triggers
+ * listen on the person's GitHub source, added here when they have none and
+ * GitHub is connected. Anything else it would need (connecting GitHub, a
+ * webhook) returns `needs_setup`, and the page opens the dialog instead.
+ */
+export async function addAgentSuggestedTrigger(
+  t: OpenGeniText,
+  input: {
+    client: {
+      listEventSources(workspaceId: string): Promise<EventSource[]>;
+      createEventSource(
+        workspaceId: string,
+        request: CreateEventSourceRequest,
+      ): Promise<{ source: EventSource }>;
+      createScheduledTask(
+        workspaceId: string,
+        request: CreateScheduledTaskRequest,
+      ): Promise<ScheduledTask>;
+    };
+    workspaceId: string;
+    agent: Pick<Agent, "id" | "name" | "visibility">;
+    suggestion: AgentTemplateTrigger;
+    githubConnected: boolean | null;
+    timeZone?: string | undefined;
+    now: Date;
+  },
+): Promise<{ kind: "created"; task: ScheduledTask } | { kind: "needs_setup" }> {
+  const visibility = input.agent.visibility === "private" ? "private" : "workspace";
+  let sources = await input.client.listEventSources(input.workspaceId);
+  let draft = agentTriggerDraftFromSuggestion(input.suggestion, {
+    sources,
+    timeZone: input.timeZone,
+  });
+  const missing = agentTriggerMissingSource(draft, sources);
+  if (missing) {
+    // Unknown status leaves it to the server, as the dialog's source step does.
+    if (missing.kind !== "github" || input.githubConnected === false)
+      return { kind: "needs_setup" };
+    const { source } = await input.client.createEventSource(
+      input.workspaceId,
+      createEventSourceRequest(t, {
+        choice: automationTemplateSourceChoice(missing),
+        name: "",
+        visibility,
+      }),
+    );
+    sources = [...sources, source];
+    draft = {
+      ...draft,
+      events: {
+        ...draft.events,
+        triggers: draft.events.triggers.map((trigger) =>
+          !trigger.sourceId && trigger.templateSource?.kind === "github"
+            ? { ...trigger, sourceId: source.id }
+            : trigger,
+        ),
+      },
+    };
+  }
+  if (draft.events.triggers.some((trigger) => !trigger.sourceId)) return { kind: "needs_setup" };
+  const task = await input.client.createScheduledTask(
+    input.workspaceId,
+    agentTriggerCreateRequest(t, {
+      agent: input.agent,
+      suggestion: input.suggestion,
+      draft,
+      sources,
+      now: input.now,
+    }),
+  );
+  return { kind: "created", task };
 }
