@@ -41,6 +41,11 @@ export const REFUSED_RUN_COMMENT_WINDOW_MS = 24 * 60 * 60 * 1_000;
 export const REFUSED_RUN_COMMENT_LIMIT = 3;
 const GITHUB_API = "https://api.github.com";
 const GITHUB_TIMEOUT_MS = 10_000;
+/**
+ * How long reading and posting on one pull request may take in all, which
+ * bounds how long its advisory lock keeps a transaction open.
+ */
+const COMMENT_DEADLINE_MS = 15_000;
 /** The longest an automation's name is quoted in a comment. */
 const AUTOMATION_NAME_MAX = 80;
 /** Pages of recent comments read for an earlier one (100 each). */
@@ -412,6 +417,8 @@ async function commentOnce(input: {
   warn: (message: string, fields: Record<string, string | number>) => void;
 }): Promise<boolean> {
   const { fetcher, token, pullRequest, cause, warn } = input;
+  const deadline = AbortSignal.timeout(COMMENT_DEADLINE_MS);
+  const signal = () => AbortSignal.any([deadline, AbortSignal.timeout(GITHUB_TIMEOUT_MS)]);
   const marker = refusedRunCommentMarker(cause);
   const path = `${GITHUB_API}/repos/${encodeURIComponent(pullRequest.owner)}/${encodeURIComponent(
     pullRequest.name,
@@ -419,7 +426,7 @@ async function commentOnce(input: {
   for (let page = 1; page <= COMMENT_PAGES_MAX; page += 1) {
     const listed = await fetcher(
       `${path}?since=${encodeURIComponent(input.since.toISOString())}&per_page=100&page=${page}`,
-      { headers: headers(token), signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) },
+      { headers: headers(token), signal: signal() },
     );
     if (!listed.ok) {
       warn("Reading a refused run's pull request comments failed", {
@@ -447,7 +454,7 @@ async function commentOnce(input: {
     method: "POST",
     headers: { ...headers(token), "content-type": "application/json" },
     body: JSON.stringify({ body: refusedRunCommentBody({ cause, automation: input.automation }) }),
-    signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    signal: signal(),
   });
   if (!created.ok) {
     warn("Commenting on a refused run's pull request failed", {
