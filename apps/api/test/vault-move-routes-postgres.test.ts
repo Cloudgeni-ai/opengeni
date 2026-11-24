@@ -62,7 +62,7 @@ async function scope(): Promise<Scope> {
     .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${account!.id}, 'person-a', 'active', ${workspace!.id})`;
   await shared!
     .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
-    values (${account!.id}, ${workspace!.id}, 'person-a', 'person-a', 'member', ${shared!.admin.json(GRANTED)})`;
+    values (${account!.id}, ${workspace!.id}, 'person-a', 'person-a', 'member', ${shared!.admin.json([...GRANTED, "workspace:admin"])})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -74,6 +74,7 @@ const GRANTED: Permission[] = [
   "secrets:write",
   "secrets:use",
 ];
+const ADMIN: Permission[] = [...GRANTED, "workspace:admin"];
 
 /**
  * The app with a remote bridge factory over one fake provider that keeps its
@@ -134,7 +135,7 @@ function fixture() {
     path: string,
     method = "GET",
     body?: unknown,
-    permissions: Permission[] = GRANTED,
+    permissions: Permission[] = ADMIN,
   ) {
     const token = await signDelegatedAccessToken(delegationSecret, {
       ...target,
@@ -216,6 +217,10 @@ function fixture() {
           `/vaults/${item.vaultId}/items/${item.id}/fields/${field.id}/reveal`,
           "POST",
           {},
+          // Values are checked as an admin: password-manager items and copies
+          // a member could only use are hidden from members (docs/secrets.md,
+          // "Who can see a value"); these tests are about the move itself.
+          ADMIN,
         ),
         200,
       )

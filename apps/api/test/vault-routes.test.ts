@@ -767,7 +767,7 @@ describe("vault routes", () => {
       asCreator,
       { expectedGeneration: rotated.json.generation, useOnly: false },
     );
-    expect(unset.status).toBe(422);
+    expect(unset.status).toBe(400);
 
     // An existing item can be made use-only later.
     const later = await call(
