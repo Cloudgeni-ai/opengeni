@@ -284,7 +284,7 @@ describe("turn-capacity Prometheus alerts", () => {
         [
           "opengeni_mcp_lifecycle_operations_total",
           'policy="strict"',
-          'outcome=~"failed|refused_by_policy"',
+          'outcome=~"failed|refused_by_policy|auth_needed"',
         ],
       ],
       [
@@ -330,7 +330,7 @@ describe("turn-capacity Prometheus alerts", () => {
       }
     }
     const bestEffort = alertExpression(template, "OpenGeniMcpBestEffortConnectFailureRatio");
-    expect(bestEffort.match(/outcome!="refused_by_policy"/g)).toHaveLength(2);
+    expect(bestEffort.match(/outcome!~"refused_by_policy\|auth_needed"/g)).toHaveLength(2);
   });
 
   test("alerts on product-level failures users hit, with plain-language copy", async () => {
