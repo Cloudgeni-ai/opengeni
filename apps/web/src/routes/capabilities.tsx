@@ -21,9 +21,9 @@ import {
   type ConnectionCatalogService,
 } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
-import { CapabilityMark } from "@/components/capabilities/capability-page";
+import { CapabilityMark } from "@opengeni/react/ui/capability-page";
 import { CatalogItemPage } from "@/components/capabilities/catalog-item-page";
-import { humanizeName } from "@/components/capabilities/skill-copy";
+import { humanizeName } from "@opengeni/react/app/lib/skill-names";
 import {
   CapabilityPageSlotContext,
   type CapabilityPageSlotValue,

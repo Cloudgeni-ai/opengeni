@@ -7,8 +7,8 @@ import {
   CapabilityMark,
   CapabilityPage,
   TechnicalDetails,
-} from "@/components/capabilities/capability-page";
-import { humanizeName, skillBody, skillSummary } from "@/components/capabilities/skill-copy";
+} from "@opengeni/react/ui/capability-page";
+import { humanizeName, skillBody, skillSummary } from "@opengeni/react/app/lib/skill-names";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";

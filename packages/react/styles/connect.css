@@ -110,6 +110,7 @@
 .og-capability-catalog-status-line { color: var(--og-color-fg-muted, inherit); }
 .og-capability-catalog-row[data-row-status="added"] .og-capability-catalog-status-line { color: var(--og-color-status-idle, var(--og-color-fg-muted, inherit)); }
 .og-capability-catalog-row[data-row-status="attention"] .og-capability-catalog-status-line { color: var(--og-color-status-waiting, var(--og-color-fg-muted, inherit)); }
+.og-capability-catalog-row[data-status-tone="description"] .og-capability-catalog-status-line { color: var(--og-color-fg-muted, inherit); }
 .og-connection-type-picker { display:flex; flex-wrap:wrap; gap:4px; border:0; padding:0; margin:0 0 16px; }
 .og-connection-type-picker legend { font-size:12px; margin-bottom:8px; }
 .og-connection-type-picker label { position:relative; padding:8px 12px; font-size:13px; border-radius:8px; cursor:pointer; }

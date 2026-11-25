@@ -35,6 +35,8 @@ export type UsageGroupBy =
   | "rootSession"
   | "person"
   | "schedule"
+  /** The agent each chat was started for. */
+  | "agent"
   /** Where the work came from: web app, API/SDK/embed, Slack, schedule, agent. */
   | "source";
 
@@ -128,6 +130,8 @@ export type UsageFacets = {
   projects: Array<{ id: string; name: string }>;
   people: Array<{ key: string; name: string | null; you: boolean }>;
   schedules: Array<{ id: string; name: string }>;
+  /** Present when the server answers the agent dimension. */
+  agents?: Array<{ id: string; name: string }>;
   /** Present when the server answers the source dimension and custom ranges. */
   sources?: string[];
 };
@@ -142,6 +146,7 @@ export type UsageFilters = {
   person?: string[];
   rootSessionId?: string[];
   scheduleId?: string[];
+  agentId?: string[];
   source?: string[];
 };
 

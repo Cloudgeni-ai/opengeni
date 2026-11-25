@@ -74,6 +74,17 @@ const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
  * repetitions could not finish inside the control budget anyway.
  */
 export const CONTROL_FIXTURE_READY_MS = 45_000;
+/** How long the hostile Pause fixture sleeps after printing its ready marker
+ * before it writes its zombie artifact. Pause marks an adopted background
+ * command stopping and the sandbox lease reaper ends its process group on its
+ * next sweep (every 30 s by default, plus the sweep's own work), so the window
+ * must cover the time to click Pause plus one reaper period with room to
+ * spare. A shorter window would race the reaper instead of testing Pause. */
+export const PAUSE_FIXTURE_DELAYED_WRITE_SECONDS = 120;
+/** Zombie probes after Pause run only once the fixture's delayed write would
+ * have happened, plus this margin, so a process Pause failed to stop is caught
+ * by the first probe instead of slipping past it. */
+const PAUSE_ZOMBIE_PROBE_MARGIN_MS = 5_000;
 /** Default wall-clock budget for every Steer repetition plus the final Pause. */
 export const DEFAULT_CONTROL_BUDGET_MS = 25 * 60_000;
 /** How often a long wait reports that it is still waiting. */
@@ -1068,7 +1079,7 @@ export function controlFixtureProgram(
     "if mkdir pause-stress/claimed 2>/dev/null; then",
     "printf '%s\\n' " + fixtureShellQuote(controlMarker),
     "trap '' INT TERM",
-    "sleep 30",
+    "sleep " + PAUSE_FIXTURE_DELAYED_WRITE_SECONDS,
     "printf zombie > " + fixtureShellQuote(zombiePath),
     "else",
     "printf '%s\\n' " + fixtureShellQuote("PAUSE_RESUMED_SAFE_" + marker),
@@ -3586,6 +3597,9 @@ async function proveLivePauseCancellation(input: {
     (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
     controlFixtureReadyLabel("Pause"),
   );
+  // The fixture prints its marker immediately before its delayed-write sleep.
+  const pauseZombieProbeAt =
+    performance.now() + PAUSE_FIXTURE_DELAYED_WRITE_SECONDS * 1_000 + PAUSE_ZOMBIE_PROBE_MARGIN_MS;
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("Pause fixture output was not bound to its owning turn attempt");
   }
@@ -3776,6 +3790,9 @@ async function proveLivePauseCancellation(input: {
   });
   await Bun.sleep(6_000);
   await auditCancelledPredecessorEvents(client, workspaceId, sessionId, audit);
+  // Probe only after the delayed write would have landed: an earlier probe
+  // cannot tell a stopped process from one that is still sleeping.
+  await Bun.sleep(Math.max(0, pauseZombieProbeAt - performance.now()));
   const zombieProbe = await client.terminalExec(workspaceId, sessionId, {
     command: `test ! -e '${zombiePath}'`,
     cwd: "",

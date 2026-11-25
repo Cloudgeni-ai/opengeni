@@ -4898,7 +4898,8 @@ const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|accou
  * stays queued and resumes by itself when an account can serve it), or
  * sooner on another model. It names no time: the timeline cannot keep a
  * time current. Named rate limits and waits that a person must resolve
- * keep their recorded explanation.
+ * keep their recorded explanation, and so does a wait on the account the chat
+ * is pinned to: another model would not help it, automatic account choice does.
  */
 function capacityWaitPresentation(
   t: OpenGeniText,
@@ -4908,6 +4909,7 @@ function capacityWaitPresentation(
 ): { turnId: string | null; label: string; detail: string; text: string } {
   if (
     ACTION_CAPACITY_WAIT_REASONS.has(stringValue(payload.waitReason)) ||
+    payload.waitReason === "pinned_account_unavailable" ||
     payload.waitReason === "codex_rate_limited" ||
     ACTION_CAPACITY_WAIT_CODE.test(stringValue(payload.code))
   ) {

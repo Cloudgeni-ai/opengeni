@@ -1,5 +1,5 @@
 import { codexPlanKey } from "@opengeni/codex";
-import type { SubscriptionReconnectAccount } from "@opengeni/contracts/subscription-capacity-wait";
+import type { SubscriptionWaitAccount } from "@opengeni/contracts/subscription-capacity-wait";
 import {
   automaticallyUsable,
   connectionIneligibility,
@@ -10,7 +10,10 @@ import {
   type PlacementInput,
 } from "@opengeni/subscriptions";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
-import type { SubscriptionCoreWaitPresentation } from "./subscription-core/wait-reason";
+import {
+  subscriptionWaitAccountLabel,
+  type SubscriptionCoreWaitPresentation,
+} from "./subscription-core/wait-reason";
 
 /** Explain the result using the same accepted, scoped placement world. This
  * never excludes a runnable Free account or treats missing usage as a limit. */
@@ -28,7 +31,7 @@ export function projectCodexSubscriptionWait(
   const binding = input.session.binding;
   const pinned = binding?.choice === "explicit" ? binding.connectionId : null;
   const models = failoverCandidateModels(input).filter((model) => modelPermitted(input, model));
-  let reconnectAccount: SubscriptionReconnectAccount | undefined;
+  let waitAccount: SubscriptionWaitAccount | undefined;
   let planBlocked = false;
   let preferredModelRefused = false;
   let onlyProvenPlanBlocks = true;
@@ -89,11 +92,9 @@ export function projectCodexSubscriptionWait(
         connection.health === "needs_reconnect" &&
         reasons.every((reason) => reason === "unhealthy" || reason === "exhausted")
       ) {
-        // Labels are optional and may default to an email. In a chat or a
-        // parent agent's notice, use a non-email label or the connection id.
-        const label = connection.label?.trim().replace(/\s+/g, " ");
-        reconnectAccount ??= {
-          label: label && !label.includes("@") ? `“${label.slice(0, 80)}”` : `(${connection.id})`,
+        // A reconnect names the account by a non-email label, else its id.
+        waitAccount ??= {
+          label: subscriptionWaitAccountLabel(connection.label) ?? `(${connection.id})`,
           personal: connection.ownership.kind === "personal",
         };
         continue;
@@ -115,8 +116,8 @@ export function projectCodexSubscriptionWait(
       earliestResetAt: timed.at === null ? null : new Date(timed.at),
     };
   }
-  if (reconnectAccount && !otherBlock)
-    return { reason: "codex_relogin_required", earliestResetAt: null, reconnectAccount };
+  if (waitAccount && !otherBlock)
+    return { reason: "codex_relogin_required", earliestResetAt: null, waitAccount };
   if (planBlocked && !otherBlock)
     return {
       reason: "codex_plan_no_capacity",

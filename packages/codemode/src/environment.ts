@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { CodemodeClient, type CodemodeCallOptions, type CodemodeToolFunction } from "./index";
+import { temporaryCodemodeRefusedBearerStore } from "./refused-bearers";
 
 export const CODEMODE_ENVIRONMENT = {
   url: "OPENGENI_CODEMODE_URL",
@@ -52,6 +53,8 @@ export function environmentCodemodeClient(
     token: directTokenConfigured
       ? async () => requiredEnvironment(environment, CODEMODE_ENVIRONMENT.token)
       : async () => await readBearerFile(tokenFile!),
+    // A program run once per call shares the command-line clients' memory.
+    refusedBearers: temporaryCodemodeRefusedBearerStore(),
   });
   if (environment === process.env) cachedEnvironmentClient = { key, client };
   return client;

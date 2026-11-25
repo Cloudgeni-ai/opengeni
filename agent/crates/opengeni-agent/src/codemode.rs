@@ -4,13 +4,16 @@
 //! API. It does not execute tools, hold a second catalog, or own authority: the
 //! API's durable operation journal and the worker's exact attempt executor remain
 //! the only execution path. The worker injects a short-lived bearer into each
-//! child process; this module never persists or logs it.
+//! child process; this module never persists or logs it. It only keeps a
+//! domain-separated hash of a bearer the API refused for good, so a script that
+//! runs this client in a loop stops reaching the API (`RefusedBearers`).
 
 use std::{fmt::Write as _, path::PathBuf, time::Duration};
 
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
@@ -154,7 +157,12 @@ pub enum CodemodeError {
     #[error("{0}")]
     Unreachable(String),
     #[error("Codemode request failed with HTTP {status}: {message}")]
-    Http { status: StatusCode, message: String },
+    Http {
+        status: StatusCode,
+        /// The API's typed `details.code`, when it sent one.
+        code: Option<String>,
+        message: String,
+    },
     #[error("Codemode response was invalid: {0}")]
     InvalidResponse(String),
     #[error("Codemode operation {operation_id} did not settle before the client deadline")]
@@ -664,6 +672,9 @@ impl From<serde_json::Error> for CodemodeError {
 struct CodemodeClient {
     base_url: Url,
     token: String,
+    /// Marker name for this bearer at this API base; a hash, never the bearer.
+    refusal_key: String,
+    refused_bearers: Option<RefusedBearers>,
     http: Client,
 }
 
@@ -672,7 +683,8 @@ impl CodemodeClient {
         let base_url = environment_value(URL_ENV)
             .ok_or_else(|| CodemodeError::Configuration(format!("{URL_ENV} is required")))?;
         let token = configured_token()?;
-        Self::new(&base_url, token)
+        Ok(Self::new(&base_url, token)?
+            .with_refused_bearers(RefusedBearers::in_temporary_directory()))
     }
 
     fn new(base_url: &str, token: String) -> Result<Self, CodemodeError> {
@@ -702,12 +714,62 @@ impl CodemodeClient {
             .map_err(|error| CodemodeError::Transport(error.to_string()))?;
         Ok(Self {
             base_url: parsed,
+            refusal_key: refused_bearer_key(base_url, &token),
             token,
+            refused_bearers: None,
             http,
         })
     }
 
+    fn with_refused_bearers(mut self, refused_bearers: RefusedBearers) -> Self {
+        self.refused_bearers = Some(refused_bearers);
+        self
+    }
+
+    /// A bearer the API already refused for good fails here, unsent, with the
+    /// same refusal. A renewed bearer has another key and is sent normally.
+    fn refuse_known_dead_bearer(&self) -> Result<(), CodemodeError> {
+        match self
+            .refused_bearers
+            .as_ref()
+            .and_then(|store| store.read(&self.refusal_key))
+        {
+            Some(refusal) => Err(CodemodeError::Http {
+                status: StatusCode::from_u16(refusal.status).unwrap_or(StatusCode::UNAUTHORIZED),
+                code: refusal.code,
+                message: refusal.message,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    fn remember_dead_bearer<T>(
+        &self,
+        result: Result<T, CodemodeError>,
+    ) -> Result<T, CodemodeError> {
+        if let (
+            Err(CodemodeError::Http {
+                status,
+                code,
+                message,
+            }),
+            Some(store),
+        ) = (&result, &self.refused_bearers)
+        {
+            store.record(
+                &self.refusal_key,
+                &BearerRefusal {
+                    status: status.as_u16(),
+                    code: code.clone(),
+                    message: message.clone(),
+                },
+            );
+        }
+        result
+    }
+
     async fn catalog(&self) -> Result<Catalog, CodemodeError> {
+        self.refuse_known_dead_bearer()?;
         let response = self
             .http
             .get(self.url("catalog")?)
@@ -715,7 +777,7 @@ impl CodemodeClient {
             .send()
             .await
             .map_err(|error| transport_error(&error))?;
-        decode_json_response(response).await
+        self.remember_dead_bearer(decode_json_response(response).await)
     }
 
     #[cfg(test)]
@@ -810,6 +872,7 @@ impl CodemodeClient {
     }
 
     async fn submit(&self, request: &CallRequest) -> Result<Operation, CodemodeError> {
+        self.refuse_known_dead_bearer()?;
         let response = self
             .http
             .post(self.url("calls")?)
@@ -818,11 +881,13 @@ impl CodemodeClient {
             .send()
             .await
             .map_err(|error| transport_error(&error))?;
-        let submission: Submission = decode_json_response(response).await?;
+        let submission: Submission =
+            self.remember_dead_bearer(decode_json_response(response).await)?;
         Ok(submission.operation)
     }
 
     async fn read(&self, operation_id: &str) -> Result<Operation, CodemodeError> {
+        self.refuse_known_dead_bearer()?;
         let response = self
             .http
             .get(self.url(&format!("calls/{operation_id}"))?)
@@ -831,13 +896,207 @@ impl CodemodeClient {
             .send()
             .await
             .map_err(|error| transport_error(&error))?;
-        decode_json_response(response).await
+        self.remember_dead_bearer(decode_json_response(response).await)
     }
 
     fn url(&self, path: &str) -> Result<Url, CodemodeError> {
         self.base_url
             .join(path)
             .map_err(|error| CodemodeError::Configuration(error.to_string()))
+    }
+}
+
+/// Bearers the API refused for good, remembered across processes.
+///
+/// Every `codemode` command is its own process, so a script that calls it in a
+/// loop would otherwise send a dead bearer on every iteration. A 401, or a 403
+/// `agent_attempt_caller_stale` (the bearer's turn attempt ended), can never
+/// clear for that bearer. Markers live in one private (0700) per-user directory
+/// under the temporary directory and hold only the refusal's status, code and
+/// message under a domain-separated hash of the API base and bearer. The
+/// JavaScript clients (packages/codemode/src/refused-bearers.ts) share the
+/// exact format. Any file-system problem only disables the memory.
+struct RefusedBearers {
+    directory: PathBuf,
+}
+
+const REFUSED_BEARER_DIRECTORY_PREFIX: &str = "opengeni-codemode-refused-";
+/// Delegated bearers live at most 24 hours; an older marker names nothing usable.
+const REFUSED_BEARER_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_REFUSAL_MARKER_BYTES: u64 = 8 * 1024;
+const MAX_REFUSAL_MESSAGE_CHARS: usize = 2048;
+const MAX_REFUSAL_MARKERS_PRUNED: usize = 64;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct BearerRefusal {
+    status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    message: String,
+}
+
+impl BearerRefusal {
+    /// Only a well-formed refusal that can never clear is remembered or replayed.
+    fn validated(self) -> Option<Self> {
+        if let Some(code) = &self.code {
+            if code.is_empty()
+                || code.len() > 128
+                || !code
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                return None;
+            }
+        }
+        let status = StatusCode::from_u16(self.status).ok()?;
+        if !is_terminal_bearer_refusal(status, self.code.as_deref()) {
+            return None;
+        }
+        Some(Self {
+            message: self
+                .message
+                .chars()
+                .take(MAX_REFUSAL_MESSAGE_CHARS)
+                .collect(),
+            ..self
+        })
+    }
+}
+
+fn is_terminal_bearer_refusal(status: StatusCode, code: Option<&str>) -> bool {
+    status == StatusCode::UNAUTHORIZED
+        || (status == StatusCode::FORBIDDEN && code == Some("agent_attempt_caller_stale"))
+}
+
+/// Marker name for one bearer at one API base (trailing slashes ignored).
+fn refused_bearer_key(base_url: &str, token: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"opengeni:codemode-refused-bearer:v1\0");
+    digest.update(base_url.trim().trim_end_matches('/').as_bytes());
+    digest.update(b"\0");
+    digest.update(token.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn is_refusal_key(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+impl RefusedBearers {
+    fn in_temporary_directory() -> Self {
+        Self::in_root(&std::env::temp_dir())
+    }
+
+    fn in_root(root: &std::path::Path) -> Self {
+        #[cfg(unix)]
+        let user = nix::unistd::getuid().as_raw().to_string();
+        #[cfg(not(unix))]
+        let user = "user".to_string();
+        Self {
+            directory: root.join(format!("{REFUSED_BEARER_DIRECTORY_PREFIX}{user}")),
+        }
+    }
+
+    fn owned(metadata: &std::fs::Metadata) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            metadata.uid() == nix::unistd::getuid().as_raw()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            true
+        }
+    }
+
+    fn private_directory(&self, create: bool) -> bool {
+        if create {
+            let _ = create_private_directory(&self.directory);
+        }
+        // lstat: a symlink in its place is never followed or trusted.
+        let Ok(metadata) = std::fs::symlink_metadata(&self.directory) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.mode() & 0o077 != 0 {
+                return false;
+            }
+        }
+        metadata.is_dir() && Self::owned(&metadata)
+    }
+
+    fn expired(metadata: &std::fs::Metadata) -> bool {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= REFUSED_BEARER_MAX_AGE)
+    }
+
+    fn read(&self, key: &str) -> Option<BearerRefusal> {
+        if !is_refusal_key(key) || !self.private_directory(false) {
+            return None;
+        }
+        let path = self.directory.join(key);
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if !metadata.is_file()
+            || !Self::owned(&metadata)
+            || metadata.len() > MAX_REFUSAL_MARKER_BYTES
+        {
+            return None;
+        }
+        if Self::expired(&metadata) {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+        serde_json::from_slice::<BearerRefusal>(&std::fs::read(&path).ok()?)
+            .ok()?
+            .validated()
+    }
+
+    fn record(&self, key: &str, refusal: &BearerRefusal) {
+        let Some(refusal) = refusal.clone().validated() else {
+            return;
+        };
+        if !is_refusal_key(key) || !self.private_directory(true) {
+            return;
+        }
+        let Ok(bytes) = serde_json::to_vec(&refusal) else {
+            return;
+        };
+        // Exclusive create never follows or replaces an existing path.
+        if write_new_file(&self.directory.join(key), &bytes).is_ok() {
+            self.prune_expired();
+        }
+    }
+
+    fn prune_expired(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.directory) else {
+            return;
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            if !entry.file_name().to_str().is_some_and(is_refusal_key) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.is_file()
+                && Self::owned(&metadata)
+                && Self::expired(&metadata)
+                && std::fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+                if removed >= MAX_REFUSAL_MARKERS_PRUNED {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -988,8 +1247,9 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
         bytes.extend_from_slice(&chunk);
     }
     if !status.is_success() {
-        let message = serde_json::from_slice::<Value>(&bytes)
-            .ok()
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+        let message = body
+            .as_ref()
             .and_then(|value| {
                 value
                     .pointer("/error/message")
@@ -998,7 +1258,27 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
                     .map(ToOwned::to_owned)
             })
             .unwrap_or_else(|| "request rejected".to_string());
-        return Err(CodemodeError::Http { status, message });
+        let code = body
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/error/details/code")
+                    .or_else(|| value.pointer("/details/code"))
+                    .and_then(Value::as_str)
+            })
+            .filter(|code| {
+                !code.is_empty()
+                    && code.len() <= 128
+                    && code
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+            .map(ToOwned::to_owned);
+        return Err(CodemodeError::Http {
+            status,
+            code,
+            message,
+        });
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| CodemodeError::InvalidResponse(error.to_string()))
@@ -2512,6 +2792,181 @@ mod tests {
             .to_string()
             .contains("Reload this client before changing state."));
         server.await.expect("server");
+    }
+
+    /// packages/codemode/test/client.test.ts pins the same vector.
+    #[test]
+    fn refused_bearer_markers_share_the_javascript_key() {
+        let expected = "13e7038274c51ab79fbb2cb6d04668e68bd7ffbb177d983532b526691d4ae784";
+        for base in [
+            "https://api.example.test/v1/workspaces/ws/codemode",
+            "https://api.example.test/v1/workspaces/ws/codemode/",
+            " https://api.example.test/v1/workspaces/ws/codemode// ",
+        ] {
+            assert_eq!(refused_bearer_key(base, "attempt-bearer"), expected);
+        }
+        assert_ne!(
+            refused_bearer_key(
+                "https://api.example.test/v1/workspaces/ws/codemode",
+                "other"
+            ),
+            expected
+        );
+    }
+
+    async fn refuse_once(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            read_request(&mut stream).await;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("response");
+            // The listener closes here: any later request cannot reach a server.
+        });
+        (
+            format!("http://{address}/v1/workspaces/ws/codemode"),
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_dead_bearer_reaches_the_api_once_across_processes() {
+        for (status_line, body, code) in [
+            (
+                "401 Unauthorized",
+                r#"{"error":{"code":"unauthenticated","message":"authentication required","details":{"code":"credential_invalid"}}}"#,
+                "credential_invalid",
+            ),
+            (
+                "403 Forbidden",
+                r#"{"error":{"code":"forbidden","message":"This process's tool access belongs to a turn attempt that is no longer active.","details":{"code":"agent_attempt_caller_stale"}}}"#,
+                "agent_attempt_caller_stale",
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("temporary directory");
+            let (url, server) = refuse_once(status_line, body).await;
+            // Each client stands for a separate `codemode` process.
+            let process = || {
+                CodemodeClient::new(&url, "dead-bearer".to_string())
+                    .expect("client")
+                    .with_refused_bearers(RefusedBearers::in_root(root.path()))
+            };
+            let refused = process().catalog().await.expect_err("refused");
+            server.await.expect("server");
+            assert!(
+                matches!(&refused, CodemodeError::Http { code: Some(c), .. } if c == code),
+                "{refused:?}"
+            );
+            for again in [
+                process().catalog().await.expect_err("refused locally"),
+                process()
+                    .read("operation")
+                    .await
+                    .expect_err("refused locally"),
+                process()
+                    .call(CodemodeCallArgs {
+                        tool: "demo.lookup".to_string(),
+                        arguments: "{}".to_string(),
+                        full: false,
+                        save_image: None,
+                    })
+                    .await
+                    .expect_err("refused locally"),
+            ] {
+                // The same refusal, not a connection failure: nothing was sent.
+                assert_eq!(again.to_string(), refused.to_string());
+            }
+            let store = RefusedBearers::in_root(root.path());
+            for entry in std::fs::read_dir(&store.directory)
+                .expect("markers")
+                .flatten()
+            {
+                let marker = std::fs::read_to_string(entry.path()).expect("marker");
+                assert!(!marker.contains("dead-bearer"));
+            }
+            // A renewed bearer is not refused.
+            assert!(store
+                .read(&refused_bearer_key(&url, "renewed-bearer"))
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_can_clear_is_not_remembered() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let body = r#"{"error":{"code":"forbidden","message":"missing permission","details":{"code":"missing_permission"}}}"#;
+        let (url, server) = refuse_once("403 Forbidden", body).await;
+        let client = CodemodeClient::new(&url, "live-bearer".to_string())
+            .expect("client")
+            .with_refused_bearers(RefusedBearers::in_root(root.path()));
+        client.catalog().await.expect_err("refused");
+        server.await.expect("server");
+        assert!(RefusedBearers::in_root(root.path())
+            .read(&refused_bearer_key(&url, "live-bearer"))
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refusal_memory_trusts_only_its_own_private_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let store = RefusedBearers::in_root(root.path());
+        let key = refused_bearer_key("https://api.example.test", "bearer");
+        let refusal = BearerRefusal {
+            status: 401,
+            code: None,
+            message: "authentication required".to_string(),
+        };
+        store.record(&key, &refusal);
+        assert_eq!(store.read(&key), Some(refusal.clone()));
+        let mode = |path: &std::path::Path| {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(&store.directory), 0o700);
+        assert_eq!(mode(&store.directory.join(&key)), 0o600);
+        std::fs::set_permissions(&store.directory, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        assert_eq!(store.read(&key), None);
+        std::fs::set_permissions(&store.directory, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
+        // A refusal that can clear is never written.
+        let other = refused_bearer_key("https://api.example.test", "other");
+        store.record(
+            &other,
+            &BearerRefusal {
+                status: 403,
+                code: Some("missing_permission".to_string()),
+                message: "missing permission".to_string(),
+            },
+        );
+        assert!(!store.directory.join(&other).exists());
+        // A symlink in the directory's place is never followed.
+        let linked_root = tempfile::tempdir().expect("temporary directory");
+        let target = tempfile::tempdir().expect("temporary directory");
+        std::fs::set_permissions(target.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
+        let linked = RefusedBearers::in_root(linked_root.path());
+        std::os::unix::fs::symlink(target.path(), &linked.directory).expect("symlink");
+        linked.record(&key, &refusal);
+        assert_eq!(std::fs::read_dir(target.path()).expect("target").count(), 0);
+        assert_eq!(linked.read(&key), None);
     }
 
     #[tokio::test]

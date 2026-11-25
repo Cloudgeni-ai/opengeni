@@ -36,6 +36,55 @@ describe("Sites skill single-file path", () => {
     }
   });
 
+  test("sends every new app to the design reference in the first read", () => {
+    const description = /^description: (.+)$/mu.exec(skill)?.[1] ?? "";
+    expect(description).toContain(
+      "read `references/design.md` in the same `skill_read` as `SKILL.md`",
+    );
+    const look = skill.slice(skill.indexOf("## Look"), skill.indexOf("## Edit an existing app"));
+    expect(look).toContain(
+      "Before writing markup for a new app or a restyle, read\n`references/design.md`.",
+    );
+    // A page shown to others gets its own design before the Opengeni look.
+    expect(look.indexOf("a design of its own")).toBeGreaterThan(-1);
+    expect(look.indexOf("a design of its own")).toBeLessThan(
+      look.indexOf("Otherwise the Opengeni look"),
+    );
+
+    const design = reference("design.md");
+    // One extra file in the fast path, so it stays short.
+    expect(Buffer.byteLength(design)).toBeLessThan(8 * 1024);
+    for (const heading of [
+      "## Decide before writing markup",
+      "## Tools in the Opengeni look",
+      "## Pages with a design of their own",
+      "## Every app",
+      "## Signs of a generated page",
+      "## Before saving",
+    ])
+      expect(design).toContain(heading);
+    // The person's or workspace's design, and an installed design Skill, win.
+    expect(design).toContain("A design the person or the workspace gave you wins");
+    expect(design).toContain("`frontend-design`");
+    // Dashboards and charts have their own guide, and it wins for those pages.
+    expect(design).toContain("`references/dashboards.md`, which\nwins over this file");
+    expect(design).toContain("A small edit keeps the app's look.");
+    // Nothing may load beside the app, fonts included.
+    expect(design).toContain("Nothing may load from a font or CSS CDN");
+    expect(design).not.toMatch(/https?:\/\//u);
+    // Every class and token it names exists in the shipped stylesheet.
+    const tools = design.slice(
+      design.indexOf("## Tools in the Opengeni look"),
+      design.indexOf("## Pages with a design of their own"),
+    );
+    const names = new Set(
+      [...tools.matchAll(/`(-{0,2}og-[a-z0-9-]+)`/gu)].map(([, name]) => name!),
+    );
+    expect(names.size).toBeGreaterThan(12);
+    for (const name of names)
+      expect(SITE_UI_CSS, name).toContain(name.startsWith("--") ? `${name}:` : `.${name}`);
+  });
+
   test("puts the path choice and the single-file Site before any app material", () => {
     const choice = skill.indexOf("## Pick the path first");
     const simple = skill.indexOf("## Single-file app");

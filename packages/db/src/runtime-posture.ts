@@ -2612,6 +2612,8 @@ export const FORCE_RLS_TABLES = [
   "vault_field_versions",
   "vault_item_fields",
   "vault_item_name_aliases",
+  // 1563_vault_item_use_only: marks that an item's values are never shown again.
+  "vault_item_use_only",
   "vault_items",
   "vault_name_aliases",
   "vault_passkey_leases",
@@ -3162,6 +3164,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
+  // 1563_vault_item_use_only: a use-only mark is added, never changed or removed.
+  "vault_item_use_only",
   // Written by the invoker-rights 1105 triggers; read by the "This workspace" feed.
   "workspace_activity_events",
   "workspace_artifact_events",

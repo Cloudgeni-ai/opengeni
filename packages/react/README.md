@@ -1634,6 +1634,52 @@ The conversation's "usage limit reached" row is customized on
 replaced with `renderAllowanceExhausted`. See
 [usage allowances](../../docs/usage-allowances.md#react-components-and-the-console).
 
+## Skills page (`@opengeni/react/skills`)
+
+`SkillsPanel` is a workspace's whole Skills page: the list, one Skill's page
+with its folder editor (SKILL.md plus supporting text files), save and
+remove, version history and restore when the client can read them, and
+upload of a SKILL.md, a skill folder or a .zip (picked or dropped on the
+list). Uploading a skill whose name already exists opens that skill with the
+uploaded files as unsaved changes, so nothing is replaced until the person
+saves.
+
+The client only needs the four Skill calls (`listWorkspaceSkills`,
+`readWorkspaceSkill`, `saveWorkspaceSkill`, `removeWorkspaceSkill`); history
+and restore appear when it also has `getPreferenceRegistry` and
+`restoreWorkspaceSkill`. `scopes` limits what is listed and offered, and
+`canManage` decides who may change what: people who can't see the same
+page with read-only instructions.
+A relay that refuses some writes itself (a name the host's built-in Skills
+use, a scope it doesn't offer) can answer with an `error.details.code` and
+pass those codes as `refusalCodes`; the page then shows the relay's own
+sentence instead of generic advice.
+
+```tsx
+import { SkillsPanel } from "@opengeni/react/skills";
+import "@opengeni/react/connect.css";
+
+<SkillsPanel
+  client={client}
+  workspaceId={workspaceId}
+  scopes={["workspace"]}
+  canManage={() => isWorkspaceAdmin}
+  description="Instructions agents in this workspace load when a task needs them."
+/>;
+```
+
+The list and the skill page use the scoped `@opengeni/react/connect.css`
+styles, so import it once next to `@opengeni/react/styles.css`; without it
+the list rows lose their layout.
+
+`slot` and `controllerRef` let a host put the open Skill on its own route;
+`renderHeader`, `addMenuItems` and the `children` render prop add host
+headers, extra add options and dialogs. The upload readers
+(`readSkillUpload`, `unzipSkillArchive`, `filesFromDrop`) and `SkillPage` are
+exported for hosts that build their own layout. `demo/skills.html` runs the
+page against an in-memory client (`?role=member`, `?empty=1`,
+`?scopes=all`, `?theme=light`).
+
 ## Terminal startup input
 
 `SandboxTerminal` captures bounded early typing while attaching. Supported stock

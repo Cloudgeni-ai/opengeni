@@ -13,6 +13,7 @@ import {
   BROWSER_DEFAULT_WAIT_MS,
   BROWSER_LOCATOR_WAIT_MS,
   BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS,
+  browserActionDeadlineMs,
   BrowserActionCommand,
   BrowserClipboard,
   BrowserDiagnosticBatch,
@@ -82,6 +83,7 @@ import {
   CdpResponseRefusedError,
   CdpSessionDetachedError,
   CdpTransportError,
+  DEFAULT_COMMAND_TIMEOUT_MS,
   type CdpDroppedMessage,
   type CdpEvent,
 } from "./cdp";
@@ -211,6 +213,9 @@ const RECORDING_FRAME_QUALITY = 70;
 const RECORDING_FRAME_MAX_WIDTH = 1_280;
 const RECORDING_FRAME_MAX_HEIGHT = 800;
 const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
+/** How long a viewport change waits for the page to finish its resize work
+ * before it reports the page busy instead of checking the size. */
+const VIEWPORT_LAYOUT_TIMEOUT_MS = 10_000;
 // Still captures share the target/input queue. Bound the whole read phase so
 // a renderer that stops producing pixels cannot hold it for successive CDP deadlines.
 const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
@@ -293,6 +298,12 @@ const SCROLLBAR_STYLE_TIMEOUT_MS = 2_000;
 /** What a full-page capture changed to keep its scrollbar gutters, and how to undo it. */
 type ScrollbarLayout = {
   viewportWidth: number | null;
+  /** The viewport hides content past its right edge, so the page cannot be
+   * scrolled sideways to it. */
+  clipsSideways: boolean;
+  /** The most content, in CSS px, that one of the page's own scrolling areas
+   * holds below what it shows; a full-page capture does not include it. */
+  hiddenScrolledHeight: number;
   inexact: boolean;
   restore: () => Promise<void>;
 };
@@ -325,6 +336,25 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
   };
   const refresh = new Set();
   let overflow = false;
+  // Content scrolled inside an element is not part of the document's size,
+  // so a capture beyond the viewport leaves it out.
+  let hidden = 0;
+  const scrolls = (value) => value === "auto" || value === "scroll" || value === "overlay";
+  // The viewport takes the root's overflow, or the body's when the root's is
+  // visible; hidden or clip there means the page never scrolls sideways.
+  const rootStyle = getComputedStyle(root);
+  const body = document.body;
+  // The body's own overflow then belongs to the viewport, so it scrolls the
+  // document itself (the capture includes it) and the body never scrolls.
+  const propagated = rootStyle.overflowX === "visible" && rootStyle.overflowY === "visible" && body;
+  const sideways = propagated ? getComputedStyle(body).overflowX : rootStyle.overflowX;
+  const clipsSideways = sideways === "hidden" || sideways === "clip";
+  // On the captured page: not an off-canvas drawer or a box moved out of it.
+  const captured = (element) => {
+    const box = element.getBoundingClientRect();
+    return box.right > -scrollX && box.left < innerWidth - scrollX &&
+      box.bottom > -scrollY && box.top < root.scrollHeight - scrollY;
+  };
   if (innerWidth - root.clientWidth >= 1) pin(":root", root, getComputedStyle(root));
   if (innerHeight - root.clientHeight >= 1) refresh.add(":root");
   // Changing a rule restyles every element its last compound could match, so
@@ -364,6 +394,13 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
         element.scrollWidth <= width
       ) continue;
       const style = getComputedStyle(element);
+      if (
+        scrolls(style.overflowY) &&
+        !(propagated && element === body) &&
+        element.scrollHeight - height > hidden &&
+        style.visibility === "visible" &&
+        captured(element)
+      ) hidden = element.scrollHeight - height;
       const vertical = wide - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth) >= 1;
       const horizontal = tall - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth) >= 1;
       if (!vertical && !horizontal) continue;
@@ -376,7 +413,15 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
     }
   };
   visit(document, null);
-  return { viewportWidth: innerWidth, pinned, own, refresh: overflow ? [":root"] : [...refresh] };
+  return {
+    viewportWidth: innerWidth,
+    clipsSideways,
+    // Less than a row of text is no content left out.
+    hiddenScrolledHeight: hidden >= 16 ? Math.floor(hidden) : 0,
+    pinned,
+    own,
+    refresh: overflow ? [":root"] : [...refresh],
+  };
 })()`;
 /** Lays the page out, which re-evaluates the scrollbars of restyled scrollers. */
 const LAYOUT_READ_EXPRESSION =
@@ -593,6 +638,81 @@ function dialogScopedConnection(
   });
 }
 
+/**
+ * The caller of an action stops waiting at the deadline derived from the
+ * action's declared waits (browserActionDeadlineMs). Each of those waits is
+ * bounded, but nearly every page read an action makes (finding its element,
+ * scrolling it into view, checking what is under the pointer) waits for the
+ * page's main thread. On a page that keeps it busy (a large single-page app
+ * rendering, a page under heavy script load) a single click's few dozen reads
+ * each wait seconds and together run far past that deadline, so the caller
+ * gives up without knowing whether the click happened. The action therefore
+ * keeps to the same deadline itself, leaving this much for its reply to reach
+ * the caller, and says exactly what happened when the page was too slow.
+ */
+const ACTION_REPLY_MARGIN_MS = 10_000;
+
+type ActionBudget = {
+  readonly deadlineAt: number;
+  readonly seconds: number;
+  /** False once the action returned: work it started that outlives it (a
+   * timer, a listener) is no longer bound by its deadline. */
+  active: boolean;
+};
+const actionBudget = new AsyncLocalStorage<ActionBudget>();
+
+/** An action's page reads used up its time; see ACTION_REPLY_MARGIN_MS.
+ * `sent` is false when the command was refused before it reached the page. */
+class ActionBudgetSpentError extends InteractionControllerError {
+  constructor(
+    readonly seconds: number,
+    readonly sent = true,
+  ) {
+    super("tab_not_responding", `the page did not answer within the action's ${seconds} seconds`);
+    this.name = "ActionBudgetSpentError";
+  }
+}
+
+function actionBudgetSpent(): boolean {
+  const budget = actionBudget.getStore();
+  return budget !== undefined && budget.active && Date.now() >= budget.deadlineAt;
+}
+
+/** A connection whose page commands end at the action's deadline. Commands to
+ * the browser itself do not wait on a page, and input keeps its own bound: a
+ * pressed button must always get its release. */
+function budgetedConnection(
+  connection: BrowserCdpConnection,
+  budget: ActionBudget,
+): BrowserCdpConnection {
+  return new Proxy(connection, {
+    get(target, property) {
+      if (property === "send") {
+        return async <T = Record<string, unknown>>(
+          ...[method, params, options]: Parameters<BrowserCdpConnection["send"]>
+        ): Promise<T> => {
+          if (!budget.active || options?.sessionId === undefined || method.startsWith("Input."))
+            return await target.send<T>(method, params, options);
+          const remaining = budget.deadlineAt - Date.now();
+          if (remaining <= 0) throw new ActionBudgetSpentError(budget.seconds, false);
+          try {
+            return await target.send<T>(method, params, {
+              ...options,
+              timeoutMs: Math.min(options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, remaining),
+            });
+          } catch (error) {
+            if (error instanceof CdpCommandTimeoutError && Date.now() >= budget.deadlineAt)
+              throw new ActionBudgetSpentError(budget.seconds);
+            throw error;
+          }
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 /** How long work that noticed a dialog itself gets to report it. */
 const DIALOG_WORK_SETTLE_MS = 250;
 
@@ -760,6 +880,17 @@ type ActionSettleBaseline = {
   navigation: number;
 };
 
+/** A main-frame navigation the running action started, until it commits or
+ * stops (see watchActionNavigation). */
+type ActionNavigationWatch = {
+  sequence: number;
+  commits: number;
+  url: string;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  ended: Promise<void>;
+  end: () => void;
+};
+
 type TargetState = {
   targetId: string;
   sessionId: string;
@@ -792,6 +923,18 @@ type TargetState = {
    * first input on. When the tab's debugging ends under the fill, the next
    * attachment reads the field back (see fillHeldOnNewAttachment). */
   pendingFill?: { backendDOMNodeId: number; value: string };
+  /** A single left click whose press went out on this attachment and whose
+   * release has not been acknowledged, with what its hit-target guard
+   * reported as the press reached the page. When the tab's debugging ends
+   * under the press (a password manager adds its inline menu frame as the
+   * press focuses a login field), the next attachment finishes the click
+   * (see finishClickOnNewAttachment). */
+  pendingClick?: {
+    x: number;
+    y: number;
+    button: "left" | "right" | "middle";
+    verdicts: ReadonlyArray<HitTargetVerdict | null>;
+  };
   /** The document already known to draw, so input sent to it while its tab
    * is hidden reaches the page (see drawHiddenTabForInput). */
   inputDrawnDocument?: string;
@@ -834,6 +977,12 @@ type TargetState = {
   /** A main-frame cross-document navigation has started but not yet committed
    * or stopped. */
   navigationPending: boolean;
+  /** An action is running on this tab, so navigations it starts are watched. */
+  watchingActionNavigation?: boolean;
+  actionNavigation?: ActionNavigationWatch | null;
+  /** The address of a navigation the running action started that was
+   * stopped because its website never answered. */
+  unansweredActionNavigation?: string | null;
   screencasts: Map<string, TargetScreencast>;
   tail: Promise<void>;
   unsubscribe: Array<() => void>;
@@ -2417,7 +2566,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 layout = await this.keepScrollbarLayout(state, deadline);
                 // The capture keeps the page's own layout width, scrollbar
                 // gutter included, so the image is as wide as the tab's viewport.
-                cssWidth = Math.max(metrics.content.width, layout?.viewportWidth ?? 0);
+                // Content past the right edge widens it only when the page can
+                // be scrolled sideways to it.
+                cssWidth =
+                  layout.clipsSideways && layout.viewportWidth !== null
+                    ? layout.viewportWidth
+                    : Math.max(metrics.content.width, layout.viewportWidth ?? 0);
                 cssHeight = metrics.content.height;
                 scrollX = 0;
                 scrollY = 0;
@@ -2551,7 +2705,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 scrollX,
                 scrollY,
               });
-              return layout?.inexact ? { ...frame, inexactScrollbars: true as const } : frame;
+              return {
+                ...frame,
+                ...(layout?.inexact ? { inexactScrollbars: true as const } : {}),
+                ...(layout && layout.hiddenScrolledHeight > 0
+                  ? { hiddenScrolledHeight: layout.hiddenScrolledHeight }
+                  : {}),
+              };
             } finally {
               await layout?.restore();
             }
@@ -2576,7 +2736,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     deadline: number,
   ): Promise<ScrollbarLayout> {
-    const unchanged = { viewportWidth: null, inexact: false, restore: async () => {} };
+    const unchanged = {
+      viewportWidth: null,
+      clipsSideways: false,
+      hiddenScrolledHeight: 0,
+      inexact: false,
+      restore: async () => {},
+    };
     let found: unknown;
     try {
       found = await this.screenshotRead(
@@ -2601,12 +2767,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return unchanged;
     }
     const viewportWidth = found.viewportWidth;
+    const clipsSideways = found.clipsSideways === true;
+    const hiddenScrolledHeight =
+      typeof found.hiddenScrolledHeight === "number" &&
+      Number.isSafeInteger(found.hiddenScrolledHeight) &&
+      found.hiddenScrolledHeight > 0
+        ? found.hiddenScrolledHeight
+        : 0;
     const pinned = found.pinned;
     const own = found.own;
     const refresh = found.refresh;
     const inexact = refresh.length > 0;
     if (pinned.length + own.length === 0 && !inexact) {
-      return { viewportWidth, inexact, restore: async () => {} };
+      return {
+        viewportWidth,
+        clipsSideways,
+        hiddenScrolledHeight,
+        inexact,
+        restore: async () => {},
+      };
     }
     // Every step stays within the capture's own deadline.
     const stepTimeout = () =>
@@ -2687,7 +2866,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         }
       });
     };
-    return { viewportWidth, inexact, restore };
+    return { viewportWidth, clipsSideways, hiddenScrolledHeight, inexact, restore };
   }
 
   /** Evaluates a read-only expression where page scripts cannot see or replace it. */
@@ -2980,6 +3159,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // Input counts as sent once an effectful command left browserd, so a later
     // unresponsive-tab deadline must keep the action's outcome uncertain.
     let effects: { state: TargetState; before: number } | undefined;
+    // Where a run of the actions is: the action it is on, the tab's input
+    // count before that action, and whether every action has run. When the
+    // tab's debugging ends at a known point, the rest run on a new
+    // attachment (see resumeAfterDetach) from `resumeFrom`.
+    const progress = { actionIndex: 0, effectsBefore: 0, allRan: false };
+    let resumeFrom = 0;
     const targetId = this.browserTargetIdOf(command.targetId);
     // A tab in front whose page did not answer may wait on a dialog only the
     // person sees, which no debugger can read: cancelling it hides the tab
@@ -2995,25 +3180,60 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (command.observationMode === "none" || command.observationMode === "input") return null;
       return await this.observe(this.tabIdOf(targetId));
     }
+    // While an action runs, a navigation it starts is watched, so a website
+    // that never answers ends the action instead of the tab (see
+    // watchActionNavigation).
     const act = async (state: TargetState, info: TargetInfo) => {
+      state.watchingActionNavigation = true;
+      try {
+        return await actOn(state, info);
+      } finally {
+        state.watchingActionNavigation = false;
+        state.unansweredActionNavigation = null;
+        this.endActionNavigationWatch(state);
+      }
+    };
+    const actOn = async (state: TargetState, info: TargetInfo) => {
       effects = { state, before: state.actionEffectCount };
-      if (!state.dialog) await this.refreshFrame(state);
-      this.assertExpectedGenerations(command, state);
       const actions = command.action.type === "batch" ? command.action.actions : [command.action];
-      if (state.dialog && actions[0]?.type !== "handle_dialog") {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser JavaScript dialog must be handled before another action",
+      progress.allRan = false;
+      progress.actionIndex = resumeFrom;
+      progress.effectsBefore = state.actionEffectCount;
+      try {
+        if (!state.dialog) await this.refreshFrame(state);
+        // The remaining actions of a batch without fenceEachAction follow
+        // the page wherever the earlier ones took it.
+        if (resumeFrom === 0 || (command.action.type === "batch" && command.action.fenceEachAction))
+          this.assertExpectedGenerations(command, state);
+        if (state.dialog && actions[resumeFrom]?.type !== "handle_dialog") {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "browser JavaScript dialog must be handled before another action",
+          );
+        }
+      } catch (error) {
+        if (resumeFrom === 0 || !(error instanceof InteractionDefiniteDriverError)) throw error;
+        const unknown = new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `browser action #${resumeFrom} (${actions[resumeFrom]!.type}) failed after it sent input or completed ${resumeFrom} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
         );
+        unknown.failureReason = error.failureReason ?? error.code;
+        throw unknown;
       }
       if (!(command.action.type === "viewport" && command.action.mode === "fit")) {
         await this.bringToFrontForAction(state);
       }
-      let completedActions = 0;
+      let completedActions = resumeFrom;
       // Navigations complete only once their page committed, so a batch that
       // has so far only navigated and waited knows exactly where the tab is.
-      let onlyCommittedNavigation = true;
-      let committedNavigations = 0;
+      const ran = actions.slice(0, resumeFrom);
+      let onlyCommittedNavigation = ran.every(
+        (action) =>
+          action.type === "navigate" || action.type === "history" || action.type === "wait",
+      );
+      let committedNavigations = ran.filter(
+        (action) => action.type === "navigate" || action.type === "history",
+      ).length;
       const initialEffectCount = state.actionEffectCount;
       const requestsBeforeActions = {
         open: new Set(state.inflightRequests),
@@ -3021,11 +3241,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         navigation: state.navigationSequence,
       };
       for (const [actionIndex, action] of actions.entries()) {
+        if (actionIndex < resumeFrom) continue;
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
         state.locatorFollowsNavigation =
           command.action.type === "batch" && !command.action.fenceEachAction && actionIndex > 0;
         state.accessibilityRebuildDue = true;
         const effectsBeforeAction = state.actionEffectCount;
+        progress.actionIndex = actionIndex;
+        progress.effectsBefore = effectsBeforeAction;
+        delete state.pendingClick;
         try {
           if (action.type === "handle_dialog") {
             await this.dispatchAction(state, action, command.operationId);
@@ -3051,6 +3275,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 // change before its input stays a refusal.
                 refindAfterDocumentChange: state.locatorFollowsNavigation === true,
               });
+              await this.awaitActionNavigation(state);
             });
           }
           state.nodeRoute = null;
@@ -3125,6 +3350,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }
       }
+      progress.allRan = true;
       // An open dialog is the page's state, whatever view was asked for: the
       // caller must handle it before anything else works in this tab. Its
       // observation reads nothing from the blocked page.
@@ -3268,25 +3494,122 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // input was sent, nothing ran: start again on a new attachment.
     const retryBeforeInput = () =>
       effects === undefined || effects.state.actionEffectCount === effects.before;
-    const observation = await this.withTarget(targetId, act, { retryBeforeInput }).catch(
-      async (error: unknown) => {
-        const failure = await this.actionFailure(error, effects);
-        if (effects) {
-          await this.observeOnNewAttachment(failure, effects.state, command);
-          // The fill's field holds the requested value on the new attachment:
-          // the fill completed, and the receipt shows the page as it left it.
-          if (
-            failure instanceof InteractionOutcomeUnknownDriverError &&
-            failure.observation &&
-            (await this.fillHeldOnNewAttachment(failure, effects.state, command))
-          )
-            return failure.observation as BrowserObservationValue;
+    const actions = command.action.type === "batch" ? command.action.actions : [command.action];
+    const budgetMs = Math.max(0, browserActionDeadlineMs(command.action) - ACTION_REPLY_MARGIN_MS);
+    const budget: ActionBudget = {
+      deadlineAt: Date.now() + budgetMs,
+      seconds: Math.round(budgetMs / 1_000),
+      active: true,
+    };
+    const run = async (): Promise<BrowserObservationValue | null> => {
+      // Each resume follows an attachment Chrome ended under an action; a page
+      // that keeps ending them stops after one per action.
+      for (let resumes = 0; ; resumes += 1) {
+        try {
+          return await this.withTarget(targetId, act, { retryBeforeInput });
+        } catch (error) {
+          const next =
+            effects && resumes < actions.length
+              ? await this.resumeAfterDetach(effects.state, progress, actions)
+              : null;
+          if (next !== null && next < actions.length) {
+            resumeFrom = next;
+            continue;
+          }
+          if (next !== null) {
+            // Every action ran; only the page as they left it is read on the
+            // new attachment. A page that cannot be read there leaves the
+            // outcome unknown, as before.
+            try {
+              return command.observationMode === undefined || command.observationMode === "full"
+                ? await this.observe(command.targetId)
+                : null;
+            } catch {
+              // Reported below from the original failure.
+            }
+          }
+          const failure = await this.actionFailure(error, effects);
+          if (effects) await this.observeOnNewAttachment(failure, effects.state, command);
+          throw failure;
         }
-        throw failure;
-      },
-    );
+      }
+    };
+    let observation: BrowserObservationValue | null;
+    try {
+      observation = await actionBudget.run(budget, run);
+    } finally {
+      budget.active = false;
+    }
     this.refreshSubscribedFrame(targetId);
     return observation;
+  }
+
+  /**
+   * Where a run of actions can go on after Chrome ended the tab's debugging
+   * under it (it does when another extension adds a frame of its own, as a
+   * password manager does when a login field gets focus), or null when it
+   * cannot. The next action to run on a new attachment, or the number of
+   * actions when every one ran:
+   * - every action ran, and only reading the page after them failed;
+   * - the action under way sent no input: it runs again;
+   * - its fill's field holds the value on the new attachment: the fill is
+   *   complete;
+   * - its click's press reached the element (its hit-target guard reported
+   *   so) and the new attachment sends the release: the click is complete.
+   * Anything else stays unknown.
+   */
+  private async resumeAfterDetach(
+    state: TargetState,
+    progress: { actionIndex: number; effectsBefore: number; allRan: boolean },
+    actions: ReadonlyArray<{ readonly type: string }>,
+  ): Promise<number | null> {
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+    } catch {
+      return null;
+    }
+    if (
+      this.states.get(state.targetId) === state ||
+      this.crashedTargets.has(state.targetId) ||
+      this.goneTargets.has(this.tabIdOf(state.targetId)) ||
+      state.dialog
+    )
+      return null;
+    if (progress.allRan) return actions.length;
+    const index = progress.actionIndex;
+    if (state.actionEffectCount === progress.effectsBefore) return index;
+    if (actions[index]?.type === "fill" && (await this.fillHeldOnNewAttachment(state)))
+      return index + 1;
+    if (await this.finishClickOnNewAttachment(state)) return index + 1;
+    return null;
+  }
+
+  /**
+   * Finishes a single click whose press went out and reached its element
+   * before the tab's debugging ended: the new attachment sends the release
+   * at the same point, so the page gets the click a person's press and
+   * release give it. The guard's report proves the press arrived; without it
+   * nothing is sent. Chrome dispatches a click only for a release that
+   * follows a press, so a release the old attachment did deliver adds only a
+   * mouseup.
+   */
+  private async finishClickOnNewAttachment(state: TargetState): Promise<boolean> {
+    const click = state.pendingClick;
+    if (!click || click.verdicts.length === 0 || click.verdicts[0] !== null) return false;
+    try {
+      await this.withTarget(state.targetId, async (current) => {
+        await this.sendActionTarget(current, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x: click.x,
+          y: click.y,
+          button: click.button,
+          clickCount: 1,
+        });
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** What a failed action reports, given whether it already sent input. */
@@ -3295,6 +3618,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     effects: { state: TargetState; before: number } | undefined,
   ): Promise<unknown> {
     const inputSent = effects !== undefined && effects.state.actionEffectCount !== effects.before;
+    if (error instanceof ActionBudgetSpentError) {
+      return inputSent
+        ? new InteractionOutcomeUnknownDriverError(
+            "tab_not_responding",
+            `The input was sent, but this page then answered too slowly for the action to finish within ${error.seconds} seconds: it keeps its main thread busy. Check the page before continuing; do not repeat the action automatically.`,
+          )
+        : new InteractionDefiniteDriverError(
+            "tab_not_responding",
+            `This page answered too slowly to act on: it keeps its main thread busy, so the action could not be prepared within ${error.seconds} seconds and nothing was sent. Wait a few seconds and try again; reload the tab if it stays this slow.`,
+          );
+    }
     if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
       return inputSent
         ? new InteractionOutcomeUnknownDriverError(
@@ -3366,21 +3700,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * value, read on the tab's new attachment. Only then is the fill known to be
    * complete; anything else stays unknown.
    */
-  private async fillHeldOnNewAttachment(
-    failure: InteractionOutcomeUnknownDriverError,
-    state: TargetState,
-    command: BrowserActionCommandValue,
-  ): Promise<boolean> {
+  private async fillHeldOnNewAttachment(state: TargetState): Promise<boolean> {
     const fill = state.pendingFill;
-    if (failure.message !== TAB_DISCONNECTED_UNDER_INPUT || command.action.type !== "fill" || !fill)
-      return false;
-    const current = this.states.get(state.targetId);
-    if (!current || current === state || current.nodeRoute) return false;
+    if (!fill) return false;
     try {
-      return (
-        (await this.callOnNode(current, fill.backendDOMNodeId, CONFIRM_EDITABLE_VALUE_FUNCTION, [
-          { value: fill.value },
-        ])) === true
+      return await this.withTarget(
+        state.targetId,
+        async (current) =>
+          (await this.callOnNode(current, fill.backendDOMNodeId, CONFIRM_EDITABLE_VALUE_FUNCTION, [
+            { value: fill.value },
+          ])) === true,
+        { read: true },
       );
     } catch {
       return false;
@@ -3537,8 +3867,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async ensureConnection(): Promise<BrowserCdpConnection> {
     const connection = await this.openConnection();
+    const budget = actionBudget.getStore();
+    const budgeted = budget?.active ? budgetedConnection(connection, budget) : connection;
     const scope = dialogWork.getStore();
-    return scope ? dialogScopedConnection(connection, scope) : connection;
+    return scope ? dialogScopedConnection(budgeted, scope) : budgeted;
   }
 
   private async openConnection(): Promise<BrowserCdpConnection> {
@@ -4470,7 +4802,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.on(
         "Page.frameStoppedLoading",
         (event) => {
-          if (event.params.frameId === state.frame.id) state.navigationPending = false;
+          if (event.params.frameId !== state.frame.id) return;
+          state.navigationPending = false;
+          this.endActionNavigationWatch(state);
         },
         sessionId,
       ),
@@ -5172,18 +5506,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** Lets the page lay out and present one frame at its new size, so the next
-   * read or capture sees it. Bounded: a throttled page never blocks. */
-  private async presentFrame(state: TargetState): Promise<void> {
-    await this.sendTarget(
-      state,
-      "Runtime.evaluate",
-      {
-        expression: NEXT_PRESENTED_FRAME_EXPRESSION,
-        awaitPromise: true,
-        returnByValue: true,
-      },
-      { timeoutMs: 1_000 },
-    ).catch(() => undefined);
+   * read or capture sees it. A throttled page that draws no frames resolves
+   * this after 300 ms; only a page whose main thread stays busy (with its own
+   * resize work, say) for `timeoutMs` does not, and then this is false. */
+  private async presentFrame(state: TargetState, timeoutMs: number): Promise<boolean> {
+    try {
+      await this.sendActionTarget(
+        state,
+        "Runtime.evaluate",
+        {
+          expression: NEXT_PRESENTED_FRAME_EXPRESSION,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        { potentialEffect: false, timeoutMs },
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof CdpCommandTimeoutError) return false;
+      // A dialog the resize opened is reported as for any action.
+      if (error instanceof DialogOpenedSignal) throw error;
+      // Other failures (a document replaced meanwhile) leave the size to the
+      // check that follows.
+      return true;
+    }
   }
 
   /** Applies a viewport change with this tab's frame sampling held off: it
@@ -5426,7 +5772,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await send();
-      await this.presentFrame(state);
+      // A page still laying itself out at the new size can be read only once
+      // that is done. Sending the change again meanwhile would wait on it too.
+      if (!(await this.presentFrame(state, VIEWPORT_LAYOUT_TIMEOUT_MS)))
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          VIEWPORT_PAGE_BUSY_MESSAGE,
+        );
       // An unreadable page does not confirm the change either.
       const measured = await this.measureViewport(state);
       if (measured && took(measured)) return;
@@ -7418,6 +7770,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.applyViewportChange(
             state,
             async () => {
+              // Touch first: the page answers it only between its own tasks,
+              // and a new size starts the page's resize work, which can keep
+              // it busy for a long time. The size itself the browser applies
+              // without waiting for the page.
+              if (viewport.mobile || state.touchEmulated) {
+                await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                  enabled: viewport.mobile,
+                  ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
+                });
+                state.touchEmulated = viewport.mobile;
+              }
               await this.sendActionTarget(
                 state,
                 "Emulation.setDeviceMetricsOverride",
@@ -7437,13 +7800,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 },
               );
               if (mode === "fit") this.targetViewports.set(state.targetId, viewport);
-              if (viewport.mobile || state.touchEmulated) {
-                await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
-                  enabled: viewport.mobile,
-                  ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
-                });
-                state.touchEmulated = viewport.mobile;
-              }
               state.emulatedViewport = {
                 width: viewport.width,
                 height: viewport.height,
@@ -7474,13 +7830,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.applyViewportChange(
             state,
             async () => {
-              await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
               if (state.touchEmulated) {
                 await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
                   enabled: false,
                 });
                 state.touchEmulated = false;
               }
+              // After touch, as for a viewport change.
+              await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
               await this.redrawTab(state);
               state.emulatedViewport = undefined;
             },
@@ -8297,6 +8654,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
     const text = action.text ?? this.clipboardText;
+    // This clipboard holds only what clipboard actions put there. A page's
+    // own Copy button writes to the browser's clipboard instead, which this
+    // one never reads, so pasting it here would type nothing and look done.
+    if (action.text === undefined && text === "") {
+      throw new InteractionDefiniteDriverError("invalid_action", EMPTY_CLIPBOARD_PASTE);
+    }
     if (action.text !== undefined) this.setClipboard(text, "paste", state.targetId);
     if (action.locator) {
       const node = await this.resolveActionLocator(state, action.locator);
@@ -9127,6 +9490,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await moved;
       }
       for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+        // Only a single click in the page's own frame can be finished on a
+        // new attachment: input to a frame of its own needs that frame's
+        // session, which a new attachment does not keep.
+        if (count === 1 && sessionId === undefined && guard?.reported)
+          state.pendingClick = { x, y, button, verdicts: guard.verdicts };
         await this.sendActionTarget(
           state,
           "Input.dispatchMouseEvent",
@@ -9139,6 +9507,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           { type: "mouseReleased", x, y, button, clickCount },
           input,
         );
+        delete state.pendingClick;
       }
       if (hidden) await moved;
     } catch (error) {
@@ -9147,6 +9516,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // the same page. The next action removes it, and it disarms itself
       // after a few seconds regardless.
       if (guard !== null) {
+        // A press whose tab's debugging ended under it may still be finished
+        // on a new attachment (see finishClickOnNewAttachment), which needs
+        // the guard's report that it reached the element. Over the
+        // extension bridge that report can still be on its way; take it in
+        // first. Bounded, and never waits on the page.
+        if (state.pendingClick) {
+          await this.ensureConnection()
+            .then((connection) => connection.flushEvents?.())
+            .catch(() => undefined);
+        }
         guard.stopReports();
         state.unsettledHitTargetGuards.push(guard);
       }
@@ -9491,15 +9870,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeScroll;
       throw scrollRefusal(error.message) ?? error;
     }
-    const boxAfter =
-      boxBefore === null ? null : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
-    const unscrolled =
-      scrollBefore !== null
-        ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
-        : boxBefore !== null &&
-          boxAfter !== null &&
-          Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
-    state.actionEffectCount = effectsBeforeScroll;
+    let unscrolled: boolean;
+    try {
+      const boxAfter =
+        boxBefore === null
+          ? null
+          : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
+      unscrolled =
+        scrollBefore !== null
+          ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+          : boxBefore !== null &&
+            boxAfter !== null &&
+            Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
+    } finally {
+      // The scroll is not input, also when measuring it fails (a page that
+      // stops answering, an action out of time): no input was sent yet.
+      state.actionEffectCount = effectsBeforeScroll;
+    }
     // The page reacts to a scroll on its next frames (a sticky header that
     // shrinks once the page scrolls, and the content it moves), so after one
     // the target is measured only once it has stopped moving.
@@ -11454,15 +11841,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           !before.open.has(requestId) &&
           requestLoad(state.requests.get(requestId), Date.now()) === "loading",
       );
-    while (pending() && Date.now() < deadline && !state.dialog && this.attached(state)) {
+    while (pending() && Date.now() < deadline && !state.dialog && this.keepsSettling(state)) {
       await delay(ACTION_REQUEST_POLL_MS);
     }
-    if (!state.dialog && this.attached(state)) await delay(ACTION_RESPONSE_APPLY_MS);
+    if (!state.dialog && this.keepsSettling(state)) await delay(ACTION_RESPONSE_APPLY_MS);
+  }
+
+  /** Whether settling may go on: `state` is still this tab's attachment and
+   * the action has time left. A tab that closed (a popup its page closed, say)
+   * or lost its attachment has nothing left to settle, and an action out of
+   * time must answer now, so the settle waits end at once instead of at their
+   * bound. */
+  private keepsSettling(state: TargetState): boolean {
+    return this.attached(state) && !actionBudgetSpent();
   }
 
   /** Whether `state` is still this tab's attachment. A tab that closed (a
    * popup its page closed, say) or lost its attachment has nothing left to
-   * settle, so the settle waits end at once instead of at their bound. */
+   * settle. */
   private attached(state: TargetState): boolean {
     return this.states.get(state.targetId) === state;
   }
@@ -11481,13 +11877,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.navigationPending &&
       Date.now() < deadline &&
       !state.dialog &&
-      this.attached(state)
+      this.keepsSettling(state)
     ) {
       if (state.frame.loaderId !== loaderId) break;
       await delay(ACTION_REQUEST_POLL_MS);
     }
     if (state.dialog || state.frame.loaderId === loaderId) return;
-    while (Date.now() < deadline && !state.dialog && this.attached(state)) {
+    while (Date.now() < deadline && !state.dialog && this.keepsSettling(state)) {
       try {
         if (await this.documentReady(state)) return;
       } catch {
@@ -11501,6 +11897,95 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (event.params.frameId !== state.frame.id) return;
     state.navigationPending = true;
     state.navigationSequence += 1;
+    this.watchActionNavigation(state, event);
+  }
+
+  /**
+   * While a main-frame navigation waits for its website's first answer,
+   * Chromium holds every command for the page (reading it, running script)
+   * until the new document commits; only browser-side commands such as
+   * `Page.stopLoading` still answer. A link to a website that never answers
+   * would leave the action, and every later read of the tab, waiting until
+   * they time out with an unresponsive tab. So a navigation an action started
+   * gets the same bound as an explicit navigation: when nothing committed by
+   * then, loading stops, the tab keeps its page and the action says why.
+   */
+  private watchActionNavigation(state: TargetState, event: CdpEvent): void {
+    if (!state.watchingActionNavigation) return;
+    this.endActionNavigationWatch(state);
+    let end = () => {};
+    const ended = new Promise<void>((resolve) => {
+      end = resolve;
+    });
+    const watch: ActionNavigationWatch = {
+      sequence: state.navigationSequence,
+      commits: state.mainFrameCommits,
+      url: typeof event.params.url === "string" ? event.params.url : "",
+      timer: undefined,
+      ended,
+      end,
+    };
+    watch.timer = setTimeout(() => {
+      void this.stopUnansweredActionNavigation(state, watch);
+    }, this.navigationCommitTimeoutMs);
+    watch.timer.unref?.();
+    state.actionNavigation = watch;
+  }
+
+  private async stopUnansweredActionNavigation(
+    state: TargetState,
+    watch: ActionNavigationWatch,
+  ): Promise<void> {
+    if (state.actionNavigation !== watch) return;
+    if (
+      this.attached(state) &&
+      !state.dialog &&
+      state.navigationPending &&
+      state.navigationSequence === watch.sequence &&
+      state.mainFrameCommits === watch.commits
+    ) {
+      state.unansweredActionNavigation = watch.url;
+      await this.sendTarget(
+        state,
+        "Page.stopLoading",
+        {},
+        { timeoutMs: TARGET_CLOSE_SETTLE_TIMEOUT_MS },
+      ).catch(() => undefined);
+    }
+    this.endActionNavigationWatch(state);
+  }
+
+  private endActionNavigationWatch(state: TargetState): void {
+    const watch = state.actionNavigation;
+    if (!watch) return;
+    state.actionNavigation = null;
+    clearTimeout(watch.timer);
+    watch.end();
+  }
+
+  /** After an action's input: when it started a navigation that has not
+   * committed yet, wait for it to commit or to be stopped as unanswered, and
+   * end the action with a definite reason in the second case. */
+  private async awaitActionNavigation(state: TargetState): Promise<void> {
+    const watch = state.actionNavigation;
+    // A same-document step commits without ending the load, and a dialog
+    // stops the wait: neither leaves an unanswered navigation behind.
+    if (watch) {
+      while (
+        state.actionNavigation === watch &&
+        state.navigationPending &&
+        state.navigationSequence === watch.sequence &&
+        state.mainFrameCommits === watch.commits &&
+        !state.dialog &&
+        this.attached(state)
+      ) {
+        await Promise.race([watch.ended, delay(ACTION_REQUEST_POLL_MS)]);
+      }
+    }
+    const url = state.unansweredActionNavigation;
+    if (url === null || url === undefined) return;
+    state.unansweredActionNavigation = null;
+    throw new ActionNavigationNotAnsweredError(url, this.navigationCommitTimeoutMs);
   }
 
   /**
@@ -11729,8 +12214,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.sessionId,
       );
     });
-    if (options.potentialEffect !== false && method !== "Page.getNavigationHistory")
-      state.actionEffectCount += 1;
+    const effect = options.potentialEffect !== false && method !== "Page.getNavigationHistory";
+    if (effect) state.actionEffectCount += 1;
     const command = connection.send<T>(method, params, {
       sessionId: options.sessionId ?? this.commandSession(state, method),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -11746,6 +12231,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new DialogOpenedSignal("browser action opened a JavaScript dialog");
       }
       return result.value;
+    } catch (error) {
+      // Refused at the action's deadline before it was sent: no effect.
+      if (effect && error instanceof ActionBudgetSpentError && !error.sent)
+        state.actionEffectCount -= 1;
+      throw error;
     } finally {
       unsubscribe();
     }
@@ -12102,6 +12592,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (frame.id !== state.frame.id) return;
     state.navigationPending = false;
     state.mainFrameCommits += 1;
+    this.endActionNavigationWatch(state);
     if (frame.loaderId !== state.frame.loaderId) {
       // The previous document and its frames are gone. Chromium does not
       // always report their unfinished requests (a WebUI start page's
@@ -12477,6 +12968,11 @@ function closedTargetListFailure(error: unknown): unknown {
     false,
   );
 }
+
+/** A paste with nothing on this BrowserSession's clipboard, and what pastes
+ * instead. */
+export const EMPTY_CLIPBOARD_PASTE =
+  "browser clipboard is empty, so nothing was pasted. It holds only text from clipboard write and copy actions, not what a page's own Copy button copied: copy that text with a clipboard copy action and a locator on it, or paste with text";
 
 /** Why a clipboard copy found nothing to copy, and what copies instead. */
 export function clipboardCopyFailure(reason: string, fromElement: boolean): string {
@@ -13084,6 +13580,8 @@ const VIEWPORT_NOT_TAKEN_MESSAGE =
   "The viewport change was sent, but the tab did not take that size. Observe the tab to see its size now.";
 const VIEWPORT_RESET_NOT_TAKEN_MESSAGE =
   "The viewport reset was sent, but the tab did not return to its own size and scale. Observe the tab to see its size now.";
+const VIEWPORT_PAGE_BUSY_MESSAGE =
+  "The browser applied the new size, but the page was still busy laying itself out at it after 10 s, so the size could not be checked. Observe the tab again shortly to see its size; reload it only if its page is still not answering then.";
 
 /** Captures tried, and the pause between them, to have a hidden tab draw
  * before input is sent to it (see drawHiddenTabForInput). */
@@ -15905,6 +16403,30 @@ class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
       true,
     );
     this.name = "NavigationNotAnsweredError";
+    this.failureReason = "destination_not_answered";
+  }
+}
+
+/** A page an action opened in its tab never answered, and the browser stopped
+ * loading it: the tab keeps the page the action ran on. */
+class ActionNavigationNotAnsweredError extends InteractionDefiniteDriverError {
+  constructor(url: string, timeoutMs: number) {
+    let origin = "";
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:")
+        origin = ` (${parsed.origin})`;
+    } catch {
+      // No address to name.
+    }
+    super(
+      "timeout",
+      `the page it opened${origin} did not load: its website did not answer within ${Math.round(
+        timeoutMs / 1_000,
+      )} seconds, so the browser stopped loading it and the tab still shows the previous page`,
+      false,
+    );
+    this.name = "ActionNavigationNotAnsweredError";
     this.failureReason = "destination_not_answered";
   }
 }

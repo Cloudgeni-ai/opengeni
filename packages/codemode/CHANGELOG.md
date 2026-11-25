@@ -1,5 +1,21 @@
 # @opengeni/codemode
 
+## 6.38.0
+
+### Patch Changes
+
+- 47f4951: Apps get dashboard building blocks: `/__opengeni/ui.css` adds KPI cards, number cells, good and bad tones, chart colours per theme, details and empty states, and `/__opengeni/charts.js` (`SITE_CHARTS_JS`, inlined by `resolveSiteUiStylesheet`) draws formatted KPIs, bars, line and scatter charts and sortable tables. The `sites` Skill sends dashboards to a short `references/dashboards.md`.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

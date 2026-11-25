@@ -1836,6 +1836,130 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  describe("a browser the default open would reuse but that can never be continued", () => {
+    const replacementId = randomUUID();
+    const unavailable = () =>
+      new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            code: "conflict",
+            message:
+              "Current browser is unavailable: its last launch has no completed record of a browser process, so its working copy cannot be continued. Its browser record and recovery state are preserved",
+            retryable: false,
+          },
+        }),
+      );
+    const scenario = (refusal: string | null) => {
+      const dead = discoveredBrowserSession(browserSessionId, sessionId);
+      dead.lifecycle = "active";
+      dead.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const replacement = discoveredBrowserSession(replacementId, sessionId);
+      replacement.lifecycle = "active";
+      replacement.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-2",
+        placementInstanceId: "placement-1",
+      };
+      const target = { ...browserTarget(), browserSessionId: replacementId };
+      const creates: Array<{ operationId: string }> = [];
+      const ended: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            getBrowserSession: async () => dead,
+            listBrowserSessions: async () => ({ revision: 1, sessions: [dead] }),
+            listBrowserTargets: async (_workspaceId, id) => {
+              if (id === browserSessionId) throw unavailable();
+              return {
+                browserSessionId: id,
+                controllerGeneration: "controller-2",
+                targets: [target],
+              };
+            },
+            observeBrowserTarget: async () => browserObservation(target),
+            createBrowserSession: async (_workspaceId, request) => {
+              creates.push(request as unknown as { operationId: string });
+              return { session: replacement } as never;
+            },
+            controlBrowserSessionLifecycle: async (_workspaceId, id) => {
+              ended.push(id);
+              throw new Error("the old browser must be kept");
+            },
+          }),
+          inspectBrowserSessionWorkingCopy: async () =>
+            ({
+              browserSessionId,
+              controllerGeneration: "controller-1",
+              adoptable: refusal === null,
+              refusal,
+              explanation: "synthetic",
+              manifest: null,
+              platformSupported: true,
+              profileIdentityMatches: null,
+              profileInUse: false,
+              receipt: null,
+              freshness: { status: "unknown", latestCheckpointAt: null },
+              activeAdoption: null,
+            }) as never,
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const operationId = randomUUID();
+      const open = async (input: Record<string, unknown>) =>
+        await definitions[0]!.execute(input, {
+          operationId,
+          caller: { kind: "model", subjectId: "model:test" },
+        });
+      return { open, creates, ended, operationId };
+    };
+    const text = (result: { content: Array<{ type: string; text?: string }> }) =>
+      result.content.flatMap((part) => (part.type === "text" ? [part.text!] : [])).join("\n");
+
+    test("is replaced by a new browser, and the result says so", async () => {
+      const { open, creates, ended, operationId } = scenario("receipt_not_adoptable");
+      const result = await open({});
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        session: { id: replacementId, lifecycle: "active" },
+      });
+      expect(creates).toHaveLength(1);
+      // Its own operation, not the one this call's ID names.
+      expect(creates[0]!.operationId).not.toBe(operationId);
+      expect(ended).toEqual([]);
+      expect(text(result as never)).toContain(
+        `BrowserSession ${browserSessionId} cannot be continued (its last launch left no record of a running browser), so this opened a new browser, BrowserSession ${replacementId}, without its sign-ins and tabs. The old one is kept; use the new ID from now on.`,
+      );
+    });
+
+    test.each([
+      ["a copy that can be adopted", null],
+      ["a copy a process may still use", "process_state_unknown"],
+    ])("is not replaced over %s", async (_label, refusal) => {
+      const { open, creates } = scenario(refusal);
+      const result = await open({});
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "conflict" } },
+      });
+      expect(creates).toEqual([]);
+    });
+
+    test("named by its ID, it is not replaced", async () => {
+      const { open, creates } = scenario("receipt_not_adoptable");
+      const result = await open({ browserSessionId });
+      expect(result).toMatchObject({ isError: true });
+      expect(creates).toEqual([]);
+    });
+  });
+
   describe("a stopped browser whose working directory was moved, copied or restored", () => {
     const digest = "ab".repeat(32);
     const inspection = (overrides: Record<string, unknown> = {}) => ({
@@ -3709,6 +3833,48 @@ describe("interaction attempt tools", () => {
       expect(text).toContain("can't fix it here");
       expect(text).not.toContain("now posted in this chat");
       expect(text).not.toContain("capability_authorization_request");
+    });
+  });
+
+  test("a computer that failed to start reports why instead of an opened computer", async () => {
+    const failedId = randomUUID();
+    const opened = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+        createComputerSession: async () =>
+          ({
+            session: {
+              ...discoveredComputerSession(failedId, sessionId),
+              lifecycle: "failed",
+              failureCode: "driver_failed",
+            },
+            operation: {
+              state: "failed",
+              error: {
+                code: "driver_failed",
+                message: "The desktop driver could not start on this machine.",
+                retryable: false,
+              },
+            },
+          }) as never,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    })[0]!.execute(
+      { mode: "new" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:fixture" } },
+    );
+
+    // As for a browser that did not start, the start error is the result.
+    await expect(opened).rejects.toMatchObject({
+      status: 502,
+      code: "driver_failed",
+      retryable: false,
+      message: expect.stringContaining(
+        `ComputerSession ${failedId} did not start: The desktop driver could not start`,
+      ),
     });
   });
 
@@ -6472,6 +6638,95 @@ describe("interaction attempt tools", () => {
     expect(mac.structuredContent).not.toHaveProperty("existing");
   });
 
+  test("computer_open on macOS uses a running app's window when macOS cannot launch it", async () => {
+    // An app run from a folder macOS does not know: listed, not installed.
+    const vm: ComputerTarget = {
+      ...computerTarget(),
+      id: "cua:window:74:2838",
+      applicationId: "UTM",
+      title: "Windows",
+      focused: false,
+    };
+    const other: ComputerTarget = {
+      ...computerTarget(),
+      id: "cua:window:51:12",
+      applicationId: "iPhone Mirroring",
+      title: "iPhone Mirroring",
+      current: true,
+    };
+    const session = { ...activeComputerSession(), platform: "macos" as const };
+    const observed: string[] = [];
+    const captured: string[] = [];
+    let targets = [other, vm];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets,
+        }),
+        observeComputerTarget: async (_w, _s, targetId) => {
+          observed.push(targetId);
+          return computerObservation(targets.find((target) => target.id === targetId)!);
+        },
+        captureComputerTarget: async (_w, _s, targetId) => {
+          captured.push(targetId);
+          return {
+            frameId: "frame-1",
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            targetId,
+            targetGeneration: vm.targetGeneration,
+            sequence: 0,
+            mediaType: "image/jpeg" as const,
+            width: 640,
+            height: 400,
+            capturedAt: now,
+            sha256: "0".repeat(64),
+            data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+          };
+        },
+        actInComputer: async (_w, _s, value) => ({
+          ...computerReceipt(value.operationId, computerObservation(other)),
+          state: "failed",
+          observation: null,
+          error: {
+            code: "invalid_action",
+            message:
+              "CUA launch_app refused the operation: No installed macOS app found for bundle_id 'com.utmapp.UTM'.",
+            retryable: false,
+          },
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const open = async (applicationId: string) =>
+      await definitions[0]!.execute(
+        { computerSessionId, applicationId, includeScreenshot: true },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+
+    const found = await open("UTM");
+    expect(observed).toEqual([vm.id]);
+    expect(found.structuredContent).toMatchObject({ existing: { target: { id: vm.id } } });
+    expect(captured).toEqual([vm.id]);
+
+    // With no window of the app, another app's window is never captured.
+    targets = [other];
+    captured.length = 0;
+    const missing = await open("UTM");
+    expect(missing.structuredContent).toMatchObject({ launch: { state: "failed" } });
+    expect(captured).toEqual([]);
+    expect(missing.content.at(-1)).toEqual({
+      type: "text",
+      text: "No screenshot: no window of UTM was observed. Check computer_targets for its window.",
+    });
+  });
+
   test("computer_open never reports a launch that ran, or may have run, as failed", async () => {
     const screen: ComputerTarget = {
       ...computerTarget(),
@@ -8142,6 +8397,7 @@ describe("interaction attempt tools", () => {
             capturedAt: now,
             data: image,
             inexactScrollbars: true,
+            hiddenScrolledHeight: 1604,
           };
         },
       }),
@@ -8162,7 +8418,7 @@ describe("interaction attempt tools", () => {
       mediaType: "image/jpeg",
       width: 120,
       height: 200,
-      note: "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.",
+      note: "This image leaves out content that scrolls inside the page's own areas: one holds 1604 CSS px below what it shows. To capture it, scroll within that area and take more screenshots, or, if the area grows with the window, set the viewport 1604 px taller and capture again. Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.",
     });
     expect(result.content[1]).toEqual({
       type: "image",

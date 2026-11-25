@@ -4796,6 +4796,34 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
+  const payload = await signedDelegatedAccessTokenPayload(secret, token);
+  if (
+    !payload ||
+    payload.exp < nowSeconds ||
+    payload.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
+  ) {
+    return null;
+  }
+  return payload;
+}
+
+/**
+ * The claims of a delegated access token whose signature, prefix and shape
+ * verify, whatever its expiry. It names who sent a refused token (request
+ * telemetry) and is never authority: only `verifyDelegatedAccessToken` admits
+ * a token.
+ */
+export async function signedDelegatedAccessTokenClaims(
+  secret: string,
+  token: string,
+): Promise<DelegatedAccessTokenPayload | null> {
+  return await signedDelegatedAccessTokenPayload(secret, token);
+}
+
+async function signedDelegatedAccessTokenPayload(
+  secret: string,
+  token: string,
+): Promise<DelegatedAccessTokenPayload | null> {
   const prefix = token.startsWith(delegatedRestrictedAccessTokenPrefix)
     ? delegatedRestrictedAccessTokenPrefix
     : token.startsWith(delegatedServiceAccessTokenPrefix)
@@ -4827,11 +4855,7 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   const payload = DelegatedAccessTokenPayload.safeParse(decoded);
-  if (
-    !payload.success ||
-    payload.data.exp < nowSeconds ||
-    payload.data.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
-  ) {
+  if (!payload.success) {
     return null;
   }
   if (
@@ -24426,6 +24450,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Console agents (organization agents) are on for the caller's organization.
     // Absent on older servers and when off.
     orgAgents: primitives.optionalBoolean,
+    // Whether this deployment can export an editable artifact as an Office
+    // file (it runs the artifact materializer). Absent on older servers:
+    // clients then treat it as unknown.
+    artifactExport: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z

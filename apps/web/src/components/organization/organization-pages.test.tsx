@@ -1093,6 +1093,42 @@ describe("People page", () => {
     await view.unmount();
   });
 
+  test("an invitation row with no available actions has no empty ⋯ menu", async () => {
+    const sent = {
+      id: "00000000-0000-4000-8000-000000000001",
+      state: "sent" as const,
+      attemptCount: 1,
+      revision: 1,
+      errorClass: null,
+      retryState: "unavailable" as const,
+      sentAt: timestamp,
+      updatedAt: timestamp,
+    };
+    // An admin can't revoke an owner's invitation, and a sent email can't be resent.
+    const client = makeClient({
+      listOrganizationInvitationsForOrganization: mock(async () => ({
+        invitations: [
+          { ...invitation("member"), delivery: sent },
+          { ...invitation("owner"), delivery: sent },
+        ],
+        nextCursor: null,
+      })),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client} actorRole="admin">
+        <OrganizationPeoplePage workspaceId="workspace-a" />
+      </Provider>,
+    );
+    await flush();
+    const labels = Array.from(view.container.querySelectorAll("[aria-label]")).map((element) =>
+      element.getAttribute("aria-label"),
+    );
+    expect(labels).toContain("More actions for member@example.test");
+    expect(labels).not.toContain("More actions for owner@example.test");
+    await view.unmount();
+  });
+
   test("the only owner's role is locked with the reason", async () => {
     const client = makeClient();
     const view = mount(null);

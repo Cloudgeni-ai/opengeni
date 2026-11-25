@@ -66,7 +66,7 @@ export function insightsRawQuerySupported(
     "scheduleId",
     "limit",
     ...(organization ? ["workspaceId"] : []),
-    ...(calls ? ["cursor"] : ["groupBy", "seriesGroups"]),
+    ...(calls ? ["cursor"] : ["groupBy", "seriesGroups", "agentId"]),
   ]);
   if (Object.keys(query).some((key) => !keys.has(key))) return false;
   if (
@@ -86,6 +86,7 @@ export function insightsRawQuerySupported(
       "rootSession",
       "person",
       "schedule",
+      "agent",
       ...(organization ? ["workspace"] : []),
     ]).has(String(query.groupBy))
   );

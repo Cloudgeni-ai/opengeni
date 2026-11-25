@@ -2654,6 +2654,71 @@ mod tests {
         ));
     }
 
+    /// Chrome updates an installed extension on its own schedule, so a new
+    /// agent meets extensions released before it. Every protocol in the
+    /// extension's compatibility record that is not retired must still reach
+    /// this agent: registered under the host name it calls, with its origin
+    /// allowed, and with its bridge version accepted. Retiring one follows
+    /// the rule in that file.
+    #[test]
+    fn installed_extension_protocols_stay_supported() {
+        let record: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../apps/browser-extension/bridge-compat.json"
+        ))
+        .expect("bridge-compat.json");
+        let protocols = record["protocols"].as_array().expect("protocols");
+        let branded = "d".repeat(32);
+        let mut checked = 0;
+        for protocol in protocols {
+            if protocol.get("retiredOn").is_some() {
+                continue;
+            }
+            let id = protocol["id"].as_str().expect("id");
+            let version =
+                u32::try_from(protocol["bridgeProtocolVersion"].as_u64().expect("version"))
+                    .expect("version");
+            let hello = serde_json::json!({ "type": "hello", "protocolVersion": version });
+            assert_eq!(
+                hello_version_refusal(hello.to_string().as_bytes()),
+                None,
+                "{id}: bridge version {version} is refused"
+            );
+            let (extension, registered_by) = match protocol["build"].as_str() {
+                // Opengeni Browser reaches a standalone agent, the store and
+                // the unpacked build alike.
+                Some("opengeni") => (
+                    STORE_EXTENSION_ID.to_string(),
+                    vec![native_hosts(&[], true), native_hosts(&[], false)],
+                ),
+                // A product's own extension reaches the agent its app installs.
+                Some("branded") => (
+                    branded.clone(),
+                    vec![
+                        native_hosts(std::slice::from_ref(&branded), false),
+                        native_hosts(std::slice::from_ref(&branded), true),
+                    ],
+                ),
+                other => panic!("{id}: unknown build {other:?}"),
+            };
+            let name = match protocol["nativeHost"].as_str() {
+                Some("shared") => NATIVE_HOST_NAME.to_string(),
+                Some("per-extension") => format!("{NATIVE_HOST_NAME}.{extension}"),
+                other => panic!("{id}: unknown nativeHost {other:?}"),
+            };
+            let origin = format!("chrome-extension://{extension}/");
+            for hosts in registered_by {
+                assert!(
+                    hosts
+                        .iter()
+                        .any(|host| host.name == name && host.origins.contains(&origin)),
+                    "{id}: no native host {name} allows {origin}"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "the record lists no current protocol");
+    }
+
     #[test]
     fn extra_extension_ids_are_validated_deduplicated_and_kept_in_order() {
         let ids = parse_extension_ids(&format!(

@@ -11130,7 +11130,11 @@ export class PrefixedMcpServer implements MCPServer {
     } catch (error) {
       outcome = mcpDestinationRefusal(this.destinationPolicyFailure?.reason)
         ? "refused_by_policy"
-        : "failed";
+        : // The broker already refused this account a credential and told the
+          // person it needs attention; the server itself was not the problem.
+          this.setupAuthNeededReasons?.has(this.registryId)
+          ? "auth_needed"
+          : "failed";
       await this.reportDestinationPolicyFailure();
       // The SDK logs its rejected Error directly. Keep exact internal truth
       // out-of-band and reject only a structural public lifecycle error.

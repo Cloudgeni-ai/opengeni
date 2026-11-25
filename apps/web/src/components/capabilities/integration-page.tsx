@@ -14,7 +14,7 @@ import {
   CapabilityPage,
   OutcomeList,
   TechnicalDetails,
-} from "@/components/capabilities/capability-page";
+} from "@opengeni/react/ui/capability-page";
 import { integrationDisclosureElementId } from "@/components/capabilities/integration-sheet";
 import { ConnectorToolPermissions } from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import {

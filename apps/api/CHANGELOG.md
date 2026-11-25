@@ -1,5 +1,60 @@
 # @opengeni/api-router
 
+## 6.38.0
+
+### Minor Changes
+
+- b193d0c: Editable artifacts no longer show a Download button on a deployment that cannot export them. The client configuration now reports `artifactExport` (whether the artifact materializer is deployed), and the web console offers Download only when it is not `false`. Before, the button was always shown: each click saved a named version, then failed with "Download failed. Try again."
+
+### Patch Changes
+
+- 5b2cd0d: A full-page browser screenshot now says when it leaves out content that scrolls inside the page's own areas (an app's main pane or a table), and by how many CSS pixels, with how to capture the rest. It is also exactly as wide as the viewport when the page hides content past its right edge, instead of widening to content no one can scroll to.
+- c05ba68: Automations that run an agent with Memory are no longer refused when they start. Microsoft Teams chats with an agent now get its Memory, as Slack and app chats do.
+  An automation whose agent was deleted or is no longer shared now stops with a clear reason instead of retrying.
+- Updated dependencies [f1289fa]
+- Updated dependencies [969cb9b]
+- Updated dependencies [f9b646c]
+- Updated dependencies [14d9e24]
+- Updated dependencies [020a5df]
+- Updated dependencies [3e41dc8]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [bd4550b]
+- Updated dependencies [b193d0c]
+- Updated dependencies [66afd96]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [c05ba68]
+- Updated dependencies [b76dd79]
+- Updated dependencies [47f4951]
+- Updated dependencies [d1ecb10]
+- Updated dependencies [b902e4e]
+- Updated dependencies [262c8b2]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/capabilities@6.38.0
+  - @opengeni/runtime@6.38.0
+  - @opengeni/db@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/core@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/artifact-tool@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/decisions@6.38.0
+  - @opengeni/documents@6.38.0
+  - @opengeni/events@6.38.0
+  - @opengeni/github@6.38.0
+  - @opengeni/interaction@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/storage@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+  - @opengeni/vaults@6.38.0
+  - @opengeni/vaults-bitwarden@6.38.0
+  - @opengeni/vaults-keeper@6.38.0
+  - @opengeni/vaults-onepassword@6.38.0
+  - @opengeni/vaults-protonpass@6.38.0
+  - @opengeni/agent-proto@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

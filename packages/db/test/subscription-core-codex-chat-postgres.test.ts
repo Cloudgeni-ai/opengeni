@@ -704,7 +704,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       kind: "wait",
       reason: "codex_relogin_required",
       explicitConnectionId: pinned,
-      reconnectAccount: { label: `(${pinned})`, personal: false },
+      waitAccount: { label: `(${pinned})`, personal: false },
     });
     // ...and a pin that can never serve this work says so (its model list
     // excludes the turn's model).

@@ -1,7 +1,9 @@
 /* ----------------------------------------------------------------------------
    How people read a Skill's name. Registries and SKILL.md frontmatter hand us
    slugs ("vercel-react-best-practices"); a Skill written in Opengeni without a
-   name keeps a generated `authored-<id>` key, which is never shown.
+   name keeps a generated `authored-<id>` key, which is never shown. The
+   frontmatter's trigger text is for agents; people read a name and one plain
+   sentence from the body.
    -------------------------------------------------------------------------- */
 
 const SMALL_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"]);
@@ -42,4 +44,44 @@ export function skillShortDescription(description: string | null | undefined): s
   if (!text) return null;
   const sentence = /^(.{20,}?[.!?])(\s|$)/.exec(text)?.[1] ?? text;
   return sentence.length > 140 ? `${sentence.slice(0, 137).trimEnd()}…` : sentence;
+}
+
+/** The SKILL.md body without its YAML frontmatter. */
+export function skillBody(markdown: string | null | undefined): string {
+  return (markdown ?? "").replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim();
+}
+
+/**
+ * The first plain paragraph of the SKILL.md body: what the skill is, in the
+ * author's words for people. Headings, lists, code and callouts are skipped;
+ * null when the body has no prose paragraph.
+ */
+export function skillSummary(markdown: string | null | undefined): string | null {
+  const body = skillBody(markdown).replace(/```[\s\S]*?```/g, "");
+  for (const block of body.split(/\r?\n\s*\r?\n/)) {
+    const text = block.trim();
+    if (!text) continue;
+    if (/^(#|[-*+] |\d+\. |>|\||<|!\[)/.test(text)) continue;
+    const plain = text
+      .replace(/\r?\n/g, " ")
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/[*_`]/g, "")
+      .trim();
+    if (plain.length < 20) continue;
+    return plain.length > 320 ? `${plain.slice(0, 317).trimEnd()}...` : plain;
+  }
+  return null;
+}
+
+export function scopeLabel(scope: "user" | "workspace" | "organization"): string {
+  return scope === "user" ? "Personal" : scope === "workspace" ? "Workspace" : "Organization";
+}
+
+/** "Only you" / "Everyone in this workspace" / "Everyone in your organization". */
+export function scopeAudience(scope: "user" | "workspace" | "organization"): string {
+  return scope === "user"
+    ? "Only you"
+    : scope === "workspace"
+      ? "Everyone in this workspace"
+      : "Everyone in your organization";
 }

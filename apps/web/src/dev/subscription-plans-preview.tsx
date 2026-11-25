@@ -25,7 +25,7 @@ export const previewPlans: BillingSubscriptionCatalog["plans"] = [
     label: "Free",
     monthlyPriceMicros: 0,
     monthlyCreditMicros: 10_000_000,
-    seatLimit: 5,
+    seatLimit: 3,
     freeCredit: true,
     stripePriceId: null,
     selfService: false,
@@ -35,7 +35,7 @@ export const previewPlans: BillingSubscriptionCatalog["plans"] = [
     label: "Pro",
     monthlyPriceMicros: 20_000_000,
     monthlyCreditMicros: 100_000_000,
-    seatLimit: 10,
+    seatLimit: 5,
     freeCredit: false,
     stripePriceId: "price_preview_pro",
     selfService: true,
@@ -45,7 +45,7 @@ export const previewPlans: BillingSubscriptionCatalog["plans"] = [
     label: "Max",
     monthlyPriceMicros: 100_000_000,
     monthlyCreditMicros: 500_000_000,
-    seatLimit: null,
+    seatLimit: 10,
     freeCredit: false,
     stripePriceId: "price_preview_max",
     selfService: true,
@@ -117,14 +117,14 @@ export function previewPlan(key: string): BillingPlanBalance {
     creditRemainingMicros: key === "pro" ? 73_450_000 : item.monthlyCreditMicros,
     creditScoped: key === "free",
     periodResetAt: "2026-11-01T10:00:00Z",
-    seatsUsed: key === "pro" ? 7 : 5,
+    seatsUsed: key === "pro" ? 4 : 2,
     seatLimit: item.seatLimit,
     cancelAtPeriodEnd: false,
   };
 }
 
-// The seat view uses the switched-on limits: Free 1, Pro 2, Max 10, Enterprise unlimited.
-const seatPreviewLimits: Record<string, number | null> = { free: 1, pro: 2, max: 10 };
+// The seat view uses the production limits: Free 3, Pro 5, Max 10, Enterprise unlimited.
+const seatPreviewLimits: Record<string, number | null> = { free: 3, pro: 5, max: 10 };
 const seatPreviewPlans = previewPlans.map((plan) => ({
   ...plan,
   seatLimit: seatPreviewLimits[plan.key] ?? null,
@@ -270,19 +270,19 @@ export function SubscriptionPlansPreview() {
               </AppContext.Provider>
             ) : view === "seats" ? (
               <>
-                <PlanSeats plan={seatPreviewPlan("free", 1)} />
+                <PlanSeats plan={seatPreviewPlan("free", 3)} />
                 <SeatLimitNotice
                   canManage
-                  upgrade={seatUpgradeFor(seatPreviewPlan("free", 1), seatPreviewPlans)}
+                  upgrade={seatUpgradeFor(seatPreviewPlan("free", 3), seatPreviewPlans)}
                   onUpgrade={() => {
                     window.location.search = "?plan=free";
                   }}
                 />
                 <p className="text-xs text-fg-muted">Without billing access:</p>
-                <PlanSeats plan={seatPreviewPlan("pro", 2)} />
+                <PlanSeats plan={seatPreviewPlan("pro", 5)} />
                 <SeatLimitNotice
                   canManage={false}
-                  upgrade={seatUpgradeFor(seatPreviewPlan("pro", 2), seatPreviewPlans)}
+                  upgrade={seatUpgradeFor(seatPreviewPlan("pro", 5), seatPreviewPlans)}
                   onUpgrade={() => undefined}
                 />
                 <p className="text-xs text-fg-muted">A full Max plan:</p>

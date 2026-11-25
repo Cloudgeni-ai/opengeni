@@ -41,6 +41,7 @@ const demoInputs = {
   sessionHistoryImport: resolve(__dirname, "session-history-import.html"),
   embeddedChat: resolve(__dirname, "embedded-chat.html"),
   embeddedMeeting: resolve(__dirname, "embedded-meeting.html"),
+  skills: resolve(__dirname, "skills.html"),
 };
 
 export default defineConfig({

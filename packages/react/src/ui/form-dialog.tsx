@@ -4,12 +4,14 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type ElementType,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { ArrowLeftIcon, LoaderCircleIcon, LockIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
@@ -207,6 +209,8 @@ export function FormFrame({
   const [internalPending, setInternalPending] = useState(false);
   const [thrown, setThrown] = useState<ReactNode>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLElement>(null);
+  usePageFooterAtScrollportEdge(footerRef, variant === "page" && footer !== false);
   // A submit that finishes after the person left the form (a page they
   // navigated away from) must not act on it: closing it would navigate back.
   const mountedRef = useRef(true);
@@ -497,13 +501,17 @@ export function FormFrame({
 
         {footer === false ? null : (
           <footer
+            ref={footerRef}
             className={cn(
               "flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-x-4 gap-y-3 border-t border-border",
               (variant === "dialog" || variant === "sheet") &&
                 "px-6 py-4 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch @max-[26rem]/form:px-5 max-sm:pb-[max(1rem,env(safe-area-inset-bottom))]",
               // On a phone the stacked buttons would cover a fifth of the
               // screen and the fields under them; there they follow the form.
-              variant === "page" && "sticky bottom-0 z-10 bg-bg max-sm:static",
+              // Elsewhere they stick to the bottom of the visible area (see
+              // usePageFooterAtScrollportEdge).
+              variant === "page" &&
+                "sticky bottom-[calc(-1*var(--og-form-footer-scroll-padding,0px))] z-10 bg-bg max-sm:static",
               variant === "inline" && (plain ? "py-3" : "px-5 py-3"),
             )}
           >
@@ -539,6 +547,56 @@ export function FormFrame({
       </form>
     </div>
   );
+}
+
+/**
+ * A sticky `bottom: 0` footer sticks to its scroll container's padding edge,
+ * not to the bottom of what is visible: in a scroller with bottom padding (the
+ * sign-in pages' ConsentFrame, for example) it stopped that far above the
+ * bottom, and the fields scrolled on below it. This lowers the footer by the
+ * scroller's bottom padding so it rests on the visible edge, wherever a form
+ * page is placed. At the end of the form it still sits right after the fields.
+ */
+function usePageFooterAtScrollportEdge(footerRef: RefObject<HTMLElement | null>, enabled: boolean) {
+  // Before paint, so a stuck footer never shows a frame at the old height.
+  useIsomorphicLayoutEffect(() => {
+    const footer = footerRef.current;
+    if (!enabled || !footer) return;
+    const scroller = scrollContainerOf(footer);
+    if (!scroller) return;
+    const update = () =>
+      footer.style.setProperty(
+        "--og-form-footer-scroll-padding",
+        getComputedStyle(scroller).paddingBottom,
+      );
+    update();
+    // Padding follows breakpoints, which change with the scroller's size.
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(scroller);
+    return () => {
+      observer?.disconnect();
+      footer.style.removeProperty("--og-form-footer-scroll-padding");
+    };
+  }, [footerRef, enabled]);
+}
+
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/**
+ * The nearest ancestor a sticky element sticks within, if any. Not <body> or
+ * <html>: when the page itself scrolls, the viewport is the scroller, whatever
+ * overflow the body reports.
+ */
+function scrollContainerOf(element: HTMLElement): HTMLElement | null {
+  for (
+    let node = element.parentElement;
+    node && node !== document.body && node !== document.documentElement;
+    node = node.parentElement
+  ) {
+    const style = getComputedStyle(node);
+    if (/auto|scroll|hidden|overlay/.test(`${style.overflowX} ${style.overflowY}`)) return node;
+  }
+  return null;
 }
 
 /** Label and control placeholders, the shape of the fields that are loading. */

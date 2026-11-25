@@ -311,6 +311,21 @@ const BrowserScreenshotInput = z
 // space; static, so it never changes text already sent.
 const INEXACT_SCROLLBARS_NOTE =
   "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.";
+// Shown only on a full-page capture of a page that scrolls content inside its
+// own areas (an app's main pane, a table), which the document's size and so
+// the image leave out.
+function hiddenScrolledContentNote(hidden: number): string {
+  return `This image leaves out content that scrolls inside the page's own areas: one holds ${hidden} CSS px below what it shows. To capture it, scroll within that area and take more screenshots, or, if the area grows with the window, set the viewport ${hidden} px taller and capture again.`;
+}
+function screenshotNote(frame: { inexactScrollbars?: true; hiddenScrolledHeight?: number }): {
+  note?: string;
+} {
+  const notes = [
+    ...(frame.hiddenScrolledHeight ? [hiddenScrolledContentNote(frame.hiddenScrolledHeight)] : []),
+    ...(frame.inexactScrollbars ? [INEXACT_SCROLLBARS_NOTE] : []),
+  ];
+  return notes.length > 0 ? { note: notes.join(" ") } : {};
+}
 const BrowserScreenshotOutput = z
   .object({
     kind: z.literal("browser_screenshot"),
@@ -1989,6 +2004,7 @@ export function createInteractionAttemptToolDefinitions(
     execute: async (value, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
       const reattached: ReattachedBrowserRecord = { from: null };
+      const replaced: ReplacedBrowserRecord = { from: null, reason: null };
       const opened = await reportingChatMove(
         chatMove,
         async () =>
@@ -2011,6 +2027,7 @@ export function createInteractionAttemptToolDefinitions(
                     extension.installUrl,
                     chatMove,
                     reattached,
+                    replaced,
                   ),
               ),
           ),
@@ -2028,6 +2045,13 @@ export function createInteractionAttemptToolDefinitions(
         notes.push({
           type: "text",
           text: reattachedBrowserNote(reattached.from, opened.session.id),
+        });
+      }
+      if (replaced.from !== null && replaced.reason !== null) {
+        currentTab.forgetSession(replaced.from);
+        notes.push({
+          type: "text",
+          text: replacedBrowserNote(replaced.from, replaced.reason, opened.session.id),
         });
       }
       if (!value.includeScreenshot)
@@ -2314,7 +2338,7 @@ export function createInteractionAttemptToolDefinitions(
             scrollY: frame.scrollY,
             capturedAt: frame.capturedAt,
             fullPage: value.fullPage ?? false,
-            ...(frame.inexactScrollbars ? { note: INEXACT_SCROLLBARS_NOTE } : {}),
+            ...screenshotNote(frame),
           },
           [browserToolImageContent(frame.data, frame.mediaType)],
         );
@@ -2981,14 +3005,19 @@ export function createInteractionAttemptToolDefinitions(
       }
       if (!includeScreenshot)
         return notes.length ? new InteractionExecutionResult(result, notes) : result;
-      // With a launched app, its window; otherwise the screen.
-      const target = appWindow ?? openedScreenshotTarget(opened.targets);
+      // With a launched app, its window; otherwise the screen. A named app
+      // with no observed window gets the screen only: another app's window
+      // would pass for the app's.
+      const target =
+        appWindow ?? openedScreenshotTarget(opened.targets, { screenOnly: Boolean(applicationId) });
       if (!target)
         return new InteractionExecutionResult(result, [
           ...notes,
           {
             type: "text" as const,
-            text: "The computer opened, but it has no screen or window to capture a screenshot of.",
+            text: applicationId
+              ? `No screenshot: no window of ${applicationId} was observed. Check computer_targets for its window.`
+              : "The computer opened, but it has no screen or window to capture a screenshot of.",
           },
         ]);
       try {
@@ -4152,6 +4181,39 @@ type WorkingCopyTransport = Partial<
   Pick<OpenGeniClient, "inspectBrowserSessionWorkingCopy" | "adoptBrowserSessionWorkingCopy">
 >;
 
+/** Why a browser's working copy can never be continued, as a person reads it,
+ * by the controller's refusal. Other refusals (a copy that can be adopted, an
+ * adoption still settling, a process that may still use the copy) are not
+ * final, so an open does not replace the browser over them. */
+const UNCONTINUABLE_WORKING_COPY: Readonly<Record<string, string>> = {
+  receipt_not_adoptable: "its last launch left no record of a running browser",
+  authority_changed: "it was launched under another controller",
+  working_copy_invalid: "its working directory is missing or incomplete",
+};
+
+/** Why a browser that an open failed to continue can never be continued, or
+ * null when it might be (or the failure is about something else). Only a
+ * definite conflict is inspected, and inspecting changes nothing. */
+async function uncontinuableBrowserReason(
+  transport: WorkingCopyTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  error: unknown,
+): Promise<string | null> {
+  if (
+    !(error instanceof OpenGeniApiError) ||
+    error.status !== 409 ||
+    error.retryable ||
+    !transport.inspectBrowserSessionWorkingCopy
+  )
+    return null;
+  const inspection = await transport
+    .inspectBrowserSessionWorkingCopy(workspaceId, browserSessionId)
+    .catch(() => null);
+  if (!inspection || inspection.activeAdoption || !inspection.refusal) return null;
+  return UNCONTINUABLE_WORKING_COPY[inspection.refusal] ?? null;
+}
+
 /**
  * A stopped browser whose working directory was moved, copied or restored
  * (for example when its machine's disk was restored) does not continue from
@@ -4578,9 +4640,14 @@ async function openBrowser(
   extensionUrl: string,
   chatMove: ChatMoveRecord = { moved: false },
   reattached: ReattachedBrowserRecord = { from: null },
+  replaced: ReplacedBrowserRecord = { from: null, reason: null },
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
+  // Whether the open picked this browser itself (the default reuse) rather
+  // than being given it: only such a browser is replaced when it turns out it
+  // can never be continued.
+  let reusedByDefault = false;
   // A create that launched the browser in this call returns its tabs and the
   // opened tab's observation, which replaces the two reads below.
   let initialView: Awaited<ReturnType<InteractionTransport["createBrowserSession"]>>["initialView"];
@@ -4687,6 +4754,7 @@ async function openBrowser(
           );
     if (reusable) {
       session = reusable;
+      reusedByDefault = true;
     } else {
       created = true;
       if (attachedInventory) {
@@ -4738,6 +4806,32 @@ async function openBrowser(
       );
     await adoptBrowserWorkingCopy(transport, workspaceId, session.id, value.adoptWorkingCopy);
   }
+  // The browser this open chose for itself cannot be continued, ever: open a
+  // new one instead of failing every default open on it. It is kept, and an
+  // open that names it still says why it cannot continue.
+  const replaceUncontinuable = async (error: unknown) => {
+    const reason = reusedByDefault
+      ? await uncontinuableBrowserReason(transport, workspaceId, session.id, error)
+      : null;
+    if (reason === null) return null;
+    replaced.from = session.id;
+    replaced.reason = reason;
+    // Its own operation: this call's ID may already name the failed resume,
+    // and a retry of this call opens the same replacement.
+    return await openBrowser(
+      transport,
+      workspaceId,
+      sourceSessionId,
+      { ...value, mode: "new" },
+      {
+        ...context,
+        operationId: derivedOperationId("browser-replacement", context.operationId, session.id),
+      },
+      extensionUrl,
+      chatMove,
+      reattached,
+    );
+  };
   if (isResumablePausedBrowser(session)) {
     const stoppedId = session.id;
     let resumed: Awaited<ReturnType<InteractionTransport["resumeBrowserSession"]>>;
@@ -4746,6 +4840,8 @@ async function openBrowser(
         operationId: context.operationId,
       });
     } catch (error) {
+      const replacement = await replaceUncontinuable(error);
+      if (replacement) return replacement;
       throw (await workingCopyRecoveryError(transport, workspaceId, stoppedId)) ?? error;
     }
     if (resumed.operation?.state === "failed") {
@@ -4767,8 +4863,15 @@ async function openBrowser(
       }
     : {};
   if (session.lifecycle !== "active") return { session, targets: [], ...chosenProfile };
-  let targets =
-    initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+  let targets: z.infer<typeof BrowserTargetListResponse>["targets"];
+  try {
+    targets =
+      initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+  } catch (error) {
+    const replacement = await replaceUncontinuable(error);
+    if (replacement) return replacement;
+    throw error;
+  }
   if (
     value.initialUrl &&
     !created &&
@@ -5070,16 +5173,27 @@ async function openComputer(
       ),
       sourceSessionId,
     );
-    session = reusable
-      ? reusable
-      : (
-          await transport.createComputerSession(workspaceId, {
-            operationId: context.operationId,
-            sessionId: sourceSessionId,
-            ...(value.name ? { name: value.name } : {}),
-            ...(value.placement ? { placement: value.placement } : {}),
-          })
-        ).session;
+    if (reusable) session = reusable;
+    else {
+      const created = await transport.createComputerSession(workspaceId, {
+        operationId: context.operationId,
+        sessionId: sourceSessionId,
+        ...(value.name ? { name: value.name } : {}),
+        ...(value.placement ? { placement: value.placement } : {}),
+      });
+      session = created.session;
+      // A computer that failed to start is not a result to act on: report
+      // why, as browser_open does, instead of an opened computer without
+      // screens.
+      const startError = created.operation?.error;
+      if (startError && session.lifecycle === "failed") {
+        throw new OpenGeniApiError(
+          startError.code === "unsupported" ? 422 : 502,
+          `ComputerSession ${session.id} did not start: ${startError.message}`,
+          { code: startError.code, retryable: startError.retryable },
+        );
+      }
+    }
   }
   if (session.lifecycle !== "active") return { session, targets: [] };
   try {
@@ -5108,8 +5222,10 @@ function lockedScreenText(message: string): string {
 /**
  * Find `applicationId` already open in a computer `computer_open` just opened,
  * or launch it. A macOS launch finds a running app exactly, so there it is
- * always launched. Windows and Linux start another copy, so a listed window of
- * the app is observed instead. A launch acts on no window's contents, so any listed
+ * launched first; only when macOS refuses it, as for an app run from a folder
+ * it does not know (a downloaded app opened in place), is a listed window of
+ * the running app observed. Windows and Linux start another copy, so a listed
+ * window of the app is observed first. A launch acts on no window's contents, so any listed
  * target carries it (see launchCarrier). Its receipt observes the app's window,
  * and names that window as its target: the carrier is an implementation detail,
  * and naming another app's window would read as having acted on it. A launch
@@ -5132,15 +5248,17 @@ async function launchOpenedComputerApp(
   | { existing: z.input<typeof ComputerObservation> }
   | { note: string }
 > {
-  const open =
-    opened.session.platform === "macos"
-      ? null
-      : openComputerAppWindow(opened.targets, applicationId);
-  if (open) {
-    const existing = await Promise.resolve()
+  const openWindow = async (): Promise<z.input<typeof ComputerObservation> | null> => {
+    const open = openComputerAppWindow(opened.targets, applicationId);
+    if (!open) return null;
+    return await Promise.resolve()
       .then(() => transport.observeComputerTarget(workspaceId, opened.session.id, open.id))
       .catch(() => null);
+  };
+  const macos = opened.session.platform === "macos";
+  if (!macos) {
     // A window that cannot be read (closed meanwhile) is launched as usual.
+    const existing = await openWindow();
     if (existing) return { existing };
   }
   const carrier = launchCarrier(opened.targets);
@@ -5153,31 +5271,41 @@ async function launchOpenedComputerApp(
     context.operationId,
     opened.session.id,
   );
+  // macOS refused the launch and ran nothing: the app may still be running.
+  const refusedOnMac = async <T>(
+    fallback: T,
+  ): Promise<T | { existing: z.input<typeof ComputerObservation> }> => {
+    if (!macos) return fallback;
+    const existing = await openWindow();
+    return existing ? { existing } : fallback;
+  };
   try {
-    return {
-      launch: launchReceiptOnAppWindow(
-        await transport.actInComputer(workspaceId, opened.session.id, {
-          operationId,
-          targetId: carrier.id,
-          expectedTargetGeneration: carrier.targetGeneration,
-          expectedObservationId: null,
-          expectedFrameId: null,
-          action: { type: "launch", applicationId },
-        }),
-      ),
-    };
+    const launch = launchReceiptOnAppWindow(
+      await transport.actInComputer(workspaceId, opened.session.id, {
+        operationId,
+        targetId: carrier.id,
+        expectedTargetGeneration: carrier.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: null,
+        action: { type: "launch", applicationId },
+      }),
+    );
+    return launch.state === "failed" ? await refusedOnMac({ launch }) : { launch };
   } catch (error) {
     const recorded = await Promise.resolve()
       .then(() => transport.getComputerActionReceipt(workspaceId, opened.session.id, operationId))
       .catch(() => null);
-    if (recorded) return { launch: launchReceiptOnAppWindow(recorded) };
+    if (recorded) {
+      const launch = launchReceiptOnAppWindow(recorded);
+      return launch.state === "failed" ? await refusedOnMac({ launch }) : { launch };
+    }
     if (error instanceof OpenGeniApiError && error.outcomeUnknown)
       return {
         note: `${launchMayHaveRunNote(applicationId)} (${screenshotFailureReason(error)})`,
       };
-    return {
+    return await refusedOnMac({
       note: `The computer opened, but ${applicationId} could not be launched: ${screenshotFailureReason(error)}`,
-    };
+    });
   }
 }
 
@@ -5396,6 +5524,21 @@ type ChatMoveRecord = { moved: boolean };
 /** The session in the person's Chrome an open replaced, when the one it named
  * had ended because that Chrome reconnected. */
 type ReattachedBrowserRecord = { from: string | null };
+
+/** The browser an open chose for itself but replaced with a new one, because
+ * it can never be continued, and why. */
+type ReplacedBrowserRecord = { from: string | null; reason: string | null };
+
+/** The line an open's result adds when it opened a new browser in place of
+ * the one it would have continued: the new one starts without the old one's
+ * sign-ins and tabs. */
+function replacedBrowserNote(
+  replacedBrowserSessionId: string,
+  reason: string,
+  browserSessionId: string,
+): string {
+  return `BrowserSession ${replacedBrowserSessionId} cannot be continued (${reason}), so this opened a new browser, BrowserSession ${browserSessionId}, without its sign-ins and tabs. The old one is kept; use the new ID from now on.`;
+}
 
 /** The line an open's result adds when it continued in a new session because
  * the one it named had ended: later calls must use the new ID. */
@@ -6354,9 +6497,11 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
       ...(details ? { details } : {}),
       guidance: error.outcomeUnknown
         ? "The request may have completed. Do not repeat actions automatically; inspect the existing session before continuing."
-        : error.retryable
-          ? "Check the existing session before retrying. Keep its identity and do not recreate it to bypass the failure."
-          : "Resolve the reported issue before calling again; this failure is not marked retryable.",
+        : failure?.code === "agent_offline"
+          ? `The machine this ${failure.surface} runs on is offline. Wait for it to reconnect, or, if the work does not need this machine, open a new ${failure.surface} on another online machine from sandboxes_list.`
+          : error.retryable
+            ? "Check the existing session before retrying. Keep its identity and do not recreate it to bypass the failure."
+            : "Resolve the reported issue before calling again; this failure is not marked retryable.",
     };
     return {
       isError: true,
@@ -6371,7 +6516,10 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
 /** The screen computer_open includes a screenshot of: the one this computer
  * works in, else the focused one, else the one showing the focused window;
  * with no screen, the window it works in, else the focused one. */
-function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTarget | undefined {
+function openedScreenshotTarget(
+  targets: readonly ComputerTarget[],
+  { screenOnly = false }: { screenOnly?: boolean } = {},
+): ComputerTarget | undefined {
   const screens = targets.filter((target) => target.kind === "screen");
   const windows = targets.filter((target) => target.kind === "window");
   const focusedWindow = windows.find((target) => target.focused)?.bounds;
@@ -6379,7 +6527,7 @@ function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTar
     x: focusedWindow.x + focusedWindow.width / 2,
     y: focusedWindow.y + focusedWindow.height / 2,
   };
-  return (
+  const shownScreen =
     screens.find((screen) => screen.current) ??
     screens.find((screen) => screen.focused) ??
     (centre &&
@@ -6391,7 +6539,9 @@ function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTar
           centre.y >= bounds.y &&
           centre.y < bounds.y + bounds.height,
       )) ??
-    screens[0] ??
+    screens[0];
+  if (shownScreen || screenOnly) return shownScreen;
+  return (
     windows.find((window) => window.current) ??
     windows.find((window) => window.focused) ??
     windows[0]

@@ -31,9 +31,14 @@ import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
 /**
  * Where onboarding sends the person when it finishes somewhere other than
- * home: a chat, or a workspace's new-chat page when there is no `sessionId`.
+ * home: a chat, the workspace's guided setups (`page: "get-started"`), or a
+ * workspace's new-chat page when there is neither.
  */
-export type OnboardingDestination = { workspaceId: string; sessionId?: string };
+export type OnboardingDestination = {
+  workspaceId: string;
+  sessionId?: string;
+  page?: "get-started";
+};
 
 type DeveloperSetupClient = Pick<
   ChatClient<OpenGeniBrowserClient>,

@@ -668,6 +668,40 @@ e2e(
   90_000,
 );
 
+for (const menu of ["src", "dynamic"] as const)
+  e2e(
+    `clicking a login field and typing into it completes while a password manager would show its inline menu (${menu})`,
+    async () => {
+      await withFixture(menu, async ({ observe, act, heldFrames }) => {
+        for (let attempt = 0; attempt < 30 && !heldFrames().includes("widget"); attempt++)
+          await Bun.sleep(100);
+        const observation = await observe();
+        const email = ref(observation, "textbox", "Email");
+        // The click focuses the field, which is when the password manager
+        // adds its menu frame and Chrome ends the tab's debugging under the
+        // press; the typing follows at once.
+        const typed = await act(observation, {
+          type: "batch",
+          actions: [
+            { type: "click", locator: email },
+            { type: "press", key: "End" },
+            { type: "type", locator: email, text: ".no" },
+          ],
+        });
+        expect(typed.error ?? null, JSON.stringify(typed.error)).toBeNull();
+        expect(typed.state).toBe("completed");
+        const after = await observe();
+        expect(
+          nodes(after).some((node) => (node as { value?: string }).value === "a@example.com.no"),
+          JSON.stringify(nodes(after).filter((node) => node.role === "textbox")),
+        ).toBe(true);
+        // The page's own frame stays.
+        expect(heldFrames()).toContain("widget");
+      });
+    },
+    90_000,
+  );
+
 e2e(
   "an action right after an observation works when a password manager's menu ends the tab's debugging in between",
   async () => {

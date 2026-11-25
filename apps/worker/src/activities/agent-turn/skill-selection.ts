@@ -34,6 +34,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
       include: () => tools.has("artifacts_create") && tools.has("artifacts_publish"),
     },
     { name: "secrets", include: () => tools.has("secret_search") },
+    { name: "agents", include: () => tools.has("bot_template_save") },
     { name: "video-generation", include: () => context.videoGenerationEnabled },
   ];
   return definitions
@@ -57,6 +58,7 @@ export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) 
     ),
     sites: names.has("sites"),
     secrets: names.has("secrets"),
+    agents: names.has("agents"),
     videoGeneration: names.has("video-generation"),
   });
   return [...artifacts, ...(names.has("skill-management") ? [loadSkillManagementSkill()] : [])]

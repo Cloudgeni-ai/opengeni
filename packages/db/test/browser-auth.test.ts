@@ -940,6 +940,74 @@ describe("browser auth and network resources", () => {
     expect(JSON.stringify(operation)).not.toContain("hosted_url");
   });
 
+  test("a completed handoff reaches the resumed turn through its approval", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    const toolCallId = "interaction-human-completed";
+    const interventionId = crypto.randomUUID();
+    const request = {
+      operation: "request" as const,
+      resourceKind: "browser_session" as const,
+      resourceId: browser.browserSessionId,
+      targetId: "target-human-completed",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-human-completed",
+      expectedDocumentGeneration: "document-generation-human-completed",
+      kind: "mfa" as const,
+      reason: "Approve the sign-in on your phone.",
+      expiresInSeconds: 300,
+    };
+    const settled = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [{ id: toolCallId }],
+        interactionInterventionRequests: [
+          { id: interventionId, operationId: crypto.randomUUID(), toolCallId, input: request },
+        ],
+      },
+      events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+    });
+    expect(settled.action).toBe("settled");
+    const accepted = await acceptSessionApprovalDecision(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      subjectId: scope.actorSubjectId,
+      payload: { approvalId: toolCallId, decision: "approve" },
+      clientEventId: crypto.randomUUID(),
+      interactionIntervention: {
+        interventionId,
+        operationId: crypto.randomUUID(),
+        expectedVersion: 1,
+        outcome: "completed",
+      },
+    });
+    expect(accepted.action).toBe("accepted");
+    if (accepted.action !== "accepted") throw new Error("handoff was not accepted");
+    // The resumed turn reads the settled handoff back from its trigger, as
+    // the worker does, outside any request's row-security scope.
+    expect(
+      await getInteractionInterventionResumeForEvent(
+        client.db,
+        scope.workspaceId,
+        scope.sessionId,
+        accepted.event,
+      ),
+    ).toMatchObject({
+      toolCallId,
+      intervention: { id: interventionId, status: "completed" },
+    });
+  });
+
   test("keeps model-owned expiry attached to the exact approval across re-freeze", async () => {
     if (!available) return;
     const scope = await fixture();

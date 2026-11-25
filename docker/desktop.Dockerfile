@@ -30,7 +30,7 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 FROM scratch AS chrome-assets
 
-ADD --checksum=sha256:4696bce00b128f385a870ba2eb6eede61698f22374ea0d8e09af8a1c6543d397 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_158.0.8127.36-1_amd64.deb /google-chrome-stable.deb
+ADD --checksum=sha256:a656b2db00a8cb7f13a1d754f6aad91f84014906452c6dfb7f3ead93035da03b https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_158.0.8127.88-1_amd64.deb /google-chrome-stable.deb
 
 # The pinned rg builds the agent embeds and appends to every command's PATH,
 # with the static musl jq committed under agent/vendor/jq/. Pins equal
@@ -371,8 +371,8 @@ ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.79-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261103T013555Z
+ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.108-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261123T154646Z
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
 ENV DEBIAN_FRONTEND=noninteractive

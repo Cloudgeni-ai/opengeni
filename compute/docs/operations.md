@@ -1598,10 +1598,19 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   never sets a VM's `memory.high` below what it holds, so such a VM's
   `memory.high` stays where the kernel could bring it, above its bound;
   `cat /sys/fs/cgroup/compute/<sandbox id>/memory.high` shows it. A sandbox
-  guaranteed all of its memory is never compressed. Give the host swap of at least a quarter of its
-  memory and a zswap pool of at least 20 %; the agent warns at start when
-  either is smaller, and on a host without swap running sandboxes are
-  never compressed. On a host shared with VMs or services beyond compute,
+  guaranteed all of its memory is never compressed. Give the host swap at
+  least as large as the sandboxes' memory (host-setup's default) and a
+  zswap pool of at least 20 %: every page zswap compresses takes a swap
+  slot at its original size, and guest memory compresses several times
+  over, so a smaller swap file fills while the pool is mostly empty, and
+  from then on nothing more is compressed and a host short of memory ends
+  VMs. The agent warns at start when either is smaller, reports the slots
+  (`compute.host.swap.total`, `compute.host.swap.free`), and a host with
+  under 15 % of them free for five minutes alerts
+  (`OpenGeniComputeHostSwapSlotsLow`). host-setup makes a swap file
+  smaller than it would now make anew at the next boot; on a running host,
+  swap a new file in while little of the old one is used. On a host
+  without swap running sandboxes are never compressed. On a host shared with VMs or services beyond compute,
   `--memory-total-mib` says how much of its memory compute may use: the
   capacity, the watermarks, both limits and the levels come from that
   share, so sandboxes never take memory promised to the rest. Keep the
