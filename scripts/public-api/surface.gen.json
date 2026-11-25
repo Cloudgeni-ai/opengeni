@@ -13216,7 +13216,9 @@
         "$.idempotencyKey": "string?",
         "$.package": "object?",
         "$.package{}": "unknown",
-        "$.previous": "boolean?"
+        "$.previous": "union?=[\"0\",\"1\"]",
+        "$.previous|0": "boolean",
+        "$.previous|1": "string"
       }
     },
     "AppShotCapture": {

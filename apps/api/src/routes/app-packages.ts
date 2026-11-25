@@ -19,6 +19,7 @@ import {
   installAppPackage,
 } from "../app-packages/service";
 import {
+  appRestoreRequestKey,
   appUpgradeOperationKey,
   resolveAppUpgradeSource,
   upgradeAppFromPackage,
@@ -27,6 +28,7 @@ import { listAppPackageStatus } from "../app-packages/status";
 import type { PackageSkillWriter } from "../app-packages/skills";
 import { parseRequestBody } from "../http/request-body";
 import { authorizeSkillScopeMutation } from "./skill-content";
+import { skillInstallerActor } from "./skill-install-authority";
 
 const AppId = z.string().uuid();
 
@@ -46,26 +48,21 @@ async function run<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * A person saves a package's Skills as workspace Skills when they may change
- * the workspace's Skills (the same check as the Skills page); otherwise the
- * app installs without them and says why.
+ * The caller saves a package's Skills as workspace Skills when they may
+ * change the workspace's Skills (the same check as the Skills page), as who
+ * they are: a person, a key (service) or an agent (through Agent learning).
+ * Otherwise the app installs without them and says why.
  */
 function personSkillWriter(authorization: AccessGrantAuthorization): PackageSkillWriter {
   try {
     authorizeSkillScopeMutation(authorization, "workspace");
+    return { actor: skillInstallerActor(authorization) };
   } catch {
     return {
       refused:
         "Adding Skills to this workspace needs permission to change its Skills; ask someone who can to upgrade the app",
     };
   }
-  return {
-    actor: {
-      kind: "human",
-      principalKind: "human_session",
-      subjectId: authorization.grant.subjectId,
-    },
-  };
 }
 
 /**
@@ -158,10 +155,26 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!parsedId.success) throw new HTTPException(422, { message: "Invalid app id" });
       const request = await body(context, AppPackageUpgradeRequest);
       const result = await run(async () => {
-        const source = await resolveAppUpgradeSource(deps, grant, parsedId.data, request);
+        const restoreKey =
+          request.previous && request.idempotencyKey
+            ? appRestoreRequestKey(
+                "subject",
+                grant.subjectId,
+                parsedId.data,
+                request.idempotencyKey,
+              )
+            : null;
+        const source = await resolveAppUpgradeSource(
+          deps,
+          grant,
+          parsedId.data,
+          request,
+          restoreKey,
+        );
         return await upgradeAppFromPackage(deps, grant, parsedId.data, {
           package: source.package,
           snapshotId: source.snapshotId,
+          restoreKey,
           skillWriter: personSkillWriter(authorization),
           dryRun: request.dryRun,
           allowDestructive: request.allowDestructive,

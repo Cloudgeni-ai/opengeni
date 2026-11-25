@@ -15,12 +15,12 @@ import {
 import { siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   artifactRequestedToolsMissingFromAttemptCatalog,
-  deleteAppPackageSnapshot,
+  consumeAppPackageSnapshot,
   getAppPackageInstall,
   getAppPackageId,
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
-  latestAppPackageSnapshot,
+  getAppPackageSnapshot,
   publishWorkspaceArtifactVersion,
   putAppPackageInstall,
   saveAppPackageSnapshot,
@@ -47,7 +47,14 @@ import { decodeSiteAssetFiles, storeSiteAssetFiles, type DecodedSiteAssets } fro
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
-import { AppPackageError, exportAppPackage, jsonBytes, ownPackageId, reason } from "./service";
+import {
+  AppPackageError,
+  appPackageFilesAt,
+  exportAppPackage,
+  jsonBytes,
+  ownPackageId,
+  reason,
+} from "./service";
 import { appSyncHooks, syncName } from "./syncs";
 import {
   applyPackageSkills,
@@ -93,6 +100,22 @@ export function appUpgradeOperationKey(
   const digest = createHash("sha256").update(stableJson(pkg)).digest("hex");
   return `${prefix}:${createHash("sha256")
     .update(`${namespace}:app-upgrade:${appId}:${digest}:${idempotencyKey}`)
+    .digest("hex")}`;
+}
+
+/**
+ * The key of one "go back" request (its caller and idempotency key), kept on
+ * the saved state it applied, so a retry of `previous: true` finds the same
+ * one after it was gone back to.
+ */
+export function appRestoreRequestKey(
+  prefix: "subject" | "attempt",
+  namespace: string,
+  appId: string,
+  idempotencyKey: string,
+): string {
+  return `${prefix}:${createHash("sha256")
+    .update(`${namespace}:app-restore:${appId}:${idempotencyKey}`)
     .digest("hex")}`;
 }
 
@@ -425,6 +448,7 @@ async function prepare(
       skills: pkg.skills ?? [],
       links: install?.skills ?? [],
       packageId: pkg.packageId ?? currentPackageId,
+      mode: "upgrade",
     });
     plan.skills = {
       added: skills.added,
@@ -486,26 +510,44 @@ export function upgradePlanChanges(plan: AppPackageUpgradePlan): boolean {
 }
 
 /**
- * The package an upgrade applies: the one given, or with `previous` the
- * app's latest saved state (from before its last upgrade). The app must be
- * one the caller sees; the upgrade itself checks they manage it.
+ * The package an upgrade applies: the one given, or with `previous` a saved
+ * state of the app from before an upgrade: the one with that id (also once
+ * gone back to, so a retry applies the same one) or, with `true`, the latest
+ * not gone back to. Its package is the saved definitions plus the app's
+ * files at the saved version. The app must be one the caller sees; the
+ * upgrade itself checks they manage it.
  */
 export async function resolveAppUpgradeSource(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   appId: string,
-  request: { package?: Record<string, unknown> | undefined; previous?: boolean | undefined },
+  request: {
+    package?: Record<string, unknown> | undefined;
+    previous?: boolean | string | undefined;
+  },
+  /** appRestoreRequestKey of this request, when it has an idempotency key. */
+  restoreKey: string | null = null,
 ): Promise<{ package: unknown; snapshotId: string | null }> {
   if (!request.previous) return { package: request.package, snapshotId: null };
   const viewer = await siteViewerForGrant(deps.db, grant);
   await getWorkspaceArtifactCurrent(deps.db, grant.workspaceId, viewer, appId);
-  const snapshot = await latestAppPackageSnapshot(deps.db, grant.workspaceId, appId);
+  const snapshot = await getAppPackageSnapshot(
+    deps.db,
+    grant.workspaceId,
+    appId,
+    typeof request.previous === "string" ? { id: request.previous } : { restoreKey },
+  );
   if (!snapshot)
     throw new ApiHttpError(409, {
       code: "conflict",
       message: "This app has no earlier version saved to go back to",
     });
-  return { package: snapshot.package, snapshotId: snapshot.id };
+  const saved = snapshot.package as { app?: Record<string, unknown> };
+  const files = await appPackageFilesAt(deps, grant, appId, snapshot.versionId);
+  return {
+    package: { ...saved, app: { ...saved.app, ...files } },
+    snapshotId: snapshot.id,
+  };
 }
 
 /**
@@ -529,8 +571,10 @@ export async function upgradeAppFromPackage(
     provenance: AppUpgradeProvenance | null;
     /** Who saves the package's Skills, or why no one can. */
     skillWriter: PackageSkillWriter;
-    /** The saved state this applies (going back), deleted once it applied. */
+    /** The saved state this applies (going back), marked gone back to once it applied. */
     snapshotId?: string | null | undefined;
+    /** appRestoreRequestKey of this request, kept on the saved state it applied. */
+    restoreKey?: string | null | undefined;
   },
 ): Promise<AppPackageUpgradeResponse> {
   const prepared = await prepare(deps, grant, appId, input.package);
@@ -586,14 +630,19 @@ export async function upgradeAppFromPackage(
   // runs; the app's earlier versions stay in its history.
   if (!input.snapshotId && upgradePlanChanges(plan)) {
     try {
-      const exported = await exportAppPackage(deps, grant, appId);
+      const before = await current();
+      if (!before.currentVersion) throw new Error("The app has no published version");
+      // Its files stay in the app's version history; only the definitions are saved.
+      const exported = await exportAppPackage(deps, grant, appId, {}, { files: false });
+      const { html: _html, source: _source, assets: _assets, ...app } = exported.package.app;
       await saveAppPackageSnapshot(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         appId,
         packageVersion: prepared.install?.packageVersion ?? null,
+        versionId: before.currentVersion.id,
         operationKey: input.provenance.operationKey,
-        package: exported.package as unknown as Record<string, unknown>,
+        package: { ...exported.package, app } as unknown as Record<string, unknown>,
         keep: APP_PACKAGE_SNAPSHOTS_KEPT,
       });
     } catch (error) {
@@ -790,7 +839,10 @@ export async function upgradeAppFromPackage(
     automations,
   });
   if (input.snapshotId)
-    await deleteAppPackageSnapshot(deps.db, grant.workspaceId, input.snapshotId);
+    await consumeAppPackageSnapshot(deps.db, grant.workspaceId, {
+      snapshotId: input.snapshotId,
+      restoreKey: input.restoreKey ?? input.provenance.operationKey,
+    });
 
   return {
     app: after,

@@ -70,7 +70,11 @@ const STATUS: AppPackageStatus[] = noApps
         skills: [{ id: "s1", name: "work-summary", modified: true }],
         automations: [{ id: "t1", name: "Update the work summary" }],
         update: { templateKey: "work-summary", packageVersion: "1.0.0" },
-        previous: { packageVersion: "0.8.0", savedAt: day(9) },
+        previous: {
+          id: "5f0c2b1e-3d4a-4b6c-8e9f-0a1b2c3d4e5f",
+          packageVersion: "0.8.0",
+          savedAt: day(9),
+        },
       }),
       status(APPS[1]!.id, "Issue tracker", issueTracker.package.packageId, { modified: true }),
     ];

@@ -52,10 +52,22 @@ export async function exportPackageExtras(
   }
   const automations: AppPackageAutomation[] = [];
   for (const link of install.automations) {
-    const task = await getScheduledTask(deps.db, grant.workspaceId, link.taskId).catch(() => null);
+    let task: Awaited<ReturnType<typeof getScheduledTask>>;
+    try {
+      task = await getScheduledTask(deps.db, grant.workspaceId, link.taskId);
+    } catch (error) {
+      notExported.push({
+        part: "automation",
+        name: link.name,
+        reason: reason(error, "reading it"),
+      });
+      continue;
+    }
+    // Removed here: nothing to export.
     if (!task) continue;
     automations.push({
-      name: task.name,
+      // The name it came with, which links it to the app (a rename here stays here).
+      name: link.name,
       prompt: task.agentConfig.prompt.replaceAll(appId, "{{appId}}"),
       schedule: task.schedule as Record<string, unknown>,
     });

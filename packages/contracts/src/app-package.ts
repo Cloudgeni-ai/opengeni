@@ -48,7 +48,7 @@ export const APP_PACKAGE_SKILLS_MAX = 10;
 export const APP_PACKAGE_AUTOMATIONS_MAX = 5;
 /** An automation's instructions for each run, at most this many characters. */
 export const APP_PACKAGE_AUTOMATION_PROMPT_MAX_CHARS = 8_000;
-/** Earlier states of an installed app kept to go back to (see docs/app-packages.md#rollback). */
+/** Earlier states of an installed app kept to go back to (see docs/app-packages.md#updates-and-going-back). */
 export const APP_PACKAGE_SNAPSHOTS_KEPT = 3;
 /** How long a package file `app_export` stores for download is kept. */
 export const APP_PACKAGE_EXPORT_TTL_SECONDS = 24 * 60 * 60;
@@ -334,10 +334,11 @@ export const AppPackageUpgradeRequest = /* @__PURE__ */ defineSchema(() =>
         .record(primitives.string, z.unknown())
         .optional()
         .describe("The package file's JSON. Give it, or `previous`."),
-      previous: primitives.boolean
+      previous: z
+        .union([primitives.boolean, primitives.string.uuid()])
         .optional()
         .describe(
-          "Go back to the app as it was before its last upgrade (its saved earlier state), instead of a package.",
+          "Go back to a saved earlier state of the app instead of a package: its id (from the app's status `previous.id`, so a retry applies the same one), or true for the latest.",
         ),
       dryRun: primitives.boolean.optional().describe("Only return the plan; nothing changes."),
       allowDestructive: primitives.boolean
@@ -352,8 +353,8 @@ export const AppPackageUpgradeRequest = /* @__PURE__ */ defineSchema(() =>
         .optional()
         .describe("Required to apply; the same key and package apply once."),
     })
-    .refine((value) => (value.package === undefined) !== (value.previous !== true), {
-      message: "Give exactly one of package or previous: true",
+    .refine((value) => (value.package === undefined) !== !value.previous, {
+      message: "Give exactly one of package or previous",
       path: ["package"],
     }),
 );
@@ -477,7 +478,7 @@ export type AppPackageStatus = {
   }>;
   automations: Array<{ id: string; name: string }>;
   /** Its saved state before the last upgrade, to go back to; null when there is none. */
-  previous: { packageVersion: string | null; savedAt: string } | null;
+  previous: { id: string; packageVersion: string | null; savedAt: string } | null;
   /** A ready-made app with the same package and a later version; null when there is none. */
   update: { templateKey: string; packageVersion: string } | null;
 };

@@ -1,13 +1,14 @@
 -- deployment-mode: rolling
--- Installed app packages (docs/app-packages.md "Installed packages"): for an
+-- Installed app packages (docs/app-packages.md#updates-and-going-back): for an
 -- app installed or upgraded from a package, the package's version label, the
 -- app version the package wrote (a later version means the app was changed
 -- here: "Modified"), the workspace Skills that came with it and the revision
 -- each was written at, and the automations it added. Snapshots keep the
--- app's state (as a package) before each applied upgrade, the latest few,
--- so it can go back.
+-- app's state before each applied upgrade, the latest few, so it can go
+-- back: the app version it was at (its files stay in the app's version
+-- history) and its definitions as a package without those files.
 --
--- Rows hold ids, labels and the saved packages only, under the workspace's
+-- Rows hold ids, labels and definitions only, under the workspace's
 -- row-level security; deleting the app or the workspace deletes them.
 --
 -- Rolling: new tables the previous release never reads or writes.
@@ -21,7 +22,7 @@ CREATE TABLE app_package_installs (
   package_version text,
   -- The app version the package published or matched; null when unknown.
   version_id uuid,
-  -- [{ "skillId", "name", "revisionId" }]
+  -- [{ "skillId", "name", "revisionId", "pendingRevisionId"? }]
   skills jsonb NOT NULL DEFAULT '[]'::jsonb,
   -- [{ "taskId", "name" }]
   automations jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -47,15 +48,24 @@ CREATE TABLE app_package_snapshots (
   workspace_id uuid NOT NULL,
   artifact_id uuid NOT NULL,
   package_version text,
+  -- The app version to go back to.
+  version_id uuid NOT NULL,
   -- The upgrade that saved it, so a retried upgrade saves it once.
   operation_key text NOT NULL,
+  -- The definitions (data, SQL, tools, syncs, Skills, automations) as a
+  -- package without the app's files.
   package jsonb NOT NULL,
+  -- Set once the app went back to it, with that request's key (a retry finds it).
+  consumed_at timestamptz,
+  consumed_restore_key text,
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT app_package_snapshots_pkey PRIMARY KEY (id),
   CONSTRAINT app_package_snapshots_operation_key UNIQUE (artifact_id, operation_key),
   CONSTRAINT app_package_snapshots_version_check
     CHECK (package_version IS NULL OR char_length(package_version) BETWEEN 1 AND 32),
   CONSTRAINT app_package_snapshots_key_check CHECK (char_length(operation_key) BETWEEN 1 AND 300),
+  CONSTRAINT app_package_snapshots_consumed_key_check
+    CHECK (consumed_restore_key IS NULL OR char_length(consumed_restore_key) BETWEEN 1 AND 300),
   CONSTRAINT app_package_snapshots_package_check CHECK (jsonb_typeof(package) = 'object'),
   CONSTRAINT app_package_snapshots_artifact_fk FOREIGN KEY (artifact_id)
     REFERENCES workspace_artifacts(id) ON DELETE CASCADE,

@@ -7611,7 +7611,7 @@ export const SITE_BROWSER_RUNTIME: string = [
   "}",
   "){",
   "let query=new URLSearchParams;",
-  "for(let key of[\"sourceSessionId\",\"includeSubSessions\",\"q\",\"kind\",\"sort\",\"status\",\"limit\",\"cursor\"])if(options[key]!==void 0)query.set(key,String(options[key]));",
+  "for(let key of[\"sourceSessionId\",\"includeSubSessions\",\"q\",\"kind\",\"excludeKind\",\"sort\",\"status\",\"limit\",\"cursor\"])if(options[key]!==void 0)query.set(key,String(options[key]));",
   "let suffix=query.size?`?${",
   "query.toString()}",
   "`:\"\";",

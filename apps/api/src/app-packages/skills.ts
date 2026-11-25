@@ -7,7 +7,11 @@ import type {
   SkillRecord,
 } from "@opengeni/contracts";
 import { listSkills, readSkill, saveSkill, type ApiRouteDeps } from "@opengeni/core";
-import { appPackageSkillIds, type AppPackageInstallSkill } from "@opengeni/db";
+import {
+  appPackageSkillIds,
+  relinkAppPackageSkill,
+  type AppPackageInstallSkill,
+} from "@opengeni/db";
 import { createHash } from "node:crypto";
 import { reason } from "./service";
 
@@ -17,8 +21,9 @@ import { reason } from "./service";
  * (the same lifecycle, Agent learning for agents, revision history), named
  * by their SKILL.md and linked to the app with the revision the package
  * wrote. A Skill with the package's name that another copy of the same
- * package added is shared, not added twice; one that has nothing to do with
- * the package is left as it is and reported.
+ * package added is shared, not added twice (an install links it as it is;
+ * only an upgrade, after its plan, replaces it); one that has nothing to do
+ * with the package is left as it is and reported.
  */
 
 /** Who writes the Skills, or why they can't be written (reported per Skill). */
@@ -74,14 +79,17 @@ async function workspaceSkillNamed(
   return found && found.stableKey === name ? found : null;
 }
 
-/** Whether a linked Skill was edited here: its live revision isn't the one the package wrote. */
+/**
+ * Whether a linked Skill was edited here: its live revision is neither the
+ * one the package wrote nor one it saved for review.
+ */
 export function skillModified(
   record: Pick<SkillRecord, "activeRevisionId"> | null,
   link: AppPackageInstallSkill,
 ): boolean {
-  return Boolean(
-    record?.activeRevisionId && link.revisionId && record.activeRevisionId !== link.revisionId,
-  );
+  const live = record?.activeRevisionId;
+  if (!live || (!link.revisionId && !link.pendingRevisionId)) return false;
+  return live !== link.revisionId && live !== link.pendingRevisionId;
 }
 
 export async function planPackageSkills(
@@ -91,6 +99,8 @@ export async function planPackageSkills(
     skills: readonly AppPackageSkill[];
     links: readonly AppPackageInstallSkill[];
     packageId: string | null;
+    /** An install links a shared Skill as it is; an upgrade replaces it. */
+    mode: "install" | "upgrade";
   },
 ): Promise<PackageSkillPlan> {
   const plan: PackageSkillPlan = {
@@ -122,6 +132,18 @@ export async function planPackageSkills(
             reason:
               "A different Skill with this name is already in this workspace; it stays as it is and the app doesn't use the package's",
           });
+          continue;
+        }
+        if (input.mode === "install" && filesKey(named.files) !== filesKey(skill.files)) {
+          // Another copy of the app shares it, maybe edited or newer: keep it.
+          plan.problems.push({
+            part: "skill",
+            name: skill.name,
+            reason:
+              "This workspace's version of the Skill is kept; upgrade the app to replace it with the package's",
+          });
+          plan.unchanged.push(skill.name);
+          plan.steps.push({ skill, current: named, write: false });
           continue;
         }
         current = named;
@@ -170,6 +192,9 @@ export async function applyPackageSkills(
           skillId: current.id,
           name: skill.name,
           revisionId: current.activeRevisionId ?? current.revisionId,
+          ...(links.get(skill.name)?.pendingRevisionId
+            ? { pendingRevisionId: links.get(skill.name)!.pendingRevisionId }
+            : {}),
         });
       continue;
     }
@@ -192,11 +217,27 @@ export async function applyPackageSkills(
         files: skill.files,
         reason: `${current ? "Updated" : "Added"} with the app ${input.appTitle}`.slice(0, 2000),
       });
-      links.set(skill.name, {
-        skillId: receipt.skillId,
-        name: skill.name,
-        revisionId: receipt.revisionId,
-      });
+      if (receipt.outcome === "pending") {
+        // Not live until approved: the live revision stays the linked one.
+        links.set(skill.name, {
+          skillId: receipt.skillId,
+          name: skill.name,
+          revisionId: current ? (current.activeRevisionId ?? current.revisionId) : null,
+          pendingRevisionId: receipt.revisionId,
+        });
+      } else {
+        links.set(skill.name, {
+          skillId: receipt.skillId,
+          name: skill.name,
+          revisionId: receipt.revisionId,
+        });
+        // Other copies of the package that share it now link the new revision.
+        if (current)
+          await relinkAppPackageSkill(deps.db, grant.workspaceId, {
+            skillId: receipt.skillId,
+            revisionId: receipt.revisionId,
+          }).catch(() => undefined);
+      }
       written.push(skill.name);
       if (receipt.outcome === "pending")
         problems.push({

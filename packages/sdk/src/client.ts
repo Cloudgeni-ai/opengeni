@@ -10504,8 +10504,9 @@ export class OpenGeniClient {
   /**
    * Upgrades an app from a newer package (docs/app-packages.md#upgrade):
    * `dryRun` returns the plan; otherwise the package's version becomes the
-   * app's new version and only its new data definitions run. `previous: true`
-   * instead goes back to the app's state before its last upgrade.
+   * app's new version and only its new data definitions run. `previous` (a
+   * saved state's id from `listAppPackageStatus`, or `true` for the latest)
+   * instead goes back to the app's state before an upgrade.
    */
   async upgradeAppPackage(
     workspaceId: string,

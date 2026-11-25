@@ -2,15 +2,22 @@ import { sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 
 /**
- * Apps installed or upgraded from a package (migration 1566,
- * docs/app-packages.md "Installed packages"): the package's version label,
+ * Apps installed or upgraded from a package (migration 1571,
+ * docs/app-packages.md#updates-and-going-back): the package's version label,
  * the app version the package wrote, the Skills and automations that came
  * with it, and the app's saved states before each upgrade. Callers have
  * already opened the app as the person (or list only apps the viewer sees);
  * everything runs under the workspace's row-level security.
  */
 
-export type AppPackageInstallSkill = { skillId: string; name: string; revisionId: string | null };
+export type AppPackageInstallSkill = {
+  skillId: string;
+  name: string;
+  /** The revision the package wrote, live on the Skill. */
+  revisionId: string | null;
+  /** A revision the package saved for review (Agent learning), not live yet. */
+  pendingRevisionId?: string | null | undefined;
+};
 export type AppPackageInstallAutomation = { taskId: string; name: string };
 
 export type AppPackageInstall = {
@@ -75,7 +82,7 @@ export type AppPackageInstallListing = AppPackageInstall & {
   packageId: string | null;
   currentVersionId: string | null;
   archived: boolean;
-  previous: { packageVersion: string | null; savedAt: string } | null;
+  previous: { id: string; packageVersion: string | null; savedAt: string } | null;
 };
 
 /**
@@ -101,9 +108,32 @@ export async function appPackageSkillIds(
 }
 
 /**
- * Installed apps the viewer can see (every workspace app plus their own Only
- * me ones; a null subject sees workspace apps only), with their latest saved
- * state. At most 500, most recently changed first.
+ * Point every app linked to this Skill at its new revision, so copies of one
+ * package that share the Skill don't show it as changed here.
+ */
+export async function relinkAppPackageSkill(
+  db: Database,
+  workspaceId: string,
+  link: { skillId: string; revisionId: string },
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (tx) => {
+    await tx.execute(
+      sql`update app_package_installs i set skills = (
+          select jsonb_agg(case when entry->>'skillId' = ${link.skillId}
+            then entry || jsonb_build_object('revisionId', ${link.revisionId}::text, 'pendingRevisionId', null)
+            else entry end order by ord)
+          from jsonb_array_elements(i.skills) with ordinality as e(entry, ord))
+        where i.workspace_id = ${workspaceId}::uuid
+          and i.skills @> ${JSON.stringify([{ skillId: link.skillId }])}::jsonb`,
+    );
+  });
+}
+
+/**
+ * Apps installed from a package that the viewer can see (every workspace app
+ * plus their own Only me ones; a null subject sees workspace apps only),
+ * including ones installed before installs were recorded, with their latest
+ * saved state not yet gone back to. At most 500, most recently changed first.
  */
 export async function listAppPackageInstalls(
   db: Database,
@@ -112,44 +142,52 @@ export async function listAppPackageInstalls(
 ): Promise<AppPackageInstallListing[]> {
   return await withWorkspaceRls(db, workspaceId, async (tx) => {
     const rows = await rawRows<
-      InstallRow & {
+      Partial<InstallRow> & {
         artifact_id: string;
         title: string;
         package_id: string | null;
         current_version_id: string | null;
         status: string;
+        previous_id: string | null;
         previous_version: string | null;
         previous_at: Date | string | null;
       }
     >(
       tx,
-      sql`select i.artifact_id, i.package_version, i.version_id, i.skills, i.automations,
+      sql`select a.id as artifact_id, i.package_version, i.version_id, i.skills, i.automations,
           a.title, a.package_id, a.current_version_id, a.status,
-          s.package_version as previous_version, s.created_at as previous_at
-        from app_package_installs i
-        join workspace_artifacts a on a.id = i.artifact_id and a.workspace_id = i.workspace_id
+          s.id as previous_id, s.package_version as previous_version, s.created_at as previous_at
+        from workspace_artifacts a
+        left join app_package_installs i on i.artifact_id = a.id and i.workspace_id = a.workspace_id
         left join lateral (
-          select package_version, created_at from app_package_snapshots
-          where artifact_id = i.artifact_id and workspace_id = i.workspace_id
+          select id, package_version, created_at from app_package_snapshots
+          where artifact_id = a.id and workspace_id = a.workspace_id and consumed_at is null
           order by created_at desc, id desc limit 1
         ) s on true
-        where i.workspace_id = ${workspaceId}::uuid
+        where a.workspace_id = ${workspaceId}::uuid
+          and (i.artifact_id is not null or a.package_id is not null)
           and (a.visibility = 'workspace_shared'
             or (${viewer.subjectId}::text is not null and a.owner_subject_id = ${viewer.subjectId}::text))
         order by a.updated_at desc, a.id desc
         limit 500`,
     );
     return rows.map((row) => ({
-      ...fromRow(row),
+      ...fromRow({
+        package_version: row.package_version ?? null,
+        version_id: row.version_id ?? null,
+        skills: row.skills ?? [],
+        automations: row.automations ?? [],
+      }),
       appId: row.artifact_id,
       title: row.title,
       packageId: row.package_id,
       currentVersionId: row.current_version_id,
       archived: row.status === "archived",
-      previous: row.previous_at
+      previous: row.previous_id
         ? {
+            id: row.previous_id,
             packageVersion: row.previous_version,
-            savedAt: new Date(row.previous_at).toISOString(),
+            savedAt: new Date(row.previous_at!).toISOString(),
           }
         : null,
     }));
@@ -158,7 +196,9 @@ export async function listAppPackageInstalls(
 
 /**
  * Save the app's state before an applied upgrade, once per upgrade
- * (`operationKey`), and keep only the latest `keep`.
+ * (`operationKey`), and keep only the latest `keep`. The state is the app
+ * version it was at plus its definitions as a package without the app's
+ * files, which stay in the app's version history.
  */
 export async function saveAppPackageSnapshot(
   db: Database,
@@ -167,6 +207,7 @@ export async function saveAppPackageSnapshot(
     workspaceId: string;
     appId: string;
     packageVersion: string | null;
+    versionId: string;
     operationKey: string;
     package: Record<string, unknown>;
     keep: number;
@@ -175,9 +216,10 @@ export async function saveAppPackageSnapshot(
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     await tx.execute(
       sql`insert into app_package_snapshots
-          (account_id, workspace_id, artifact_id, package_version, operation_key, package)
+          (account_id, workspace_id, artifact_id, package_version, version_id, operation_key, package)
         values (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.appId}::uuid,
-          ${input.packageVersion}, ${input.operationKey}, ${JSON.stringify(input.package)}::jsonb)
+          ${input.packageVersion}, ${input.versionId}::uuid, ${input.operationKey},
+          ${JSON.stringify(input.package)}::jsonb)
         on conflict (artifact_id, operation_key) do nothing`,
     );
     await tx.execute(
@@ -193,32 +235,55 @@ export async function saveAppPackageSnapshot(
 export type AppPackageSnapshot = {
   id: string;
   packageVersion: string | null;
+  /** The app version to go back to. */
+  versionId: string;
+  /** The definitions, as a package without the app's files. */
   package: Record<string, unknown>;
   savedAt: string;
 };
 
-/** The app's latest saved state, or null when it has none. */
-export async function latestAppPackageSnapshot(
+type SnapshotRow = {
+  id: string;
+  package_version: string | null;
+  version_id: string;
+  package: Record<string, unknown>;
+  created_at: Date | string;
+};
+
+/**
+ * One saved state of the app: the one with this id (also after the app went
+ * back to it), else the one this request already went back to (a retry),
+ * else its latest not yet gone back to. Null when there is none.
+ */
+export async function getAppPackageSnapshot(
   db: Database,
   workspaceId: string,
   appId: string,
+  by: { id: string } | { restoreKey: string | null },
 ): Promise<AppPackageSnapshot | null> {
   return await withWorkspaceRls(db, workspaceId, async (tx) => {
-    const [row] = await rawRows<{
-      id: string;
-      package_version: string | null;
-      package: Record<string, unknown>;
-      created_at: Date | string;
-    }>(
-      tx,
-      sql`select id, package_version, package, created_at from app_package_snapshots
-        where workspace_id = ${workspaceId}::uuid and artifact_id = ${appId}::uuid
-        order by created_at desc, id desc limit 1`,
-    );
+    const columns = sql`select id, package_version, version_id, package, created_at
+      from app_package_snapshots
+      where workspace_id = ${workspaceId}::uuid and artifact_id = ${appId}::uuid`;
+    let [row] =
+      "id" in by
+        ? await rawRows<SnapshotRow>(tx, sql`${columns} and id = ${by.id}::uuid`)
+        : by.restoreKey
+          ? await rawRows<SnapshotRow>(
+              tx,
+              sql`${columns} and consumed_restore_key = ${by.restoreKey} limit 1`,
+            )
+          : [];
+    if (!row && !("id" in by))
+      [row] = await rawRows<SnapshotRow>(
+        tx,
+        sql`${columns} and consumed_at is null order by created_at desc, id desc limit 1`,
+      );
     return row
       ? {
           id: row.id,
           packageVersion: row.package_version,
+          versionId: row.version_id,
           package: row.package,
           savedAt: new Date(row.created_at).toISOString(),
         }
@@ -226,16 +291,21 @@ export async function latestAppPackageSnapshot(
   });
 }
 
-/** Drop a saved state once the app went back to it. */
-export async function deleteAppPackageSnapshot(
+/**
+ * Mark a saved state as gone back to (by this request), so "Restore previous
+ * version" offers the one before it and a retry still finds it.
+ */
+export async function consumeAppPackageSnapshot(
   db: Database,
   workspaceId: string,
-  snapshotId: string,
+  input: { snapshotId: string; restoreKey: string },
 ): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (tx) => {
     await tx.execute(
-      sql`delete from app_package_snapshots
-        where workspace_id = ${workspaceId}::uuid and id = ${snapshotId}::uuid`,
+      sql`update app_package_snapshots
+        set consumed_at = now(), consumed_restore_key = ${input.restoreKey}
+        where workspace_id = ${workspaceId}::uuid and id = ${input.snapshotId}::uuid
+          and consumed_at is null`,
     );
   });
 }

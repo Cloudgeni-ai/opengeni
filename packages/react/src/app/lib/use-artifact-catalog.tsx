@@ -92,16 +92,30 @@ export function useArtifactCatalog(
         loading: true,
         error: null,
       });
-      const fetchPage = (cursor?: string) =>
-        client.listArtifactCatalog(workspaceId, {
+      const fetchPage = async (cursor?: string) => {
+        const query = {
           ...(q ? { q } : {}),
-          // Apps have their own page: everything else is "all" here.
-          ...(kind === "all" ? { excludeKind: "site" as const } : { kind }),
           sort,
           status,
           limit: 60,
           ...(cursor !== undefined ? { cursor } : {}),
-        });
+        };
+        if (kind !== "all")
+          return await client.listArtifactCatalog(workspaceId, { ...query, kind });
+        // Apps have their own page: everything else is "all" here.
+        try {
+          return await client.listArtifactCatalog(workspaceId, {
+            ...query,
+            excludeKind: "site",
+          });
+        } catch (error) {
+          // A server from before excludeKind refuses it: leave apps out here instead.
+          if (!String((error as { message?: unknown })?.message ?? error).includes("excludeKind"))
+            throw error;
+          const page = await client.listArtifactCatalog(workspaceId, query);
+          return { ...page, items: page.items.filter((item) => item.kind !== "site") };
+        }
+      };
       try {
         let next: CatalogPages;
         if (more && shown) {

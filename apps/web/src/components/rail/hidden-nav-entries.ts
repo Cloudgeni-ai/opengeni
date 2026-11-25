@@ -18,15 +18,17 @@ const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = 
 
 /**
  * The entries this person hides: the inbox, and the rail destinations by
- * `navItemKey`. Apps and Artifacts are separate pages, hidden separately.
+ * `navItemKey`. Hiding Artifacts hides Apps too, as when Apps was its tab,
+ * so a rail trimmed before Apps had its own page stays as it was.
  */
 export function hiddenNavEntries(hidden: readonly string[]): {
   inbox: boolean;
   targets: ReadonlySet<string>;
 } {
+  const entries = hidden.includes("artifacts") ? [...hidden, "apps"] : hidden;
   return {
     inbox: hidden.includes("inbox"),
-    targets: new Set(hidden.flatMap((entry) => ENTRY_TARGETS[entry] ?? [])),
+    targets: new Set(entries.flatMap((entry) => ENTRY_TARGETS[entry] ?? [])),
   };
 }
 

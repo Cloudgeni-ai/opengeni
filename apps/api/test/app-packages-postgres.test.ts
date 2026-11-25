@@ -1690,13 +1690,25 @@ test("packages carry Skills and automations; updates show them, and go back", as
     packageVersion: { current: "1.1.0", next: "1.0.0" },
     skills: { changed: ["board-notes"] },
   });
+  const savedId = updated.previous.id as string;
+  const restoreKey = crypto.randomUUID();
   const restored = await f.call(manager, "POST", `${base}/package/upgrade`, {
-    previous: true,
-    idempotencyKey: crypto.randomUUID(),
+    previous: savedId,
+    idempotencyKey: restoreKey,
   });
   expect(restored.status, restored.text).toBe(200);
   const content = await f.call(manager, "GET", `${base}/content`);
   expect(content.json.html).toContain("Board 1.0.0");
+  expect(await listed()).toMatchObject({ packageVersion: "1.0.0", previous: null });
+  // A retry of the same restore applies the same saved state once, not an older one.
+  for (const previous of [savedId, true]) {
+    const retried = await f.call(manager, "POST", `${base}/package/upgrade`, {
+      previous,
+      idempotencyKey: restoreKey,
+    });
+    expect(retried.status, retried.text).toBe(200);
+    expect(retried.json.plan.packageVersion).toMatchObject({ next: "1.0.0" });
+  }
   expect(await listed()).toMatchObject({ packageVersion: "1.0.0" });
   // Exactly one of package or previous.
   const both = await f.call(manager, "POST", `${base}/package/upgrade`, {
@@ -1705,6 +1717,19 @@ test("packages carry Skills and automations; updates show them, and go back", as
     dryRun: true,
   });
   expect(both.status).toBe(422);
+
+  // Installing another copy from an older file links the shared Skill as it is.
+  const copy = await f.install({ package: skilledPackage("0.9.0", "Version zero.") }, manager);
+  expect(copy.status, copy.text).toBe(201);
+  expect(copy.json.notInstalled).toContainEqual(
+    expect.objectContaining({ part: "skill", name: "board-notes" }),
+  );
+  const kept = await f.call(
+    manager,
+    "GET",
+    `/v1/workspaces/${f.target.id}/skills/content?skillId=${updated.skills[0].id}`,
+  );
+  if (kept.status === 200) expect(kept.text).not.toContain("Version zero.");
 
   // Without permission to change Skills, the app installs and the Skill is reported.
   const plain = await f.install({ package: skilledPackage("1.2.0", "Version three.") });

@@ -16,6 +16,7 @@ import {
   installAppPackage,
 } from "../app-packages/service";
 import {
+  appRestoreRequestKey,
   appUpgradeOperationKey,
   resolveAppUpgradeSource,
   upgradeAppFromPackage,
@@ -280,17 +281,32 @@ export function registerAppPackageTools(
           );
         const claims = exactAgentAttemptClaims(grant);
         if (!claims) throw new AppPackageError("validation", "Upgrading needs a live agent turn");
-        const source = await resolveAppUpgradeSource(deps, grant, args.appId, {
-          package: args.previous
-            ? undefined
-            : (args.package ??
-              ((await readPackageFile(deps, grant, args.fileId!)) as Record<string, unknown>)),
-          previous: args.previous,
-        });
+        const restoreKey = args.previous
+          ? appRestoreRequestKey(
+              "attempt",
+              `${claims.sessionId}:${claims.turnId}`,
+              args.appId,
+              args.idempotencyKey,
+            )
+          : null;
+        const source = await resolveAppUpgradeSource(
+          deps,
+          grant,
+          args.appId,
+          {
+            package: args.previous
+              ? undefined
+              : (args.package ??
+                ((await readPackageFile(deps, grant, args.fileId!)) as Record<string, unknown>)),
+            previous: args.previous,
+          },
+          restoreKey,
+        );
         const pkg = source.package;
         const result = await upgradeAppFromPackage(deps, grant, args.appId, {
           package: pkg,
           snapshotId: source.snapshotId,
+          restoreKey,
           skillWriter: agentSkillWriter(claims),
           dryRun: args.dryRun,
           allowDestructive: args.allowDestructive,

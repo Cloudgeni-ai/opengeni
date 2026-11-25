@@ -25,10 +25,35 @@ function readyMadeVersions(): Map<string, { templateKey: string; packageVersion:
   return versions;
 }
 
+type SkillRecords = Awaited<ReturnType<typeof listSkills>>;
+
+/** The linked workspace Skills that still exist, by id, paging past any number of Skills. */
+async function linkedSkills(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  ids: ReadonlySet<string>,
+): Promise<Map<string, SkillRecords[number]>> {
+  const found = new Map<string, SkillRecords[number]>();
+  const context = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  let after: { stableKey: string; id: string } | undefined;
+  for (;;) {
+    const page = await listSkills(deps.db, context, {
+      scope: "workspace",
+      metadataOnly: true,
+      limit: 500,
+      ...(after ? { after } : {}),
+    });
+    for (const record of page) if (ids.has(record.id)) found.set(record.id, record);
+    const last = page.at(-1);
+    if (page.length < 500 || !last || found.size === ids.size) return found;
+    after = { stableKey: last.stableKey, id: last.id };
+  }
+}
+
 /**
- * Installed apps the caller sees (docs/app-packages.md "Installed
- * packages"): each one's version, whether it or its Skills were changed
- * here, its automations, whether it can go back, and a ready-made update.
+ * Installed apps the caller sees (docs/app-packages.md#updates-and-going-back):
+ * each one's version, whether it or its Skills were changed here, its
+ * automations, whether it can go back, and a ready-made update.
  */
 export async function listAppPackageStatus(
   deps: ApiRouteDeps,
@@ -37,17 +62,8 @@ export async function listAppPackageStatus(
   const viewer = await siteViewerForGrant(deps.db, grant);
   const installs = await listAppPackageInstalls(deps.db, grant.workspaceId, viewer);
   if (installs.length === 0) return { apps: [] };
-  const skills = installs.some((install) => install.skills.length > 0)
-    ? new Map(
-        (
-          await listSkills(
-            deps.db,
-            { accountId: grant.accountId, workspaceId: grant.workspaceId },
-            { scope: "workspace", metadataOnly: true, limit: 1000 },
-          )
-        ).map((record) => [record.id, record]),
-      )
-    : new Map();
+  const ids = new Set(installs.flatMap((install) => install.skills.map((link) => link.skillId)));
+  const skills = ids.size > 0 ? await linkedSkills(deps, grant, ids) : new Map();
   const updates = readyMadeVersions();
   const apps: AppPackageStatus[] = installs.map((install) => {
     const ready = install.packageId ? updates.get(install.packageId) : undefined;

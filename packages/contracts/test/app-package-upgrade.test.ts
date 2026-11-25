@@ -155,6 +155,12 @@ describe("package versions, Skills and automations", () => {
   test("an upgrade names exactly one of a package or the previous version", () => {
     expect(AppPackageUpgradeRequest.safeParse({ package: base }).success).toBe(true);
     expect(AppPackageUpgradeRequest.safeParse({ previous: true }).success).toBe(true);
+    // A saved state by id, so a plan and its retry apply the same one.
+    expect(
+      AppPackageUpgradeRequest.safeParse({ previous: "5f0c2b1e-3d4a-4b6c-8e9f-0a1b2c3d4e5f" })
+        .success,
+    ).toBe(true);
+    expect(AppPackageUpgradeRequest.safeParse({ previous: "latest" }).success).toBe(false);
     expect(AppPackageUpgradeRequest.safeParse({ package: base, previous: true }).success).toBe(
       false,
     );

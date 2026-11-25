@@ -173,7 +173,10 @@ export async function exportAppPackage(
   grant: AccessGrant,
   appId: string,
   request: AppPackageExportRequest = {},
+  /** Without its built files (an upgrade's saved state keeps its version instead). */
+  options: { files?: boolean } = {},
 ): Promise<AppPackageExportResponse> {
+  const withFiles = options.files !== false;
   if (!deps.objectStorage)
     throw new AppPackageError("unavailable", "File storage isn't configured");
   const viewer = await siteViewerForGrant(deps.db, grant);
@@ -207,7 +210,7 @@ export async function exportAppPackage(
       description: artifact.description,
       html: content.html,
       // An HTML-only app has no retained source of its own.
-      ...(ref.sourceKey ? { source: content.source } : {}),
+      ...(ref.sourceKey && withFiles ? { source: content.source } : {}),
     },
     tools: await portableTools(deps, grant, content.requestedTools, notExported),
     data: {
@@ -237,7 +240,7 @@ export async function exportAppPackage(
     ...(extras.automations ? { automations: extras.automations } : {}),
   };
   // A multi-file build's files, measured from the manifest before any is read.
-  if (ref.assetManifest) {
+  if (ref.assetManifest && withFiles) {
     const encoded = ref.assetManifest.files.reduce(
       (total, file) => total + Math.ceil(file.sizeBytes / 3) * 4 + file.path.length + 24,
       0,
@@ -276,6 +279,43 @@ const tooLarge = () =>
     "too_large",
     `The package would be over ${APP_PACKAGE_MAX_BYTES / (1024 * 1024)} MB (the app's files and definitions together)`,
   );
+
+/**
+ * The app's files at one of its versions, as a package's `app` has them:
+ * its HTML, retained source and built files. Going back rebuilds the saved
+ * state's package from these.
+ */
+export async function appPackageFilesAt(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  appId: string,
+  versionId: string,
+): Promise<Pick<AppPackage["app"], "html" | "source" | "assets">> {
+  if (!deps.objectStorage)
+    throw new AppPackageError("unavailable", "File storage isn't configured");
+  const viewer = await siteViewerForGrant(deps.db, grant);
+  const ref = await getWorkspaceArtifactContentRef(
+    deps.db,
+    grant.workspaceId,
+    viewer,
+    appId,
+    versionId,
+  );
+  const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
+  return {
+    html: content.html,
+    ...(ref.sourceKey ? { source: content.source } : {}),
+    ...(ref.assetManifest
+      ? {
+          assets: await readSiteAssetBundle(
+            deps.objectStorage,
+            grant.workspaceId,
+            ref.assetManifest,
+          ),
+        }
+      : {}),
+  };
+}
 
 /**
  * The package id of an app made here: derived from its id, so every export
@@ -839,6 +879,7 @@ export async function installAppPackage(
       skills: pkg.skills,
       links: skillLinks,
       packageId: pkg.packageId ?? null,
+      mode: "install",
     });
     notInstalled.push(...plan.problems);
     const applied = await applyPackageSkills(

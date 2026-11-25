@@ -143,7 +143,7 @@ function problemText(problem: AppPackageProblem): string {
 export type UpgradeSource =
   | { kind: "file"; title: string; request: { package: Record<string, unknown> } }
   | { kind: "update"; title: string; version: string; request: { package: unknown } }
-  | { kind: "previous"; title: string; version: string | null; request: { previous: true } };
+  | { kind: "previous"; title: string; version: string | null; request: { previous: string } };
 
 export type UpgradeState =
   | { phase: "planning"; source: UpgradeSource }
@@ -174,7 +174,7 @@ function upgradeDescription(source: UpgradeSource): string {
   if (source.kind === "update") return `To version ${source.version}. The app's data stays.`;
   return `${
     source.version ? `Back to version ${source.version}` : "Back to before the last update"
-  }. The app's data stays.`;
+  }. The app's data stays, and so do Skills and automations added since.`;
 }
 
 /**
@@ -263,13 +263,16 @@ export function useAppPackageActions(workspaceId: string) {
         toast.error("Couldn't read the update", { description: userErrorText(error) });
       }
     },
-    restore: (status: AppPackageStatus) =>
+    restore: (status: AppPackageStatus) => {
+      if (!status.previous) return;
       void upgrade.start(status.appId, {
         kind: "previous",
         title: status.title,
-        version: status.previous?.packageVersion ?? null,
-        request: { previous: true },
-      }),
+        version: status.previous.packageVersion,
+        // This saved state, so the plan and a retry apply the same one.
+        request: { previous: status.previous.id },
+      });
+    },
   };
 }
 
@@ -575,7 +578,7 @@ export function InstallAppDialog({
       description={
         chosen
           ? chosen.skills.length > 0
-            ? "Adds the app to this workspace and turns on its Skills for your agents."
+            ? "Adds the app and its Skills for agents in this workspace."
             : "Adds the app to this workspace."
           : undefined
       }

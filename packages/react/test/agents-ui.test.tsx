@@ -2281,7 +2281,7 @@ test("Installing a ready-made app names its Skills and automations, then opens i
   // Nothing installs until the dialog's one Install button.
   expect(installer.requests).toEqual([]);
   const dialog = document.querySelector<HTMLElement>("[role='dialog']")!;
-  expect(dialog.textContent).toContain("turns on its Skills");
+  expect(dialog.textContent).toContain("Adds the app and its Skills");
   expect(dialog.textContent).toContain("issue-tracker");
   expect(dialog.textContent).toContain("File and update issues in the tracker");
   expect(dialog.textContent).toContain("Triage new issues");

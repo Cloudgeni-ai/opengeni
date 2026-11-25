@@ -122,7 +122,7 @@ accounts; nothing from the author's connections is packaged.
 
 `POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/package/upgrade`
 (`artifacts:publish` and manager of the app). Body
-`{ package | previous: true, dryRun?, allowDestructive?, idempotencyKey? }`
+`{ package | previous: <saved state id> | true, dryRun?, allowDestructive?, idempotencyKey? }`
 (exactly one of `package` and `previous`; see [Updates and going
 back](#updates-and-going-back)). Returns 200 with
 `{ app, dryRun, applied, plan, upgraded, notUpgraded }`. Code:
@@ -241,21 +241,25 @@ Skills (`saveSkill`), not a separate store.
 
 - **Install** adds each one as a workspace Skill (its `stableKey` is the
   Skill's name) and links it to the app in `app_package_installs.skills`
-  (`skillId`, `name`, and the `revisionId` the package wrote). Copies of one
-  package share their Skills. A different Skill with the same name already
-  here stays as it is and is reported. Writing workspace Skills needs
-  `documents:manage` from a person; without it the app installs and each
-  Skill is listed in `notInstalled`. An agent's install writes them as the
-  agent, under the workspace's Agent learning setting (Review first leaves
-  them pending).
+  (`skillId`, `name`, and the `revisionId` the package wrote, or
+  `pendingRevisionId` while it waits for review). Copies of one package share
+  their Skills: installing another copy links the shared Skill as it is here
+  (reported when its files differ) and only an upgrade, after its plan,
+  replaces it. A different Skill with the same name already here stays as it
+  is and is reported. Writing workspace Skills needs the same permission as
+  the Skills page (`documents:manage`); without it the app installs and each
+  Skill is listed in `notInstalled`. Skills are written as the caller: a
+  person, a key (as a service) or an agent, under the workspace's Agent
+  learning setting (Review first leaves them pending).
 - **Upgrade** plans them like the rest (`plan.skills`: `added`, `changed`,
   `unchanged`, and `kept`, Skills the app came with that the package no
   longer has, which stay) and writes only changed ones.
 - **Export** writes the linked Skills' current files, so an edited Skill
   travels with the app.
 - **Archiving or deleting the app keeps its Skills.** They are ordinary
-  workspace Skills, labelled "From app <title>" on the Skills page; remove one
-  there when it's no longer wanted.
+  workspace Skills; while the app is archived they show "From app <title>"
+  on the Skills page (deleting the app drops the link and the label). Remove
+  one there when it's no longer wanted.
 
 ## Automations
 
@@ -264,29 +268,40 @@ an automation `schedule`. Install adds each one **switched off**, owned by
 the installer; `{{appId}}` in the prompt becomes the new app's id (and back
 on export). Adding them needs `scheduled_tasks:manage`, otherwise each is
 listed in `notInstalled`. Upgrades add new ones (also off) and keep the
-app's existing ones as they are (`plan.automations`: `added`, `kept`).
+app's existing ones as they are (`plan.automations`: `added`, `kept`). They
+are matched by the name they came with, so renaming one here doesn't add it
+again. Archiving the app leaves its automations as they are; switch them off
+on the Automations page if they shouldn't run.
 
 ## Updates and going back
 
 `GET /v1/workspaces/:workspaceId/app-packages/status` (`artifacts:read`;
-SDK `listAppPackageStatus`) lists the installed apps the caller can see, each
+SDK `listAppPackageStatus`) lists the installed apps the caller can see
+(also ones installed before installs were recorded, which show no version
+until their first update), each
 with its `packageVersion`, `archived`, `modified`, its Skills (each with
 `modified`), its automations, `previous` (a saved earlier state) and `update`
 (a ready-made app with the same `packageId` and a later `packageVersion`).
 
 - **Modified**: the app's current version isn't the one the package wrote,
-  or a linked Skill's live revision isn't the one the package wrote. Apps
+  or a linked Skill's live revision is neither the one the package wrote nor
+  one it saved for review. Apps
   stay editable; the mark is a warning, not a lock. An upgrade's
   `plan.localChanges` (`app`, `skills`) names what it would replace, and the
   console warns before it.
 - **Update**: the Apps page shows **Update available**; it opens the
   ordinary upgrade with the ready-made app's package, dry run first.
 - **Going back**: before applying an upgrade that changes something, the API
-  exports the app as it is (with its Skills) into `app_package_snapshots`,
-  keeping the last 3 per app. `previous: true` upgrades the app from the
-  latest one the same way (plan first); the snapshot is used up once applied,
-  so going back again reaches the one before. With no snapshot it answers 409.
-  Data is never rolled back: migrations already run stay.
+  saves the app as it is in `app_package_snapshots`, keeping the last 3 per
+  app: the app version it was at (its files stay in the app's version
+  history) and its definitions and Skills as a package without those files.
+  `previous` upgrades the app from one the same way (plan first): its id
+  (`status.previous.id`, so the plan and a retry apply the same one) or
+  `true` for the latest. Once applied it is marked gone back to, with the
+  request's key, so going back again reaches the one before and a retry of
+  the same request (same `idempotencyKey`) applies the same one once. With
+  none it answers 409. Data is never rolled back: migrations already run
+  stay, and so do Skills and automations added since.
 
 ## Console
 
@@ -294,7 +309,7 @@ The rail's **Apps** page lists the apps here, with their version and
 **Modified** or **Update available**, and below them the ready-made apps not
 added yet. Header actions: **Install from file** (for people who can publish)
 and **New app**. Installing (a ready-made app or a file) opens one dialog:
-it says installing adds the app and turns on its Skills, names each Skill
+it says installing adds the app and its Skills for agents, names each Skill
 with its one line, lists automations (added off), offers demo data when the
 package has some, and has one **Install** button. The new app opens.
 
