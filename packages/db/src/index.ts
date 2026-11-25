@@ -86070,29 +86070,37 @@ export async function claimSessionWorkForAttempt(
           }
           // A sender's Your GitHub that didn't fit, or a sender without one,
           // would leave this chat's personal repositories without Git access:
-          // keep what the same person already gave this chat.
-          const ownGitHubSubjectId = receiverContext
-            ? null
-            : (droppedGitHubOwner ??
-              (lacksPersonalGitHubForResources(
-                internalPersonalConnectionDelegations,
-                session.resources,
-              )
-                ? initiatingHumanSubjectId
-                : null));
+          // keep what the same person gave this chat in their latest message.
+          // Scheduled runs keep exactly what their schedule admitted.
+          const ownGitHubSubjectId =
+            receiverContext || scheduledTaskRunId
+              ? null
+              : (droppedGitHubOwner ??
+                (lacksPersonalGitHubForResources(
+                  internalPersonalConnectionDelegations,
+                  session.resources,
+                )
+                  ? initiatingHumanSubjectId
+                  : null));
           if (ownGitHubSubjectId) {
+            // Only the person's latest own message counts: if they sent it
+            // without Your GitHub, nothing older is brought back.
             const recent = await tx
-              .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
+              .select({
+                id: schema.sessionTurns.id,
+                delegations: schema.sessionTurns.personalConnectionDelegations,
+              })
               .from(schema.sessionTurns)
               .where(
                 and(
                   eq(schema.sessionTurns.workspaceId, workspaceId),
                   eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.initiatorKind, "subject"),
                   eq(schema.sessionTurns.initiatingHumanSubjectId, ownGitHubSubjectId),
                 ),
               )
               .orderBy(desc(schema.sessionTurns.position))
-              .limit(20);
+              .limit(1);
             const history = recent.flatMap((row) => {
               // One unreadable old snapshot must not stop this turn starting.
               try {
@@ -86103,6 +86111,9 @@ export async function claimSessionWorkForAttempt(
                   ),
                 ];
               } catch {
+                console.warn(
+                  `[session-claim] skipped unreadable Your GitHub snapshot on turn ${row.id}`,
+                );
                 return [];
               }
             });
