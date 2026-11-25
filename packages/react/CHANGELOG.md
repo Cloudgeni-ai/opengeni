@@ -1,5 +1,38 @@
 # @opengeni/react
 
+## 6.40.0
+
+### Minor Changes
+
+- 2a4f625: The sidebar layout's options add `appsPlacement`: apps as rows in the Sessions list (`sessions`, the default), in an Apps section of their own below Sessions (`section`), or hidden (`hidden`). `sessionsShowApps` stays and follows it (`false` is `hidden`), so saved layouts and existing callers keep working; a `tab` a preview saved reads as `section`. With `SessionShellSlots.appsPlacement` `section`, the Sessions list draws an Apps section below the list, with the same header style as Sessions, showing the first five apps and Show more for the rest; its view menu offers the choice when the surface passes `onAppsPlacementChange`. The agent page's Can use lists tools by readable name (the tool's own title, a curated GitHub name, or its code name in words); one GitHub action is one row covering Opengeni's built-in name and GitHub MCP's, so a choice there sets both.
+
+### Patch Changes
+
+- 2a4f625: Automation run history explains the `duplicate_agent_run` skip: one event delivery starts at most one run per agent, so when several automations of the same agent match it, the others record a skipped run with that reason.
+- 71fd8b6: Long chat messages in the native app render formatted again, like on the web: bold,
+  lists, links, math and inline `opengeni-html` / `opengeni-site` previews, instead of
+  raw text pages. A long message is cut where markdown-it starts a top-level block
+  (display math counted as one block), so each chunk parses to the same blocks as in the
+  whole message (apart from rare inputs where the math pass's simpler fence rule
+  disagrees with markdown-it). Each chunk is math-normalized and parsed on its own (at
+  most 8,192 characters per parse) and mounted one chunk-sized slice per frame. A visual
+  too long to share a chunk goes to the preview renderer whole; other code blocks longer
+  than one chunk show as pages. While a message streams, only its last blocks are parsed
+  again. Messages over 65,536 characters, and a single text block too long for one
+  chunk, still show as selectable plain-text pages.
+
+  Math in chat Markdown (web and native) finds display blocks in linear time: many
+  unclosed `$$` or `\[` openers no longer make the math pass quadratic. Output is
+  unchanged.
+
+- 2a4f625: A sub-session that waits only on a connection card no longer says "needs you" forever: completing a session's goal withdraws its open connection cards, and the parent's line for such a wait has Dismiss, which hides it until that sub-session waits again. Questions and approvals stay as they are.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/connect@6.40.0
+
 ## 6.39.0
 
 ### Minor Changes
