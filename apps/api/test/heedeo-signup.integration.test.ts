@@ -10,7 +10,7 @@ import { createManagedAuth, findManagedAuthOAuthState } from "../src/auth/manage
 // Heedeo signup scoring (docs/signup-abuse-protection.md, "Heedeo shadow
 // scoring") through the real auth routes: the browser's token reaches the
 // one evaluation in the user-create hook for email and Google sign-up, shadow
-// never refuses, enforce refuses a flagged signup with the generic refusal,
+// never refuses, enforce refuses a `block` signup with the generic refusal,
 // and a Heedeo failure never stops a signup.
 let shared: SharedTestDatabase | null;
 let client: DbClient | null;
@@ -69,12 +69,23 @@ test("signups carry the browser's Heedeo token into one evaluation; only enforce
       values (${schema}, ${modeRevision}, ${mode}, 'test', 'heedeo signup test')`;
     resetHeedeoSignupModeCache();
   };
-  const verdicts = async (userId: string | null) =>
-    userId === null
-      ? await shared!.admin`select * from opengeni_private.signup_heedeo_evaluations
-          where data_schema = ${schema} and user_id is null order by created_at`
-      : await shared!.admin`select * from opengeni_private.signup_heedeo_evaluations
-          where data_schema = ${schema} and user_id = ${userId}`;
+  // Verdicts are written after the response, without delaying the signup:
+  // wait for the expected number of rows.
+  const verdicts = async (userId: string | null, expected = 1) => {
+    const read = async () =>
+      userId === null
+        ? await shared!.admin`select * from opengeni_private.signup_heedeo_evaluations
+            where data_schema = ${schema} and user_id is null order by created_at`
+        : await shared!.admin`select * from opengeni_private.signup_heedeo_evaluations
+            where data_schema = ${schema} and user_id = ${userId}`;
+    const deadline = Date.now() + 5_000;
+    let rows = await read();
+    while (rows.length < expected && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      rows = await read();
+    }
+    return rows;
+  };
   const userId = async (email: string) =>
     (await shared!.admin<{ id: string }[]>`select id from auth_users where email = ${email}`)[0]
       ?.id ?? null;
@@ -99,7 +110,7 @@ test("signups carry the browser's Heedeo token into one evaluation; only enforce
   const offEmail = `off-${id}@example.test`;
   expect((await signUp(offEmail, "tok-off")).status).toBe(200);
   expect(evaluations).toHaveLength(0);
-  expect(await verdicts(await userId(offEmail))).toHaveLength(0);
+  expect(await verdicts(await userId(offEmail), 0)).toHaveLength(0);
   const offConfig = (await (await app.request("/v1/config/client")).json()) as {
     auth: { heedeo?: unknown };
   };
@@ -197,8 +208,20 @@ test("signups carry the browser's Heedeo token into one evaluation; only enforce
     expect.objectContaining({ signup_method: "google", outcome: "evaluated", flagged: false }),
   ]);
 
-  // Enforce: a flagged signup is refused with the generic answer and no account.
+  // Enforce: a flagged `review` signup goes through; a `block` one is refused
+  // with the generic answer and no account.
   await setMode("enforce");
+  answer = () => Response.json({ flagged: true, no_token: false, score: 150, suggested: "review" });
+  const reviewEmail = `review-${id}@example.test`;
+  expect((await signUp(reviewEmail, "tok-review")).status).toBe(200);
+  expect(await verdicts(await userId(reviewEmail))).toEqual([
+    expect.objectContaining({
+      outcome: "evaluated",
+      mode: "enforce",
+      band: "review",
+      flagged: true,
+    }),
+  ]);
   answer = () => Response.json({ flagged: true, no_token: true, score: 200, suggested: "block" });
   const refusedEmail = `refused-${id}@example.test`;
   const refused = await signUp(refusedEmail);

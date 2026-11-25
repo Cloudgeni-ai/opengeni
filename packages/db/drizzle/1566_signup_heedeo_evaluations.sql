@@ -62,7 +62,7 @@ CREATE TABLE opengeni_private.signup_heedeo_evaluations (
 );
 CREATE INDEX signup_heedeo_evaluations_user ON opengeni_private.signup_heedeo_evaluations (data_schema, user_id);
 CREATE INDEX signup_heedeo_evaluations_created ON opengeni_private.signup_heedeo_evaluations (data_schema, created_at);
--- The retention delete matches on created_at alone.
+-- The retention delete's policy matches on created_at alone.
 CREATE INDEX signup_heedeo_evaluations_expiry ON opengeni_private.signup_heedeo_evaluations (created_at);
 COMMENT ON TABLE opengeni_private.signup_heedeo_evaluations IS 'Heedeo signup verdicts while scoring is on: codes, numbers and ids only (no email, no address). Kept 180 days.';
 
@@ -75,11 +75,12 @@ ALTER TABLE opengeni_private.signup_heedeo_evaluations FORCE ROW LEVEL SECURITY;
 CREATE POLICY mode_read ON opengeni_private.signup_heedeo_mode_revisions FOR SELECT USING (true);
 -- Verdicts: whoever has SELECT (the owner, an analytics reader granted it)
 -- reads all; the runtime has no SELECT. The runtime inserts any verdict and
--- deletes only expired ones.
+-- deletes only expired ones. now() (stable, unlike clock_timestamp()) lets the
+-- planner use the created_at index for that delete.
 CREATE POLICY evaluation_read ON opengeni_private.signup_heedeo_evaluations FOR SELECT USING (true);
 CREATE POLICY evaluation_append ON opengeni_private.signup_heedeo_evaluations FOR INSERT WITH CHECK (true);
 CREATE POLICY evaluation_expiry ON opengeni_private.signup_heedeo_evaluations FOR DELETE
-  USING (created_at < clock_timestamp() - interval '180 days');
+  USING (created_at < now() - interval '180 days');
 
 DO $signup_heedeo$
 DECLARE data_schema text := current_schema(); owner_name text := current_user;

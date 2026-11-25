@@ -15,6 +15,8 @@ export const HEEDEO_TOKEN_WAIT_MS = 1_800;
 
 let configured: HeedeoClientConfig | null = null;
 let script: HTMLScriptElement | null = null;
+/** The script ran; without `window.heedeo` then (a blocker's stub), no token comes. */
+let loaded = false;
 
 function heedeoScriptSource(config: HeedeoClientConfig): string | null {
   try {
@@ -37,6 +39,9 @@ export function preloadHeedeo(config: HeedeoClientConfig | null | undefined): vo
   script = document.createElement("script");
   script.src = source;
   script.async = true;
+  script.onload = () => {
+    loaded = true;
+  };
   script.onerror = () => {
     // Blocked or offline: signups go on at once without a token; a later
     // page load tries again.
@@ -46,6 +51,8 @@ export function preloadHeedeo(config: HeedeoClientConfig | null | undefined): vo
   };
   document.head.append(script);
 }
+
+const scriptLoaded = () => loaded;
 
 function agent(): HeedeoAgent | undefined {
   const candidate = (window as unknown as { heedeo?: unknown }).heedeo;
@@ -70,7 +77,8 @@ export async function heedeoSignupToken(
   });
   const identify = (async () => {
     let heedeo = agent();
-    while (!heedeo && Date.now() < deadline) {
+    // `loaded` changes in the script's onload while this waits.
+    while (!heedeo && !scriptLoaded() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
       heedeo = agent();
     }
@@ -90,6 +98,7 @@ export async function heedeoSignupToken(
 /** Tests only. */
 export function resetHeedeoForTests(): void {
   configured = null;
+  loaded = false;
   script?.remove();
   script = null;
 }

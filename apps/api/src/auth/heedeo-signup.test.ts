@@ -31,6 +31,7 @@ const flaggedAnswer = {
   visitor: { id: "vis_1" },
 };
 const cleanAnswer = { ...flaggedAnswer, flagged: false, score: 0, suggested: "allow", reasons: [] };
+const blockAnswer = { ...flaggedAnswer, score: 250, suggested: "block" };
 
 type Call = { url: string; init: RequestInit };
 function fetcher(...responses: (Response | Error | (() => Promise<Response>))[]) {
@@ -231,7 +232,7 @@ describe("user-create admission", () => {
     const { records, admit, record } = harness("off", fn);
     await runWithHeedeoSignup(attempt, async () => {
       expect(await admit()).toBe("allow");
-      await recordHeedeoSignupAfterCreate(db, "user-1", undefined, record);
+      recordHeedeoSignupAfterCreate(db, "user-1", undefined, record);
     });
     expect(calls).toHaveLength(0);
     expect(records).toHaveLength(0);
@@ -243,9 +244,9 @@ describe("user-create admission", () => {
     await runWithHeedeoSignup(attempt, async () => {
       expect(await admit("google")).toBe("allow");
       expect(records).toHaveLength(0);
-      await recordHeedeoSignupAfterCreate(db, "user-1", undefined, record);
+      recordHeedeoSignupAfterCreate(db, "user-1", undefined, record);
       // Once per signup.
-      await recordHeedeoSignupAfterCreate(db, "user-1", undefined, record);
+      recordHeedeoSignupAfterCreate(db, "user-1", undefined, record);
     });
     expect(records).toEqual([
       expect.objectContaining({
@@ -261,15 +262,49 @@ describe("user-create admission", () => {
     ]);
   });
 
-  test("enforce refuses a flagged signup and records it without a user", async () => {
-    const { fn } = fetcher(Response.json(flaggedAnswer));
+  test("enforce refuses a signup in the block band and records it without a user", async () => {
+    const { fn } = fetcher(Response.json(blockAnswer));
     const { records, admit } = harness("enforce", fn);
     await runWithHeedeoSignup(attempt, async () => {
       expect(await admit("passkey")).toBe("refuse");
     });
     expect(records).toEqual([
-      expect.objectContaining({ userId: null, outcome: "refused", signupMethod: "passkey" }),
+      expect.objectContaining({
+        userId: null,
+        outcome: "refused",
+        signupMethod: "passkey",
+        band: "block",
+      }),
     ]);
+  });
+
+  test("enforce lets a flagged signup in a lower band through and records it", async () => {
+    const { fn } = fetcher(Response.json(flaggedAnswer));
+    const { records, admit, record } = harness("enforce", fn);
+    await runWithHeedeoSignup(attempt, async () => {
+      expect(await admit()).toBe("allow");
+      recordHeedeoSignupAfterCreate(db, "user-5", undefined, record);
+    });
+    expect(records).toEqual([
+      expect.objectContaining({
+        userId: "user-5",
+        outcome: "evaluated",
+        flagged: true,
+        band: "review",
+      }),
+    ]);
+  });
+
+  test("the verdict write never delays the signup", async () => {
+    const { fn } = fetcher(Response.json(flaggedAnswer));
+    const { admit } = harness("shadow", fn);
+    let finished = false;
+    await runWithHeedeoSignup(attempt, async () => {
+      expect(await admit()).toBe("allow");
+      recordHeedeoSignupAfterCreate(db, "user-6", undefined, () => new Promise(() => undefined));
+      finished = true;
+    });
+    expect(finished).toBe(true);
   });
 
   test("enforce lets a clean signup through", async () => {
@@ -289,7 +324,7 @@ describe("user-create admission", () => {
       const { records, admit, record } = harness("enforce", fn);
       await runWithHeedeoSignup(attempt, async () => {
         expect(await admit()).toBe("allow");
-        await recordHeedeoSignupAfterCreate(db, "user-2", undefined, record);
+        recordHeedeoSignupAfterCreate(db, "user-2", undefined, record);
       });
       expect(records).toEqual([
         expect.objectContaining({ userId: "user-2", outcome: "error", flagged: null }),
@@ -317,7 +352,7 @@ describe("user-create admission", () => {
         fetcher: fn,
         readMode: async () => "shadow",
       });
-      await recordHeedeoSignupAfterCreate(db, "user-3", undefined, async () => {
+      recordHeedeoSignupAfterCreate(db, "user-3", undefined, async () => {
         throw new Error("insert failed");
       });
       return result;
@@ -330,7 +365,7 @@ describe("user-create admission", () => {
     const { records, admit, record } = harness("enforce", fn);
     await runWithHeedeoSignup(attempt, async () => {
       expect(await admit("credential", { heedeoSecretKey: undefined })).toBe("allow");
-      await recordHeedeoSignupAfterCreate(db, "user-4", undefined, record);
+      recordHeedeoSignupAfterCreate(db, "user-4", undefined, record);
     });
     expect(calls).toHaveLength(0);
     expect(records).toEqual([

@@ -15,7 +15,10 @@ function fakePage(heedeo?: unknown) {
     configurable: true,
     value: {
       createElement: () => ({ src: "", async: false, remove: () => undefined }),
-      head: { append: (element: { src: string; async: boolean }) => appended.push(element) },
+      head: {
+        append: (element: { src: string; async: boolean; onload?: () => void }) =>
+          appended.push(element),
+      },
     },
   });
   Object.defineProperty(globalThis, "window", {
@@ -80,6 +83,15 @@ describe("Heedeo in the browser", () => {
     fakePage(undefined);
     preloadHeedeo(config);
     expect(await heedeoSignupToken(100)).toBeUndefined();
+  });
+
+  test("a script that loaded without window.heedeo (a blocker's stub) answers at once", async () => {
+    const appended = fakePage(undefined) as { onload?: () => void }[];
+    preloadHeedeo(config);
+    appended[0]!.onload?.();
+    const started = Date.now();
+    expect(await heedeoSignupToken(1_500)).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   test("email sign-up and every Google or GitHub click send a fresh token", async () => {

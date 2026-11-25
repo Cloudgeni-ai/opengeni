@@ -8,6 +8,7 @@ import {
   completeSelfServiceOrganizationSetupWithSignupNetwork,
   createDb,
   listSignupHeedeoVerdicts,
+  pruneSignupHeedeoEvaluations,
   nestedPostgresSqlState,
   readHeedeoSignupMode,
   readSignupNetworkVelocitySettings,
@@ -174,6 +175,17 @@ test("the runtime appends verdicts it cannot read and prunes only expired ones; 
     errorCode: "Bad Code",
     httpStatus: 9_999,
   });
+  // Writes prune in the background at most every ten minutes; prune now.
+  await pruneSignupHeedeoEvaluations(client.db);
+  // The runtime's delete (no WHERE: it has no SELECT) is served by the
+  // created_at index through its now()-based policy.
+  const plan = await client.db.transaction(async (tx) => {
+    await tx.execute(sql`set local enable_seqscan = off`);
+    return JSON.stringify(
+      await tx.execute(sql`explain delete from opengeni_private.signup_heedeo_evaluations`),
+    );
+  });
+  expect(plan).toContain("signup_heedeo_evaluations_expiry");
 
   const rows = await shared.admin`select user_id, signup_method, mode, outcome, error_code,
       http_status, latency_ms, token_present, no_token, evaluation_id, score, band, flagged,

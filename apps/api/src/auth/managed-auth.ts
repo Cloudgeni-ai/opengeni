@@ -1010,7 +1010,7 @@ export function createManagedAuth(
             }
           },
           after: async (user, context) => {
-            await recordHeedeoSignupAfterCreate(db, user.id, (message, attributes) =>
+            recordHeedeoSignupAfterCreate(db, user.id, (message, attributes) =>
               options.observability?.warn(message, attributes),
             );
             await funnel?.recordSignUp(context);

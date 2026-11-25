@@ -573,9 +573,12 @@ default:
 - `off`: nothing loads, nothing is sent, nothing is stored.
 - `shadow`: every signup is scored and the verdict stored. It never blocks
   anyone; compare the verdicts with our own decisions before enforcing.
-- `enforce`: as shadow, and a signup Heedeo flags (`flagged: true`, its
-  review or block band; a person pressed Trust on is never flagged) is
-  refused with the existing generic refusal and no account is created.
+- `enforce`: as shadow, and a signup in Heedeo's top band, `block` (its
+  `suggested`; a person pressed Trust on is `allow`), is refused with the
+  existing generic refusal and no account is created. A flagged signup in a
+  lower band (`review`) is stored and let through. Heedeo answers `block` only
+  once its workspace has a Block threshold (Settings, thresholds; none by
+  default), so without one enforce refuses no one.
 
 Heedeo runs only while the mode is not `off` and both keys are set on the API:
 `OPENGENI_HEEDEO_PUBLISHABLE_KEY` and `OPENGENI_HEEDEO_SECRET_KEY` (a private
@@ -609,8 +612,9 @@ How it works:
   answer fails open in every mode and is stored as `error`.
 
 Stored: `opengeni_private.signup_heedeo_evaluations`, one row per evaluated,
-skipped or refused signup while the mode is on, kept 180 days (the runtime
-deletes older rows as it writes). Columns: `data_schema`, `id`, `created_at`,
+skipped or refused signup while the mode is on, kept 180 days (each API process deletes older rows at most every ten
+minutes, in the background). The row is written after the response path, so
+storing it never delays or fails a signup. Columns: `data_schema`, `id`, `created_at`,
 `user_id` (`auth_users.id`; null for an enforce refusal), `signup_method`
 (`email`, `google`, `github`, `passkey`, `other`), `mode` (`shadow`,
 `enforce`), `outcome` (`evaluated`, `error`, `skipped`, `refused`),

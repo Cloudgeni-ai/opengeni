@@ -18,7 +18,7 @@ import type { ManagedAuthProviderId } from "./managed-auth-attempt-context";
  * Heedeo signup scoring (docs/signup-abuse-protection.md, "Heedeo shadow
  * scoring"). One evaluation per signup, in the user-create hook, bounded by
  * OPENGENI_HEEDEO_TIMEOUT_MS. Every Heedeo failure fails open. Shadow records
- * the verdict only; enforce refuses a flagged signup.
+ * the verdict only; enforce refuses a signup in Heedeo's top band, `block`.
  */
 
 export const HEEDEO_API_VERSION = "2026-11-08";
@@ -297,25 +297,29 @@ export function heedeoSignupMethod(providerId: ManagedAuthProviderId | string): 
 type Warn = (message: string, attributes: Record<string, string | number | boolean>) => void;
 type WriteVerdict = (db: Database, value: SignupHeedeoEvaluationRecord) => Promise<void>;
 
-async function store(
+/** Starts the verdict write without waiting for it; a failure is only logged. */
+function store(
   db: Database,
   value: SignupHeedeoEvaluationRecord,
   warn: Warn | undefined,
   write: WriteVerdict = recordSignupHeedeoEvaluation,
-) {
-  try {
-    await write(db, value);
-  } catch (error) {
+): void {
+  const failed = (error: unknown) =>
     warn?.("Heedeo signup verdict was not stored", {
       reason: error instanceof Error ? error.name : "unknown",
     });
+  try {
+    void write(db, value).catch(failed);
+  } catch (error) {
+    failed(error);
   }
 }
 
 /**
  * The user-create hook's Heedeo step, after Opengeni's own refusals. Returns
- * "refuse" only in enforce mode for an answer Heedeo flagged (recorded as
- * `refused` with no user); every other answer and every failure is "allow".
+ * "refuse" only in enforce mode for an answer in Heedeo's top band, `block`
+ * (recorded as `refused` with no user; a trusted person is never `block`).
+ * Every other answer, flagged `review` included, and every failure is "allow".
  * The verdict waits in the attempt's context for `recordHeedeoSignupAfterCreate`.
  */
 export async function heedeoSignupAdmission(options: {
@@ -390,25 +394,33 @@ export async function heedeoSignupAdmission(options: {
     });
   }
   const verdict: SignupHeedeoEvaluationRecord = { ...base, ...evaluation };
-  if (mode === "enforce" && evaluation.outcome === "evaluated" && evaluation.flagged === true) {
-    await store(options.db, { ...verdict, outcome: "refused" }, options.warn, options.record);
+  if (
+    mode === "enforce" &&
+    evaluation.outcome === "evaluated" &&
+    evaluation.band === "block" &&
+    evaluation.flagged !== false
+  ) {
+    store(options.db, { ...verdict, outcome: "refused" }, options.warn, options.record);
     return "refuse";
   }
   if (context) context.pending = verdict;
-  else await store(options.db, verdict, options.warn, options.record);
+  else store(options.db, verdict, options.warn, options.record);
   return "allow";
 }
 
-/** Stores the attempt's verdict against the new user; best-effort, never throws. */
-export async function recordHeedeoSignupAfterCreate(
+/**
+ * Starts storing the attempt's verdict against the new user and returns at
+ * once: best-effort, never throws, never delays the signup.
+ */
+export function recordHeedeoSignupAfterCreate(
   db: Database,
   userId: string,
   warn?: Warn,
   record?: WriteVerdict,
-): Promise<void> {
+): void {
   const context = storage.getStore();
   const pending = context?.pending;
   if (!context || !pending) return;
   context.pending = null;
-  await store(db, { ...pending, userId }, warn, record);
+  store(db, { ...pending, userId }, warn, record);
 }

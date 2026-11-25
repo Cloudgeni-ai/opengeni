@@ -88,11 +88,25 @@ const integer = (value: number | null | undefined, min: number, max: number) =>
     ? Math.min(max, Math.max(min, Math.round(value)))
     : null;
 
+/** How often one process prunes expired verdicts. */
+export const SIGNUP_HEEDEO_PRUNE_INTERVAL_MS = 10 * 60_000;
+let lastPruneStartedAt = 0;
+
 /**
- * Stores one verdict, then deletes verdicts older than 180 days (the table's
- * runtime delete policy matches only those). Runtime connection; the caller
- * treats any failure as best-effort. Values that don't fit the columns are
- * dropped, never failing the write.
+ * Deletes verdicts older than 180 days. The runtime has no SELECT on the
+ * table, so the statement has no WHERE of its own (one would need SELECT
+ * rights); the runtime's delete policy is the filter, `created_at < now() -
+ * interval '180 days'`, which the planner serves from the created_at index.
+ */
+export async function pruneSignupHeedeoEvaluations(db: Database): Promise<void> {
+  await rawRows(db, sql`delete from opengeni_private.signup_heedeo_evaluations`);
+}
+
+/**
+ * Stores one verdict. At most once per SIGNUP_HEEDEO_PRUNE_INTERVAL_MS per
+ * process it also starts a prune of expired verdicts, without waiting for it.
+ * Runtime connection; the caller treats any failure as best-effort. Values
+ * that don't fit the columns are dropped, never failing the write.
  */
 export async function recordSignupHeedeoEvaluation(
   db: Database,
@@ -116,7 +130,11 @@ export async function recordSignupHeedeoEvaluation(
       ${`{${reasonCodes.map((value) => `"${value}"`).join(",")}}`}::text[],
       ${boundedText(record.visitorId, 200)})`,
   );
-  await rawRows(db, sql`delete from opengeni_private.signup_heedeo_evaluations`);
+  const now = Date.now();
+  if (now - lastPruneStartedAt >= SIGNUP_HEEDEO_PRUNE_INTERVAL_MS) {
+    lastPruneStartedAt = now;
+    void pruneSignupHeedeoEvaluations(db).catch(() => undefined);
+  }
 }
 
 export type SignupHeedeoVerdictOrganization = {
