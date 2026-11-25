@@ -1,7 +1,11 @@
 import { expect, mock, test } from "bun:test";
 import { act, createElement, type ReactNode } from "react";
 import { registerDom, renderComponent } from "../../react/test/render-hook";
-import { MAX_MARKDOWN_LENGTH, plainTextPage } from "../src/timeline/markdown-limit";
+import {
+  MAX_MARKDOWN_CHUNK_LENGTH,
+  MAX_MARKDOWN_LENGTH,
+  plainTextPage,
+} from "../src/timeline/markdown-limit";
 
 const markdownInputs: string[] = [];
 const rendererPath = Bun.resolveSync(
@@ -68,14 +72,14 @@ test("the real renderer only sends bounded input to Markdown, including streamin
   markdownInputs.length = 0;
   const view = await renderComponent(render("**hello**", { tone: "body", streaming: true }));
   expect(markdownInputs).toEqual(["**hello**"]);
-  const text = "a://".repeat(10_000) + "FINAL CHARACTER 😀";
+  const text = "a://".repeat(MAX_MARKDOWN_LENGTH / 4) + "FINAL CHARACTER 😀";
   await view.rerender(render(text, { tone: "body", streaming: true }));
   expect(markdownInputs).toEqual(["**hello**"]);
   const pages: string[] = [];
   for (let index = 0; index < plainTextPage(text, 0).count; index++) {
     const spans = view.container.querySelectorAll("span");
     pages.push(spans[spans.length - 1]!.textContent ?? "");
-    expect(pages[index]!.length).toBeLessThanOrEqual(MAX_MARKDOWN_LENGTH);
+    expect(pages[index]!.length).toBeLessThanOrEqual(MAX_MARKDOWN_CHUNK_LENGTH);
     const next = Array.from(view.container.querySelectorAll("button")).find(
       (button) => button.textContent === "Next",
     )!;
@@ -95,7 +99,7 @@ test("the real renderer only sends bounded input to Markdown, including streamin
 
 test("math-expanded input falls back to the original, fully readable source", async () => {
   markdownInputs.length = 0;
-  const text = "$x$ ".repeat(MAX_MARKDOWN_LENGTH / 4);
+  const text = "$x$ ".repeat(MAX_MARKDOWN_CHUNK_LENGTH / 4);
   const view = await renderComponent(render(text, { tone: "muted" }));
   expect(markdownInputs).toEqual([]);
   expect(view.container.textContent).toContain(plainTextPage(text, 0).text);

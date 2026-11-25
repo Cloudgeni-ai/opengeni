@@ -2,6 +2,7 @@ import {
   cloneElement,
   createContext,
   Fragment,
+  memo,
   useContext,
   useMemo,
   useRef,
@@ -31,7 +32,7 @@ import {
   interactivePreviewKind,
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
-import { MAX_MARKDOWN_LENGTH, prepareBoundedMarkdown } from "./markdown-limit";
+import { MAX_MARKDOWN_LENGTH, markdownSegments, type MarkdownSegment } from "./markdown-limit";
 import { PlainTextMessage } from "./plain-text-message";
 import { Icon } from "./icon";
 import { isStandaloneLinkGroup, soleTextGroupOf } from "./markdown-standalone-links";
@@ -608,27 +609,7 @@ function webRules(
       const content = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
       const info = (node as { sourceInfo?: unknown }).sourceInfo;
       const language = typeof info === "string" ? (info.trim().split(/\s+/)[0] ?? "") : "";
-      if (language === INTERACTIVE_ANSWER_FENCE) {
-        return (
-          <AnswerFence
-            key={node.key}
-            content={content}
-            renderSource={() => <CodeFence content={content} language={language} onCopy={onCopy} />}
-          />
-        );
-      }
-      const kind = interactivePreviewKind(language);
-      if (kind && media.renderInteractiveBlock) {
-        return (
-          <InteractiveFence
-            key={node.key}
-            kind={kind}
-            content={content}
-            render={media.renderInteractiveBlock}
-          />
-        );
-      }
-      return <CodeFence key={node.key} content={content} language={language} onCopy={onCopy} />;
+      return fenceElement(node.key, content, language, onCopy, media);
     },
     image: (node) => {
       const attributes = (node as { attributes?: { src?: unknown; alt?: unknown } }).attributes;
@@ -669,6 +650,37 @@ function webRules(
       );
     },
   };
+}
+
+/** A fenced block as Markdown draws it: an interactive answer, a preview or code. */
+function fenceElement(
+  key: string,
+  content: string,
+  language: string,
+  onCopy: ((text: string) => void) | undefined,
+  media: MarkdownMediaOptions,
+): ReactElement {
+  if (language === INTERACTIVE_ANSWER_FENCE) {
+    return (
+      <AnswerFence
+        key={key}
+        content={content}
+        renderSource={() => <CodeFence content={content} language={language} onCopy={onCopy} />}
+      />
+    );
+  }
+  const kind = interactivePreviewKind(language);
+  if (kind && media.renderInteractiveBlock) {
+    return (
+      <InteractiveFence
+        key={key}
+        kind={kind}
+        content={content}
+        render={media.renderInteractiveBlock}
+      />
+    );
+  }
+  return <CodeFence key={key} content={content} language={language} onCopy={onCopy} />;
 }
 
 /** An assistant-authored interactive preview fence, as the host should draw it. */
@@ -808,6 +820,84 @@ function MarkdownImage({ src, alt }: { src: string; alt: string }) {
   );
 }
 
+type ChunkRendering = {
+  styles: Record<string, TextStyle>;
+  rules: RenderRules;
+  onLinkPress?: ((url: string) => boolean) | undefined;
+  interactive: boolean;
+};
+
+/**
+ * One bounded Markdown parse. Memoized on its source, so while a long message streams
+ * only the chunk that changed is parsed again.
+ */
+const MarkdownChunk = memo(
+  function MarkdownChunk({
+    segment,
+    last,
+    streaming,
+    rendering,
+  }: {
+    segment: Extract<MarkdownSegment, { kind: "markdown" }>;
+    last: boolean;
+    streaming: boolean;
+    rendering: ChunkRendering;
+  }) {
+    const { styles, rules, onLinkPress, interactive } = rendering;
+    const { source, prepared } = segment;
+    // Previews and interactive answers both need to know whether the last fence is still open.
+    const openTail = useMemo(
+      () =>
+        last && (interactive || source.includes(INTERACTIVE_ANSWER_FENCE))
+          ? trailingOpenFence(source)
+          : null,
+      [last, interactive, source],
+    );
+    const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);
+    return (
+      <FenceStateContext.Provider value={fenceState}>
+        <Markdown
+          markdownit={prepared.hasMath ? MATH_PARSER : PARSER}
+          style={styles}
+          rules={rules}
+          {...(onLinkPress ? { onLinkPress } : {})}
+        >
+          {prepared.hasMath ? prepared.text : source}
+        </Markdown>
+      </FenceStateContext.Provider>
+    );
+  },
+  // The segment object is rebuilt on every delta; its source determines it.
+  (previous, next) =>
+    previous.segment.source === next.segment.source &&
+    previous.last === next.last &&
+    previous.streaming === next.streaming &&
+    previous.rendering === next.rendering,
+);
+
+/** A top-level fence of a long message, drawn directly instead of through Markdown. */
+function DirectFence({
+  segment,
+  streaming,
+  onCopy,
+  media,
+}: {
+  segment: Extract<MarkdownSegment, { kind: "fence" }>;
+  streaming: boolean;
+  onCopy?: ((text: string) => void) | undefined;
+  media: MarkdownMediaOptions;
+}) {
+  const fenceState = useMemo(
+    () => ({ openTail: segment.closed ? null : segment.content, streaming }),
+    [segment.closed, segment.content, streaming],
+  );
+  return (
+    <FenceStateContext.Provider value={fenceState}>
+      {fenceElement("fence", segment.content, segment.language, onCopy, media)}
+    </FenceStateContext.Provider>
+  );
+}
+
 /** Trim the trailing paragraph margin (web `last:mb-0`). */
 function TrimmedMarkdown({
   text,
@@ -827,34 +917,53 @@ function TrimmedMarkdown({
   media: MarkdownMediaOptions & MarkdownLinkOptions;
 }) {
   const theme = useNativeTimelineTheme();
-  const math = useMemo(() => prepareBoundedMarkdown(text), [text]);
+  const segments = useMemo(() => markdownSegments(text), [text]);
   const styles = useMemo(() => {
     const base = webMarkdownStyles(theme, tone);
     return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
   }, [theme, tone, textStyle]);
   const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
-  // Previews and interactive answers both need to know whether the last fence is still open.
-  const openTail = useMemo(
-    () =>
-      math && (media.renderInteractiveBlock || text.includes(INTERACTIVE_ANSWER_FENCE))
-        ? trailingOpenFence(text)
-        : null,
-    [math, media.renderInteractiveBlock, text],
+  const rendering = useMemo<ChunkRendering>(
+    () => ({ styles, rules, onLinkPress, interactive: !!media.renderInteractiveBlock }),
+    [styles, rules, onLinkPress, media.renderInteractiveBlock],
   );
-  const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);
-  if (!math) return <PlainTextMessage text={text} style={styles.body!} />;
+  if (!segments) return <PlainTextMessage text={text} style={styles.body!} />;
+  let offset = 0;
   return (
     <View style={{ marginBottom: -10 }}>
-      <FenceStateContext.Provider value={fenceState}>
-        <Markdown
-          markdownit={math.hasMath ? MATH_PARSER : PARSER}
-          style={styles}
-          rules={rules}
-          {...(onLinkPress ? { onLinkPress } : {})}
-        >
-          {math.hasMath ? math.text : text}
-        </Markdown>
-      </FenceStateContext.Provider>
+      {segments.map((segment, index) => {
+        const last = index === segments.length - 1;
+        // Keyed by where the segment starts, which stays put while later text streams in.
+        const key = `${segment.kind}:${offset}`;
+        offset += segment.source.length;
+        if (segment.kind === "markdown") {
+          return segment.source.trim() ? (
+            <MarkdownChunk
+              key={key}
+              segment={segment}
+              last={last}
+              streaming={streaming && last}
+              rendering={rendering}
+            />
+          ) : null;
+        }
+        if (segment.kind === "fence") {
+          return (
+            <DirectFence
+              key={key}
+              segment={segment}
+              streaming={streaming && last}
+              onCopy={onCopy}
+              media={media}
+            />
+          );
+        }
+        return (
+          <View key={key} style={{ marginBottom: 10 }}>
+            <PlainTextMessage text={segment.source} style={styles.body!} />
+          </View>
+        );
+      })}
     </View>
   );
 }

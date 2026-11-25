@@ -152,11 +152,19 @@ profile, so a release build installed from Xcode registers for the sandbox.
 
 ## Message rendering limits
 
-The shared native timeline renders Markdown only up to 8,192 UTF-16 code units
-(roughly 1,300 words), including math delimiter normalization. Longer messages
-use selectable plain-text pages; Previous/Next expose the complete source without
-mounting it all or running Markdown, math or interactive-preview parsers over it.
-The original message and copy action are unchanged.
+The shared native timeline never gives one Markdown parse more than 8,192 UTF-16
+code units (roughly 1,300 words), including math delimiter normalization. A longer
+message is cut into chunks between top-level blocks (an unindented line after a
+blank line, never inside a code fence or display math), and each chunk is parsed
+on its own, so parsing grows linearly and a streaming message only re-parses its
+last chunk. A code fence at the start of a line is drawn directly as a code block,
+interactive answer or `opengeni-html` / `opengeni-site` preview, without Markdown.
+Link reference definitions only resolve within their own chunk.
+
+Messages over 65,536 code units (roughly 10,000 words), and a single block longer
+than one chunk, use selectable plain-text pages; Previous/Next expose the complete
+source without mounting it all or running Markdown, math or interactive-preview
+parsers over it. The original message and copy action are unchanged.
 
 This app has a separate lockfile: its overrides pin `markdown-it` 14.3.1,
 `linkify-it` 5.0.2 and `decode-uri-component` 0.5.1. The root install pins the
