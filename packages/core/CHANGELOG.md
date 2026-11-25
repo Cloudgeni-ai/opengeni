@@ -1,5 +1,32 @@
 # @opengeni/core
 
+## 6.39.0
+
+### Patch Changes
+
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [58b1b0e]
+- Updated dependencies [1f28f11]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/runtime@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/db@6.39.0
+  - @opengeni/documents@6.39.0
+  - @opengeni/events@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/storage@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
 ## 6.38.0
 
 ### Patch Changes

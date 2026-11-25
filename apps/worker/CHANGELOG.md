@@ -1,5 +1,44 @@
 # @opengeni/worker-bundle
 
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [58b1b0e]
+- Updated dependencies [1f28f11]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/codemode@6.39.0
+  - @opengeni/runtime@6.39.0
+  - @opengeni/core@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/db@6.39.0
+  - @opengeni/decisions@6.39.0
+  - @opengeni/documents@6.39.0
+  - @opengeni/events@6.39.0
+  - @opengeni/github@6.39.0
+  - @opengeni/interaction@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/storage@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/vaults-bitwarden@6.39.0
+  - @opengeni/vaults-keeper@6.39.0
+  - @opengeni/vaults-onepassword@6.39.0
+  - @opengeni/vaults-protonpass@6.39.0
+  - @opengeni/jev@6.39.0
+  - @opengeni/agent-proto@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/subscriptions@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
 ## 6.38.0
 
 ### Patch Changes
