@@ -1,5 +1,21 @@
 # @opengeni/react-native
 
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [6b4d423]
+- Updated dependencies [9012657]
+- Updated dependencies [7b76136]
+- Updated dependencies [d6f3b77]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/react@6.39.0
+
 ## 6.38.0
 
 ### Patch Changes

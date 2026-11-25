@@ -1,5 +1,30 @@
 # @opengeni/react
 
+## 6.39.0
+
+### Minor Changes
+
+- e4598af: Insights usage can group by agent (`groupBy=agent`) and filter by `agentId`; a worker's usage counts toward its root chat's agent, and responses add `facets.agents`. An agent's page shows what it cost in the last 30 days and per run to people who can see Usage.
+- e4598af: Agents are easier to set up. **Add agent ▾ → Create with chat** opens a chat that drafts the agent from a plain description and creates it once the person confirms, using the new bundled `agents` Skill (`builtin:agents`); `bot_template_save` also accepts `toolPermissions` and `skills`. New agents in the form start with short Instructions and ask before merging pull requests. The form and the agent's page offer common triggers as switches: when a pull request opens, when mentioned on a PR, and every weekday morning (`commonAgentTriggers()`).
+- d6f3b77: Paying for a plan through Stripe checkout now confirms it when you return, from Billing or from onboarding. A short message says your plan is activating, then names it once it's active, for example "Pro is active". A cancelled plan checkout shows nothing new. A checkout return is still confirmed when a redirect or an unfinished setup step changes the address first.
+
+### Patch Changes
+
+- 6b4d423: An organization's admins, not only its owner, can choose "Anyone in <organization>" for an agent, matching the API's organization administration rule.
+- 7b76136: A turn someone else started (such as meeting notes) that waits for Codex usage in your Personal workspace now says it can't use your own ChatGPT account, and offers "Continue on my account" when that account has room. The button takes over the wait as you, also after you paused the chat.
+
+  A ChatGPT account that Opengeni saw used no longer reads "No usage yet". When a live usage check returns no windows (for example a personal account the viewer can't read live), the Codex overview keeps the saved reading, and list rows show an older reading with its age ("Checked 16 hours ago"), or "No recent reading" when none is left.
+
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/connect@6.39.0
+
 ## 6.38.0
 
 ### Minor Changes
