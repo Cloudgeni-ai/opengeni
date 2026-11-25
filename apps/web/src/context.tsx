@@ -383,6 +383,11 @@ export function RootRouteComponent() {
                     onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                     emailVerificationRequired={managedEmailVerificationRequired}
                     newSignupsEnabled={managedNewSignupsEnabled}
+                    heedeo={
+                      clientConfig?.auth.mode === "managedSession"
+                        ? clientConfig.auth.heedeo
+                        : undefined
+                    }
                     signupChallengeSiteKey={
                       clientConfig?.auth.mode === "managedSession"
                         ? clientConfig.auth.signupChallengeSiteKey
@@ -406,10 +411,19 @@ export function RootRouteComponent() {
                   onSubmit={handleManagedAuth}
                   emailVerificationRequired={managedEmailVerificationRequired}
                   newSignupsEnabled={managedNewSignupsEnabled}
+                  heedeo={
+                    clientConfig?.auth.mode === "managedSession"
+                      ? clientConfig.auth.heedeo
+                      : undefined
+                  }
                   signupChallengeSiteKey={
                     clientConfig?.auth.mode === "managedSession"
                       ? clientConfig.auth.signupChallengeSiteKey
                       : undefined
+                  }
+                  signInChallengeRequired={
+                    clientConfig?.auth.mode === "managedSession" &&
+                    clientConfig.auth.signInChallengeRequired === true
                   }
                   socialProviders={socialProvidersForHost(
                     window.location.hostname,
@@ -431,10 +445,17 @@ export function RootRouteComponent() {
               onSubmit={handleManagedAuth}
               emailVerificationRequired={managedEmailVerificationRequired}
               newSignupsEnabled={managedNewSignupsEnabled}
+              heedeo={
+                clientConfig?.auth.mode === "managedSession" ? clientConfig.auth.heedeo : undefined
+              }
               signupChallengeSiteKey={
                 clientConfig?.auth.mode === "managedSession"
                   ? clientConfig.auth.signupChallengeSiteKey
                   : undefined
+              }
+              signInChallengeRequired={
+                clientConfig?.auth.mode === "managedSession" &&
+                clientConfig.auth.signInChallengeRequired === true
               }
               socialProviders={socialProvidersForHost(
                 window.location.hostname,

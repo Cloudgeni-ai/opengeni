@@ -2683,6 +2683,10 @@ function runtimeEnvValues(
             "OPENGENI_SIGNUP_CHALLENGE_ENABLED",
             env.OPENGENI_SIGNUP_CHALLENGE_ENABLED ?? "false",
           ),
+          valueEnv(
+            "OPENGENI_SIGN_IN_CHALLENGE_ENABLED",
+            env.OPENGENI_SIGN_IN_CHALLENGE_ENABLED ?? "false",
+          ),
           ...[
             "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
             "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
@@ -2692,6 +2696,16 @@ function runtimeEnvValues(
               ? requiredEnv(key, env[key])
               : valueEnv(key, env[key]),
           ),
+          // Heedeo signup scoring: optional; inert until the operator mode is
+          // not off and both keys are set. The secret key goes to the runtime
+          // env Secret like the signup challenge secret, never Helm values.
+          ...[
+            "OPENGENI_HEEDEO_PUBLISHABLE_KEY",
+            "OPENGENI_HEEDEO_SECRET_KEY",
+            "OPENGENI_HEEDEO_API_URL",
+            "OPENGENI_HEEDEO_SCRIPT_URL",
+            "OPENGENI_HEEDEO_TIMEOUT_MS",
+          ].map((key) => valueEnv(key, env[key])),
           valueEnv(
             "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
             env.OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS ?? publicBaseUrl ?? "",

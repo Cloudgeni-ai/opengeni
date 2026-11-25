@@ -73,6 +73,11 @@ import { canArchiveChat, requestSessionArchive } from "../lib/archive-session";
 import { notifySessionListChanged } from "../lib/session-list-invalidation";
 import { waitingDescendants } from "../lib/descendant-requests";
 import {
+  SessionInterventionNotice,
+  interventionsFor,
+  useSessionInterventions,
+} from "../components/session/session-interventions";
+import {
   useDescendantRequestsRefresh,
   useLineagePollInterval,
 } from "../lib/use-descendant-requests-refresh";
@@ -2820,6 +2825,21 @@ function SessionChatPane(props: {
     () => waitingDescendants(props.agentNodes, resumingSubSessions),
     [props.agentNodes, resumingSubSessions],
   );
+  // Browser or computer hand-offs this session or a waiting sub-session is
+  // paused on; read only while one of them waits.
+  const interventionSessionIds = useMemo(
+    () =>
+      [props.session, ...waitingSubSessions]
+        .filter((session) => session.status === "requires_action")
+        .map((session) => session.id),
+    [props.session, waitingSubSessions],
+  );
+  const sessionInterventions = useSessionInterventions({
+    client: context.client,
+    workspaceId: props.session.workspaceId,
+    sessionIds: interventionSessionIds,
+  });
+  const ownInterventions = interventionsFor(sessionInterventions, props.session.id);
   // A sub-session whose turn ended (idle, failed) is no longer resuming.
   useEffect(() => {
     if (resumingSubSessions.size === 0) return;
@@ -4999,6 +5019,16 @@ function SessionChatPane(props: {
                   await runsOn.fleet.refresh();
                 }}
               />
+              <SessionInterventionNotice
+                className="mb-2"
+                interventions={ownInterventions}
+                mutating={sessionInterventions.mutating}
+                onResolve={(intervention, outcome) => {
+                  void sessionInterventions
+                    .resolve(intervention, outcome)
+                    .then(() => props.onReloadSession());
+                }}
+              />
               {waitingSubSessions.length > 0 ? (
                 <LazyPart fallback={null}>
                   {/* Links in sub-session questions resolve like links in the timeline. */}
@@ -5017,6 +5047,7 @@ function SessionChatPane(props: {
                       events={props.events}
                       waiting={waitingSubSessions}
                       onResolved={props.onDescendantResolved}
+                      interventions={sessionInterventions}
                       onResumingChange={onSubSessionResumingChange}
                       refreshSignal={props.descendantRefreshSignal}
                       onAllowAccess={props.onAllowAccess}

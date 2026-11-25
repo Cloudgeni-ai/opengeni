@@ -57,6 +57,8 @@ export interface ScheduleAccess {
   canReadSessionIds: boolean;
   /** Pick an existing chat as the target. */
   canTargetSessions: boolean;
+  /** Workspace admin: may turn someone else's Workspace schedule off and on. */
+  isAdmin?: boolean | undefined;
 }
 
 export function useScheduleAccess(workspaceId: string): ScheduleAccess {
@@ -70,6 +72,7 @@ export function useScheduleAccess(workspaceId: string): ScheduleAccess {
     canRun: can("scheduled_tasks:run"),
     canReadSessionIds,
     canTargetSessions: can("sessions:read") && canReadSessionIds,
+    isAdmin: can("workspace:admin"),
   };
 }
 
@@ -80,6 +83,14 @@ export function schedulePermissions(task: ScheduledTask, access: ScheduleAccess)
     own,
     canEdit: own && access.canManage,
     canRun: own && access.canRun,
+    // An admin turns someone else's Workspace schedule off and on (it keeps
+    // running as its owner), but never edits, runs or deletes it.
+    canToggle:
+      access.canManage &&
+      (own
+        ? // Locked to the app or key that made it: only an admin's status-only path.
+          task.creatorLocked !== true || access.isAdmin === true
+        : access.isAdmin === true && task.visibility !== "private"),
     canPauseOrDelete: own && access.canManage,
     canDuplicate: access.canManage,
   };
@@ -197,7 +208,7 @@ export function ScheduleTile({ task }: { task: ScheduledTask }) {
 
 /** Whether the list row shows the on/off switch: the viewer can pause it. */
 export function canSwitchSchedule(task: ScheduledTask, access: ScheduleAccess): boolean {
-  return schedulePermissions(task, access).canPauseOrDelete;
+  return schedulePermissions(task, access).canToggle;
 }
 
 /**
@@ -354,7 +365,7 @@ export function ScheduleMenuItems({
           Run now
         </DropdownMenuItem>
       ) : null}
-      {pauseItem && perms.canPauseOrDelete ? (
+      {pauseItem && perms.canToggle ? (
         <DropdownMenuItem disabled={busy} onSelect={paused ? onResume : onPause}>
           {paused ? <PlayIcon /> : <PauseIcon />}
           {paused ? "Resume" : "Pause"}
@@ -388,5 +399,7 @@ export function ScheduleMenuItems({
 /** A schedule the viewer can do nothing with has no ⋯ menu at all. */
 export function hasMenuItems(task: ScheduledTask, access: ScheduleAccess): boolean {
   const perms = schedulePermissions(task, access);
-  return perms.canRun || perms.canPauseOrDelete || perms.canEdit || perms.canDuplicate;
+  return (
+    perms.canRun || perms.canToggle || perms.canPauseOrDelete || perms.canEdit || perms.canDuplicate
+  );
 }

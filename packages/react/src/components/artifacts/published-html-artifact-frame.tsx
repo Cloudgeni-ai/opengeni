@@ -27,6 +27,13 @@ export {
 
 export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = HTML_FRAME_HOST_SANDBOX;
 
+/**
+ * After the frame host's page loads, how long its `ready` may take before the
+ * frame counts as failed (the host unreachable, blocked or not framable).
+ * `ready` is posted while that page parses, so this is only message latency.
+ */
+export const HTML_FRAME_HOST_READY_GRACE_MS = 2000;
+
 export type PublishedHtmlArtifactFrameProps = {
   html: string;
   /**
@@ -37,6 +44,17 @@ export type PublishedHtmlArtifactFrameProps = {
   autoHeight?: boolean;
   /** Upper bound for `autoHeight`, in CSS pixels. */
   maxAutoHeight?: number;
+  /**
+   * The document can show its content: its first height report (inline
+   * previews post one once their stylesheets have loaded) or, failing that,
+   * its load. Called at most once per frame.
+   */
+  onPainted?: () => void;
+  /**
+   * The HTML could not be delivered: the frame host's page loaded but never
+   * announced itself. Reloading the frame tries again.
+   */
+  onFailed?: () => void;
   theme?: "light" | "dark";
   title: string;
   className?: string;
@@ -99,12 +117,29 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
   const themeRef = useRef(props.theme);
   themeRef.current = props.theme;
   const [reportedHeight, setHeight] = useState<number>();
+  const onPaintedRef = useRef(props.onPainted);
+  onPaintedRef.current = props.onPainted;
+  const onFailedRef = useRef(props.onFailed);
+  onFailedRef.current = props.onFailed;
+  const paintedRef = useRef(false);
+  // Once per document: new HTML is a new page that has not painted yet.
+  const paintedHtmlRef = useRef(props.html);
+  if (paintedHtmlRef.current !== props.html) {
+    paintedHtmlRef.current = props.html;
+    paintedRef.current = false;
+  }
+  const painted = useRef(() => {
+    if (paintedRef.current) return;
+    paintedRef.current = true;
+    onPaintedRef.current?.();
+  }).current;
+  const listensForHeight = props.autoHeight === true || props.onPainted !== undefined;
   const height =
     reportedHeight === undefined
       ? undefined
       : Math.min(props.maxAutoHeight ?? 1200, Math.max(80, Math.ceil(reportedHeight)));
   useEffect(() => {
-    if (!props.autoHeight) return;
+    if (!listensForHeight) return;
     const receive = (event: MessageEvent) => {
       if (
         event.source !== frameRef.current?.contentWindow ||
@@ -112,11 +147,13 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       )
         return;
       const value = event.data.height;
-      if (typeof value === "number" && Number.isFinite(value)) setHeight(value);
+      if (typeof value !== "number" || !Number.isFinite(value)) return;
+      setHeight(value);
+      painted();
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [props.autoHeight]);
+  }, [listensForHeight, painted]);
   useEffect(() => {
     frameRef.current?.contentWindow?.postMessage(
       { type: "opengeni.preview.theme", theme: props.theme },
@@ -140,6 +177,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       { type: "opengeni.preview.theme", theme: themeRef.current },
       "*",
     );
+    painted();
     frameLoadPendingRef.current = true;
     onFrameLoadRef.current();
   };
@@ -150,6 +188,16 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
     mode: "interactive",
     onLoaded: documentLoaded,
   });
+  // The frame host's page loaded without announcing itself: it is an error
+  // page (unreachable, blocked, refused framing), and the HTML never arrives.
+  const readyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(
+    () => () => {
+      clearTimeout(readyTimerRef.current);
+      readyTimerRef.current = undefined;
+    },
+    [documentHtml],
+  );
   useEffect(() => {
     bridgeRef.current = props.toolBridge;
   }, [props.toolBridge]);
@@ -220,7 +268,15 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
         onLoad={() => {
           // Loads before the HTML's own document are the frame host's; a
           // later one is the HTML navigating, as with srcdoc.
-          if (frameHost.onFrameLoad()) documentLoaded();
+          if (frameHost.onFrameLoad()) {
+            documentLoaded();
+          } else if (frameHost.phaseRef.current === "loader" && onFailedRef.current) {
+            clearTimeout(readyTimerRef.current);
+            readyTimerRef.current = setTimeout(() => {
+              readyTimerRef.current = undefined;
+              if (frameHost.phaseRef.current === "loader") onFailedRef.current?.();
+            }, HTML_FRAME_HOST_READY_GRACE_MS);
+          }
         }}
         className={props.className}
         style={style}

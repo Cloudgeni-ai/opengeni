@@ -2593,9 +2593,35 @@ const SettingsSchema = z.object({
    */
   skillImportGithubToken: z.string().min(1).optional(),
   signupChallengeEnabled: EnvBoolean.default(false),
+  /**
+   * Email sign-in also requires the signup challenge (credential stuffing).
+   * Takes effect only while `signupChallengeEnabled` is on.
+   */
+  signInChallengeEnabled: EnvBoolean.default(false),
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
   signupChallengeHostnames: z.string().default(""),
+  /**
+   * Heedeo signup scoring (docs/signup-abuse-protection.md, "Heedeo shadow
+   * scoring"). Active only when the operator mode (heedeoSignupMode) is not
+   * off and both keys are set. The secret key stays on the server.
+   */
+  heedeoPublishableKey: z.string().trim().min(1).optional().catch(undefined),
+  heedeoSecretKey: z.string().trim().min(1).optional().catch(undefined),
+  heedeoApiUrl: z.string().url().default("https://app.heedeo.com").catch("https://app.heedeo.com"),
+  heedeoScriptUrl: z
+    .string()
+    .url()
+    .default("https://heedeo.dev/i.js")
+    .catch("https://heedeo.dev/i.js"),
+  /** Total budget for one signup evaluation, retry included; out-of-range values are clamped. */
+  heedeoTimeoutMs: z.coerce
+    .number()
+    .catch(1_500)
+    .transform((value) =>
+      Number.isFinite(value) ? Math.min(5_000, Math.max(100, Math.round(value))) : 1_500,
+    )
+    .default(1_500),
   /**
    * More disposable-inbox mail domains or MX hosts (comma separated) for
    * signup checks, added to the built-in list. A domain matches itself and
@@ -7134,9 +7160,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
     skillImportGithubToken: optional("OPENGENI_SKILL_IMPORT_GITHUB_TOKEN"),
     signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
+    signInChallengeEnabled: optional("OPENGENI_SIGN_IN_CHALLENGE_ENABLED"),
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),
     signupChallengeHostnames: optional("OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES"),
+    heedeoPublishableKey: optional("OPENGENI_HEEDEO_PUBLISHABLE_KEY"),
+    heedeoSecretKey: optional("OPENGENI_HEEDEO_SECRET_KEY"),
+    heedeoApiUrl: optional("OPENGENI_HEEDEO_API_URL"),
+    heedeoScriptUrl: optional("OPENGENI_HEEDEO_SCRIPT_URL"),
+    heedeoTimeoutMs: optional("OPENGENI_HEEDEO_TIMEOUT_MS"),
     signupDisposableMailDomains: optional("OPENGENI_SIGNUP_DISPOSABLE_MAIL_DOMAINS"),
     signupMailMxLookupTimeoutMs: optional("OPENGENI_SIGNUP_MAIL_MX_LOOKUP_TIMEOUT_MS"),
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),

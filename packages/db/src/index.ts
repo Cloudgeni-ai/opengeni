@@ -47,6 +47,12 @@ export * from "./session-target";
 export * from "./session-resource-removal";
 export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
+import {
+  droppedPersonalGitHubOwner,
+  lacksPersonalGitHubForResources,
+  ownPersonalGitHubDelegation,
+  projectPersonalGitHubDelegationsOntoResources,
+} from "./personal-github-delegation-projection";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
@@ -1336,6 +1342,8 @@ import {
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
+import { isPauseResponseEventType, pauseResponseTrigger } from "./pause-response-trigger";
+export { pauseResponseTrigger } from "./pause-response-trigger";
 import {
   boundedChildProgressNote,
   buildChildRequiresActionPayload,
@@ -1406,8 +1414,12 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
-export type { QuiescenceReceiptWakeRepairCursor } from "./quiescence-receipt-wake-repair";
+export type {
+  QuiescenceReceiptWakeRepairCursor,
+  QuiescenceReceiptWakeRepairFailure,
+} from "./quiescence-receipt-wake-repair";
 export {
+  classifyQuiescenceReceiptWakeRepairFailure,
   QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS,
   QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS,
 } from "./quiescence-receipt-wake-repair";
@@ -1472,6 +1484,7 @@ export * from "./session-share-links";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./signup-heedeo";
 export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
@@ -84828,12 +84841,7 @@ export async function claimSessionWorkForAttempt(
                     ),
                   )
                   .limit(1);
-                if (
-                  !legacyResumeTrigger ||
-                  !["user.approvalDecision", "user.humanInputResponse"].includes(
-                    legacyResumeTrigger.type,
-                  )
-                ) {
+                if (!legacyResumeTrigger || !isPauseResponseEventType(legacyResumeTrigger.type)) {
                   throw new SessionControlInvariantError(
                     `Running turn ${activeTurn.id} has no pending-update attempt boundary`,
                   );
@@ -84892,11 +84900,11 @@ export async function claimSessionWorkForAttempt(
             if (input.trigger.kind !== "approval") {
               return { action: "unclaimed", reason: "no-work" };
             }
-            const advancesApproval = await isNewerApprovalTrigger(
+            const advancesApproval = await isPauseResponseTriggerOf(
               tx as unknown as Database,
               workspaceId,
               sessionId,
-              activeTurn.triggerEventId,
+              activeTurn,
               input.trigger.triggerEventId,
             );
             if (!advancesApproval) {
@@ -85647,11 +85655,25 @@ export async function claimSessionWorkForAttempt(
           const receiverContext = delivered.receiverContext;
           const authorityUpdate = delivered.updates[0];
           if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
-          const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+          const frozenPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
             receiverContext?.personalConnectionDelegations ??
               authorityUpdate.personalConnectionDelegations,
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
+          // The receiving context's own authority already fits this session;
+          // a sender's (an agent message or steer) is fitted to its repositories.
+          let internalPersonalConnectionDelegations = receiverContext
+            ? frozenPersonalConnectionDelegations
+            : projectPersonalGitHubDelegationsOntoResources(
+                frozenPersonalConnectionDelegations,
+                session.resources,
+              );
+          const droppedGitHubOwner = receiverContext
+            ? null
+            : droppedPersonalGitHubOwner(
+                frozenPersonalConnectionDelegations,
+                internalPersonalConnectionDelegations,
+              );
           const internalXaiAuthority = receiverContext
             ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
             : frozenXaiExecutionAuthority(authorityUpdate);
@@ -86047,6 +86069,62 @@ export async function claimSessionWorkForAttempt(
             // not an ambient request subject. The attempt snapshot below also
             // freezes the same visibility/owner-membership authority tuple.
             initiatingHumanSubjectId = privateOwnerSubjectId;
+          }
+          // A sender's Your GitHub that didn't fit, or a sender without one,
+          // would leave this chat's personal repositories without Git access:
+          // keep what the same person gave this chat in their latest message.
+          // Scheduled runs keep exactly what their schedule admitted.
+          const ownGitHubSubjectId =
+            receiverContext || scheduledTaskRunId
+              ? null
+              : (droppedGitHubOwner ??
+                (lacksPersonalGitHubForResources(
+                  internalPersonalConnectionDelegations,
+                  session.resources,
+                )
+                  ? initiatingHumanSubjectId
+                  : null));
+          if (ownGitHubSubjectId) {
+            // Only the person's latest own message counts: if they sent it
+            // without Your GitHub, nothing older is brought back.
+            const recent = await tx
+              .select({
+                id: schema.sessionTurns.id,
+                delegations: schema.sessionTurns.personalConnectionDelegations,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.initiatorKind, "subject"),
+                  eq(schema.sessionTurns.initiatingHumanSubjectId, ownGitHubSubjectId),
+                ),
+              )
+              .orderBy(desc(schema.sessionTurns.position))
+              .limit(1);
+            const history = recent.flatMap((row) => {
+              // One unreadable old snapshot must not stop this turn starting.
+              try {
+                return [
+                  parsedPersonalConnectionDelegations(
+                    row.delegations,
+                    `session_turns:${workspaceId}:${sessionId}:own-github`,
+                  ),
+                ];
+              } catch {
+                console.warn(
+                  `[session-claim] skipped unreadable Your GitHub snapshot on turn ${row.id}`,
+                );
+                return [];
+              }
+            });
+            const own = ownPersonalGitHubDelegation(history, ownGitHubSubjectId, session.resources);
+            if (own)
+              internalPersonalConnectionDelegations = [
+                ...internalPersonalConnectionDelegations,
+                own,
+              ];
           }
           let acceptedPersonalConnectionDelegations = internalPersonalConnectionDelegations;
           let acceptedMcpAccountBindings = parseAcceptedMcpAccountBindings(
@@ -88493,34 +88571,18 @@ export async function peekSessionWork(
         if (!currentTrigger) {
           throw new Error(`Turn ${turn.id} points to missing trigger ${turn.triggerEventId}`);
         }
-        const [actionResponse] = await scopedDb
-          .select({ id: schema.sessionEvents.id })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, workspaceId),
-              eq(schema.sessionEvents.sessionId, sessionId),
-              inArray(schema.sessionEvents.type, [
-                "user.approvalDecision",
-                "user.humanInputResponse",
-              ]),
-              gt(schema.sessionEvents.sequence, currentTrigger.sequence),
-            ),
-          )
-          // One question answer is accepted per pause and only the trigger
-          // carries it, so it resumes first. Approval decisions are applied
-          // together by any resume (those up to its trigger), and one recorded
-          // after the trigger resumes the turn again.
-          .orderBy(
-            sql`(${schema.sessionEvents.type} = 'user.humanInputResponse') desc`,
-            desc(schema.sessionEvents.sequence),
-            desc(schema.sessionEvents.id),
-          )
-          .limit(1);
-        if (actionResponse) {
+        // Only an answer recorded for this turn resumes it (see
+        // pauseResponseTrigger); the claim applies the same rule.
+        const actionResponseId = await pauseResponseTrigger(scopedDb as unknown as Database, {
+          workspaceId,
+          sessionId,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+        });
+        if (actionResponseId) {
           return {
             kind: "approval-pending",
-            triggerEventId: actionResponse.id,
+            triggerEventId: actionResponseId,
             ...fence,
           };
         }
@@ -89660,11 +89722,11 @@ async function settleSessionWorkBeforeAttemptClaim(
           } else if (turn && input.trigger.kind === "approval") {
             if (
               turn.status !== "requires_action" ||
-              !(await isNewerApprovalTrigger(
+              !(await isPauseResponseTriggerOf(
                 tx as unknown as Database,
                 workspaceId,
                 input.sessionId,
-                turn.triggerEventId,
+                turn,
                 input.trigger.triggerEventId,
               ))
             ) {
@@ -91689,34 +91751,26 @@ function readWorkerDeathRedispatchMetadata(metadata: unknown): WorkerDeathRedisp
   return { kind: "valid", count: raw };
 }
 
-async function isNewerApprovalTrigger(
+/**
+ * The claim's half of the pause-response rule: the candidate resumes the
+ * paused turn only if it is an answer recorded for that turn after its
+ * current trigger. The peek picks candidates with the same rule.
+ */
+async function isPauseResponseTriggerOf(
   tx: Database,
   workspaceId: string,
   sessionId: string,
-  currentTriggerEventId: string,
+  turn: { id: string; triggerEventId: string },
   candidateTriggerEventId: string,
 ): Promise<boolean> {
-  const rows = await tx
-    .select({
-      id: schema.sessionEvents.id,
-      type: schema.sessionEvents.type,
-      sequence: schema.sessionEvents.sequence,
-    })
-    .from(schema.sessionEvents)
-    .where(
-      and(
-        eq(schema.sessionEvents.workspaceId, workspaceId),
-        eq(schema.sessionEvents.sessionId, sessionId),
-        inArray(schema.sessionEvents.id, [currentTriggerEventId, candidateTriggerEventId]),
-      ),
-    );
-  const current = rows.find((row) => row.id === currentTriggerEventId);
-  const candidate = rows.find((row) => row.id === candidateTriggerEventId);
-  return Boolean(
-    current &&
-    candidate &&
-    ["user.approvalDecision", "user.humanInputResponse"].includes(candidate.type) &&
-    candidate.sequence > current.sequence,
+  return (
+    (await pauseResponseTrigger(tx, {
+      workspaceId,
+      sessionId,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      candidateEventId: candidateTriggerEventId,
+    })) === candidateTriggerEventId
   );
 }
 

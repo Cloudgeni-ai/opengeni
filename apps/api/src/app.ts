@@ -1,10 +1,21 @@
 import { observedSdkVersion } from "./http/sdk-version";
 import {
+  emailSignInChallengeRequired,
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
+  verifyEmailSignInChallenge,
   verifySignupChallenge,
   verifySocialSignupChallenge,
 } from "./auth/signup-challenge";
+import {
+  heedeoClientConfig,
+  heedeoKeysConfigured,
+  heedeoOAuthState,
+  heedeoSignupRequestFrom,
+  heedeoToken,
+  heedeoTokenFromOAuthState,
+  runWithHeedeoSignup,
+} from "./auth/heedeo-signup";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
@@ -154,6 +165,7 @@ import {
   updateOrganizationMcpConnectionSettings,
   admitMcpConnectionRateLimit,
   type OrganizationMcpConnectionSettings,
+  readHeedeoSignupMode,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -1408,16 +1420,26 @@ export function createAppComposition(
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
       let signupChallengeVerified = false;
-      if (deps.settings.signupChallengeEnabled && oauthCallbackProvider) {
+      // The browser's Heedeo token for this attempt (docs/signup-abuse-protection.md,
+      // "Heedeo shadow scoring"); only the user-create hook sends it.
+      let heedeoSignupToken: string | null = null;
+      const heedeoConfigured = heedeoKeysConfigured(deps.settings);
+      if ((deps.settings.signupChallengeEnabled || heedeoConfigured) && oauthCallbackProvider) {
         const state = new URL(c.req.url).searchParams.get("state");
         const stored = state ? await findManagedAuthOAuthState(managedAuth, state) : null;
         if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
-          signupChallengeVerified = oauthSignupChallengeVerified(
-            stored.value,
-            oauthCallbackProvider,
-          );
+          signupChallengeVerified =
+            deps.settings.signupChallengeEnabled &&
+            oauthSignupChallengeVerified(stored.value, oauthCallbackProvider);
+          if (heedeoConfigured) {
+            heedeoSignupToken = heedeoTokenFromOAuthState(stored.value, oauthCallbackProvider);
+          }
         }
       }
+      const runSignup = <T>(operation: () => T): T =>
+        runWithHeedeoSignup(heedeoSignupRequestFrom(c.req.raw, heedeoSignupToken), () =>
+          runWithSignupChallenge(signupChallengeVerified, operation),
+        );
       if (
         pathname === "/v1/auth/sign-up/email" &&
         c.req.method === "POST" &&
@@ -1439,6 +1461,27 @@ export function createAppComposition(
           .catch(() => null);
         await verifySignupChallenge(deps.settings, input?.signupChallengeToken);
         signupChallengeVerified = true;
+      }
+      if (heedeoConfigured && pathname === "/v1/auth/sign-up/email" && c.req.method === "POST") {
+        const input = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        heedeoSignupToken = heedeoToken(input?.heedeoToken);
+      }
+      if (
+        emailSignInChallengeRequired(deps.settings) &&
+        pathname === "/v1/auth/sign-in/email" &&
+        c.req.method === "POST"
+      ) {
+        // Credential stuffing guesses passwords here; the sign-in form sends
+        // the same challenge token as sign-up. A sign-in creates no account,
+        // so it never grants the sign-up proof.
+        const input = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        await verifyEmailSignInChallenge(deps.settings, input?.signupChallengeToken);
       }
       let signupProviderRequest = c.req.raw;
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
@@ -1478,8 +1521,13 @@ export function createAppComposition(
           opengeniSignupChallenge: verified
             ? { provider: body.provider, expiresAt: Date.now() + 600_000 }
             : null,
+          // Server-owned: a browser-sent value is always replaced.
+          opengeniHeedeo: heedeoConfigured
+            ? (heedeoOAuthState(body.provider, body.heedeoToken) ?? null)
+            : null,
         };
         delete body.signupChallengeToken;
+        delete body.heedeoToken;
         signupProviderRequest = new Request(c.req.raw, { body: JSON.stringify(body) });
       }
       if (oauthCallbackProvider) {
@@ -1517,14 +1565,9 @@ export function createAppComposition(
         return oauthCallbackProvider
           ? await runManagedAuthProvider(
               oauthCallbackProvider,
-              async () =>
-                await runWithSignupChallenge(signupChallengeVerified, () =>
-                  managedAuth.handler(signupProviderRequest),
-                ),
+              async () => await runSignup(() => managedAuth.handler(signupProviderRequest)),
             )
-          : await runWithSignupChallenge(signupChallengeVerified, () =>
-              managedAuth.handler(signupProviderRequest),
-            );
+          : await runSignup(() => managedAuth.handler(signupProviderRequest));
       }
       requireManagedAuthProviderRouteAllowed(c.req.method, pathname);
       // Provider authentication/recovery is isolated from whichever actor the
@@ -1549,9 +1592,7 @@ export function createAppComposition(
           attempt.transactionId,
           oauthCallbackProvider,
           async () => {
-            const response = await runWithSignupChallenge(signupChallengeVerified, () =>
-              managedAuth.handler(isolated.request),
-            );
+            const response = await runSignup(() => managedAuth.handler(isolated.request));
             return {
               response,
               authSessionId: currentManagedAuthCreatedSessionId(),
@@ -1619,14 +1660,9 @@ export function createAppComposition(
           deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
         providerResponse = discardProviderSession
           ? await runManagedAuthDiscardedProviderSession(
-              async () =>
-                await runWithSignupChallenge(signupChallengeVerified, () =>
-                  managedAuth.handler(providerRequest),
-                ),
+              async () => await runSignup(() => managedAuth.handler(providerRequest)),
             )
-          : await runWithSignupChallenge(signupChallengeVerified, () =>
-              managedAuth.handler(providerRequest),
-            );
+          : await runSignup(() => managedAuth.handler(providerRequest));
       }
       let replacementCookies: readonly string[] | undefined;
       if (deps.settings.managedAuthSessionSetMode === "broker") {
@@ -1996,6 +2032,9 @@ export function createAppComposition(
           deps.settings.productAccessMode === "managed"
             ? await managedAuthNewSignupsGate.signupsOpen()
             : true,
+          deps.settings.productAccessMode === "managed" && heedeoKeysConfigured(deps.settings)
+            ? heedeoClientConfig(deps.settings, await readHeedeoSignupMode(deps.db))
+            : undefined,
         ),
         documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
@@ -3313,7 +3352,11 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
+function clientAuthConfig(
+  settings: AppDependencies["settings"],
+  newSignupsEnabled: boolean,
+  heedeo?: { publishableKey: string; scriptUrl: string },
+) {
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
@@ -3325,6 +3368,8 @@ function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabl
       ...(settings.signupChallengeEnabled
         ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
         : {}),
+      ...(emailSignInChallengeRequired(settings) ? { signInChallengeRequired: true } : {}),
+      ...(heedeo ? { heedeo } : {}),
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
           ? (["google"] as const)

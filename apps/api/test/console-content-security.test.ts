@@ -48,6 +48,31 @@ describe("console Content-Security-Policy sources", () => {
     }
   });
 
+  test("lists Heedeo's script origin for script and identify only when both keys are set", async () => {
+    const configured = await consoleContentSecuritySources({
+      settings: testSettings({
+        productAccessMode: "managed",
+        sitesDomain: undefined,
+        heedeoPublishableKey: "pk_test",
+        heedeoSecretKey: "sk_test",
+      } as never),
+      objectStorage: null,
+    });
+    expect(configured.directives["script-src"]).toEqual(["https://heedeo.dev"]);
+    expect(configured.directives["connect-src"]).toContain("https://heedeo.dev");
+    expect(configured.directives["frame-src"]).toEqual([]);
+    const oneKey = await consoleContentSecuritySources({
+      settings: testSettings({
+        productAccessMode: "managed",
+        sitesDomain: undefined,
+        heedeoPublishableKey: "pk_test",
+      } as never),
+      objectStorage: null,
+    });
+    expect(oneKey.directives["script-src"]).toEqual([]);
+    expect(oneKey.directives["connect-src"]).not.toContain("https://heedeo.dev");
+  });
+
   test("adds nothing that is not configured", async () => {
     const result = await consoleContentSecuritySources({
       settings: testSettings({ productAccessMode: "managed", sitesDomain: undefined } as never),

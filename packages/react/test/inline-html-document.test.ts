@@ -13,3 +13,15 @@ test("inline visuals supply documented styles, controls and the optional SDK thr
   expect(html).toContain("opengeni.preview.height");
   expect(publishedHtmlArtifactDocument(html, true)).toContain("createOpenGeniSiteClient");
 });
+
+test("inline visuals report their height before the helpers' CDN scripts, so slow helpers never hold the preview", () => {
+  const html = inlineHtmlDocument('<div id="chart">bars</div>');
+  const fragment = html.indexOf('<div id="chart">');
+  const reporter = html.indexOf("opengeni.preview.height");
+  const firstCdnScript = html.indexOf('<script src="https://unpkg.com/');
+  expect(fragment).toBeGreaterThan(-1);
+  expect(firstCdnScript).toBeGreaterThan(-1);
+  expect(reporter).toBeGreaterThan(fragment);
+  expect(reporter).toBeLessThan(firstCdnScript);
+  expect(html.endsWith("</body></html>")).toBe(true);
+});

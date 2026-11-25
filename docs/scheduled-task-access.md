@@ -145,6 +145,12 @@ Already-admitted occurrences retain their frozen execution settings. Text in a
 launcher prompt naming a child model is also unchanged; editing that instruction
 is a separate content change, not an effect of changing these defaults.
 
+Both scheduled and event-driven occurrences targeting a chat use that chat's
+effective model settings at admission. A saved settings change takes effect
+without waiting for another turn; an older queued turn starting later does not
+undo it. If the effective settings change while a fresh occurrence is being
+admitted, the database rejects the stale snapshot so the worker can read again.
+
 ## Who owns a schedule
 
 A schedule's owner is the person who saved it: a managed human (or a verified
@@ -211,6 +217,16 @@ organization allows Only me chats.
   With admin visibility off the list is empty and admins cannot pause them,
   exactly like private chats. A deployment can require it to stay on with
   `OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED=true`.
+- A workspace admin can pause and resume someone else's Workspace schedule, or
+  one locked to the app or key that created it
+  (`POST …/scheduled-tasks/:taskId/pause` and `…/resume`, and the
+  `scheduled_tasks_pause` and `scheduled_tasks_resume` tools), so turning it
+  off and on needs the same permission. Resuming changes nothing else: the
+  schedule runs as its owner again, exactly as before the pause, and its event
+  triggers are re-armed. This also turns on one its owner paused. Each admin
+  pause and resume is audited (`scheduled_task.admin_paused` and
+  `scheduled_task.admin_resumed`, with the owner). Changing or running it stays
+  with its owner.
 
 The audience is not execution configuration: like the name and status it is
 left out of the execution digest, so changing it never invalidates accepted

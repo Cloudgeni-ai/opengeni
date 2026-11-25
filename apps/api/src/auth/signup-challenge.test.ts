@@ -4,6 +4,7 @@ import {
   oauthSignupChallengeVerified,
   requireSignupChallenge,
   runWithSignupChallenge,
+  verifyEmailSignInChallenge,
   verifySignupChallenge,
   verifySocialSignupChallenge,
 } from "./signup-challenge";
@@ -52,6 +53,29 @@ describe("signup challenge admission", () => {
         throw new Error("timeout");
       }) as unknown as typeof fetch),
     ).rejects.toMatchObject({ status: 503 });
+  });
+  test("email sign-in uses the same verification with a sign-in message", async () => {
+    const signIn = { ...settings, signInChallengeEnabled: true } as Settings;
+    await verifyEmailSignInChallenge(signIn, "valid", mockFetch(passed()));
+    await expect(
+      verifyEmailSignInChallenge(signIn, undefined, mockFetch(passed())),
+    ).rejects.toMatchObject({
+      status: 403,
+      message: "Complete the verification to sign in.",
+      details: { managedAuthCode: "SIGNUP_CHALLENGE_REQUIRED" },
+    });
+    await expect(
+      verifyEmailSignInChallenge(signIn, "token", mockFetch({ ...passed(), success: false })),
+    ).rejects.toMatchObject({
+      status: 403,
+      details: { managedAuthCode: "SIGNUP_CHALLENGE_FAILED" },
+    });
+    // Either setting off: no token needed and the provider is never called.
+    for (const off of [settings, { ...signIn, signupChallengeEnabled: false } as Settings]) {
+      await verifyEmailSignInChallenge(off, undefined, (async () => {
+        throw new Error("must not verify");
+      }) as unknown as typeof fetch);
+    }
   });
   test("HTTP 200 provider failures and malformed replies are retryable unavailability", async () => {
     for (const reply of [

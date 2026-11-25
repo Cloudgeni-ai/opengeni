@@ -1,3 +1,4 @@
+import { heedeoKeysConfigured, heedeoOAuthState } from "../auth/heedeo-signup";
 import { verifySocialSignupChallenge } from "../auth/signup-challenge";
 import { clearSiteDataOnSignOut } from "../http/clear-site-data";
 import {
@@ -421,7 +422,9 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         authorityHash,
         actorEpoch,
         transactionSecretHash,
-        request: body,
+        // The Heedeo token is fresh per click; a replay of the same start
+        // must still match its receipt.
+        request: { ...body, heedeoToken: undefined },
       });
       const receiptIdentifier = `opengeni-managed-social-start:${authorityHash}:${body.operationId}`;
       const authContext = await available.managedAuth.$context;
@@ -473,6 +476,9 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
             callbackURL: callbackURL.toString(),
             errorCallbackURL: errorCallbackURL.toString(),
             additionalData: {
+              ...(heedeoKeysConfigured(deps.settings)
+                ? { opengeniHeedeo: heedeoOAuthState(body.provider, body.heedeoToken) ?? null }
+                : {}),
               ...(signupVerified
                 ? {
                     opengeniSignupChallenge: {

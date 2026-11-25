@@ -16245,11 +16245,15 @@
         "$.auth|mode=configuredToken.scheme": "const!=[\"\\\"bearer\\\"\"]",
         "$.auth|mode=managedSession": "object",
         "$.auth|mode=managedSession.emailVerificationRequired": "boolean!",
+        "$.auth|mode=managedSession.heedeo": "object?",
+        "$.auth|mode=managedSession.heedeo.publishableKey": "string!",
+        "$.auth|mode=managedSession.heedeo.scriptUrl": "string!",
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
         "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
         "$.auth|mode=managedSession.passkeySignIn": "boolean!",
         "$.auth|mode=managedSession.passkeySignUp": "boolean!",
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
+        "$.auth|mode=managedSession.signInChallengeRequired": "boolean?",
         "$.auth|mode=managedSession.signupChallengeSiteKey": "string?",
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
@@ -28234,6 +28238,7 @@
         "$.purpose": "ref(RecordingPurpose)!",
         "$.reachWorkspaceIds": "array? null",
         "$.reachWorkspaceIds[]": "string",
+        "$.sharedWorkspaceId": "string? null",
         "$.sourceWorkspace": "object? null",
         "$.sourceWorkspace.id": "string!",
         "$.sourceWorkspace.name": "string!",
@@ -35632,6 +35637,7 @@
         "$.metadata{}|4{}": "ref(__schema0)",
         "$.reachWorkspaceIds": "array? null",
         "$.reachWorkspaceIds[]": "string",
+        "$.sharedWorkspaceId": "string? null",
         "$.title": "string?",
         "$.visibility": "ref(SessionVisibility)?"
       }
@@ -44974,7 +44980,8 @@
       "FAILED_RECORDING_ID": "value",
       "LIVE_LINES": "value",
       "LIVE_RECORDING_ID": "value",
-      "MeetingsFixture": "type"
+      "MeetingsFixture": "type",
+      "TEAMMATE_SUBJECT_ID": "value"
     },
     "@opengeni/react/this-computer": {
       "AppIcon": "value",

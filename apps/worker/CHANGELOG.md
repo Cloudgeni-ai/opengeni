@@ -1,5 +1,77 @@
 # @opengeni/worker-bundle
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [ca5b614]
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/core@6.41.0
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/db@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/documents@6.41.0
+  - @opengeni/github@6.41.0
+  - @opengeni/runtime@6.41.0
+  - @opengeni/storage@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codemode@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/decisions@6.41.0
+  - @opengeni/events@6.41.0
+  - @opengeni/interaction@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/vaults-bitwarden@6.41.0
+  - @opengeni/vaults-keeper@6.41.0
+  - @opengeni/vaults-onepassword@6.41.0
+  - @opengeni/vaults-protonpass@6.41.0
+  - @opengeni/jev@6.41.0
+  - @opengeni/agent-proto@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/subscriptions@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [2a4f625]
+- Updated dependencies [928df9f]
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/core@6.40.0
+  - @opengeni/runtime@6.40.0
+  - @opengeni/contracts@6.40.0
+  - @opengeni/db@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/capabilities@6.40.0
+  - @opengeni/codemode@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/decisions@6.40.0
+  - @opengeni/documents@6.40.0
+  - @opengeni/events@6.40.0
+  - @opengeni/github@6.40.0
+  - @opengeni/interaction@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/storage@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+  - @opengeni/vaults@6.40.0
+  - @opengeni/vaults-bitwarden@6.40.0
+  - @opengeni/vaults-keeper@6.40.0
+  - @opengeni/vaults-onepassword@6.40.0
+  - @opengeni/vaults-protonpass@6.40.0
+  - @opengeni/jev@6.40.0
+  - @opengeni/agent-proto@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/subscriptions@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
 ## 6.39.0
 
 ### Patch Changes

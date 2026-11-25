@@ -70,6 +70,14 @@ export const WORKSPACE_MACHINE_NOT_STARTED_TOOL_CALL_EVENT_TEXT =
 export const WORKSPACE_MACHINE_NOT_STARTED_TOOL_CALL_RESULT_TEXT =
   "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run it again.";
 
+/** Person-facing copy for a call that still waited for approval when its turn ended. */
+export const AWAITING_APPROVAL_NOT_STARTED_TOOL_CALL_EVENT_TEXT =
+  "This call was waiting for approval when the turn ended, so it never ran.";
+
+/** Model-visible result for a call that still waited for approval when its turn ended. */
+export const AWAITING_APPROVAL_NOT_STARTED_TOOL_CALL_RESULT_TEXT =
+  "This tool call was still waiting for approval when the turn ended, so it never ran. Nothing changed; only repeat it if the person still wants it.";
+
 /** The person-facing and model-visible not-started copy for a recovery reason. */
 export function notStartedToolCallTexts(reason: string | undefined): {
   event: string;
@@ -89,6 +97,8 @@ export function notStartedToolCallResult(input: {
   callItem: Record<string, unknown>;
   /** The recovery reason, which picks the copy (see notStartedToolCallTexts). */
   reason?: string;
+  /** The call still waited for its approval, rather than for the sandbox. */
+  awaitingApproval?: boolean;
 }): Record<string, unknown> {
   const name = typeof input.callItem.name === "string" ? input.callItem.name : "tool";
   return {
@@ -99,7 +109,12 @@ export function notStartedToolCallResult(input: {
       : {}),
     callId: input.callId,
     status: "incomplete",
-    output: { type: "text", text: notStartedToolCallTexts(input.reason).result },
+    output: {
+      type: "text",
+      text: input.awaitingApproval
+        ? AWAITING_APPROVAL_NOT_STARTED_TOOL_CALL_RESULT_TEXT
+        : notStartedToolCallTexts(input.reason).result,
+    },
   };
 }
 
@@ -284,6 +299,48 @@ export async function consumeSettledPendingToolCallsForCompletedTurnInTransactio
 }
 
 /**
+ * The approval calls among `pending` that provably never ran: paused for
+ * approval, no result, no MCP question asked mid-call, and no approve
+ * decision recorded for them in their turn (a call paused for approval is
+ * invoked only by a resume that applies such a decision).
+ */
+async function callIdsStillAwaitingApproval(
+  tx: Database,
+  input: Pick<ClosePendingSessionToolCallsInput, "workspaceId" | "sessionId" | "turnId">,
+  pending: ReadonlyArray<{
+    callId: string;
+    interruptionKind: string | null;
+    mcpInputRequest: unknown;
+    resultItem: unknown;
+  }>,
+): Promise<Set<string>> {
+  const candidates = pending
+    .filter(
+      (call) =>
+        call.interruptionKind === "approval" &&
+        call.mcpInputRequest == null &&
+        call.resultItem == null,
+    )
+    .map((call) => call.callId);
+  if (candidates.length === 0) return new Set();
+  const approved = await tx
+    .select({ callId: sql<string | null>`${schema.sessionEvents.payload} ->> 'approvalId'` })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        sql`${schema.sessionEvents.payload} ->> 'decision' = 'approve'`,
+        inArray(sql`${schema.sessionEvents.payload} ->> 'approvalId'`, candidates),
+      ),
+    );
+  const approvedIds = new Set(approved.flatMap(({ callId }) => (callId ? [callId] : [])));
+  return new Set(candidates.filter((callId) => !approvedIds.has(callId)));
+}
+
+/**
  * Close raw tool calls for a logical turn while its owning session/turn locks
  * are held. Recoverable transitions preserve interruption rows because those
  * rows are the exact open-suffix resume authority for a replacement attempt;
@@ -326,6 +383,11 @@ export async function closePendingSessionToolCallsInTransaction(
     }));
   if (pending.length === 0)
     return { sequence: input.sequence, events: [], closed: 0, interrupted: 0 };
+  // A call paused for approval runs only after an approve decision is
+  // recorded for it in its turn. One still without a result and with no such
+  // decision never ran: it settles as not started, not as an unknown outcome.
+  // A call whose MCP server asked a question mid-call had already started.
+  const awaitingApprovalCallIds = await callIdsStillAwaitingApproval(tx, input, pending);
 
   const history = await tx
     .select({
@@ -401,13 +463,19 @@ export async function closePendingSessionToolCallsInTransaction(
         )
       : undefined;
     const interrupted = !existingResult && !call.resultItem;
+    // Only a function call becomes "not started"; other awaiting call types
+    // keep the conservative interrupted result below.
+    const awaitingApproval = interrupted && awaitingApprovalCallIds.has(call.callId);
     const notStarted =
-      interrupted && call.callType === "function_call" && notStartedCallIds.has(call.callId);
+      interrupted &&
+      call.callType === "function_call" &&
+      (notStartedCallIds.has(call.callId) || awaitingApproval);
     const interruptedResult = notStarted
       ? notStartedToolCallResult({
           callId: call.callId,
           callItem: call.callItem,
           reason: input.reason,
+          awaitingApproval,
         })
       : interruptedToolCallResult({
           callType: call.callType,
@@ -429,6 +497,7 @@ export async function closePendingSessionToolCallsInTransaction(
       result: existingResult?.item ?? call.resultItem ?? interruptedResult,
       interrupted,
       notStarted,
+      awaitingApproval,
     };
   });
 
@@ -498,7 +567,14 @@ export async function closePendingSessionToolCallsInTransaction(
         output: resolution.notStarted
           ? {
               isError: true,
-              content: [{ type: "text", text: notStartedToolCallTexts(input.reason).event }],
+              content: [
+                {
+                  type: "text",
+                  text: resolution.awaitingApproval
+                    ? AWAITING_APPROVAL_NOT_STARTED_TOOL_CALL_EVENT_TEXT
+                    : notStartedToolCallTexts(input.reason).event,
+                },
+              ],
             }
           : resolution.interrupted
             ? {

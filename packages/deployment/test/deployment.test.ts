@@ -49,6 +49,7 @@ describe("deployment contract", () => {
     ];
     const disabled = generateRuntimeArtifacts(contract, {}, {});
     expect(disabled.runtimeEnv).toContain("OPENGENI_SIGNUP_CHALLENGE_ENABLED=false");
+    expect(disabled.runtimeEnv).toContain("OPENGENI_SIGN_IN_CHALLENGE_ENABLED=false");
     expect(disabled.requiredEnvVars).not.toContain(keys[1]);
     const enabled = { OPENGENI_SIGNUP_CHALLENGE_ENABLED: "true" };
     const missing = generateRuntimeArtifacts(contract, {}, enabled);
@@ -75,6 +76,25 @@ describe("deployment contract", () => {
     expect(configured.helmValuesYaml).not.toContain("synthetic-private-key");
     expect(configured.summary).not.toHaveProperty("signupChallengeSecretKey");
     for (const key of keys) expect(configured.missingEnvVars).not.toContain(key);
+  });
+
+  test("Heedeo keys are optional and the secret key stays out of Helm values", () => {
+    const contract = contractForProfile("azure-existing-services", "managed-saas-staging");
+    expect(requiredRuntimeEnvVars(contract, {})).not.toContain("OPENGENI_HEEDEO_SECRET_KEY");
+    const configured = generateRuntimeArtifacts(
+      contract,
+      {},
+      {
+        OPENGENI_HEEDEO_PUBLISHABLE_KEY: "pk_synthetic-public",
+        OPENGENI_HEEDEO_SECRET_KEY: "sk_synthetic-private",
+        OPENGENI_HEEDEO_TIMEOUT_MS: "1500",
+      },
+    );
+    expect(configured.runtimeEnv).toContain("OPENGENI_HEEDEO_SECRET_KEY=sk_synthetic-private");
+    expect(configured.runtimeEnv).toContain("OPENGENI_HEEDEO_PUBLISHABLE_KEY=pk_synthetic-public");
+    expect(configured.runtimeEnv).toContain("OPENGENI_HEEDEO_TIMEOUT_MS=1500");
+    expect(configured.helmValuesYaml).not.toContain("sk_synthetic-private");
+    expect(configured.missingEnvVars).not.toContain("OPENGENI_HEEDEO_SECRET_KEY");
   });
 
   test("ships valid built-in profiles", () => {

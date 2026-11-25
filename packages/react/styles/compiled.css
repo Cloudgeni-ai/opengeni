@@ -13861,6 +13861,14 @@
 :where(.og-root).og-preview-loading canvas[data-painted="true"],:where(.og-root) .og-preview-loading canvas[data-painted="true"] {
   background-image: none;
 }
+:where(.og-root).og-preview-loading[data-fill],:where(.og-root) .og-preview-loading[data-fill] {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+}
+:where(.og-root).og-preview-loading[data-fill] canvas,:where(.og-root) .og-preview-loading[data-fill] canvas {
+  height: 100%;
+}
 :where(.og-root).og-preview-loading-label,:where(.og-root) .og-preview-loading-label {
   position: absolute;
   left: 16px;

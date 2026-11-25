@@ -1,3 +1,4 @@
+import { heedeoSignupToken } from "@/lib/heedeo";
 import { teamsAuthReturnPath } from "@/lib/teams-connect";
 import type { ChatClient } from "@opengeni/sdk";
 // The console primarily uses `@opengeni/sdk`. Bootstrap, managed-session,
@@ -975,10 +976,12 @@ export async function signUpEmail(input: {
   password: string;
 }): Promise<unknown> {
   const attribution = signupAttribution();
+  const heedeoToken = await heedeoSignupToken();
   return await authRequest<unknown>("/sign-up/email", {
     method: "POST",
     body: JSON.stringify({
       ...input,
+      ...(heedeoToken ? { heedeoToken } : {}),
       // The verification link returns here with a one-shot marker and the
       // first-touch campaign parameters; no browser storage is involved.
       callbackURL: signupReturnPath(authReturnBase(), "email_verified"),
@@ -1075,6 +1078,7 @@ export async function signInEmail(input: {
   email: string;
   password: string;
   rememberMe?: boolean;
+  signupChallengeToken?: string;
 }): Promise<unknown> {
   return await authRequest<unknown>("/sign-in/email", {
     method: "POST",
@@ -1164,14 +1168,21 @@ export async function signUpPasskey(input: {
   name: string;
   signupChallengeToken?: string;
 }): Promise<unknown> {
+  // Identify alongside the ceremony so the passkey prompt never waits on it.
+  const heedeo = heedeoSignupToken();
   const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-up/options", {
     method: "POST",
     body: JSON.stringify(input),
   });
   const response = await createPasskey(ceremony);
+  const heedeoToken = await heedeo;
   return await authRequest<unknown>("/passkey/sign-up", {
     method: "POST",
-    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+    body: JSON.stringify({
+      challengeId: ceremony.challengeId,
+      response,
+      ...(heedeoToken ? { heedeoToken } : {}),
+    }),
   });
 }
 
@@ -1211,11 +1222,14 @@ export async function startManagedSocialSignIn(
       : signupReturnPath(authReturnBase(), `${provider}_signin`),
   );
   const attribution = reauthentication ? null : signupAttribution();
+  // A Google or GitHub click may create an account, so each one identifies.
+  const heedeoToken = reauthentication ? undefined : await heedeoSignupToken();
   const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
     method: "POST",
     body: JSON.stringify({
       provider,
       ...(signupChallengeToken ? { signupChallengeToken } : {}),
+      ...(heedeoToken ? { heedeoToken } : {}),
       callbackURL,
       errorCallbackURL: reauthentication
         ? callbackURL
