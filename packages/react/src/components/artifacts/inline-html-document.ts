@@ -4,10 +4,11 @@ import { VISUALIZATION_CSS, VISUALIZATION_HELPERS } from "./visualization-assets
  * Conversation styling/helpers only. Rendering and tool transport remain in the Site frame.
  *
  * The height reporter sits right after the fragment, before the helpers: a
- * parser-inserted script waits for the stylesheets above it (a fragment's
- * Google Fonts `<link>`), so its first report means the content can paint,
- * and it never waits on the helpers' CDN scripts. The host shows its loading
- * surface until that report.
+ * parser-inserted script runs only after the stylesheets above it (a
+ * fragment's Google Fonts `<link>`) and the fragment's own blocking scripts,
+ * so its first report means the content can paint, and it never waits on the
+ * helpers' CDN scripts. The host shows its loading surface until that report
+ * (bounded, see `ArtifactSandbox`).
  */
 export function inlineHtmlDocument(fragment: string): string {
   return (

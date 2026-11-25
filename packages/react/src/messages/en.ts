@@ -72,6 +72,7 @@ export const englishMessages = {
   "artifacts.artifactChrome.couldNotOpenThisArtifact": "Could not open this artifact",
   "artifacts.artifactChrome.couldnTLoadThisSite": "Couldn’t load this app.",
   "artifacts.artifactChrome.couldnTLoadThisSite2": "Couldn't load this app",
+  "artifacts.artifactChrome.couldnTLoadThisPreview": "Couldn’t load this preview.",
   "artifacts.artifactChrome.countvalueWorkspaceToolsAvailableTo":
     "{countValue} workspace tools available to this app",
   "artifacts.artifactChrome.edit": "Edit",

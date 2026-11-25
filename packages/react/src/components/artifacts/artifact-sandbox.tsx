@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -45,8 +46,9 @@ export type ArtifactSandboxProps = {
   maxAutoHeight?: number | undefined;
   /**
    * Cover the frame with the "Preparing preview…" surface until its document
-   * can paint, so slow page loads (render-blocking fonts, the frame host)
-   * never show as an empty box.
+   * can paint, so slow page loads (render-blocking fonts or scripts, the frame
+   * host) never show as an empty box. A frame that cannot be delivered shows
+   * an error with Retry.
    */
   loadingUntilPainted?: boolean | undefined;
   theme?: "light" | "dark" | undefined;
@@ -174,17 +176,14 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
     setReloadKey((value) => value + 1);
   };
   const frameKey = `${reloadKey}:${props.reloadToken ?? 0}:${props.frameKey ?? ""}`;
-  // Which frame has painted; a reload or new page shows the loading surface again.
-  const [paintedFrameKey, setPaintedFrameKey] = useState<string | null>(null);
-  const loading = props.loadingUntilPainted === true && paintedFrameKey !== frameKey;
-  const frame = (
+  const frame = (gate?: FrameGate) => (
     <PublishedHtmlArtifactFrame
-      key={frameKey}
+      {...(gate ? {} : { key: frameKey })}
       title={props.title}
       html={props.html}
       autoHeight={Boolean(props.autoHeight && !focused)}
       {...(props.maxAutoHeight ? { maxAutoHeight: props.maxAutoHeight } : {})}
-      {...(props.loadingUntilPainted ? { onPainted: () => setPaintedFrameKey(frameKey) } : {})}
+      {...(gate ? { onPainted: gate.onPainted, onFailed: gate.onFailed } : {})}
       {...(props.theme ? { theme: props.theme } : {})}
       {...(!focused && props.height ? { style: { height: props.height } } : {})}
       {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
@@ -341,21 +340,77 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         </div>
       </div>
       {props.loadingUntilPainted ? (
-        <div
-          data-artifact-frame-slot=""
-          className={cn("relative", (props.fill || focused) && "flex min-h-0 flex-1 flex-col")}
+        <LoadingFrameSlot
+          // A reload or new HTML is a new page: loading again.
+          key={`${frameKey}\u0000${props.html}`}
+          className={cn((props.fill || focused) && "flex min-h-0 flex-1 flex-col")}
+          theme={props.theme}
+          onRetry={reload}
         >
           {frame}
-          {loading ? (
-            <div role="status" aria-live="polite" className="absolute inset-0">
-              <PreviewLoading fill />
-            </div>
-          ) : null}
-        </div>
+        </LoadingFrameSlot>
       ) : (
-        frame
+        frame()
       )}
     </dialog>
+  );
+}
+
+type FrameGate = { onPainted: () => void; onFailed: () => void };
+
+/**
+ * Past this, the frame is shown whatever it has drawn: a resource that never
+ * finishes (a hung CDN) must not hold the loading surface forever.
+ */
+export const FRAME_PAINT_TIMEOUT_MS = 15_000;
+
+/** One page in the frame: loading until it paints, or an error with Retry. */
+function LoadingFrameSlot({
+  className,
+  theme,
+  onRetry,
+  children,
+}: {
+  className?: string | undefined;
+  theme?: "light" | "dark" | undefined;
+  onRetry: () => void;
+  children: (gate: FrameGate) => ReactNode;
+}) {
+  const labels = useArtifactLabels();
+  const [state, setState] = useState<"loading" | "painted" | "failed">("loading");
+  const loading = state === "loading";
+  useEffect(() => {
+    if (!loading) return;
+    const timer = setTimeout(() => setState("painted"), FRAME_PAINT_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [loading]);
+  const gate = useRef<FrameGate>({
+    onPainted: () => setState((current) => (current === "loading" ? "painted" : current)),
+    onFailed: () => setState((current) => (current === "loading" ? "failed" : current)),
+  }).current;
+  return (
+    <div data-artifact-frame-slot="" aria-busy={loading} className={cn("relative", className)}>
+      {children(gate)}
+      <span role="status" className="sr-only">
+        {loading ? labels.preparingPreview : ""}
+      </span>
+      {loading ? (
+        <div aria-hidden="true" data-og-theme={theme} className="absolute inset-0">
+          <PreviewLoading fill />
+        </div>
+      ) : null}
+      {state === "failed" ? (
+        <div
+          role="alert"
+          className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface p-4 text-center text-sm text-fg-muted"
+        >
+          {labels.previewLoadFailed}
+          <ArtifactButton size="sm" onClick={onRetry}>
+            {labels.retry}
+          </ArtifactButton>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
