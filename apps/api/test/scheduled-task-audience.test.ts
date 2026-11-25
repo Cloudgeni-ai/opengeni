@@ -511,3 +511,52 @@ test("only its owner's schedules can run on a personal machine, Only me or share
   });
   expect(renamed.status).toBe(200);
 });
+
+test("an admin turns someone else's shared schedule off and on again with the same permission", async () => {
+  const f = await fixture();
+  const created = await f.create(f.owner.headers, { name: "Review when mentioned on a PR" });
+  expect(created.status).toBe(201);
+  const task = (await created.json()) as { id: string; ownerSubjectId: string | null };
+  expect(task.ownerSubjectId).toBe(f.owner.subjectId);
+  const toggle = async (headers: Record<string, string>, action: "pause" | "resume") =>
+    await f.app.request(`${f.base}/${task.id}/${action}`, { method: "POST", headers });
+  const status = async () =>
+    (
+      (await (
+        await f.app.request(`${f.base}/${task.id}`, { headers: f.owner.headers })
+      ).json()) as {
+        status: string;
+      }
+    ).status;
+
+  // The case that triggered it: off worked, on was refused as owner-only.
+  const off = await toggle(f.admin.headers, "pause");
+  expect(off.status).toBe(200);
+  expect(await status()).toBe("paused");
+  const on = await toggle(f.admin.headers, "resume");
+  expect(on.status).toBe(200);
+  expect(((await on.json()) as { status: string }).status).toBe("active");
+  expect(await status()).toBe("active");
+  // Off and on again, and resuming an active one changes nothing.
+  expect((await toggle(f.admin.headers, "pause")).status).toBe(200);
+  expect((await toggle(f.admin.headers, "resume")).status).toBe(200);
+  expect((await toggle(f.admin.headers, "resume")).status).toBe(200);
+  expect(await status()).toBe("active");
+
+  // Editing it still belongs to its owner.
+  const renamed = await f.app.request(`${f.base}/${task.id}`, {
+    method: "PATCH",
+    headers: f.admin.headers,
+    body: JSON.stringify({ name: "Mine now" }),
+  });
+  expect(renamed.status).toBe(403);
+
+  // A member who is neither owner nor admin can do neither.
+  expect((await toggle(f.other.headers, "pause")).status).toBe(403);
+  expect((await toggle(f.owner.headers, "pause")).status).toBe(200);
+  expect((await toggle(f.other.headers, "resume")).status).toBe(403);
+  expect(await status()).toBe("paused");
+  // The owner turns their own off and on as before.
+  expect((await toggle(f.owner.headers, "resume")).status).toBe(200);
+  expect(await status()).toBe("active");
+});

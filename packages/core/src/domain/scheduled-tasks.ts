@@ -1057,10 +1057,11 @@ export async function assertScheduledTaskMutationOwner(
     if (task?.creatorLocked)
       throw new HTTPException(403, {
         message:
-          "This schedule is locked to the app or key that created it, so only that creator can change, run or delete it. A workspace admin can pause it.",
+          "This schedule is locked to the app or key that created it, so only that creator can change, run or delete it. A workspace admin can pause or resume it.",
       });
     throw new HTTPException(403, {
-      message: "Only the schedule owner can change or run it. Copy it to create your own schedule.",
+      message:
+        "Only the schedule owner can change or run it. A workspace admin can pause or resume it. Copy it to create your own schedule.",
     });
   }
 }
@@ -1083,7 +1084,8 @@ async function assertSiteMayReachScheduledTask(
 
 /**
  * An admin's pause of a schedule they do not own. Pausing is reversible and
- * changes nothing else; only the owner can change, run or resume it again.
+ * changes nothing else; `resumeScheduledTaskAsAdmin` undoes it. Only the
+ * owner can change or run it.
  */
 export async function pauseScheduledTaskAsAdmin(
   db: Database,
@@ -1092,6 +1094,31 @@ export async function pauseScheduledTaskAsAdmin(
 ): Promise<ScheduledTask> {
   return await withScheduledTaskAuthorityWriteErrors(() =>
     updateScheduledTask(db, workspaceId, taskId, { status: "paused" }),
+  );
+}
+
+/**
+ * An admin's resume of a schedule they do not own: the undo of
+ * `pauseScheduledTaskAsAdmin`, so turning it off and on needs the same
+ * permission. It changes nothing else, so it runs as its owner again, exactly
+ * as before the pause, and its event triggers are re-armed.
+ */
+export async function resumeScheduledTaskAsAdmin(
+  db: Database,
+  existing: Pick<ScheduledTask, "workspaceId" | "id" | "status">,
+): Promise<ScheduledTask> {
+  const rearm = existing.status !== "active" || (await scheduledTaskFinishedOnce(db, existing));
+  return await withScheduledTaskAuthorityWriteErrors(() =>
+    updateScheduledTask(db, existing.workspaceId, existing.id, {
+      status: "active",
+      ...(rearm
+        ? {
+            beforeUpdateCommit: async (tx: Database) => {
+              await rearmScheduledTaskEventsOnResume(tx, existing);
+            },
+          }
+        : {}),
+    }),
   );
 }
 

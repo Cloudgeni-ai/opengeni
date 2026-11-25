@@ -211,6 +211,12 @@ organization allows Only me chats.
   With admin visibility off the list is empty and admins cannot pause them,
   exactly like private chats. A deployment can require it to stay on with
   `OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED=true`.
+- A workspace admin can pause and resume someone else's Workspace schedule
+  (`POST …/scheduled-tasks/:taskId/pause` and `…/resume`, and the
+  `scheduled_tasks_pause` and `scheduled_tasks_resume` tools), so turning it
+  off and on needs the same permission. Resuming changes nothing else: the
+  schedule runs as its owner again, exactly as before the pause, and its event
+  triggers are re-armed. Changing or running it stays with its owner.
 
 The audience is not execution configuration: like the name and status it is
 left out of the execution digest, so changing it never invalidates accepted

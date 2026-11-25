@@ -49,6 +49,7 @@ import {
   scheduledTaskTriggerToken,
   pauseScheduledTaskAsAdmin,
   pausePrivateScheduledTaskAsAdmin,
+  resumeScheduledTaskAsAdmin,
   requirePausableScheduledTask,
   requireVisibleScheduledTask,
   scheduledTaskAccess,
@@ -489,8 +490,20 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
+    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
     const previous: ScheduledTaskRestoreState = { task: existing };
+    // An admin turns someone else's schedule back on with the permission
+    // that turned it off; editing and running it stay with its owner.
+    if (
+      viewer.admin &&
+      (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
+    ) {
+      const task = await resumeScheduledTaskAsAdmin(db, existing);
+      await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
+      const [resumed] = await withEventsAndBlockers([task]);
+      return c.json(scheduledTaskForGrant(resumed ?? task, grant));
+    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
