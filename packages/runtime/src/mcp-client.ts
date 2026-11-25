@@ -1,6 +1,23 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { MCPServerStreamableHttp } from "@openai/agents";
 
 type MCPServerStreamableHttpOptions = ConstructorParameters<typeof MCPServerStreamableHttp>[0];
+
+const toolCallObservations = new AsyncLocalStorage<McpToolCallObservation>();
+
+export class McpToolCallObservation {
+  wireInvalidParams = false;
+  readonly cleanups: Array<() => void> = [];
+
+  run<T>(call: () => T): T {
+    return toolCallObservations.run(this, call);
+  }
+
+  close(): void {
+    for (const cleanup of this.cleanups.splice(0)) cleanup();
+  }
+}
 
 /**
  * MCP client protocol selection for streamable HTTP servers.
@@ -17,8 +34,48 @@ type MCPServerStreamableHttpOptions = ConstructorParameters<typeof MCPServerStre
  * so a 2026-07-28 client rejects every tool list and the turn silently runs
  * without any connected app.
  */
-export function loadMcpClientModule(): Promise<unknown> {
-  return import("@modelcontextprotocol/client");
+type McpClientModule = typeof import("@modelcontextprotocol/client");
+let observedMcpClientModule: Promise<McpClientModule> | undefined;
+
+function loadMcpClientModule(): Promise<McpClientModule> {
+  return (observedMcpClientModule ??= import("@modelcontextprotocol/client").then((sdk) => {
+    // The SDK uses Invalid params for local output-schema failures too, and
+    // converts both into the same thrown error shape. Observe only a matching
+    // response before the SDK handles it, without changing the message or error.
+    class ObservedTransport extends sdk.StreamableHTTPClientTransport {
+      private readonly toolCalls = new Map<string | number, McpToolCallObservation>();
+
+      override onmessage: NonNullable<StreamableHTTPClientTransport["onmessage"]> = (message) => {
+        if (!sdk.isJSONRPCErrorResponse(message) && !sdk.isJSONRPCResultResponse(message)) return;
+        if (message.id === undefined || message.id === null) return;
+        const observation = this.toolCalls.get(message.id);
+        if (!observation) return;
+        this.toolCalls.delete(message.id);
+        observation.wireInvalidParams =
+          "error" in message && message.error.code === sdk.ProtocolErrorCode.InvalidParams;
+      };
+
+      override send(...args: Parameters<StreamableHTTPClientTransport["send"]>) {
+        const [message] = args;
+        const scope = toolCallObservations.getStore();
+        if (
+          scope &&
+          !Array.isArray(message) &&
+          sdk.isJSONRPCRequest(message) &&
+          message.method === "tools/call"
+        ) {
+          const { id } = message;
+          scope.wireInvalidParams = false;
+          this.toolCalls.set(id, scope);
+          scope.cleanups.push(() => {
+            if (this.toolCalls.get(id) === scope) this.toolCalls.delete(id);
+          });
+        }
+        return super.send(...args);
+      }
+    }
+    return { ...sdk, StreamableHTTPClientTransport: ObservedTransport };
+  }));
 }
 
 export function mcpStreamableHttpClientOptions(params: {
