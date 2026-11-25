@@ -228,6 +228,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/api-router",
   ],
+  "test/e2e/browser-viewer-fit.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/artifact-library.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -240,6 +245,13 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/embedded-artifact-viewer.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/embedded-interaction-viewer.browser.e2e.ts": [
+    "@opengeni/api-router",
+    "@opengeni/browserd",
     "@opengeni/react",
     "@opengeni/sdk",
     "@opengeni/testing",
@@ -273,6 +285,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/codex-account.browser.e2e.ts": ["opengeni-web", "@opengeni/sdk", "@opengeni/testing"],
   "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/modal-layer.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/workspace-pause-timers.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -463,6 +476,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/form-page-footer.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/signed-out-page.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/capability-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/plugin-discovery.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],

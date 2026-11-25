@@ -689,7 +689,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("adapts rail shortcuts to viewport height without hiding them on tall screens", async () => {
+  test("keeps rail shortcuts and the Setup group usable at every viewport height", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 900 },
       extraHTTPHeaders: ownerHeaders,
@@ -698,13 +698,17 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       await workspaceFromPage(page);
-      await page.getByRole("link", { name: "Capabilities", exact: true }).waitFor();
+      await page.getByRole("link", { name: "Agents", exact: true }).waitFor();
       expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
       expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
+      // Setup is closed by default and opens only when asked.
+      const setup = page.getByRole("button", { name: "Setup", exact: true });
+      expect(await setup.getAttribute("aria-expanded")).toBe("false");
+      expect(await page.getByRole("link", { name: "Capabilities", exact: true }).count()).toBe(0);
       await page.setViewportSize({ width: 1280, height: 600 });
-      await page.getByRole("button", { name: "More", exact: true }).click();
+      await setup.click();
       await page.getByRole("link", { name: "Capabilities", exact: true }).waitFor();
-      await page.getByRole("button", { name: "Less", exact: true }).click();
+      await setup.click();
       expect(await page.getByRole("link", { name: "Capabilities", exact: true }).count()).toBe(0);
       for (const height of [400, 300]) {
         await page.setViewportSize({ width: 1280, height });
@@ -746,7 +750,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         expect(layout.settingsClickable).toBe(true);
       }
       await page.setViewportSize({ width: 1280, height: 900 });
-      await page.getByRole("link", { name: "Capabilities", exact: true }).waitFor();
+      await page.getByRole("link", { name: "Agents", exact: true }).waitFor();
       expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
       expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
     } finally {
@@ -1700,10 +1704,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       status: initialPinResponse.status(),
       body: await initialPinResponse.text(),
     }).toEqual({ status: 200, body: expect.any(String) });
-    await pageA
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
     // Session navigation now starts the real capture-backed workbench while the
     // session record is still loading. Keep a bounded render budget that includes
     // that intentional parallel surface instead of measuring the rail alone.
@@ -1716,6 +1716,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     expect(await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
       "Unpin session",
     );
+    // The header's "…" menu reconciles from the same relation.
+    await expectHeaderPin(pageA, "Unpin");
 
     // A sibling tab in the same browser context must reconcile through the
     // document-scoped invalidation channel without a reload or the 15s poll.
@@ -1735,14 +1737,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const unpinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .click();
-    await pageA
-      .locator("header")
-      .getByRole("button", { name: "Pin session", exact: true })
-      .waitFor();
+    await clickHeaderPin(pageA, "Unpin");
+    await expectHeaderPin(pageA, "Pin");
     await Promise.all([unpinMutation, sameTabUnpinRefresh]);
     await sameTabPinnedTarget.waitFor({ state: "detached" });
 
@@ -1753,14 +1749,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const repinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
-    await pageA
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await clickHeaderPin(pageA, "Pin");
+    await expectHeaderPin(pageA, "Unpin");
     await Promise.all([repinMutation, sameTabRepinRefresh]);
     await sameTabPinnedTarget.waitFor();
-    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(128);
+    // Includes five opens of the header's "…" menu, where Pin lives.
+    expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(192);
 
     // A genuinely separate browser context represents another device: it owns
     // independent document, cache, BroadcastChannel, and focus state, while the
@@ -1771,16 +1765,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const pageB = await deviceB.newPage();
     await pageB.goto(targetUrl);
-    await pageB
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await expectHeaderPin(pageB, "Unpin");
     await createSessionThroughApi(pageB, apiBaseUrl, workspaceId, "Newer unrelated activity");
     await pageB.reload();
-    await pageB
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await expectHeaderPin(pageB, "Unpin");
     const pinnedB = pageB.getByRole("group", { name: "Pinned" });
     await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     expect(
@@ -1799,10 +1787,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const otherPage = await otherMember.newPage();
     await otherPage.goto(targetUrl);
-    await otherPage
-      .locator("header")
-      .getByRole("button", { name: "Pin session", exact: true })
-      .waitFor();
+    await expectHeaderPin(otherPage, "Pin");
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Server-backed workspace search is a separate dialog, not a rail filter.
@@ -1923,24 +1908,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // online through the same header action succeeds without a second logical
     // pin state or an OCC dead end.
     await deviceB.setOffline(true);
-    await pageB
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .click();
+    await clickHeaderPin(pageB, "Unpin");
     await pageB.getByText("Couldn't unpin session", { exact: true }).waitFor();
-    await pageB
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await expectHeaderPin(pageB, "Unpin");
     await deviceB.setOffline(false);
-    await pageB
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .click();
-    await pageB
-      .locator("header")
-      .getByRole("button", { name: "Pin session", exact: true })
-      .waitFor();
+    await clickHeaderPin(pageB, "Unpin");
+    await expectHeaderPin(pageB, "Pin");
 
     // A different device has no shared browser channel. Returning focus must
     // trigger a real server reconciliation without reloading the document.
@@ -1956,30 +1929,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     );
     await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
     await crossDeviceRefresh;
-    await pageA
-      .locator("header")
-      .getByRole("button", { name: "Pin session", exact: true })
-      .waitFor();
+    await expectHeaderPin(pageA, "Pin");
     await pageA.getByRole("group", { name: "Pinned" }).waitFor({ state: "detached" });
     expect(await pageA.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Pin from the header as a fresh OCC revision, then prove both the second
     // owner device and the other member reconcile to their respective truths.
-    await pageA.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
-    await pageA
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await clickHeaderPin(pageA, "Pin");
+    await expectHeaderPin(pageA, "Unpin");
     await pageB.reload();
-    await pageB
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await expectHeaderPin(pageB, "Unpin");
     await otherPage.reload();
-    await otherPage
-      .locator("header")
-      .getByRole("button", { name: "Pin session", exact: true })
-      .waitFor();
+    await expectHeaderPin(otherPage, "Pin");
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     expect(browserPageErrors.get(deviceA)).toEqual([]);
@@ -4526,6 +4487,28 @@ async function configuredContext(
     localStorage.setItem("opengeni.accessKey", "configured-test-placeholder");
   });
   return context;
+}
+
+/** Pin and Unpin live in the session header's "…" menu. */
+async function openHeaderPinItem(page: Page, label: "Pin" | "Unpin") {
+  await page
+    .locator("header")
+    .getByRole("button", { name: "More session actions", exact: true })
+    .click();
+  const item = page.getByRole("menuitem", { name: label, exact: true });
+  await item.waitFor();
+  return item;
+}
+
+async function expectHeaderPin(page: Page, label: "Pin" | "Unpin") {
+  // The open menu's item follows the pin state live.
+  await openHeaderPinItem(page, label);
+  await page.keyboard.press("Escape");
+  await page.getByRole("menu").waitFor({ state: "detached" });
+}
+
+async function clickHeaderPin(page: Page, label: "Pin" | "Unpin") {
+  await (await openHeaderPinItem(page, label)).click();
 }
 
 async function reactCommitCount(page: Page): Promise<number> {

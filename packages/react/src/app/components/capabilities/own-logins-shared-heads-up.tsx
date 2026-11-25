@@ -19,6 +19,7 @@ import type {
   ConnectedAccountGroup,
   ConnectionAccountChoices,
 } from "./session-connection-accounts";
+import { isLapsedAccount } from "./session-connection-accounts";
 
 /** One of your own accounts this chat uses, however many times it is connected. */
 export type OwnLoginInUse = {
@@ -102,6 +103,8 @@ export function ownLoginsInUse(
       if (
         account.subjectId !== subjectId ||
         account.turnedOnHere === false ||
+        // Stopped working: the chat can't use it until it is reconnected.
+        isLapsedAccount(account) ||
         (chosen !== undefined && !chosen.includes(account.id)) ||
         seen.has(account.id)
       )

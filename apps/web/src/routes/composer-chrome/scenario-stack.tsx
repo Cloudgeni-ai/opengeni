@@ -93,6 +93,11 @@ function useHarnessLiveQueue(seed: UseTurnQueueResult): {
         setTurns((prev) => prev.filter((turn) => turn.id !== turnId));
         return true;
       },
+      steerTurns: async (turnIds) => {
+        if (seed.mutationError) return false;
+        setTurns((prev) => prev.filter((turn) => !turnIds.includes(turn.id)));
+        return true;
+      },
       removeTurn: async (turnId) => {
         setTurns((prev) => prev.filter((turn) => turn.id !== turnId));
         return true;

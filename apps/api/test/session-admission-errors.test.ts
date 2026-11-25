@@ -13,7 +13,7 @@ import {
   canonicalConfiguredModel,
   modelUnavailableHttpException,
 } from "../../../packages/core/src/domain/sessions";
-import { mcpAccountBindingsFromVisibleConnections } from "../../../packages/core/src/domain/mcp-account-bindings";
+import { resolveMcpAccountBindings } from "../../../packages/core/src/domain/mcp-account-bindings";
 import { createApp } from "../src/app";
 import {
   ClientSessionEvent,
@@ -369,10 +369,12 @@ describe("session admission error envelope", () => {
 });
 
 test("a removed connector selection reaches clients as a typed recovery refusal", async () => {
+  // New messages leave out a pick that stopped working, but an id the sender
+  // can't see (typo'd, forged or deleted) is still refused with the typed 422.
   const server = app();
   const removedId = "00000000-0000-4000-8000-000000000099";
   server.post("/v1/test/stale-connector-account", () => {
-    mcpAccountBindingsFromVisibleConnections({
+    resolveMcpAccountBindings({
       accountId: workspaceId,
       workspaceId,
       subjectId: "sender",
@@ -386,6 +388,7 @@ test("a removed connector selection reaches clients as a typed recovery refusal"
       ],
       connections: [],
       selections: [{ serverId: "mail", connectionId: removedId }],
+      unusableSelections: "omit",
     });
     throw new Error("stale account unexpectedly accepted");
   });

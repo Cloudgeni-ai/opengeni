@@ -23,6 +23,7 @@ import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { triggerHearsSource } from "./event-trigger-listening";
 import * as schema from "./schema";
 
 // Migration 0929. Event sources deliver into a workspace; each raw delivery is
@@ -268,7 +269,7 @@ export async function createEventSource(
                       ? eq(schema.eventSources.connectionId, input.connectionId)
                       : isNull(schema.eventSources.connectionId),
                   )
-                : input.kind === "workspace"
+                : input.kind === "workspace" || input.kind === "github_personal"
                   ? eq(schema.eventSources.ownerSubjectId, input.ownerSubjectId ?? "")
                   : eq(schema.eventSources.externalKey, input.externalKey ?? ""),
             ),
@@ -318,7 +319,7 @@ export async function createEventSource(
  * "This workspace" reads Opengeni's own recording events the same way.
  */
 export function eventSourceKindHasFeed(kind: EventSourceKind): boolean {
-  return kind === "gmail" || kind === "workspace";
+  return kind === "gmail" || kind === "workspace" || kind === "github_personal";
 }
 
 /** Have the feed pump read these sources' feeds now. */
@@ -808,7 +809,7 @@ export async function recordEventDeliveryInTransaction(
       .returning({ id: schema.inboundEvents.id });
     if (row) inserted.push({ id: row.id, event });
   }
-  const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
+  const matched = await queueMatchingEvents(tx, input, deliveryRow.id, inserted, settleMs);
   if (input.billingOrigin === "api" && matched.length > 0) {
     // Rows lock in id order, so concurrent deliveries can't deadlock here.
     await tx.execute(
@@ -925,12 +926,25 @@ async function deliveryEvents(
 /**
  * Evaluate the source's active triggers on runnable automations and queue
  * each matching event once per automation. A trigger only sees a private
- * source when its automation belongs to the source's owner, and an event only
- * fires the triggers of the stream it arrived on (an MCP subscription).
+ * source when its automation belongs to the source's owner (or, for a
+ * personal app sync, the source is an opted-in person's own Gmail or GitHub
+ * like the owner's one its trigger names; see triggerHearsSource), and an
+ * event only fires the triggers of the stream it arrived on (an MCP
+ * subscription).
+ *
+ * One event starts at most one run per agent and owner: when several
+ * automations of the same agent (`agentConfig.agentId`) and owner match an
+ * event, only one queues it: one that isn't held back by the storm guard or
+ * a blocker its owner was told about, then the oldest. An automation left
+ * with none of the delivery's events records a skipped run (reason
+ * `duplicate_agent_run`) in its run history, once per streak of them.
+ * Automations of different agents or owners, and ones without an agent,
+ * each run.
  */
 async function queueMatchingEvents(
   tx: Database,
   input: RecordEventDeliveryInput,
+  deliveryId: string,
   events: Array<{ id: string; event: StoredEventInput }>,
   settleMs: number,
 ): Promise<string[]> {
@@ -942,10 +956,24 @@ async function queueMatchingEvents(
     conditions: unknown;
     include_own_events: boolean;
     stream_key: string;
+    agent_id: string | null;
+    task_created_at: Date | string;
+    task_account_id: string;
+    authority_revision: number;
+    execution_digest: string | null;
+    owner_subject_id: string | null;
+    held: boolean;
   }>(
     tx,
     sql`select trigger.id, trigger.task_id, trigger.event_types, trigger.conditions,
-        trigger.include_own_events, trigger.stream_key
+        trigger.include_own_events, trigger.stream_key,
+        nullif(task.agent_config ->> 'agentId', '') as agent_id,
+        task.created_at as task_created_at, task.account_id as task_account_id,
+        task.authority_revision, task.execution_digest, task.owner_subject_id,
+        (settings.throttled_since is not null or exists (
+          select 1 from scheduled_task_blocker_reviews review
+          where review.workspace_id = task.workspace_id and review.task_id = task.id
+            and review.state = 'notified')) as held
       from event_triggers trigger
       join scheduled_tasks task
         on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
@@ -953,11 +981,10 @@ async function queueMatchingEvents(
         on settings.task_id = trigger.task_id and settings.workspace_id = trigger.workspace_id
       join event_sources source
         on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
-      where trigger.workspace_id = ${input.workspaceId} and trigger.source_id = ${input.sourceId}
+      where trigger.workspace_id = ${input.workspaceId}
         and trigger.status = 'active' and task.status = 'active' and task.deleted_at is null
         and settings.completed_at is null
-        and (source.visibility = 'workspace' or source.owner_subject_id is null
-          or source.owner_subject_id = task.owner_subject_id)
+        and ${triggerHearsSource(sql`${input.sourceId}::uuid`)}
       order by trigger.task_id, trigger.position`,
   );
   const queued = new Map<string, Map<string, { triggerIds: string[]; occurredAt: Date }>>();
@@ -980,6 +1007,47 @@ async function queueMatchingEvents(
       entry.triggerIds.push(trigger.id);
       forTask.set(id, entry);
       queued.set(trigger.task_id, forTask);
+    }
+  }
+  if (queued.size === 0) return [];
+  // At most one run per agent and owner for each event.
+  const tasks = new Map(triggers.map((trigger) => [trigger.task_id, trigger]));
+  const byAgent = new Map<string, (typeof triggers)[number][]>();
+  for (const taskId of queued.keys()) {
+    const task = tasks.get(taskId);
+    if (!task?.agent_id) continue;
+    const key = JSON.stringify([task.agent_id, task.owner_subject_id]);
+    byAgent.set(key, [...(byAgent.get(key) ?? []), task]);
+  }
+  for (const agentTasks of byAgent.values()) {
+    if (agentTasks.length < 2) continue;
+    const ranked = [...agentTasks].sort(
+      (a, b) =>
+        Number(a.held) - Number(b.held) ||
+        asDate(a.task_created_at).getTime() - asDate(b.task_created_at).getTime() ||
+        (a.task_id < b.task_id ? -1 : a.task_id > b.task_id ? 1 : 0),
+    );
+    const taken = new Set<string>();
+    for (const task of ranked) {
+      const forTask = queued.get(task.task_id)!;
+      for (const eventId of [...forTask.keys()]) {
+        if (taken.has(eventId)) forTask.delete(eventId);
+        else taken.add(eventId);
+      }
+    }
+    for (const duplicate of ranked) {
+      if (queued.get(duplicate.task_id)!.size > 0) continue;
+      queued.delete(duplicate.task_id);
+      await recordSkippedEventRun(tx, {
+        accountId: duplicate.task_account_id,
+        workspaceId: input.workspaceId,
+        taskId: duplicate.task_id,
+        authorityRevision: Number(duplicate.authority_revision),
+        executionDigest: duplicate.execution_digest,
+        producerKey: eventDuplicateAgentRunProducerKey(deliveryId, duplicate.task_id),
+        reason: EVENT_DUPLICATE_AGENT_RUN_REASON,
+        oncePerStreak: true,
+      });
     }
   }
   if (queued.size === 0) return [];
@@ -1668,6 +1736,14 @@ export function eventChainLimitProducerKey(firstInboxId: string): string {
   return `scheduled-task-event-chain-limit:${firstInboxId}`;
 }
 
+/** Why an automation's run was skipped: another automation of its agent took the same delivery. */
+export const EVENT_DUPLICATE_AGENT_RUN_REASON = "duplicate_agent_run";
+
+/** The producer key of the skipped run that records one delivery left to another automation of the agent. */
+export function eventDuplicateAgentRunProducerKey(deliveryId: string, taskId: string): string {
+  return `scheduled-task-event-duplicate:${deliveryId}:${taskId}`;
+}
+
 type DispatchFacts = {
   account_id: string;
   task_status: string;
@@ -1686,6 +1762,8 @@ type DispatchFacts = {
   consumed_since_armed: boolean;
   recent_occurrences: number;
   oldest_recent_occurrence_at: Date | string | null;
+  task_owner: string | null;
+  sync_owner: string | null;
 };
 
 function byteLength(value: unknown): number {
@@ -1727,9 +1805,11 @@ export async function claimEventTriggerDispatch(
         sql`select task.account_id, task.status as task_status,
             task.deleted_at is not null as task_deleted, task.name as task_name,
             task.authority_revision, task.execution_digest,
+            task.owner_subject_id as task_owner, task.action ->> 'ownerSubjectId' as sync_owner,
             coalesce((select run.error = 'chain_limit' and run.admission_refusal is not null
               from scheduled_task_runs run
               where run.workspace_id = task.workspace_id and run.task_id = task.id
+                and run.error is distinct from ${EVENT_DUPLICATE_AGENT_RUN_REASON}
               order by run.created_at desc, run.id desc limit 1), false) as chain_limit_engaged,
             coalesce(task.reusable_session_id, (
               select run.session_id from scheduled_task_runs run
@@ -1740,7 +1820,8 @@ export async function claimEventTriggerDispatch(
             settings.throttled_since, settings.throttle_notified,
             (exists (select 1 from scheduled_task_runs run
                 where run.workspace_id = task.workspace_id and run.task_id = task.id
-                  and run.created_at >= settings.armed_at)
+                  and run.created_at >= settings.armed_at
+                  and run.error is distinct from ${EVENT_DUPLICATE_AGENT_RUN_REASON})
               or exists (select 1 from scheduled_task_event_occurrences occurrence
                 where occurrence.workspace_id = task.workspace_id and occurrence.task_id = task.id
                   and occurrence.created_at >= settings.armed_at)) as consumed_since_armed,
@@ -1825,6 +1906,8 @@ export async function claimEventTriggerDispatch(
             chainDepth: schema.inboundEvents.chainDepth,
           },
           sourceKind: schema.eventSources.kind,
+          sourceVisibility: schema.eventSources.visibility,
+          sourceOwner: schema.eventSources.ownerSubjectId,
         })
         .from(schema.scheduledTaskEventInbox)
         .innerJoin(
@@ -1860,13 +1943,14 @@ export async function claimEventTriggerDispatch(
               limited.map((entry) => entry.inbox.id),
             ),
           );
-        const recorded = await recordChainLimitReceipt(tx, {
+        const recorded = await recordSkippedEventRun(tx, {
           accountId: facts.account_id,
           workspaceId,
           taskId,
           authorityRevision: facts.authority_revision,
           executionDigest: facts.execution_digest,
           producerKey: eventChainLimitProducerKey(limited[0]!.inbox.id),
+          reason: "chain_limit",
         });
         if (recorded && !facts.chain_limit_engaged && facts.session_id !== null) {
           chainLimitNotice = {
@@ -1914,16 +1998,28 @@ export async function claimEventTriggerDispatch(
       let summaryBytes = 2;
       for (const entry of pending) {
         if (carried.length >= EVENT_OCCURRENCE_CARRIED_EVENTS_MAX) break;
+        // Another person's private source (a personal sync's subscriber):
+        // the run history, which the automation's readers see, keeps only
+        // which event it was, never its content.
+        const othersPrivate =
+          entry.sourceVisibility === "private" &&
+          entry.sourceOwner !== null &&
+          entry.sourceOwner !== facts.task_owner &&
+          entry.sourceOwner !== facts.sync_owner;
         const summary = InboundEventSummary.parse({
           id: entry.event.id,
           sourceId: entry.event.sourceId,
           sourceKind: entry.sourceKind,
           type: entry.event.type,
           occurredAt: entry.event.occurredAt.toISOString(),
-          subject: entry.event.subject,
-          summary: entry.event.summary,
-          url: entry.event.url,
-          actor: { kind: entry.event.actorKind, name: entry.event.actorName },
+          ...(othersPrivate
+            ? { subject: null, summary: "", url: null, actor: { kind: "unknown", name: null } }
+            : {
+                subject: entry.event.subject,
+                summary: entry.event.summary,
+                url: entry.event.url,
+                actor: { kind: entry.event.actorKind, name: entry.event.actorName },
+              }),
         });
         const size = byteLength(summary) + 1;
         if (summaryBytes + size > EVENT_OCCURRENCE_SUMMARIES_MAX_BYTES) break;
@@ -1983,12 +2079,14 @@ export async function claimEventTriggerDispatch(
 }
 
 /**
- * The run history's record that the chain limit left events out: a skipped
- * run with reason `chain_limit`, never started. Recorded in a savepoint, so
- * an automation the refusal guard won't take (one that changed meanwhile)
+ * A run history record of events an automation did not run on: a skipped
+ * run with a retryable admission refusal, never started. Reasons:
+ * `chain_limit` and `duplicate_agent_run` (another automation of the same
+ * agent took the delivery; migration 1565). Recorded in a savepoint, so an
+ * automation the refusal guard won't take (one that changed meanwhile)
  * still dispatches; returns whether it was recorded.
  */
-async function recordChainLimitReceipt(
+async function recordSkippedEventRun(
   tx: Database,
   input: {
     accountId: string;
@@ -1997,8 +2095,21 @@ async function recordChainLimitReceipt(
     authorityRevision: number;
     executionDigest: string | null;
     producerKey: string;
+    reason: string;
+    /** Not when the automation's latest run is already this skip. */
+    oncePerStreak?: boolean;
   },
 ): Promise<boolean> {
+  const refusal = JSON.stringify({ version: 1, reason: input.reason, retryable: true });
+  if (input.oncePerStreak) {
+    const [latest] = await rawRows<{ error: string | null }>(
+      tx,
+      sql`select error from scheduled_task_runs
+        where workspace_id = ${input.workspaceId} and task_id = ${input.taskId}
+        order by created_at desc, id desc limit 1`,
+    );
+    if (latest?.error === input.reason) return false;
+  }
   try {
     return await tx.transaction(async (savepoint) => {
       const rows = await rawRows<{ id: string }>(
@@ -2008,8 +2119,7 @@ async function recordChainLimitReceipt(
             fired_at, completed_at, action_kind, status, error, admission_refusal)
           values (${input.accountId}, ${input.workspaceId}, ${input.taskId},
             ${input.authorityRevision}, ${input.executionDigest}, 'event', ${input.producerKey},
-            now(), now(), 'agent_turn', 'skipped', 'chain_limit',
-            '{"version":1,"reason":"chain_limit","retryable":true}'::jsonb)
+            now(), now(), 'agent_turn', 'skipped', ${input.reason}, ${refusal}::jsonb)
           on conflict do nothing
           returning id`,
       );

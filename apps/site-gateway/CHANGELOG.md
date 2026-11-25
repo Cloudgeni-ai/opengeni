@@ -1,5 +1,121 @@
 # @opengeni/site-gateway
 
+## 0.3.14
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/sdk@6.41.0
+
+## 0.3.13
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+
+## 0.3.12
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+
+## 0.3.11
+
+### Patch Changes
+
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+
+## 0.3.10
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/sdk@6.37.3
+
+## 0.3.9
+
+### Patch Changes
+
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/sdk@6.37.2
+
+## 0.3.8
+
+### Patch Changes
+
+- @opengeni/contracts@6.37.1
+- @opengeni/sdk@6.37.1
+
+## 0.3.7
+
+### Patch Changes
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/sdk@6.37.0
+  - @opengeni/contracts@6.37.0
+
+## 0.3.6
+
+### Patch Changes
+
+- 23e52db: Published apps' frame chrome and the gateway's own pages follow the viewer's light or dark system setting.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [e765d11]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [837e58f]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/sdk@6.36.0
+
 ## 0.3.5
 
 ### Patch Changes

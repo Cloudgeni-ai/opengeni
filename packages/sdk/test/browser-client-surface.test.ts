@@ -36,7 +36,6 @@ const legacyBrowserUnusedMethods = [
   "getLatestEventResult",
   "getLatestStartedTurn",
   // Shared Insights methods are adopted by the separately owned Insights UI.
-  "getWorkspaceInsightsUsage",
   "getOrganizationInsightsUsage",
   // The overloaded Insights call-list API predates this boundary too. Erasing
   // type signatures must not mistake its overloads for runtime consumers.
@@ -136,11 +135,19 @@ const integrationMethods = [
   // app_sync_* tools and Apps read status through the Site runtime.
   "createAppSync",
   "deleteAppSync",
+  "getAppSyncOptInReview",
   "getAppSyncStatus",
   "listAppSyncs",
   "runAppSync",
   "setAppSyncOptIn",
   "updateAppSync",
+  // App webhook management for hosts and scripts; agents use the
+  // app_webhook_* tools. Apps notify through the Site runtime (site.notify).
+  "createAppWebhook",
+  "deleteAppWebhook",
+  "listAppWebhooks",
+  "notifyFromApp",
+  "updateAppWebhook",
   // The workspace default limit profile for published Sites, for hosts and
   // admin scripts; the web console sets limits per Site.
   "getSiteLimitProfile",
@@ -170,6 +177,10 @@ const nativeAppMethods = [
 // A product embedding Opengeni states, from its backend as the person, which
 // of their phones it rings for agent calls; no Opengeni browser surface uses it.
 const embeddingProductMethods = ["getAgentCallHostPhones", "setAgentCallHostPhones"];
+
+// App server code runs with logs are read by the app's chat agent
+// (`app_server_runs`) and SDK consumers; the console shows only the status line.
+const appServerRunMethods = ["listAppServerRuns"];
 
 // #3470 retired the preference editor and learning/onboarding hooks, not their
 // public SDK contracts. Preserve these existing browser methods for old bundles
@@ -294,6 +305,12 @@ async function readBrowserProductionSources(): Promise<string> {
 }
 
 describe("browser client runtime surface", () => {
+  test("session model defaults are on the public integration client, not the browser client", () => {
+    const options = { baseUrl: "https://api.example.test" };
+    expect(new OpenGeniClient(options).setSessionModelSettings).toBeFunction();
+    expect(new OpenGeniBrowserClient(options)).not.toHaveProperty("setSessionModelSettings");
+  });
+
   test.each(["getOrganizationApiKey", "updateOrganizationApiKey"] as const)(
     "keeps %s on all non-browser public clients but out of the browser client",
     (methodName) => {
@@ -325,6 +342,7 @@ describe("browser client runtime surface", () => {
         ...integrationMethods,
         ...nativeAppMethods,
         ...embeddingProductMethods,
+        ...appServerRunMethods,
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,

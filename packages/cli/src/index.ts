@@ -53,7 +53,7 @@ const USAGE = `Usage: opengeni <command> [options]
 Commands:
   connect                    Add Opengeni to the coding agents on this computer
                              (Claude Code, Codex, Cursor, VS Code with Copilot)
-    --client <list>          claude, codex, cursor, vscode or all (default: the ones installed)
+    --client <list>          claude, codex, cursor, vscode, or all (the ones installed, the default)
     --no-skill               Don't install the short opengeni skill
     --no-sign-in             Don't start sign-in where the agent's command can
   agents deploy [dir]        Deploy agents/<key>.yaml files to an organization (default dir: agents)
@@ -252,7 +252,7 @@ function runConnectCommand(argv: readonly string[], io: CliIo): number {
   }
   if (args.positionals.length > 0) args.errors.push(`unexpected argument ${args.positionals[0]}.`);
   const clients = parseClients(nonEmpty(args.flags.get("client")));
-  if (typeof clients === "string") args.errors.push(clients);
+  if (typeof clients === "object" && "error" in clients) args.errors.push(clients.error);
   if (args.errors.length > 0) {
     for (const error of args.errors) io.stderr(`error: ${error}\n`);
     io.stderr("Run opengeni --help for usage.\n");
@@ -266,7 +266,7 @@ function runConnectCommand(argv: readonly string[], io: CliIo): number {
     io.connectDeps ?? nodeConnectDeps(env),
     {
       baseUrl,
-      clients: clients as Exclude<typeof clients, string>,
+      clients: clients as Exclude<typeof clients, { error: string }>,
       skill: !args.flags.has("no-skill"),
       signIn: !args.flags.has("no-sign-in"),
     },

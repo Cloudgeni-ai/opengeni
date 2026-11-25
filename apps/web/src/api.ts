@@ -1,3 +1,4 @@
+import { heedeoSignupToken } from "@/lib/heedeo";
 import { teamsAuthReturnPath } from "@/lib/teams-connect";
 import type { ChatClient } from "@opengeni/sdk";
 // The console primarily uses `@opengeni/sdk`. Bootstrap, managed-session,
@@ -86,7 +87,7 @@ let managedActorForegroundIdle: Promise<void> | null = null;
 let resolveManagedActorForegroundIdle: (() => void) | null = null;
 const managedActorMutationListeners = new Set<() => void>();
 const managedActorInvalidationListeners = new Set<() => void>();
-const signInLostListeners = new Set<() => void>();
+const signInLostListeners = new Set<(reason: "signed_out" | "forbidden") => void>();
 let managedActorMutationCount = 0;
 const MANAGED_ACTOR_EPOCH_HEADER = "x-opengeni-actor-epoch";
 const MANAGED_ACTOR_STATE_HEADER = "x-opengeni-actor-state";
@@ -204,21 +205,30 @@ export function createOpenGeniClient(
 /**
  * Hear when an API request is refused because this page's sign-in is gone
  * (the server's 401 says the sign-in was missing or expired), so the app can
- * stop its background reads and sign in again instead of polling on.
+ * stop its background reads and sign in again instead of polling on. A 403
+ * reports `"forbidden"`: with one sign-in cookie per browser, another tab may
+ * have signed in a different person, so the app checks who is signed in.
  */
-export function subscribeSignInLost(listener: () => void): () => void {
+export function subscribeSignInLost(
+  listener: (reason: "signed_out" | "forbidden") => void,
+): () => void {
   signInLostListeners.add(listener);
   return () => signInLostListeners.delete(listener);
 }
 
 function noteSignInLost(response: Response): void {
-  if (response.status !== 401 || signInLostListeners.size === 0) return;
+  if (signInLostListeners.size === 0) return;
+  if (response.status === 403) {
+    for (const listener of [...signInLostListeners]) listener("forbidden");
+    return;
+  }
+  if (response.status !== 401) return;
   void response
     .clone()
     .json()
     .then((envelope: unknown) => {
       if (!isSignInLostRejection(envelope)) return;
-      for (const listener of [...signInLostListeners]) listener();
+      for (const listener of [...signInLostListeners]) listener("signed_out");
     })
     .catch(() => undefined);
 }
@@ -966,10 +976,12 @@ export async function signUpEmail(input: {
   password: string;
 }): Promise<unknown> {
   const attribution = signupAttribution();
+  const heedeoToken = await heedeoSignupToken();
   return await authRequest<unknown>("/sign-up/email", {
     method: "POST",
     body: JSON.stringify({
       ...input,
+      ...(heedeoToken ? { heedeoToken } : {}),
       // The verification link returns here with a one-shot marker and the
       // first-touch campaign parameters; no browser storage is involved.
       callbackURL: signupReturnPath(authReturnBase(), "email_verified"),
@@ -1156,14 +1168,21 @@ export async function signUpPasskey(input: {
   name: string;
   signupChallengeToken?: string;
 }): Promise<unknown> {
+  // Identify alongside the ceremony so the passkey prompt never waits on it.
+  const heedeo = heedeoSignupToken();
   const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-up/options", {
     method: "POST",
     body: JSON.stringify(input),
   });
   const response = await createPasskey(ceremony);
+  const heedeoToken = await heedeo;
   return await authRequest<unknown>("/passkey/sign-up", {
     method: "POST",
-    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+    body: JSON.stringify({
+      challengeId: ceremony.challengeId,
+      response,
+      ...(heedeoToken ? { heedeoToken } : {}),
+    }),
   });
 }
 
@@ -1203,11 +1222,14 @@ export async function startManagedSocialSignIn(
       : signupReturnPath(authReturnBase(), `${provider}_signin`),
   );
   const attribution = reauthentication ? null : signupAttribution();
+  // A Google or GitHub click may create an account, so each one identifies.
+  const heedeoToken = reauthentication ? undefined : await heedeoSignupToken();
   const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
     method: "POST",
     body: JSON.stringify({
       provider,
       ...(signupChallengeToken ? { signupChallengeToken } : {}),
+      ...(heedeoToken ? { heedeoToken } : {}),
       callbackURL,
       errorCallbackURL: reauthentication
         ? callbackURL

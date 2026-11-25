@@ -289,7 +289,7 @@ transcripts.
 ## Agents
 
 Organizations with Console agents turned on (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`,
-off by default) get **Agents** and **Tool servers** in the Console nav. The
+off by default, `*` for all) get **Agents** and **Tool servers** in the Console nav. The
 pages call the public organization routes
 (`/v1/organizations/:organizationId/agents`, tool servers under
 `agents/tool-servers`; contracts in

@@ -8,6 +8,7 @@ const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD 
 const demoInputs = {
   agentSettings: resolve(__dirname, "agent-settings.html"),
   agentRows: resolve(__dirname, "agent-rows.html"),
+  appUpgrade: resolve(__dirname, "app-upgrade.html"),
   sessionStatus: resolve(__dirname, "session-status.html"),
   approvalReview: resolve(__dirname, "approval-review.html"),
   siteToolConsent: resolve(__dirname, "site-tool-consent.html"),
@@ -40,6 +41,7 @@ const demoInputs = {
   sessionHistoryImport: resolve(__dirname, "session-history-import.html"),
   embeddedChat: resolve(__dirname, "embedded-chat.html"),
   embeddedMeeting: resolve(__dirname, "embedded-meeting.html"),
+  skills: resolve(__dirname, "skills.html"),
 };
 
 export default defineConfig({

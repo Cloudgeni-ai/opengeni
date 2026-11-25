@@ -4,7 +4,10 @@ import type {
   BrowserFrameWebSocketFactory,
 } from "@opengeni/react/interaction";
 
-type ResolveDemoTarget = (browserSessionId: string, targetId: string) => BrowserTarget | null;
+type ResolveDemoTarget = (
+  browserSessionId: string,
+  targetId: string,
+) => (BrowserTarget & { demoViewport?: { width: number; height: number } | undefined }) | null;
 
 /** Deterministic frame transport for the public React demo. It speaks the exact
  * BrowserSession binary envelope while the normal SDK mock owns REST state. */
@@ -55,7 +58,8 @@ class DemoBrowserWebSocket extends EventTarget {
     const target = this.resolveTarget(this.browserSessionId, this.targetId);
     if (!target || !target.documentGeneration) return;
     try {
-      const image = await renderDemoPage(target);
+      const { width, height } = target.demoViewport ?? { width: 1_280, height: 720 };
+      const image = await renderDemoPage(target, width, height);
       if (this.closed) return;
       this.sequence += 1;
       const metadata = new TextEncoder().encode(
@@ -68,8 +72,8 @@ class DemoBrowserWebSocket extends EventTarget {
           documentGeneration: target.documentGeneration,
           sequence: this.sequence,
           mediaType: "image/png",
-          width: 1_280,
-          height: 720,
+          width,
+          height,
           deviceScaleFactor: 1,
           scrollX: 0,
           scrollY: 0,
@@ -87,21 +91,33 @@ class DemoBrowserWebSocket extends EventTarget {
   }
 }
 
-async function renderDemoPage(target: BrowserTarget): Promise<Uint8Array> {
+async function renderDemoPage(
+  target: BrowserTarget,
+  width: number,
+  height: number,
+): Promise<Uint8Array> {
   const canvas = document.createElement("canvas");
-  canvas.width = 1_280;
-  canvas.height = 720;
+  canvas.width = width;
+  canvas.height = height;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Demo browser canvas is unavailable.");
 
-  const gradient = context.createLinearGradient(0, 0, 1_280, 720);
+  const gradient = context.createLinearGradient(0, 0, width, height);
   gradient.addColorStop(0, "#0b1220");
   gradient.addColorStop(1, "#121b30");
   context.fillStyle = gradient;
-  context.fillRect(0, 0, 1_280, 720);
+  context.fillRect(0, 0, width, height);
+
+  const margin = Math.min(166, Math.floor(width / 12));
+  const cardWidth = width - 2 * margin;
+  const top = Math.min(86, Math.floor(height / 8));
+  const padding = Math.min(48, Math.floor(cardWidth / 14));
+  const left = margin + padding;
+  const contentWidth = cardWidth - 2 * padding;
+  const compact = width < 600;
 
   context.fillStyle = "#151d2b";
-  roundRect(context, 166, 86, 948, 548, 22);
+  roundRect(context, margin, top, cardWidth, height - 2 * top, 18);
   context.fill();
   context.strokeStyle = "#2a3850";
   context.lineWidth = 2;
@@ -109,39 +125,46 @@ async function renderDemoPage(target: BrowserTarget): Promise<Uint8Array> {
 
   context.fillStyle = "#7aa2f7";
   context.beginPath();
-  context.arc(232, 148, 18, 0, Math.PI * 2);
+  context.arc(left + 15, top + 44, 15, 0, Math.PI * 2);
   context.fill();
   context.fillStyle = "#f2f5fb";
   context.font = "600 24px Inter, system-ui, sans-serif";
-  context.fillText("Opengeni browser", 270, 157);
+  context.fillText("Opengeni browser", left + 43, top + 52, contentWidth - 43);
 
   context.fillStyle = "#0f1624";
-  roundRect(context, 214, 194, 852, 52, 12);
+  roundRect(context, left, top + 80, contentWidth, 44, 12);
   context.fill();
   context.strokeStyle = "#2a3850";
   context.stroke();
   context.fillStyle = "#9aa8bd";
   context.font = "16px ui-monospace, SFMono-Regular, monospace";
-  context.fillText(target.url, 236, 226, 800);
+  context.fillText(target.url, left + 12, top + 108, contentWidth - 24);
 
   context.fillStyle = "#f2f5fb";
-  context.font = "650 42px Inter, system-ui, sans-serif";
-  context.fillText(target.title || "Agent browser", 214, 334, 820);
+  context.font = `650 ${compact ? 25 : 38}px Inter, system-ui, sans-serif`;
+  context.fillText(target.title || "Agent browser", left, top + 188, contentWidth);
   context.fillStyle = "#aab6c8";
-  context.font = "20px Inter, system-ui, sans-serif";
-  context.fillText("This page is controlled through the public BrowserSession SDK.", 214, 378);
-  context.fillText("Human and agent actions share one causal, generation-fenced stream.", 214, 410);
+  context.font = "16px Inter, system-ui, sans-serif";
+  const description = compact
+    ? ["Live browser page", "Human and agent share this tab."]
+    : [
+        "This page is controlled through the public BrowserSession SDK.",
+        "Human and agent actions share one causal, generation-fenced stream.",
+      ];
+  description.forEach((line, index) =>
+    context.fillText(line, left, top + 222 + index * 25, contentWidth),
+  );
 
   context.fillStyle = "#6ea8fe";
-  roundRect(context, 214, 466, 208, 54, 12);
+  roundRect(context, left, top + 272, Math.min(208, contentWidth), 44, 12);
   context.fill();
   context.fillStyle = "#07101f";
   context.font = "600 18px Inter, system-ui, sans-serif";
-  context.fillText("Explore Opengeni", 241, 500);
+  context.fillText("Explore Opengeni", left + 16, top + 300, contentWidth - 32);
 
   context.fillStyle = "#6f7d92";
   context.font = "14px ui-monospace, SFMono-Regular, monospace";
-  context.fillText(`Live frame ${new Date().toLocaleTimeString()}`, 214, 582);
+  context.fillText(`Live frame · ${width} × ${height}`, left, top + 362, contentWidth);
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(

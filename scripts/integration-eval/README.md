@@ -39,8 +39,8 @@ rejects any other approval so a run never writes outside its fixtures.
    (see `docs/billing-origin.md`). A signed-in test person
    (`OPENGENI_EVAL_LOGIN_EMAIL` and `OPENGENI_EVAL_LOGIN_PASSWORD` instead of
    the key) is billed as app use. Email sign-in needs a solved Turnstile
-   challenge where the deployment enables it
-   (`OPENGENI_SIGNUP_CHALLENGE_ENABLED`), so use the key there.
+   challenge where the deployment enables it on sign-in
+   (`OPENGENI_SIGN_IN_CHALLENGE_ENABLED`), so use the key there.
 2. Two workspaces: one with the integrations connected, one with none.
 3. In the connected workspace, set each connection's change tools to **Ask
    first** (Capabilities → the connection → Tool permissions). Connector

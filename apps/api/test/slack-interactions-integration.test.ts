@@ -72,6 +72,7 @@ import {
   personalConnectionDelegationSourceForGrant,
   createSlackEventSource,
   createSessionForRequest,
+  settleSlackEventRecordings,
   updateSessionTitle,
   type ApiRouteDeps,
   type AppDependencies,
@@ -12446,6 +12447,104 @@ describe("Slack event source", () => {
     const [private_] = await shared!.admin`select count(*)::int as count from event_deliveries
       where source_id = ${source.id} and convert_from(body, 'UTF8') like '%Something private%'`;
     expect(private_!.count).toBe(0);
+  }, 90_000);
+
+  test("reaches the workspaces the organization shares the bot with, until sharing stops", async () => {
+    if (!available) return;
+    const value = await fixture({ eventTriggers: true, routedWorkspaceName: "Support" });
+    const target = value.routed!;
+    const add = async (workspaceId: string) =>
+      await createSlackEventSource({
+        db: client.db,
+        accountId: value.owner.accountId,
+        workspaceId,
+        createdBySubjectId: value.owner.subjectId,
+      });
+    // Not shared yet: the other workspace has no Slack bot.
+    await expect(add(target.workspaceId)).rejects.toThrow("Connect Slack to this workspace first");
+    await shared!.admin`
+      insert into opengeni_private.organization_slack_bot_access(
+        connection_id, account_id, home_workspace_id, enabled, generation, updated_by_subject_id)
+      values (${value.connectionId}, ${value.owner.accountId}, ${value.owner.workspaceId},
+        true, 1, ${value.owner.subjectId})`;
+    const homeSource = await add(value.owner.workspaceId);
+    const sharedSource = await add(target.workspaceId);
+    expect(sharedSource).toMatchObject({
+      kind: "slack",
+      workspaceId: target.workspaceId,
+      externalKey: `team:${value.teamId}`,
+      visibility: "workspace",
+    });
+    // Adding it again returns the same source.
+    expect((await add(target.workspaceId)).id).toBe(sharedSource.id);
+
+    const post = async (eventId: string, ts: string, text: string) => {
+      const response = await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/events",
+          JSON.stringify({
+            type: "event_callback",
+            team_id: value.teamId,
+            api_app_id: "A_OPENGENI",
+            event_id: eventId,
+            event_time: 1_761_200_000,
+            authorizations: [{ team_id: value.teamId, user_id: value.botUserId, is_bot: true }],
+            event: {
+              type: "message",
+              channel: "C_SUPPORT",
+              channel_type: "channel",
+              user: value.otherSlackUserId,
+              text,
+              ts,
+            },
+          }),
+          "application/json",
+        ),
+      );
+      expect(response.status).toBe(200);
+      // Slack is answered first; the shared workspaces' deliveries land after.
+      await settleSlackEventRecordings();
+    };
+    const summaries = async (workspaceId: string, sourceId: string) =>
+      (await listInboundEvents(client.db, workspaceId, { sourceIds: [sourceId], limit: 10 })).events
+        .map((event) => event.summary)
+        .sort();
+    const setAccess = async (enabled: boolean, workspaceIds: string[] | null) =>
+      await shared!.admin`
+        update opengeni_private.organization_slack_bot_access
+        set enabled = ${enabled}, workspace_ids = ${workspaceIds}::uuid[], generation = generation + 1
+        where connection_id = ${value.connectionId}`;
+
+    await post("Ev_1", "1761200001.000100", "Shared with every workspace");
+    // Narrowed to another workspace: the shared one no longer hears.
+    await setAccess(true, [crypto.randomUUID()]);
+    await post("Ev_2", "1761200002.000100", "Narrowed elsewhere");
+    await setAccess(true, [target.workspaceId]);
+    await post("Ev_3", "1761200003.000100", "Shared with this workspace");
+    // Revoked: only the home workspace still hears.
+    await setAccess(false, null);
+    await post("Ev_4", "1761200004.000100", "Sharing turned off");
+
+    const message = (text: string) => `Message in channel C_SUPPORT: ${text}`;
+    expect(await summaries(value.owner.workspaceId, homeSource.id)).toEqual(
+      [
+        "Shared with every workspace",
+        "Narrowed elsewhere",
+        "Shared with this workspace",
+        "Sharing turned off",
+      ]
+        .map(message)
+        .sort(),
+    );
+    expect(await summaries(target.workspaceId, sharedSource.id)).toEqual(
+      ["Shared with every workspace", "Shared with this workspace"].map(message).sort(),
+    );
+    // A revoked share also stops new shared sources.
+    const other = await createWorkspace(client.db, {
+      accountId: value.owner.accountId,
+      name: "Unshared",
+    });
+    await expect(add(other.id)).rejects.toThrow("Connect Slack to this workspace first");
   }, 90_000);
 });
 

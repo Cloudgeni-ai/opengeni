@@ -41,6 +41,10 @@ import {
 } from "@opengeni/runtime";
 import {
   GITHUB_REST_API_ORIGIN,
+  githubRestBearerHeaders,
+  githubRestGetter,
+  githubRestInternalServerConfig,
+  personalGitHubRestCacheScope,
   GITHUB_REST_MCP_APP_SERVER_ID,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
   GITHUB_REST_READ_TOOL_NAMES,
@@ -55,7 +59,6 @@ import {
 } from "@opengeni/runtime/github-rest-mcp";
 
 const PERSONAL_GITHUB_DELEGATION_SERVER_ID = "github:personal";
-const INTERNAL_GITHUB_MCP_TIMEOUT_MS = 20_000;
 
 type ResolveCredential = (
   request: ResolveConnectionCredentialInput,
@@ -161,7 +164,9 @@ export async function buildGitHubRestMcpForTurn(input: {
         }),
       ),
     });
-    configs.push(internalMcpConfig(GITHUB_REST_MCP_APP_SERVER_ID, "GitHub — Opengeni bot"));
+    configs.push(
+      githubRestInternalServerConfig(GITHUB_REST_MCP_APP_SERVER_ID, "GitHub — Opengeni bot"),
+    );
     toolRefs.push({ kind: "mcp", id: GITHUB_REST_MCP_APP_SERVER_ID });
     connectorBindings.push(
       ...githubConnectorBindings(GITHUB_REST_MCP_APP_SERVER_ID, appRepositories),
@@ -190,7 +195,9 @@ export async function buildGitHubRestMcpForTurn(input: {
         }),
       ),
     });
-    configs.push(internalMcpConfig(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "GitHub — My account"));
+    configs.push(
+      githubRestInternalServerConfig(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "GitHub — My account"),
+    );
     toolRefs.push({ kind: "mcp", id: GITHUB_REST_MCP_PERSONAL_SERVER_ID });
     connectorBindings.push(
       ...githubConnectorBindings(
@@ -258,17 +265,6 @@ function withPullRequestCreatedHook(
     return result;
   };
   return server;
-}
-
-function internalMcpConfig(id: string, name: string): Settings["mcpServers"][number] {
-  return {
-    id,
-    name,
-    url: `${GITHUB_REST_API_ORIGIN}/`,
-    allowedTools: [...GITHUB_REST_TOOL_NAMES],
-    timeoutMs: INTERNAL_GITHUB_MCP_TIMEOUT_MS,
-    cacheToolsList: true,
-  };
 }
 
 function appRepositoryAuthority(resources: ResourceRef[]): GitHubRestRepository[] {
@@ -570,7 +566,7 @@ function personalAuthorityResolver(input: {
       );
     }
     return {
-      headers: githubAuthorizationHeaders(resolution.headers),
+      headers: githubRestBearerHeaders(resolution.headers),
       connectionId: resolution.connectionId,
       actor: { kind: "personal_oauth", login: current.login },
       authorizeProviderRequest: async () => {
@@ -582,7 +578,7 @@ function personalAuthorityResolver(input: {
             input,
             repository,
             false,
-            githubGetWith(githubAuthorizationHeaders(resolution.headers)),
+            githubRestGetter(githubRestBearerHeaders(resolution.headers)),
           );
           return true;
         } catch {
@@ -778,7 +774,7 @@ async function validatePersonalRepository(
     let live: Awaited<ReturnType<typeof livePersonalGitHubRepository>>;
     try {
       live = await livePersonalGitHubRepository({
-        cacheScope: personalCacheScope(delegation.connectionId, current),
+        cacheScope: personalGitHubRestCacheScope(delegation.connectionId, current),
         repository: { repositoryId: repository.repositoryId },
         githubGet,
       });
@@ -800,34 +796,6 @@ async function validatePersonalRepository(
     }
   }
   return { delegation, login: metadata.githubLogin };
-}
-
-function personalCacheScope(
-  connectionId: string,
-  current: { connectionAuthorityGeneration: number; credentialBindingId: string },
-): string {
-  return `${connectionId}|${current.connectionAuthorityGeneration}|${current.credentialBindingId}`;
-}
-
-function githubGetWith(headers: Record<string, string>) {
-  return async (url: URL): Promise<Response> => {
-    if (url.origin !== GITHUB_REST_API_ORIGIN) {
-      throw new GitHubRestAuthorityError("GitHub REST destination binding mismatch");
-    }
-    return await fetch(url, {
-      method: "GET",
-      // A renamed repository answers with a same-origin redirect; the shared
-      // lookup follows it only to api.github.com.
-      redirect: "manual",
-      headers: {
-        accept: "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-        "user-agent": "OpenGeni-GitHub-Bridge/1",
-        ...headers,
-      },
-      signal: AbortSignal.timeout(INTERNAL_GITHUB_MCP_TIMEOUT_MS),
-    });
-  };
 }
 
 async function resolvePersonalCredential(
@@ -860,7 +828,7 @@ async function resolvePersonalCredential(
       () => personalConnectionNeedsReconnect(input),
     );
   }
-  return { resolution, headers: githubAuthorizationHeaders(resolution.headers) };
+  return { resolution, headers: githubRestBearerHeaders(resolution.headers) };
 }
 
 /**
@@ -903,9 +871,9 @@ function personalRepositoryResolver(
         false,
       );
       const live = await livePersonalGitHubRepository({
-        cacheScope: personalCacheScope(delegation.connectionId, current),
+        cacheScope: personalGitHubRestCacheScope(delegation.connectionId, current),
         repository: { fullName },
-        githubGet: githubGetWith(headers),
+        githubGet: githubRestGetter(headers),
       }).catch(() => {
         throw new GitHubRestAuthorityError("GitHub is temporarily unavailable. Try again.");
       });
@@ -1077,18 +1045,6 @@ function positiveSafeInteger(value: unknown): number | null {
 
 function repositoryKey(repository: GitHubRestRepository): string {
   return `${repository.connectionId}\0${repository.repositoryId}`;
-}
-
-function githubAuthorizationHeaders(headers: Record<string, string>): Record<string, string> {
-  const authorization = new Headers(headers).get("authorization");
-  if (
-    !authorization ||
-    !/^Bearer [^\u0000-\u0020\u007f]+$/u.test(authorization) ||
-    authorization.length > 16_384
-  ) {
-    throw new GitHubRestAuthorityError("Personal GitHub authorization header is unavailable");
-  }
-  return { authorization };
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {

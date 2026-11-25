@@ -10,6 +10,8 @@
 // allows other people's agents to (per workspace, off by default). It shows
 // them who it came from: the person the session works for.
 import {
+  CONNECTION_CARD_NOTICE_PREFIX,
+  isConnectionCardNoticeKey,
   NOTIFICATION_BODY_MAX_CHARS,
   NOTIFICATION_FACT_LABEL_MAX_CHARS,
   NOTIFICATION_FACT_VALUE_MAX_CHARS,
@@ -167,6 +169,20 @@ export async function personLabel(
   return "A teammate";
 }
 
+/**
+ * An agent's own notification key. Connection-card keys belong to the chat's
+ * connection cards, which mark it as needing the person until they are done,
+ * so an agent can neither set nor clear that state through them.
+ */
+export function agentNotificationKey(key: string): string {
+  const parsed = NotificationKey.parse(key);
+  if (isConnectionCardNoticeKey(parsed))
+    throw new ToolArgumentError(
+      `Notification keys starting with "${CONNECTION_CARD_NOTICE_PREFIX}" are reserved for connection cards. Use another key.`,
+    );
+  return parsed;
+}
+
 export function registerNotificationTools(input: RegisterNotificationToolsInput): void {
   const { server, deps, grant, sessionId, authorize, attempt, json } = input;
 
@@ -238,7 +254,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     },
     async ({ title, subtitle, message, facts, link, key, urgency, recipient }) => {
       await authorize();
-      const resolvedKey = NotificationKey.parse(key ?? `n-${crypto.randomUUID().slice(0, 8)}`);
+      const resolvedKey = agentNotificationKey(key ?? `n-${crypto.randomUUID().slice(0, 8)}`);
       const owner = await getSessionInboxRecipient(
         deps.db,
         grant.workspaceId,
@@ -360,7 +376,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         recipientSubjectId = member?.subjectId ?? recipient;
       }
       const payload = SessionNotificationWithdrawnPayload.parse({
-        key: NotificationKey.parse(key),
+        key: agentNotificationKey(key),
         ...(recipientSubjectId ? { recipientSubjectId } : {}),
       });
       await appendOwn([{ type: "session.notification.withdrawn", payload }]);
@@ -409,6 +425,8 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
       const allowed = async (item: InboxItemRow): Promise<boolean> => {
         if (fullAccess) return true;
         if (item.kind !== "notification") return false;
+        // A connection card waits on the person as an approval does.
+        if (isConnectionCardNoticeKey(item.sourceKey)) return false;
         if (policy === "any_agent") return true;
         return (
           item.workspaceId === grant.workspaceId &&

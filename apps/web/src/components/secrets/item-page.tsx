@@ -412,7 +412,7 @@ export function ItemPage({
   item: VaultItem;
   vault: VaultSummary;
   api: VaultsApi;
-  /** Reveal and copy values ("use = reveal"). Viewers can't. */
+  /** May use this vault's values; seeing them also needs the item's canReveal. */
   canUse: boolean;
   actions: ItemPageActions;
   /**
@@ -436,6 +436,9 @@ export function ItemPage({
     }
   }, [itemId]);
   useEffect(() => () => setRevealed({}), []);
+  // The server decides who may see values (docs/secrets.md, "Who can see a
+  // value"); the page only hides what would be refused.
+  const canSee = canUse && item.canReveal !== false;
 
   const archived = item.archivedAt !== null;
   const readOnly = vault.mode === "read_only";
@@ -655,7 +658,7 @@ export function ItemPage({
                       item={item}
                       field={field}
                       api={api}
-                      canUse={canUse}
+                      canUse={canSee}
                       revealed={revealed[field.id]}
                       onRevealed={(value) =>
                         setRevealed((current) => {
@@ -672,6 +675,14 @@ export function ItemPage({
               {!canUse ? (
                 <p className="mt-3 mb-0 text-xs leading-4.5 text-fg-muted">
                   You can see what's here but not the values. Ask a workspace admin for access.
+                </p>
+              ) : !canSee ? (
+                <p className="mt-3 mb-0 text-xs leading-4.5 text-fg-muted">
+                  {item.useOnly
+                    ? "Use only: agents can use these values, but nobody can see or copy them."
+                    : vault.source === "opengeni"
+                      ? "Agents can use these values. Only the person who saved this or an admin can see them."
+                      : "Agents can use these values. Only an admin can see them here."}
                 </p>
               ) : null}
             </DetailSection>

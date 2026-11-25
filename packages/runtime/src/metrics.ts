@@ -56,7 +56,18 @@ export function isMcpToolMetricLabel(value: unknown): value is string {
 
 export const MCP_LIFECYCLE_PHASES = ["connect", "close"] as const;
 export const MCP_LIFECYCLE_POLICIES = ["strict", "best_effort"] as const;
-export const MCP_LIFECYCLE_OUTCOMES = ["completed", "failed"] as const;
+/**
+ * `auth_needed`: the connection broker refused setup a credential (sign-in
+ * expired or revoked, account not usable for this turn), so the connect never
+ * reached the server with a credential. The person already sees that the
+ * account needs attention; operators should not read it as the server failing.
+ */
+export const MCP_LIFECYCLE_OUTCOMES = [
+  "completed",
+  "failed",
+  "refused_by_policy",
+  "auth_needed",
+] as const;
 
 /**
  * Closed outcomes of one fresh-box command-readiness replacement decision:

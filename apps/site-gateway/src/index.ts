@@ -18,8 +18,19 @@ import {
   SITE_GATEWAY_VERSION_PREFIX,
   parseSiteHostname,
 } from "@opengeni/contracts";
-import { SITE_UI_CSS, SITE_UI_STYLESHEET_PATH } from "@opengeni/sdk/site-ui";
+import {
+  SITE_CHARTS_JS,
+  SITE_CHARTS_SCRIPT_PATH,
+  SITE_UI_CSS,
+  SITE_UI_STYLESHEET_PATH,
+} from "@opengeni/sdk/site-ui";
 import { handleApi } from "./api";
+import { siteUiAsset } from "./site-ui-asset";
+import {
+  handleAppServerInternal,
+  isAppServerInternalPath,
+  type LoopbackExports,
+} from "./app-server";
 import { handleAsset, isAssetPath } from "./assets";
 import { handleCallback, handleLogin, handleLogout } from "./auth";
 import { parseCookies, readSession, readVisitor } from "./cookies";
@@ -55,30 +66,14 @@ export type { GatewayEnv } from "./env";
 export { SiteDatabase } from "./site-database";
 /** The per-Site live-hint Durable Object class bound as `SITE_LIVE` (optional). */
 export { SiteLive } from "./site-live";
+/** The loopback entrypoint loaded app server code calls back through (`ctx.exports.AppServerHost`). */
+export { AppServerHost } from "./app-server";
 
 function plain(status: number, body: string, headers: HeadersInit = {}): Response {
   const out = applySecurityHeaders(new Headers(headers), { noindex: true, hsts: false });
   out.set("Content-Type", "text/plain; charset=utf-8");
   if (!out.has("Cache-Control")) out.set("Cache-Control", "no-store");
   return new Response(body, { status, headers: out });
-}
-
-/**
- * The opt-in Opengeni look for apps (`<link rel="stylesheet" href="/__opengeni/ui.css">`).
- * Site HTML runs in an opaque origin, so the stylesheet may be read cross-origin.
- */
-function siteUiStylesheet(request: Request, hsts: boolean): Response {
-  if (request.method !== "GET" && request.method !== "HEAD")
-    return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
-  const headers = applySecurityHeaders(
-    new Headers({
-      "content-type": "text/css; charset=utf-8",
-      "cache-control": "public, max-age=300",
-    }),
-    { noindex: true, hsts },
-  );
-  headers.set("Cross-Origin-Resource-Policy", "cross-origin");
-  return new Response(request.method === "HEAD" ? null : SITE_UI_CSS, { headers });
 }
 
 function robots(noindex: boolean): Response {
@@ -105,7 +100,8 @@ export function unexpectedErrorResponse(request: Request, env: GatewayEnv): Resp
   if (
     isApiPath(url.pathname) ||
     isSiteDbInternalPath(url.pathname) ||
-    isSiteLiveInternalPath(url.pathname)
+    isSiteLiveInternalPath(url.pathname) ||
+    isAppServerInternalPath(url.pathname)
   )
     return jsonError(
       500,
@@ -149,6 +145,14 @@ export async function handleRequest(
     return await handleSiteDbInternal(request, url, env, config);
   if (isSiteLiveInternalPath(url.pathname))
     return await handleSiteLiveInternal(request, url, env, config);
+  if (isAppServerInternalPath(url.pathname))
+    return await handleAppServerInternal(
+      request,
+      url,
+      env,
+      config,
+      (ctx as WaitUntil & { exports?: LoopbackExports }).exports,
+    );
   const requestHost = url.hostname.toLowerCase();
   // `og.<domain>` is reserved for the console's HTML frame host, never a Site.
   if (isHtmlFrameHostRequest(requestHost, config.sitesDomain)) {
@@ -215,7 +219,10 @@ export async function handleRequest(
   // cache hits and refusals included (src/platform-requests.ts).
   if (record) countSiteRequest(config, ctx, hostname);
   const forceNoindex = config.forceNoindex || !record || record.noindex;
-  if (pathname === SITE_UI_STYLESHEET_PATH) return siteUiStylesheet(request, hsts);
+  if (pathname === SITE_UI_STYLESHEET_PATH)
+    return siteUiAsset(request, hsts, "text/css; charset=utf-8", SITE_UI_CSS);
+  if (pathname === SITE_CHARTS_SCRIPT_PATH)
+    return siteUiAsset(request, hsts, "text/javascript; charset=utf-8", SITE_CHARTS_JS);
   if (pathname === "/robots.txt")
     return robots(forceNoindex || record?.status !== "active" || !record?.versionId);
   if (

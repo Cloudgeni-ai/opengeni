@@ -39,7 +39,10 @@ import {
   createWorkspace,
   engageSitePlatformBrake,
   ensureExternalIdentity,
+  getPersonalGitHubRepositorySelectionState,
   liftSitePlatformBrake,
+  persistProviderOAuthConnection,
+  replacePersonalGitHubRepositorySelections,
   readSitePlatformTotals,
   readSessionUsageLimit,
   recordSitePlatformUsage,
@@ -1044,7 +1047,7 @@ test("anyone who can open a Site reads where it is published; its settings stay 
 
   const created = await f.publication(f.owner, site.id, "PUT", { access: "invited" });
   expect(created.status, JSON.stringify(created.json)).toBe(201);
-  // A viewer without artifacts:publish gets the primary address and status only.
+  // A viewer without artifacts:publish gets the primary address, status and chat model only.
   const published = await link(viewer);
   expect(published.status, JSON.stringify(published.json)).toBe(200);
   expect(published.json).toEqual({
@@ -1052,6 +1055,8 @@ test("anyone who can open a Site reads where it is published; its settings stay 
     hostname: created.json.hostname,
     url: created.json.url,
     status: "active",
+    // The model the app's chat starts with (none set here).
+    agentModel: null,
   });
   // The publication's settings (access, invitations, moderation) stay with managers.
   const settings = await f.publication(viewer, site.id, "GET");
@@ -1584,7 +1589,16 @@ test("published page tools: declarations, audiences, live membership and approva
     expect(
       (await f.gateway(f.host, "GET", "/site/config", { session: invited })).json.viewer.kind,
     ).toBe("invited");
-    for (const method of ["catalog", "declarations", "resolve", "call", "invoke"]) {
+    // Hyphenated shell-only methods reach the tools route too (not unsupported).
+    for (const method of [
+      "catalog",
+      "declarations",
+      "resolve",
+      "call",
+      "invoke",
+      "sync-review",
+      "sync-opt-in",
+    ]) {
       expect(
         (await f.gateway(f.host, "POST", `/tools/${method}`, { visitor, body: {} })).status,
       ).toBe(403);
@@ -1692,6 +1706,156 @@ test("published page tools: a saved Allow makes a recommended-Ask connection too
     expect(f.callAuthorizations.at(-1)).toBe("Bearer page-prod");
   } finally {
     f.close();
+  }
+}, 180_000);
+
+// An app that declares Your GitHub tools (`github_personal`) runs them on its
+// published address on each signed-in member's own GitHub connection with All
+// my repositories; a member without one is told to connect in Opengeni.
+test("published page tools: Your GitHub runs on each viewer's own GitHub account", async () => {
+  const f = await fixture({
+    environmentsEncryptionKey: randomBytes(32).toString("base64"),
+    githubRestMcpEnabled: true,
+    githubPersonalOauthEnabled: true,
+    githubPersonalAllRepositoriesEnabled: true,
+    githubPersonalOauthClientId: "Ov23published-client",
+    githubPersonalOauthClientSecret: "published-client-secret",
+    integrationsEnabled: true,
+    integrationsStateSecret: "published-personal-github-state",
+  });
+  const tool = { serverId: "github_personal", toolName: "workflow_runs_list" };
+  const site = await f.publish("Deployments", "workspace", [tool]);
+  const publication = await f.publication(f.owner, site.id, "PUT", { agent: { enabled: false } });
+  expect(publication.status, JSON.stringify(publication.json)).toBe(201);
+  const host = String(publication.json.hostname);
+  const viewer = await f.person([...memberPermissions, "connections:read", "connections:write"]);
+  // The member's own Your GitHub, All my repositories (read).
+  const now = new Date().toISOString();
+  const credentialBindingId = crypto.randomUUID();
+  const connection = await persistProviderOAuthConnection(db.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: viewer.subjectId,
+    visibleToSubjectId: viewer.subjectId,
+    providerDomain: "github.com",
+    kind: "oauth2",
+    status: "active",
+    credentialEncrypted: encryptEnvironmentValue(
+      environmentsEncryptionKeyBytes(f.settings)!,
+      JSON.stringify({ access_token: "member-token", token_type: "Bearer", scope: "repo" }),
+    ),
+    grantedScopes: ["repo"],
+    expiresAt: null,
+    metadata: {
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "424242",
+      githubUserId: "424242",
+      githubLogin: "member-gh",
+      oauthEnvironment: f.settings.environment,
+      oauthClientMarker: "a".repeat(32),
+      credentialBindingId,
+      connectedAt: now,
+      lastVerifiedAt: now,
+    },
+    createdBySubjectId: viewer.subjectId,
+    updatedBySubjectId: viewer.subjectId,
+    credentialRole: "opengeni_github_personal",
+    providerFamily: "github",
+    providerPrincipalId: "424242",
+    requireLiveUserAuthority: true,
+    requiredLiveUserPermission: "connections:write",
+    exclusiveProviderPrincipalPerOwner: true,
+  });
+  const selection = await getPersonalGitHubRepositorySelectionState(db.db, {
+    accountId: f.accountId,
+    originWorkspaceId: f.workspace.id,
+    subjectId: viewer.subjectId,
+    connectionId: connection!.id,
+  });
+  await replacePersonalGitHubRepositorySelections(db.db, {
+    accountId: f.accountId,
+    originWorkspaceId: f.workspace.id,
+    subjectId: viewer.subjectId,
+    connectionId: connection!.id,
+    expectedConnectionAuthorityGeneration: selection!.connectionAuthorityGeneration,
+    expectedSelectionGeneration: selection!.selectionGeneration,
+    idempotencyKey: crypto.randomUUID(),
+    allRepositoriesAccess: "read",
+    repositories: [],
+  });
+  // GitHub answers the member's token only.
+  const github: string[] = [];
+  const realFetch = globalThis.fetch;
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.origin !== "https://api.github.com") return await realFetch(input, init);
+    const authorization = new Headers(init?.headers).get("authorization");
+    github.push(`${url.pathname} ${authorization}`);
+    if (authorization !== "Bearer member-token") return new Response("{}", { status: 401 });
+    const repository = {
+      id: 4242,
+      full_name: "Cloudgeni-ai/opengeni-ops",
+      html_url: "https://github.com/Cloudgeni-ai/opengeni-ops",
+      private: true,
+      visibility: "private",
+      archived: false,
+      disabled: false,
+      default_branch: "main",
+      permissions: { pull: true, triage: false, push: false, maintain: false, admin: false },
+    };
+    if (
+      url.pathname === "/repos/Cloudgeni-ai/opengeni-ops" ||
+      url.pathname === "/repositories/4242"
+    )
+      return Response.json(repository);
+    if (url.pathname === "/repos/Cloudgeni-ai/opengeni-ops/actions/runs")
+      return Response.json({
+        total_count: 1,
+        workflow_runs: [{ id: 777, name: "release", status: "completed", conclusion: "success" }],
+      });
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch);
+  try {
+    const post = (session: string, method: string, body: unknown) =>
+      f.gateway(host, "POST", `/tools/${method}`, { session, body });
+    const member = await f.signIn(viewer, host);
+    const ready = await post(member, "readiness", { targets: [{ identity: tool }] });
+    expect(ready.status, JSON.stringify(ready.json)).toBe(200);
+    expect(ready.json.tools[0]).toMatchObject({
+      state: "ready",
+      runsAs: { connector: "Your GitHub", account: "member-gh", shared: false },
+    });
+    const invoked = await post(member, "invoke", {
+      target: { identity: tool },
+      operationId: crypto.randomUUID(),
+      arguments: { repository: "Cloudgeni-ai/opengeni-ops", limit: 1 },
+    });
+    expect(invoked.status, JSON.stringify(invoked.json)).toBe(200);
+    expect(JSON.stringify(invoked.json.result)).toContain("release");
+    expect(github.length).toBeGreaterThan(0);
+    expect(github.every((line) => line.endsWith(" Bearer member-token"))).toBe(true);
+
+    // The owner has no Your GitHub: Connect, in Opengeni; nothing reaches GitHub.
+    github.length = 0;
+    const owner = await f.signIn(f.owner, host);
+    const connect = await post(owner, "readiness", { targets: [{ identity: tool }] });
+    expect(connect.json.tools[0]).toMatchObject({
+      state: "open_in_opengeni",
+      connector: "Your GitHub",
+    });
+    const refused = await post(owner, "invoke", {
+      target: { identity: tool },
+      operationId: crypto.randomUUID(),
+      arguments: { repository: "Cloudgeni-ai/opengeni-ops", limit: 1 },
+    });
+    expect(refused.status).toBe(409);
+    expect(github).toEqual([]);
+  } finally {
+    fetchSpy.mockRestore();
   }
 }, 180_000);
 

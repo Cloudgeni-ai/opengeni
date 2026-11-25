@@ -162,7 +162,8 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 
 Some Worker Fleet panels and recording rules also read **cluster-infra** series:
 container working sets from cAdvisor/kubelet; pod, phase, resource-limit, HPA,
-and node-readiness data from kube-state-metrics; memory/I/O PSI, swap, and node
+and node-readiness data from kube-state-metrics; memory/I/O PSI, system-disk
+busy time, swap, and node
 identity from node-exporter; and runtime errors plus instance-to-node identity
 from kubelet. If an exporter is absent, the dependent cluster panels and alerts
 are empty. The app-emitted memory-guard panels remain available without a

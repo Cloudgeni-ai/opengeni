@@ -7,27 +7,25 @@ import type {
   ChatSession as Session,
   SessionEvent,
   ChatSessionListResponse as SessionListResponse,
+  WorkspaceArtifact,
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   ArchiveIcon,
+  ArrowLeftRightIcon,
   ArrowLeftIcon,
   CopyIcon,
-  CopyPlusIcon,
-  DownloadIcon,
-  InfoIcon,
   LinkIcon,
   Maximize2Icon,
+  MessageSquareIcon,
   MoreHorizontalIcon,
   PanelLeftCloseIcon,
-  PanelLeftIcon,
-  PanelLeftOpenIcon,
   PanelRightCloseIcon,
-  PanelRightIcon,
-  PanelRightOpenIcon,
   PinIcon,
   PlusIcon,
-  RotateCcwIcon,
+  RefreshCwIcon,
+  Settings2Icon,
+  SquareArrowOutUpRightIcon,
 } from "lucide-react";
 import {
   lazy,
@@ -44,9 +42,11 @@ import {
   type RefObject,
 } from "react";
 import { SiteView } from "../../artifacts";
+import { useArtifactLabels } from "../../components/artifacts/artifact-chrome";
+import type { SiteLiveState } from "../../components/artifacts/artifact-sandbox";
+import { AppServerStatusLine } from "../components/artifacts/app-server-status";
 import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { useArtifactsBackLink } from "../components/artifacts/artifact-page-chrome";
-import { CopyArtifactLinkButton } from "../components/artifacts/copy-artifact-link";
 import type {
   CreatedConversation,
   NewConversationCreateOptions,
@@ -66,7 +66,6 @@ import {
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
 import { useSiteActions } from "../components/artifacts/site-actions";
-import { useExportApp } from "../components/artifacts/app-package";
 import { useSiteSidebarActions } from "../lib/site-sidebar-bridge";
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
@@ -82,14 +81,9 @@ import {
   useSitePublicationLink,
 } from "../components/artifacts/site-public-link";
 import { useAppApi } from "../lib/app-api";
-import {
-  notifySiteToolReadinessChanged,
-  useConsoleSiteToolBridge,
-  useConsoleSiteViewer,
-} from "../lib/console-site";
-import { toast } from "../lib/toast";
-import { userErrorText } from "../../ui/api-error";
-import { Link, useNavigate } from "../lib/navigation";
+import { useChatOperations } from "../lib/actions/chat-operations";
+import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
+import { Link, useNavigate, usePage, useRouter } from "../lib/navigation";
 import { hasWorkspacePermission } from "../lib/permissions";
 import type { SiteViewArtifactsReturn } from "../lib/routes";
 import { sessionDisplayTitle } from "../lib/session-rename";
@@ -101,15 +95,22 @@ import {
   SITE_CHAT_MIN_WIDTH,
   SITE_MIN_WIDTH,
   newlyWaitingConversation,
+  useSiteChatOpen,
   useSiteChatPanelLayout,
   type SiteChatPanelLayout,
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
 import { AppConnectCard } from "../lib/app-connect-card";
-import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
+import { AppSyncJoinCard, AppSyncOptInHost } from "../lib/app-sync-opt-in";
+import {
+  siteMayHaveChanged,
+  useSiteLiveVersion,
+  type SiteLiveVersion,
+} from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
-import { useWindowBarTitle } from "../../ui/window-bar-title";
+import { useWindowBarCarriesBack, useWindowBarTitle } from "../../ui/window-bar-title";
+import { WindowBarEndControls } from "../components/window-bar";
 
 // Loaded when someone opens it, from the Artifacts route that already holds
 // the publish form and the Site's management (a separate lazy entry would
@@ -142,7 +143,9 @@ type SiteState =
     };
 
 /** A conversation this panel just created, for its first open. */
-type SiteHandoff = CreatedConversation & { creation: SessionCreationHandoff | null };
+type SiteHandoff = CreatedConversation & {
+  creation: SessionCreationHandoff | null;
+};
 
 /**
  * A Site with its chat beside it. The Site fills the page; the panel shows
@@ -160,10 +163,14 @@ type SiteHandoff = CreatedConversation & { creation: SessionCreationHandoff | nu
  * reloads in place when one is published or restored, and the version chip
  * in its header offers the history and one-click Undo.
  *
- * Its header says whether the Site is on the web: "Published" opens or
- * copies the address, or Publish for people who can. Publishing and its
- * settings open the Site's own publish form in place of the Site, with the
- * chat still beside it.
+ * Its header is one slim row on the page itself, without a frame: the way
+ * back, the title and version, whether the Site is on the web ("Published"
+ * opens or copies the address, or Publish for people who can), its "…" and
+ * full screen. In the macOS app the title is the window bar's, and the
+ * controls join it there, so the Site starts right under the bar. Publishing
+ * and its settings open the Site's own publish form in place of the Site,
+ * with the chat still beside it; it is in the address (`?publishing`), so
+ * going back closes it.
  */
 export function SiteViewRoute({
   workspaceId,
@@ -173,6 +180,7 @@ export function SiteViewRoute({
   page,
   artifactsReturn,
   connect,
+  publishing: publishingRequested = false,
   embedded = false,
 }: {
   workspaceId: string;
@@ -195,9 +203,13 @@ export function SiteViewRoute({
   artifactsReturn?: SiteViewArtifactsReturn | undefined;
   /** Open this connect card item's dialog once (`?connect=`, from a published App). */
   connect?: string | undefined;
+  /** Show the publish form in place of the Site (`?publishing`). */
+  publishing?: boolean | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
+  const router = useRouter();
+  const pageHost = usePage();
   const viewer = useConsoleSiteViewer();
   // By value: a host may pass a new object on every render.
   const backKey = artifactsReturn?.browse ? JSON.stringify(artifactsReturn) : "";
@@ -216,10 +228,11 @@ export function SiteViewRoute({
           ...back,
           ...(conversation ? { conversation } : {}),
           ...(href === "/" ? {} : { page: href }),
+          ...(publishingRequested ? { publishing: true } : {}),
         },
         ...(options.replace ? { replace: true } : {}),
       }),
-    [back, conversation, navigate, siteId, workspaceId],
+    [back, conversation, navigate, publishingRequested, siteId, workspaceId],
   );
   // Anyone who can open the Site sees whether it is published and its
   // address; Publish and the publish form are for people who can publish.
@@ -248,14 +261,16 @@ export function SiteViewRoute({
           ...back,
           ...(conversation ? { conversation } : {}),
           ...(page ? { page } : {}),
+          ...(publishingRequested ? { publishing: true } : {}),
         },
         replace: true,
       }),
-    [back, conversation, navigate, page, siteId, workspaceId],
+    [back, conversation, navigate, page, publishingRequested, siteId, workspaceId],
   );
   const connectCard =
     artifact?.status === "active" ? (
-      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex justify-end">
+      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex flex-col items-end gap-2">
+        <AppSyncJoinCard workspaceId={workspaceId} siteId={siteId} />
         <AppConnectCard
           workspaceId={workspaceId}
           siteId={siteId}
@@ -263,65 +278,139 @@ export function SiteViewRoute({
           connectKey={connect}
           onConnectKeyHandled={connectHandled}
         />
+        <AppSyncOptInHost workspaceId={workspaceId} siteId={siteId} />
       </div>
     ) : null;
-  // The publish form, open for this Site; another Site starts without it.
+  // The publish form, open for this Site while the address says so.
   const siteKey = `${workspaceId}/${siteId}`;
-  const [publishingFor, setPublishingFor] = useState<string | null>(null);
+  // Only for people who may publish: for others a shared `?publishing` link
+  // just opens the app.
   const publishingSite =
-    publishingFor === siteKey && artifact?.status === "active" ? artifact : null;
+    publishingRequested && canPublish && artifact?.status === "active" ? artifact : null;
   const publishing = publishingSite !== null;
   // In the macOS app the Site's name is the window bar's title, as a page's
   // is, instead of in its toolbar (which shows it again in full screen, where
   // the bar's row is hidden). The publish form, opened in front of the Site,
   // names the bar once it has loaded; the Site's claim mounted first, so it
   // yields while the form is open.
+  // Opened from Artifacts: the bar's trail ("Artifacts › name") is the one way
+  // back, so the toolbar drops its own back link while the bar shows it.
+  const artifactsBack = useArtifactsBackLink(workspaceId, back?.fromSession, back ?? undefined);
+  const artifactsBackHref = artifactsBack.href;
+  const artifactsBackClick = useRef(artifactsBack.onClick);
+  artifactsBackClick.current = artifactsBack.onClick;
+  const backPlace = useMemo(() => {
+    if (!back) return null;
+    const crumb = {
+      label: "Artifacts",
+      href: artifactsBackHref,
+      onClick: () => artifactsBackClick.current?.(),
+    };
+    return { section: crumb, parent: crumb };
+  }, [back, artifactsBackHref]);
   const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing, {
     copyable: true,
+    place: backPlace,
   });
+  const barCarriesBack = useWindowBarCarriesBack(titleInWindowBar);
   // Full screen is the route's so opening the form can leave it first.
   const [fullScreen, setFullScreen] = useState(false);
+  const publishingSearch = useCallback(
+    (open: boolean) => ({
+      ...back,
+      ...(conversation ? { conversation } : {}),
+      ...(page ? { page } : {}),
+      ...(open ? { publishing: true } : {}),
+    }),
+    [back, conversation, page],
+  );
   const openPublishing = useCallback(() => {
     setFullScreen(false);
-    setPublishingFor(siteKey);
-  }, [siteKey]);
+    void navigate({
+      to: SITE_ROUTE,
+      params: { workspaceId, siteId },
+      search: publishingSearch(true),
+      state: { sitePublishingFromSite: siteKey },
+    });
+  }, [navigate, publishingSearch, siteId, siteKey, workspaceId]);
   // Back from the form returns focus to the control that opened it.
   const siteColumn = useRef<HTMLDivElement>(null);
   const returnFocus = useRef(false);
+  // Opened from this Site in this tab: going back is the browser's Back, so
+  // the history doesn't keep the form. Opened by link: back replaces it.
   const closePublishing = useCallback(() => {
     returnFocus.current = true;
-    setPublishingFor(null);
-  }, []);
+    const openedHere =
+      router.state.location.state?.sitePublishingFromSite === siteKey && !pageHost.opensBeside;
+    if (openedHere) window.history.back();
+    else
+      void navigate({
+        to: SITE_ROUTE,
+        params: { workspaceId, siteId },
+        search: publishingSearch(false),
+        replace: true,
+      });
+  }, [navigate, pageHost, publishingSearch, router, siteId, siteKey, workspaceId]);
+  // However the form closes (its back link or the browser's Back), focus
+  // returns to the control that opens it.
+  const wasPublishing = useRef(publishing);
   useEffect(() => {
-    if (publishing || !returnFocus.current) return;
+    const closed = wasPublishing.current && !publishing;
+    wasPublishing.current = publishing;
+    if (!closed && !returnFocus.current) return;
+    if (publishing) return;
     returnFocus.current = false;
-    siteColumn.current?.querySelector<HTMLElement>("[data-site-publication]")?.focus();
+    document.querySelector<HTMLElement>("[data-site-header] [data-site-publication]")?.focus();
   }, [publishing]);
-  const site = useMemo<SiteState>(
-    () =>
-      artifact
-        ? {
-            status: "ready",
-            title: artifact.title,
-            versionId: artifact.currentVersion?.id ?? null,
-            revision: artifact.currentVersion?.revision ?? null,
-            archived: artifact.status === "archived",
-          }
-        : live.failed
-          ? { status: "error" }
-          : { status: "loading" },
-    [artifact, live.failed],
-  );
+  // Leaving full screen returns focus to the "…" it was opened from.
+  const wasFullScreen = useRef(fullScreen);
+  useEffect(() => {
+    const left = wasFullScreen.current && !fullScreen;
+    wasFullScreen.current = fullScreen;
+    if (left) document.querySelector<HTMLElement>("[data-site-actions-menu]")?.focus();
+  }, [fullScreen]);
+  const site = useMemo(() => siteStateOf(artifact, live.failed), [artifact, live.failed]);
   const { check } = live;
   // Embedded (the phone app's viewer) there is no page URL to keep the Site's
   // address in, so it lives here, starting at `page`.
   const [embeddedLocation, setEmbeddedLocation] = useState(page ?? "/");
   const onEmbeddedLocationChange = useCallback((href: string) => setEmbeddedLocation(href), []);
-  const backControl = back ? (
-    <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
-  ) : undefined;
+  const backControl =
+    back && !(barCarriesBack && !fullScreen) ? (
+      <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
+    ) : undefined;
   const { layout, update: updateLayout } = useSiteChatPanelLayout(accessContext.subjectId);
+  // Open or closed per person and app. Until the person chooses, every app
+  // offers its chat beside it where there is room for both (a wide window);
+  // a narrower one, where the chat stacks under the app, opens it only for
+  // an app they have chatted with (`useSiteChatOpen`).
+  const chat = useSiteChatOpen(accessContext.subjectId, siteId);
+  const wide = useWideWindow();
+  const chatOpen = chat.chosen ? chat.open : chat.open || wide;
+  const setChatOpen = chat.setOpen;
+  // Hiding and showing move focus to the control that undoes it.
+  const [chatFocus, setChatFocus] = useState<"show" | "hide" | null>(null);
+  useEffect(() => {
+    if (!chatFocus) return;
+    document
+      .querySelector<HTMLElement>(
+        chatFocus === "show" ? "[data-site-chat-show]" : "[data-site-chat-hide]",
+      )
+      ?.focus();
+    setChatFocus(null);
+  }, [chatFocus]);
+  const hideChat = useCallback(() => {
+    setChatOpen(false);
+    setChatFocus("show");
+  }, [setChatOpen]);
+  const showChat = useCallback(() => {
+    setChatOpen(true);
+    setChatFocus("hide");
+  }, [setChatOpen]);
   const [relay] = useState(() => new ChatFileDropRelay());
+  const [liveState, setLiveState] = useState<SiteLiveState | undefined>(undefined);
+  const [reloadToken, setReloadToken] = useState(0);
+  const reload = useCallback(() => setReloadToken((value) => value + 1), []);
   if (embedded) {
     return (
       <div
@@ -345,6 +434,53 @@ export function SiteViewRoute({
       </div>
     );
   }
+  const archived = artifact?.status === "archived";
+  const titleNode = artifact ? (
+    <SiteTitleMenu workspaceId={workspaceId} origin={{ siteId, title: artifact.title }}>
+      {/* Focusable, so the menu key or Shift+F10 opens its menu. */}
+      <span
+        tabIndex={0}
+        className="min-w-0 truncate rounded-sm text-sm font-medium text-fg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
+        title={artifact.title}
+      >
+        {artifact.title}
+      </span>
+    </SiteTitleMenu>
+  ) : null;
+  const versionMenu =
+    live.detail && !archived ? (
+      <SiteVersionMenu
+        workspaceId={workspaceId}
+        siteId={siteId}
+        detail={live.detail}
+        canPublish={canPublish}
+        onRestored={check}
+      />
+    ) : null;
+  // The one publication control and the Site's "…" (with full screen in it).
+  // The Site view never says "Live": it stays current, and says so only
+  // while Updating or Reconnecting.
+  const siteControls =
+    artifact && !archived ? (
+      <>
+        <span data-site-publication-slot="" className="contents">
+          <SitePublicationControl
+            load={publication.load}
+            canPublish={canPublish}
+            onOpenPublishing={openPublishing}
+          />
+        </span>
+        <SiteActionsMenu
+          workspaceId={workspaceId}
+          origin={{ siteId, title: artifact.title }}
+          hasVersion={Boolean(artifact.currentVersion)}
+          onReload={reload}
+          onFullScreen={fullScreen ? undefined : () => setFullScreen(true)}
+        />
+      </>
+    ) : null;
+  // While the chat is closed the app has the whole width; this brings it back.
+  const showChatButton = artifact && !chatOpen ? <ShowChatButton onClick={showChat} /> : null;
   return (
     <div
       className={cn(
@@ -356,13 +492,42 @@ export function SiteViewRoute({
       data-workspace-scroll-owner="self-managed"
       data-site-chat-position={layout.position}
     >
-      {/* The Site's column, not its chat: the Site's toolbar is this page's
-          top row. */}
+      {/* The Site's column, not its chat: the Site's header is this page's
+          top row (in the macOS app, the window bar). */}
       <div
         ref={siteColumn}
         data-site-column
         className="relative flex min-h-0 min-w-0 flex-1 flex-col"
       >
+        {publishing || fullScreen ? null : (
+          <SiteHeader inWindowBar={titleInWindowBar} column={siteColumn} side={layout.position}>
+            {/* In the macOS app these sit on the bar's right; the back link
+                stays (it keeps the list's filters, or the chat it came from)
+                until the bar's own crumb carries them. */}
+            {titleInWindowBar ? (
+              backControl
+            ) : (
+              <>
+                {layout.position === "left" ? showChatButton : null}
+                {backControl}
+                {titleNode}
+              </>
+            )}
+            {versionMenu}
+            <span className="min-w-2 flex-1" />
+            <SiteLiveStateLabel state={liveState} />
+            {canPublish && artifact && !archived ? (
+              <AppServerStatusLine
+                workspaceId={workspaceId}
+                siteId={siteId}
+                versionId={artifact.currentVersion?.id ?? null}
+                onOpenChat={showChat}
+              />
+            ) : null}
+            {siteControls}
+            {layout.position === "left" && !titleInWindowBar ? null : showChatButton}
+          </SiteHeader>
+        )}
         {publishingSite ? (
           <Suspense fallback={<div className="min-h-0 flex-1 bg-bg" />}>
             <SitePublishingPage
@@ -375,25 +540,19 @@ export function SiteViewRoute({
             />
           </Suspense>
         ) : null}
-        {artifact?.status === "archived" ? (
-          <>
-            {backControl ? (
-              <div className="flex min-h-12 shrink-0 items-center border-b border-border/80 px-3 sm:px-4">
-                {backControl}
-              </div>
-            ) : null}
-            <p className="p-4 text-sm text-fg-muted">
-              This app is archived.{" "}
-              <Link
-                to="/workspaces/$workspaceId/artifacts/$artifactId"
-                params={{ workspaceId, artifactId: siteId }}
-                search={{ tab: "settings" }}
-                className="font-medium text-fg underline underline-offset-2"
-              >
-                {canPublish ? "Restore it from app details" : "View app details"}
-              </Link>
-            </p>
-          </>
+        {archived ? (
+          <p className="p-4 text-sm text-fg-muted">
+            This app is archived.{" "}
+            <Link
+              to="/workspaces/$workspaceId/artifacts/$artifactId"
+              params={{ workspaceId, artifactId: siteId }}
+              search={{ tab: "settings" }}
+              state={{ artifactDetailFromSite: siteId }}
+              className="font-medium text-fg underline underline-offset-2"
+            >
+              {canPublish ? "Restore it from its settings" : "View its settings"}
+            </Link>
+          </p>
         ) : (
           // Hidden, not unmounted, behind the form: the Site keeps its page.
           <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", publishing && "hidden")}>
@@ -405,8 +564,11 @@ export function SiteViewRoute({
               viewer={viewer}
               siteLocation={page ?? "/"}
               onSiteLocationChange={onSiteLocationChange}
-              toolbarStart={backControl}
-              showTitle={!titleInWindowBar || fullScreen}
+              // The header above draws the controls; the frame's own toolbar
+              // shows only in full screen.
+              showToolbar={false}
+              onLiveStateChange={setLiveState}
+              reloadToken={reloadToken}
               renderTitle={
                 artifact
                   ? (title) => (
@@ -419,55 +581,24 @@ export function SiteViewRoute({
                     )
                   : undefined
               }
-              // The one publication control. The Site view never says "Live":
-              // it stays current, and says so only while Updating or Reconnecting.
-              liveStatus={
-                <>
-                  <SitePublicationControl
-                    load={publication.load}
-                    canPublish={canPublish}
-                    onOpenPublishing={openPublishing}
-                  />
-                  <CopyArtifactLinkButton
-                    workspaceId={workspaceId}
-                    item={{ kind: "site", id: siteId }}
-                    className="size-8 rounded-md text-fg-muted hover:text-fg"
-                  />
-                  {artifact ? (
-                    <SiteActionsMenu
-                      workspaceId={workspaceId}
-                      origin={{ siteId, title: artifact.title }}
-                      hasVersion={Boolean(artifact.currentVersion)}
-                      versionId={artifact.currentVersion?.id ?? null}
-                    />
-                  ) : null}
-                </>
-              }
+              // In full screen the frame's toolbar carries the same controls
+              // (mounted only there, so there is one of each).
+              liveStatus={fullScreen ? siteControls : null}
               versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
               watch={live.watch}
-              versionControl={
-                live.detail ? (
-                  <SiteVersionMenu
-                    workspaceId={workspaceId}
-                    siteId={siteId}
-                    detail={live.detail}
-                    canPublish={canPublish}
-                    onRestored={check}
-                  />
-                ) : undefined
-              }
+              versionControl={fullScreen ? versionMenu : null}
               fullScreen={fullScreen}
               onFullScreenChange={setFullScreen}
               archivedMessage={
                 canPublish
-                  ? "This app is archived. Restore it from app details."
+                  ? "This app is archived. Restore it from its settings."
                   : "This app is archived."
               }
             />
           </div>
         )}
         {publishing ? null : connectCard}
-        <ChatFileDropCover relay={relay} enabled={!layout.collapsed} />
+        <ChatFileDropCover relay={relay} enabled={chatOpen} />
       </div>
       <ChatFileDropRelayProvider relay={relay}>
         <SiteChatPanel
@@ -480,9 +611,17 @@ export function SiteViewRoute({
           conversation={conversation}
           startNew={startNew}
           page={page}
+          publishing={publishingRequested}
           artifactsReturn={back}
           layout={layout}
           updateLayout={updateLayout}
+          open={chatOpen}
+          onOpen={setChatOpen}
+          onHide={hideChat}
+          onHasConversations={chat.setFallback}
+          agentModel={
+            publication.load.state === "ready" ? (publication.load.link.agentModel ?? null) : null
+          }
           onEvent={(event) => {
             // A publish or restore from this conversation shows at once.
             if (siteMayHaveChanged(event)) check();
@@ -492,6 +631,86 @@ export function SiteViewRoute({
     </div>
   );
 }
+
+function siteStateOf(artifact: WorkspaceArtifact | undefined, failed: boolean): SiteState {
+  return artifact
+    ? {
+        status: "ready",
+        title: artifact.title,
+        versionId: artifact.currentVersion?.id ?? null,
+        revision: artifact.currentVersion?.revision ?? null,
+        archived: artifact.status === "archived",
+      }
+    : failed
+      ? { status: "error" }
+      : { status: "loading" };
+}
+
+/**
+ * The Site view's chat, for an app opened as a page from the sidebar
+ * (app-page-view.tsx), beside the app while it is open: the same panel, its
+ * conversations and New, Copy link and Open as a full chat. The page's
+ * address stays the app's own, so the conversation open here is this
+ * panel's, not the address's.
+ */
+export function AppPageChat({
+  workspaceId,
+  siteId,
+  live,
+  layout,
+  updateLayout,
+  open,
+  onOpen,
+  onHide,
+}: {
+  workspaceId: string;
+  siteId: string;
+  live: SiteLiveVersion;
+  layout: SiteChatPanelLayout;
+  updateLayout: (patch: Partial<SiteChatPanelLayout>) => void;
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  onHide: () => void;
+}) {
+  const { client, accessContext } = useAppContext();
+  const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
+  const publication = useSitePublicationLink({ client, workspaceId, siteId });
+  const [conversation, setConversation] = useState<string | undefined>(undefined);
+  const choose = useCallback(
+    (search: { conversation?: string }) => setConversation(search.conversation),
+    [],
+  );
+  const artifact = live.detail?.artifact;
+  const site = useMemo(() => siteStateOf(artifact, live.failed), [artifact, live.failed]);
+  const { check } = live;
+  return (
+    <SiteChatPanel
+      workspaceId={workspaceId}
+      siteId={siteId}
+      site={site}
+      retrySite={live.retry}
+      canPublish={canPublish}
+      conversation={conversation}
+      startNew={false}
+      publishing={false}
+      choose={choose}
+      layout={layout}
+      updateLayout={updateLayout}
+      open={open}
+      onOpen={onOpen}
+      onHide={onHide}
+      onHasConversations={ignoreHasConversations}
+      agentModel={
+        publication.load.state === "ready" ? (publication.load.link.agentModel ?? null) : null
+      }
+      onEvent={(event) => {
+        if (siteMayHaveChanged(event)) check();
+      }}
+    />
+  );
+}
+
+const ignoreHasConversations = () => {};
 
 /** Right-click the Site's title: copy it or the Site's address. */
 function SiteTitleMenu({
@@ -514,7 +733,7 @@ function SiteTitleMenu({
         </ContextMenuItem>
         <ContextMenuItem onSelect={site.copyLink}>
           <LinkIcon className="size-4" />
-          Copy link
+          Copy app link
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
@@ -522,25 +741,161 @@ function SiteTitleMenu({
 }
 
 /**
- * The Site's "…", as a chat's header has one: Copy title, the sidebar's Pin
- * and Archive (while the sidebar lists Sites), Duplicate and Site details.
- * Copy link and the published address keep their own controls beside it.
+ * The Site's header row. On the page it is a slim row with no frame of its
+ * own, so the Site reads as part of the page. In the macOS app, where the
+ * window bar already names the Site, its controls join the bar instead (on
+ * the right of the Site's column, so they stay above the Site wherever the
+ * chat sits) and the Site starts right under it.
+ */
+function SiteHeader({
+  inWindowBar,
+  column,
+  side,
+  children,
+}: {
+  inWindowBar: boolean;
+  column: RefObject<HTMLElement | null>;
+  /** The chat's side: moving it moves the column without resizing it. */
+  side: SiteChatPanelLayout["position"];
+  children: ReactNode;
+}) {
+  const [right, setRight] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const element = column.current;
+    if (!inWindowBar || !element) return;
+    const update = () =>
+      setRight(Math.max(0, window.innerWidth - element.getBoundingClientRect().right));
+    update();
+    window.addEventListener("resize", update);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(element);
+    return () => {
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+    };
+  }, [column, inWindowBar, side]);
+  if (inWindowBar) {
+    return (
+      <WindowBarEndControls right={right === null ? null : right + 8}>
+        <div data-site-header="" className="contents">
+          {children}
+        </div>
+      </WindowBarEndControls>
+    );
+  }
+  return (
+    <div
+      data-site-header=""
+      className="flex h-11 shrink-0 items-center gap-1.5 bg-canvas pr-2 pl-3 sm:pl-4"
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Only while the Site isn't current: Updating or Reconnecting, announced politely. */
+function SiteLiveStateLabel({ state }: { state: SiteLiveState | undefined }) {
+  const labels = useArtifactLabels();
+  const busy = state === "updating" || state === "reconnecting";
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-live-status={busy ? state : undefined}
+      className={
+        busy
+          ? "mr-1 inline-flex items-center gap-1.5 text-2xs font-medium text-fg-muted"
+          : "sr-only"
+      }
+    >
+      {busy ? (
+        <>
+          <span
+            aria-hidden="true"
+            className={cn(
+              "size-1.5 rounded-full",
+              state === "updating"
+                ? "bg-status-running ring-4 ring-status-running/15 motion-safe:animate-pulse"
+                : "bg-status-waiting ring-4 ring-status-waiting/15",
+            )}
+          />
+          <span className="max-sm:sr-only">
+            {state === "updating" ? labels.liveUpdating : labels.liveReconnecting}
+          </span>
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * Whether the window is wide enough for the chat to sit beside the app (the
+ * layout's `lg` breakpoint); without media queries (tests, old hosts) it is.
+ */
+function useWideWindow(): boolean {
+  const query = "(min-width: 1024px)";
+  const [wide, setWide] = useState(() =>
+    typeof window === "undefined" || typeof window.matchMedia !== "function"
+      ? true
+      : window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const list = window.matchMedia(query);
+    const update = () => setWide(list.matches);
+    update();
+    list.addEventListener?.("change", update);
+    return () => list.removeEventListener?.("change", update);
+  }, []);
+  return wide;
+}
+
+/**
+ * Brings back a closed chat: a labelled button in the app's header (or the
+ * macOS window bar), so the chat is always one visible click away.
+ */
+function ShowChatButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      aria-label="Show chat"
+      title="Show chat"
+      aria-expanded={false}
+      data-site-chat-show=""
+      className="h-7 gap-1.5 rounded-full px-2.5 text-xs pointer-coarse:h-11"
+      onClick={onClick}
+    >
+      <MessageSquareIcon aria-hidden="true" className="size-3.5" />
+      Chat
+    </Button>
+  );
+}
+
+/**
+ * The Site's "…", as a chat's header has one, with the few actions people use
+ * often: full screen, reload, the sidebar's Pin and Archive (while the
+ * sidebar lists Sites) and Settings. Rarer ones (duplicate, export, allowed
+ * actions) are in Settings; copying the address is in "Published".
  */
 function SiteActionsMenu({
   workspaceId,
   origin,
   hasVersion,
-  versionId,
+  onReload,
+  onFullScreen,
 }: {
   workspaceId: string;
   origin: { siteId: string; title: string };
   hasVersion: boolean;
-  versionId: string | null;
+  onReload: () => void;
+  /** Absent while the app is already full screen. */
+  onFullScreen?: (() => void) | undefined;
 }) {
   const site = useSiteActions(workspaceId, origin, { hasVersion });
   const sidebar = useSiteSidebarActions(workspaceId, origin);
-  const resetAllowed = useResetSiteToolAllowances(workspaceId, origin.siteId, versionId);
-  const exportApp = useExportApp(workspaceId);
+  const labels = useArtifactLabels();
   return (
     <span data-site-actions-root="" className="contents">
       <DropdownMenu>
@@ -557,10 +912,16 @@ function SiteActionsMenu({
             <MoreHorizontalIcon aria-hidden="true" className="size-4" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-52">
-          <DropdownMenuItem onSelect={site.copyTitle}>
-            <CopyIcon aria-hidden="true" />
-            Copy title
+        <DropdownMenuContent align="end" className="w-56">
+          {onFullScreen ? (
+            <DropdownMenuItem onSelect={onFullScreen}>
+              <Maximize2Icon aria-hidden="true" />
+              {labels.openFullScreen}
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuItem onSelect={onReload}>
+            <RefreshCwIcon aria-hidden="true" />
+            {labels.reloadSite}
           </DropdownMenuItem>
           {sidebar ? (
             <DropdownMenuItem onSelect={sidebar.togglePin}>
@@ -568,33 +929,12 @@ function SiteActionsMenu({
               {sidebar.pinned ? "Unpin" : "Pin"}
             </DropdownMenuItem>
           ) : null}
-          {site.duplicate ? (
-            <DropdownMenuItem disabled={site.duplicate.busy} onSelect={site.duplicate.run}>
-              <CopyPlusIcon aria-hidden="true" />
-              {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
-            </DropdownMenuItem>
-          ) : null}
-          {site.duplicate && exportApp ? (
-            <DropdownMenuItem
-              disabled={exportApp.busy}
-              onSelect={() => void exportApp.run(origin.siteId)}
-            >
-              <DownloadIcon aria-hidden="true" />
-              Export app
-            </DropdownMenuItem>
-          ) : null}
           <DropdownMenuItem asChild>
-            <Link {...site.details}>
-              <InfoIcon aria-hidden="true" />
-              App details
+            <Link {...site.details} state={{ artifactDetailFromSite: origin.siteId }}>
+              <Settings2Icon aria-hidden="true" />
+              Settings
             </Link>
           </DropdownMenuItem>
-          {resetAllowed ? (
-            <DropdownMenuItem disabled={resetAllowed.busy} onSelect={resetAllowed.run}>
-              <RotateCcwIcon aria-hidden="true" />
-              Reset allowed actions
-            </DropdownMenuItem>
-          ) : null}
           {sidebar ? (
             <>
               <DropdownMenuSeparator />
@@ -608,41 +948,6 @@ function SiteActionsMenu({
       </DropdownMenu>
     </span>
   );
-}
-
-/**
- * Forget this person's "Always allow" choices on this Site: its next actions
- * ask again. Open frames hear it as a readiness change.
- */
-function useResetSiteToolAllowances(
-  workspaceId: string,
-  siteId: string,
-  versionId: string | null,
-): { busy: boolean; run: () => void } | null {
-  const api = useAppApi();
-  const [busy, setBusy] = useState(false);
-  const run = useCallback(() => {
-    if (!versionId) return;
-    setBusy(true);
-    api
-      .request<{ version: 1; removed: number }>(
-        `/v1/workspaces/${encodeURIComponent(workspaceId)}/tools/site-allowances/reset`,
-        {
-          method: "POST",
-          body: JSON.stringify({ siteArtifactId: siteId, siteVersionId: versionId }),
-        },
-      )
-      .then(
-        () => {
-          notifySiteToolReadinessChanged(siteId);
-          toast.success("Allowed actions reset");
-        },
-        (error: unknown) =>
-          toast.error("Couldn't reset allowed actions", { description: userErrorText(error) }),
-      )
-      .finally(() => setBusy(false));
-  }, [api, siteId, versionId, workspaceId]);
-  return versionId ? { busy, run } : null;
 }
 
 const PAGE_SIZE = 30;
@@ -771,10 +1076,17 @@ function SiteChatPanel({
   conversation,
   startNew: startNewRequested,
   page,
+  publishing,
   artifactsReturn,
   layout,
   updateLayout,
+  open,
+  onOpen,
+  onHide,
+  onHasConversations,
+  agentModel,
   onEvent,
+  choose,
 }: {
   workspaceId: string;
   siteId: string;
@@ -786,22 +1098,42 @@ function SiteChatPanel({
   startNew: boolean;
   /** The Site's own address, kept when another conversation is chosen. */
   page?: string | undefined;
+  /** Whether the publish form is open, kept when another conversation is chosen. */
+  publishing: boolean;
   /** The Artifacts page the Site was opened from, kept when another conversation is chosen. */
   artifactsReturn?: SiteViewArtifactsReturn | undefined;
-  /** Width, hidden and side, remembered per person; shared with the Site beside it. */
+  /** Width and side, remembered per person; shared with the Site beside it. */
   layout: SiteChatPanelLayout;
   updateLayout: (patch: Partial<SiteChatPanelLayout>) => void;
+  /** Whether the chat shows; closed, it stays mounted and the Site has the width. */
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  onHide: () => void;
+  /** Whether this person has chatted with the Site, which opens it by default. */
+  onHasConversations: (has: boolean) => void;
+  /** The model the app's chat is set to start with, preselected when allowed. */
+  agentModel: string | null;
   /** Each new event in the open conversation, so the Site can follow its edits. */
   onEvent: (event: SessionEvent) => void;
+  /**
+   * Opens a conversation (or none, for the newest) where the address can't
+   * hold it; by default the Site view's address does.
+   */
+  choose?: ((search: { conversation?: string }, replace?: boolean) => void) | undefined;
 }) {
   const context = useAppContext();
   const api = useAppApi();
+  const chatOps = useChatOperations();
   const navigate = useNavigate();
   const panelId = useId();
   const panel = useRef<HTMLElement>(null);
-  const hideButtonId = `${panelId}-hide`;
-  const showButtonId = `${panelId}-show`;
   const list = useSiteConversations(workspaceId, siteId);
+  // Opened from one of its chats, or one it has: open unless the person
+  // closed it. Known at once for a chat in the address, so it doesn't open late.
+  const chatted = Boolean(conversation) || (list.loaded && list.sessions.length > 0);
+  useEffect(() => {
+    if (list.loaded || chatted) onHasConversations(chatted);
+  }, [chatted, list.loaded, onHasConversations]);
   const left = layout.position === "left";
   const maxWidth = useAvailableWidth(panel);
   const width = Math.min(layout.width, maxWidth);
@@ -824,10 +1156,12 @@ function SiteChatPanel({
     if (list.loaded && pinned !== defaultId) setDefaultId(pinned);
   }, [defaultId, list.loaded, pinned]);
 
-  // Choosing a conversation anywhere (the rail, a link) ends composing and
-  // shows a hidden panel: the sidebar is where conversations are chosen, so
-  // choosing one must show it. Opening the page keeps the panel as it was.
-  // Returning to the Site itself, as its rail row does, opens its newest.
+  // Choosing a conversation anywhere (the rail, a link, arriving from a chat)
+  // ends composing and shows a hidden panel: the sidebar is where
+  // conversations are chosen, so choosing one must show it. Returning to the
+  // Site itself, as its rail row does, opens its newest.
+  // Arriving with one (a link, Back, a reload) is the default above, not a
+  // choice, so a chat the person closed stays closed.
   const previousConversation = useRef(conversation);
   const startingNew = useRef(false);
   useEffect(() => {
@@ -835,22 +1169,28 @@ function SiteChatPanel({
     previousConversation.current = conversation;
     if (conversation) {
       setComposing(false);
-      if (conversation !== previous) updateLayout({ collapsed: false });
+      if (conversation !== previous) onOpen(true);
     } else if (previous && !startingNew.current) setDefaultId(undefined);
     startingNew.current = false;
-  }, [conversation, updateLayout]);
+  }, [conversation, onOpen]);
 
-  const toSite = useCallback(
+  const toSiteRoute = useCallback(
     (search: { conversation?: string }, replace = false) =>
       void navigate({
         to: SITE_ROUTE,
         params: { workspaceId, siteId },
         // Choosing a conversation keeps the Site where it is.
-        search: { ...artifactsReturn, ...search, ...(page ? { page } : {}) },
+        search: {
+          ...artifactsReturn,
+          ...search,
+          ...(page ? { page } : {}),
+          ...(publishing ? { publishing: true as const } : {}),
+        },
         ...(replace ? { replace: true } : {}),
       }),
-    [artifactsReturn, navigate, page, siteId, workspaceId],
+    [artifactsReturn, navigate, page, publishing, siteId, workspaceId],
   );
+  const toSite = choose ?? toSiteRoute;
 
   // A link may name a conversation that isn't this Site's, or one since
   // archived or deleted; fall back to the Site's own.
@@ -907,22 +1247,6 @@ function SiteChatPanel({
     return () => cancelAnimationFrame(animation);
   }, [focusRequest]);
 
-  // Hiding and showing keep focus on the control that brings the panel back.
-  const [focusToggle, setFocusToggle] = useState<"show" | "hide" | null>(null);
-  useEffect(() => {
-    if (!focusToggle) return;
-    document.getElementById(focusToggle === "show" ? showButtonId : hideButtonId)?.focus();
-    setFocusToggle(null);
-  }, [focusToggle, hideButtonId, showButtonId]);
-  const hide = () => {
-    updateLayout({ collapsed: true });
-    setFocusToggle("show");
-  };
-  const show = () => {
-    updateLayout({ collapsed: false });
-    setFocusToggle("hide");
-  };
-
   const ready = site.status === "ready" ? site : null;
   const canCreate =
     hasWorkspacePermission(context.accessContext, workspaceId, "sessions:create") &&
@@ -974,10 +1298,10 @@ function SiteChatPanel({
     if (startNewHandled.current) return;
     startNewHandled.current = true;
     setComposing(true);
-    updateLayout({ collapsed: false });
+    onOpen(true);
     if (conversation) startingNew.current = true;
     toSite({}, true);
-  }, [conversation, startNewRequested, toSite, updateLayout]);
+  }, [conversation, onOpen, startNewRequested, toSite]);
   // Created like the Site's own chats: private to this person and listed
   // under the Site. The API refuses anything else a Site may not set; files
   // are the person's own, attached here in the console as in any chat.
@@ -1058,209 +1382,183 @@ function SiteChatPanel({
         : "Conversation";
 
   return (
-    <>
-      <aside
-        ref={panel}
-        id={panelId}
-        aria-label="Chat"
-        hidden={layout.collapsed}
-        style={{ [WIDTH_VARIABLE]: `${width}px` } as CSSProperties}
-        data-position={layout.position}
-        className={cn(
-          "relative flex min-h-0 shrink-0 flex-col border-border bg-bg lg:w-(--og-site-chat-width) max-lg:h-[55%] max-lg:w-full max-lg:border-t",
-          left ? "lg:border-r" : "lg:border-l",
-          // Hidden, not unmounted: the conversation keeps its place and stream.
-          layout.collapsed && "hidden",
-        )}
-      >
-        <ResizeHandle
-          label="Resize chat"
-          controls={panelId}
-          value={width}
-          min={SITE_CHAT_MIN_WIDTH}
-          max={maxWidth}
-          // The edge toward the Site: dragging toward it widens the chat.
-          edge={left ? "end" : "start"}
-          // Live while dragging without re-rendering the conversation.
-          onResize={(next) => panel.current?.style.setProperty(WIDTH_VARIABLE, `${next}px`)}
-          onResizeEnd={(next) => {
-            panel.current?.style.setProperty(WIDTH_VARIABLE, `${next}px`);
-            updateLayout({ width: next });
-          }}
-          onReset={() => updateLayout({ width: SITE_CHAT_DEFAULT_WIDTH })}
-          onCollapse={hide}
-          className="max-lg:hidden"
-        />
-        <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border pr-2 pl-4">
-          <h2
-            className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
-            title={title ?? undefined}
-          >
-            {title ?? <span className="sr-only">New conversation</span>}
-          </h2>
-          {canCreate ? (
-            <Button
-              type="button"
-              variant={showComposer ? "secondary" : "ghost"}
-              size="sm"
-              className="pointer-coarse:h-11"
-              onClick={startNew}
-            >
-              <PlusIcon aria-hidden="true" className="size-3.5" />
-              New
-            </Button>
-          ) : null}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label="More"
-                title="More"
-                className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-              >
-                <MoreHorizontalIcon aria-hidden="true" className="size-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-52">
-              {selectedId ? (
-                <DropdownMenuItem asChild>
-                  <Link
-                    to="/workspaces/$workspaceId/sessions/$sessionId"
-                    params={{ workspaceId, sessionId: selectedId }}
-                  >
-                    <Maximize2Icon aria-hidden="true" />
-                    Open as a full chat
-                  </Link>
-                </DropdownMenuItem>
-              ) : null}
-              {/* Beside the Site only on wide screens; narrower ones stack the chat below. */}
-              <DropdownMenuItem
-                className="max-lg:hidden"
-                onSelect={() => updateLayout({ position: left ? "right" : "left" })}
-              >
-                {left ? (
-                  <PanelRightIcon aria-hidden="true" />
-                ) : (
-                  <PanelLeftIcon aria-hidden="true" />
-                )}
-                {left ? "Move chat to right" : "Move chat to left"}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+    <aside
+      ref={panel}
+      id={panelId}
+      aria-label="Chat"
+      hidden={!open}
+      style={{ [WIDTH_VARIABLE]: `${width}px` } as CSSProperties}
+      data-position={layout.position}
+      className={cn(
+        "relative flex min-h-0 shrink-0 flex-col border-border bg-bg lg:w-(--og-site-chat-width) max-lg:h-[55%] max-lg:w-full max-lg:border-t",
+        left ? "lg:border-r" : "lg:border-l",
+        // Hidden, not unmounted: the conversation keeps its place and stream.
+        !open && "hidden",
+      )}
+    >
+      <ResizeHandle
+        label="Resize chat"
+        controls={panelId}
+        value={width}
+        min={SITE_CHAT_MIN_WIDTH}
+        max={maxWidth}
+        // The edge toward the Site: dragging toward it widens the chat.
+        edge={left ? "end" : "start"}
+        // Live while dragging without re-rendering the conversation.
+        onResize={(next) => panel.current?.style.setProperty(WIDTH_VARIABLE, `${next}px`)}
+        onResizeEnd={(next) => {
+          panel.current?.style.setProperty(WIDTH_VARIABLE, `${next}px`);
+          updateLayout({ width: next });
+        }}
+        onReset={() => updateLayout({ width: SITE_CHAT_DEFAULT_WIDTH })}
+        onCollapse={onHide}
+        className="max-lg:hidden"
+      />
+      <div className="flex h-11 shrink-0 items-center gap-0.5 pr-2 pl-4">
+        <h2
+          className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
+          title={title ?? undefined}
+        >
+          {title ?? <span className="sr-only">New conversation</span>}
+        </h2>
+        {canCreate ? (
           <Button
-            id={hideButtonId}
+            type="button"
+            variant={showComposer ? "secondary" : "ghost"}
+            size="sm"
+            className="mr-0.5 pointer-coarse:h-11"
+            onClick={startNew}
+          >
+            <PlusIcon aria-hidden="true" className="size-3.5" />
+            New
+          </Button>
+        ) : null}
+        {selectedId ? (
+          <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="Hide chat"
-            title="Hide chat"
-            aria-controls={panelId}
-            aria-expanded={true}
+            aria-label="Copy link to this chat"
+            title="Copy link"
+            data-site-chat-copy-link=""
             className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-            onClick={hide}
+            onClick={() => void chatOps.copyLink({ id: selectedId, workspaceId })}
           >
-            {left ? (
-              <PanelLeftCloseIcon aria-hidden="true" className="size-4" />
-            ) : (
-              <PanelRightCloseIcon aria-hidden="true" className="size-4" />
-            )}
+            <LinkIcon aria-hidden="true" className="size-4" />
           </Button>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col">
-          {!list.loaded && !conversation ? (
-            list.error ? (
-              <Retry message="Couldn’t load conversations." onRetry={() => void list.refresh()} />
-            ) : (
-              <PanelLoading label="Loading conversations" />
-            )
-          ) : showComposer ? (
-            canCreate ? (
-              <ConsoleNewConversation
-                key={`new:${siteId}`}
-                workspaceId={workspaceId}
-                createSession={createSession}
-                title={ready ? `Ask about ${ready.title}` : "New conversation"}
-                onCreated={(created) => {
-                  setHandoff({
-                    ...created,
-                    creation: createdSessions.current.get(created.sessionId) ?? null,
-                  });
-                  void list.refresh();
-                  // Opening it ends composing, like any other choice.
-                  toSite({ conversation: created.sessionId });
-                }}
-                className="min-h-0 flex-1 px-3 pb-3"
-              />
-            ) : site.status === "loading" ? (
-              <PanelLoading label="Loading app" />
-            ) : site.status === "error" ? (
-              <Retry message="Couldn’t load this app." onRetry={retrySite} />
-            ) : (
-              <p className="px-4 py-4 text-sm text-fg-muted">No conversations yet.</p>
-            )
-          ) : selectedId ? (
-            // The regular chat, as on its own page, without the session panel
-            // there's no room for beside a Site.
-            <SessionUiFeaturesOff features={["dock"]}>
-              <Suspense fallback={<PanelLoading label="Loading conversation" />}>
-                <SessionRoute
-                  key={selectedId}
-                  workspaceId={workspaceId}
-                  sessionId={selectedId}
-                  placement="panel"
-                  onEvent={onEvent}
-                  messageContext={messageContext}
-                  // The first prompt and anything typed meanwhile carry over.
-                  creationHandoff={handedOff?.creation ?? null}
-                  initialDraft={handedOff?.draft}
-                  // A voice-first chat starts its call once it opens.
-                  realtimeAutostartModel={handedOff?.realtimeModel}
-                  onRealtimeAutostartConsumed={() =>
-                    setHandoff((current) =>
-                      current?.sessionId === selectedId
-                        ? { ...current, realtimeModel: undefined }
-                        : current,
-                    )
-                  }
-                  onNewSession={canCreate ? startNew : undefined}
-                />
-              </Suspense>
-            </SessionUiFeaturesOff>
-          ) : null}
-        </div>
-      </aside>
-      {layout.collapsed ? (
-        <div
-          className={cn(
-            "flex shrink-0 border-border bg-bg lg:w-12 lg:flex-col max-lg:h-12 max-lg:justify-end max-lg:border-t max-lg:px-2",
-            left ? "lg:border-r" : "lg:border-l",
-          )}
-        >
-          <div className="flex h-12 items-center justify-center">
-            <Button
-              id={showButtonId}
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Show chat"
-              title="Show chat"
-              aria-controls={panelId}
-              aria-expanded={false}
-              className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-              onClick={show}
+        ) : null}
+        {selectedId ? (
+          <Button
+            asChild
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+          >
+            <Link
+              to="/workspaces/$workspaceId/sessions/$sessionId"
+              params={{ workspaceId, sessionId: selectedId }}
+              aria-label="Open as a full chat"
+              title="Open as a full chat"
             >
-              {left ? (
-                <PanelLeftOpenIcon aria-hidden="true" className="size-4" />
-              ) : (
-                <PanelRightOpenIcon aria-hidden="true" className="size-4" />
-              )}
-            </Button>
-          </div>
-        </div>
-      ) : null}
-    </>
+              <SquareArrowOutUpRightIcon aria-hidden="true" className="size-4" />
+            </Link>
+          </Button>
+        ) : null}
+        {/* Beside the Site only on wide screens; narrower ones stack the chat below. */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={left ? "Move chat to right" : "Move chat to left"}
+          title={left ? "Move chat to right" : "Move chat to left"}
+          className="text-fg-muted hover:text-fg pointer-coarse:size-11 max-lg:hidden"
+          onClick={() => updateLayout({ position: left ? "right" : "left" })}
+        >
+          <ArrowLeftRightIcon aria-hidden="true" className="size-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Hide chat"
+          title="Hide chat"
+          aria-controls={panelId}
+          aria-expanded={true}
+          data-site-chat-hide=""
+          className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+          onClick={onHide}
+        >
+          {left ? (
+            <PanelLeftCloseIcon aria-hidden="true" className="size-4" />
+          ) : (
+            <PanelRightCloseIcon aria-hidden="true" className="size-4" />
+          )}
+        </Button>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {!list.loaded && !conversation ? (
+          list.error ? (
+            <Retry message="Couldn’t load conversations." onRetry={() => void list.refresh()} />
+          ) : (
+            <PanelLoading label="Loading conversations" />
+          )
+        ) : showComposer ? (
+          canCreate ? (
+            <ConsoleNewConversation
+              key={`new:${siteId}`}
+              workspaceId={workspaceId}
+              createSession={createSession}
+              defaultModel={agentModel}
+              title={ready ? `Ask about ${ready.title}` : "New conversation"}
+              onCreated={(created) => {
+                setHandoff({
+                  ...created,
+                  creation: createdSessions.current.get(created.sessionId) ?? null,
+                });
+                void list.refresh();
+                // Opening it ends composing, like any other choice.
+                toSite({ conversation: created.sessionId });
+              }}
+              className="min-h-0 flex-1 px-3 pb-3"
+            />
+          ) : site.status === "loading" ? (
+            <PanelLoading label="Loading app" />
+          ) : site.status === "error" ? (
+            <Retry message="Couldn’t load this app." onRetry={retrySite} />
+          ) : (
+            <p className="px-4 py-4 text-sm text-fg-muted">No conversations yet.</p>
+          )
+        ) : selectedId ? (
+          // The regular chat, as on its own page, without the session panel
+          // there's no room for beside a Site.
+          <SessionUiFeaturesOff features={["dock"]}>
+            <Suspense fallback={<PanelLoading label="Loading conversation" />}>
+              <SessionRoute
+                key={selectedId}
+                workspaceId={workspaceId}
+                sessionId={selectedId}
+                placement="panel"
+                onEvent={onEvent}
+                messageContext={messageContext}
+                // The first prompt and anything typed meanwhile carry over.
+                creationHandoff={handedOff?.creation ?? null}
+                initialDraft={handedOff?.draft}
+                // A voice-first chat starts its call once it opens.
+                realtimeAutostartModel={handedOff?.realtimeModel}
+                onRealtimeAutostartConsumed={() =>
+                  setHandoff((current) =>
+                    current?.sessionId === selectedId
+                      ? { ...current, realtimeModel: undefined }
+                      : current,
+                  )
+                }
+                onNewSession={canCreate ? startNew : undefined}
+              />
+            </Suspense>
+          </SessionUiFeaturesOff>
+        ) : null}
+      </div>
+    </aside>
   );
 }
 

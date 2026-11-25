@@ -4,11 +4,16 @@ import type {
   ModelDecisionRequest,
   ModelDecisionResponse,
 } from "@opengeni/contracts";
+import type { AppServerRun, AppServerStatus } from "@opengeni/contracts";
 import type {
   AppPackageExportRequest,
   AppPackageExportResponse,
   AppPackageInstallRequest,
   AppPackageInstallResponse,
+  AppPackageUpgradeRequest,
+  AppPackageUpgradeResponse,
+  AppTemplate,
+  ListAppTemplatesResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -156,10 +161,19 @@ import type {
   AppSync,
   AppSyncCreateRequest,
   AppSyncListResponse,
+  AppSyncOptInReview,
   AppSyncRunResponse,
   AppSyncStatusResponse,
   AppSyncSubscriptionResponse,
   AppSyncUpdateRequest,
+} from "@opengeni/contracts";
+import type {
+  AppNotifyRequest,
+  AppNotifyResponse,
+  AppWebhookCreateRequest,
+  AppWebhookListResponse,
+  AppWebhookSaveResponse,
+  AppWebhookUpdateRequest,
 } from "@opengeni/contracts";
 import type {
   SiteDataCollectionDefinitionRequest,
@@ -302,6 +316,7 @@ import {
 import type {
   OrganizationSkillReach,
   SkillRecord,
+  SkillScope,
   SkillSummary,
   SkillWriteReceipt,
   SaveWorkspaceSkillRequest,
@@ -611,6 +626,7 @@ import type {
   InstallLibrarySkillRequest,
   InstalledSkill,
   ListInstalledSkillsResponse,
+  ListLibrarySkillsResponse,
   CreateBillingPortalRequest,
   BillingSubscriptionCatalog,
   BillingAutoTopUpSettings,
@@ -798,6 +814,7 @@ import type {
   SessionShareLinkState,
   SessionLink,
   SessionLinksResponse,
+  SessionPullRequestResponse,
   AddSessionLinkRequest,
   SharedSession,
   SessionVisibilityChangePreview,
@@ -2056,6 +2073,22 @@ export class OpenGeniClient {
     return await this.requestJson<SessionLinksResponse>(
       "GET",
       `${sessionPath(workspaceId, sessionId)}/links${options.fresh ? "?fresh=true" : ""}`,
+    );
+  }
+
+  /**
+   * A linked pull request's details (files, commits, discussion, checks), read
+   * like its Linked status. `fresh` skips the short cache.
+   */
+  async getSessionPullRequest(
+    workspaceId: string,
+    sessionId: string,
+    linkId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<SessionPullRequestResponse> {
+    return await this.requestJson<SessionPullRequestResponse>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/links/${encodeURIComponent(linkId)}/pull-request${options.fresh ? "?fresh=true" : ""}`,
     );
   }
 
@@ -3351,7 +3384,13 @@ export class OpenGeniClient {
 
   async listScheduledTasks(
     workspaceId: string,
-    options: { limit?: number; offset?: number; sessionId?: string } = {},
+    options: {
+      limit?: number;
+      offset?: number;
+      sessionId?: string;
+      /** Only automations whose runs are chats with this agent. */
+      agentId?: string;
+    } = {},
   ): Promise<ScheduledTask[]> {
     return await this.requestJson<ScheduledTask[]>(
       "GET",
@@ -3360,6 +3399,7 @@ export class OpenGeniClient {
       {
         ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
         ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+        ...(options.agentId ? { agentId: options.agentId } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );
@@ -5437,11 +5477,16 @@ export class OpenGeniClient {
     ) {
       throw invalidApiResponseError("browser frame evidence does not match its request");
     }
+    const hiddenScrolled =
+      response.headers.get("x-opengeni-browser-frame-hidden-scrolled-height") ?? "";
     return {
       ...metadata,
       data,
       ...(response.headers.get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
         ? { inexactScrollbars: true as const }
+        : {}),
+      ...(/^[1-9][0-9]{0,8}$/.test(hiddenScrolled)
+        ? { hiddenScrolledHeight: Number(hiddenScrolled) }
         : {}),
     };
   }
@@ -8881,10 +8926,17 @@ export class OpenGeniClient {
   async listAgentChats(
     workspaceId: string,
     agentId: string,
-    options: { filter?: AgentChatsFilter; cursor?: string; limit?: number } = {},
+    options: {
+      filter?: AgentChatsFilter;
+      /** Only open chats that are with the agent itself: no Slack threads that only mentioned it, no cancelled chats. */
+      direct?: boolean;
+      cursor?: string;
+      limit?: number;
+    } = {},
   ): Promise<ListAgentChatsResponse> {
     const query = new URLSearchParams();
     if (options.filter) query.set("filter", options.filter);
+    if (options.direct) query.set("direct", "true");
     if (options.cursor) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
@@ -10271,6 +10323,34 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * The site icon of an outside link in this person's sidebar (an image),
+   * or null when the site has none to show. Only links in their sidebar.
+   */
+  async getSidebarLinkIcon(
+    workspaceId: string,
+    url: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Blob | null> {
+    const correlationId = crypto.randomUUID();
+    const response = await this.fetchImpl(
+      this.url(
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout/link-icon?url=${encodeURIComponent(url)}`,
+      ),
+      {
+        method: "GET",
+        headers: { ...this.headers(correlationId), Accept: "image/*" },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    if (response.status === 404) {
+      await cancelResponseBody(response, "sidebar link has no icon");
+      return null;
+    }
+    if (!response.ok) throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    return await response.blob();
+  }
+
   async listWorkspaceArtifacts(
     workspaceId: string,
     options: WorkspaceArtifactListOptions & { signal?: AbortSignal } = {},
@@ -10416,6 +10496,41 @@ export class OpenGeniClient {
       undefined,
       options,
     );
+  }
+
+  /**
+   * Upgrades an app from a newer package (docs/app-packages.md#upgrade):
+   * `dryRun` returns the plan; otherwise the package's version becomes the
+   * app's new version and only its new data definitions run.
+   */
+  async upgradeAppPackage(
+    workspaceId: string,
+    appId: string,
+    request: AppPackageUpgradeRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageUpgradeResponse> {
+    return await this.requestJson<AppPackageUpgradeResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(appId)}/package/upgrade`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Ready-made apps; add one with `installAppPackage` and its `package`. */
+  async listAppTemplates(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppTemplate[]> {
+    const response = await this.requestJson<ListAppTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-templates`,
+      undefined,
+      undefined,
+      options,
+    );
+    return response.templates;
   }
 
   async setWorkspaceArtifactStatus(
@@ -10585,17 +10700,42 @@ export class OpenGeniClient {
     );
   }
 
-  /** Opt the caller in to (or out of) a personal data sync. */
+  /**
+   * Opt the caller in to (or out of) a personal data sync. `account` picks
+   * which of their accounts of the sync's connector it runs on (an id from
+   * `getAppSyncOptInReview`). Without it an earlier choice is kept, else
+   * their first own account is used, and `accounts` lists them when several.
+   */
   async setAppSyncOptIn(
     workspaceId: string,
     siteId: string,
     syncId: string,
     optedIn: boolean,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; account?: string } = {},
   ): Promise<AppSyncSubscriptionResponse> {
+    const { account, ...requestOptions } = options;
     return await this.requestJson<AppSyncSubscriptionResponse>(
       optedIn ? "PUT" : "DELETE",
       `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/subscription`,
+      optedIn && account ? { account } : undefined,
+      undefined,
+      requestOptions,
+    );
+  }
+
+  /**
+   * What the caller confirms before opting in to a personal data sync: the
+   * tool and connector, their accounts of it, and the collection it fills.
+   */
+  async getAppSyncOptInReview(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncOptInReview> {
+    return await this.requestJson<AppSyncOptInReview>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/opt-in`,
       undefined,
       undefined,
       options,
@@ -10612,6 +10752,122 @@ export class OpenGeniClient {
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data/syncs`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Whether the app's current version has server code, and today's runs and errors. Needs a manager of the app. */
+  async getAppServerStatus(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppServerStatus> {
+    return await this.requestJson<AppServerStatus>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/server/status`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Recent runs of the app's server code, newest first. Needs a manager of the app. */
+  async listAppServerRuns(
+    workspaceId: string,
+    siteId: string,
+    query: { limit?: number; status?: "ok" | "error"; before?: string } = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ runs: AppServerRun[] }> {
+    const params = new URLSearchParams();
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    if (query.status) params.set("status", query.status);
+    if (query.before) params.set("before", query.before);
+    const search = params.toString();
+    return await this.requestJson<{ runs: AppServerRun[] }>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/server/runs${search ? `?${search}` : ""}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** The app's inbound webhooks, with their addresses. Needs a manager of the app. */
+  async listAppWebhooks(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookListResponse> {
+    return await this.requestJson<AppWebhookListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create an inbound webhook; the response carries its secret, shown once. */
+  async createAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    request: AppWebhookCreateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change a webhook; `rotateSecret: true` returns a new secret, shown once. */
+  async updateAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    request: AppWebhookUpdateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "PATCH",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a webhook; its address stops accepting deliveries. */
+  async deleteAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Send a notification from the app as the caller (what `site.notify` does from its page). */
+  async notifyFromApp(
+    workspaceId: string,
+    siteId: string,
+    request: AppNotifyRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppNotifyResponse> {
+    return await this.requestJson<AppNotifyResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/notify`,
+      request,
       undefined,
       options,
     );
@@ -11609,15 +11865,37 @@ export class OpenGeniClient {
     );
   }
 
+  /** Reviewed library skills to add with `installLibrarySkill`; `enabled` once added. */
+  async listLibrarySkills(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<CapabilityCatalogItem[]> {
+    const response = await this.requestJson<ListLibrarySkillsResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/skills/library`,
+      undefined,
+      undefined,
+      options,
+    );
+    return response.skills;
+  }
+
   /** Shared authored/installed catalog metadata. File bodies are read on demand. */
   async listWorkspaceSkills(
     workspaceId: string,
-    options: { cursor?: string; limit?: number; sessionId?: string } = {},
+    options: {
+      cursor?: string;
+      limit?: number;
+      sessionId?: string;
+      /** Only Skills of this scope; `user` is the caller's own. */
+      scope?: SkillScope;
+    } = {},
   ): Promise<{ skills: SkillSummary[]; nextCursor: string | null }> {
     const query = new URLSearchParams();
     if (options.cursor !== undefined) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.sessionId !== undefined) query.set("sessionId", options.sessionId);
+    if (options.scope !== undefined) query.set("scope", options.scope);
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/skills/content${suffix}`);
   }

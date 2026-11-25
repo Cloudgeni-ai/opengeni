@@ -310,6 +310,9 @@ export async function buildCapabilityCatalog(input: {
         subjectId: input.subjectId,
         accountId: input.accountId,
         ownServers: [...input.settings.mcpServers, ...runnableMcpServers],
+        // Listed even when the owner's account stopped working, so its
+        // connector keeps showing that it needs reconnecting.
+        includeLapsed: true,
       })
     : [];
   return {
@@ -419,7 +422,12 @@ async function withPersonalWorkspaceCarriedItems(
           );
     if (!item || item.kind !== "mcp") continue;
     const origin = server.personalExtension;
-    const detail = `From ${origin.originWorkspaceName}`;
+    // Listed so it shows as needing reconnecting, but not runnable: nothing
+    // selects it by default or offers it as ready until it is reconnected.
+    const lapsed = server.lapsedConnection !== undefined;
+    const detail = lapsed
+      ? `From ${origin.originWorkspaceName}. Reconnect your account to use it.`
+      : `From ${origin.originWorkspaceName}`;
     const projected: CapabilityCatalogItem = {
       ...item,
       enabled: true,
@@ -429,8 +437,12 @@ async function withPersonalWorkspaceCarriedItems(
         kind: server.connectionRef.kind ?? "oauth2",
         subjectScope: "subject",
       },
-      runtime: { ...item.runtime, available: true, mcpServerId: server.id },
-      lifecycle: { status: "ready", readiness: "ready", detail, managedBy: "workspace" },
+      runtime: lapsed
+        ? { ...item.runtime, available: false, mcpServerId: server.id, notes: detail }
+        : { ...item.runtime, available: true, mcpServerId: server.id },
+      lifecycle: lapsed
+        ? { status: "installed", readiness: "attention", detail, managedBy: "workspace" }
+        : { status: "ready", readiness: "ready", detail, managedBy: "workspace" },
       actions: ["inspect"],
       metadata: {
         ...item.metadata,
@@ -3453,6 +3465,25 @@ async function discoverCuratedSkillLibraryItems(): Promise<CapabilityCatalogItem
   return listSkillLibraryEntries().map((entry) => curatedSkillCatalogItem(entry));
 }
 
+/**
+ * Every reviewed library skill this deployment can install, `enabled` once
+ * the workspace added it directly. The capability catalog lists only added
+ * ones; this is the list to add from.
+ */
+export async function listLibrarySkillCatalogItems(
+  db: Database,
+  workspaceId: string,
+): Promise<CapabilityCatalogItem[]> {
+  const installed = new Set(
+    (await listInstalledSkills(db, workspaceId))
+      .filter((skill) => skill.owners.some((owner) => owner.kind === "direct"))
+      .map((skill) => skill.capabilityId),
+  );
+  return (await discoverCuratedSkillLibraryItems()).map((item) =>
+    installed.has(item.id) ? { ...item, enabled: true } : item,
+  );
+}
+
 function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogItem {
   return CapabilityCatalogItem.parse({
     id: `skill:${entry.id}`,
@@ -3472,6 +3503,7 @@ function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogIte
     metadata: {
       libraryId: entry.id,
       version: entry.version,
+      ...(entry.team ? { team: entry.team } : {}),
       contentSha256: entry.contentSha256,
       sourceCommit: entry.sourceCommit,
       sourceUrl: entry.sourceUrl,

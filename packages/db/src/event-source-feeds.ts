@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
-import { automationsListenTo } from "./event-trigger-listening";
+import { automationsListenTo, triggerHearsSource } from "./event-trigger-listening";
 import {
   recordEventDeliveryInTransaction,
   type RecordEventDeliveryInput,
@@ -102,6 +102,47 @@ export async function claimEventSourceFeed(
       return { feed: mapFeed(row), wanted: wanted?.wanted === true };
     }),
   );
+}
+
+/**
+ * The event types and conditions of the runnable triggers listening to a
+ * source (see automationsListenTo), for a feed that reads only what its
+ * triggers name: "GitHub (your connection)" polls just the pull requests and
+ * repositories they ask about.
+ */
+export async function listListeningEventTriggers(
+  db: Database,
+  workspaceId: string,
+  sourceId: string,
+): Promise<Array<{ eventTypes: string[]; conditions: unknown[]; createdAt: Date }>> {
+  return await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const rows = await rawRows<{
+      event_types: string[];
+      conditions: unknown[];
+      created_at: Date | string;
+    }>(
+      scoped,
+      sql`select trigger.event_types, trigger.conditions, trigger.created_at
+        from event_triggers trigger
+        join scheduled_tasks task
+          on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
+        join scheduled_task_event_settings settings
+          on settings.task_id = trigger.task_id and settings.workspace_id = trigger.workspace_id
+        join event_sources source
+          on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
+        where trigger.workspace_id = ${workspaceId}
+          and trigger.status in ('active', 'blocked')
+          and task.status = 'active' and task.deleted_at is null and settings.completed_at is null
+          and ${triggerHearsSource(sql`${sourceId}::uuid`, { activeOnly: true })}
+        order by trigger.created_at
+        limit 500`,
+    );
+    return rows.map((row) => ({
+      eventTypes: Array.isArray(row.event_types) ? row.event_types : [],
+      conditions: Array.isArray(row.conditions) ? row.conditions : [],
+      createdAt: new Date(row.created_at),
+    }));
+  });
 }
 
 export type EventSourceFeedStepResult = {

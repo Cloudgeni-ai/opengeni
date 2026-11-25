@@ -1,3 +1,4 @@
+import { MCP_DESTINATION_CONNECTION_ERRORS } from "@opengeni/contracts";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
@@ -734,6 +735,34 @@ describe("CatalogItemPage", () => {
       expect(view.container.textContent).toContain("Each person connects their own account.");
       expect(view.container.textContent).not.toContain("Your connection stopped working");
       expect(view.container.textContent).not.toContain("Needs attention");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a blocked connector explains the address problem instead of asking to sign in again", async () => {
+    const blocked = {
+      id: "blocked-account",
+      workspaceId: "integration-tests",
+      subjectId: "me",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      status: "error",
+      lastError: MCP_DESTINATION_CONNECTION_ERRORS.blocked,
+    } as ConnectionMetadata;
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        workspaceId=""
+        item={item({ enabled: true })}
+        health={{ state: "attention", reason: "failed", connection: blocked }}
+        onAction={() => {}}
+      />,
+    );
+    try {
+      expect(view.container.textContent).toContain("Connector address unavailable");
+      expect(view.container.textContent).toContain(MCP_DESTINATION_CONNECTION_ERRORS.blocked);
+      expect(view.container.textContent).not.toContain("Sign in again to keep using");
     } finally {
       await view.unmount();
     }

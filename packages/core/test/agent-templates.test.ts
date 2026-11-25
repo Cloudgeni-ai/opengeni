@@ -2,12 +2,27 @@ import { describe, expect, test } from "bun:test";
 import { agentTemplateByKey, agentTemplates } from "../src/index";
 
 describe("ready-made agents", () => {
-  test("all three content files are valid and in gallery order", () => {
+  test("every content file is valid and in gallery order", () => {
     expect(agentTemplates().map((template) => template.key)).toEqual([
       "triage",
       "bug-fixer",
       "pr-reviewer",
+      "cve-scanner",
+      "incident-responder",
+      "dependency-updater",
+      "product-analyst",
     ]);
+  });
+
+  test("names and keys are unique, and every agent named for a handoff is one of them", () => {
+    const names = agentTemplates().map((template) => template.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(new Set(agentTemplates().map((template) => template.key)).size).toBe(names.length);
+    for (const template of agentTemplates()) {
+      for (const [, named] of template.instructions.matchAll(/"([^"]+)" agent/gu)) {
+        expect(names).toContain(named);
+      }
+    }
   });
 
   test("each has instructions, a merge Block and at least one suggested trigger", () => {
@@ -26,6 +41,53 @@ describe("ready-made agents", () => {
     }
   });
 
+  test("PR reviewer adds, in one click, a review when someone on the team mentions it on a PR", () => {
+    const reviewer = agentTemplateByKey("pr-reviewer");
+    const mentioned = reviewer?.suggestedTriggers.find(
+      (suggestion) => suggestion.name === "Review when mentioned on a PR",
+    );
+    expect(mentioned?.oneClick).toBe(true);
+    expect(mentioned?.schedule).toBeNull();
+    const team = {
+      field: "data.comment.author_association",
+      op: "in",
+      value: ["OWNER", "MEMBER", "COLLABORATOR"],
+    };
+    const mention = { field: "data.comment.mentions_app", op: "equals", value: true };
+    expect(mentioned?.triggers.map((trigger) => [trigger.source, trigger.eventTypes])).toEqual([
+      [{ kind: "github" }, ["issue_comment.created"]],
+      [{ kind: "github" }, ["pull_request_review_comment.created"]],
+    ]);
+    // Issue comments only on pull requests; review comments always are.
+    expect(mentioned?.triggers[0]?.conditions).toEqual([
+      { field: "data.issue.pull_request", op: "equals", value: true },
+      mention,
+      team,
+    ]);
+    expect(mentioned?.triggers[1]?.conditions).toEqual([mention, team]);
+    // Its own comments never start it.
+    expect(mentioned?.triggers.every((trigger) => !trigger.includeOwnEvents)).toBe(true);
+    // The others still open the form.
+    expect(reviewer?.suggestedTriggers[0]?.oneClick).toBeUndefined();
+  });
+
+  test("PR reviewer labels findings Critical, Bug or Nit and posts only Critical and Bug", () => {
+    const instructions = agentTemplateByKey("pr-reviewer")?.instructions ?? "";
+    expect(instructions).toContain(
+      "- Critical: security, data loss, outage, or a broken migration or public API.",
+    );
+    expect(instructions).toContain("- Bug: wrong behaviour in a realistic case.");
+    expect(instructions).toContain("- Nit: style or an optional improvement.");
+    expect(instructions).toContain("its category, the concrete case that triggers it");
+    expect(instructions).toContain("Post only Critical and Bug findings; leave nits out.");
+    expect(instructions).toContain(
+      "Comment on conventions only where the repo has written rules (AGENTS.md, lint config).",
+    );
+    // The rubric replaces the old labels and review levels.
+    expect(instructions).not.toContain("Blocker:");
+    expect(instructions).not.toContain("Review level");
+  });
+
   test("they stay general: no Opengeni-internal skills or names", () => {
     for (const template of agentTemplates()) {
       const text = JSON.stringify(template).toLowerCase();
@@ -34,9 +96,70 @@ describe("ready-made agents", () => {
     }
   });
 
+  test("CVE scanner runs weekly and on pull requests, skips ones without dependency changes, and hands fixes to PR reviewer", () => {
+    const scanner = agentTemplateByKey("cve-scanner");
+    expect(scanner?.suggestedTriggers.map((suggestion) => suggestion.schedule)).toEqual([
+      { type: "calendar", hour: 8, minute: 0, daysOfWeek: ["MONDAY"] },
+      null,
+    ]);
+    // GitHub events carry no changed paths, so the run itself skips other pull requests.
+    const pullRequests = scanner?.suggestedTriggers[1];
+    expect(pullRequests?.triggers[0]?.eventTypes).toEqual([
+      "pull_request.opened",
+      "pull_request.ready_for_review",
+    ]);
+    expect(pullRequests?.instructions).toContain("Otherwise, do nothing.");
+    expect(scanner?.instructions).toContain("lockfile");
+    expect(scanner?.instructions).toContain('"PR reviewer" agent');
+  });
+
+  test("Incident responder listens for alerts and Slack reports and hands fixes to Bug fixer", () => {
+    const responder = agentTemplateByKey("incident-responder");
+    const triggers = responder?.suggestedTriggers.flatMap((suggestion) => suggestion.triggers);
+    expect(triggers?.map((trigger) => trigger.source)).toEqual([
+      { kind: "webhook", adapter: "standard" },
+      { kind: "slack" },
+    ]);
+    expect(triggers?.[0]?.eventTypes).toEqual(["*"]);
+    expect(triggers?.[1]?.conditions).toEqual([
+      { field: "data.in_thread", op: "equals", value: false },
+    ]);
+    expect(responder?.instructions).toContain('"Bug fixer" agent');
+  });
+
+  test("Dependency updater opens one pull request a week for PR reviewer", () => {
+    const updater = agentTemplateByKey("dependency-updater");
+    expect(updater?.suggestedTriggers).toHaveLength(1);
+    expect(updater?.suggestedTriggers[0]?.schedule).toEqual({
+      type: "calendar",
+      hour: 9,
+      minute: 0,
+      daysOfWeek: ["MONDAY"],
+    });
+    expect(updater?.suggestedTriggers[0]?.triggers).toEqual([]);
+    expect(updater?.instructions).toContain('"PR reviewer" agent');
+  });
+
   test("lookup by key", () => {
     expect(agentTemplateByKey("bug-fixer")?.name).toBe("Bug fixer");
     expect(agentTemplateByKey("missing")).toBeUndefined();
+  });
+
+  test("Triage listens where reports arrive and hands bugs to Bug fixer by name", () => {
+    const triage = agentTemplateByKey("triage");
+    const kinds = triage?.suggestedTriggers.flatMap((suggestion) =>
+      suggestion.triggers.map((trigger) => trigger.source.kind),
+    );
+    expect(kinds).toEqual(expect.arrayContaining(["github", "slack", "webhook"]));
+    const slack = triage?.suggestedTriggers.find((suggestion) =>
+      suggestion.triggers.some((trigger) => trigger.source.kind === "slack"),
+    );
+    // New messages only, not every thread reply.
+    expect(slack?.triggers[0]?.eventTypes).toEqual(["message.posted"]);
+    expect(slack?.triggers[0]?.conditions).toEqual([
+      { field: "data.in_thread", op: "equals", value: false },
+    ]);
+    expect(triage?.instructions).toContain('"Bug fixer" agent');
   });
 });
 

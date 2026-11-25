@@ -1,5 +1,307 @@
 # @opengeni/runtime
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codemode@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/decisions@6.41.0
+  - @opengeni/interaction@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/jev@6.41.0
+  - @opengeni/agent-proto@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- 928df9f: Exclude MCP argument rejections from the tool failure ratio regardless of server. Any MCP server can mark an `isError: true` result with `_meta["opengeni/argumentRejected"]: true`, and external JSON-RPC Invalid params errors (`-32602`) also count as rejections. This changes metrics only, not tool results or retry behavior.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/capabilities@6.40.0
+  - @opengeni/codemode@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/decisions@6.40.0
+  - @opengeni/interaction@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+  - @opengeni/vaults@6.40.0
+  - @opengeni/jev@6.40.0
+  - @opengeni/agent-proto@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- 58b1b0e: Count an optional tool connection whose sign-in Opengeni already refused (expired, revoked or not usable for the turn) as its own `auth_needed` lifecycle outcome instead of a connection failure. The person already sees that account needs a reconnect, so the best-effort connection failure alert no longer pages for it on every turn, and those refusals no longer dilute the ratio of real connection failures.
+- 1f28f11: The agent is told which message is its reply: text written before a tool call is a progress update, and only the message after its last tool call is the final response, so follow-up tool work such as saving notes comes before the answer. Before, an agent could write its answer, save a note, and end with only a short trailer such as a progress bar; the reply then showed only the trailer, with the answer folded into the work log.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/codemode@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/decisions@6.39.0
+  - @opengeni/interaction@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/jev@6.39.0
+  - @opengeni/agent-proto@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- 969cb9b: A tool search that mentions Opengeni itself, as app chats often do ("the Opengeni app"), no longer shows a Connected Machine card. The platform's own domain no longer counts as naming its built-in integrations; their own names still do.
+- 14d9e24: A default `browser_open` (no `browserSessionId`, default reuse) no longer fails on a browser that can never be continued. When the browser it picks for reuse is refused and inspecting its working copy shows it can never be continued (its last launch left no record of a browser process, it was launched under another controller, or its working directory is missing), the open starts a new browser instead and its result says which browser was replaced and why. The old browser is kept, and an open that names it by ID still reports why it cannot continue. A copy that can be adopted, an adoption still settling, or a copy a process may still use are not replaced.
+- 020a5df: `computer_open` with `applicationId` now works for a macOS app run from a folder macOS doesn't know, such as a downloaded app opened in place.
+
+  - When macOS can't find such an app to launch, the launch fails definitely instead of reporting an unknown outcome, since nothing ran.
+  - If the app is already running, the open then observes its listed window.
+  - When no window of the named app was observed, the screenshot shows only a screen, never another app's window. When there is no screen, it says why no screenshot was taken.
+
+- 3e41dc8: `computer_open` now reports a computer that failed to start as an error with the controller's reason (`ComputerSession <id> did not start: …`), as `browser_open` already does, instead of an opened computer with no screens.
+- 5b2cd0d: A full-page browser screenshot now says when it leaves out content that scrolls inside the page's own areas (an app's main pane or a table), and by how many CSS pixels, with how to capture the rest. It is also exactly as wide as the viewport when the page hides content past its right edge, instead of widening to content no one can scroll to.
+- 66afd96: A browser or computer request that fails because its Connected Machine is offline now says what to do instead of the generic "resolve the reported issue": wait for the machine to reconnect, or open a new browser or computer on another online machine from `sandboxes_list`.
+- 47f4951: Apps get dashboard building blocks: `/__opengeni/ui.css` adds KPI cards, number cells, good and bad tones, chart colours per theme, details and empty states, and `/__opengeni/charts.js` (`SITE_CHARTS_JS`, inlined by `resolveSiteUiStylesheet`) draws formatted KPIs, bars, line and scatter charts and sortable tables. The `sites` Skill sends dashboards to a short `references/dashboards.md`.
+- d1ecb10: New apps look designed instead of generic. The bundled `sites` Skill now carries design guidance (`references/design.md`) that the agent reads before it writes a new app or restyles one: what the first screen leads with, how to compose a tool in the Opengeni look, how to design a page of its own, the states every app needs, and the generated-page habits to leave out. A page shown to others (a landing page, invitation, menu, portfolio) now gets a design of its own instead of the Opengeni look. A person's or workspace's own design still comes first.
+- 262c8b2: Pause, terminal Cancel and an explicit stop now stop an unsupervised session background command's process group. Before, such a command was only marked stopping and kept running, so a process that ignored interrupts could still write after it should have stopped. Slow turn settlements and Steer handovers are now logged with the time spent in each phase.
+- Updated dependencies [f1289fa]
+- Updated dependencies [969cb9b]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+  - @opengeni/capabilities@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/decisions@6.38.0
+  - @opengeni/interaction@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+  - @opengeni/vaults@6.38.0
+  - @opengeni/jev@6.38.0
+  - @opengeni/agent-proto@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- e93d6d4: Include a bounded error class, code, and reviewed source locations in API fatal logs even when protected diagnostics are disabled. Exception messages and unreviewed paths are never copied to the log. Keep an early Connected Machine replay failure attached to its caller instead of leaking an unhandled rejection while the initial attach is still in progress.
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- 556abe5: A custom MCP server that can't be reached no longer fails calls to other tools. Tool calls without a remembered catalog, approvals, the MCP endpoints, the MCP sign-in consent screen and app tool calls now leave that server out, as the tool list already does. A call to that server's own tool still reports its failure.
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/tool-gateway@6.37.3
+  - @opengeni/capabilities@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/decisions@6.37.3
+  - @opengeni/interaction@6.37.3
+  - @opengeni/sdk@6.37.3
+  - @opengeni/vaults@6.37.3
+  - @opengeni/jev@6.37.3
+  - @opengeni/agent-proto@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- 9b5daaa: Record why a browser live view stopped getting frames. The browser controller now reports the state of its frame streams and live-view sockets (states, counts and times, never page content), and the API logs `browser.frame_stream.stalled` with that report when an open view's heartbeat finds a stream or view without a frame for ten seconds, so the reason survives the controller's sandbox stopping.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/decisions@6.37.2
+  - @opengeni/interaction@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/jev@6.37.2
+  - @opengeni/agent-proto@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: App server code: publishing refuses tool names that aren't tools in the workspace and names the id to use, and an agent's `app_server_run` and run logs act for the person whose turn it is.
+- e71502d: Require Node.js 22.19 or later (`engines.node`) for the packages that load `@opengeni/runtime`, whose `e2b` dependency requires it; installers that enforce engines refused them on 22.15.
+- 1d7c08a: Restore streamed remote workspace archives that contain symlinks. A save stores the workspace's symlinks, but the streamed restore refused them, so any workspace with one could be saved and never restored. A failed hydration now logs why.
+- Updated dependencies [17783d3]
+  - @opengeni/config@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/jev@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/sdk@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- a2ad192: Add the opt-in `fitViewport` prop to `BrowserViewer`. An embed can fit a managed Chromium page to its panel without cropping or overriding an explicitly set viewport. The console still scales its existing frame. Only viewer-fitted sizes carry to new tabs.
+- cf218c3: Report refused MCP destinations separately from connection failures. A native account that points to a blocked or unresolvable address now shows what went wrong in connection settings, while a temporary DNS failure still retries normally.
+- ee17f5d: The Agents page lists the ready-made agents not added yet under the workspace's own, each added in one click. The Artifacts page's Apps tab, and its empty state, offer ready-made apps the same way, opening the app once it's added (Capabilities' **Ready-made** tab now opens it too). Three new ready-made apps keep their own data: **Issue tracker**, **Incident log** and **Feedback board** (with votes), next to **Decision log**.
+
+  An agent's GitHub trigger now covers every repository the GitHub connection reaches, or only the repositories you choose, and each run checks out the repository its event is about. Before, the one repository picked in **Add trigger** was only checked out, so the trigger fired for every repository; existing agent triggers now fire only for that repository. An agent's GitHub trigger saved with no repository, which already fired for every repository, now also checks out each event's repository (from the workspace's GitHub allowlist) in its new chat. A trigger that continues a chat keeps the chosen repositories open there. Other automations are unchanged.
+
+  The pasted webhook secret steps are one component shared by Add a source, a source's page and Add trigger, and the Skills section on an agent's page has more room above **Add a Skill**.
+
+  New apps take the Opengeni look by default (`/__opengeni/ui.css`), single-file apps included, unless the person's design, the workspace's design system or the product the app is about comes first; the ready-made apps use it too. `ui.css` now sizes text in `rem`, so the reader's browser text size applies, and uses 16px inputs on touch screens so phones don't zoom when a field is tapped.
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [19fe301]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/sdk@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/capabilities@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/codemode@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/decisions@6.37.0
+  - @opengeni/interaction@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/tool-gateway@6.37.0
+  - @opengeni/vaults@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+  - @opengeni/jev@6.37.0
+  - @opengeni/agent-proto@6.37.0
+
+## 6.36.0
+
+### Minor Changes
+
+- 8ace4d4: Run Claude on Amazon Bedrock with the deployment's AWS identity: set `OPENGENI_BEDROCK_REGION` to use the native Messages transport against Bedrock, with `eu.`/`us.`/`global.` inference profiles, inference-profile ARNs, model discovery, Bedrock pricing and opt-in per-user cost attribution through an assumed role. The deployment model credential source (`ModelCredentialSourceV1` `mechanism`) gains the value `aws_iam`; clients that switch on it should treat unknown values as a deployment credential. While Bedrock is on, `OPENGENI_MODEL_PROVIDERS_JSON` cannot use the provider id `bedrock`.
+- 27832fd: Upgrade an existing app from a newer package of it: a dry run returns the plan (new version, tools, collections, migrations, queries and syncs), and applying it publishes the package's version as a new version of the same app and runs only what is new. Nothing is deleted; destructive changes need `allowDestructive: true` and conflicts stop the upgrade. Adds `POST /v1/workspaces/:workspaceId/published-artifacts/:appId/package/upgrade`, `upgradeAppPackage` in the SDK, the `app_upgrade` agent tool and Upgrade from package in the app's menu. Package demo data now carries the app's shared files (`demoData.files`) and SQL blob values (`{ "$base64": "…" }`), and package files `app_export` stores are deleted after 24 hours. Older packages stay readable. See docs/app-packages.md.
+- bede91b: The function `apply_patch` tool takes an optional `then` shell command. It runs once, only after every patch operation applied, through the same `exec_command` path (sandbox, lean defaults, turn cancellation, finish floor, secret references and leak guard, truncation and approval policy), inside the exclusive edit call, and its result follows the patch result in the same tool output. A failed patch leaves it unrun and says so. The tool description notes that one patch can change several files, and one system-prompt sentence suggests batching decided edits and passing the follow-up check as `then`.
+
+  The function `apply_patch` is applied one file section at a time: an Add File section without lines creates an empty file instead of failing the whole patch, an Invalid Context failure is followed by the closest matching region of the file with line numbers, a section whose hunks were written out of file order is retried in file order when each hunk matches exactly one place, and each section reports its own result.
+
+  All of this is on by default; `OPENGENI_EXPERIMENT_APPLY_PATCH_THEN=false` restores the previous plain tool.
+
+- b1abd39: Ready-made content names the team it is for: `AgentTemplate` has an optional `team`, and new `AppTemplate` content (an app package with a name, a line and a team) is listed by `GET /v1/workspaces/:workspaceId/app-templates` (SDK `listAppTemplates`); add one with `installAppPackage` and its `package`. `GET /v1/workspaces/:workspaceId/skills/library` (SDK `listLibrarySkills`) lists every reviewed library skill to add, `enabled` once added.
+
+  `ConnectionInstalled` lists what you have in the same rows as the catalog: logo, name and one status line ("Installed · Workspace"), two columns where there is room. `CapabilityCatalogRow` takes an optional `statusLine` that replaces the description and drops the glyph unless the row needs attention. `ConnectionInstalledItem.showStatus` is deprecated: the status line always shows. The `.og-connection-installed-status` and `.capability-search-section` classes are removed. Embedding products that style these rows see a visible change; the row buttons no longer carry an `aria-label`, so their visible text is their name. Catalog rows carry `data-row-status` for styling; `data-status` is on the row only when it shows no indicator.
+
+### Patch Changes
+
+- 59235cb: The Branch view in Changes and the branch comparison stored with workspace captures now show only the changes made on the current branch, measured from where it left the default branch, like a pull request. Before, a checkout that had fallen behind the default branch also listed every later change on the default branch, reversed. Git diff requests take a new optional `mergeBase` flag for this.
+- 9cfc4b7: Keep Claude subscriptions out of automatic rotation after a model request is denied with HTTP 403. The account shows why it was skipped and returns to service after reconnecting. Model suspensions and stream errors do not quarantine the account.
+- f2c07c2: The ready-made Triage agent suggests a Slack trigger (a new message in a channel), and Triage and Bug fixer start with what they can reach and hand off by name instead of asking for setup first. `scheduled_tasks_create` takes `agentConfig.agentName` (an agent's name or id), and the apps Skill tells agents to start work on new app records with an automation on app change events, not page code. Adding a GitHub event source without a GitHub connection offers Connect GitHub. The coding-agent setup guide shows how to add the Opengeni MCP server by hand when the `opengeni` npm package isn't available.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- 0b36a4b: The workspace filesystem layout and the agent's sandbox manifest now come from one builder and one placement rule. `buildManifest` takes the turn's placement (`activeSandboxBackend`, `sandboxWorkspaceRoot`) and owns the Connected Machine root and resource rules; the layout is that manifest without files. The SDK renders nothing from the manifest into the system prompt (`manifestInstructions: false` replaces the `instructionManifest` projection and `filesystemInstructions`), so a resumed sandbox that still holds an earlier turn's file mount at a custom path no longer adds a remote mount policy section to the cached system prompt. Rendered text for every other case is unchanged.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [e765d11]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [837e58f]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/sdk@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/decisions@6.36.0
+  - @opengeni/interaction@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/jev@6.36.0
+  - @opengeni/agent-proto@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

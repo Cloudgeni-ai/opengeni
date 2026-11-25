@@ -32,6 +32,14 @@ export type NewerBrowserActionOption = {
 
 export const NEWER_BROWSER_ACTION_OPTIONS: readonly NewerBrowserActionOption[] = [
   {
+    surfaceKeys: ["BrowserAction $|type=viewport.mode"],
+    name: 'mode "fit"',
+    context: 'a "viewport" action',
+    alternative: "keep the existing frame size",
+    usedBy: (action) =>
+      someObject(action, (value) => value.type === "viewport" && value.mode === "fit"),
+  },
+  {
     // First accepted by the agent release after 0.1.144.
     surfaceKeys: [
       "BrowserAction $",

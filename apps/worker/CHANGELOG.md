@@ -1,5 +1,419 @@
 # @opengeni/worker-bundle
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [ca5b614]
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/core@6.41.0
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/db@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/documents@6.41.0
+  - @opengeni/github@6.41.0
+  - @opengeni/runtime@6.41.0
+  - @opengeni/storage@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codemode@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/decisions@6.41.0
+  - @opengeni/events@6.41.0
+  - @opengeni/interaction@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/vaults-bitwarden@6.41.0
+  - @opengeni/vaults-keeper@6.41.0
+  - @opengeni/vaults-onepassword@6.41.0
+  - @opengeni/vaults-protonpass@6.41.0
+  - @opengeni/jev@6.41.0
+  - @opengeni/agent-proto@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/subscriptions@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [2a4f625]
+- Updated dependencies [928df9f]
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/core@6.40.0
+  - @opengeni/runtime@6.40.0
+  - @opengeni/contracts@6.40.0
+  - @opengeni/db@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/capabilities@6.40.0
+  - @opengeni/codemode@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/decisions@6.40.0
+  - @opengeni/documents@6.40.0
+  - @opengeni/events@6.40.0
+  - @opengeni/github@6.40.0
+  - @opengeni/interaction@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/storage@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+  - @opengeni/vaults@6.40.0
+  - @opengeni/vaults-bitwarden@6.40.0
+  - @opengeni/vaults-keeper@6.40.0
+  - @opengeni/vaults-onepassword@6.40.0
+  - @opengeni/vaults-protonpass@6.40.0
+  - @opengeni/jev@6.40.0
+  - @opengeni/agent-proto@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/subscriptions@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [58b1b0e]
+- Updated dependencies [1f28f11]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/codemode@6.39.0
+  - @opengeni/runtime@6.39.0
+  - @opengeni/core@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/db@6.39.0
+  - @opengeni/decisions@6.39.0
+  - @opengeni/documents@6.39.0
+  - @opengeni/events@6.39.0
+  - @opengeni/github@6.39.0
+  - @opengeni/interaction@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/storage@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/vaults-bitwarden@6.39.0
+  - @opengeni/vaults-keeper@6.39.0
+  - @opengeni/vaults-onepassword@6.39.0
+  - @opengeni/vaults-protonpass@6.39.0
+  - @opengeni/jev@6.39.0
+  - @opengeni/agent-proto@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/subscriptions@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- bfe5398: A chat pinned to one subscription account now says so when it waits for that account. The chat keeps honouring the pin: its turn still waits for the chosen account and never moves to another one by itself. But the wait no longer tells people to switch the chat to another model, which did not help, because the pin holds whatever the model.
+
+  - The composer shows "This chat is pinned to the Claude account “Team”, which is out of capacity. Resets Sat 18:00." with one button, **Use automatic account choice**. It switches the chat back to automatic account choice through the existing session account choice (`connectionId: null`), which applies to the waiting turn, so it continues at once on another account. People who can't manage the chat are told who can. A turned-off or no-longer-eligible pinned account gets the same notice and button.
+  - The timeline keeps the wait's own explanation instead of the generic "switch to another model" line.
+  - The person's inbox notification is titled "Chat waiting for its pinned Claude account", names the account and when it has room again, and offers automatic account choice instead of a model switch. It is still sent once per waiting turn and updated in place when what it said changes.
+  - A worker's parent agent is told the same, with the `setSessionModelAccount` action (`connectionId: null`) as the way to let the worker continue, instead of `session_set_model`.
+
+  The account is named by its label only when the label is not an email address. The internal wait field that named an account needing a new sign-in is now `waitAccount` (type `SubscriptionWaitAccount`; `SubscriptionReconnectAccount` remains as a deprecated alias) and also names a pinned account.
+
+- c05ba68: Automations that run an agent with Memory are no longer refused when they start. Microsoft Teams chats with an agent now get its Memory, as Slack and app chats do.
+  An automation whose agent was deleted or is no longer shared now stops with a clear reason instead of retrying.
+- Updated dependencies [f1289fa]
+- Updated dependencies [969cb9b]
+- Updated dependencies [f9b646c]
+- Updated dependencies [14d9e24]
+- Updated dependencies [020a5df]
+- Updated dependencies [3e41dc8]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [bd4550b]
+- Updated dependencies [b193d0c]
+- Updated dependencies [66afd96]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [c05ba68]
+- Updated dependencies [b76dd79]
+- Updated dependencies [47f4951]
+- Updated dependencies [d1ecb10]
+- Updated dependencies [b902e4e]
+- Updated dependencies [262c8b2]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+  - @opengeni/capabilities@6.38.0
+  - @opengeni/runtime@6.38.0
+  - @opengeni/db@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/subscriptions@6.38.0
+  - @opengeni/core@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/decisions@6.38.0
+  - @opengeni/documents@6.38.0
+  - @opengeni/events@6.38.0
+  - @opengeni/github@6.38.0
+  - @opengeni/interaction@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/storage@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+  - @opengeni/vaults@6.38.0
+  - @opengeni/vaults-bitwarden@6.38.0
+  - @opengeni/vaults-keeper@6.38.0
+  - @opengeni/vaults-onepassword@6.38.0
+  - @opengeni/vaults-protonpass@6.38.0
+  - @opengeni/jev@6.38.0
+  - @opengeni/agent-proto@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/runtime@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/db@6.37.3
+  - @opengeni/core@6.37.3
+  - @opengeni/tool-gateway@6.37.3
+  - @opengeni/capabilities@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/decisions@6.37.3
+  - @opengeni/documents@6.37.3
+  - @opengeni/events@6.37.3
+  - @opengeni/github@6.37.3
+  - @opengeni/interaction@6.37.3
+  - @opengeni/sdk@6.37.3
+  - @opengeni/storage@6.37.3
+  - @opengeni/vaults@6.37.3
+  - @opengeni/vaults-bitwarden@6.37.3
+  - @opengeni/vaults-keeper@6.37.3
+  - @opengeni/vaults-onepassword@6.37.3
+  - @opengeni/vaults-protonpass@6.37.3
+  - @opengeni/jev@6.37.3
+  - @opengeni/agent-proto@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/subscriptions@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [3fc742f]
+- Updated dependencies [9b5daaa]
+- Updated dependencies [c78d62c]
+- Updated dependencies [8ee5e81]
+  - @opengeni/runtime@6.37.2
+  - @opengeni/contracts@6.37.2
+  - @opengeni/db@6.37.2
+  - @opengeni/core@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/decisions@6.37.2
+  - @opengeni/documents@6.37.2
+  - @opengeni/events@6.37.2
+  - @opengeni/github@6.37.2
+  - @opengeni/interaction@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/storage@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/vaults-bitwarden@6.37.2
+  - @opengeni/vaults-keeper@6.37.2
+  - @opengeni/vaults-onepassword@6.37.2
+  - @opengeni/vaults-protonpass@6.37.2
+  - @opengeni/jev@6.37.2
+  - @opengeni/agent-proto@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/subscriptions@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: Require Node.js 22.15 or later (`engines.node`) for the packages that load `@opengeni/storage`, which uses zlib's zstd streams; on older Node versions the import fails.
+- e71502d: Require Node.js 22.19 or later (`engines.node`) for the packages that load `@opengeni/runtime`, whose `e2b` dependency requires it; installers that enforce engines refused them on 22.15.
+- Updated dependencies [ae9c227]
+- Updated dependencies [3595193]
+- Updated dependencies [e71502d]
+- Updated dependencies [ae9c227]
+- Updated dependencies [e71502d]
+- Updated dependencies [bc538e2]
+- Updated dependencies [1d7c08a]
+- Updated dependencies [17783d3]
+- Updated dependencies [e71502d]
+  - @opengeni/runtime@6.37.1
+  - @opengeni/db@6.37.1
+  - @opengeni/core@6.37.1
+  - @opengeni/storage@6.37.1
+  - @opengeni/documents@6.37.1
+  - @opengeni/config@6.37.1
+  - @opengeni/events@6.37.1
+  - @opengeni/github@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/jev@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/sdk@6.37.1
+  - @opengeni/subscriptions@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/vaults-bitwarden@6.37.1
+  - @opengeni/vaults-keeper@6.37.1
+  - @opengeni/vaults-onepassword@6.37.1
+  - @opengeni/vaults-protonpass@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- Updated dependencies [cc649c3]
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [19fe301]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [20daa38]
+- Updated dependencies [a0b9135]
+  - @opengeni/db@6.37.0
+  - @opengeni/sdk@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/runtime@6.37.0
+  - @opengeni/capabilities@6.37.0
+  - @opengeni/subscriptions@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/core@6.37.0
+  - @opengeni/documents@6.37.0
+  - @opengeni/events@6.37.0
+  - @opengeni/codemode@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/decisions@6.37.0
+  - @opengeni/github@6.37.0
+  - @opengeni/interaction@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/storage@6.37.0
+  - @opengeni/tool-gateway@6.37.0
+  - @opengeni/vaults@6.37.0
+  - @opengeni/vaults-bitwarden@6.37.0
+  - @opengeni/vaults-keeper@6.37.0
+  - @opengeni/vaults-onepassword@6.37.0
+  - @opengeni/vaults-protonpass@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+  - @opengeni/jev@6.37.0
+  - @opengeni/agent-proto@6.37.0
+
+## 6.36.0
+
+### Minor Changes
+
+- 8ace4d4: Run Claude on Amazon Bedrock with the deployment's AWS identity: set `OPENGENI_BEDROCK_REGION` to use the native Messages transport against Bedrock, with `eu.`/`us.`/`global.` inference profiles, inference-profile ARNs, model discovery, Bedrock pricing and opt-in per-user cost attribution through an assumed role. The deployment model credential source (`ModelCredentialSourceV1` `mechanism`) gains the value `aws_iam`; clients that switch on it should treat unknown values as a deployment credential. While Bedrock is on, `OPENGENI_MODEL_PROVIDERS_JSON` cannot use the provider id `bedrock`.
+
+### Patch Changes
+
+- 55539f1: Show where recordings spend time between Stop and the transcript. The SDK measures storage uploads and finalize, React measures transcript delivery and composer insertion, and the API and worker emit recording stage timings with a shared recording key. Transcript long polling reports its intentional wait separately from active API work.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- 0b36a4b: The workspace filesystem layout and the agent's sandbox manifest now come from one builder and one placement rule. `buildManifest` takes the turn's placement (`activeSandboxBackend`, `sandboxWorkspaceRoot`) and owns the Connected Machine root and resource rules; the layout is that manifest without files. The SDK renders nothing from the manifest into the system prompt (`manifestInstructions: false` replaces the `instructionManifest` projection and `filesystemInstructions`), so a resumed sandbox that still holds an earlier turn's file mount at a custom path no longer adds a remote mount policy section to the cached system prompt. Rendered text for every other case is unchanged.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [9cfc4b7]
+- Updated dependencies [837e58f]
+- Updated dependencies [26b0190]
+- Updated dependencies [e765d11]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [b419673]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [23e52db]
+- Updated dependencies [86bef5d]
+- Updated dependencies [53320fa]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [53320fa]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [837e58f]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [0b36a4b]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/core@6.36.0
+  - @opengeni/sdk@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/runtime@6.36.0
+  - @opengeni/db@6.36.0
+  - @opengeni/subscriptions@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/decisions@6.36.0
+  - @opengeni/documents@6.36.0
+  - @opengeni/events@6.36.0
+  - @opengeni/github@6.36.0
+  - @opengeni/interaction@6.36.0
+  - @opengeni/storage@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/vaults-bitwarden@6.36.0
+  - @opengeni/vaults-keeper@6.36.0
+  - @opengeni/vaults-onepassword@6.36.0
+  - @opengeni/vaults-protonpass@6.36.0
+  - @opengeni/jev@6.36.0
+  - @opengeni/agent-proto@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

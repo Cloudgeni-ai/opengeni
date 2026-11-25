@@ -15,7 +15,7 @@ import type {
 } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { ChevronDownIcon, CornerDownRightIcon } from "lucide-react";
+import { ChevronDownIcon, CornerDownRightIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { PendingApproval } from "../../../approvals";
@@ -32,11 +32,13 @@ import {
   HumanInputSurface,
   type ToolReviewDetailsLoader,
 } from "../../../session-ui";
-import { buttonVariants } from "../../../ui/button";
+import type { ApprovalSurfaceProps } from "../../../components/approval-surface";
+import { Button, buttonVariants } from "../../../ui/button";
 import { userErrorText } from "../../../ui/api-error";
 import {
   DESCENDANT_REQUEST_EVENT_LIMIT,
   DESCENDANT_REQUEST_EVENT_TYPES,
+  awaitsConnection,
   descendantRequestActivity,
   subSessionsNeedYouLabel,
 } from "../../lib/descendant-requests";
@@ -85,6 +87,8 @@ export type DescendantRequestsProps = {
   allowedSaveTo?: HumanInputFormProps["allowedSaveTo"];
   /** Safety-net re-read of questions while shown (live hints drive the rest). */
   pollIntervalMs?: number | undefined;
+  /** Asks a provider for access an action's account lacks, before approving it. */
+  onAllowAccess?: ApprovalSurfaceProps["onAllowAccess"];
 };
 
 // The shared-feed mode with an empty feed: no live stream per sub-session.
@@ -102,9 +106,54 @@ const collapsedStacks = new Map<string, boolean>();
 // the viewing session's events.
 const delegatedRequests = new Set<string>();
 
+// Waits the person dismissed, by sub-session: the wait key it had then. A new
+// wait (a question, an approval, another card) has a new key and shows again.
+const DISMISSED_WAITS_STORAGE_KEY = "opengeni.subSessionWaits.dismissed";
+const DISMISSED_WAITS_LIMIT = 200;
+let dismissedWaits: Map<string, string> | null = null;
+
+function readDismissedWaits(): Map<string, string> {
+  if (dismissedWaits) return dismissedWaits;
+  dismissedWaits = new Map();
+  try {
+    const stored: unknown = JSON.parse(
+      globalThis.localStorage?.getItem(DISMISSED_WAITS_STORAGE_KEY) ?? "[]",
+    );
+    if (Array.isArray(stored))
+      for (const entry of stored)
+        if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string")
+          dismissedWaits.set(entry[0], entry[1]);
+  } catch {
+    // Unreadable storage: nothing was dismissed.
+  }
+  return dismissedWaits;
+}
+
+function dismissWait(key: string, waitKey: string): void {
+  const waits = readDismissedWaits();
+  waits.delete(key);
+  waits.set(key, waitKey);
+  while (waits.size > DISMISSED_WAITS_LIMIT) waits.delete(waits.keys().next().value!);
+  try {
+    globalThis.localStorage?.setItem(DISMISSED_WAITS_STORAGE_KEY, JSON.stringify([...waits]));
+  } catch {
+    // Kept for this tab only.
+  }
+}
+
+/** What identifies one wait of a sub-session: a new wait has a new key. */
+function subSessionWaitKey(session: SessionSummary): string {
+  return (
+    session.requiresActionSince ??
+    session.awaitingConnectionSince ??
+    `sequence:${session.lastSequence}`
+  );
+}
+
 export function resetDescendantRequestsStateForTests(): void {
   collapsedStacks.clear();
   delegatedRequests.clear();
+  dismissedWaits = new Map();
 }
 
 /**
@@ -124,7 +173,18 @@ export function DescendantRequests(props: DescendantRequestsProps) {
     collapsedStacks.set(stackKey, next);
     rerender((value) => value + 1);
   };
-  const count = props.waiting.length;
+  const dismissed = readDismissedWaits();
+  // Only a card-only wait can be dismissed: a sub-session that needs action stays.
+  const waiting = props.waiting.filter(
+    (session) =>
+      session.status === "requires_action" ||
+      dismissed.get(`${props.workspaceId}\u0000${session.id}`) !== subSessionWaitKey(session),
+  );
+  const dismiss = (session: SessionSummary) => {
+    dismissWait(`${props.workspaceId}\u0000${session.id}`, subSessionWaitKey(session));
+    rerender((value) => value + 1);
+  };
+  const count = waiting.length;
   const events = props.events;
   const delegatedInEvents = useMemo(() => delegatedHumanInputRequestIds(events ?? []), [events]);
   if (count === 0) return null;
@@ -161,7 +221,7 @@ export function DescendantRequests(props: DescendantRequestsProps) {
           )}
           data-descendant-requests-stack=""
         >
-          {props.waiting.map((session, index) => (
+          {waiting.map((session, index) => (
             // Later asks start as compact bars so every one is visible.
             <DescendantRequestItem
               key={session.id}
@@ -169,6 +229,7 @@ export function DescendantRequests(props: DescendantRequestsProps) {
               delegatedInEvents={delegatedInEvents}
               session={session}
               compact={stacked && index > 0}
+              onDismiss={() => dismiss(session)}
             />
           ))}
         </div>
@@ -192,10 +253,13 @@ function DescendantRequestItem({
   loadSkillReview,
   allowedSaveTo,
   pollIntervalMs = DEFAULT_POLL_MS,
+  onAllowAccess,
+  onDismiss,
 }: DescendantRequestsProps & {
   session: SessionSummary;
   compact: boolean;
   delegatedInEvents: ReadonlySet<string>;
+  onDismiss: () => void;
 }) {
   const sessionId = session.id;
   const t = useOpenGeniText();
@@ -245,7 +309,7 @@ function DescendantRequestItem({
   // settling (here, on the sub-session's page or by an agent). The tree still
   // shows the sub-session waiting until it is re-read, so say nothing for the
   // rest of that wait; a new wait has a new start time.
-  const waitKey = session.requiresActionSince ?? `sequence:${session.lastSequence}`;
+  const waitKey = subSessionWaitKey(session);
   const [handledWait, setHandledWait] = useState<string | null>(null);
   useEffect(() => {
     if (hasRequest) setHandledWait(waitKey);
@@ -389,17 +453,24 @@ function DescendantRequestItem({
               loadDetails={loadDetails}
               onApprove={(approval, answer) => decide(approval, "approve", answer)}
               onReject={(approval) => decide(approval, "reject")}
+              onAllowAccess={onAllowAccess}
             />
           </div>
         ) : null}
       </div>
     );
   }
-  // Waiting on something only its own page can take (a reconnect, a sign-in):
-  // say so once both reads are in, and point there.
+  // Waiting on something only its own page can take (a connection card, a
+  // sign-in): say so once both reads are in, and point there.
   const loaded = !humanInput.loading && (activity.data !== null || activity.error !== null);
   // A sub-session kept up while it resumes waits on nobody once it has no request.
-  if (!loaded || handledWait === waitKey || session.status !== "requires_action") return null;
+  if (
+    !loaded ||
+    handledWait === waitKey ||
+    (session.status !== "requires_action" && !awaitsConnection(session))
+  )
+    return null;
+  const cardOnlyWait = session.status !== "requires_action" && awaitsConnection(session);
   return (
     <div
       data-descendant-request={sessionId}
@@ -417,6 +488,20 @@ function DescendantRequestItem({
         at={null}
         className={cn(buttonVariants({ variant: "outline", size: "sm" }), "shrink-0")}
       />
+      {/* Only a card-only wait can be put away: a question, an approval or a
+          sign-in the parent can't load stays until it is answered. */}
+      {cardOnlyWait ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`Dismiss: ${title}`}
+          onClick={onDismiss}
+          className="-mr-1 shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+        >
+          <XIcon aria-hidden="true" className="size-4" />
+        </Button>
+      ) : null}
     </div>
   );
 }

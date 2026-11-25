@@ -1281,15 +1281,35 @@ export class SiteDatabase {
       if (!Array.isArray(row) || row.length !== width || !row.every(isSqlValue))
         throw new SiteDbError("validation", "Every row needs one scalar value per column");
     const maxDatabaseBytes = this.maxDatabaseBytes(body.maxDatabaseBytes);
+    const update = body.onConflict === "update";
+    if (
+      update &&
+      (typeof body.conflictColumn !== "string" || !body.columns.includes(body.conflictColumn))
+    )
+      throw new SiteDbError("validation", "Give the key column to update rows by");
     const verb =
       body.onConflict === "replace"
         ? "INSERT OR REPLACE"
         : body.onConflict === "ignore"
           ? "INSERT OR IGNORE"
           : "INSERT";
+    const others = body.columns.filter((column) => column !== body.conflictColumn);
+    // An upsert by key: the key column must be the primary key or unique.
+    const upsert = update
+      ? ` ON CONFLICT (${quoteSiteSqlIdentifier(body.conflictColumn!)}) ${
+          others.length > 0
+            ? `DO UPDATE SET ${others
+                .map(
+                  (column) =>
+                    `${quoteSiteSqlIdentifier(column)} = excluded.${quoteSiteSqlIdentifier(column)}`,
+                )
+                .join(", ")}`
+            : "DO NOTHING"
+        }`
+      : "";
     const statement = `${verb} INTO ${quoteSiteSqlIdentifier(body.table)} (${body.columns
       .map(quoteSiteSqlIdentifier)
-      .join(", ")}) VALUES (${body.columns.map(() => "?").join(", ")})`;
+      .join(", ")}) VALUES (${body.columns.map(() => "?").join(", ")})${upsert}`;
     return guarded(() =>
       this.state.storage.transactionSync(() => {
         const sizeBefore = this.sql.databaseSize;

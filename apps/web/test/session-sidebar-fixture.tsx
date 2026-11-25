@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { OpenGeniProvider } from "@opengeni/react";
 import {
   createRootRoute,
@@ -12,6 +12,7 @@ import { SiteViewRoute } from "@opengeni/react/app/routes/site-view";
 import { siteViewSearch } from "@opengeni/react/app/lib/routes";
 import { Toaster } from "sonner";
 import { SessionList } from "@opengeni/react/app/components/rail/session-list";
+import { SessionShellSlotsContext } from "../../../packages/react/src/app/components/rail/session-shell-slots";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   sessionBrowsePreferenceStorageId,
@@ -24,6 +25,41 @@ import {
   workspaceId,
 } from "./session-sidebar-context";
 import "../src/styles.css";
+
+// `?appRows=pending`: the person's "Group chats under their app" choice isn't
+// known yet, as before the sidebar layout arrives; `sessionSidebarAppRows(value)`
+// settles it.
+const pendingAppRows = new URLSearchParams(window.location.search).get("appRows") === "pending";
+let settleAppRows: (value: boolean) => void = () => {};
+Object.assign(window, { sessionSidebarAppRows: (value: boolean) => settleAppRows(value) });
+
+// `?apps=sessions|section|hidden`: the person's apps placement, which the
+// list's view menu changes here as the web app's sidebar options do.
+const appsParam = new URLSearchParams(window.location.search).get("apps");
+const initialAppsPlacement =
+  appsParam === "sessions" || appsParam === "section" || appsParam === "hidden" ? appsParam : null;
+const fillRail = new URLSearchParams(window.location.search).get("fill") === "1";
+
+function RailSessionList() {
+  const [sessionsShowApps, setSessionsShowApps] = useState<boolean | null>(
+    pendingAppRows ? null : true,
+  );
+  settleAppRows = setSessionsShowApps;
+  const [appsPlacement, setAppsPlacement] = useState(initialAppsPlacement);
+  const slots = useMemo(
+    () =>
+      appsPlacement
+        ? { appsPlacement, onAppsPlacementChange: setAppsPlacement }
+        : { sessionsShowApps },
+    [appsPlacement, sessionsShowApps],
+  );
+  if (!pendingAppRows && !appsPlacement) return <SessionList />;
+  return (
+    <SessionShellSlotsContext.Provider value={slots}>
+      <SessionList />
+    </SessionShellSlotsContext.Provider>
+  );
+}
 
 function RequestProfile() {
   const [snapshot, setSnapshot] = useState("");
@@ -93,21 +129,7 @@ const root = createRootRoute({
               className="h-dvh w-[56px] shrink-0 border-r border-border bg-surface"
             />
           ) : (
-            <aside
-              aria-label="Workspace sidebar"
-              className="flex h-dvh w-full shrink-0 flex-col border-r border-border bg-surface md:w-[288px]"
-            >
-              <header className="shrink-0 px-6 pb-5 pt-6">
-                <p className="text-sm font-medium">Product engineering</p>
-                <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
-              </header>
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
-                <SessionList />
-              </div>
-              <footer className="shrink-0 border-t border-border px-6 py-4 text-xs text-fg-muted">
-                Alex Morgan
-              </footer>
-            </aside>
+            <FixtureSidebar />
           )}
           <MainArea />
         </main>
@@ -116,6 +138,30 @@ const root = createRootRoute({
     </OpenGeniProvider>
   ),
 });
+
+/** The sidebar. `?fill=1`: the list fills spare height as in the real rail. */
+function FixtureSidebar() {
+  return (
+    <aside
+      aria-label="Workspace sidebar"
+      className="flex h-dvh w-full shrink-0 flex-col border-r border-border bg-surface md:w-[288px]"
+    >
+      <header className="shrink-0 px-6 pb-5 pt-6">
+        <p className="text-sm font-medium">Product engineering</p>
+        <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
+      </header>
+      <div
+        data-rail-scroll-viewport={fillRail ? "" : undefined}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4"
+      >
+        <RailSessionList />
+      </div>
+      <footer className="shrink-0 border-t border-border px-6 py-4 text-xs text-fg-muted">
+        Alex Morgan
+      </footer>
+    </aside>
+  );
+}
 
 /** The Site view where the app shows it; otherwise the empty chat page. */
 function MainArea() {
@@ -130,6 +176,7 @@ function MainArea() {
           siteId={siteId}
           conversation={siteViewSearch(location.search).conversation}
           startNew={siteViewSearch(location.search).new === true}
+          publishing={siteViewSearch(location.search).publishing === true}
         />
       </section>
     );

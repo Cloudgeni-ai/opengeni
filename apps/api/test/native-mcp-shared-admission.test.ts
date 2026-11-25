@@ -413,8 +413,52 @@ test.each(["configured", "session-local", "durable"] as const)(
     for (const use of scheduledUses) expect(await use.authorize()).toBe(use.actorIndex === 0);
     expect(await resolved.authorizeProviderRequest?.()).toBe(false);
     expect((await childResolver(request)).status).toBe("auth_needed");
+    // His own account that stopped working no longer refuses the message: it
+    // is sent without that account, never with the other participant's, and
+    // the turn records what it went without.
+    await send(bob, {
+      text: "Revoked selection",
+      clientEventId: crypto.randomUUID(),
+      connectionAccounts: selections[1]!.selection,
+    });
+    const [revokedTurn] = await shared.admin<
+      {
+        initiator_subject_id: string;
+        mcp_account_bindings: { connectionId: string }[] | null;
+        personal_connection_delegations: { connectionId: string }[] | null;
+        gaps: unknown;
+      }[]
+    >`select initiator_subject_id, mcp_account_bindings, personal_connection_delegations,
+        metadata -> 'connectionAccountGaps' as gaps
+      from session_turns where session_id = ${session.id} order by created_at desc, id desc limit 1`;
+    expect(revokedTurn?.initiator_subject_id).toBe(identities[1]!.subjectId);
+    const usedIds = [
+      ...(revokedTurn?.mcp_account_bindings ?? []),
+      ...(revokedTurn?.personal_connection_delegations ?? []),
+    ].map((use) => use.connectionId);
+    expect(usedIds).not.toContain(selections[1]!.connection.id);
+    expect(usedIds).not.toContain(selections[0]!.connection.id);
+    expect(revokedTurn?.gaps).toEqual([
+      {
+        serverId: server.id,
+        connectionId: selections[1]!.connection.id,
+        reason: "account_inactive",
+      },
+    ]);
+    // An account id he can't see is still refused.
     await expect(
-      send(bob, { text: "Revoked selection", connectionAccounts: selections[1]!.selection }),
+      send(bob, {
+        text: "Unknown account",
+        clientEventId: crypto.randomUUID(),
+        connectionAccounts: [{ serverId: server.id, connectionId: crypto.randomUUID() }],
+      }),
+    ).rejects.toMatchObject({ status: 422, retryable: false, outcomeUnknown: false });
+    await expect(
+      send(bob, {
+        text: "Still cannot borrow",
+        clientEventId: crypto.randomUUID(),
+        connectionAccounts: selections[0]!.selection,
+      }),
     ).rejects.toMatchObject({ status: 422, retryable: false, outcomeUnknown: false });
   },
   90_000,

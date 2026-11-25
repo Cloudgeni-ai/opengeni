@@ -74,6 +74,8 @@ export const ManagedPasskeySignUpRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       challengeId: z.string().min(16).max(128),
       response: ManagedPasskeyCredentialResponse,
+      /** Heedeo signup scoring token; ignored when not a string within bounds. */
+      heedeoToken: z.string().max(4096).optional().catch(undefined),
     })
     .strict(),
 );

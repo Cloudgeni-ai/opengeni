@@ -46,9 +46,10 @@ values are USD micro-units (1 USD = 1,000,000).
 Migration defaults: Free $0/$10 credit/5 seats, Pro $20/$200/10, Max $200/$2,000/unlimited,
 Enterprise manual price/0 automatic credit/unlimited. Stripe IDs start null, so
 paid plans are not purchasable until an operator applies a catalog with Stripe
-prices. The launch catalog is Free $0/$10/5 seats, Pro $20/$100/10 seats and
-Max $100/$500/unlimited (5× prepaid credit on paid plans); apply it with
-`plans:catalog` at activation rather than relying on the migration defaults.
+prices. The production catalog is Free $0/$10/3 seats, Pro $20/$100/5 seats,
+Max $100/$500/10 seats and Enterprise unlimited (5× prepaid credit on paid
+plans; seat limits since 24 November 2026); apply it with `plans:catalog`
+rather than relying on the migration defaults.
 
 ### Changing a plan's price or monthly credit
 

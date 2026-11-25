@@ -224,7 +224,13 @@ export type OrganizationActionContext = {
    * Per-connection rate limit: seconds until the named tool may run again, or
    * 0 to run it now. Absent means no limit (in-process callers).
    */
-  admit?: (toolName: string) => number;
+  admit?: (toolName: string) => number | Promise<number>;
+  /**
+   * Reads every Skill folder of a GitHub repository at one commit, for
+   * `skills_sync` with `direction: "repository"`. Absent: that direction is
+   * unavailable.
+   */
+  readSkillRepository?: (url: string) => Promise<import("@opengeni/core").SkillRepositorySnapshot>;
 };
 
 export function buildOrganizationMcpServer(input: OrganizationActionContext): Server {
@@ -239,7 +245,7 @@ export function buildOrganizationMcpServer(input: OrganizationActionContext): Se
     {
       capabilities: { tools: {} },
       instructions:
-        "Opengeni runs agents in the cloud. Hand work over with delegate and follow it with wait_for (done means the chat's turn finished with a final answer); session_send adds a follow-up. Use the workspace's apps (apps_list, app_query, app_write), tools (tools_search, tool_call; approval-gated calls return a link for the person), Skills (skills_sync) and Knowledge (knowledge_search, knowledge_save). Tools use this connection's default workspace (workspace_use) when you leave workspaceId out. For anything else: opengeni_actions_search, opengeni_action_describe, then opengeni_action_call.",
+        "Opengeni runs agents in the cloud. Hand work over with delegate and follow it with wait_for (done means the chat's turn finished with a final answer); session_send adds a follow-up. Use the workspace's apps (apps_list, app_query, app_write), share what you built (app_save, app_publish, file_save), tools (tools_search, tool_call; approval-gated calls return a link for the person), Skills and Knowledge (knowledge_search, knowledge_save). skills_sync uploads Skills as Personal unless scope is workspace or organization (which may wait for review, per the workspace's Agent learning setting); direction pull gets the workspace's Skills; direction repository syncs a public GitHub repository's Skill folders. The remote agent doesn't see this computer: give it a self-contained brief, and never put secrets in a message. Tools use this connection's default workspace (workspace_use) when you leave workspaceId out. Schedules, agents (their instructions), workspace instructions and anything else: opengeni_actions_search, opengeni_action_describe, then opengeni_action_call.",
     },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -253,7 +259,7 @@ export function buildOrganizationMcpServer(input: OrganizationActionContext): Se
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
     const args = request.params.arguments ?? {};
-    const wait = input.admit?.(request.params.name) ?? 0;
+    const wait = (await input.admit?.(request.params.name)) ?? 0;
     if (wait > 0)
       return failure(
         `Too many calls from this connection: try again in ${wait} seconds. Nothing was run, so retrying is safe.`,
@@ -746,10 +752,10 @@ function json(value: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
-/** A browser-only action: say why, and that the person has to do it. */
+/** A browser-only action: say why, and what an agent can do instead, else that the person has to. */
 function browserOnly(entry: ActionCatalogEntry): CallToolResult {
   return failure(
-    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the web app in a browser.`,
+    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. ${entry.agentAlternative ?? "The person has to do it in the web app in a browser."}`,
   );
 }
 

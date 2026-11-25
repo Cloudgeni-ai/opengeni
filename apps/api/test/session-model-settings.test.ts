@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import type { AccessGrant, SessionAuthorizationPort } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
+import type { AccessGrant, Permission, SessionAuthorizationPort } from "@opengeni/contracts";
+import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  createApiKey,
   createDb,
   createSession,
   ensureManagedAccessForUser,
@@ -22,9 +25,11 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { createApp } from "../src/app";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
+const delegationSecret = "model-settings-test-delegation-secret";
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("session-model-settings");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
@@ -103,6 +108,253 @@ async function fixture(overrides: Partial<SessionCreateInput> = {}) {
   });
   return { grant, session };
 }
+
+async function workspaceKey(grant: AccessGrant, permissions: Permission[]) {
+  const token = `ogk_${crypto.randomUUID()}`;
+  await createApiKey(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    name: "Model defaults integration",
+    prefix: token.slice(0, 12),
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    credentialKind: "workspace",
+    permissions,
+  });
+  return token;
+}
+
+function http(value: Awaited<ReturnType<typeof fixture>>, port?: SessionAuthorizationPort) {
+  const app = createApp({
+    ...deps(port),
+    settings: testSettings({ productAccessMode: "managed", delegationSecret }),
+  });
+  return (token: string | null, body: unknown, sessionId = value.session.id) =>
+    app.request(`/v1/workspaces/${value.grant.workspaceId}/sessions/${sessionId}/model-settings`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+}
+
+function modelDefaults() {
+  return {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+    latencyMode: "fast",
+    idempotencyKey: crypto.randomUUID(),
+  };
+}
+
+test("HTTP model settings require session control and a workspace key is scoped to its workspace", async () => {
+  const value = await fixture();
+  const other = await fixture();
+  const [control, readOnly, otherKey] = await Promise.all([
+    workspaceKey(value.grant, ["sessions:control"]),
+    workspaceKey(value.grant, ["sessions:read"]),
+    workspaceKey(other.grant, ["sessions:control"]),
+  ]);
+  const put = http(value);
+  const input = modelDefaults();
+  expect((await put(null, input)).status).toBe(401);
+  expect((await put(readOnly, input)).status).toBe(403);
+  expect((await put(otherKey, input)).status).toBe(403);
+  expect((await put(control, input, other.session.id)).status).toBe(404);
+  expect(
+    (
+      await http(value, {
+        authorizeSession: async () => ({ allowed: false, reason: "forbidden" }),
+      })(control, input)
+    ).status,
+  ).toBe(404);
+  const applied = await put(control, input);
+  expect(applied.status).toBe(200);
+  expect(await applied.json()).toEqual({
+    sessionId: value.session.id,
+    model: input.model,
+    reasoningEffort: input.reasoningEffort,
+    latencyMode: input.latencyMode,
+    effectiveFrom: "future_turns",
+    releasedCapacityWaitTurnId: null,
+  });
+});
+
+test("HTTP model settings validate policy and do not clamp the desired settings", async () => {
+  const value = await fixture({ latencyMode: "ultrafast" });
+  const put = http(value);
+  const token = await workspaceKey(value.grant, ["sessions:control"]);
+  const input = modelDefaults();
+  const before = await shared.admin`select * from sessions where id = ${value.session.id}`;
+  for (const [change, message] of [
+    [{ latencyMode: undefined }, "Invalid session model settings request"],
+    [{ expected: { typo: "high" } }, "Invalid session model settings request"],
+    [{ latencyMode: "ultrafast" }, "latency mode ultrafast is not runnable"],
+    [{ reasoningEffort: "minimal" }, "Reasoning effort minimal is not runnable"],
+    [{ model: "not-configured" }, "not available"],
+  ] as const) {
+    const response = await put(token, { ...input, ...change });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain(message);
+  }
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    allowedProviders: null,
+    allowedModels: ["scripted-model"],
+  });
+  const denied = await put(token, input);
+  expect(denied.status).toBe(400);
+  expect((await denied.json()).error.message).toContain("workspace's model policy");
+  expect(await shared.admin`select * from sessions where id = ${value.session.id}`).toEqual(before);
+  const applied = await put(token, { ...input, model: "scripted-model", latencyMode: "standard" });
+  expect(applied.status).toBe(200);
+  expect(await applied.json()).toMatchObject({ latencyMode: "standard" });
+});
+
+test("HTTP model settings compare atomically and replay the original result without overwriting a newer choice", async () => {
+  const value = await fixture();
+  const put = http(value);
+  const token = await workspaceKey(value.grant, ["sessions:control"]);
+  const before = await footprint(value.session.id);
+  const expected = { model: "scripted-model", reasoningEffort: "medium", latencyMode: "standard" };
+  const inputs = [
+    { ...modelDefaults(), expected },
+    { ...modelDefaults(), model: "gpt-5.6-terra", expected },
+  ];
+  // Verify every supplied field can veto a write, not just the model.
+  for (const stale of [
+    { model: "gpt-5.6-sol" },
+    { reasoningEffort: "high" },
+    { latencyMode: "fast" },
+  ]) {
+    const response = await put(token, { ...modelDefaults(), expected: stale });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        details: { reason: "model_settings_mismatch", current: expected },
+      },
+    });
+  }
+  const results = await Promise.all(
+    inputs.map(async (input) => {
+      const response = await put(token, input);
+      return { input, status: response.status, body: await response.json() };
+    }),
+  );
+  expect(results.map(({ status }) => status).sort()).toEqual([200, 409]);
+  const winner = results.find(({ status }) => status === 200)!;
+  expect(results.find(({ status }) => status === 409)!.body).toMatchObject({
+    error: {
+      details: {
+        current: { model: winner.input.model, reasoningEffort: "high", latencyMode: "fast" },
+      },
+    },
+  });
+  const newer = await put(token, {
+    ...modelDefaults(),
+    model: "scripted-model",
+    latencyMode: "standard",
+    expected: { latencyMode: "fast" },
+  });
+  expect(newer.status).toBe(200);
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    allowedProviders: null,
+    allowedModels: ["scripted-model"],
+  });
+  const replay = await put(token, winner.input);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual(winner.body);
+  for (const change of [{ latencyMode: "standard" }, { expected: { model: "scripted-model" } }]) {
+    const conflict = await put(token, { ...winner.input, ...change });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ error: { code: "idempotency_conflict" } });
+  }
+  expect(await getSession(client.db, value.grant.workspaceId, value.session.id)).toMatchObject({
+    model: "scripted-model",
+    reasoningEffort: "high",
+    latencyMode: "standard",
+  });
+  expect(await footprint(value.session.id)).toEqual(before);
+  expect(
+    await shared.admin`select id from session_events where session_id = ${value.session.id} and type = 'session.model_settings.updated'`,
+  ).toHaveLength(2);
+  expect(
+    await shared.admin`select id from session_command_receipts where target_session_id = ${value.session.id}`,
+  ).toHaveLength(2);
+});
+
+test("HTTP model settings leave an already running turn and its execution policy alone", async () => {
+  const value = await fixture();
+  const active = await agent(value);
+  const agentToken = await signDelegatedAccessToken(delegationSecret, {
+    accountId: active.accountId,
+    workspaceId: active.workspaceId,
+    subjectId: active.subjectId,
+    permissions: active.permissions,
+    principalKind: "agent_attempt",
+    ...active.metadata,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  expect((await http(value)(agentToken, modelDefaults())).status).toBe(403);
+  const token = await workspaceKey(value.grant, ["sessions:control"]);
+  const before =
+    await shared.admin`select * from session_turns where id = ${active.metadata.turnId}`;
+  const response = await http(value)(token, modelDefaults());
+  expect(response.status).toBe(200);
+  expect(
+    await shared.admin`select * from session_turns where id = ${active.metadata.turnId}`,
+  ).toEqual(before);
+  expect(await getSession(client.db, value.grant.workspaceId, value.session.id)).toMatchObject({
+    model: "gpt-5.6-sol",
+    latencyMode: "fast",
+  });
+});
+
+test("HTTP compares before validating a capacity-wait model switch and can release it with explicit latency", async () => {
+  const value = await fixture();
+  const attempt = await agent(value);
+  const { turnId, attemptId } = attempt.metadata;
+  const armed = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.session.id,
+    turnId,
+    attemptId,
+    waitReason: "no_eligible_capacity",
+    earliestResetAt: new Date(Date.now() + 24 * 60 * 60_000),
+    failurePayload: { error: "No subscription capacity" },
+  });
+  expect(armed.action).toBe("waiting");
+  const put = http(value);
+  const token = await workspaceKey(value.grant, ["sessions:control"]);
+  const input = modelDefaults();
+  expect((await put(token, { ...input, model: "not-configured" })).status).toBe(400);
+  expect((await put(token, { ...input, latencyMode: "ultrafast" })).status).toBe(400);
+  expect(
+    (await put(token, { ...input, model: "not-configured", expected: { latencyMode: "fast" } }))
+      .status,
+  ).toBe(409);
+  expect(await getSessionTurn(client.db, value.grant.workspaceId, turnId)).toMatchObject({
+    model: "scripted-model",
+    status: "waiting_capacity",
+  });
+
+  const applied = await put(token, input);
+  expect(applied.status).toBe(200);
+  const body = await applied.json();
+  expect(body).toMatchObject({ releasedCapacityWaitTurnId: turnId, latencyMode: "fast" });
+  expect(await getSessionTurn(client.db, value.grant.workspaceId, turnId)).toMatchObject({
+    model: input.model,
+    latencyMode: "fast",
+    status: "recovering",
+  });
+  expect(await (await put(token, input)).json()).toEqual(body);
+});
 async function footprint(sessionId: string) {
   const [result] = await shared.admin`select status, active_turn_id, direct_control_state,
     queue_version, queue_head_position, queue_tail_position, metadata, tools,

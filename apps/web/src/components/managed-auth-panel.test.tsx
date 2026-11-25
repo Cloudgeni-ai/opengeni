@@ -648,22 +648,21 @@ test("Continue with Google on the Sign in tab gets a challenge token first, then
   const panel = await mountSocialPanel();
   try {
     expect(panel.host.textContent).toContain("Welcome back.");
-    // Only the email form's visible widget renders before a click.
-    expect(turnstile.widgets).toHaveLength(1);
-    expect(turnstile.widgets[0]!.execution).toBeUndefined();
+    // Nothing visible: no widget rendered before a click.
+    expect(turnstile.widgets).toHaveLength(0);
     await panel.click("Continue with Google");
-    expect(turnstile.widgets[1]).toMatchObject({
+    expect(turnstile.widgets[0]).toMatchObject({
       action: "signup",
       execution: "execute",
       appearance: "interaction-only",
     });
-    expect(turnstile.executed).toEqual(["2"]);
+    expect(turnstile.executed).toEqual(["1"]);
     expect(panel.starts).toEqual([]);
     expect(panel.button("Continue with GitHub").disabled).toBe(true);
     expect(panel.button("Sign up").disabled).toBe(true);
-    await turnstile.call(1, "callback", "signin-tab-token");
+    await turnstile.call(0, "callback", "signin-tab-token");
     expect(panel.starts).toEqual([["google", "signin-tab-token"]]);
-    expect(panel.host.textContent).not.toContain("Complete the");
+    expect(panel.host.textContent).not.toContain("Complete the signup verification");
   } finally {
     await panel.unmount();
   }
@@ -674,14 +673,13 @@ test("when Cloudflare asks for interaction the challenge shows inline and the lo
   const panel = await mountSocialPanel();
   try {
     await panel.click("Continue with GitHub");
-    await turnstile.call(1, "before-interactive-callback");
-    // The second one: the email form's visible widget comes first.
-    const widget = panel.host.querySelectorAll('[aria-label="Signup verification"]')[1]!;
+    await turnstile.call(0, "before-interactive-callback");
+    const widget = panel.host.querySelector('[aria-label="Signup verification"]')!;
     expect(widget.className).toContain("mt-3");
     // The rest of the form stays usable while a person solves it.
     expect(panel.button("Continue with Google").disabled).toBe(false);
     expect(panel.host.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled).toBe(false);
-    await turnstile.call(1, "callback", "solved");
+    await turnstile.call(0, "callback", "solved");
     expect(panel.starts).toEqual([["github", "solved"]]);
   } finally {
     await panel.unmount();
@@ -693,9 +691,9 @@ test("choosing something else while the challenge waits for a person cancels the
   const panel = await mountSocialPanel();
   try {
     await panel.click("Continue with Google");
-    await turnstile.call(1, "before-interactive-callback");
+    await turnstile.call(0, "before-interactive-callback");
     await panel.click("Sign up");
-    await turnstile.call(1, "callback", "too-late");
+    await turnstile.call(0, "callback", "too-late");
     expect(panel.starts).toEqual([]);
     expect(panel.host.textContent).toContain("Create account");
     expect(panel.button("Continue with Google").disabled).toBe(false);
@@ -712,14 +710,14 @@ test("a challenge that can't produce a token still lets an existing person conti
   });
   try {
     await panel.click("Continue with Google");
-    await turnstile.call(1, "error-callback", "600010");
+    await turnstile.call(0, "error-callback", "600010");
     expect(panel.starts).toEqual([["google", undefined]]);
     // A provider start failure is reported and the buttons come back.
     expect(panel.host.textContent).toContain("Couldn't continue with Google. Try again.");
     expect(panel.button("Continue with Google").disabled).toBe(false);
     fail = false;
     await panel.click("Continue with Google");
-    await turnstile.call(2, "callback", "retry-token");
+    await turnstile.call(1, "callback", "retry-token");
     expect(panel.starts.at(-1)).toEqual(["google", "retry-token"]);
   } finally {
     await panel.unmount();
@@ -760,9 +758,7 @@ test("while new accounts are paused, or without a site key, social sign-in runs 
     const panel = await mountSocialPanel(props);
     try {
       await panel.click("Continue with Google");
-      // At most the email form's visible widget; nothing runs for the click.
-      expect(turnstile.widgets.every((widget) => widget.execution === undefined)).toBe(true);
-      expect(turnstile.executed).toEqual([]);
+      expect(turnstile.widgets).toHaveLength(0);
       expect(panel.starts).toEqual([["google", undefined]]);
     } finally {
       await panel.unmount();
@@ -795,7 +791,7 @@ test("a config change that turns the challenge off mid-click brings the buttons 
   try {
     await render(true);
     await act(async () => button("Continue with Google").click());
-    expect(turnstile.executed).toEqual(["2"]);
+    expect(turnstile.executed).toEqual(["1"]);
     expect(button("Continue with GitHub").disabled).toBe(true);
     await render(false);
     expect(starts).toEqual([]);
@@ -815,6 +811,7 @@ test("email sign-in shows the visible challenge and sends its token, like sign-u
   const submits: Array<[string, Record<string, unknown>]> = [];
   let refuse = true;
   const panel = await mountSocialPanel({
+    signInChallengeRequired: true,
     onSubmit: async (mode, input) => {
       submits.push([mode, input]);
       if (refuse) {
@@ -839,6 +836,7 @@ test("email sign-in shows the visible challenge and sends its token, like sign-u
     );
   try {
     expect(turnstile.widgets[0]).toMatchObject({ action: "signup", sitekey: "test-key" });
+    expect(turnstile.widgets[0]!.execution).toBeUndefined();
     await setField("#managed-auth-email", "person@example.test");
     await setField('input[type="password"]', "any-password");
     // Unsolved: nothing is sent and the form says what to do.
@@ -872,36 +870,42 @@ test("email sign-in shows the visible challenge and sends its token, like sign-u
   }
 });
 
-test("without a site key email sign-in shows no challenge and sends no token", async () => {
-  const turnstile = fakeTurnstile();
-  const submits: Array<Record<string, unknown>> = [];
-  const panel = await mountSocialPanel({
-    signupChallengeSiteKey: undefined,
-    onSubmit: async (_mode, input) => {
-      submits.push(input);
-    },
-  });
-  const setField = async (selector: string, value: string) => {
-    const input = panel.host.querySelector<HTMLInputElement>(selector)!;
-    const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
-    await act(async () => {
-      (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!.onChange({
-        target: { value },
-      });
+for (const [label, props] of [
+  ["without the sign-in setting", {}],
+  ["without a site key", { signupChallengeSiteKey: undefined, signInChallengeRequired: true }],
+] as const)
+  test(`${label} email sign-in shows no challenge and sends no token`, async () => {
+    const turnstile = fakeTurnstile();
+    const submits: Array<Record<string, unknown>> = [];
+    const panel = await mountSocialPanel({
+      ...props,
+      onSubmit: async (_mode, input) => {
+        submits.push(input);
+      },
     });
-  };
-  try {
-    await setField("#managed-auth-email", "person@example.test");
-    await setField('input[type="password"]', "any-password");
-    await act(async () =>
-      panel.host
-        .querySelector("form")!
-        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
-    );
-    expect(turnstile.widgets).toHaveLength(0);
-    expect(submits).toHaveLength(1);
-    expect("signupChallengeToken" in submits[0]!).toBe(false);
-  } finally {
-    await panel.unmount();
-  }
-});
+    const setField = async (selector: string, value: string) => {
+      const input = panel.host.querySelector<HTMLInputElement>(selector)!;
+      const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+      await act(async () => {
+        (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[
+          propsKey
+        ]!.onChange({
+          target: { value },
+        });
+      });
+    };
+    try {
+      await setField("#managed-auth-email", "person@example.test");
+      await setField('input[type="password"]', "any-password");
+      await act(async () =>
+        panel.host
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(turnstile.widgets).toHaveLength(0);
+      expect(submits).toHaveLength(1);
+      expect("signupChallengeToken" in submits[0]!).toBe(false);
+    } finally {
+      await panel.unmount();
+    }
+  });

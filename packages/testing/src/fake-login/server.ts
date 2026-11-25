@@ -348,6 +348,7 @@ export async function startFakeLoginServer(
         ["/otp-split", "Sign in with a code typed into separate boxes"],
         ["/passkey/register", "Create a passkey"],
         ["/passkey/login", "Sign in with a passkey"],
+        ["/passkey/new-tab", "Sign in with a passkey in a new tab"],
         ["/popup-login", "Sign in with FakeID (popup)"],
         ["/captcha-iframe", "Sign in with a robot check"],
       ];
@@ -850,6 +851,18 @@ export async function startFakeLoginServer(
 <label for="username">Username (optional)</label><input id="username" name="username" type="text" autocomplete="username webauthn">
 <button type="button" id="passkey-login">Sign in with a passkey</button><p id="passkey-status" hidden></p>`,
           script: PASSKEY_LOGIN_SCRIPT,
+        }),
+      );
+    }
+    if (path === "/passkey/new-tab" && method === "GET") {
+      // A link that opens the passkey sign-in in a tab of its own, as sign-in
+      // and account-connection links often do.
+      return html(
+        page({
+          title: "Passkey sign-in in a new tab",
+          user,
+          body: `<h1>Passkey sign-in in a new tab</h1>
+<p><a href="/passkey/login" target="_blank">Open passkey sign-in in a new tab</a></p>`,
         }),
       );
     }

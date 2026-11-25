@@ -263,3 +263,17 @@ test("empty or unavailable bundled selections do not read bundled files", () => 
     reads.mockRestore();
   }
 });
+
+test("agent creation guidance appears only where the chat can save an agent", () => {
+  const context = { firstPartyTools: ["bot_template_save"], videoGenerationEnabled: false };
+  expect(configuredBundledSkillNames(context)).toContain("agents");
+  expect(loadConfiguredBundledSkills(context).map((entry) => entry.id)).toContain("builtin:agents");
+  expect(
+    configuredBundledSkillNames({ firstPartyTools: [], videoGenerationEnabled: false }),
+  ).not.toContain("agents");
+  expect(
+    loadConfiguredBundledSkills({ ...context, bundledSkillIds: ["builtin:schedules"] }).map(
+      (entry) => entry.id,
+    ),
+  ).not.toContain("builtin:agents");
+});

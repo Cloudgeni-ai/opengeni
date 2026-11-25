@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   contractForProfile,
   deploymentProfiles,
+  BEDROCK_PASSTHROUGH_ENV,
   CREDIT_MARGIN_BPS_PASSTHROUGH_ENV,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
@@ -48,6 +49,7 @@ describe("deployment contract", () => {
     ];
     const disabled = generateRuntimeArtifacts(contract, {}, {});
     expect(disabled.runtimeEnv).toContain("OPENGENI_SIGNUP_CHALLENGE_ENABLED=false");
+    expect(disabled.runtimeEnv).toContain("OPENGENI_SIGN_IN_CHALLENGE_ENABLED=false");
     expect(disabled.requiredEnvVars).not.toContain(keys[1]);
     const enabled = { OPENGENI_SIGNUP_CHALLENGE_ENABLED: "true" };
     const missing = generateRuntimeArtifacts(contract, {}, enabled);
@@ -74,6 +76,25 @@ describe("deployment contract", () => {
     expect(configured.helmValuesYaml).not.toContain("synthetic-private-key");
     expect(configured.summary).not.toHaveProperty("signupChallengeSecretKey");
     for (const key of keys) expect(configured.missingEnvVars).not.toContain(key);
+  });
+
+  test("Heedeo keys are optional and the secret key stays out of Helm values", () => {
+    const contract = contractForProfile("azure-existing-services", "managed-saas-staging");
+    expect(requiredRuntimeEnvVars(contract, {})).not.toContain("OPENGENI_HEEDEO_SECRET_KEY");
+    const configured = generateRuntimeArtifacts(
+      contract,
+      {},
+      {
+        OPENGENI_HEEDEO_PUBLISHABLE_KEY: "pk_synthetic-public",
+        OPENGENI_HEEDEO_SECRET_KEY: "sk_synthetic-private",
+        OPENGENI_HEEDEO_TIMEOUT_MS: "1500",
+      },
+    );
+    expect(configured.runtimeEnv).toContain("OPENGENI_HEEDEO_SECRET_KEY=sk_synthetic-private");
+    expect(configured.runtimeEnv).toContain("OPENGENI_HEEDEO_PUBLISHABLE_KEY=pk_synthetic-public");
+    expect(configured.runtimeEnv).toContain("OPENGENI_HEEDEO_TIMEOUT_MS=1500");
+    expect(configured.helmValuesYaml).not.toContain("sk_synthetic-private");
+    expect(configured.missingEnvVars).not.toContain("OPENGENI_HEEDEO_SECRET_KEY");
   });
 
   test("ships valid built-in profiles", () => {
@@ -848,6 +869,7 @@ describe("deployment contract", () => {
         OPENGENI_OPENAI_API_KEY: "openai",
         OPENGENI_OPENROUTER_API_KEY: "openrouter",
         OPENGENI_OPPER_API_KEY: "opper",
+        OPENGENI_SKILL_IMPORT_GITHUB_TOKEN: "github_pat_skill_import",
         OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
         OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
@@ -877,6 +899,9 @@ describe("deployment contract", () => {
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OPENROUTER_API_KEY=openrouter");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OPPER_API_KEY=opper");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_SKILL_IMPORT_GITHUB_TOKEN=github_pat_skill_import",
+    );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
     expect(artifacts.runtimeEnv).toContain(
@@ -1882,6 +1907,36 @@ describe("deployment contract", () => {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }
+  });
+
+  test("a Bedrock-only deployment passes its Bedrock settings and needs no OpenAI key", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const bedrock = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_BEDROCK_REGION: "eu-west-1",
+      OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN: "arn:aws:iam::123456789012:role/opengeni-users",
+      OPENGENI_OPENAI_MODEL: "bedrock/eu.anthropic.claude-opus-5-5",
+      OPENGENI_OPENAI_ALLOWED_MODELS: "bedrock/eu.anthropic.claude-opus-5-5",
+    });
+    expect(bedrock.runtimeEnv).toContain("OPENGENI_BEDROCK_REGION=eu-west-1");
+    expect(bedrock.runtimeEnv).toContain(
+      "OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN=arn:aws:iam::123456789012:role/opengeni-users",
+    );
+    expect(bedrock.missingEnvVars).not.toContain("OPENGENI_OPENAI_API_KEY");
+    // An OpenAI model still allowed next to Bedrock still needs the key.
+    const mixed = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_BEDROCK_REGION: "eu-west-1",
+      OPENGENI_OPENAI_MODEL: "bedrock/eu.anthropic.claude-opus-5-5",
+      OPENGENI_OPENAI_ALLOWED_MODELS: "bedrock/eu.anthropic.claude-opus-5-5,gpt-5.5",
+    });
+    expect(mixed.missingEnvVars).toContain("OPENGENI_OPENAI_API_KEY");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.missingEnvVars).toContain("OPENGENI_OPENAI_API_KEY");
+    for (const key of BEDROCK_PASSTHROUGH_ENV) expect(absent.runtimeEnv).not.toContain(`${key}=`);
   });
 
   test("passes the optional credit margin override through without making it required", () => {

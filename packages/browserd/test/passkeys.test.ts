@@ -14,6 +14,8 @@ type StoredCredential = { credentialId: string; signCount: number; privateKey: s
 class FakeCdp {
   readonly calls: Call[] = [];
   readonly authenticators = new Map<string, Map<string, StoredCredential>>();
+  /** Sessions waiting for their debugger: they answer page commands only once resumed. */
+  readonly paused = new Map<string, Array<() => void>>();
   private readonly listeners = new Map<
     string,
     Set<(event: { params: Record<string, unknown> }) => void>
@@ -28,6 +30,8 @@ class FakeCdp {
     const sessionId = options.sessionId;
     this.calls.push({ method, params: { ...params }, sessionId });
     const store = sessionId ? this.authenticators.get(sessionId) : undefined;
+    const held = sessionId ? this.paused.get(sessionId) : undefined;
+    if (held && method.startsWith("Page.")) await new Promise<void>((run) => held.push(run));
     switch (method) {
       case "Page.enable":
         return {} as T;
@@ -40,6 +44,9 @@ class FakeCdp {
         if (sessionId === "broken") throw new Error("WebAuthn domain unavailable");
         this.authenticators.set(sessionId!, new Map());
         return { authenticatorId: `authenticator-${sessionId}` } as T;
+      case "WebAuthn.removeVirtualAuthenticator":
+        this.authenticators.delete(sessionId!);
+        return {} as T;
       case "WebAuthn.addCredential": {
         const credential = params.credential as StoredCredential;
         store!.set(credential.credentialId, { ...credential });
@@ -71,6 +78,12 @@ class FakeCdp {
     for (const listener of this.listeners.get(`${sessionId}\0${method}`) ?? []) {
       listener({ params });
     }
+  }
+
+  resume(sessionId: string): void {
+    const held = this.paused.get(sessionId) ?? [];
+    this.paused.delete(sessionId);
+    for (const run of held) run();
   }
 
   installed(sessionId: string): Record<string, number> {
@@ -208,8 +221,9 @@ test("withdraws passkey autofill in a tab before its authenticator exists, or gi
     source: PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT,
     runImmediately: true,
   });
-  // A tab that cannot take the withdrawal gets no authenticator at all.
-  expect(await manager.attachTarget(cdp, { targetId: "tab-x", sessionId: "no-page" })).toBe(false);
+  // A tab that cannot take the withdrawal keeps no authenticator.
+  await manager.attachTarget(cdp, { targetId: "tab-x", sessionId: "no-page" });
+  await Bun.sleep(0);
   expect(cdp.authenticators.has("no-page")).toBe(false);
   expect((await sync([vaultCredential()])).authenticators).toBe(1);
   // A cross-origin frame shares its tab's authenticator and gets the same
@@ -219,6 +233,36 @@ test("withdraws passkey autofill in a tab before its authenticator exists, or gi
     cdp.calls.filter((call) => call.sessionId === "frame-1").map((call) => call.method),
   ).toEqual(["Page.enable", "Page.addScriptToEvaluateOnNewDocument"]);
   await manager.withdrawAutofill(cdp, "no-page");
+});
+
+test("a tab that answers page commands only once it runs still gets its authenticator before it runs", async () => {
+  // A tab the page opened (a link to a new tab, window.open) waits for its
+  // debugger and answers Page commands only after it is resumed, and the
+  // driver resumes it only once attachTarget returns.
+  const cdp = new FakeCdp();
+  const manager = new BrowserPasskeyManager({ ...binding, commandTimeoutMs: 200 });
+  await manager.sync({
+    protocolVersion: 1,
+    ...binding,
+    credentials: [vaultCredential()],
+    acknowledgeEventIds: [],
+  });
+  cdp.paused.set("opened", []);
+  expect(await manager.attachTarget(cdp, { targetId: "tab-opened", sessionId: "opened" })).toBe(
+    true,
+  );
+  // Everything is sent before the tab runs, the withdrawal first.
+  expect(cdp.calls.map((call) => call.method)).toEqual([
+    "Page.enable",
+    "Page.addScriptToEvaluateOnNewDocument",
+    "WebAuthn.enable",
+    "WebAuthn.addVirtualAuthenticator",
+    "WebAuthn.addCredential",
+  ]);
+  cdp.resume("opened");
+  await Bun.sleep(0);
+  expect(Object.keys(cdp.installed("opened"))).toEqual([STANDARD_ID]);
+  expect(manager.authenticatorCount).toBe(1);
 });
 
 test("the withdrawal reports no passkey autofill and leaves conditional requests unanswered until aborted", async () => {

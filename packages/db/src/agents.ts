@@ -29,6 +29,11 @@ import { nestedErrorRecords, nestedPostgresSqlState } from "./persistence-errors
 
 export type AgentHome = { accountId: string; workspaceId: string };
 export type AgentVisibilityValue = "private" | "workspace";
+/**
+ * Who can edit a shared agent (1561): whoever made it and the workspace's
+ * admins, or everyone in its workspace who can start chats there.
+ */
+export type AgentEditAccessValue = "creator_and_admins" | "everyone";
 export type AgentOriginValue = "slack_agent" | "bot_template" | "app" | "slack";
 
 /** The current revision's content, read from the agent's home workspace. */
@@ -68,6 +73,11 @@ export type AgentRecord = {
    * it for the previous release, which still reads that.
    */
   organizationAccess: boolean;
+  /**
+   * Who can edit it when shared (1561). Agents made before it, and any value
+   * this release can't read, are `creator_and_admins`.
+   */
+  editAccess: AgentEditAccessValue;
   /** Can use rules as stored (1517); read them through the contract's schema. */
   toolPermissions: unknown[];
   /** Skills listed on its page, as stored (1517). */
@@ -127,6 +137,7 @@ type AgentRow = {
   memory_enabled: boolean;
   memory_collection_id: string | null;
   organization_access?: boolean | null;
+  edit_access?: string | null;
   tool_permissions?: unknown;
   skills?: unknown;
   template_key?: string | null;
@@ -167,6 +178,7 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     memoryEnabled: row.memory_enabled,
     memoryCollectionId: row.memory_collection_id,
     organizationAccess: row.visibility !== "private" && row.organization_access === true,
+    editAccess: row.edit_access === "everyone" ? "everyone" : "creator_and_admins",
     toolPermissions: Array.isArray(row.tool_permissions) ? row.tool_permissions : [],
     skills: Array.isArray(row.skills) ? row.skills : [],
     templateKey: row.template_key ?? null,
@@ -218,7 +230,7 @@ function mapInstall(row: InstallRow): AgentSlackInstallRecord {
 const AGENT_COLUMNS = sql.raw(`a.id::text as id, a.account_id::text as account_id,
   a.workspace_id::text as workspace_id, a.visibility, a.owner_subject_id, a.name, a.description,
   a.avatar, a.memory_enabled, a.memory_collection_id::text as memory_collection_id,
-  a.organization_access, a.tool_permissions, a.skills, a.template_key,
+  a.organization_access, a.edit_access, a.tool_permissions, a.skills, a.template_key,
   a.current_revision, a.origin, a.source_session_id::text as source_session_id,
   a.created_by_subject_id, a.version, a.created_at, a.updated_at`);
 
@@ -413,6 +425,8 @@ export type CreateAgentInput = {
   memoryEnabled: boolean;
   /** Anyone in the organization can use it (shared agents only). */
   organizationAccess?: boolean;
+  /** Who can edit it when shared. New agents default to everyone in the workspace. */
+  editAccess?: AgentEditAccessValue;
   /** Can use rules, already validated. */
   toolPermissions?: readonly unknown[];
   /** Skills listed on its page, already validated. */
@@ -459,7 +473,7 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
     tx,
     sql`insert into agents (${sql.raw(input.id ? "id, " : "")}account_id, workspace_id, visibility,
         owner_subject_id, name, name_key, description, avatar, memory_enabled, organization_access,
-        tool_permissions, skills, template_key,
+        edit_access, tool_permissions, skills, template_key,
         current_revision, origin, source_session_id, created_by_subject_id)
       values (${input.id ? sql`${input.id}::uuid, ` : sql``}${home.accountId}::uuid,
         ${home.workspaceId}::uuid, ${input.visibility}, ${input.ownerSubjectId}, ${input.name},
@@ -467,6 +481,7 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
         ${input.avatar === null ? sql`null` : sql`${JSON.stringify(input.avatar)}::jsonb`},
         ${input.memoryEnabled},
         ${input.visibility === "workspace" && input.organizationAccess === true},
+        ${input.editAccess ?? "creator_and_admins"},
         ${JSON.stringify(input.toolPermissions ?? [])}::jsonb, ${JSON.stringify(input.skills ?? [])}::jsonb,
         ${input.templateKey ?? null}, 1,
         ${input.origin}, ${input.sourceSessionId}::uuid,
@@ -474,7 +489,7 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
       returning ${sql.raw(`id::text as id, account_id::text as account_id,
         workspace_id::text as workspace_id, visibility, owner_subject_id, name, description, avatar,
         memory_enabled, memory_collection_id::text as memory_collection_id, organization_access,
-        tool_permissions, skills, template_key,
+        edit_access, tool_permissions, skills, template_key,
         current_revision, origin, source_session_id::text as source_session_id, created_by_subject_id, version,
         created_at, updated_at`)}`,
   );
@@ -557,9 +572,22 @@ export type AgentPatch = {
    * installation it is in. Making the agent Only me turns it off.
    */
   organizationAccess?: boolean;
+  /** Who can edit it when shared (1561). */
+  editAccess?: AgentEditAccessValue;
   /** Forget the current Memory collection (for example after a visibility change). */
   clearMemoryCollection?: boolean;
 };
+
+/**
+ * The caller may no longer make this change: who can edit the agent was
+ * rechecked under its row lock (`authorize`) and refused it.
+ */
+export class AgentEditRefusedError extends Error {
+  readonly name = "AgentEditRefusedError";
+  constructor() {
+    super("Only whoever made this agent, or a workspace admin, can change it.");
+  }
+}
 
 export type UpdateAgentOutcome =
   | { kind: "updated"; agent: AgentRecord; revised: boolean }
@@ -610,12 +638,19 @@ export async function updateAgent(
     expectedVersion: number | null;
     patch: AgentPatch;
     actorSubjectId: string | null;
+    /**
+     * Whether the caller may make this change to the agent as it is now,
+     * checked under its row lock so a concurrent change of who can edit it
+     * can't be raced. Refused: `AgentEditRefusedError`.
+     */
+    authorize?: (current: AgentRecord) => boolean;
   },
 ): Promise<UpdateAgentOutcome> {
   try {
     return await withRlsContext(db, home, async (tx) => {
       const current = await lockAgent(tx, home, input.agentId);
       if (!current) return { kind: "not_found" as const };
+      if (input.authorize && !input.authorize(current)) throw new AgentEditRefusedError();
       if (input.expectedVersion !== null && current.version !== input.expectedVersion) {
         return { kind: "version_conflict" as const, current };
       }
@@ -651,6 +686,7 @@ export async function updateAgent(
           memory_enabled = ${patch.memoryEnabled ?? current.memoryEnabled},
           memory_collection_id = ${patch.clearMemoryCollection ? null : current.memoryCollectionId}::uuid,
           organization_access = ${organizationAccess},
+          edit_access = ${patch.editAccess ?? current.editAccess},
           tool_permissions = ${JSON.stringify(patch.toolPermissions ?? current.toolPermissions)}::jsonb,
           skills = ${JSON.stringify(patch.skills ?? current.skills)}::jsonb,
           current_revision = ${nextRevision}::integer,
@@ -738,10 +774,13 @@ export async function deleteAgent(
   db: Database,
   home: AgentHome,
   agentId: string,
+  /** Whether the caller may delete it as it is now, under its row lock. */
+  authorize?: (current: AgentRecord) => boolean,
 ): Promise<boolean> {
   return await withRlsContext(db, home, async (tx) => {
     const current = await lockAgent(tx, home, agentId);
     if (!current) return false;
+    if (authorize && !authorize(current)) throw new AgentEditRefusedError();
     await tx.execute(sql`delete from agents
       where id = ${agentId}::uuid and workspace_id = ${home.workspaceId}::uuid`);
     return true;
@@ -888,13 +927,19 @@ export async function listAgentChats(
     viewerSubjectId: string | null;
     filter: "yours" | "everyone";
     sharedOnly?: boolean;
+    /**
+     * Only open chats that are with the agent itself (what an automation can
+     * post into): no Slack threads that only mentioned it, no cancelled chats.
+     */
+    direct?: boolean;
     excludeSessionId?: string | null;
     /** Keyset cursor: chats created before this one (`cursorAt` of the last chat read). */
     before?: { createdAt: string; sessionId: string } | null;
     limit: number;
   },
 ): Promise<AgentChatRecord[]> {
-  const limit = Math.max(1, Math.min(100, Math.trunc(input.limit)));
+  // A page is at most 100; callers ask for one more to tell whether more follow.
+  const limit = Math.max(1, Math.min(101, Math.trunc(input.limit)));
   if (input.filter === "yours" && input.viewerSubjectId === null) return [];
   const viewer = input.viewerSubjectId;
   return await withRlsContext(db, home, async (tx) => {
@@ -917,13 +962,17 @@ export async function listAgentChats(
       sql`with bound as (
           select s.id from sessions s
           where s.workspace_id = ${home.workspaceId}::uuid and s.agent_id = ${input.agentId}::uuid
-          union
+          ${
+            input.direct
+              ? sql``
+              : sql`union
           select i.session_id from slack_interactions i
           join sessions s on s.id = i.session_id and s.workspace_id = i.workspace_id
           where i.workspace_id = ${home.workspaceId}::uuid
             and i.slack_agent_id = ${input.agentId}::uuid
             and i.session_id is not null
-            and s.agent_id is null
+            and s.agent_id is null`
+          }
         )
         select s.id::text as id, s.title, s.visibility, s.created_by_subject_id,
           s.owner_subject_id, s.created_at, s.updated_at,
@@ -952,6 +1001,7 @@ export async function listAgentChats(
         ) dm on true
         where s.archived_at is null
           and s.parent_session_id is null
+          ${input.direct ? sql`and s.status <> 'cancelled'` : sql``}
           -- A Site viewer's chat belongs to the Site's audience, not the workspace.
           and s.site_access_root_id is null
           and ${

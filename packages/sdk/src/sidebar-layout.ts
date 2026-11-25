@@ -4,10 +4,61 @@
  * types they don't know, so a newer server never breaks an older client.
  */
 
+import type { SessionAvatar } from "@opengeni/contracts";
+
 /** Where an item comes from: the workspace default, or this person's own. */
 export type SidebarItemOrigin = "workspace" | "personal";
 
 export type SidebarLiveListKind = "pinned_apps" | "recent_apps";
+
+/**
+ * An item's icon: a lucide icon name from `SIDEBAR_ITEM_ICONS` in
+ * `@opengeni/contracts/sidebar-layout` (such as `rocket` or `chart-line`).
+ * Newer servers may add names; draw the usual mark for one you don't know.
+ */
+export type SidebarItemIcon = string;
+
+/**
+ * Where apps show: as rows in the Sessions list (`sessions`), in an Apps
+ * section of their own below Sessions (`section`), or not as rows, their chats
+ * listed as ordinary chats (`hidden`).
+ */
+export type SidebarAppsPlacement = "sessions" | "section" | "hidden";
+
+/** The primary rail's built-in entries a person (or the default) can hide. */
+export type SidebarNavEntry =
+  | "inbox"
+  | "capabilities"
+  | "knowledge"
+  | "automations"
+  | "agents"
+  | "meetings"
+  | "artifacts"
+  | "apps"
+  | "get_started";
+
+/** Navigation options as set; unset ones keep today's behaviour (or follow the default). */
+export type SidebarLayoutOptions = {
+  /** Apps show as rows of their own in the Sessions list (default true); false is the same as appsPlacement `hidden`. */
+  sessionsShowApps?: boolean;
+  /** Where apps show (default `sessions`). */
+  appsPlacement?: SidebarAppsPlacement;
+  /** Built-in rail entries left out (default none). */
+  hiddenNavEntries?: SidebarNavEntry[];
+  /** Settings rail entry ids moved under More; the rest stay at the top (default none). */
+  settingsMore?: string[];
+};
+
+/** The navigation options in effect for this person. */
+export type ResolvedSidebarLayoutOptions = {
+  /** False only when apps are hidden. */
+  sessionsShowApps: boolean;
+  /** Absent from servers from before it: read sessionsShowApps then. */
+  appsPlacement?: SidebarAppsPlacement;
+  hiddenNavEntries: string[];
+  /** Null: no settings entry is under More. */
+  settingsMore: string[] | null;
+};
 
 /** A link to an app, optionally one of its pages. */
 export type ResolvedSidebarAppLink = {
@@ -19,6 +70,7 @@ export type ResolvedSidebarAppLink = {
   path: string | null;
   /** Its own label, else the app's title. */
   label: string;
+  icon?: SidebarItemIcon;
 };
 
 /** An outside https link; open it in a new tab and mark it external. */
@@ -28,6 +80,8 @@ export type ResolvedSidebarExternalLink = {
   type: "link";
   url: string;
   label: string;
+  /** Without one, show the site's icon (`client.getSidebarLinkIcon`). */
+  icon?: SidebarItemIcon;
 };
 
 /** A list the sidebar fills in itself; `apps` holds only apps this person can open. */
@@ -45,7 +99,20 @@ export type ResolvedSidebarLiveList = {
 export type ResolvedSidebarChild =
   | ResolvedSidebarAppLink
   | ResolvedSidebarExternalLink
-  | ResolvedSidebarLiveList;
+  | ResolvedSidebarLiveList
+  | ResolvedSidebarAgentLink;
+
+/** A link to an agent's page; only agents this person can see are listed. */
+export type ResolvedSidebarAgentLink = {
+  id: string;
+  origin: SidebarItemOrigin;
+  type: "agent";
+  agentId: string;
+  /** Its own label, else the agent's name. */
+  label: string;
+  /** The agent's avatar, or its initials when it has none. */
+  avatar: SessionAvatar;
+};
 
 /** A named, collapsible group of links and lists. */
 export type ResolvedSidebarGroup = {
@@ -55,6 +122,7 @@ export type ResolvedSidebarGroup = {
   label: string;
   /** Whether it starts collapsed. */
   collapsed: boolean;
+  icon?: SidebarItemIcon;
   items: ResolvedSidebarChild[];
 };
 
@@ -71,6 +139,8 @@ export type SidebarLayoutResponse = {
     revision: number;
     /** Whether they changed anything, so Reset applies. */
     customized: boolean;
+    /** Their own options, as set. */
+    options?: SidebarLayoutOptions;
   };
   workspace: {
     revision: number;
@@ -78,18 +148,30 @@ export type SidebarLayoutResponse = {
     canEdit: boolean;
     /** The default before anyone's own changes; for admins only. */
     items?: ResolvedSidebarItem[];
+    /** The default's own options, as set; for admins only. */
+    options?: SidebarLayoutOptions;
   };
+  /** The navigation options in effect; absent from servers from before them (today's behaviour). */
+  options?: ResolvedSidebarLayoutOptions;
 };
 
 type NewSidebarChild =
-  | { id?: string; type: "app"; appId: string; path?: string; label?: string }
-  | { id?: string; type: "link"; url: string; label: string }
-  | { id?: string; type: "live_list"; list: SidebarLiveListKind; label?: string; limit?: number };
+  | { id?: string; type: "app"; appId: string; path?: string; label?: string; icon?: string }
+  | { id?: string; type: "link"; url: string; label: string; icon?: string }
+  | { id?: string; type: "live_list"; list: SidebarLiveListKind; label?: string; limit?: number }
+  | { id?: string; type: "agent"; agentId: string; label?: string };
 
 /** A new item; the server picks an id when it's omitted. */
 export type NewSidebarItem =
   | NewSidebarChild
-  | { id?: string; type: "group"; label: string; collapsed?: boolean; items?: NewSidebarChild[] };
+  | {
+      id?: string;
+      type: "group";
+      label: string;
+      collapsed?: boolean;
+      icon?: string;
+      items?: NewSidebarChild[];
+    };
 
 export type SidebarLayoutChange =
   | {
@@ -112,6 +194,8 @@ export type SidebarLayoutChange =
       url?: string;
       collapsed?: boolean;
       limit?: number | null;
+      /** App links, outside links and groups; null removes it. */
+      icon?: string | null;
     }
   /** Personal: hides a workspace item or deletes your own. Workspace: deletes it. */
   | { op: "remove"; itemId: string }
@@ -131,7 +215,17 @@ export type SidebarLayoutChange =
       afterId?: string;
     }
   /** Personal: back to the workspace default. Workspace: empties the default. */
-  | { op: "reset" };
+  | { op: "reset" }
+  /** Navigation options for the scope; null clears one (personal: back to the default's). */
+  | {
+      op: "options";
+      /** Also sets appsPlacement: false is `hidden`, true is `sessions`. */
+      sessionsShowApps?: boolean | null;
+      /** Also sets sessionsShowApps; wins over it in the same change. */
+      appsPlacement?: SidebarAppsPlacement | null;
+      hiddenNavEntries?: SidebarNavEntry[] | null;
+      settingsMore?: string[] | null;
+    };
 
 export type UpdateSidebarLayoutRequest = {
   /** `personal`: your own sidebar. `workspace`: everyone's default (workspace admins). */

@@ -4274,6 +4274,11 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "subscription_connections",
     "organization_memberships",
     "workspace_memberships",
+    "app_notifications",
+    "event_sources",
+    "connections",
+    "scheduled_tasks",
+    "scheduled_task_blocker_reviews",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4282,6 +4287,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "session_content_collections",
     "modal_inventory_read_capabilities",
     "inbox_items",
+    "organization_tenancy_inventory_capabilities",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -4371,6 +4377,9 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sandbox_fleet_warm_boxes_v1()",
       "discard_refused_session_create_v1(uuid, uuid)",
       "sync_subscription_relogin_notice_v1(uuid)",
+      "deliver_app_notification_v1(uuid)",
+      "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+      "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4384,6 +4393,9 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sandbox_fleet_warm_boxes_v1()",
       "discard_refused_session_create_v1(uuid, uuid)",
       "sync_subscription_relogin_notice_v1(uuid)",
+      "deliver_app_notification_v1(uuid)",
+      "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+      "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4486,7 +4498,8 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
         entry.name !== "claim_native_push_deliveries_v2(uuid, integer, integer)" &&
         entry.name !== "ring_agent_call_v1(uuid, boolean)" &&
         entry.name !== "end_agent_call_rings_v1(uuid)" &&
-        entry.name !== "sync_subscription_relogin_notice_v1(uuid)",
+        entry.name !== "sync_subscription_relogin_notice_v1(uuid)" &&
+        entry.name !== "deliver_app_notification_v1(uuid)",
     );
     expect(eventViolations(beforeOutbox)).toEqual([]);
     const beforeRecordings = eventPosture(false);

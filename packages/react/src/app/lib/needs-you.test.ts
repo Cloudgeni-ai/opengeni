@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { Session } from "../types";
 
-import { countNeedsYou, filterNeedsYou, rootNeedsYou } from "./needs-you";
+import {
+  awaitingPersonSince,
+  awaitsConnection,
+  awaitsPerson,
+  countNeedsYou,
+  filterNeedsYou,
+  rootNeedsYou,
+} from "./needs-you";
 
 function session(overrides: Partial<Session> & { id: string }): Session {
   const { id, ...rest } = overrides;
@@ -16,6 +23,32 @@ function session(overrides: Partial<Session> & { id: string }): Session {
 }
 
 describe("needs you", () => {
+  test("an idle chat whose agent waits on a connection card needs you, as an approval does", () => {
+    const since = "2026-11-19T14:00:00.000Z";
+    const waiting = session({ id: "a", awaitingConnectionSince: since } as never);
+    expect(awaitsConnection(waiting)).toBe(true);
+    expect(awaitsPerson(waiting)).toBe(true);
+    expect(awaitingPersonSince(waiting)).toBe(since);
+    expect(rootNeedsYou(waiting)).toBe(true);
+    expect(countNeedsYou([waiting])).toBe(1);
+    const child = session({
+      id: "a1",
+      parentSessionId: "r",
+      rootSessionId: "r",
+      awaitingConnectionSince: since,
+    } as never);
+    expect(filterNeedsYou([child])).toEqual([child]);
+    // Only while nothing runs: a resumed turn no longer waits on the card.
+    const running = session({
+      id: "b",
+      status: "running",
+      awaitingConnectionSince: since,
+    } as never);
+    expect(awaitsPerson(running)).toBe(false);
+    expect(rootNeedsYou(running)).toBe(false);
+    expect(awaitsPerson(session({ id: "c" }))).toBe(false);
+  });
+
   test("a session the runtime could not start is stuck, not waiting on the person", () => {
     const stuck = session({
       id: "a",
@@ -25,6 +58,14 @@ describe("needs you", () => {
     expect(rootNeedsYou(stuck)).toBe(false);
     expect(countNeedsYou([stuck])).toBe(0);
     expect(filterNeedsYou([stuck])).toEqual([]);
+  });
+
+  test("a sub-agent whose questions are with the agent that started it does not wait on the person", () => {
+    const waiting = { id: "b", status: "requires_action" as const, parentSessionId: "a" };
+    const withAgent = session({ ...waiting, rootSessionId: "a", questionWithAgent: true });
+    expect(awaitsPerson(withAgent)).toBe(false);
+    expect(filterNeedsYou([withAgent])).toEqual([]);
+    expect(awaitsPerson(session({ ...waiting, rootSessionId: "a" }))).toBe(true);
   });
 
   test("a root needs you when it, or a spawned agent, waits on a person or failed", () => {

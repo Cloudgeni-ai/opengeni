@@ -28,13 +28,15 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
-/** The only root browser e2e that drives the real browserd (BR-7). */
+const BROWSER_VIEWER_FIT_E2E = "test/e2e/browser-viewer-fit.browser.e2e.ts";
 const SECRETS_FAKE_LOGIN_E2E = "test/e2e/secrets-fake-login.browser.e2e.ts";
+const EMBEDDED_INTERACTION_VIEWER_E2E = "test/e2e/embedded-interaction-viewer.browser.e2e.ts";
 const CLAUDE_SUBSCRIPTION_E2E = "test/e2e/claude-subscription.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
 const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
+const MODAL_LAYER_E2E = "test/e2e/modal-layer.browser.e2e.ts";
 const COMPOSER_KEYBOARD_E2E = "test/e2e/composer-keyboard.browser.e2e.ts";
 const COMPOSER_FOCUS_HANDOFF_E2E = "test/e2e/composer-focus-handoff.browser.e2e.ts";
 const CONNECTOR_ACCOUNTS_E2E = "test/e2e/connector-accounts.browser.e2e.ts";
@@ -388,6 +390,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/archived-chat-status.browser.e2e.ts",
       "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
+      BROWSER_VIEWER_FIT_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
@@ -407,13 +410,16 @@ describe("fail-closed change impact", () => {
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      EMBEDDED_INTERACTION_VIEWER_E2E,
       "test/e2e/error-branding.browser.e2e.ts",
       "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
+      "test/e2e/form-page-footer.browser.e2e.ts",
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
+      MODAL_LAYER_E2E,
       "test/e2e/new-conversation.browser.e2e.ts",
       "test/e2e/onepassword-catalog.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
@@ -706,9 +712,50 @@ describe("fail-closed change impact", () => {
     const plan = createImpactPlan(["packages/browserd/src/index.ts"]);
     expect(plan.mode).toBe("focused");
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
-    expect(plan.e2eTests).toEqual([SECRETS_FAKE_LOGIN_E2E]);
+    expect(plan.e2eTests).toEqual([EMBEDDED_INTERACTION_VIEWER_E2E, SECRETS_FAKE_LOGIN_E2E]);
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
+  });
+
+  test("modal layering coverage follows the React layer, styles, and fixture", () => {
+    expect(usesBrowserRunner(MODAL_LAYER_E2E)).toBe(true);
+    for (const path of [
+      MODAL_LAYER_E2E,
+      "packages/react/src/lib/modal-layer.tsx",
+      "packages/react/styles/index.css",
+      "packages/react/test/fixtures/modal-layer/main.tsx",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(MODAL_LAYER_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      MODAL_LAYER_E2E,
+    );
+  });
+
+  test("browser viewer fitting follows the React demo and its dependencies", () => {
+    expect(usesBrowserRunner(BROWSER_VIEWER_FIT_E2E)).toBe(true);
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${BROWSER_VIEWER_FIT_E2E}"`,
+    );
+    for (const path of [
+      BROWSER_VIEWER_FIT_E2E,
+      "packages/react/demo/browser-harness.tsx",
+      "packages/react/src/components/browser-viewer.tsx",
+      "packages/sdk/src/interaction.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(BROWSER_VIEWER_FIT_E2E);
+      expect(plan.unitTests, path).not.toContain(BROWSER_VIEWER_FIT_E2E);
+      expect(plan.integrationTests, path).not.toContain(BROWSER_VIEWER_FIT_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      BROWSER_VIEWER_FIT_E2E,
+    );
   });
 
   test("error presentation coverage follows its fixture and shared client dependencies", () => {
@@ -814,7 +861,10 @@ describe("fail-closed change impact", () => {
     for (const path of ["packages/browserd/src/index.ts"]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode, path).toBe("focused");
-      expect(plan.e2eTests, path).toEqual([SECRETS_FAKE_LOGIN_E2E]);
+      expect(plan.e2eTests, path).toEqual([
+        EMBEDDED_INTERACTION_VIEWER_E2E,
+        SECRETS_FAKE_LOGIN_E2E,
+      ]);
     }
   });
 
@@ -876,6 +926,7 @@ describe("fail-closed change impact", () => {
       expect(plan.integrationTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
     }
     expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([
+      EMBEDDED_INTERACTION_VIEWER_E2E,
       SECRETS_FAKE_LOGIN_E2E,
     ]);
   });
@@ -1005,6 +1056,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/archived-chat-status.browser.e2e.ts",
       "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
+      BROWSER_VIEWER_FIT_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
@@ -1024,13 +1076,16 @@ describe("fail-closed change impact", () => {
       "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      EMBEDDED_INTERACTION_VIEWER_E2E,
       "test/e2e/error-branding.browser.e2e.ts",
       "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
+      "test/e2e/form-page-footer.browser.e2e.ts",
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
+      MODAL_LAYER_E2E,
       "test/e2e/new-conversation.browser.e2e.ts",
       "test/e2e/onepassword-catalog.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,

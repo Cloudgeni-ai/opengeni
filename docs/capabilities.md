@@ -166,6 +166,15 @@ every catalog read, session create, approval-policy read and worker claim.
   **From <workspace>**; it is managed in the origin workspace. Its owner can
   still set its approvals in Personal, stored for the Personal workspace like
   any of its own connectors.
+- When the owner's account behind it stops working (`needs_reauth`, `error`
+  or `revoked`), the catalog keeps listing it, through the listing-only
+  `includeLapsed` opt-in, as not runnable (`runtime.available: false`,
+  readiness `attention`), so it shows as needing reconnecting rather than
+  vanishing, and is never a default tool or offered as ready. Nothing runs or
+  binds it. A new chat or tool-policy change that still names it is accepted
+  and keeps it chosen but not run until it is reconnected; a new chat's first
+  turn records an `account_inactive` gap for it. Any other unknown connector id
+  is still refused.
 
 API Integrations follow the same rules
 (`personalWorkspaceExtensionApiIntegrations`): a curated definition (for
@@ -333,6 +342,8 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/mcp
 The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like hosted vault values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values - installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
+
+Header values given here are stored as written: a `{{secret:…}}` reference is not resolved. To keep a server's key in a workspace or organization vault, connect it as a shared service connection instead (an admin's **Add a shared key**, or the connect flow with ownership `workspace`); Opengeni stores the reference and reads the value only when it calls the tool. See [Shared service connections](secrets.md#shared-service-connections).
 
 The generic `capability_catalog_items` and `capability_installations` tables are
 MCP-only. Skills, Plugins, and Integration Definitions are projected
@@ -758,6 +769,12 @@ version; omission is rejected and a stale version returns `409`, so two
 administrators cannot silently overwrite each other's accepted source
 revision.
 
+GitHub reads are anonymous unless the deployment sets
+`OPENGENI_SKILL_IMPORT_GITHUB_TOKEN`, which moves them from GitHub's shared
+per-IP limit to the token's own. The token is only sent to `api.github.com`,
+and with it every read first confirms the repository is public, so a token that
+can see private repositories still imports only public Skills.
+
 The authoritative persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under
 FORCE RLS. Runtime materialization revalidates the stored artifact and digest
@@ -822,13 +839,39 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 
 ## Web Flow
 
-The **Capabilities** view has exactly three top-level sections, in this order:
-**Integrations**, **Connectors**, and **Bundles**. The first two are
-connections - something that holds an identity in another product. The third is
-not: a Bundle is a named collection of tools and instructions.
+The **Capabilities** page is the one setup page, with three tabs:
+**Connections**, **Skills** and **Ready-made**
+(`apps/web/src/components/capabilities/setup-tabs.tsx`). Each tab is its own
+address: `/plugins?section=skills|ready-made` (no `section` is Connections).
+Ready-made also takes `?kind=agent|app|skill` to show one kind. Older `?section=plugins` and `?section=gallery` links
+open Ready-made, and `/capabilities` links keep working. Knowledge keeps its
+own page (`/state`). The simplified interface's Capabilities page shows only
+connections.
 
-The heading outline says the same thing: exactly three `<h2>`s, one per
-section. The Featured strip, the discovery controls, **Enabled**, **Custom
+Every tab lists what you have first, then suggestions, in the same row
+(`CapabilityCatalogRow`): logo or initial, name, one line and one action.
+Rows you have show a status line in place of the description, with whose it
+is where that is known ("Installed · Workspace", "Installed · Yours"), and no
+glyph unless they need attention (`ConnectionInstalled`).
+
+**Ready-made** lists ready-made agents (`packages/core/src/agent-templates`),
+apps (`packages/core/src/app-templates`, [app packages](app-packages.md#ready-made-apps))
+and reviewed library skills (`GET /v1/workspaces/:workspaceId/skills/library`,
+SDK `listLibrarySkills`, every installable library skill with `enabled` once
+added; the capability catalog lists only added ones), grouped by each item's own `team` (agent and app
+templates' `team`, a library skill's `metadata.team`), alphabetically, with
+items without one under **More**. One click adds an item through the same
+paths as elsewhere: `createAgentFromTemplate`, `installAppPackage` with the
+template's package (one idempotency key per ready-made app, so adding it
+again opens the same app), and `installLibrarySkill`. An added item opens
+instead.
+
+The **Connections** tab has two top-level sections: **Integrations** and
+**Connectors**, both connections - something that holds an identity in another
+product. Bundles (named collections of tools and instructions) show on
+**Ready-made**.
+
+The heading outline says the same thing: one `<h2>` per section. The Featured strip, the discovery controls, **Enabled**, **Custom
 APIs**, and **Browse** all render *inside* the Connectors `<section>` element,
 and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
 surfaces of their own.

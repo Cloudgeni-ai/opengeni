@@ -16,6 +16,23 @@ const ToolReviewSelectionLabel = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 
+/**
+ * Access the connected account still lacks for the action, read from the
+ * account's own grant when the review was prepared. Approving first asks the
+ * provider for exactly these scopes on that account; the approval still
+ * covers only this one call.
+ */
+export const ToolReviewAccessNeeded = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      providerDomain: z.string().min(1).max(256),
+      connectionId: z.string().min(1).max(256),
+      scopes: z.array(z.string().min(1).max(2048)).min(1).max(32),
+    })
+    .strict(),
+);
+export type ToolReviewAccessNeeded = z.infer<typeof ToolReviewAccessNeeded>;
+
 /** Trusted adapter hints, never read from agent arguments or tool output. */
 export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
   z
@@ -77,6 +94,7 @@ export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
         .array(ToolReviewSelectionLabel)
         .max(TOOL_REVIEW_SELECTION_LABELS_MAX)
         .optional(),
+      accessNeeded: ToolReviewAccessNeeded.optional(),
     })
     .strict(),
 );
@@ -249,6 +267,24 @@ export const ToolReviewReasonCode = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type ToolReviewReasonCode = z.infer<typeof ToolReviewReasonCode>;
+/**
+ * The agent whose Can use rule made a call ask or blocked it, with that rule
+ * (docs/agents.md). Absent when the connection's own settings decided. The
+ * `reasonCode` stays `asks_by_default` or `blocked_by_default` for hosts that
+ * don't read it.
+ */
+export const ToolReviewAgentRule = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      agentId: z.string().max(256),
+      agentName: z.string().max(256),
+      connector: z.string().max(512),
+      tool: z.string().max(256),
+      permission: z.enum(["ask", "block"]),
+    })
+    .strict(),
+);
+export type ToolReviewAgentRule = z.infer<typeof ToolReviewAgentRule>;
 export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -273,6 +309,7 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       moreFields: primitives.nonnegativeInteger,
       reason: primitives.string,
       reasonCode: ToolReviewReasonCode.optional(),
+      agentRule: ToolReviewAgentRule.optional(),
       createdAt: primitives.string,
       updatedAt: primitives.string,
       approveLabel: primitives.string,
@@ -292,6 +329,12 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       approvedBy: z.enum(["you", "account_owner"]).optional(),
       /** The account owner's name, with `approvedBy: "account_owner"`, when known. */
       accountOwnerLabel: z.string().optional(),
+      /**
+       * Access the action's account lacked when it was held for review, which
+       * approving asks the provider for first (see `ToolReviewAccessNeeded`).
+       * It stays after the decision, so a review rendered again looks the same.
+       */
+      accessNeeded: ToolReviewAccessNeeded.optional(),
       detailsAvailable: primitives.boolean,
     })
     .strict(),

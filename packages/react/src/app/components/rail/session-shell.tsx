@@ -517,6 +517,8 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
           <Wordmark className="text-[17px]" />
         </Link>
       ) : null}
+      {/* A page's own controls at the strip's end (an app page's chat button). */}
+      <div data-canvas-strip-end="" className="ml-auto flex items-center empty:hidden" />
     </header>
   );
 }
@@ -625,6 +627,7 @@ function SessionRouteHeader({
       keyAuthRequired={context.keyAuthRequired}
       onForgetAccessKey={context.forgetAccessKey}
       inspectorOpen={context.inspectorOpen}
+      inspectorHint={context.inspectorHint === true}
       onToggleInspector={
         dock
           ? () => {

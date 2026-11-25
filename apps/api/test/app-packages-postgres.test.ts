@@ -29,6 +29,7 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
+  markSiteToolData,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -36,6 +37,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
+import { sweepAppPackageExports } from "../src/app-packages/exports";
 import { NO_APP_SYNCS, setAppSyncHooks } from "../src/app-packages/syncs";
 import { APP_PACKAGE_SYNC_HOOKS } from "../src/app-sync/package-hooks";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
@@ -469,6 +471,34 @@ test("an exported app installs into another workspace and works there, with empt
   expect(original.json.collections.find((c: any) => c.name === "tasks").recordCount).toBe(2);
 }, 120_000);
 
+test("tool data from a connected account is never packaged as demo data", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f);
+  // A shared sync stored a connected account's data in both: it stays in this workspace.
+  await markSiteToolData(f.deps.db, { accountId: f.accountId, workspaceId: f.source.id }, appId, [
+    { target: "collection:tasks", connector: "example-crm", route: "example-crm", shared: true },
+    { target: "sql", connector: "example-crm", route: "example-crm", shared: true },
+  ]);
+  const exported = await f.exportApp(appId, { demoData: true });
+  expect(exported.status, exported.text).toBe(200);
+  expect(exported.json.package.demoData?.records.tasks).toBeUndefined();
+  expect(exported.json.package.demoData?.sqlRows.items).toBeUndefined();
+  expect(exported.json.notExported).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        part: "demo_data",
+        name: "tasks",
+        reason: expect.stringContaining("connected account"),
+      }),
+      expect.objectContaining({
+        part: "demo_data",
+        name: "items",
+        reason: expect.stringContaining("connected account"),
+      }),
+    ]),
+  );
+}, 120_000);
+
 test("demo data is included only when the author asks, and installs unless declined", async () => {
   const f = await fixture();
   const appId = await buildBoard(f);
@@ -870,6 +900,541 @@ test("installing syncs needs permission to manage automations", async () => {
   ]);
 }, 120_000);
 
+/** Upgrade an app of the source workspace from a package, as its author. */
+function upgrade(f: Fixture, appId: string, body: Record<string, unknown>, who: Who = f.author) {
+  return f.call(who, "POST", `${f.appBase(f.source.id, appId)}/package/upgrade`, body);
+}
+
+async function sqlRows(f: Fixture, appId: string, sql: string) {
+  const result = await f.call(f.author, "POST", `${f.appBase(f.source.id, appId)}/sql/execute`, {
+    sql,
+  });
+  expect(result.status, result.text).toBe(200);
+  return result.json.rows as Array<Record<string, unknown>>;
+}
+
+test("an upgrade publishes the package's version and runs only what is new, keeping the data", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f);
+  const pkg = (await f.exportApp(appId)).json.package as AppPackage;
+  const before = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/data`);
+
+  // The app's own package changes nothing.
+  const same = await upgrade(f, appId, { package: pkg, dryRun: true });
+  expect(same.status, same.text).toBe(200);
+  const versionBefore = same.json.app.currentVersion.id as string;
+  expect(same.json.plan).toMatchObject({
+    version: { changed: false },
+    tools: { added: [], removed: [] },
+    collections: { added: [], changed: [], kept: [] },
+    migrations: { applied: ["create_items", "index_items"], new: [], conflicting: [] },
+    queries: { added: [], changed: [], removed: [] },
+    destructive: [],
+    conflicts: [],
+  });
+
+  const next: AppPackage = structuredClone(pkg);
+  next.app.html = "<!doctype html><h1>Team board 2</h1>";
+  delete next.app.source;
+  next.data.collections = [
+    ...next.data.collections.filter((c) => c.name !== "notes"),
+    { name: "labels", accessMode: "shared" } as AppPackage["data"]["collections"][number],
+  ];
+  next.sql.migrations.push({
+    name: "add_price",
+    sql: "ALTER TABLE items ADD COLUMN price INTEGER DEFAULT 0;",
+  });
+  next.sql.queries = [
+    { ...next.sql.queries[0]!, sql: "SELECT name, qty, price FROM items ORDER BY id" },
+    { name: "count_items", sql: "SELECT count(*) AS n FROM items", audience: "signed_in" },
+  ] as AppPackage["sql"]["queries"];
+  const planned = await upgrade(f, appId, { package: next, dryRun: true });
+  expect(planned.status, planned.text).toBe(200);
+  expect(planned.json).toMatchObject({ dryRun: true, applied: false });
+  expect(planned.json.plan).toMatchObject({
+    version: { changed: true, html: true, source: true, tools: false },
+    collections: { added: ["labels"], changed: [], unchanged: ["tasks"], kept: ["notes"] },
+    migrations: { applied: ["create_items", "index_items"], new: ["add_price"], conflicting: [] },
+    queries: { added: ["count_items"], changed: ["list_items"], removed: [] },
+    destructive: [],
+    conflicts: [],
+  });
+  // A dry run changes nothing; applying needs a key.
+  expect((await sqlRows(f, appId, "SELECT name FROM pragma_table_info('items')")).length).toBe(3);
+  const keyless = await upgrade(f, appId, { package: next });
+  expect(keyless.status).toBe(422);
+
+  const key = crypto.randomUUID();
+  const applied = await upgrade(f, appId, { package: next, idempotencyKey: key });
+  expect(applied.status, applied.text).toBe(200);
+  expect(applied.json.notUpgraded).toEqual([]);
+  expect(applied.json.upgraded).toMatchObject({
+    version: true,
+    collections: ["labels"],
+    migrations: ["add_price"],
+  });
+  expect(applied.json.upgraded.queries.sort()).toEqual(["count_items", "list_items"]);
+  expect(applied.json.app.id).toBe(appId);
+  expect(applied.json.app.title).toBe("Team board");
+  expect(applied.json.app.currentVersion.id).not.toBe(versionBefore);
+
+  const content = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/content`);
+  expect(content.json.html).toBe(next.app.html);
+  const after = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/data`);
+  const counts = (json: any) =>
+    Object.fromEntries(json.collections.map((c: any) => [c.name, c.recordCount]));
+  expect(counts(after.json)).toEqual({ ...counts(before.json), labels: 0 });
+  const listed = await f.call(
+    f.author,
+    "POST",
+    `${f.appBase(f.source.id, appId)}/sql/queries/list_items`,
+    {},
+  );
+  expect(listed.json.rows).toEqual([
+    { name: "Bolts", qty: 40, price: 0 },
+    { name: "Nuts", qty: 12, price: 0 },
+  ]);
+  const sql = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/sql`);
+  expect(sql.json.migrations.map((m: any) => m.name)).toEqual([
+    "create_items",
+    "index_items",
+    "add_price",
+  ]);
+
+  // The same request again finds it done and publishes nothing new.
+  const replayed = await upgrade(f, appId, { package: next, idempotencyKey: key });
+  expect(replayed.status, replayed.text).toBe(200);
+  expect(replayed.json.plan.version.changed).toBe(false);
+  expect(replayed.json.upgraded).toMatchObject({ version: false, migrations: [], queries: [] });
+  expect(replayed.json.app.currentVersion.id).toBe(applied.json.app.currentVersion.id);
+
+  // Managers only.
+  const outsider = await f.call(
+    f.installer,
+    "POST",
+    `${f.appBase(f.source.id, appId)}/package/upgrade`,
+    { package: next, dryRun: true },
+  );
+  expect(outsider.status).toBeGreaterThanOrEqual(403);
+}, 120_000);
+
+test("destructive changes need allowDestructive, and conflicts stop the upgrade", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f);
+  const pkg = (await f.exportApp(appId)).json.package as AppPackage;
+
+  const risky: AppPackage = structuredClone(pkg);
+  risky.app.html = "<!doctype html><h1>Risky</h1>";
+  risky.sql.migrations.push({ name: "drop_qty", sql: "ALTER TABLE items DROP COLUMN qty;" });
+  // The empty notes collection may change who reads it; nothing is hidden.
+  risky.data.collections = risky.data.collections.map((c) =>
+    c.name === "notes" ? { ...c, accessMode: "shared" } : c,
+  );
+  const plan = await upgrade(f, appId, { package: risky, dryRun: true });
+  expect(plan.status, plan.text).toBe(200);
+  expect(plan.json.plan.collections.changed).toEqual(["notes"]);
+  expect(plan.json.plan.destructive).toEqual([
+    expect.objectContaining({ part: "migration", name: "drop_qty" }),
+  ]);
+  const refused = await upgrade(f, appId, { package: risky, idempotencyKey: crypto.randomUUID() });
+  expect(refused.status, refused.text).toBe(409);
+  expect(refused.json.error.message).toContain("allowDestructive");
+  // Nothing ran.
+  expect((await sqlRows(f, appId, "SELECT name FROM pragma_table_info('items')")).length).toBe(3);
+  const content = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/content`);
+  expect(content.json.html).toBe(pkg.app.html);
+
+  // A migration the app ran, with other SQL: nothing applies, even when allowed.
+  const conflicting: AppPackage = structuredClone(risky);
+  conflicting.sql.migrations[0] = {
+    name: "create_items",
+    sql: "CREATE TABLE items (id INTEGER PRIMARY KEY, title TEXT);",
+  };
+  conflicting.data.collections.push({
+    name: "labels",
+    accessMode: "shared",
+  } as AppPackage["data"]["collections"][number]);
+  const blocked = await upgrade(f, appId, {
+    package: conflicting,
+    allowDestructive: true,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(blocked.status, blocked.text).toBe(409);
+  const sourceData = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/data`);
+  expect(sourceData.json.collections.map((c: any) => c.name).sort()).toEqual(["notes", "tasks"]);
+  const dry = await upgrade(f, appId, { package: conflicting, dryRun: true });
+  expect(dry.json.plan.migrations.conflicting).toEqual(["create_items"]);
+  expect(dry.json.plan.conflicts).toEqual([
+    expect.objectContaining({ part: "migration", name: "create_items" }),
+  ]);
+  // Changing who reads a collection that has records stops it too.
+  const hiding: AppPackage = structuredClone(pkg);
+  hiding.data.collections = hiding.data.collections.map((c) =>
+    c.name === "tasks" ? { ...c, accessMode: "per_viewer" } : c,
+  );
+  const hidden = await upgrade(f, appId, { package: hiding, dryRun: true });
+  expect(hidden.json.plan.conflicts).toEqual([
+    expect.objectContaining({ part: "collection", name: "tasks" }),
+  ]);
+
+  // Confirmed, the destructive upgrade applies.
+  const allowed = await upgrade(f, appId, {
+    package: risky,
+    allowDestructive: true,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(allowed.status, allowed.text).toBe(200);
+  expect(allowed.json.notUpgraded).toEqual([]);
+  expect(allowed.json.upgraded).toMatchObject({
+    version: true,
+    collections: ["notes"],
+    migrations: ["drop_qty"],
+  });
+  expect(await sqlRows(f, appId, "SELECT name FROM items ORDER BY id")).toEqual([
+    { name: "Bolts" },
+    { name: "Nuts" },
+  ]);
+}, 120_000);
+
+test("upgrades compare syncs through the sync hooks and agents upgrade with app_upgrade", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f, { sql: false });
+  const applied: Array<{ syncs: unknown[]; upgradeKey: string }> = [];
+  setAppSyncHooks({
+    ...NO_APP_SYNCS,
+    list: async () => [{ name: "Import", tool: "contacts_list" }],
+    planUpgrade: async ({ syncs }) => ({
+      added: syncs.map((s) => String(s.name)).filter((n) => n !== "Import"),
+      changed: ["Import"],
+      unchanged: [],
+      kept: ["Old"],
+      problems: [],
+    }),
+    applyUpgrade: async ({ syncs, upgradeKey }) => {
+      applied.push({ syncs, upgradeKey });
+      return { upgraded: syncs.map((s) => String(s.name)), notUpgraded: [] };
+    },
+  });
+  const pkg = (await f.exportApp(appId)).json.package as AppPackage;
+  pkg.syncs = [
+    { name: "Import", tool: "contacts_list", schedule: "hourly" },
+    { name: "Extra", tool: "contacts_list" },
+  ];
+  const agent = await agentTools(f, f.source.id, f.author);
+  const dry = await agent.callTool("app_upgrade", {
+    appId,
+    package: pkg,
+    dryRun: true,
+    idempotencyKey: "upgrade-syncs",
+  });
+  expect(dry.isError, JSON.stringify(dry.value)).toBe(false);
+  expect(dry.value.plan.syncs).toEqual({
+    added: ["Extra"],
+    changed: ["Import"],
+    unchanged: [],
+    kept: ["Old"],
+  });
+  expect(applied).toEqual([]);
+  const done = await agent.callTool("app_upgrade", {
+    appId,
+    package: pkg,
+    idempotencyKey: "upgrade-syncs",
+  });
+  expect(done.isError, JSON.stringify(done.value)).toBe(false);
+  expect(done.value.upgraded.syncs).toEqual(["Import", "Extra"]);
+  expect(applied).toEqual([{ syncs: pkg.syncs, upgradeKey: expect.stringMatching(/^attempt:/) }]);
+  const missing = await agent.callTool("app_upgrade", { appId, idempotencyKey: "nothing" });
+  expect(missing.isError).toBe(true);
+}, 120_000);
+
+test("demo data carries shared files and SQL blob values", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f);
+  const base = f.appBase(f.source.id, appId);
+  const upload = async (name: string, body: string, scope: "shared" | "private") => {
+    const response = await f.app.request(
+      `${base}/files?name=${encodeURIComponent(name)}&scope=${scope}`,
+      {
+        method: "POST",
+        headers: { ...f.author.headers, "content-type": "text/plain" },
+        body,
+      },
+    );
+    const text = await response.text();
+    expect(response.status, text).toBe(201);
+    return JSON.parse(text) as { id: string };
+  };
+  const sharedFile = await upload("readme.txt", "hello", "shared");
+  await upload("mine.txt", "private", "private");
+  await f.call(f.author, "POST", `${base}/data/write`, {
+    operations: [{ op: "put", collection: "tasks", key: "doc", data: { title: sharedFile.id } }],
+  });
+  expect(
+    (
+      await f.call(f.author, "POST", `${base}/sql/migrations`, {
+        name: "create_blobs",
+        sql: "CREATE TABLE blobs (id INTEGER PRIMARY KEY, data BLOB);",
+      })
+    ).status,
+  ).toBe(201);
+  await sqlRows(f, appId, "INSERT INTO blobs (data) VALUES (X'00ff10'), (NULL)");
+
+  const exported = await f.exportApp(appId, { demoData: true });
+  expect(exported.status, exported.text).toBe(200);
+  const pkg = exported.json.package as AppPackage;
+  expect(pkg.demoData?.files).toEqual([
+    expect.objectContaining({
+      id: sharedFile.id,
+      name: "readme.txt",
+      base64: Buffer.from("hello").toString("base64"),
+    }),
+  ]);
+  expect(pkg.demoData?.sqlRows.blobs).toEqual([
+    { id: 1, data: { $base64: "AP8Q" } },
+    { id: 2, data: null },
+  ]);
+  expect(exported.json.notExported).toContainEqual(
+    expect.objectContaining({ part: "demo_data", name: "files" }),
+  );
+  // Only files, when asked for only files.
+  const onlyFiles = await f.exportApp(appId, { demoData: { files: true } });
+  expect(onlyFiles.status, onlyFiles.text).toBe(200);
+  expect(onlyFiles.json.package.demoData.files).toHaveLength(1);
+  expect(onlyFiles.json.package.demoData.records).toEqual({});
+
+  const installed = await f.install({ package: pkg });
+  expect(installed.status, installed.text).toBe(201);
+  expect(installed.json.notInstalled).toEqual([]);
+  expect(installed.json.installed).toMatchObject({ demoFiles: 1 });
+  const target = f.appBase(f.target.id, installed.json.app.id);
+  const files = await f.call(f.installer, "GET", `${target}/files`);
+  expect(files.json.files).toEqual([expect.objectContaining({ name: "readme.txt" })]);
+  const newId = files.json.files[0].id as string;
+  // Records that named the old file name the new one.
+  const doc = await f.call(f.installer, "POST", `${target}/data/get`, {
+    collection: "tasks",
+    key: "doc",
+  });
+  expect(JSON.stringify(doc.json)).toContain(newId);
+  const blobs = await f.call(f.installer, "POST", `${target}/sql/execute`, {
+    sql: "SELECT id, hex(data) AS hex FROM blobs ORDER BY id",
+  });
+  expect(blobs.json.rows).toEqual([
+    { id: 1, hex: "00FF10" },
+    { id: 2, hex: "" },
+  ]);
+}, 120_000);
+
+const b64 = (text: string) => Buffer.from(text).toString("base64");
+
+/** One asset file of an app's current version, through the console's asset route. */
+async function assetText(f: Fixture, who: Who, workspaceId: string, appId: string, path: string) {
+  const content = await f.call(who, "GET", `${f.appBase(workspaceId, appId)}/content`);
+  expect(content.status, content.text).toBe(200);
+  const base = String(content.json.assetBaseUrl);
+  const response = await f.app.request(`${new URL(base).pathname}${path}`);
+  return { status: response.status, text: await response.text(), base };
+}
+
+test("multi-file apps travel in packages with their files and keep their provenance", async () => {
+  const f = await fixture();
+  const packageId = crypto.randomUUID();
+  const original: Record<string, unknown> = {
+    format: APP_PACKAGE_FORMAT,
+    version: 1,
+    packageId,
+    app: {
+      title: "Split board",
+      html: '<!doctype html><script type="module" src="./assets/index-1.js"></script>',
+      assets: {
+        files: [
+          { path: "assets/index-1.js", base64: b64("export const v = 1;") },
+          { path: "assets/index-1.css", base64: b64("body{margin:0}") },
+        ],
+      },
+    },
+    tools: [],
+    data: { collections: [] },
+    sql: { migrations: [], queries: [] },
+    syncs: [],
+  };
+  // Installed into the source workspace: the copy serves its files and records the package.
+  const first = await f.call(
+    f.author,
+    "POST",
+    `/v1/workspaces/${f.source.id}/app-packages/install`,
+    { package: original, idempotencyKey: crypto.randomUUID() },
+  );
+  expect(first.status, first.text).toBe(201);
+  expect(first.json.packageId).toBe(packageId);
+  const appId = first.json.app.id as string;
+  const served = await assetText(f, f.author, f.source.id, appId, "assets/index-1.js");
+  expect(served).toMatchObject({ status: 200, text: "export const v = 1;" });
+
+  // Exported again: the same files and the same package id.
+  const exported = await f.exportApp(appId);
+  expect(exported.status, exported.text).toBe(200);
+  const pkg = exported.json.package as AppPackage;
+  expect(pkg.packageId).toBe(packageId);
+  expect(pkg.app.assets?.files).toEqual([
+    { path: "assets/index-1.css", base64: b64("body{margin:0}") },
+    { path: "assets/index-1.js", base64: b64("export const v = 1;") },
+  ]);
+
+  // Installed elsewhere: the files under the copy's own token.
+  const copy = await f.install({ package: pkg });
+  expect(copy.status, copy.text).toBe(201);
+  const copyId = copy.json.app.id as string;
+  const copied = await assetText(f, f.installer, f.target.id, copyId, "assets/index-1.css");
+  expect(copied).toMatchObject({ status: 200, text: "body{margin:0}" });
+  expect(copied.base).not.toBe(served.base);
+
+  // An app made here exports with an id of its own, the same every time.
+  const own = await buildBoard(f, { sql: false });
+  const ownIds = await Promise.all([f.exportApp(own), f.exportApp(own)]);
+  expect(ownIds[0].json.package.packageId).toBe(ownIds[1].json.package.packageId);
+  expect(ownIds[0].json.package.packageId).not.toBe(packageId);
+
+  const upgradeCopy = (body: Record<string, unknown>) =>
+    f.call(f.installer, "POST", `${f.appBase(f.target.id, copyId)}/package/upgrade`, body);
+  // A newer version of the same app: the changed files publish under a new token.
+  const next = structuredClone(pkg);
+  next.app.assets!.files[1] = { path: "assets/index-1.js", base64: b64("export const v = 2;") };
+  const planned = await upgradeCopy({ package: next, dryRun: true });
+  expect(planned.status, planned.text).toBe(200);
+  expect(planned.json.plan).toMatchObject({
+    version: { changed: true, html: false, assets: true },
+    package: { id: packageId, current: packageId },
+    destructive: [],
+  });
+  const applied = await upgradeCopy({ package: next, idempotencyKey: crypto.randomUUID() });
+  expect(applied.status, applied.text).toBe(200);
+  expect(applied.json.upgraded.version).toBe(true);
+  const upgraded = await assetText(f, f.installer, f.target.id, copyId, "assets/index-1.js");
+  expect(upgraded).toMatchObject({ status: 200, text: "export const v = 2;" });
+  expect(upgraded.base).not.toBe(copied.base);
+
+  // Another app's package is refused unless confirmed, then becomes the copy's.
+  const other = { ...structuredClone(next), packageId: ownIds[0].json.package.packageId };
+  const refused = await upgradeCopy({ package: other, idempotencyKey: crypto.randomUUID() });
+  expect(refused.status, refused.text).toBe(409);
+  expect(refused.json.error.message).toContain("different app");
+  expect(refused.json.error.details.plan.destructive).toEqual([
+    expect.objectContaining({ part: "package" }),
+  ]);
+  const forced = await upgradeCopy({
+    package: other,
+    allowDestructive: true,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(forced.status, forced.text).toBe(200);
+  const after = await upgradeCopy({ package: other, dryRun: true });
+  expect(after.json.plan.package).toEqual({ id: other.packageId, current: other.packageId });
+
+  // A package's files must be valid: a bad one refuses the install.
+  const broken = structuredClone(original) as any;
+  broken.app.assets.files.push({ path: "../escape.js", base64: b64("x") });
+  const bad = await f.install({ package: broken });
+  expect(bad.status).toBe(422);
+}, 120_000);
+
+test("upgrades check asset files and an app's own package id first; export measures files before reading them", async () => {
+  const f = await fixture();
+  const own = await buildBoard(f, { sql: false });
+  const pkg = (await f.exportApp(own)).json.package as AppPackage;
+
+  // An app made here is compared by the id its exports carry.
+  const other = { ...structuredClone(pkg), packageId: crypto.randomUUID() };
+  const planned = await upgrade(f, own, { package: other, dryRun: true });
+  expect(planned.status, planned.text).toBe(200);
+  expect(planned.json.plan.package).toEqual({ id: other.packageId, current: pkg.packageId });
+  expect(planned.json.plan.destructive).toEqual([
+    { part: "package", reason: "This package is from a different app" },
+  ]);
+
+  // A bad asset file is a conflict in the plan, and nothing runs.
+  const broken = structuredClone(pkg) as any;
+  broken.data.collections.push({ name: "extra", accessMode: "shared" });
+  broken.app.assets = { files: [{ path: "../escape.js", base64: b64("x") }] };
+  const dry = await upgrade(f, own, { package: broken, dryRun: true });
+  expect(dry.status, dry.text).toBe(200);
+  expect(dry.json.plan.conflicts).toEqual([
+    expect.objectContaining({ part: "version", name: "assets" }),
+  ]);
+  const applied = await upgrade(f, own, { package: broken, idempotencyKey: crypto.randomUUID() });
+  expect(applied.status, applied.text).toBe(409);
+  const data = await f.call(f.author, "GET", `${f.appBase(f.source.id, own)}/data`);
+  expect(data.json.collections.map((c: any) => c.name)).not.toContain("extra");
+
+  // Files too large for a package are refused from the manifest, before any is read.
+  const huge = (n: number) => ({
+    path: `assets/big-${n}.js`,
+    sha256: String(n).repeat(64),
+    sizeBytes: 9_500_000,
+  });
+  // Version history is immutable to the app; the admin skips that trigger to fake big files.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update workspace_artifact_versions set asset_manifest = ${tx.json({
+      token: "t".repeat(22),
+      files: [huge(1), huge(2)],
+    })} where artifact_id = ${own}`;
+  });
+  const tooBig = await f.exportApp(own);
+  expect(tooBig.status, tooBig.text).toBe(413);
+  expect(tooBig.json.error.message).toContain("over 24 MB");
+
+  // Install takes no more than export makes.
+  const padded = { ...structuredClone(pkg), padding: "x".repeat(24 * 1024 * 1024) };
+  expect((await f.install({ package: padded })).status).toBe(413);
+}, 120_000);
+
+test("stored export files are recorded and swept after they expire", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f, { sql: false });
+  const agent = await agentTools(f, f.source.id, f.author);
+  const exported = await agent.callTool("app_export", { appId });
+  expect(exported.isError, JSON.stringify(exported.value)).toBe(false);
+  const key = new URL(exported.value.downloadUrl.url).pathname.slice(1);
+  const objects = (f.objectStorage as any).objects as Map<string, Uint8Array>;
+  expect(objects.has(key)).toBe(true);
+  const rows = () =>
+    shared.admin<Array<{ object_key: string; attempts: number; last_error: string | null }>>`
+      select object_key, attempts, last_error from app_package_exports
+      where workspace_id = ${f.source.id}`;
+  const [recorded] = await rows();
+  expect(recorded?.object_key).toBe(key);
+  const [expiry] = await shared.admin<Array<{ hours: number }>>`
+    select extract(epoch from expires_at - created_at) / 3600 as hours
+    from app_package_exports where workspace_id = ${f.source.id}`;
+  expect(Math.round(Number(expiry!.hours))).toBe(24);
+
+  // Not yet due: nothing is deleted.
+  await sweepAppPackageExports({ db: db.db, objectStorage: f.objectStorage });
+  expect(objects.has(key)).toBe(true);
+
+  await shared.admin`update app_package_exports set next_attempt_at = now() - interval '1 second'
+    where workspace_id = ${f.source.id}`;
+  // A failed delete keeps the record for a later retry.
+  const failing = {
+    deleteObject: async () => {
+      throw new Error("storage is down");
+    },
+  };
+  const failed = await sweepAppPackageExports({ db: db.db, objectStorage: failing });
+  expect(failed.failed).toBeGreaterThanOrEqual(1);
+  const [retry] = await rows();
+  expect(retry).toMatchObject({ attempts: 1, last_error: "storage is down" });
+  expect(objects.has(key)).toBe(true);
+
+  await shared.admin`update app_package_exports set next_attempt_at = now() - interval '1 second'
+    where workspace_id = ${f.source.id}`;
+  for (let pass = 0; pass < 5 && (await rows()).length > 0; pass += 1)
+    await sweepAppPackageExports({ db: db.db, objectStorage: f.objectStorage }, { limit: 200 });
+  expect(objects.has(key)).toBe(false);
+  expect(await rows()).toEqual([]);
+}, 120_000);
+
 /**
  * An agent attempt acting for `who` in a workspace, with the app package
  * tools. `accountTools` gives its chat account routes (`account-…`) of a
@@ -882,7 +1447,7 @@ async function agentTools(
   who: Who,
   accountTools: Array<{ serverId: string; canonicalServerId: string; toolName: string }> = [],
 ) {
-  const tools = ["app_export", "app_install"];
+  const tools = ["app_export", "app_install", "app_upgrade"];
   const session = await createSession(db.db, {
     accountId: f.accountId,
     workspaceId,

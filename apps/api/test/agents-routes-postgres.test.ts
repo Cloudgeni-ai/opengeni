@@ -143,6 +143,10 @@ describe("agents through the API (real PostgreSQL)", () => {
       "triage",
       "bug-fixer",
       "pr-reviewer",
+      "cve-scanner",
+      "incident-responder",
+      "dependency-updater",
+      "product-analyst",
     ]);
     const missing = await call(alice, "POST", `${root}/agent-templates/nope/agents`, {});
     expect(missing.status).toBe(404);
@@ -300,7 +304,10 @@ describe("agents through the API (real PostgreSQL)", () => {
     const admin = await bearer(workspace, "user:admin", ["workspace:admin"]);
     const base = `/v1/workspaces/${workspace.workspaceId}/agents`;
 
-    const shared_ = (await call(alice, "POST", base, { name: "Team helper" })).json.agent;
+    const shared_ = (
+      await call(alice, "POST", base, { name: "Team helper", editAccess: "creator_and_admins" })
+    ).json.agent;
+    expect(shared_.editAccess).toBe("creator_and_admins");
     // Another member uses it but cannot change it; an admin can.
     expect((await call(bob, "GET", `${base}/${shared_.id}`)).json.agent.viewer.canEdit).toBe(false);
     expect(
@@ -339,6 +346,84 @@ describe("agents through the API (real PostgreSQL)", () => {
     const refused = await call(stranger, "POST", base, { name: "Secret", visibility: "private" });
     expect(refused.status).toBe(422);
     expect(refused.json.error.message).toContain("member of the organization");
+  }, 180_000);
+
+  test("who can edit: creator and admins, or everyone in the workspace", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("agents edit access");
+    for (const subject of ["user:alice", "user:bob"]) await member(workspace, subject);
+    const alice = await bearer(workspace, "user:alice", PERSON);
+    const bob = await bearer(workspace, "user:bob", PERSON);
+    const reader = await bearer(workspace, "user:bob", ["workspace:read", "sessions:read"]);
+    const base = `/v1/workspaces/${workspace.workspaceId}/agents`;
+    const templates = `/v1/workspaces/${workspace.workspaceId}/bot-templates`;
+
+    // A create request that leaves it out keeps the rule from before it,
+    // for the API and a ready-made agent alike.
+    const omitted = (await call(alice, "POST", base, { name: "Quiet helper" })).json.agent;
+    expect(omitted.editAccess).toBe("creator_and_admins");
+    const readyMade = await call(
+      alice,
+      "POST",
+      `/v1/workspaces/${workspace.workspaceId}/agent-templates/pr-reviewer/agents`,
+      { name: "Reviewer", editAccess: "everyone" },
+    );
+    expect(readyMade.status).toBe(201);
+    expect(readyMade.json.agent.editAccess).toBe("everyone");
+    // New agents from Opengeni's apps: everyone in the workspace can edit them.
+    const created = (
+      await call(alice, "POST", base, { name: "Release helper", editAccess: "everyone" })
+    ).json.agent;
+    expect(created.editAccess).toBe("everyone");
+    const asBob = (await call(bob, "GET", `${base}/${created.id}`)).json.agent;
+    expect(asBob.viewer).toMatchObject({ canEdit: true, canManage: false });
+    const edited = await call(bob, "PATCH", `${base}/${created.id}`, {
+      expectedVersion: 1,
+      instructions: "Check the changelog first.",
+    });
+    expect(edited.status).toBe(200);
+    // ...through bot templates too.
+    expect(
+      (await call(bob, "PATCH", `${templates}/${created.id}`, { setupInstructions: "Be brief." }))
+        .status,
+    ).toBe(200);
+    // A reader who can't start chats still can't.
+    expect(
+      (await call(reader, "PATCH", `${base}/${created.id}`, { expectedVersion: 3, name: "X" }))
+        .status,
+    ).toBe(403);
+    // Who can use or edit it, and deleting it, stay with its creator and admins.
+    for (const change of [{ editAccess: "creator_and_admins" }, { visibility: "private" }]) {
+      expect(
+        (await call(bob, "PATCH", `${base}/${created.id}`, { expectedVersion: 3, ...change }))
+          .status,
+      ).toBe(403);
+    }
+    expect((await call(bob, "DELETE", `${base}/${created.id}`)).status).toBe(403);
+    expect((await call(bob, "DELETE", `${templates}/${created.id}`)).status).toBe(403);
+
+    // Creator and admins: the member is refused, through either path.
+    const restricted = await call(alice, "PATCH", `${base}/${created.id}`, {
+      expectedVersion: 3,
+      editAccess: "creator_and_admins",
+    });
+    expect(restricted.status).toBe(200);
+    expect(restricted.json.agent.editAccess).toBe("creator_and_admins");
+    expect((await call(bob, "GET", `${base}/${created.id}`)).json.agent.viewer.canEdit).toBe(false);
+    expect(
+      (await call(bob, "PATCH", `${base}/${created.id}`, { expectedVersion: 4, name: "Mine" }))
+        .status,
+    ).toBe(403);
+    expect(
+      (await call(bob, "PATCH", `${templates}/${created.id}`, { setupInstructions: "Mine" }))
+        .status,
+    ).toBe(403);
+
+    // Agents made before the setting keep today's rule.
+    const [legacy] = await shared.admin<{ edit_access: string }[]>`
+      select column_default as edit_access from information_schema.columns
+      where table_name = 'agents' and column_name = 'edit_access'`;
+    expect(legacy!.edit_access).toContain("creator_and_admins");
   }, 180_000);
 
   test("bot templates are agents: setup text as Instructions, listing, and ids", async () => {

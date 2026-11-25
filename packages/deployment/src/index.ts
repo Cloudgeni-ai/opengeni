@@ -356,6 +356,34 @@ export const API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED",
 ];
 
+/** Amazon Bedrock (docs/amazon-bedrock.md). None is a secret: AWS credentials
+ * come from the pod's identity (IRSA, EKS Pod Identity), never from this env. */
+export const BEDROCK_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_BEDROCK_REGION",
+  "OPENGENI_BEDROCK_ENDPOINT_URL",
+  "OPENGENI_BEDROCK_MODELS",
+  "OPENGENI_BEDROCK_MODEL_DISCOVERY",
+  "OPENGENI_BEDROCK_ATTRIBUTION_ROLE_ARN",
+];
+
+/** A Bedrock-only deployment needs no OpenAI key; one that sets it still passes it. */
+function openAiKeyRequired(env: Record<string, string | undefined>): boolean {
+  if (env.OPENGENI_OPENAI_API_KEY || !env.OPENGENI_BEDROCK_REGION) return true;
+  // Unset, the allowed list is the built-in OpenAI models.
+  if (!env.OPENGENI_OPENAI_ALLOWED_MODELS) return true;
+  // A Bedrock-only deployment: its default and every allowed model are on Bedrock.
+  const models = [
+    env.OPENGENI_OPENAI_MODEL ?? "",
+    ...(env.OPENGENI_OPENAI_ALLOWED_MODELS ?? "").split(","),
+  ]
+    .map((model) => model.trim())
+    .filter(Boolean);
+  return !(
+    (env.OPENGENI_OPENAI_MODEL ?? "").startsWith("bedrock/") &&
+    models.every((model) => model.startsWith("bedrock/"))
+  );
+}
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -1598,7 +1626,7 @@ export function requiredRuntimeEnvVars(
       vars.push("OPENGENI_AZURE_OPENAI_API_VERSION");
     }
   } else {
-    vars.push("OPENGENI_OPENAI_API_KEY");
+    if (openAiKeyRequired(env)) vars.push("OPENGENI_OPENAI_API_KEY");
   }
   if (env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
     vars.push("OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
@@ -1612,6 +1640,7 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
     "OPENGENI_OPPER_API_KEY",
+    "OPENGENI_SKILL_IMPORT_GITHUB_TOKEN",
   ] as const) {
     if (env[key]) vars.push(key);
   }
@@ -2654,6 +2683,10 @@ function runtimeEnvValues(
             "OPENGENI_SIGNUP_CHALLENGE_ENABLED",
             env.OPENGENI_SIGNUP_CHALLENGE_ENABLED ?? "false",
           ),
+          valueEnv(
+            "OPENGENI_SIGN_IN_CHALLENGE_ENABLED",
+            env.OPENGENI_SIGN_IN_CHALLENGE_ENABLED ?? "false",
+          ),
           ...[
             "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
             "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
@@ -2663,6 +2696,16 @@ function runtimeEnvValues(
               ? requiredEnv(key, env[key])
               : valueEnv(key, env[key]),
           ),
+          // Heedeo signup scoring: optional; inert until the operator mode is
+          // not off and both keys are set. The secret key goes to the runtime
+          // env Secret like the signup challenge secret, never Helm values.
+          ...[
+            "OPENGENI_HEEDEO_PUBLISHABLE_KEY",
+            "OPENGENI_HEEDEO_SECRET_KEY",
+            "OPENGENI_HEEDEO_API_URL",
+            "OPENGENI_HEEDEO_SCRIPT_URL",
+            "OPENGENI_HEEDEO_TIMEOUT_MS",
+          ].map((key) => valueEnv(key, env[key])),
           valueEnv(
             "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
             env.OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS ?? publicBaseUrl ?? "",
@@ -2833,7 +2876,9 @@ function runtimeEnvValues(
             : []),
           requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
         ]
-      : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
+      : openAiKeyRequired(env)
+        ? [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]
+        : []),
     ...(env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY
       ? [requiredEnv("OPENGENI_VERCEL_AI_GATEWAY_API_KEY", env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY)]
       : []),
@@ -2842,6 +2887,9 @@ function runtimeEnvValues(
       : []),
     ...(env.OPENGENI_OPPER_API_KEY
       ? [requiredEnv("OPENGENI_OPPER_API_KEY", env.OPENGENI_OPPER_API_KEY)]
+      : []),
+    ...(env.OPENGENI_SKILL_IMPORT_GITHUB_TOKEN
+      ? [requiredEnv("OPENGENI_SKILL_IMPORT_GITHUB_TOKEN", env.OPENGENI_SKILL_IMPORT_GITHUB_TOKEN)]
       : []),
   ];
 
@@ -3016,6 +3064,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of BEDROCK_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

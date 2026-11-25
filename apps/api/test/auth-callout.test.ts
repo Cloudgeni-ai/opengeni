@@ -169,7 +169,7 @@ describe("handleAuthorizationRequest", () => {
       Buffer.from(res.userJwt!.split(".")[1]!, "base64url").toString("utf8"),
     );
     const scope = `agent.${WS}.${AGENT}.connection.${CONNECTION}.>`;
-    expect(userClaims.nats.pub.allow).toEqual([scope, "_INBOX.>"]);
+    expect(userClaims.nats.pub.allow).toEqual([scope, "_INBOX.>", "$SYS.REQ.USER.INFO"]);
     expect(userClaims.nats.sub.allow).toEqual([scope]);
     expect(userClaims.aud).toBe("APP");
     const now = Math.floor(Date.now() / 1000);

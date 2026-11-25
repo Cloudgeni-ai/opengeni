@@ -1,5 +1,115 @@
 # @opengeni/capabilities
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/network@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/network@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/network@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- 969cb9b: A tool search that mentions Opengeni itself, as app chats often do ("the Opengeni app"), no longer shows a Connected Machine card. The platform's own domain no longer counts as naming its built-in integrations; their own names still do.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/network@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/network@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/network@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.37.1
+- @opengeni/network@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- 19fe301: Fix `@opengeni/core` and `@opengeni/api-router` failing to load from npm (6.36.0): `@opengeni/capabilities` now exports the shared Nango helpers such as `NANGO_TAG` by name. The publish check now fails when a built package imports a name that another package's build doesn't export.
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/contracts@6.37.0
+  - @opengeni/network@6.37.0
+
+## 6.36.0
+
+### Patch Changes
+
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/network@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

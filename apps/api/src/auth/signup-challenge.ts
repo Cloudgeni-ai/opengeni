@@ -118,6 +118,11 @@ export async function verifySignupChallenge(
   }
 }
 
+/** Email sign-in needs the challenge only when both settings are on. */
+export function emailSignInChallengeRequired(settings: Settings): boolean {
+  return settings.signupChallengeEnabled && settings.signInChallengeEnabled === true;
+}
+
 /**
  * Email sign-in carries the same challenge as email sign-up, from the same
  * widget and with the same error shape, so password guessing from scripts
@@ -129,6 +134,7 @@ export async function verifyEmailSignInChallenge(
   token: unknown,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
+  if (!emailSignInChallengeRequired(settings)) return;
   await verifySignupChallenge(settings, token, fetcher, {
     requiredMessage: "Complete the verification to sign in.",
   });

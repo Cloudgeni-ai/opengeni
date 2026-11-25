@@ -2460,12 +2460,10 @@ invocation boundary also records
 `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` with one closed structural
 outcome: `success`, `provider_declared_error`, `auth_needed`,
 `outcome_uncertain`, `timeout`, `cancelled`, `thrown_transport_error`, or
-`thrown_protocol_error`, plus `rejected` when a first-party tool refused the
-caller's own arguments before doing any work (a schema mismatch, a bad field
-combination, an unknown ID). The first-party server marks such an error result
-with the `opengeni/argumentRejected` result `_meta` key, which the worker honors
-only from that server and removes before anyone sees the result; the
-`OpenGeniMcpToolFailureRatio` alert leaves `rejected` out of both the failures
+`thrown_protocol_error`, plus `rejected` when the server reports that it
+refused the caller's own arguments. See the
+[server contract](mcp-surfaces.md#reporting-rejected-arguments-from-an-mcp-server).
+The `OpenGeniMcpToolFailureRatio` alert leaves `rejected` out of both the failures
 and the total. `tool` is bounded (`mcpToolMetricLabel` in
 `packages/runtime/src/metrics.ts`): it is the tool name only for a verified
 first-party server calling a name in the fixed first-party catalog, and the
@@ -3762,7 +3760,11 @@ restore, cold restore downloads the object into a verified disk spool (size and
 SHA-256 against the descriptor) before any box is created, then streams it into
 `tar -x` reading stdin in the new box. Every chunk passes the SDK's tar member
 checks before the box sees it and is hashed again, so a spool that changed
-after it was verified fails the restore. The restored tree is then
+after it was verified fails the restore. Symlinks restore as they were saved
+(`tar -c` stores them); no member may descend through one or repeat a path, so
+a link never redirects a write. A failed hydration logs the cause's class,
+code, tar check reason and exit code, never file names or the extractor's
+output. The restored tree is then
 fingerprinted against the descriptor as before. A provider without these
 stream methods reads the verified spool into one buffer and hydrates from it.
 Filesystem snapshot recovery boots the exact selected immutable Image directly,
@@ -4083,7 +4085,10 @@ closed. Normal turn finalization drains only attempt-owned yielded shells before
 workspace capture. Once a command's durable session adoption commits, normal
 completion and Steer detach from it instead of cancelling it. Session/workspace
 Pause and terminal Cancel atomically transition adopted commands to `stopping`;
-provider-specific reconciliation then proves exact exit/loss before settlement.
+provider-specific reconciliation then stops them (through the native supervisor,
+or, for an unsupervised command, by running the token/PGID-guarded TERM/KILL
+helper against the turn shell marker persisted at adoption) and proves exact
+exit/loss before settlement.
 Resume never revives a stopping command. Connected Machines and other
 non-persistable routes do not dirty the provisioned cloud-home generation.
 

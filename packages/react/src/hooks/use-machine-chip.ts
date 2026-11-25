@@ -16,6 +16,8 @@ export type MachineChip = {
   /** The capture time backing an offline/stale label (ISO), or null. M4 may
    *  reformat this; `label` already embeds a relative form. */
   asOf: string | null;
+  /** A Connected Machine that is genuinely unreachable (not just asleep). */
+  unreachable?: boolean | undefined;
 };
 
 export type DeriveMachineChipInput = {
@@ -97,6 +99,7 @@ export function deriveMachineChip(t: OpenGeniText, input: DeriveMachineChipInput
       state: "offline",
       label: input.activeIsSelfhosted === true ? offlineLabel : managedRestingLabel,
       asOf,
+      ...(input.activeIsSelfhosted === true ? { unreachable: true } : {}),
     };
   }
 
@@ -118,6 +121,7 @@ export function deriveMachineChip(t: OpenGeniText, input: DeriveMachineChipInput
     state: "offline",
     label: input.activeIsSelfhosted === true ? offlineLabel : managedRestingLabel,
     asOf,
+    ...(selfhostedOffline ? { unreachable: true } : {}),
   };
 }
 

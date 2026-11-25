@@ -27,13 +27,18 @@ import {
   ModelPolicyRefusedError,
   ModelUnavailableError,
 } from "@opengeni/contracts";
-import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
+import { ContinueAfterCapabilitySetupRequest, connectionCardNoticeKey } from "@opengeni/contracts";
+import {
+  connectionCardWithdrawals,
+  type ConnectionCardWithdrawalKey,
+} from "../connection-card-withdrawals";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
 import {
   enqueueCapabilitySetupContinuation,
   getConnectionMetadata,
   getProviderConnectionHomeWorkspace,
   latestConnectionAuthNotice,
+  listInboxItems,
 } from "@opengeni/db";
 import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
@@ -56,7 +61,6 @@ import {
 } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
-  isVerifiedDelegatedHumanAuthorization,
   scheduledTaskViewerSubjectForGrant,
   withSiteSessionOrigin,
 } from "@opengeni/core";
@@ -172,6 +176,8 @@ import {
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
   UpdateSessionVisibilityRequest,
+  SetSessionModelSettingsRequest,
+  type SetSessionModelSettingsResponse,
   SessionVisibility,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
@@ -287,6 +293,7 @@ import {
   failSessionRealtimeConnectionInTransaction,
   NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
+  SessionModelSettingsMismatchError,
   SessionControlConflictError,
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
@@ -438,6 +445,7 @@ import {
   removeSessionResources,
   updateSessionProfile,
   setSessionRetention,
+  setSessionModel,
   setSessionUnattended,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
@@ -459,7 +467,10 @@ import {
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
   humanSecretWriteContext,
+  canSavePrivateSecretAnswer,
+  isSignedInSecretAnswerer,
   prepareSecretAnswers,
+  projectSecretAnswerTargets,
   splitSecretAnswers,
 } from "../secret-answers";
 import { browserSseDeliveryOptions, sseSessionStream } from "../http/sse";
@@ -798,7 +809,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       await next();
       return;
     }
-    const grant = await requireAccessGrant(c, deps, workspaceId);
+    const grant = await requireAccessGrant(
+      c,
+      deps,
+      workspaceId,
+      operation === "session.model.write" ? "sessions:control" : undefined,
+    );
+    if (operation === "session.model.write" && grant.principalKind === "agent_attempt") {
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: "This route does not accept agent attempt credentials.",
+        retryable: false,
+      });
+    }
     try {
       const authorization = await requireSessionAuthorization(deps, grant, {
         sessionId,
@@ -1730,6 +1753,56 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(body);
     },
   );
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/model-settings", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const parsed = SetSessionModelSettingsRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "Invalid session model settings request.",
+        retryable: false,
+        details: { fields: zodErrorFields(parsed.error) },
+      });
+    }
+    try {
+      const result = await setSessionModel(deps, grant, sessionId, parsed.data, "http");
+      return c.json<SetSessionModelSettingsResponse>({
+        sessionId,
+        model: result.model,
+        reasoningEffort: result.reasoningEffort,
+        latencyMode: result.latencyMode,
+        effectiveFrom: result.effectiveFrom,
+        releasedCapacityWaitTurnId: result.releasedCapacityWaitTurnId,
+      });
+    } catch (error) {
+      if (error instanceof SessionModelSettingsMismatchError) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: error.message,
+          retryable: false,
+          details: { reason: "model_settings_mismatch", current: error.current },
+        });
+      }
+      if (error instanceof SessionCommandIdempotencyError) {
+        throw new ApiHttpError(409, {
+          code: "idempotency_conflict",
+          message: error.message,
+          retryable: false,
+        });
+      }
+      if (error instanceof HTTPException && error.status === 422) {
+        throw new ApiHttpError(400, {
+          code: "validation_failed",
+          message: error.message,
+          retryable: false,
+        });
+      }
+      throw error;
+    }
+  });
 
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/visibility", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -3263,7 +3336,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     connectionId: string,
     grant: { subjectId: string; accountId: string },
   ): Promise<
-    | { capabilityId: string; capabilityName: string; toolsVerified: false; connectionId: string }
+    | {
+        capabilityId: string;
+        capabilityName: string;
+        toolsVerified: false;
+        connectionId: string;
+        /** The more access the card asked for, which the account now holds. */
+        askedScopes: string[];
+      }
     | "no_card"
     | null
   > {
@@ -3306,7 +3386,78 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       capabilityName: item?.name ?? connection.providerDomain,
       toolsVerified: false,
       connectionId,
+      askedScopes: card.payload.reason === "insufficient_scope" ? asked : [],
     };
+  }
+
+  /**
+   * Withdraw a finished card's open notices in this chat and the person's
+   * others. A key naming one account reaches the person's chats anywhere; a
+   * capability or server is set up per workspace, so its key stays in this one.
+   */
+  async function withdrawConnectionCardNotices(
+    person: { accountId: string; subjectId: string },
+    workspaceId: string,
+    sessionId: string,
+    keys: readonly ConnectionCardWithdrawalKey[],
+  ): Promise<void> {
+    const sessions = connectionCardWithdrawals(
+      { workspaceId, sessionId },
+      keys,
+      await listInboxItems(db, person),
+    );
+    for (const [id, entry] of sessions) {
+      await appendAndPublishEvents(
+        db,
+        bus,
+        entry.workspaceId,
+        id,
+        [...entry.keys].map((key) => ({
+          type: "session.notification.withdrawn" as const,
+          payload: { key },
+        })),
+      ).catch(() => undefined);
+    }
+  }
+
+  /** The notices a finished card may have opened, by every name its continuation knows. */
+  function connectionCardNoticeKeys(
+    payload: ContinueAfterCapabilitySetupRequest,
+    target: { capabilityId: string; endpointUrl?: string | undefined },
+    askedScopes: readonly string[],
+  ): ConnectionCardWithdrawalKey[] {
+    const keys = new Map<string, boolean>();
+    if ("connectionId" in payload) {
+      // The account works again, and holds the access this card asked for:
+      // other chats' cards for the same reconnect or the same access are done.
+      keys.set(
+        connectionCardNoticeKey({ providerDomain: "", connectionId: payload.connectionId }),
+        true,
+      );
+      if (askedScopes.length)
+        keys.set(
+          connectionCardNoticeKey({
+            providerDomain: "",
+            connectionId: payload.connectionId,
+            reason: "insufficient_scope",
+            scopes: askedScopes,
+          }),
+          true,
+        );
+    } else
+      keys.set(
+        connectionCardNoticeKey({ providerDomain: "", capability: { id: target.capabilityId } }),
+        false,
+      );
+    if (target.endpointUrl)
+      keys.set(
+        connectionCardNoticeKey({
+          providerDomain: "",
+          setupRequest: { endpointUrl: target.endpointUrl },
+        }),
+        false,
+      );
+    return [...keys].map(([key, accountWide]) => ({ key, accountWide }));
   }
 
   app.post(
@@ -3340,6 +3491,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
+      let askedScopes: string[] = [];
       let target: {
         capabilityId: string;
         capabilityName: string;
@@ -3369,7 +3521,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             reason: "no_card",
           } satisfies ContinueAfterCapabilitySetupResponse);
         }
-        target = ready;
+        const { askedScopes: readyScopes, ...readyTarget } = ready;
+        askedScopes = readyScopes;
+        target = readyTarget;
       } else {
         // A reviewed integration's card stands for the person's own connected
         // instances of it, which the workspace catalog does not list.
@@ -3421,6 +3575,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             : {}),
         };
       }
+      // The card is done: it no longer needs the person, here or in another
+      // chat that asked for the same account, whatever the agent does next.
+      await withdrawConnectionCardNotices(
+        { accountId: grant.accountId, subjectId: grant.subjectId },
+        workspaceId,
+        sessionId,
+        connectionCardNoticeKeys(payload, target, askedScopes),
+      ).catch(() => undefined);
       const result = await enqueueCapabilitySetupContinuation(db, {
         accountId: grant.accountId,
         workspaceId,
@@ -4894,6 +5056,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(secretAnswers.length
             ? {
                 secretAnswers,
+                privateSecretAnswerAuthorized: canSavePrivateSecretAnswer(authorization),
                 secretWriteContext: humanSecretWriteContext({
                   accountId: grant.accountId,
                   workspaceId,
@@ -4902,10 +5065,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               }
             : {}),
           respondedBy: grant.subjectId,
-          canonicalHumanSession:
-            authorization.canonicalManagedHumanSession ||
-            authorization.canonicalLocalHumanSession ||
-            isVerifiedDelegatedHumanAuthorization(authorization),
+          canonicalHumanSession: isSignedInSecretAnswerer(authorization),
           // An agent or personal key acting as the person is not the person
           // for a secret approval card.
           personSignedIn:
@@ -4976,7 +5136,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
     const sessionId = c.req.param("sessionId");
     const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const rawStatus = c.req.query("status");
@@ -4990,14 +5155,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...(status?.success ? { status: status.data } : {}),
     });
     c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
-    return c.json({ requests });
+    return c.json({ requests: await projectSecretAnswerTargets(db, authorization, requests) });
   });
 
   app.get(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests/:requestId",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "sessions:read",
+      );
       const sessionId = c.req.param("sessionId");
       const request = await getSessionHumanInputRequest(
         db,
@@ -5009,7 +5179,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(404, {
           message: "human-input request not found",
         });
-      return c.json(request);
+      const [projected] = await projectSecretAnswerTargets(db, authorization, [request]);
+      return c.json(projected!);
     },
   );
 
@@ -6241,6 +6412,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
+  if (suffix === "/model-settings" && verb === "PUT") return "session.model.write";
   // Changes what the agent may ask and wait for, like its tools.
   if (suffix === "/unattended" && verb === "PUT") return "session.tool_policy.write";
   // Task usage limit: read with the session; change as a control write
@@ -6269,6 +6441,8 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (/^\/links\/[^/]+$/.test(suffix) && verb === "DELETE") return "session.control";
+  // A linked pull request's details (files, commits, discussion, checks): a read.
+  if (/^\/links\/[^/]+\/pull-request$/.test(suffix) && verb === "GET") return "session.read";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   // Stands in for the person's own next message, so it needs the same access.

@@ -5,6 +5,7 @@ import { SiteDataError } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import {
+  appSyncOptInReview,
   appSyncStatusForSite,
   createAppSync,
   deleteAppSync,
@@ -48,8 +49,10 @@ function surface(context: Context): SiteDataSurface {
  *   (`site.data.syncs()`) and anyone who can see the App.
  * - `GET|POST /syncs`, `PATCH|DELETE /syncs/:syncId`, `POST /syncs/:syncId/run`:
  *   managers, outside the App's frame.
+ * - `GET /syncs/:syncId/opt-in`: what a person confirms before opting in (the
+ *   tool, their accounts of it, the collection), outside the App's frame.
  * - `PUT|DELETE /syncs/:syncId/subscription`: a person opts in to or out of a
- *   personal sync, outside the App's frame.
+ *   personal sync, outside the App's frame. `PUT` takes `{ account? }`.
  */
 export function registerAppSyncRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/published-artifacts/:artifactId";
@@ -147,12 +150,29 @@ export function registerAppSyncRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get(`${base}/syncs/:syncId/opt-in`, async (context) => {
+    const grant = await grantFor(context, "artifacts:read");
+    context.header("cache-control", "no-store");
+    return context.json(
+      await run(() =>
+        appSyncOptInReview(
+          deps,
+          grant,
+          param(context, "artifactId", "App"),
+          param(context, "syncId", "Sync"),
+          surface(context),
+        ),
+      ),
+    );
+  });
+
   for (const [method, optedIn] of [
     ["put", true],
     ["delete", false],
   ] as const)
     app[method](`${base}/syncs/:syncId/subscription`, async (context) => {
       const grant = await grantFor(context, "artifacts:read");
+      const body = optedIn ? await json(context) : null;
       return context.json(
         await run(() =>
           setAppSyncOptIn(
@@ -162,6 +182,7 @@ export function registerAppSyncRoutes(app: Hono, deps: ApiRouteDeps): void {
             param(context, "syncId", "Sync"),
             optedIn,
             surface(context),
+            body ?? {},
           ),
         ),
       );

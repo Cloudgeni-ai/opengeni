@@ -1,12 +1,18 @@
+import { HTTPException } from "hono/http-exception";
 import { createHash } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   KnowledgeEntryListRequest,
   KnowledgeEntrySaveRequest,
+  SiteDataCollectionDefinitionRequest,
   SiteDataQueryRequest,
   SiteDataWriteRequest,
+  SiteHostnameLabel,
+  SitePublishWarningFix,
   SiteSqlRunRequest,
   ToolGatewayInvokeResponse,
+  WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
+  WorkspaceArtifactRequestedTools,
 } from "@opengeni/contracts";
 import { z } from "zod";
 
@@ -188,6 +194,130 @@ export const AppWriteInput = SiteDataWriteRequest.extend({
   workspaceId: workspaceIdInput(),
 }).strict();
 
+const AppFileInput = z
+  .object({
+    path: z
+      .string()
+      .min(1)
+      .max(512)
+      .describe("Relative path, such as index.html or assets/app.js."),
+    content: z.string().optional().describe("The file as text."),
+    base64: z.string().optional().describe("Binary files (images, fonts) as base64."),
+  })
+  .strict();
+export const AppSaveInput = z
+  .object({
+    appId: appId()
+      .optional()
+      .describe("Omit to create a new app. Pass it to save a new version or roll back."),
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS)
+      .optional()
+      .describe("The app's name. Needed for a new app."),
+    html: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("The whole app as one HTML document, with its JS and CSS inline."),
+    files: z
+      .array(AppFileInput)
+      .min(1)
+      .max(1000)
+      .optional()
+      .describe(
+        "A multi-file build instead of html: the entry HTML and its JS, CSS and asset files, with paths relative to it.",
+      ),
+    entry: z
+      .string()
+      .min(1)
+      .max(512)
+      .optional()
+      .describe("The entry HTML among files. Default index.html."),
+    uploadId: uuid()
+      .optional()
+      .describe("A large build you uploaded after prepareUpload, instead of html or files."),
+    prepareUpload: z
+      .boolean()
+      .optional()
+      .describe("Only get upload URLs for a large build; then call app_save with its uploadId."),
+    requestedTools: WorkspaceArtifactRequestedTools.optional().describe(
+      "Workspace tools the app calls (serverId and toolName from tools_search).",
+    ),
+    collections: z
+      .record(z.string().min(1).max(64), SiteDataCollectionDefinitionRequest)
+      .optional()
+      .describe("App data collections to define or change, by name, with their rules."),
+    rollbackTo: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Make this earlier version current again (needs appId)."),
+    idempotencyKey: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Reuse it to retry safely; omit and the same save within an hour is a retry."),
+    workspaceId: workspaceIdInput(),
+  })
+  .strict();
+export const AppPublishInput = z
+  .object({
+    appId: appId(),
+    access: z
+      .enum(["only_me", "workspace", "public"])
+      .describe(
+        "only_me: only you. workspace: the workspace's members. public: anyone with the link, on its own hostname.",
+      ),
+    hostname: SiteHostnameLabel.optional().describe(
+      "The label of its own address, <label>.<apps domain>. Omit to keep the current one or get a suggested one.",
+    ),
+    fixes: z
+      .array(SitePublishWarningFix)
+      .max(50)
+      .optional()
+      .describe("Readiness fixes to apply (the fix objects of the warnings a publish returned)."),
+    workspaceId: workspaceIdInput(),
+  })
+  .strict();
+/** What file_save takes inline; larger files go through putUrl. */
+export const FILE_SAVE_INLINE_MAX_BYTES = 4 * 1024 * 1024;
+export const FileSaveInput = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(255)
+      .optional()
+      .describe("The file name with its extension, such as report.pdf."),
+    content: z.string().optional().describe("A text file's content."),
+    base64: z.string().optional().describe("A binary file's content as base64."),
+    contentType: z
+      .string()
+      .min(1)
+      .max(255)
+      .optional()
+      .describe("Its media type. Omit to infer it from the name."),
+    sizeBytes: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("For a file over 4 MB: its size, to get an upload URL instead of sending it here."),
+    uploadId: uuid().optional().describe("Finish an upload you sent to its putUrl."),
+    visibility: z
+      .enum(["private", "workspace"])
+      .default("private")
+      .describe("private (default): only you. workspace: everyone in the workspace."),
+    workspaceId: workspaceIdInput(),
+  })
+  .strict();
+
 const ToolsSearchInput = z
   .object({
     query: z.string().max(200).default(""),
@@ -219,8 +349,18 @@ const SkillFileInput = z
 export const SkillsSyncInput = z
   .object({
     direction: z
-      .enum(["upload", "pull"])
-      .describe("upload sends local Skill folders; pull returns the workspace's Skills."),
+      .enum(["upload", "pull", "repository"])
+      .describe(
+        "upload sends local Skill folders; pull returns the workspace's Skills; repository syncs every Skill folder of a public GitHub repository.",
+      ),
+    repository: z
+      .string()
+      .url()
+      .max(2048)
+      .optional()
+      .describe(
+        "For repository: a github.com repository or folder URL, such as https://github.com/owner/repo/tree/main/skills.",
+      ),
     skills: z
       .array(
         z
@@ -273,6 +413,8 @@ type ToolSpec = {
   description: string;
   input: z.ZodType;
   readOnly: boolean;
+  /** Whether a call can put content on the open web. */
+  openWorld?: boolean;
   run: (context: OrganizationActionContext, args: never) => Promise<CallToolResult>;
 };
 
@@ -282,6 +424,7 @@ function tool<T extends z.ZodType>(spec: {
   description: string;
   input: T;
   readOnly: boolean;
+  openWorld?: boolean;
   run: (context: OrganizationActionContext, args: z.output<T>) => Promise<CallToolResult>;
 }): ToolSpec {
   return spec as unknown as ToolSpec;
@@ -361,7 +504,14 @@ function errorEnvelope(body: unknown): {
   details?: Record<string, unknown>;
 } {
   const error = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
-  if (!error || typeof error !== "object") return {};
+  if (!error || typeof error !== "object") {
+    // Some routes (apps) answer {code, message} without the envelope.
+    const flat = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    return {
+      ...(typeof flat.message === "string" ? { message: flat.message } : {}),
+      ...(typeof flat.code === "string" ? { code: flat.code } : {}),
+    };
+  }
   return error as ReturnType<typeof errorEnvelope>;
 }
 
@@ -1110,6 +1260,892 @@ const appWrite = tool({
   },
 });
 
+/* ------------------------------------------------ saving apps and files */
+
+const PREPARE_APP_UPLOAD = "POST /v1/workspaces/:workspaceId/published-artifacts/uploads";
+const PUBLICATION_GET = "sitePublicationPath";
+const PUBLICATION_PUT =
+  "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication";
+const PUBLICATION_FIX =
+  "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes";
+/** Identical saves inside this window are one retried request. */
+const SAVE_RETRY_WINDOW_MS = 60 * 60 * 1000;
+
+function appUrl(context: OrganizationActionContext, workspaceId: string, id: string): string {
+  return new URL(`/workspaces/${workspaceId}/sites/${id}`, webOrigin(context)).href;
+}
+
+function fileUrl(context: OrganizationActionContext, workspaceId: string, id: string): string {
+  return new URL(`/workspaces/${workspaceId}/artifacts/files/${id}`, webOrigin(context)).href;
+}
+
+function digest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+type PutTarget = { putUrl: string; requiredHeaders?: Record<string, string> };
+
+function putTarget(value: unknown): PutTarget | null {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  if (typeof record?.putUrl !== "string") return null;
+  const headers = record.requiredHeaders;
+  return {
+    putUrl: record.putUrl,
+    ...(headers && typeof headers === "object"
+      ? { requiredHeaders: headers as Record<string, string> }
+      : {}),
+  };
+}
+
+const PUT_TIMEOUT_MS = 60_000;
+
+/**
+ * Send bytes to a storage URL Opengeni just prepared. Upload URLs are signed
+ * for the public storage address; where the server can't reach it (some
+ * self-hosted storage), the caller uploads the bytes itself instead.
+ */
+async function putBytes(
+  context: OrganizationActionContext,
+  target: PutTarget,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<{ ok: true } | { ok: false; status?: number }> {
+  const headers = new Headers({ "content-type": contentType });
+  for (const [name, value] of Object.entries(target.requiredHeaders ?? {}))
+    headers.set(name, value);
+  const timeout = AbortSignal.timeout(PUT_TIMEOUT_MS);
+  try {
+    const response = await fetch(target.putUrl, {
+      method: "PUT",
+      headers,
+      body: bytes as Uint8Array<ArrayBuffer>,
+      signal: context.signal ? AbortSignal.any([context.signal, timeout]) : timeout,
+    });
+    await response.body?.cancel();
+    return response.ok ? { ok: true } : { ok: false, status: response.status };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function uploadFailed(what: string, status: number | undefined, selfUpload: string) {
+  const retrySafe = status === undefined || status >= 500 || status === 429;
+  return failure(
+    `Uploading ${what} failed${status ? ` (${status})` : ""}. ${retrySafe ? "Retry, or " : ""}${selfUpload}`,
+    { retrySafe },
+  );
+}
+
+/** The route refused a reused idempotency key. */
+/**
+ * The route refused a derived key because this same save already used it with
+ * another upload: the first try of this save landed.
+ */
+function isSameSaveConflict(outcome: ActionOutcome): boolean {
+  return (
+    isKeyConflict(outcome) &&
+    /different (publication input|request)/iu.test(errorEnvelope(outcome.body).message ?? "")
+  );
+}
+
+function isKeyConflict(outcome: ActionOutcome): boolean {
+  return (
+    !outcome.ok &&
+    outcome.status === 409 &&
+    /idempotency key was already used/iu.test(errorEnvelope(outcome.body).message ?? "")
+  );
+}
+
+const KEY_REUSED =
+  "This idempotencyKey was already used for another save, so nothing was saved. Pass a new key, or none.";
+
+type AppVersionReceipt = {
+  artifact?: { id?: string; title?: string; visibility?: string };
+  version?: { id?: string; revision?: number | undefined };
+  replayed?: boolean;
+};
+
+function savedApp(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  receipt: AppVersionReceipt,
+  extra: Record<string, unknown> = {},
+) {
+  const id = receipt.artifact?.id ?? "";
+  return {
+    appId: id,
+    name: receipt.artifact?.title,
+    version: receipt.version?.revision,
+    visibility: receipt.artifact?.visibility,
+    link: appUrl(context, workspaceId, id),
+    replayed: receipt.replayed === true,
+    ...extra,
+  };
+}
+
+type AppDetail = {
+  artifact?: {
+    id?: string;
+    visibility?: string;
+    currentVersion?: VersionFacts | null;
+  };
+  versions?: VersionFacts[];
+};
+
+type VersionFacts = {
+  id?: string;
+  revision?: number;
+  sizeBytes?: number;
+  createdBySubjectId?: string;
+  createdAt?: string;
+};
+
+/** The app's current state, as the person sees it. */
+async function readApp(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  artifactId: string,
+): Promise<{ ok: true; detail: AppDetail } | { ok: false; result: CallToolResult }> {
+  const read = await action(context, "getWorkspaceArtifact", {
+    pathParameters: { workspaceId, artifactId },
+  });
+  if (!read.ok) return read;
+  return { ok: true, detail: read.body as AppDetail };
+}
+
+/** html, files or uploadId as what the app routes take: inline HTML or a finished upload. */
+async function appContent(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  args: z.output<typeof AppSaveInput>,
+): Promise<
+  | {
+      ok: true;
+      content: { html: string } | { uploadId: string };
+      identity: string;
+      /** The entry HTML, for recognising a retry; absent for a caller's own upload. */
+      entryHtml?: string;
+      /** A multi-file build, uploaded only once a save is due. */
+      needsUpload?: boolean;
+    }
+  | { ok: false; result: CallToolResult }
+> {
+  if (args.html !== undefined)
+    return {
+      ok: true,
+      content: { html: args.html },
+      identity: digest(["html", args.html]),
+      entryHtml: args.html,
+    };
+  if (args.uploadId !== undefined)
+    return {
+      ok: true,
+      content: { uploadId: args.uploadId },
+      identity: digest(["upload", args.uploadId]),
+    };
+  const files = args.files ?? [];
+  const entryPath = args.entry ?? "index.html";
+  const entry = files.find((file) => file.path === entryPath);
+  if (!entry || entry.content === undefined)
+    return {
+      ok: false,
+      result: failure(
+        `Include the entry HTML ${entryPath} as text in files, or name another with entry.`,
+      ),
+    };
+  for (const file of files) {
+    if ((file.content === undefined) === (file.base64 === undefined))
+      return { ok: false, result: failure(`Give content or base64 for ${file.path}.`) };
+  }
+  const identity = digest(["files", entryPath, files]);
+  return {
+    ok: true,
+    content: { html: entry.content },
+    identity,
+    entryHtml: entry.content,
+    needsUpload: files.length > 1,
+  };
+}
+
+/** Upload a multi-file build; returns the upload to save in place of inline HTML. */
+async function uploadFiles(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  args: z.output<typeof AppSaveInput>,
+): Promise<{ ok: true; uploadId: string } | { ok: false; result: CallToolResult }> {
+  const files = args.files ?? [];
+  const entryPath = args.entry ?? "index.html";
+  const entry = files.find((file) => file.path === entryPath);
+  const assets = files.filter((file) => file !== entry);
+  const prepared = await action(context, PREPARE_APP_UPLOAD, { pathParameters: { workspaceId } });
+  if (!prepared.ok) return prepared;
+  const upload = prepared.body as {
+    uploadId?: unknown;
+    html?: unknown;
+    assets?: unknown;
+    source?: unknown;
+  };
+  const html = putTarget(upload.html);
+  const bundle = putTarget(upload.assets);
+  if (typeof upload.uploadId !== "string" || !html || !bundle)
+    return { ok: false, result: failure("Opengeni returned an unexpected answer; retry.") };
+  const encoder = new TextEncoder();
+  const parts: Array<[PutTarget, Uint8Array, string]> = [
+    [html, encoder.encode(entry?.content ?? ""), "text/html"],
+    [
+      bundle,
+      encoder.encode(
+        JSON.stringify({
+          files: assets.map((file) => ({
+            path: file.path,
+            base64: file.base64 ?? Buffer.from(file.content ?? "", "utf8").toString("base64"),
+          })),
+        }),
+      ),
+      "application/json",
+    ],
+  ];
+  // The editable source: the text files, so the app can be changed in Opengeni later.
+  const source = putTarget(upload.source);
+  if (source)
+    parts.push([
+      source,
+      encoder.encode(
+        JSON.stringify({
+          entrypoint: entryPath,
+          files: files
+            .filter((file) => file.content !== undefined)
+            .map((file) => ({ path: file.path, content: file.content })),
+        }),
+      ),
+      "application/json",
+    ]);
+  for (const [target, bytes, contentType] of parts) {
+    const sent = await putBytes(context, target, bytes, contentType);
+    if (!sent.ok)
+      return {
+        ok: false,
+        result: uploadFailed(
+          "the app's files",
+          sent.status,
+          "upload them yourself: call app_save with prepareUpload, PUT the files, then call it with uploadId.",
+        ),
+      };
+  }
+  return { ok: true, uploadId: upload.uploadId };
+}
+
+/**
+ * A retried save whose first try succeeded: the current version is this
+ * caller's, recent, the same size, and the key derived from the version before
+ * it replays. Returns that version, or null to save normally.
+ */
+async function replayedVersion(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  args: z.output<typeof AppSaveInput>,
+  detail: AppDetail,
+  entryHtml: string,
+  versionKey: (base: string) => string,
+): Promise<AppVersionReceipt | null> {
+  const current = detail.artifact?.currentVersion;
+  if (context.caller.kind !== "person" || !current?.id || current.revision === undefined)
+    return null;
+  if (
+    current.createdBySubjectId !== context.caller.subjectId ||
+    Date.now() - Date.parse(current.createdAt ?? "") > SAVE_RETRY_WINDOW_MS ||
+    current.sizeBytes !== new TextEncoder().encode(entryHtml).byteLength
+  )
+    return null;
+  const previous = (detail.versions ?? [])
+    .filter((version) => (version.revision ?? 0) < (current.revision ?? 0) && version.id)
+    .sort((a, b) => (b.revision ?? 0) - (a.revision ?? 0))[0];
+  if (!previous?.id) return null;
+  // The route replays by key before checking the version, and refuses a stale
+  // version otherwise, so this probe never saves anything new.
+  const probe = await action(context, "publishWorkspaceArtifactVersion", {
+    pathParameters: { workspaceId, artifactId: args.appId ?? "" },
+    body: {
+      ...(args.name ? { title: args.name } : {}),
+      html: entryHtml,
+      ...(args.requestedTools ? { requestedTools: args.requestedTools } : {}),
+      expectedCurrentVersionId: previous.id,
+      idempotencyKey: versionKey(previous.id),
+    },
+  });
+  if (probe.ok) {
+    const receipt = probe.body as AppVersionReceipt;
+    return receipt.replayed === true ? receipt : null;
+  }
+  // The derived key encodes this content, so a refused reuse is this save's
+  // first try (it uploaded its files under another upload).
+  if (isSameSaveConflict(probe))
+    return {
+      artifact: { id: args.appId ?? "" },
+      version: { revision: current.revision },
+      replayed: true,
+    };
+  return null;
+}
+
+/** The app an earlier try of this create made: the caller's newest app of that name. */
+async function createdApp(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  name: string,
+): Promise<string | null> {
+  const listed = await action(context, "listArtifactCatalog", {
+    pathParameters: { workspaceId },
+    query: { kind: "site", q: name, sort: "newest", limit: 20 },
+  });
+  if (!listed.ok) return null;
+  const items = ((listed.body as { items?: unknown } | null)?.items ?? []) as Array<{
+    id?: string;
+    title?: string;
+    ownedByViewer?: boolean;
+    createdAt?: string;
+  }>;
+  const since = Date.now() - 2 * SAVE_RETRY_WINDOW_MS;
+  return (
+    items.find(
+      (item) =>
+        item.title === name &&
+        item.ownedByViewer === true &&
+        Date.parse(item.createdAt ?? "") >= since,
+    )?.id ?? null
+  );
+}
+
+/** Define or change each named collection; report each one's outcome. */
+async function defineCollections(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  artifactId: string,
+  collections: Record<string, z.output<typeof SiteDataCollectionDefinitionRequest>>,
+) {
+  const outcomes: Array<{ name: string; ok: boolean; error?: string }> = [];
+  for (const [name, definition] of Object.entries(collections)) {
+    const defined = await action(context, "defineSiteDataCollection", {
+      pathParameters: { workspaceId, artifactId, name },
+      body: definition,
+    });
+    outcomes.push(
+      defined.ok
+        ? { name, ok: true }
+        : {
+            name,
+            ok: false,
+            error: errorMessage(defined.status ?? 400, defined.body),
+          },
+    );
+  }
+  return outcomes;
+}
+
+async function rollbackApp(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  artifactId: string,
+  revision: number,
+  idempotencyKey: string | undefined,
+): Promise<CallToolResult> {
+  const read = await readApp(context, workspaceId, artifactId);
+  if (!read.ok) return read.result;
+  const current = read.detail.artifact?.currentVersion;
+  const target = (read.detail.versions ?? []).find((version) => version.revision === revision);
+  if (!current?.id || !target?.id)
+    return failure(`This app has no version ${revision}.`, {
+      versions: (read.detail.versions ?? []).map((version) => version.revision),
+    });
+  if (current.id === target.id)
+    return json({
+      appId: artifactId,
+      version: revision,
+      link: appUrl(context, workspaceId, artifactId),
+      note: `Version ${revision} is already current.`,
+    });
+  const key =
+    idempotencyKey ??
+    stableUuid(
+      "mcp-app-rollback",
+      workspaceId,
+      callerKey(context),
+      artifactId,
+      current.id,
+      target.id,
+    );
+  const rolled = await action(context, "rollbackWorkspaceArtifact", {
+    pathParameters: { workspaceId, artifactId },
+    body: {
+      versionId: target.id,
+      expectedCurrentVersionId: current.id,
+      reason: `Rolled back to version ${revision} by a connected agent`,
+      idempotencyKey: key,
+    },
+  });
+  if (!rolled.ok) return rolled.result;
+  return json(savedApp(context, workspaceId, rolled.body as AppVersionReceipt));
+}
+
+const appSave = tool({
+  name: "app_save",
+  title: "Save an app",
+  description:
+    "Create an app in Opengeni from a page you built, or save a new version of one you manage (appId), or roll one back (rollbackTo). Give html (one document), files (a multi-file build) or uploadId (a large build; prepareUpload first). collections defines its app data. A new app is visible only to you until you share it with app_publish. Never put credentials in app code: apps call workspace tools (requestedTools) instead.",
+  input: AppSaveInput,
+  readOnly: false,
+  run: async (context, args) =>
+    inWorkspace(context, args.workspaceId, async (workspaceId) => {
+      if (args.prepareUpload) {
+        const prepared = await action(context, PREPARE_APP_UPLOAD, {
+          pathParameters: { workspaceId },
+        });
+        if (!prepared.ok) return prepared.result;
+        return json({
+          ...(prepared.body as object),
+          nextStep:
+            "PUT the entry HTML to html.putUrl and, for a multi-file build, every other file as JSON {files: [{path, base64}]} to assets.putUrl, each with its requiredHeaders. Then call app_save with this uploadId.",
+        });
+      }
+      const given = [args.html, args.files, args.uploadId].filter(
+        (value) => value !== undefined,
+      ).length;
+      if (given > 1) return failure("Give one of html, files or uploadId.");
+      if (args.rollbackTo !== undefined) {
+        if (!args.appId) return failure("Pass appId to roll an app back.");
+        if (given > 0) return failure("Roll back or save new content, not both.");
+        return await rollbackApp(
+          context,
+          workspaceId,
+          args.appId,
+          args.rollbackTo,
+          args.idempotencyKey,
+        );
+      }
+      if (given === 0) {
+        if (!args.appId || !args.collections)
+          return failure(
+            "Give html, files or uploadId (prepareUpload first for a large build), or collections for an existing app.",
+          );
+        return json({
+          appId: args.appId,
+          link: appUrl(context, workspaceId, args.appId),
+          collections: await defineCollections(context, workspaceId, args.appId, args.collections),
+        });
+      }
+      if (!args.appId && !args.name) return failure("Give the new app a name.");
+      const content = await appContent(context, workspaceId, args);
+      if (!content.ok) return content.result;
+      const tools = args.requestedTools ? { requestedTools: args.requestedTools } : {};
+      const callerChoseKey = args.idempotencyKey !== undefined;
+      let body: { html: string } | { uploadId: string } = content.content;
+      const upload = async (): Promise<CallToolResult | null> => {
+        if (!content.needsUpload) return null;
+        const sent = await uploadFiles(context, workspaceId, args);
+        if (!sent.ok) return sent.result;
+        body = { uploadId: sent.uploadId };
+        return null;
+      };
+      let saved: ActionOutcome;
+      if (!args.appId) {
+        const name = args.name ?? "";
+        const key =
+          args.idempotencyKey ??
+          stableUuid(
+            "mcp-app-create",
+            workspaceId,
+            callerKey(context),
+            String(Math.floor(Date.now() / SAVE_RETRY_WINDOW_MS)),
+            digest([name, content.identity, args.requestedTools ?? null]),
+          );
+        const uploadRefused = await upload();
+        if (uploadRefused) return uploadRefused;
+        saved = await action(context, "createWorkspaceArtifact", {
+          pathParameters: { workspaceId },
+          body: {
+            title: name,
+            ...body,
+            ...tools,
+            visibility: "private",
+            idempotencyKey: key,
+          },
+        });
+        if (isKeyConflict(saved)) {
+          if (callerChoseKey) return failure(KEY_REUSED, { retrySafe: false });
+          if (!saved.ok && !isSameSaveConflict(saved)) return saved.result;
+          // An earlier try created it (a multi-file retry uploads anew, so the
+          // route sees different input under the same derived key).
+          const createdId = await createdApp(context, workspaceId, name);
+          if (createdId)
+            return json(
+              savedApp(context, workspaceId, {
+                artifact: { id: createdId, title: name },
+                replayed: true,
+              }),
+            );
+          return failure(
+            "An earlier try of this save already created the app; find it with apps_list. Pass a new idempotencyKey to create another.",
+            { retrySafe: false },
+          );
+        }
+      } else {
+        const targetId = args.appId;
+        const read = await readApp(context, workspaceId, targetId);
+        if (!read.ok) return read.result;
+        const current = read.detail.artifact?.currentVersion?.id;
+        if (!current) return failure("This app has no version to build on.");
+        // The version it builds on is part of a derived key, so saving A, B,
+        // then A again makes three versions.
+        const versionKey = (base: string) =>
+          stableUuid(
+            "mcp-app-version",
+            workspaceId,
+            callerKey(context),
+            targetId,
+            base,
+            digest([args.name ?? null, content.identity, args.requestedTools ?? null]),
+          );
+        if (!callerChoseKey && content.entryHtml !== undefined) {
+          const replay = await replayedVersion(
+            context,
+            workspaceId,
+            args,
+            read.detail,
+            content.entryHtml,
+            versionKey,
+          );
+          if (replay) return json(savedApp(context, workspaceId, replay));
+        }
+        const uploadRefused = await upload();
+        if (uploadRefused) return uploadRefused;
+        saved = await action(context, "publishWorkspaceArtifactVersion", {
+          pathParameters: { workspaceId, artifactId: targetId },
+          body: {
+            ...(args.name ? { title: args.name } : {}),
+            ...body,
+            ...tools,
+            expectedCurrentVersionId: current,
+            idempotencyKey: args.idempotencyKey ?? versionKey(current),
+          },
+        });
+        if (isKeyConflict(saved)) {
+          if (callerChoseKey) return failure(KEY_REUSED, { retrySafe: false });
+          if (!saved.ok && !isSameSaveConflict(saved)) return saved.result;
+          // The derived key encodes this content on this version: a multi-file
+          // retry of a save that already landed on it.
+          const again = await readApp(context, workspaceId, targetId);
+          if (!again.ok) return again.result;
+          return json(
+            savedApp(context, workspaceId, {
+              artifact: { id: targetId },
+              version: { revision: again.detail.artifact?.currentVersion?.revision },
+              replayed: true,
+            }),
+          );
+        }
+      }
+      if (!saved.ok) return saved.result;
+      const receipt = saved.body as AppVersionReceipt;
+      const artifactId = receipt.artifact?.id;
+      const collections =
+        args.collections && artifactId
+          ? {
+              collections: await defineCollections(
+                context,
+                workspaceId,
+                artifactId,
+                args.collections,
+              ),
+            }
+          : {};
+      return json(
+        savedApp(context, workspaceId, receipt, {
+          ...collections,
+          ...(args.appId ? {} : { nextStep: "Share it with app_publish when it's ready." }),
+        }),
+      );
+    }),
+});
+
+type PublicationView = {
+  url?: string;
+  hostname?: string;
+  access?: string;
+  status?: string;
+  warnings?: Array<{ code?: string; message?: string; suggestion?: string; fix?: unknown }>;
+};
+
+function publicationSummary(publication: PublicationView) {
+  return {
+    url: publication.url,
+    hostname: publication.hostname,
+    access: publication.access,
+    status: publication.status,
+    warnings: publication.warnings ?? [],
+  };
+}
+
+const appPublish = tool({
+  name: "app_publish",
+  title: "Share an app",
+  description:
+    "Choose who can open an app you manage: only_me, workspace (its members) or public (anyone with the link, on its own hostname). The answer lists readiness warnings; apply their fixes by calling again with fixes. Make an app public only when the person asked for it.",
+  input: AppPublishInput,
+  readOnly: false,
+  openWorld: true,
+  run: async (context, args) =>
+    inWorkspace(context, args.workspaceId, async (workspaceId) => {
+      const path = { workspaceId, artifactId: args.appId };
+      const read = await readApp(context, workspaceId, args.appId);
+      if (!read.ok) return read.result;
+      const before = read.detail.artifact?.visibility === "workspace" ? "workspace" : "private";
+      const existing = await action(context, PUBLICATION_GET, { pathParameters: path });
+      // Only "not published" (or publishing off on this deployment, also a
+      // 404) reads as unpublished; any other failure changes nothing.
+      if (!existing.ok && existing.status !== 404) return existing.result;
+      const published = existing.ok ? (existing.body as PublicationView) : null;
+      const setVisibility = (visibility: "private" | "workspace") =>
+        action(context, "updateWorkspaceArtifactVisibility", {
+          pathParameters: path,
+          body: { visibility },
+        });
+      const link = appUrl(context, workspaceId, args.appId);
+      if (args.access === "only_me") {
+        // The owner-only step first, so a refusal changes nothing.
+        if (before !== "private") {
+          const narrowed = await setVisibility("private");
+          if (!narrowed.ok) return narrowed.result;
+        }
+        if (published?.status === "active") {
+          const stopped = await action(context, PUBLICATION_PUT, {
+            pathParameters: path,
+            body: { status: "unpublished" },
+          });
+          if (!stopped.ok)
+            return failure(
+              `The app is now visible only to you, but taking it off the web failed: ${errorMessage(stopped.status ?? 400, stopped.body)} Call app_publish with only_me again.`,
+              { retrySafe: true },
+            );
+        }
+        return json({ appId: args.appId, access: "only_me", link });
+      }
+      const widened = before !== "workspace";
+      if (widened) {
+        const shared = await setVisibility("workspace");
+        if (!shared.ok) return shared.result;
+      }
+      // Workspace without a hostname stays in the app, unless it was already
+      // on the web: then only members may open it there.
+      const onTheWeb = args.access === "public" || args.hostname !== undefined;
+      const narrow =
+        args.access === "workspace" &&
+        published?.status === "active" &&
+        published.access !== "members";
+      let publication = published;
+      if (onTheWeb || narrow) {
+        const upserted = await action(context, PUBLICATION_PUT, {
+          pathParameters: path,
+          body: {
+            ...(args.hostname ? { label: args.hostname } : {}),
+            access: args.access === "public" ? "public" : "members",
+            status: "active",
+          },
+        });
+        if (!upserted.ok) {
+          const reason = errorMessage(upserted.status ?? 400, upserted.body);
+          if (!widened) return upserted.result;
+          const restored = await setVisibility("private");
+          return failure(
+            restored.ok
+              ? `${reason} Nothing changed.`
+              : `${reason} The app is now visible to the workspace; set it back with app_publish only_me.`,
+            errorFacts(upserted.status ?? 400, upserted.body),
+          );
+        }
+        publication = upserted.body as PublicationView;
+      }
+      const fixed: Array<{ fix: unknown; ok: boolean; error?: string }> = [];
+      if (args.fixes?.length && publication) {
+        for (const fix of args.fixes) {
+          const applied = await action(context, PUBLICATION_FIX, {
+            pathParameters: path,
+            body: fix,
+          });
+          if (applied.ok) publication = applied.body as PublicationView;
+          fixed.push(
+            applied.ok
+              ? { fix, ok: true }
+              : { fix, ok: false, error: errorMessage(applied.status ?? 400, applied.body) },
+          );
+        }
+      }
+      const summary = publication ? publicationSummary(publication) : null;
+      const fixable = (summary?.warnings ?? []).some((warning) => warning.fix);
+      return json({
+        appId: args.appId,
+        access: args.access,
+        link,
+        ...(summary ? { publication: summary } : {}),
+        ...(fixed.length ? { fixes: fixed } : {}),
+        ...(args.fixes?.length && !publication
+          ? { fixesIgnored: "Fixes apply to an app on the web; this one isn't published." }
+          : {}),
+        ...(fixable
+          ? {
+              nextStep:
+                "Fix the warnings before sharing the link: call app_publish again with fixes (the warnings' fix objects), or change the app.",
+            }
+          : {}),
+      });
+    }),
+});
+
+const CONTENT_TYPES: Readonly<Record<string, string>> = {
+  csv: "text/csv",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  gif: "image/gif",
+  html: "text/html",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  json: "application/json",
+  md: "text/markdown",
+  mp4: "video/mp4",
+  pdf: "application/pdf",
+  png: "image/png",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  svg: "image/svg+xml",
+  txt: "text/plain",
+  webp: "image/webp",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  zip: "application/zip",
+};
+
+function contentTypeFor(name: string): string {
+  const extension = name.split(".").pop()?.toLowerCase() ?? "";
+  return CONTENT_TYPES[extension] ?? "application/octet-stream";
+}
+
+type SavedFile = { id?: string; filename?: string; sizeBytes?: number; access?: unknown };
+
+function savedFile(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  file: SavedFile,
+  replayed = false,
+) {
+  return {
+    fileId: file.id,
+    name: file.filename,
+    sizeBytes: file.sizeBytes,
+    ...(file.access ? { access: file.access } : {}),
+    link: fileUrl(context, workspaceId, file.id ?? ""),
+    replayed,
+  };
+}
+
+const fileSave = tool({
+  name: "file_save",
+  title: "Share a file",
+  description:
+    "Save a file you made (a report, image, document or data) in the workspace's files and get its link. Send it as content (text) or base64 up to 4 MB; for a larger file pass name and sizeBytes to get a putUrl, upload it there, then call again with uploadId. Visible only to you unless visibility is workspace. Saving the same name and content again within an hour returns the first file.",
+  input: FileSaveInput,
+  readOnly: false,
+  run: async (context, args) =>
+    inWorkspace(context, args.workspaceId, async (workspaceId) => {
+      if (args.uploadId) {
+        const completed = await action(context, "completeFileUpload", {
+          pathParameters: { workspaceId, uploadId: args.uploadId },
+        });
+        if (!completed.ok) return completed.result;
+        const file = (completed.body as { file?: SavedFile }).file ?? {};
+        return json(savedFile(context, workspaceId, file));
+      }
+      if (!args.name) return failure("Give the file a name, such as report.pdf.");
+      if (args.content !== undefined && args.base64 !== undefined)
+        return failure("Give content or base64, not both.");
+      const contentType = args.contentType ?? contentTypeFor(args.name);
+      const scope = args.visibility === "workspace" ? "workspace" : "personal";
+      const inline = args.content ?? args.base64;
+      if (inline === undefined) {
+        if (!args.sizeBytes) return failure("Give content, base64, or sizeBytes for a large file.");
+        const begun = await action(context, "beginFileUpload", {
+          pathParameters: { workspaceId },
+          body: { scope, filename: args.name, contentType, sizeBytes: args.sizeBytes },
+        });
+        if (!begun.ok) return begun.result;
+        const upload = begun.body as Record<string, unknown>;
+        return json({
+          uploadId: upload.uploadId,
+          putUrl: upload.putUrl,
+          requiredHeaders: upload.requiredHeaders,
+          expiresAt: upload.expiresAt,
+          nextStep: `PUT the file's bytes to putUrl with requiredHeaders and content-type ${contentType}, then call file_save with this uploadId.`,
+        });
+      }
+      const bytes =
+        args.content !== undefined
+          ? new TextEncoder().encode(args.content)
+          : new Uint8Array(Buffer.from(args.base64 ?? "", "base64"));
+      if (bytes.byteLength === 0) return failure("The file is empty.");
+      if (bytes.byteLength > FILE_SAVE_INLINE_MAX_BYTES)
+        return failure(
+          "This file is over 4 MB: pass name and sizeBytes instead to get an upload URL.",
+        );
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      // A retry within the hour finds the file the first try saved.
+      const listed = await action(context, "listFiles", {
+        pathParameters: { workspaceId },
+        query: { scope, limit: 50 },
+      });
+      if (listed.ok) {
+        const since = Date.now() - SAVE_RETRY_WINDOW_MS;
+        const page = listed.body as { files?: unknown } | null;
+        const files = (Array.isArray(page?.files) ? page.files : []) as Array<
+          SavedFile & {
+            sha256?: string | null;
+            status?: string;
+            createdAt?: string;
+            ownerSubjectId?: string | null;
+          }
+        >;
+        const owner = context.caller.kind === "person" ? context.caller.subjectId : null;
+        const earlier = files.find(
+          (file) =>
+            owner !== null &&
+            file.ownerSubjectId === owner &&
+            file.filename === args.name &&
+            file.sha256 === sha256 &&
+            file.status === "ready" &&
+            Date.parse(file.createdAt ?? "") >= since,
+        );
+        if (earlier) return json(savedFile(context, workspaceId, earlier, true));
+      }
+      const begun = await action(context, "beginFileUpload", {
+        pathParameters: { workspaceId },
+        // With its checksum, storage verifies the bytes and the file records it.
+        body: { scope, filename: args.name, contentType, sizeBytes: bytes.byteLength, sha256 },
+      });
+      if (!begun.ok) return begun.result;
+      const upload = begun.body as { uploadId?: unknown };
+      const target = putTarget(begun.body);
+      if (typeof upload.uploadId !== "string" || !target)
+        return failure("Opengeni returned an unexpected answer; retry.");
+      const sent = await putBytes(context, target, bytes, contentType);
+      if (!sent.ok)
+        return uploadFailed(
+          "the file",
+          sent.status,
+          "upload it yourself: call file_save with name and sizeBytes, PUT the bytes, then call it with uploadId.",
+        );
+      const completed = await action(context, "completeFileUpload", {
+        pathParameters: { workspaceId, uploadId: upload.uploadId },
+      });
+      if (!completed.ok) return completed.result;
+      const file = (completed.body as { file?: SavedFile }).file ?? {};
+      return json(savedFile(context, workspaceId, file));
+    }),
+});
+
 type CatalogEntry = {
   identity: { serverId: string; toolName: string };
   modelName?: string;
@@ -1117,14 +2153,32 @@ type CatalogEntry = {
   description?: string;
   inputSchema?: unknown;
   approval?: string;
+  permission?: { decision?: string; fromSetting?: boolean };
   source?: string;
 };
+
+/**
+ * What a call needs, for an outside agent: `none`, `human` (the person
+ * approves each call) or `blocked` (refused), and whether that comes from the
+ * tool itself or from the person's and workspace's tool settings.
+ */
+export function toolsSearchApproval(entry: Pick<CatalogEntry, "approval" | "permission">): {
+  approval: "none" | "human" | "blocked";
+  approvalSource: "tool" | "policy";
+} {
+  const decision = entry.permission?.decision;
+  const approvalSource = entry.permission?.fromSetting === true ? "policy" : "tool";
+  if (decision === "block") return { approval: "blocked", approvalSource };
+  if (decision === "ask" || entry.approval === "human")
+    return { approval: "human", approvalSource };
+  return { approval: "none", approvalSource };
+}
 
 const toolsSearch = tool({
   name: "tools_search",
   title: "Find workspace tools",
   description:
-    "Find the tools Opengeni agents use in this workspace (its connected apps, MCP servers and Opengeni's own), including ones that need the person's approval (approval: human). Call one with tool_call.",
+    "Find the tools Opengeni agents use in this workspace (its connected apps, MCP servers and Opengeni's own), including ones that need the person's approval (approval: human) and ones their tool settings block (approval: blocked). approvalSource says whether that comes from the tool or from tool settings. Call one with tool_call.",
   input: ToolsSearchInput,
   readOnly: true,
   run: async (context, args) =>
@@ -1160,7 +2214,7 @@ const toolsSearch = tool({
           toolName: entry.identity.toolName,
           ...(entry.title ? { title: entry.title } : {}),
           ...(entry.description ? { description: entry.description.slice(0, 1_000) } : {}),
-          approval: entry.approval ?? "none",
+          ...toolsSearchApproval(entry),
           ...(args.includeSchemas && entry.inputSchema ? { inputSchema: entry.inputSchema } : {}),
         })),
       });
@@ -1318,11 +2372,145 @@ function sameFiles(
   return key(left) === key(right);
 }
 
+/**
+ * Save Skill folders as the caller, one result each: Personal unless `scope`
+ * says otherwise, following the workspace's Agent learning setting (Review
+ * first leaves them pending), and skipping unchanged ones.
+ */
+async function uploadSkills(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  listed: SkillSummary[],
+  scope: "user" | "workspace" | "organization",
+  uploads: ReadonlyArray<{
+    name?: string | undefined;
+    files: ReadonlyArray<{ path: string; content: string }>;
+  }>,
+  reason: string,
+): Promise<Array<Record<string, unknown>>> {
+  const results: Array<Record<string, unknown>> = [];
+  // Two folders naming the same Skill would save over each other in one sync.
+  const seen = new Set<string>();
+  for (const upload of uploads) {
+    const main = upload.files.find((file) => file.path === "SKILL.md");
+    const name = upload.name ?? (main ? skillFrontmatterName(main.content) : null);
+    if (!main) {
+      results.push({
+        name: upload.name ?? null,
+        status: "invalid",
+        error: "The folder has no SKILL.md.",
+      });
+      continue;
+    }
+    if (!name) {
+      results.push({
+        name: null,
+        status: "invalid",
+        error: "SKILL.md needs YAML frontmatter between --- lines with name: and description:.",
+      });
+      continue;
+    }
+    const stableKey = skillKey(name);
+    if (!stableKey) {
+      results.push({
+        name,
+        status: "invalid",
+        error: "The Skill's name needs letters or digits.",
+      });
+      continue;
+    }
+    if (seen.has(stableKey)) {
+      results.push({
+        name,
+        status: "invalid",
+        error: "Another folder in this sync has a Skill with the same name.",
+      });
+      continue;
+    }
+    seen.add(stableKey);
+    const current = listed.find((skill) => skill.stableKey === stableKey && skill.scope === scope);
+    if (current) {
+      const read = await action(context, "readWorkspaceSkill", {
+        pathParameters: { workspaceId, skillId: current.id },
+      });
+      const files = read.ok
+        ? ((
+            read.body as {
+              files?: Array<{ path: string; content: string }>;
+            }
+          ).files ?? [])
+        : null;
+      if (files && sameFiles(files, upload.files)) {
+        results.push({
+          name: stableKey,
+          status: "unchanged",
+          skillId: current.id,
+        });
+        continue;
+      }
+    }
+    const filesDigest = createHash("sha256").update(JSON.stringify(upload.files)).digest("hex");
+    const skillId =
+      current?.id ?? stableUuid("mcp-skill", workspaceId, callerKey(context), scope, stableKey);
+    // The exact head the lifecycle checks: its active revision (null while
+    // only a pending one exists) and scope version; a new Skill starts at 1.
+    const expectedRevisionId = current ? current.activeRevisionId : null;
+    const operationId = stableUuid(
+      "mcp-skill-save",
+      workspaceId,
+      callerKey(context),
+      skillId,
+      String(expectedRevisionId),
+      filesDigest,
+    );
+    const saved = await action(context, "saveWorkspaceSkill", {
+      pathParameters: { workspaceId },
+      body: {
+        operationId,
+        skillId,
+        expectedRevisionId,
+        expectedScopeVersion: current ? current.scopeVersion : 1,
+        scope,
+        stableKey,
+        files: upload.files,
+        deletions: [],
+        reason,
+      },
+    });
+    if (!saved.ok) {
+      const envelope = errorEnvelope(saved.body);
+      results.push({
+        name: stableKey,
+        status:
+          saved.status === 409
+            ? "conflict"
+            : saved.status === 400 || saved.status === 422
+              ? "invalid"
+              : "failed",
+        error: envelope.message ?? errorMessage(saved.status ?? 0, saved.body),
+      });
+      continue;
+    }
+    const receipt = saved.body as {
+      outcome?: string;
+      skillId?: string;
+      revisionId?: string;
+    };
+    results.push({
+      name: stableKey,
+      status: receipt.outcome === "pending" ? "pending_review" : current ? "updated" : "created",
+      skillId: receipt.skillId ?? skillId,
+      ...(receipt.revisionId ? { revisionId: receipt.revisionId } : {}),
+    });
+  }
+  return results;
+}
+
 const skillsSync = tool({
   name: "skills_sync",
   title: "Sync Skills",
   description:
-    "Upload local Skill folders to Opengeni, or pull the workspace's Skills to write locally. Uploads are Personal unless you pass scope, follow the workspace's Agent learning setting (Review first leaves them waiting for the person's review), skip unchanged Skills and report each Skill's result.",
+    "Upload local Skill folders to Opengeni, sync every Skill folder of a GitHub repository (direction repository, read at one commit), or pull the workspace's Skills to write locally. Uploads and syncs are Personal unless you pass scope, follow the workspace's Agent learning setting (Review first leaves them waiting for the person's review), skip unchanged Skills and report each Skill's result.",
   input: SkillsSyncInput,
   readOnly: false,
   run: async (context, args) =>
@@ -1356,115 +2544,70 @@ const skillsSync = tool({
         }
         return json({ skills: pulled });
       }
-      if (args.skills.length === 0) return failure("Pass skills to upload.");
-      const results: Array<Record<string, unknown>> = [];
-      for (const upload of args.skills) {
-        const main = upload.files.find((file) => file.path === "SKILL.md");
-        const name = upload.name ?? (main ? skillFrontmatterName(main.content) : null);
-        if (!main) {
-          results.push({
-            name: upload.name ?? null,
-            status: "invalid",
-            error: "The folder has no SKILL.md.",
-          });
-          continue;
+      if (args.direction === "repository") {
+        if (!args.repository) return failure("Pass repository: a GitHub repository or folder URL.");
+        if (!context.readSkillRepository) {
+          return failure("Syncing from a repository isn't available on this server.");
         }
-        if (!name) {
-          results.push({
-            name: null,
-            status: "invalid",
-            error: "SKILL.md needs YAML frontmatter between --- lines with name: and description:.",
-          });
-          continue;
-        }
-        const stableKey = skillKey(name);
-        if (!stableKey) {
-          results.push({
-            name,
-            status: "invalid",
-            error: "The Skill's name needs letters or digits.",
-          });
-          continue;
-        }
-        const current = listed.skills.find(
-          (skill) => skill.stableKey === stableKey && skill.scope === args.scope,
-        );
-        if (current) {
-          const read = await action(context, "readWorkspaceSkill", {
-            pathParameters: { workspaceId, skillId: current.id },
-          });
-          const files = read.ok
-            ? ((
-                read.body as {
-                  files?: Array<{ path: string; content: string }>;
-                }
-              ).files ?? [])
-            : null;
-          if (files && sameFiles(files, upload.files)) {
-            results.push({
-              name: stableKey,
-              status: "unchanged",
-              skillId: current.id,
-            });
-            continue;
+        let snapshot: Awaited<ReturnType<NonNullable<typeof context.readSkillRepository>>>;
+        try {
+          snapshot = await context.readSkillRepository(args.repository);
+        } catch (error) {
+          if (error instanceof HTTPException && error.status === 429) {
+            return failure(
+              "GitHub's request limit for this server has been reached. Try again after it resets, or upload the Skills from a local checkout.",
+            );
           }
+          return failure(
+            error instanceof Error && error.message
+              ? `Couldn't read the repository: ${error.message}`
+              : "Couldn't read the repository.",
+          );
         }
-        const filesDigest = createHash("sha256").update(JSON.stringify(upload.files)).digest("hex");
-        const skillId =
-          current?.id ??
-          stableUuid("mcp-skill", workspaceId, callerKey(context), args.scope, stableKey);
-        // The exact head the lifecycle checks: its active revision (null while
-        // only a pending one exists) and scope version; a new Skill starts at 1.
-        const expectedRevisionId = current ? current.activeRevisionId : null;
-        const operationId = stableUuid(
-          "mcp-skill-save",
+        const source = `${snapshot.owner}/${snapshot.repository}@${snapshot.commit.slice(0, 12)}`;
+        const results = await uploadSkills(
+          context,
           workspaceId,
-          callerKey(context),
-          skillId,
-          String(expectedRevisionId),
-          filesDigest,
+          listed.skills,
+          args.scope,
+          snapshot.skills.map((skill) => ({ files: skill.files })),
+          `Synced from ${source}`,
         );
-        const saved = await action(context, "saveWorkspaceSkill", {
-          pathParameters: { workspaceId },
-          body: {
-            operationId,
-            skillId,
-            expectedRevisionId,
-            expectedScopeVersion: current ? current.scopeVersion : 1,
-            scope: args.scope,
-            stableKey,
-            files: upload.files,
-            deletions: [],
-            reason: "Uploaded from a connected agent",
-          },
+        snapshot.skills.forEach((skill, index) => {
+          if (results[index]) results[index] = { ...results[index], path: skill.path };
         });
-        if (!saved.ok) {
-          const envelope = errorEnvelope(saved.body);
-          results.push({
-            name: stableKey,
-            status:
-              saved.status === 409
-                ? "conflict"
-                : saved.status === 400 || saved.status === 422
-                  ? "invalid"
-                  : "failed",
-            error: envelope.message ?? errorMessage(saved.status ?? 0, saved.body),
-          });
-          continue;
-        }
-        const receipt = saved.body as {
-          outcome?: string;
-          skillId?: string;
-          revisionId?: string;
-        };
-        results.push({
-          name: stableKey,
-          status:
-            receipt.outcome === "pending" ? "pending_review" : current ? "updated" : "created",
-          skillId: receipt.skillId ?? skillId,
-          ...(receipt.revisionId ? { revisionId: receipt.revisionId } : {}),
+        return json({
+          scope: args.scope,
+          repository: `https://github.com/${snapshot.owner}/${snapshot.repository}`,
+          commit: snapshot.commit,
+          results: [
+            ...results,
+            ...snapshot.skipped.map((skip) => ({
+              path: skip.path,
+              status: "invalid",
+              error: skip.reason,
+            })),
+          ],
+          ...(snapshot.truncated
+            ? {
+                note: "Only the first 50 Skill folders were synced. Sync a folder URL for the rest.",
+              }
+            : results.some((result) => result.status === "pending_review")
+              ? {
+                  note: "Skills waiting for review appear on the Skills page in Opengeni for the person to approve.",
+                }
+              : {}),
         });
       }
+      if (args.skills.length === 0) return failure("Pass skills to upload.");
+      const results = await uploadSkills(
+        context,
+        workspaceId,
+        listed.skills,
+        args.scope,
+        args.skills,
+        "Uploaded from a connected agent",
+      );
       return json({
         scope: args.scope,
         results,
@@ -1569,6 +2712,9 @@ export const NAMED_TOOLS: readonly ToolSpec[] = [
   appDescribe,
   appQuery,
   appWrite,
+  appSave,
+  appPublish,
+  fileSave,
   toolsSearch,
   toolCall,
   skillsSync,
@@ -1607,7 +2753,7 @@ export function namedToolDescriptors() {
     }) as never,
     annotations: {
       readOnlyHint: spec.readOnly,
-      ...(spec.readOnly ? {} : { openWorldHint: false }),
+      ...(spec.readOnly ? {} : { openWorldHint: spec.openWorld === true }),
     },
   }));
 }

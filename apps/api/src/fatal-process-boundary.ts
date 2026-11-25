@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
+import { dirname, join, resolve as resolvePath } from "node:path";
+import { pathToFileURL } from "node:url";
 import { isDatabaseConnectionLoss } from "@opengeni/db";
-import type { Attributes, Observability, Span } from "@opengeni/observability";
+import {
+  fatalErrorLogCause,
+  type Attributes,
+  type Observability,
+  type Span,
+} from "@opengeni/observability";
 
 export type ApiFatalEvent = "startup_failure" | "unhandled_rejection" | "uncaught_exception";
 export type ApiFatalPhase = "startup" | "running";
@@ -56,6 +64,29 @@ export type ApiFatalProcessBoundary = {
 
 const API_FATAL_FLUSH_TIMEOUT_MS = 1_000;
 const API_FATAL_CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const API_BUNDLE_DIRECTORY = "apps/api/dist/process";
+
+function apiBundleStackSources(entrypoint: string | undefined): ReadonlyMap<string, string> {
+  const sources = new Map<string, string>();
+  if (!entrypoint) return sources;
+  // Only files actually shipped beside the trusted entrypoint are reviewed here.
+  // Snapshot once at startup; a rejection's stack never drives filesystem I/O.
+  try {
+    const entryPath = resolvePath(entrypoint);
+    if (!entryPath.endsWith(`/${API_BUNDLE_DIRECTORY}/index.js`)) return sources;
+    const directory = dirname(entryPath);
+    for (const file of readdirSync(directory, { withFileTypes: true })) {
+      if (!file.isFile() || !/^chunk-[a-z0-9]{8}\.js$/.test(file.name)) continue;
+      const path = join(directory, file.name);
+      const name = `${API_BUNDLE_DIRECTORY}/${file.name}`;
+      sources.set(path, name);
+      sources.set(pathToFileURL(path).href, name);
+    }
+  } catch {
+    // Static reviewed locations still work if the deployment directory is unreadable.
+  }
+  return sources;
+}
 
 const FATAL_ERROR_CODES = {
   startup_failure: "api_startup_failed",
@@ -71,6 +102,7 @@ export function installApiFatalProcessBoundary(
   const correlationId = options.correlationId ?? (() => `api-fatal.${randomUUID()}`);
   const fallbackLog = options.fallbackLog ?? ((message: string) => console.error(message));
   const isRecoverableRejection = options.isRecoverableRejection ?? isDatabaseConnectionLoss;
+  const bundleSources = apiBundleStackSources(process.argv[1]);
   let observability = options.observability;
   let phase: ApiFatalPhase = "startup";
   let reporting = false;
@@ -118,9 +150,16 @@ export function installApiFatalProcessBoundary(
     reporting = true;
 
     const diagnostic = apiFatalDiagnostic(event, phase, reason, correlationId);
-    let message = apiFatalMessage(diagnostic);
     const activeObservability = observability;
     try {
+      let cause: ReturnType<typeof fatalErrorLogCause> | undefined;
+      if (diagnostic.reasonKind === "error") {
+        try {
+          cause = fatalErrorLogCause(reason, bundleSources);
+        } catch {
+          // A failed projection must not suppress the fatal marker or exit.
+        }
+      }
       if (activeObservability) {
         try {
           const diagnosticId = activeObservability.recordFailureDiagnostic?.({
@@ -131,11 +170,13 @@ export function installApiFatalProcessBoundary(
           });
           if (diagnosticId) {
             diagnostic.correlationId = diagnosticId;
-            message = apiFatalMessage(diagnostic);
           }
         } catch {
           // Never replace the required fatal exit with an observer failure.
         }
+      }
+      const message = apiFatalMessage(diagnostic, cause);
+      if (activeObservability) {
         let logged = false;
         try {
           activeObservability.error(message, diagnostic);
@@ -231,11 +272,16 @@ function apiFatalReasonKind(reason: unknown): ApiFatalReasonKind {
   }
 }
 
-function apiFatalMessage(diagnostic: ReturnType<typeof apiFatalDiagnostic>): string {
+function apiFatalMessage(
+  diagnostic: ReturnType<typeof apiFatalDiagnostic>,
+  cause: ReturnType<typeof fatalErrorLogCause> | undefined,
+): string {
   return (
     `Opengeni API fatal process failure (${diagnostic.errorCode}; ` +
     `phase=${diagnostic.phase}; reason_kind=${diagnostic.reasonKind}; ` +
-    `correlation_id=${diagnostic.correlationId})`
+    `correlation_id=${diagnostic.correlationId}) ` +
+    `cause_class=${cause?.kind ?? "unknown"}; cause_code=${cause?.code ?? "unknown"}; ` +
+    `cause_frames=${cause?.frames.join(",") || "unavailable"}`
   );
 }
 

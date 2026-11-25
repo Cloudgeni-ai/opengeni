@@ -1,9 +1,9 @@
 import { matchSiteOperation, type SiteOperation } from "./site-operations";
 
 const SITE_WORKSPACE_PREFIX = "/v1/workspaces/site-host";
-/** Site Data and Site SQL routes under any published Site: `<prefix>/published-artifacts/<id>/data|files|sql`. */
+/** Site Data, Site SQL and server code routes under any published Site: `<prefix>/published-artifacts/<id>/data|files|sql|notify|server`. */
 const SITE_DATA_PATH =
-  /^\/v1\/workspaces\/site-host\/published-artifacts\/([^/]+)\/(?:data|files|sql)(?:\/|$)/u;
+  /^\/v1\/workspaces\/site-host\/published-artifacts\/([^/]+)\/(?:data|files|sql|notify|server)(?:\/|$)/u;
 /** The list filter a frame without a published Site gets: it names no Site, so lists nothing. */
 export const SITE_NO_ORIGIN_ID = "00000000-0000-0000-0000-000000000000";
 
@@ -47,6 +47,7 @@ export function siteConversationContext(site: SiteConversationSite): string {
   const title = site.title.replace(/\s+/gu, " ").trim().slice(0, 200) || "Untitled app";
   return [
     `The person is working on the Opengeni app “${title}” (App id ${site.siteId}), shown beside this chat at version ${site.revision} (version id ${site.versionId}).`,
+    "Its source says what it shows and where that comes from: to answer about what it shows, read the source and call the tools or data it reads.",
     "When they ask for a change to “the app”, “this page” or a part of it, they mean this app: read its current source, then publish the change as a new version of this app.",
     "A published version goes live immediately and the preview beside this chat reloads; earlier versions can be restored.",
   ].join(" ");

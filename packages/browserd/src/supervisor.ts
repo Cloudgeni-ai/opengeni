@@ -67,6 +67,7 @@ import {
 import { CdpConnection } from "./cdp";
 import {
   AgentBrowserDriver,
+  type BrowserFrameStreamHealth,
   type BrowserRuntimeSnapshot,
   type BrowserTabNavigationOptions,
 } from "./cdp-driver";
@@ -374,6 +375,8 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   /** Keeps the browser's windows presented until the returned release is
    * called (drivers that park idle windows). */
   acquirePresence?(): Promise<() => void>;
+  /** How this browser's live frame streams are doing (drivers that stream). */
+  frameStreamHealth?(): BrowserFrameStreamHealth;
   /** Change-driven JPEG frames of one tab, for recordings. */
   recordFrames?(
     targetId: string,
@@ -1818,6 +1821,13 @@ export class BrowserSupervisor {
       release();
       throw error;
     }
+  }
+
+  /** How the session's live frame streams are doing; null when its driver
+   * does not stream frames. Reads controller state only, never the page. */
+  frameStreamHealth(reference: BrowserSessionReference): BrowserFrameStreamHealth | null {
+    const runtime = this.requireActive(reference);
+    return runtime.driver.frameStreamHealth?.() ?? null;
   }
 
   async debug(

@@ -1,4 +1,8 @@
-import { AppPackageExportRequest, AppPackageInstallRequest } from "@opengeni/contracts";
+import {
+  AppPackageExportRequest,
+  AppPackageInstallRequest,
+  AppPackageUpgradeRequest,
+} from "@opengeni/contracts";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -13,6 +17,7 @@ import {
   exportAppPackage,
   installAppPackage,
 } from "../app-packages/service";
+import { appUpgradeOperationKey, upgradeAppFromPackage } from "../app-packages/upgrade";
 import { parseRequestBody } from "../http/request-body";
 
 const AppId = z.string().uuid();
@@ -33,8 +38,9 @@ async function run<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * App packages (docs/app-packages.md): export an app as one file, and
- * install a package file into this workspace as a new app.
+ * App packages (docs/app-packages.md): export an app as one file, install a
+ * package file into this workspace as a new app, and upgrade an app from a
+ * newer package.
  */
 export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
   // The package of an app's current version. Its managers only (the same
@@ -89,4 +95,51 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     return context.json(result, result.replayed ? 200 : 201);
   });
+
+  // Upgrade an app from a package: a plan (dryRun), or the package's version
+  // as a new version of the same app plus only its new data definitions.
+  // Managers of the app who can publish (artifacts:publish).
+  app.post(
+    "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/package/upgrade",
+    async (context) => {
+      const workspaceId = context.req.param("workspaceId");
+      const authorization = await requireAccessGrantAuthorization(
+        context,
+        deps,
+        workspaceId,
+        "artifacts:publish",
+      );
+      const grant = authorization.grant;
+      const parsedId = AppId.safeParse(context.req.param("artifactId"));
+      if (!parsedId.success) throw new HTTPException(422, { message: "Invalid app id" });
+      const request = await body(context, AppPackageUpgradeRequest);
+      const result = await run(() =>
+        upgradeAppFromPackage(deps, grant, parsedId.data, {
+          package: request.package,
+          dryRun: request.dryRun,
+          allowDestructive: request.allowDestructive,
+          provenance: request.idempotencyKey
+            ? {
+                operationKey: appUpgradeOperationKey(
+                  "subject",
+                  grant.subjectId,
+                  parsedId.data,
+                  request.idempotencyKey,
+                  request.package,
+                ),
+                actorSubjectId: grant.subjectId,
+                sourceSessionId: null,
+                sourceTurnId: null,
+                sourceAttemptId: null,
+                sourceExecutionGeneration: null,
+                sourceToolName: null,
+              }
+            : null,
+        }),
+      );
+      return context.json(result, 200, {
+        "Cache-Control": "private, no-store",
+      });
+    },
+  );
 }

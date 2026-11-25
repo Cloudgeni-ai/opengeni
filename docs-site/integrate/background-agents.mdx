@@ -61,7 +61,7 @@ A scheduled task can also run when something happens: give it `events`, and each
 | `{ kind: "mcp", serverId }`                      | An MCP connection whose server offers [MCP Events](https://modelcontextprotocol.io). Opengeni subscribes while an automation listens.                                                         |
 | `{ kind: "webhook", adapter: "standard" }`       | Your backend, signed with [Standard Webhooks](https://www.standardwebhooks.com). Opengeni generates the secret.                                                                               |
 | `{ kind: "webhook", adapter: "custom", format }` | Any other app's webhooks, read as `format` describes: how they are signed, where the event type is, and whether one delivery holds several events. Linear, Sentry and Tailscale have presets. |
-| `{ kind: "github" }`, `{ kind: "slack" }`        | The deployment's GitHub App or Slack bot, set up automatically.                                                                                                                               |
+| `{ kind: "github" }`, `{ kind: "slack" }`        | The deployment's GitHub App or Slack bot, set up automatically. The Slack bot can be installed in the workspace or shared with it by the organization.                                        |
 | `{ kind: "gmail" }`                              | A person's Gmail connection, read while an automation listens.                                                                                                                                |
 
 Event triggers are on when `clientConfig.eventTriggers.enabled` is true (`OPENGENI_EVENT_TRIGGERS_ENABLED` on the deployment).

@@ -32,10 +32,15 @@ import { AgentRoute, AgentsRoute, NewAgentRoute } from "../src/routes/agents";
 import triageTemplate from "../../../packages/core/src/agent-templates/triage.agent.json";
 import bugFixerTemplate from "../../../packages/core/src/agent-templates/bug-fixer.agent.json";
 import prReviewerTemplate from "../../../packages/core/src/agent-templates/pr-reviewer.agent.json";
+import cveScannerTemplate from "../../../packages/core/src/agent-templates/cve-scanner.agent.json";
+import incidentResponderTemplate from "../../../packages/core/src/agent-templates/incident-responder.agent.json";
+import dependencyUpdaterTemplate from "../../../packages/core/src/agent-templates/dependency-updater.agent.json";
 import "../src/styles.css";
 
 const params = new URLSearchParams(location.search);
 const view = params.get("view") ?? "agents";
+// `&template=<key>`: the agent-template view shows that ready-made agent just added.
+const addedTemplateKey = params.get("template") ?? "cve-scanner";
 // `&private=off`: a workspace where Only me chats aren't available.
 const privateChats = params.get("private") !== "off";
 const SLACK_CONNECTION = "55555555-5555-4555-8555-555555555555";
@@ -107,7 +112,38 @@ const triage = makeAgent({
   ],
   skills: [{ name: "incident-runbook" }],
 });
-const agents: Agent[] = [releases, onboarding, notes, duplicate, triage];
+const TEMPLATES = [
+  triageTemplate,
+  bugFixerTemplate,
+  prReviewerTemplate,
+  cveScannerTemplate,
+  incidentResponderTemplate,
+  dependencyUpdaterTemplate,
+];
+// Every shared agent is in each linked Slack workspace, as in production.
+for (const agent of [onboarding, duplicate, triage]) {
+  agent.slack = [{ ...releases.slack[0]!, handle: agent.name.toLowerCase().replaceAll(" ", "-") }];
+}
+const addedTemplate = TEMPLATES.find((template) => template.key === addedTemplateKey)!;
+// A ready-made agent just added from the gallery (only on the agent-template view).
+const added = makeAgent({
+  id: "aaaaaaaa-0000-4000-8000-000000000006",
+  name: addedTemplate.name,
+  description: addedTemplate.description,
+  avatar: addedTemplate.avatar as Agent["avatar"],
+  instructions: addedTemplate.instructions,
+  templateKey: addedTemplate.key,
+  memory: { enabled: true, collectionId: null, scope: "workspace", reviewFirst: false },
+  toolPermissions: addedTemplate.toolPermissions as Agent["toolPermissions"],
+});
+const agents: Agent[] = [
+  releases,
+  onboarding,
+  notes,
+  duplicate,
+  triage,
+  ...(view === "agent-template" ? [added] : []),
+];
 const TRIAGE_TRIGGER = {
   id: "eeeeeeee-0000-4000-8000-000000000001",
   name: "Triage: When a GitHub issue opens",
@@ -201,7 +237,7 @@ const client = fakeAgentsClient(agents, {
   },
   yours: (agent) => agent.createdBySubjectId === "user-me",
   canCreatePrivate: privateChats,
-  templates: [triageTemplate, bugFixerTemplate, prReviewerTemplate],
+  templates: TEMPLATES,
   tasks: [TRIAGE_TRIGGER],
   capabilities: [
     capability("github", "GitHub", "github.com"),
@@ -418,6 +454,8 @@ function Screen() {
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={releases.id} />;
     case "agent-setup":
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={triage.id} />;
+    case "agent-template":
+      return <AgentRoute workspaceId={WORKSPACE_ID} agentId={added.id} />;
     case "agent-private":
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={notes.id} />;
     case "make-agent":

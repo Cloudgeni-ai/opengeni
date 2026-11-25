@@ -504,6 +504,25 @@ export function createRequestFromDraft(
   const schedule: ScheduledTaskScheduleSpec = draft.cadence
     ? specFromCadence(draft.cadence, options.now)
     : { type: "manual" };
+  // An agent's automation names its agent; the chat must be the agent's.
+  if (draft.runMode === "existing_session" && draft.agentId)
+    return {
+      name: scheduleName(draft),
+      schedule,
+      runMode: "existing_session",
+      targetSessionId: draft.targetSessionId,
+      ...(draft.visibility === "private" ? { visibility: "private" as const } : {}),
+      overlapPolicy: overlapPolicyForCreate(draft),
+      metadata: taskMetadataFromFormState(draft),
+      agentConfig: {
+        agentId: draft.agentId,
+        prompt: draft.prompt.trim(),
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      ...eventsForCreate(draft),
+    };
   if (draft.runMode === "existing_session")
     return {
       name: scheduleName(draft),
@@ -571,14 +590,18 @@ export function updateRequestFromDraft(
       pinnedAccountsRequired: _pinsRequired,
       slackBotConnectionId: _bot,
       slackBotChannelId: _channel,
+      agentId: _agent,
       ...retained
     } = {
       pinnedAccounts: undefined,
       pinnedAccountsRequired: undefined,
+      agentId: undefined,
       ...task.agentConfig,
     };
     return {
       ...retained,
+      // A change of agent travels with the config; the server checks it.
+      ...(form.agentId ? { agentId: form.agentId } : {}),
       prompt: form.prompt,
       resources: form.resources,
       ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
@@ -590,6 +613,7 @@ export function updateRequestFromDraft(
   const oldConfig = editableConfig(initial);
   const nextConfig = editableConfig(draft);
   const onlyPromptChanged = same({ ...oldConfig, prompt: nextConfig.prompt }, nextConfig);
+  const agentChanged = (initial.agentId ?? null) !== (draft.agentId ?? null);
   const oldMetadata = taskMetadataFromFormState(initial, task);
   const nextMetadata = taskMetadataFromFormState(draft, task);
   return {
@@ -637,6 +661,10 @@ export function updateRequestFromDraft(
       : same(oldConfig, nextConfig)
         ? {}
         : { agentConfig: nextConfig }),
+    // An existing chat keeps its config; only its agent changes (the chat must be the agent's).
+    ...(draft.runMode === "existing_session" && agentChanged
+      ? { agentConfigPatch: { agentId: draft.agentId ?? null } }
+      : {}),
     ...(inheritsChatSettings || initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
     ...(inheritsChatSettings ||
     same(narrowedVaultPolicy(initial.vaultPolicy), narrowedVaultPolicy(draft.vaultPolicy))

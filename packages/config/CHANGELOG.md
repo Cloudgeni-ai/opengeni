@@ -1,5 +1,135 @@
 # @opengeni/config
 
+## 6.41.0
+
+### Patch Changes
+
+- bbbeecf: Add Heedeo signup scoring, off by default. An operator mode (`heedeoSignupMode`: `off`, `shadow` or `enforce`, through the signup network velocity setter) and the `OPENGENI_HEEDEO_*` keys turn it on. Shadow scores each new account once, just before it is created, and stores the verdict without acting on it; enforce refuses a signup in Heedeo's `block` band. Heedeo failures never block a signup. The client config gains an optional `auth.heedeo` (publishable key and script URL) while scoring is on.
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- 279ae6e: `OPENGENI_ORG_AGENTS_ACCOUNT_IDS` accepts `*` to turn Console agents on for every organization. A list of organization ids still turns them on for those organizations only, and empty (the default) keeps them off.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- 17783d3: Skill preview and install can read GitHub with a deployment token, so they no longer share GitHub's anonymous 60 requests/hour limit. Set the optional `OPENGENI_SKILL_IMPORT_GITHUB_TOKEN` to a fine-grained token with public-repository read access only; reads with it still refuse any repository that isn't public, and an invalid token now says so. Generated runtime artifacts carry the setting when it is set. Thanks to @hadialjurdi7-dot.
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/contracts@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+
+## 6.36.0
+
+### Minor Changes
+
+- 8ace4d4: Run Claude on Amazon Bedrock with the deployment's AWS identity: set `OPENGENI_BEDROCK_REGION` to use the native Messages transport against Bedrock, with `eu.`/`us.`/`global.` inference profiles, inference-profile ARNs, model discovery, Bedrock pricing and opt-in per-user cost attribution through an assumed role. The deployment model credential source (`ModelCredentialSourceV1` `mechanism`) gains the value `aws_iam`; clients that switch on it should treat unknown values as a deployment credential. While Bedrock is on, `OPENGENI_MODEL_PROVIDERS_JSON` cannot use the provider id `bedrock`.
+- bede91b: The function `apply_patch` tool takes an optional `then` shell command. It runs once, only after every patch operation applied, through the same `exec_command` path (sandbox, lean defaults, turn cancellation, finish floor, secret references and leak guard, truncation and approval policy), inside the exclusive edit call, and its result follows the patch result in the same tool output. A failed patch leaves it unrun and says so. The tool description notes that one patch can change several files, and one system-prompt sentence suggests batching decided edits and passing the follow-up check as `then`.
+
+  The function `apply_patch` is applied one file section at a time: an Add File section without lines creates an empty file instead of failing the whole patch, an Invalid Context failure is followed by the closest matching region of the file with line numbers, a section whose hunks were written out of file order is retried in file order when each hunk matches exactly one place, and each section reports its own result.
+
+  All of this is on by default; `OPENGENI_EXPERIMENT_APPLY_PATCH_THEN=false` restores the previous plain tool.
+
+### Patch Changes
+
+- e765d11: Enable live browser and computer viewing through a product session proxy with an explicit viewer origin, without changing console CORS. Embedders can also hide advanced browser controls, render the intervention banner separately, and translate the task vault display name.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

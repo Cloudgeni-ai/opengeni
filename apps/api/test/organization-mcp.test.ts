@@ -134,6 +134,13 @@ async function connect(
 }
 
 describe("organization MCP action catalog", () => {
+  test("the session model settings REST route adds no agent action", () => {
+    const path = "/v1/workspaces/:workspaceId/sessions/:sessionId/model-settings";
+    expect(registeredApiRoutes()).toContainEqual(expect.objectContaining({ method: "PUT", path }));
+    expect(isActionCatalogExempt(path)).toBe(true);
+    expect(ACTION_CATALOG.some((entry) => entry.path === path)).toBe(false);
+  });
+
   test("compact UI configuration reads do not add a redundant agent action", () => {
     const path = "/v1/workspaces/:workspaceId/sessions/:sessionId";
     expect(isActionCatalogExempt(`${path}/configuration`)).toBe(true);
@@ -281,6 +288,9 @@ describe("organization MCP action catalog", () => {
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+        // The web app's confirmation step: an agent redeems a reset in one call.
+        "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
+        "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/prepare",
       ].sort(),
     );
     // Every rule still names a real action.
@@ -816,7 +826,7 @@ describe("organization MCP action inputs", () => {
     expect(byId("steerMessage").request).toEqual(["SteerSessionMessageRequest"]);
     expect(byId("saveWorkspaceSkill").request).toEqual(["SaveWorkspaceSkillRequest"]);
     expect(byId("removeWorkspaceSkill").request).toEqual(["RemoveWorkspaceSkillRequest"]);
-    expect(byId("listScheduledTasks").query).toEqual(["limit", "offset", "sessionId"]);
+    expect(byId("listScheduledTasks").query).toEqual(["agentId", "limit", "offset", "sessionId"]);
     expect(byId("listWorkspaceSkills").query).toEqual(expect.arrayContaining(["cursor", "limit"]));
   });
 
@@ -1044,7 +1054,7 @@ describe("organization MCP action inputs", () => {
       const list = (await call("opengeni_action_describe", { id: "listScheduledTasks" })).value as {
         queryParameters?: string[];
       };
-      expect(list.queryParameters).toEqual(["limit", "offset", "sessionId"]);
+      expect(list.queryParameters).toEqual(["agentId", "limit", "offset", "sessionId"]);
     } finally {
       await client.close();
     }

@@ -1170,6 +1170,13 @@ Use the flat `OpenGeniClient` interaction methods when implementing a proxy or
 custom transport. Use `client.interaction` for application logic. Both are the
 same API and authority boundary.
 
+If `BrowserViewer` or `ComputerViewer` runs on your product's origin, set
+`interactionViewerOrigin` on the same-origin session proxy and include that
+exact origin in `OPENGENI_INTERACTION_VIEWER_ORIGINS` on the Opengeni API.
+This does not change credentialed console CORS. The user's `stream:view` and
+`sessions:control` grants still decide whether they can view frames and send
+input. The browser connects to the attachment's frame endpoint directly.
+
 ## Workspace artifacts
 
 Workspace artifacts are generic, immutable HTML publications. The SDK does not
@@ -1540,6 +1547,10 @@ and the Steer runs next with the full history. The session screens show it
 only as the person's message, and the queue snapshot does not list it.
 `steerQueueItem` with `interrupt: true` on the turn that `steerMessage`
 returned stops the running attempt now instead, including tool calls in flight.
+To steer several queued messages at once, call `steerQueueItem` on the oldest
+and list the others in `together` (`{ turnId, expectedTurnVersion }`). They keep
+their queue order and the agent reads them together, with no extra
+interruption; any that already left the queue are skipped.
 
 ```ts
 // Queue (default): stacks behind the running turn.
@@ -1794,7 +1805,7 @@ Every public endpoint group has typed methods:
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `ensureWorkspace`, `getWorkspace`, `updateWorkspace` |
 | Managed organizations | `createOrganization` for first-time compatibility; `createAdditionalOrganization` for an already-onboarded human; `listOrganizationMemberships`, `listOrganizationInvitations`, `acceptOrganizationInvitation` |
-| Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `setSessionModelSettings`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `findGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |

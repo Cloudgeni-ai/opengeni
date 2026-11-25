@@ -9,6 +9,7 @@ import {
   workspaceSessionIdFromPath,
 } from "@/lib/authorized-route-recovery";
 import { SessionUnavailableRoute } from "@opengeni/react/app/routes/session-unavailable";
+import { rememberRouteRecoveryNotice } from "@opengeni/react/app/lib/route-recovery-notice";
 import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
 export function WorkspaceUnavailableRoute(props: {
@@ -34,6 +35,7 @@ export function WorkspaceUnavailableRoute(props: {
 
   useEffect(() => {
     if (fallbackTarget && typeof window !== "undefined") {
+      rememberRouteRecoveryNotice("workspace_unavailable");
       window.location.replace(fallbackTarget);
     }
   }, [fallbackTarget]);

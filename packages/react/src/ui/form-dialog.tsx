@@ -4,15 +4,18 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type ElementType,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { ArrowLeftIcon, LoaderCircleIcon, LockIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
+import { ModalLayer } from "../lib/modal-layer";
 
 import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "./button";
@@ -119,7 +122,11 @@ export interface FormFrameProps {
   showClose?: boolean | undefined;
   /** Back link above the title (page only). */
   back?:
-    | { label: ReactNode; href?: string | undefined; onClick?: (() => void) | undefined }
+    | {
+        label: ReactNode;
+        href?: string | undefined;
+        onClick?: (() => void) | undefined;
+      }
     | undefined;
   /** What gets focus when an overlay opens: the first field (default) or Cancel. */
   initialFocus?: "field" | "cancel" | undefined;
@@ -129,6 +136,11 @@ export interface FormFrameProps {
   loadingFields?: number | undefined;
   className?: string | undefined;
   bodyClassName?: string | undefined;
+  /**
+   * Inline only: the form sits on the page without its own box, aligned
+   * with the page's other sections (a settings tab with one row style).
+   */
+  plain?: boolean | undefined;
 }
 
 /** What went wrong and what to do; an API error's status and reference go behind Technical details. */
@@ -188,13 +200,17 @@ export function FormFrame({
   loadingFields = 3,
   className,
   bodyClassName,
+  plain = false,
 }: FormFrameProps) {
+  const framed = variant === "inline" && !plain;
   const msg = useOpenGeniText();
   const cancelText = cancelLabel === undefined ? msg("formDialog.cancel") : cancelLabel;
   const chrome = useContext(FormChromeContext);
   const [internalPending, setInternalPending] = useState(false);
   const [thrown, setThrown] = useState<ReactNode>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLElement>(null);
+  usePageFooterAtScrollportEdge(footerRef, variant === "page" && footer !== false);
   // A submit that finishes after the person left the form (a page they
   // navigated away from) must not act on it: closing it would navigate back.
   const mountedRef = useRef(true);
@@ -372,7 +388,7 @@ export function FormFrame({
           "rounded-2xl border border-border bg-surface shadow-[var(--og-shadow-lg)]",
         variant === "sheet" && "h-full bg-surface",
         variant === "page" && "bg-bg",
-        variant === "inline" && "rounded-lg border border-border bg-surface",
+        framed && "rounded-lg border border-border bg-surface",
         className,
       )}
     >
@@ -434,7 +450,7 @@ export function FormFrame({
               "flex min-w-0 shrink-0 items-start gap-3",
               variant === "dialog" && "px-6 pt-5 pb-4 @max-[26rem]/form:px-5",
               variant === "sheet" && "border-b border-border px-6 py-5 @max-[26rem]/form:px-5",
-              variant === "inline" && "px-5 pt-4 pb-5",
+              variant === "inline" && (plain ? "pb-4" : "px-5 pt-4 pb-5"),
             )}
           >
             {leading && variant !== "inline" ? <div className="shrink-0">{leading}</div> : null}
@@ -473,7 +489,7 @@ export function FormFrame({
             variant === "dialog" && "flex-1 overflow-y-auto px-6 pt-1 pb-6 @max-[26rem]/form:px-5",
             variant === "sheet" && "flex-1 overflow-y-auto px-6 py-6 @max-[26rem]/form:px-5",
             variant === "page" && cn(PAGE_FRAME, "flex-1 py-6 [&>*]:max-w-[640px]"),
-            variant === "inline" && "px-5 pb-5",
+            variant === "inline" && (plain ? "pb-4" : "px-5 pb-5"),
             bodyClassName,
           )}
         >
@@ -485,14 +501,18 @@ export function FormFrame({
 
         {footer === false ? null : (
           <footer
+            ref={footerRef}
             className={cn(
               "flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-x-4 gap-y-3 border-t border-border",
               (variant === "dialog" || variant === "sheet") &&
                 "px-6 py-4 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch @max-[26rem]/form:px-5 max-sm:pb-[max(1rem,env(safe-area-inset-bottom))]",
               // On a phone the stacked buttons would cover a fifth of the
               // screen and the fields under them; there they follow the form.
-              variant === "page" && "sticky bottom-0 z-10 bg-bg max-sm:static",
-              variant === "inline" && "px-5 py-3",
+              // Elsewhere they stick to the bottom of the visible area (see
+              // usePageFooterAtScrollportEdge).
+              variant === "page" &&
+                "sticky bottom-[calc(-1*var(--og-form-footer-scroll-padding,0px))] z-10 bg-bg max-sm:static",
+              variant === "inline" && (plain ? "py-3" : "px-5 py-3"),
             )}
           >
             {variant === "page" ? (
@@ -527,6 +547,56 @@ export function FormFrame({
       </form>
     </div>
   );
+}
+
+/**
+ * A sticky `bottom: 0` footer sticks to its scroll container's padding edge,
+ * not to the bottom of what is visible: in a scroller with bottom padding (the
+ * sign-in pages' ConsentFrame, for example) it stopped that far above the
+ * bottom, and the fields scrolled on below it. This lowers the footer by the
+ * scroller's bottom padding so it rests on the visible edge, wherever a form
+ * page is placed. At the end of the form it still sits right after the fields.
+ */
+function usePageFooterAtScrollportEdge(footerRef: RefObject<HTMLElement | null>, enabled: boolean) {
+  // Before paint, so a stuck footer never shows a frame at the old height.
+  useIsomorphicLayoutEffect(() => {
+    const footer = footerRef.current;
+    if (!enabled || !footer) return;
+    const scroller = scrollContainerOf(footer);
+    if (!scroller) return;
+    const update = () =>
+      footer.style.setProperty(
+        "--og-form-footer-scroll-padding",
+        getComputedStyle(scroller).paddingBottom,
+      );
+    update();
+    // Padding follows breakpoints, which change with the scroller's size.
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(scroller);
+    return () => {
+      observer?.disconnect();
+      footer.style.removeProperty("--og-form-footer-scroll-padding");
+    };
+  }, [footerRef, enabled]);
+}
+
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/**
+ * The nearest ancestor a sticky element sticks within, if any. Not <body> or
+ * <html>: when the page itself scrolls, the viewport is the scroller, whatever
+ * overflow the body reports.
+ */
+function scrollContainerOf(element: HTMLElement): HTMLElement | null {
+  for (
+    let node = element.parentElement;
+    node && node !== document.body && node !== document.documentElement;
+    node = node.parentElement
+  ) {
+    const style = getComputedStyle(node);
+    if (/auto|scroll|hidden|overlay/.test(`${style.overflowX} ${style.overflowY}`)) return node;
+  }
+  return null;
 }
 
 /** Label and control placeholders, the shape of the fields that are loading. */
@@ -723,34 +793,35 @@ export function FormDialog({
     <DialogPrimitive.Root {...overlay.rootProps}>
       {trigger ? <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger> : null}
       <DialogContainedPortal>
-        <DialogPrimitive.Overlay
-          className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-[120ms] starting:opacity-0"
+        <ModalLayer
+          className="fixed inset-0 z-50 bg-black/50 transition-colors duration-[120ms] starting:bg-transparent"
           style={layer}
-        />
-        <DialogPrimitive.Content
-          {...overlay.contentProps}
-          style={layer}
-          {...(frame.description ? {} : { "aria-describedby": undefined })}
-          className={cn(
-            "fixed z-50 flex flex-col outline-hidden transition-opacity duration-[120ms] starting:opacity-0",
-            "inset-x-0 bottom-0 max-h-[92dvh]",
-            "sm:inset-x-auto sm:bottom-auto sm:top-[12vh] sm:left-1/2 sm:max-h-[76vh] sm:w-[calc(100vw-2rem)] sm:-translate-x-1/2",
-            DIALOG_WIDTH[size],
-          )}
         >
-          <FormChromeContext.Provider value={DIALOG_CHROME}>
-            <SectionFrameReset>
-              <WindowBarTitleBoundary>
-                <FormFrame
-                  variant="dialog"
-                  {...frame}
-                  {...overlay.frameProps}
-                  className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
-                />
-              </WindowBarTitleBoundary>
-            </SectionFrameReset>
-          </FormChromeContext.Provider>
-        </DialogPrimitive.Content>
+          <DialogPrimitive.Content
+            {...overlay.contentProps}
+            style={layer}
+            {...(frame.description ? {} : { "aria-describedby": undefined })}
+            className={cn(
+              "fixed z-50 flex flex-col outline-hidden transition-opacity duration-[120ms] starting:opacity-0",
+              "inset-x-0 bottom-0 max-h-[92dvh]",
+              "sm:inset-x-auto sm:bottom-auto sm:top-[12vh] sm:left-1/2 sm:max-h-[76vh] sm:w-[calc(100vw-2rem)] sm:-translate-x-1/2",
+              DIALOG_WIDTH[size],
+            )}
+          >
+            <FormChromeContext.Provider value={DIALOG_CHROME}>
+              <SectionFrameReset>
+                <WindowBarTitleBoundary>
+                  <FormFrame
+                    variant="dialog"
+                    {...frame}
+                    {...overlay.frameProps}
+                    className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
+                  />
+                </WindowBarTitleBoundary>
+              </SectionFrameReset>
+            </FormChromeContext.Provider>
+          </DialogPrimitive.Content>
+        </ModalLayer>
       </DialogContainedPortal>
     </DialogPrimitive.Root>
   );

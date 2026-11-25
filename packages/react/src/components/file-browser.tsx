@@ -1,5 +1,7 @@
 import {
   ChevronRightIcon,
+  EyeIcon,
+  EyeOffIcon,
   FileIcon,
   FilePlusIcon,
   FolderIcon,
@@ -25,6 +27,7 @@ import { AlertDialog } from "radix-ui";
 import { usePortalContainer } from "../ui/portal-container";
 import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
+import { ModalLayer } from "../lib/modal-layer";
 import { MENU_BUTTON_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import {
   type PortalTokenStyle,
@@ -49,6 +52,12 @@ export type FileBrowserProps = {
   selectedPath?: string | undefined;
   /** Presentation-only node filter. Hidden parents never expose their children. */
   isNodeVisible?: FileNodeVisibilityPredicate | undefined;
+  /**
+   * With `onShowHiddenChange`, the toolbar has one Show hidden files toggle
+   * (its host decides what hidden means, through `isNodeVisible`).
+   */
+  showHidden?: boolean | undefined;
+  onShowHiddenChange?: ((show: boolean) => void) | undefined;
   /** Deliberately reveal this selected path by lazily opening every loaded
    * ancestor and scrolling its row into view. The path is opaque and is never
    * normalized or re-rooted here. */
@@ -190,6 +199,8 @@ export function FileBrowser({
   onSelectFile,
   selectedPath,
   isNodeVisible,
+  showHidden = false,
+  onShowHiddenChange,
   revealPath,
   revealPathRequestId,
   renderNode,
@@ -713,7 +724,7 @@ export function FileBrowser({
   const showEmpty = !result.loading && visibleTree.length === 0 && !draftCreate;
   // Retry lives next to the state it explains (the degraded/empty notice), so do
   // not render a second toolbar retry for the same failure.
-  const showToolbar = supportsMutation || result.loading;
+  const showToolbar = supportsMutation || result.loading || onShowHiddenChange !== undefined;
   // Virtua caches the previous visible range when a lazy-expanded subtree is
   // inserted in the middle of a short list. The spacer grows but later root
   // siblings can remain unmounted until a scroll/resize (for example,
@@ -979,6 +990,15 @@ export function FileBrowser({
             </>
           ) : null}
           <span className="ml-auto" />
+          {onShowHiddenChange ? (
+            <ToolbarButton
+              label={t("fileBrowser.showHiddenFiles")}
+              pressed={showHidden}
+              onClick={() => onShowHiddenChange(!showHidden)}
+            >
+              {showHidden ? <EyeIcon className="size-3.5" /> : <EyeOffIcon className="size-3.5" />}
+            </ToolbarButton>
+          ) : null}
           <ToolbarButton
             label={t("fileBrowser.refresh")}
             onClick={() => void result.refresh()}
@@ -1209,72 +1229,76 @@ function DeleteDialog({
       <AlertDialog.Portal
         container={portalContainer ?? (typeof document === "undefined" ? null : document.body)}
       >
-        <AlertDialog.Overlay className="og-root fixed inset-0 z-[100] bg-black/45 backdrop-blur-[2px]" />
-        <AlertDialog.Content
-          className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-hidden"
-          style={portalTokenStyle}
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            cancelRef.current?.focus();
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            scheduleSettle();
-          }}
-          onEscapeKeyDown={(event) => {
-            event.stopPropagation();
-            if (busy) {
-              event.preventDefault();
-            } else {
-              closeIntentRef.current = "cancel";
-            }
-          }}
+        <ModalLayer
+          overlay={AlertDialog.Overlay}
+          className="og-root fixed inset-0 z-[100] bg-black/45 before:pointer-events-none before:absolute before:inset-0 before:backdrop-blur-[2px]"
         >
-          <div className="flex items-start gap-3">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-og-status-failed/12 text-og-status-failed">
-              <Trash2Icon className="size-4" aria-hidden />
-            </span>
-            <div className="min-w-0">
-              <AlertDialog.Title className="text-og-sm font-semibold">
-                {t("fileBrowser.delete")}{" "}
-                {node.kind === "dir" ? t("fileBrowser.folder") : t("fileBrowser.file")}?
-              </AlertDialog.Title>
-              <AlertDialog.Description className="mt-1 text-og-sm leading-relaxed text-og-fg-muted">
-                <span className="break-all font-og-mono text-og-fg">{node.path}</span>
-                {node.kind === "dir"
-                  ? " and everything inside it will be permanently removed."
-                  : " will be permanently removed."}
-              </AlertDialog.Description>
+          <AlertDialog.Content
+            className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-hidden"
+            style={portalTokenStyle}
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              cancelRef.current?.focus();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              scheduleSettle();
+            }}
+            onEscapeKeyDown={(event) => {
+              event.stopPropagation();
+              if (busy) {
+                event.preventDefault();
+              } else {
+                closeIntentRef.current = "cancel";
+              }
+            }}
+          >
+            <div className="flex items-start gap-3">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-og-status-failed/12 text-og-status-failed">
+                <Trash2Icon className="size-4" aria-hidden />
+              </span>
+              <div className="min-w-0">
+                <AlertDialog.Title className="text-og-sm font-semibold">
+                  {t("fileBrowser.delete")}{" "}
+                  {node.kind === "dir" ? t("fileBrowser.folder") : t("fileBrowser.file")}?
+                </AlertDialog.Title>
+                <AlertDialog.Description className="mt-1 text-og-sm leading-relaxed text-og-fg-muted">
+                  <span className="break-all font-og-mono text-og-fg">{node.path}</span>
+                  {node.kind === "dir"
+                    ? " and everything inside it will be permanently removed."
+                    : " will be permanently removed."}
+                </AlertDialog.Description>
+              </div>
             </div>
-          </div>
-          <div className="mt-4 flex justify-end gap-2">
-            <AlertDialog.Cancel asChild>
-              <button
-                ref={cancelRef}
-                type="button"
-                onClick={() => {
-                  closeIntentRef.current = "cancel";
-                }}
-                disabled={busy}
-                className="min-h-9 rounded-og-md border border-og-border px-3 text-og-sm font-medium text-og-fg hover:bg-og-surface-2 disabled:opacity-50 pointer-coarse:min-h-11"
-              >
-                {t("fileBrowser.cancel")}
-              </button>
-            </AlertDialog.Cancel>
-            <AlertDialog.Action asChild>
-              <button
-                type="button"
-                onClick={() => {
-                  closeIntentRef.current = "confirm";
-                }}
-                disabled={busy}
-                className="min-h-9 rounded-og-md bg-og-danger-fill px-3 text-og-sm font-semibold text-og-danger-fg shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
-              >
-                {t("fileBrowser.deletePermanently")}
-              </button>
-            </AlertDialog.Action>
-          </div>
-        </AlertDialog.Content>
+            <div className="mt-4 flex justify-end gap-2">
+              <AlertDialog.Cancel asChild>
+                <button
+                  ref={cancelRef}
+                  type="button"
+                  onClick={() => {
+                    closeIntentRef.current = "cancel";
+                  }}
+                  disabled={busy}
+                  className="min-h-9 rounded-og-md border border-og-border px-3 text-og-sm font-medium text-og-fg hover:bg-og-surface-2 disabled:opacity-50 pointer-coarse:min-h-11"
+                >
+                  {t("fileBrowser.cancel")}
+                </button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeIntentRef.current = "confirm";
+                  }}
+                  disabled={busy}
+                  className="min-h-9 rounded-og-md bg-og-danger-fill px-3 text-og-sm font-semibold text-og-danger-fg shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
+                >
+                  {t("fileBrowser.deletePermanently")}
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </ModalLayer>
       </AlertDialog.Portal>
     </AlertDialog.Root>
   );
@@ -1284,11 +1308,14 @@ function ToolbarButton({
   label,
   onClick,
   disabled,
+  pressed,
   children,
 }: {
   label: string;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
+  /** A toggle's state; omitted for a plain button. */
+  pressed?: boolean | undefined;
   children: ReactNode;
 }) {
   return (
@@ -1296,11 +1323,13 @@ function ToolbarButton({
       type="button"
       title={label}
       aria-label={label}
+      aria-pressed={pressed}
       onClick={onClick}
       disabled={disabled}
       className={cn(
         "inline-flex size-7 items-center justify-center rounded-og-sm p-1 text-og-fg-muted max-[1023px]:size-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
         "hover:bg-og-surface-2 hover:text-og-fg",
+        "aria-pressed:bg-og-surface-2 aria-pressed:text-og-fg",
         "disabled:cursor-not-allowed disabled:opacity-40",
       )}
     >

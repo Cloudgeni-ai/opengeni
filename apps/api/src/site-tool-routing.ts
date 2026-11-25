@@ -18,7 +18,15 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import { ApiHttpError } from "./http/api-error";
+import {
+  PERSONAL_GITHUB_TOOLS_SERVER_ID,
+  personalGitHubToolsOffered,
+  personalGitHubToolsServerConfig,
+  readPersonalGitHubReconnectAccount,
+  readPersonalGitHubToolsAuthority,
+} from "./personal-github-tools";
 import { exactAgentAttemptClaims } from "./sandbox/agent-fleet-context";
 import { allGatewayToolRefs } from "./workspace-tool-gateway";
 
@@ -58,6 +66,11 @@ export type SiteToolConnect = {
   capabilityId: string | null;
   name: string;
   providerDomain: string;
+  /**
+   * The connector takes an API key, not a sign-in: a workspace admin adds
+   * one shared key from a vault (a shared service connection) instead.
+   */
+  apiKey?: true;
 };
 
 export type SiteToolRouting =
@@ -127,6 +140,8 @@ export type SiteToolAccountInventory = {
   accounts: ReadonlyArray<Omit<SiteToolAccount, "identity"> & { serverId: string }>;
   /** Each server's own approval recommendation and approval identity input. */
   servers?: ReadonlyMap<string, SiteToolServerApproval>;
+  /** Servers enabled from the capability catalog (for the workspace or for this person). */
+  capabilityServers?: ReadonlySet<string>;
 };
 
 /** What decides whether a server's tools ask first (see `prepareWorkspaceToolGateway`). */
@@ -202,6 +217,7 @@ export async function readSiteToolAccountInventory(
         capabilityServers.find((candidate) => candidate.id === server.id)?.capabilityId ?? null,
       name: server.name ?? server.id,
       providerDomain: ref.providerDomain,
+      ...(ref.kind === "api_key" ? { apiKey: true as const } : {}),
     });
   }
   const accounts = bindings.flatMap((binding) => {
@@ -227,7 +243,34 @@ export async function readSiteToolAccountInventory(
       },
     ];
   });
-  return { canonical, plain, accounts, servers };
+  // Your GitHub runs on each viewer's own connection: a connector whose one
+  // account is theirs (All my repositories), or Connect when they have none.
+  if (personalGitHubToolsOffered(deps.settings) && !servers.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)) {
+    const config = personalGitHubToolsServerConfig();
+    servers.set(PERSONAL_GITHUB_TOOLS_SERVER_ID, { ...(config.url ? { url: config.url } : {}) });
+    canonical.set(PERSONAL_GITHUB_TOOLS_SERVER_ID, {
+      capabilityId: PERSONAL_GITHUB_CAPABILITY_ID,
+      name: "Your GitHub",
+      providerDomain: "github.com",
+    });
+    const personalGitHub = await readPersonalGitHubToolsAuthority(deps.db, deps.settings, grant);
+    if (personalGitHub)
+      accounts.push({
+        serverId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+        connector: "Your GitHub",
+        account: personalGitHub.login,
+        canonicalServerId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+        connectionId: personalGitHub.connectionId,
+        shared: false,
+      });
+  }
+  return {
+    canonical,
+    plain,
+    accounts,
+    servers,
+    capabilityServers: new Set(capabilityServers.map((server) => server.id)),
+  };
 }
 
 /** An account of the viewer's that would serve a connector but must sign in again. */
@@ -269,13 +312,27 @@ export async function readSiteToolReconnectAccounts(
   // Only a sign-in that must be renewed; `error` is any other failure, which
   // signing in again would not fix.
   const stale = connections.filter((connection) => connection.status === "needs_reauth");
-  if (stale.length === 0) return [];
+  const wanted = new Set(canonicalServerIds);
+  // Your GitHub: the viewer's own connection GitHub stopped accepting.
+  const personalGitHub = wanted.has(PERSONAL_GITHUB_TOOLS_SERVER_ID)
+    ? await readPersonalGitHubReconnectAccount(deps.db, deps.settings, grant)
+    : null;
+  const personal: SiteToolReconnectAccount[] = personalGitHub
+    ? [
+        {
+          canonicalServerId: PERSONAL_GITHUB_TOOLS_SERVER_ID,
+          connectionId: personalGitHub.connectionId,
+          account: personalGitHub.login ?? "Your GitHub",
+          shared: false,
+        },
+      ]
+    : [];
+  if (stale.length === 0) return personal;
   const base = deps.catalogSourceSettings ?? deps.settings;
   const settings = await settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, base, {
     subjectId: grant.subjectId,
   });
-  const wanted = new Set(canonicalServerIds);
-  return mcpAccountBindingsFromVisibleConnections({
+  const mcp = mcpAccountBindingsFromVisibleConnections({
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
@@ -288,6 +345,7 @@ export async function readSiteToolReconnectAccounts(
     account: accountName(binding.accountLabel),
     shared: binding.subjectScope === "workspace",
   }));
+  return [...mcp, ...personal];
 }
 
 /**

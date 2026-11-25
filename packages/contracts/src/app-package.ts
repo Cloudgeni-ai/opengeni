@@ -10,6 +10,7 @@ import {
   WorkspaceArtifactSourceBundle,
   WorkspaceArtifactVisibility,
 } from "./artifacts";
+import { SiteAssetBundle } from "./app-assets";
 import { SiteDataCollectionDefinitionRequest } from "./site-data";
 import {
   SITE_SQL_IDENTIFIER,
@@ -35,8 +36,12 @@ export const APP_PACKAGE_MAX_BYTES = 24 * 1024 * 1024;
 export const APP_PACKAGE_DEMO_RECORDS_PER_COLLECTION = 1_000;
 export const APP_PACKAGE_DEMO_ROWS_PER_TABLE = 5_000;
 export const APP_PACKAGE_DEMO_MAX_BYTES = 8 * 1024 * 1024;
+/** Shared Site files in demo data: at most this many (their bytes count toward the demo budget). */
+export const APP_PACKAGE_DEMO_FILES_MAX = 200;
 export const APP_PACKAGE_SYNCS_MAX = 50;
 export const APP_PACKAGE_SIDEBAR_MAX = 10;
+/** How long a package file `app_export` stores for download is kept. */
+export const APP_PACKAGE_EXPORT_TTL_SECONDS = 24 * 60 * 60;
 
 const Name = primitives.string.regex(SITE_SQL_NAME);
 
@@ -75,7 +80,10 @@ export type AppPackageSync = z.infer<typeof AppPackageSync>;
  */
 export const AppPackageSidebarItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    path: SidebarAppPath.optional(),
+    // A getter, read when parsing: the sidebar's chunk can import this one back.
+    get path() {
+      return SidebarAppPath.optional();
+    },
     label: primitives.string.trim().min(1).max(SIDEBAR_LABEL_MAX_CHARS).optional(),
     group: primitives.string.trim().min(1).max(SIDEBAR_LABEL_MAX_CHARS).optional(),
   }),
@@ -90,14 +98,49 @@ export const AppPackageDemoRecord = /* @__PURE__ */ defineSchema(() =>
 );
 export type AppPackageDemoRecord = z.infer<typeof AppPackageDemoRecord>;
 
+/**
+ * A SQL value in demo rows: text, number, boolean, null, or a blob as
+ * `{ "$base64": "…" }` (the same tag Site SQL JSON exports use).
+ */
+export const AppPackageSqlValue = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    SiteSqlValueSchema,
+    z.object({
+      $base64: primitives.string.max(8 * 1024 * 1024).regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+    }),
+  ]),
+);
+export type AppPackageSqlValue = z.infer<typeof AppPackageSqlValue>;
+
 export const AppPackageSqlRow = /* @__PURE__ */ defineSchema(() =>
-  z.record(primitives.string, SiteSqlValueSchema),
+  z.record(primitives.string, AppPackageSqlValue),
 );
 export type AppPackageSqlRow = z.infer<typeof AppPackageSqlRow>;
+
+/**
+ * One of the app's shared Site files in demo data. `id` is its id in the
+ * exporting app: install gives the copy a new id and rewrites demo values
+ * that are exactly the old id.
+ */
+export const AppPackageDemoFile = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid.optional(),
+    name: primitives.string.trim().min(1).max(255),
+    contentType: primitives.string.min(1).max(255),
+    base64: primitives.string.max(16 * 1024 * 1024).regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+  }),
+);
+export type AppPackageDemoFile = z.infer<typeof AppPackageDemoFile>;
 
 export type AppPackage = {
   format: typeof APP_PACKAGE_FORMAT;
   version: number;
+  /**
+   * The app's id across its packages: every export of one app (and of copies
+   * installed from it) carries the same id, so an upgrade can tell a newer
+   * version of the same app from a different app. Absent in older packages.
+   */
+  packageId?: string | undefined;
   exportedAt: string;
   app: {
     title: string;
@@ -105,6 +148,8 @@ export type AppPackage = {
     html: string;
     /** Retained editable source; absent for HTML-only apps. */
     source?: z.infer<typeof WorkspaceArtifactSourceBundle> | undefined;
+    /** A multi-file build's asset files (JS, CSS, fonts, images) beside the HTML. */
+    assets?: SiteAssetBundle | undefined;
   };
   /** The tools the app declares; installers connect their own accounts. */
   tools: ToolGatewayIdentity[];
@@ -118,6 +163,8 @@ export type AppPackage = {
     | {
         records: Record<string, AppPackageDemoRecord[]>;
         sqlRows: Record<string, AppPackageSqlRow[]>;
+        /** The app's shared Site files (never private ones). Absent in older packages. */
+        files?: AppPackageDemoFile[] | undefined;
       }
     | undefined;
 };
@@ -127,6 +174,7 @@ export type AppPackageProblem = {
   part:
     | "package"
     | "app"
+    | "version"
     | "tools"
     | "collection"
     | "sql"
@@ -148,11 +196,14 @@ export const AppPackageExportRequest = /* @__PURE__ */ defineSchema(() =>
         z.object({
           collections: z.array(Name).max(100).optional(),
           tables: z.array(primitives.string.regex(SITE_SQL_IDENTIFIER)).max(100).optional(),
+          files: primitives.boolean
+            .optional()
+            .describe("Include the app's shared files (never private ones)."),
         }),
       ])
       .optional()
       .describe(
-        "Include demo data: true for every collection and table, or name the collections and tables. Omitted: no data.",
+        "Include demo data: true for every shared collection, table and shared file, or name the collections and tables (and files: true). Omitted: no data.",
       ),
   }),
 );
@@ -182,6 +233,8 @@ export type AppPackageInstallRequest = z.infer<typeof AppPackageInstallRequest>;
 
 export type AppPackageInstallResponse = {
   app: z.infer<typeof WorkspaceArtifact>;
+  /** The package the app was installed from, or null for a package without one. */
+  packageId?: string | null;
   /** The same request was installed before; this is that app. */
   replayed: boolean;
   installed: {
@@ -194,12 +247,105 @@ export type AppPackageInstallResponse = {
     sidebar: number;
     demoRecords: number;
     demoRows: number;
+    /** Shared Site files loaded from the demo data. */
+    demoFiles?: number;
   };
   /** What couldn't be installed; the rest was. */
   notInstalled: AppPackageProblem[];
 };
 
 export type ParsedAppPackage = { package: AppPackage; problems: AppPackageProblem[] };
+
+/** POST .../published-artifacts/:id/package/upgrade */
+export const AppPackageUpgradeRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    package: z.record(primitives.string, z.unknown()).describe("The package file's JSON."),
+    dryRun: primitives.boolean.optional().describe("Only return the plan; nothing changes."),
+    allowDestructive: primitives.boolean
+      .optional()
+      .describe(
+        "Apply changes the plan marks destructive (they could hide, reassign or delete existing data).",
+      ),
+    idempotencyKey: primitives.string
+      .trim()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Required to apply; the same key and package apply once."),
+  }),
+);
+export type AppPackageUpgradeRequest = z.infer<typeof AppPackageUpgradeRequest>;
+
+/**
+ * What upgrading an app from a package changes. Nothing is ever deleted:
+ * collections and syncs the package doesn't have are kept. Each list names
+ * collections, migrations, queries or syncs.
+ */
+export type AppPackageUpgradePlan = {
+  /** Whether the package's version differs from the app's current one. */
+  version: {
+    changed: boolean;
+    html: boolean;
+    source: boolean;
+    tools: boolean;
+    /** Whether the multi-file build's asset files differ (absent from older servers). */
+    assets?: boolean;
+  };
+  /**
+   * The package's id and the one the app came from (null when unknown). A
+   * different one is listed in `destructive`: it is another app's package.
+   */
+  package?: { id: string | null; current: string | null };
+  tools: { added: ToolGatewayIdentity[]; removed: ToolGatewayIdentity[] };
+  collections: {
+    added: string[];
+    changed: string[];
+    unchanged: string[];
+    kept: string[];
+  };
+  migrations: { applied: string[]; new: string[]; conflicting: string[] };
+  queries: {
+    added: string[];
+    changed: string[];
+    removed: string[];
+    unchanged: string[];
+  };
+  syncs: {
+    added: string[];
+    changed: string[];
+    unchanged: string[];
+    kept: string[];
+  };
+  /** Changes that could hide, reassign or delete existing data: applying needs `allowDestructive`. */
+  destructive: AppPackageProblem[];
+  /** What stops the upgrade; nothing is applied while there is any. */
+  conflicts: AppPackageProblem[];
+  /** Parts of the package that are ignored or won't apply, and why. */
+  problems: AppPackageProblem[];
+};
+
+export type AppPackageUpgradeResponse = {
+  /** The app after the upgrade (unchanged for a dry run). */
+  app: z.infer<typeof WorkspaceArtifact>;
+  dryRun: boolean;
+  /** Whether the upgrade ran (false for a dry run). */
+  applied: boolean;
+  plan: AppPackageUpgradePlan;
+  /**
+   * What this request changed. Every step skips what is already done (and
+   * the same key publishes the version once), so a retry lists only what was
+   * still left.
+   */
+  upgraded: {
+    version: boolean;
+    collections: string[];
+    migrations: string[];
+    queries: string[];
+    syncs: string[];
+  };
+  /** What couldn't be upgraded; the rest was. */
+  notUpgraded: AppPackageProblem[];
+};
 
 export class AppPackageFormatError extends Error {
   readonly name = "AppPackageFormatError";
@@ -259,6 +405,17 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
     typeof app.description === "string"
       ? app.description.slice(0, WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS)
       : null;
+  let assets: SiteAssetBundle | undefined;
+  if (app.assets !== undefined && app.assets !== null) {
+    const parsed = SiteAssetBundle.safeParse(app.assets);
+    // The HTML loads these files, so the app would be broken without them.
+    if (!parsed.success)
+      throw new AppPackageFormatError(
+        `This app package's asset files are invalid (${issue(parsed.error)})`,
+      );
+    assets = parsed.data;
+  }
+  const packageId = primitives.uuid.safeParse(root.packageId);
   let source: AppPackage["app"]["source"];
   if (app.source !== undefined && app.source !== null) {
     const parsed = WorkspaceArtifactSourceBundle.safeParse(app.source);
@@ -370,16 +527,49 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
           reason: parsed.success ? "Invalid table name" : `Invalid (${issue(parsed.error)})`,
         });
     }
-    if (Object.keys(records).length > 0 || Object.keys(sqlRows).length > 0)
-      demoData = { records, sqlRows };
+    const files: AppPackageDemoFile[] = [];
+    if (demo.files !== undefined && demo.files !== null) {
+      if (!Array.isArray(demo.files))
+        problems.push({
+          part: "demo_data",
+          reason: "demoData.files isn't a list and was ignored",
+        });
+      else
+        for (const [index, entry] of demo.files.entries()) {
+          if (files.length >= APP_PACKAGE_DEMO_FILES_MAX) {
+            problems.push({
+              part: "demo_data",
+              reason: `Only the first ${APP_PACKAGE_DEMO_FILES_MAX} files were read`,
+            });
+            break;
+          }
+          const parsed = AppPackageDemoFile.safeParse(entry);
+          if (parsed.success) files.push(parsed.data);
+          else
+            problems.push({
+              part: "demo_data",
+              name: itemName(entry, `file ${index + 1}`),
+              reason: `Invalid file (${issue(parsed.error)})`,
+            });
+        }
+    }
+    if (Object.keys(records).length > 0 || Object.keys(sqlRows).length > 0 || files.length > 0)
+      demoData = { records, sqlRows, ...(files.length > 0 ? { files } : {}) };
   }
 
   return {
     package: {
       format: APP_PACKAGE_FORMAT,
       version,
+      ...(packageId.success ? { packageId: packageId.data } : {}),
       exportedAt: typeof root.exportedAt === "string" ? root.exportedAt : "",
-      app: { title, description, html: html.data, ...(source ? { source } : {}) },
+      app: {
+        title,
+        description,
+        html: html.data,
+        ...(source ? { source } : {}),
+        ...(assets ? { assets } : {}),
+      },
       tools,
       data: { collections },
       sql: { migrations, queries },

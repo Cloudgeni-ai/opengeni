@@ -281,6 +281,16 @@ Operations:
   - `GET /data/syncs` (`site.data.syncs()`) returns each app data sync's last
     run and, for personal syncs, the viewer's own last run and opt-in
     ([app-sync.md](app-sync.md)).
+- `site.notify` (`POST /published-artifacts/current/notify`,
+  `site.notify({ title, body?, to?, path?, key? })`) is routed but not
+  enabled yet: it answers 403 with `details.reason` `notify_not_available`
+  until a follow-up migration grants delivery. Its checks and limits are in
+  [app-webhooks.md](app-webhooks.md#notifications-from-apps).
+- `site.server.fetch(path, init)` (`server.fetch`,
+  `POST /published-artifacts/current/server`) runs the app's server code for
+  the viewer and returns a `Response`; the code runs as the app on shared
+  accounts and sees only who the viewer is
+  ([app-server-code.md](app-server-code.md)).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable
@@ -452,6 +462,14 @@ version's `requestedTools`.
   picks the account; blocked, unavailable and permission-denied tools are not
   something one click fixes, so they don't show. Tools whose connector has no
   catalog entry are left out.
+- **API-key tools.** A connector that takes an API key keeps each person's
+  own `connect` item. When the app's shared syncs wait on it, a separate
+  `connect` item with `shared: true` carries `sharedKey`: `add` for a workspace admin who
+  may use secrets ("Add a shared key for Stripe", which connects it once for
+  the workspace with a key from a vault), or `ask_admin` for anyone else
+  ("Ask an admin to connect Stripe", shown as text, with no `openUrl`). Once a
+  shared service connection covers the tool it is ready and has no item. See
+  [connection presentation](connection-presentation.md#app-connect-card).
 - **Console.** The card sits over the app's bottom right corner. Its button
   opens Opengeni's own connect or reconnect dialog (the same
   `McpConnectionCard` flow as chat), and the card refreshes when it finishes
@@ -468,7 +486,8 @@ version's `requestedTools`.
   longer lists.
 - **From the app.** `site.connections` in `@opengeni/sdk/site`:
   `status()` resolves `{ supported, ready, needed }` (each need with `key`,
-  `action`, `connector`, `account`, `label` and `tools`; no ids or
+  `action`, `connector`, `account`, `sharedKey` (when set), `label` and
+  `tools`; no ids or
   addresses), `connect(key?)` starts one need's action and resolves
   `{ connected }`, `showCard()` shows the platform card again even after it
   was closed, and `onChange(listener)` fires when what the viewer has
@@ -486,7 +505,10 @@ Apps opened in Opengeni follow its light or dark theme: the frame's
 matches it and changes without a reload. (Safari doesn't pass a frame's
 `color-scheme` to `prefers-color-scheme`, so there an app follows the
 system's theme; that differs only when Opengeni's appearance is set to the
-other one.) An app that wants Opengeni's own look opts in with one tag:
+other one.) An app takes Opengeni's own look with one tag; the bundled
+`sites` Skill gives every new app this look unless a design comes first (the
+person's, the workspace's, the product the app is about, or a design of its
+own for a page shown to others, such as a landing page or a menu):
 
 ```html
 <link rel="stylesheet" href="/__opengeni/ui.css">
@@ -521,9 +543,36 @@ nothing on its own; it defines:
   `og-button-danger`), `og-input` (inputs, selects and textareas),
   `og-label`, `og-badge` (with `-success`, `-warning`, `-danger`),
   `og-table` and `og-link`.
+- Dashboard tokens and classes: `--og-series-1` to `--og-series-6` and
+  `--og-series-muted` (chart colours per theme); `og-grid`, `og-kpis`,
+  `og-kpi` (`-label`, `-value`, `-delta`, `-note`), `og-num`, `og-good`,
+  `og-bad`, `og-warn`, `og-flat`, `og-strong`, `og-empty`, `og-details`,
+  `og-table-wrap`, `og-hide-narrow`, and a selected look for an `og-button`
+  with `aria-pressed="true"` or `aria-selected="true"`.
 
 `@opengeni/sdk/site-ui` exports the stylesheet (`SITE_UI_CSS`), its path and
 `resolveSiteUiStylesheet(html)` for hosts that embed Sites themselves.
+
+The stylesheet is a kit, not a design. The Skill's `references/design.md` is
+the design guidance an agent reads, in the same `skill_read` as `SKILL.md`,
+before it writes a new app or restyles one: what the first screen leads with,
+how to compose a tool in the Opengeni look, how to design a page of its own
+from system fonts and a small palette, the states every app needs, and the
+generated-page habits to leave out. A person's or workspace's own design, and
+an installed design Skill, still come first.
+
+### Dashboards
+
+`<script src="/__opengeni/charts.js"></script>` defines `window.og`: number
+and date formats (`og.fmt`), KPI cards (`og.kpis`), horizontal bars
+(`og.bars`), line and scatter charts (`og.line`, `og.scatter`) and a sortable
+table (`og.table`). They draw with the classes above, size themselves to their
+container, follow the theme and show an empty state for empty data. The path
+is reserved and served like the stylesheet; inside Opengeni
+`resolveSiteUiStylesheet` replaces the tag with the script inline
+(`SITE_CHARTS_JS`). A bundler can't resolve the tag, so a built app adds it to
+its built HTML. The bundled `sites` Skill points dashboards at it
+(`references/dashboards.md`).
 
 ## Limits and metering
 

@@ -1618,14 +1618,19 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   // against the account, then the same turn re-places or waits for capacity.
   if (findCodexCreditPolicyError(error)) return true;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
-  // A Claude subscription refusal (rate limit or reconnect) on the checkpoint
+  // A Claude subscription refusal on the checkpoint
   // request recovers exactly like one on an ordinary request: failure
   // settlement rotates to another account or waits for capacity on the same
   // logical turn. Its wording or retry hint never makes it a terminal quota.
   const claudeRefusal = isClaudeSubscriptionTransportError(error)
     ? classifyClaudeProviderError(error)
     : null;
-  if (claudeRefusal?.kind === "unauthorized" || claudeRefusal?.kind === "rate_limited") return true;
+  if (
+    claudeRefusal?.kind === "unauthorized" ||
+    claudeRefusal?.kind === "rate_limited" ||
+    claudeRefusal?.kind === "forbidden"
+  )
+    return true;
   // Codex may reject an opaque artifact it minted itself on the compaction
   // request exactly as it can on an ordinary request. Failure settlement
   // invalidates only the exact participating artifacts and recovers the same
@@ -2196,7 +2201,11 @@ function withSandboxProviderAttribution(
 export function isClaudeSubscriptionTransportError(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
-    if (current instanceof AnthropicRequestError && current.subscription) return true;
+    if (
+      (current instanceof AnthropicRequestError && current.subscription) ||
+      (current instanceof AnthropicProviderRejection && current.subscriptionHttpPermissionRefusal)
+    )
+      return true;
     current = current.cause;
   }
   return false;
@@ -3381,9 +3390,9 @@ export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
  * forced refresh); 429 is `rate_limited` for the turn's model `modelId`, with
  * the provider's retry time (null: the adapter's fallback applies); 529 or
  * `overloaded_error` is `overloaded`, which never moves the turn to another
- * account; 403 is `fatal`, which never rotates or quarantines the account.
- * Anything else, a provider safety refusal included, is null: not a refusal
- * of the account.
+ * account. A generic HTTP 403 from the subscription transport is `forbidden`.
+ * Explicit model suspensions, stream permission errors, safety refusals, and
+ * API-key errors do not quarantine or rotate a subscription account.
  */
 export function classifyClaudeProviderError(
   error: unknown,
@@ -3393,6 +3402,11 @@ export function classifyClaudeProviderError(
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
     if (current instanceof ClaudeSubscriptionReconnectRequired) return { kind: "unauthorized" };
+    if (current instanceof AnthropicProviderRejection)
+      return current.code === "anthropic_permission_denied" &&
+        current.subscriptionHttpPermissionRefusal
+        ? { kind: "forbidden" }
+        : null;
     if (current instanceof AnthropicRequestError) {
       if (!current.subscription) return null;
       if (current.status === 401) return { kind: "unauthorized" };
@@ -3404,7 +3418,6 @@ export function classifyClaudeProviderError(
         };
       if (current.status === 529 || current.errorType === "overloaded_error")
         return { kind: "overloaded" };
-      if (current.status === 403) return { kind: "fatal" };
       return null;
     }
     current = current.cause;

@@ -6,6 +6,7 @@ import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
 } from "../browser-ephemeral";
+import { logStalledBrowserFrames } from "../browser-frame-health";
 import { createHash, randomUUID } from "node:crypto";
 import {
   environmentsEncryptionKeyBytes,
@@ -81,6 +82,8 @@ import {
   type BrowserWorkingCopyAdoption as BrowserWorkingCopyAdoptionValue,
   type BrowserWorkingCopyRefusal as BrowserWorkingCopyRefusalValue,
   type FileAsset,
+  type BrowserWorkspaceFileAuthority,
+  isPortableUploadFilename,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
   type InteractionCredentialAuthorityRef,
@@ -270,6 +273,7 @@ import {
 import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { requireInteractionAttachmentAccess } from "../http/interaction-attachment";
 import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
@@ -288,9 +292,14 @@ import {
   observeAuthMutation,
   observeBrowserActionResult,
   observeBrowserRevisionPublication,
+  observeLifecycleControllerFailure,
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import {
+  agentCallerSessionId,
+  connectedInteractionRouteSession,
+} from "../connected-interaction-route";
 import {
   connectedMachineBrowserClosingNotice,
   withBrowserClosingNotice,
@@ -762,6 +771,7 @@ export function registerBrowserSessionRoutes(
                     placement.controllerHostSandboxGroupId,
                   ).catch(() => undefined);
                 }
+                observeLifecycleControllerFailure(deps.observability, "browser.create", error);
                 return failed;
               }
               // Once the controller has accepted the exact binding, a persistence
@@ -1836,7 +1846,7 @@ export function registerBrowserSessionRoutes(
                     fileIds: workspaceFileIds,
                   });
                   const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
-                  const authorities = await Promise.all(
+                  const uploads = await Promise.all(
                     ordered.map(async (file) => {
                       const signed = await deps.objectStorage!.createGetUrl({
                         key: file.objectKey,
@@ -1844,21 +1854,28 @@ export function registerBrowserSessionRoutes(
                         audience: signedUrlAudienceForPlacement(record.session.placement),
                       });
                       return {
-                        fileId: file.id,
-                        safeFilename: browserUploadFilename(file.safeFilename),
-                        sizeBytes: file.sizeBytes,
-                        sha256: browserUploadSha256(file.sha256),
-                        download: {
-                          url: signed.url,
-                          expiresAt: signed.expiresAt.toISOString(),
+                        filename: file.filename,
+                        safeFilename: file.safeFilename,
+                        authority: {
+                          fileId: file.id,
+                          sizeBytes: file.sizeBytes,
+                          sha256: browserUploadSha256(file.sha256),
+                          download: {
+                            url: signed.url,
+                            expiresAt: signed.expiresAt.toISOString(),
+                          },
                         },
                       };
                     }),
                   );
-                  await sessionClient.stageWorkspaceFiles({
-                    operationId: request.operationId,
-                    files: authorities,
-                  });
+                  await stageBrowserUploadFiles(
+                    (authorities) =>
+                      sessionClient.stageWorkspaceFiles({
+                        operationId: request.operationId,
+                        files: authorities,
+                      }),
+                    uploads,
+                  );
                 }
               }
               await passkeyTakeover;
@@ -2382,11 +2399,11 @@ export function registerBrowserSessionRoutes(
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/attachments",
     async (context) => {
-      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+      const { workspaceId, grant, origin } = await requireInteractionAttachmentAccess(
         context,
-        "stream:view",
+        deps,
       );
-      const origin = requestOrigin(context, deps.settings);
+      const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionAttachmentRequest);
       const result = await withActiveBrowserController(
         context,
@@ -2556,6 +2573,9 @@ export function registerBrowserSessionRoutes(
         "browser.read",
         async ({ sessionClient, binding }) => {
           await sessionClient.listTargets();
+          // Live views send this heartbeat while they are open, so a view
+          // whose picture stopped is recorded here with the reason.
+          await logStalledBrowserFrames(sessionClient, browserSessionId);
           return BrowserSessionHeartbeatResponse.parse({
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
@@ -2877,7 +2897,13 @@ export function registerBrowserSessionRoutes(
         };
         await prepareRestore();
 
-        const sourceSession = await requireSourceSession(deps, workspaceId, before.sourceSessionId);
+        const sourceSession = await browserRouteSession(
+          deps,
+          grant,
+          before,
+          await requireSourceSession(deps, workspaceId, before.sourceSessionId),
+          "session.control",
+        );
         // A full controller saves its least recently used idle browser once,
         // as for a create, so a saved browser can come back while the machine
         // is at its limit.
@@ -3233,7 +3259,13 @@ export function registerBrowserSessionRoutes(
     ) {
       throw new BrowserSessionStateError("BrowserSession controller authority changed");
     }
-    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    const sourceSession = await browserRouteSession(
+      deps,
+      grant,
+      record,
+      await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+      "session.control",
+    );
     if (
       record.session.placement.kind === "connected_machine" &&
       sourceSession.activeSandboxId !== record.session.placement.sandboxId
@@ -3885,7 +3917,13 @@ export function registerBrowserSessionRoutes(
       }
       const sourceSession =
         checkpoint.capacityFor?.routeSourceSession ??
-        (await requireSourceSession(deps, workspaceId, record.sourceSessionId));
+        (await browserRouteSession(
+          deps,
+          grant,
+          record,
+          await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+          "session.control",
+        ));
       const response = await withBrowserPlacement(
         sourceSession,
         grant,
@@ -4203,6 +4241,7 @@ export function registerBrowserSessionRoutes(
           operation,
           retryControllerTransport: operation === "browser.read" || operation === "browser.action",
           allowOperationReplay,
+          ...(expectedPlacement?.kind === "sandbox_group" ? { managedHome: true } : {}),
           ...(expectedPlacementInstanceId &&
           (expectedPlacement?.kind === "sandbox_group" ||
             expectedPlacement?.kind === "external_provider")
@@ -4646,6 +4685,15 @@ export function registerBrowserSessionRoutes(
       stages?.mark("authorize");
       let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
+        if (sourceSession) {
+          sourceSession = await browserRouteSession(
+            deps,
+            grant,
+            record,
+            sourceSession,
+            authorizationOperation,
+          );
+        }
         if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
           throw sourcePlacementElsewhereApiError(
             "browser_session",
@@ -4952,10 +5000,12 @@ export function registerBrowserSessionRoutes(
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
       if (record.session.placement.kind === "connected_machine") {
-        const source = await requireSourceSession(
+        const source = await browserRouteSession(
           routeDeps,
-          record.session.workspaceId,
-          record.sourceSessionId,
+          grant,
+          record,
+          await requireSourceSession(routeDeps, record.session.workspaceId, record.sourceSessionId),
+          authorizationOperation,
         );
         if (source.activeSandboxId !== record.session.placement.sandboxId) {
           throw sourcePlacementElsewhereApiError(
@@ -5071,7 +5121,13 @@ export function registerBrowserSessionRoutes(
       return { unavailable: "It kept no private profile to continue" };
     }
     const rootSecret = browserAuthorityRoot(deps);
-    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    const sourceSession = await browserRouteSession(
+      deps,
+      grant,
+      record,
+      await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+      "session.control",
+    );
     if (
       record.session.placement.kind === "connected_machine" &&
       sourceSession.activeSandboxId !== record.session.placement.sandboxId
@@ -5267,7 +5323,13 @@ export function registerBrowserSessionRoutes(
     }
     if (binding) {
       browserAuthorityRoot(deps);
-      const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+      const sourceSession = await browserRouteSession(
+        deps,
+        grant,
+        record,
+        await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+        "session.control",
+      );
       await withBrowserPlacement(
         sourceSession,
         grant,
@@ -5326,7 +5388,13 @@ export function registerBrowserSessionRoutes(
     }
     const binding = record.session.controller;
     if (binding) {
-      const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+      const sourceSession = await browserRouteSession(
+        deps,
+        grant,
+        record,
+        await requireSourceSession(deps, workspaceId, record.sourceSessionId),
+        "session.control",
+      );
       await withBrowserPlacement(
         sourceSession,
         grant,
@@ -6410,6 +6478,32 @@ async function requireSourceSession(
   return session;
 }
 
+/** The chat whose route reaches a browser. A browser on a Connected Machine
+ * is reached through the chat that opened it while that chat works there.
+ * Once that chat has moved away, an agent chat now working on that machine (a
+ * child given its parent's browser, say) reaches it by its own route, as for a
+ * Desktop. Otherwise the opener, whose route keeps refusing it. */
+async function browserRouteSession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  record: Pick<BrowserSessionControlRecord, "sourceSessionId" | "session">,
+  source: Session,
+  operation: SessionAuthorizationOperation,
+): Promise<Session> {
+  const placement = record.session.placement;
+  if (placement?.kind !== "connected_machine" || source.activeSandboxId === placement.sandboxId) {
+    return source;
+  }
+  const callerId = agentCallerSessionId(grant);
+  if (callerId === null || callerId === record.sourceSessionId) return source;
+  const caller = await getSession(deps.db, record.session.workspaceId, callerId);
+  if (!caller || connectedInteractionRouteSession(placement.sandboxId, source, caller) !== caller) {
+    return source;
+  }
+  await authorizeSourceSession(deps, grant, caller.id, operation);
+  return caller;
+}
+
 async function authorizeSourceSession(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -6580,6 +6674,20 @@ export function browserTabDiagnosisError(error: unknown): unknown {
     failure.cause = error;
     return failure;
   }
+  // A page that did not load in time is the website's or its network path's
+  // failure, not the workspace's. As a plain 504 it would reach the agent as
+  // "the workspace is temporarily unavailable", so keep the controller's own
+  // fixed sentence, which names no page or host.
+  if (code === "timeout" && error.status >= 500 && isBrowserNavigationTimeout(error)) {
+    const failure = new ApiHttpError(504, {
+      code: "upstream_unavailable",
+      message: error.error.message,
+      retryable: error.retryable,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (code !== "tab_not_responding" && code !== "tab_crashed") return error;
   const failure = new ApiHttpError(409, {
     code,
@@ -6589,6 +6697,19 @@ export function browserTabDiagnosisError(error: unknown): unknown {
   });
   failure.cause = error;
   return failure;
+}
+
+/** The controller's fixed sentences for a navigation that did not load in
+ * time: the server never answered, the page never committed, or the document
+ * never became ready. */
+const BROWSER_NAVIGATION_TIMEOUT_MESSAGES = [
+  /^browser could not load the requested URL: its server did not respond within \d+ seconds$/u,
+  /^browser navigation did not commit a new page in time and was stopped(?:; the tab still shows its previous page)?$/u,
+  /^browser navigation timed out$/u,
+];
+
+function isBrowserNavigationTimeout(error: BrowserControlRequestError): boolean {
+  return BROWSER_NAVIGATION_TIMEOUT_MESSAGES.some((pattern) => pattern.test(error.error.message));
 }
 
 /** Keep a definite read timeout useful without publishing driver diagnostics. */
@@ -6642,7 +6763,10 @@ export function browserScreenshotError(error: unknown): unknown {
 }
 
 export function browserScreenshotResponse(
-  frame: Pick<BrowserControlFrame, "data" | "mediaType" | "metadataHeader" | "inexactScrollbars">,
+  frame: Pick<
+    BrowserControlFrame,
+    "data" | "mediaType" | "metadataHeader" | "inexactScrollbars" | "hiddenScrolledHeight"
+  >,
 ): Response {
   // Node Buffers can be views into a larger backing allocation. Copy exactly
   // the image bytes before constructing the Response.
@@ -6653,6 +6777,9 @@ export function browserScreenshotResponse(
       "content-type": frame.mediaType,
       "x-opengeni-browser-frame": frame.metadataHeader,
       ...(frame.inexactScrollbars ? { "x-opengeni-browser-frame-note": "inexact-scrollbars" } : {}),
+      ...(frame.hiddenScrolledHeight
+        ? { "x-opengeni-browser-frame-hidden-scrolled-height": String(frame.hiddenScrolledHeight) }
+        : {}),
       ...USER_CONTENT_SECURITY_HEADERS,
     },
   });
@@ -7045,7 +7172,65 @@ export function requireAuthorizedBrowserUploadFiles(
   });
 }
 
-function browserUploadFilename(value: string): string {
+/** Stages upload files under the names they were given, in any script, so
+ * the page sees `Rørføring – rev A (2).pdf` rather than an ASCII stand-in. A
+ * controller from before such names refuses the whole request as invalid; it
+ * gets the ASCII names it has always accepted instead. */
+export async function stageBrowserUploadFiles(
+  stage: (files: BrowserWorkspaceFileAuthority[]) => Promise<unknown>,
+  uploads: readonly {
+    filename: string;
+    safeFilename: string;
+    authority: Omit<BrowserWorkspaceFileAuthority, "safeFilename">;
+  }[],
+): Promise<void> {
+  const named = uploads.map((upload) => ({
+    ...upload.authority,
+    safeFilename: browserUploadFilename(upload.filename, upload.safeFilename),
+  }));
+  try {
+    await stage(named);
+  } catch (error) {
+    const ascii = uploads.map((upload) => ({
+      ...upload.authority,
+      safeFilename: asciiUploadFilename(upload.safeFilename),
+    }));
+    const refusedAsInvalid =
+      error instanceof BrowserControlRequestError &&
+      error.status === 400 &&
+      error.error.code === "invalid_action";
+    if (
+      !refusedAsInvalid ||
+      ascii.every((file, index) => file.safeFilename === named[index]!.safeFilename)
+    ) {
+      throw error;
+    }
+    await stage(ascii);
+  }
+}
+
+/** The file's own name as one portable path segment: path separators,
+ * control characters and characters Windows forbids become `_`, and a
+ * trailing dot or space, which Windows drops, is removed. Letters of every
+ * script stay. A name that cannot be kept falls back to its ASCII form. */
+export function browserUploadFilename(filename: string, safeFilename: string): string {
+  let name = filename
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f/\\<>:"|?*]+/gu, "_")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/[. ]+$/u, "");
+  const encoder = new TextEncoder();
+  const characters = [...name].slice(0, 240);
+  while (encoder.encode(characters.join("")).byteLength > 240) characters.pop();
+  name = characters
+    .join("")
+    .trimEnd()
+    .replace(/[. ]+$/u, "");
+  return isPortableUploadFilename(name) ? name : asciiUploadFilename(safeFilename);
+}
+
+function asciiUploadFilename(value: string): string {
   const normalized = value
     .trim()
     .replace(/[/\\]/gu, "_")

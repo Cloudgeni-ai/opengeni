@@ -7,6 +7,10 @@ import type {
 } from "@opengeni/sdk/site";
 import { useEffect, useRef, useState } from "react";
 import { toolReviewAction } from "@opengeni/contracts";
+import {
+  PERSONAL_GITHUB_CAPABILITY_ID,
+  personalGitHubSetupPath,
+} from "@opengeni/contracts/personal-github";
 import { McpConnectionCard } from "../../components/session-mcp-capability-card";
 import { useOpenGeniText } from "../../messages/runtime";
 import { Button } from "../../ui/button";
@@ -22,6 +26,7 @@ import {
 import { CheckboxField } from "../../ui/field";
 import { SelectMenu } from "../../ui/select-menu";
 import { useAppContext } from "../app-context";
+import { usePage } from "./navigation";
 
 // The confirmation and connect card for Site tool calls. Loaded only when a
 // Site asks, so the console's eager pages never carry it.
@@ -230,6 +235,8 @@ export function SiteToolConnect({
     if (!capabilityId) onDone(false);
   }, [capabilityId, onDone]);
   if (!capabilityId) return null;
+  if (capabilityId === PERSONAL_GITHUB_CAPABILITY_ID)
+    return <SiteToolPersonalGitHub workspaceId={request.workspaceId} onDone={onDone} />;
   return (
     <McpConnectionCard
       client={client}
@@ -270,6 +277,8 @@ export function SiteToolRecover({
     answered.current = true;
     onDone(again);
   };
+  if (failure.reconnect?.capabilityId === PERSONAL_GITHUB_CAPABILITY_ID)
+    return <SiteToolPersonalGitHub workspaceId={request.workspaceId} onDone={answer} />;
   if (failure.reconnect)
     return (
       <SiteToolReconnect
@@ -346,5 +355,55 @@ function SiteToolReconnect({
       }}
       onClose={() => onDone(connected.current)}
     />
+  );
+}
+
+/**
+ * Your GitHub is set up on its own settings page: connect or reconnect, and
+ * All my repositories, which the app's GitHub tools run on.
+ */
+function SiteToolPersonalGitHub({
+  workspaceId,
+  onDone,
+}: {
+  workspaceId: string;
+  onDone: (done: boolean) => void;
+}) {
+  const t = useOpenGeniText();
+  const page = usePage();
+  const [opened, setOpened] = useState(false);
+  const answered = useRef(false);
+  const answer = (done: boolean) => {
+    if (answered.current) return;
+    answered.current = true;
+    onDone(done);
+  };
+  const open = () => {
+    page.open(`${page.origin()}${personalGitHubSetupPath(workspaceId)}`);
+    setOpened(true);
+  };
+  return (
+    <Dialog open onOpenChange={(next) => (next ? undefined : answer(false))}>
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-base">{t("siteToolPersonalGitHub.title")}</DialogTitle>
+          <DialogDescription>{t("siteToolPersonalGitHub.description")}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="ghost" className="min-h-11" onClick={() => answer(false)}>
+            {t("siteToolRecover.close")}
+          </Button>
+          {opened ? (
+            <Button type="button" className="min-h-11" autoFocus onClick={() => answer(true)}>
+              {t("siteToolRecover.tryAgain")}
+            </Button>
+          ) : (
+            <Button type="button" className="min-h-11" autoFocus onClick={open}>
+              {t("siteToolPersonalGitHub.open")}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

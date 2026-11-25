@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
-import { AnthropicRequestError, AnthropicStreamInterruptedError } from "@opengeni/runtime";
+import {
+  AnthropicProviderRejection,
+  AnthropicRequestError,
+  AnthropicStreamInterruptedError,
+} from "@opengeni/runtime";
 import { XaiSubscriptionStreamIdleTimeoutError } from "@opengeni/xai-subscription";
 import * as parentWake from "../src/activities/parent-wake";
 import { classifyClaudeProviderError } from "../src/activities/agent-turn/errors";
@@ -35,6 +39,15 @@ afterEach(() => {
 });
 
 const MODEL = "organization-claude-subscription/claude-sonnet-5";
+const subscriptionHttp403 = () =>
+  new AnthropicProviderRejection(
+    "anthropic_permission_denied",
+    403,
+    undefined,
+    undefined,
+    {},
+    true,
+  );
 
 const identity: db.SubscriptionCoreTurnIdentity = {
   accountId: "account-1",
@@ -105,10 +118,18 @@ describe("Claude provider-error classification", () => {
     });
   });
 
-  test("403 is fatal: it never rotates or quarantines the account", () => {
-    expect(classifyClaudeProviderError(anthropic(403, "permission_error"), MODEL)).toEqual({
-      kind: "fatal",
-    });
+  test("only the generic subscription HTTP 403 is an account refusal", () => {
+    expect(
+      classifyClaudeProviderError(new Error("Wrapped", { cause: subscriptionHttp403() }), MODEL),
+    ).toEqual({ kind: "forbidden" });
+    for (const error of [
+      new AnthropicProviderRejection("anthropic_permission_denied", 403),
+      new AnthropicProviderRejection("anthropic_model_access_suspended", 403),
+      new AnthropicProviderRejection("content_policy_violation", 200),
+      anthropic(403, "permission_error"),
+    ]) {
+      expect(classifyClaudeProviderError(error, MODEL)).toBeNull();
+    }
   });
 
   test("other failures, other transports and non-errors are not account refusals", () => {
@@ -528,11 +549,35 @@ describe("Claude refusal settlement on the core", () => {
     expect(recovery).toHaveBeenCalledTimes(1);
   });
 
-  test("a 403 is fatal: nothing recorded, no rotation, no quarantine", async () => {
+  test("a generic subscription HTTP 403 quarantines the connection and re-places the turn", async () => {
+    const runtime = coreRuntime({ refusals: 1 });
+    const recovery = recoveringRecovery();
+    const { deps, releaseCurrent } = failureDeps(
+      subscriptionHttp403(),
+      core({ credentialVersion: 6 }),
+    );
+    expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+    expect(runtime.apply.mock.calls[0]![3]).toMatchObject({
+      kind: "settle",
+      receipt: { kind: "forbidden", evidence: { refreshGeneration: 6 } },
+      health: { kind: "quarantine", reason: "forbidden" },
+    });
+    expect(releaseCurrent).toHaveBeenCalledTimes(1);
+    expect(recovery.mock.calls[0]![2]).toMatchObject({
+      reason: "claude_credential_failover",
+      detail: { failureKind: "forbidden" },
+    });
+    expectNoLegacyClaudeSettlement(recovery);
+  });
+
+  test("a model suspension fails without recording a refusal or rotating the account", async () => {
     const runtime = coreRuntime({ refusals: 1 });
     const recovery = recoveringRecovery();
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
-    const { deps, settle } = failureDeps(anthropic(403, "permission_error"), core());
+    const { deps, settle } = failureDeps(
+      new AnthropicProviderRejection("anthropic_model_access_suspended", 403),
+      core(),
+    );
     expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
     expect(runtime.apply).not.toHaveBeenCalled();
     expect(runtime.count).not.toHaveBeenCalled();

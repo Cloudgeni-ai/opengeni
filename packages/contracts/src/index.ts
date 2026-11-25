@@ -21,6 +21,7 @@ export * from "./claude-cite-tags";
 export * from "./provider-citation-handles";
 export * from "./machine-access";
 export * from "./no-reply";
+export * from "./connection-card-notice";
 import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
 import {
@@ -77,11 +78,14 @@ export * from "./app-shot";
 import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./app-sync";
+export * from "./app-webhook";
 import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
 export * from "./app-assets";
+export * from "./app-server";
 export * from "./site-sql";
 export * from "./app-package";
+export * from "./app-templates";
 export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
@@ -170,7 +174,7 @@ export const HostMcpCreateSelections = /* @__PURE__ */ defineSchema(() =>
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { SessionOrgAgent } from "./organization-agents";
-import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
+import { SECRET_SAVE_TO, VaultFieldName, VaultName, VaultPolicy } from "./vaults";
 import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
@@ -251,6 +255,7 @@ export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
+export * from "./shared-service-connections";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
@@ -1324,6 +1329,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sync_delete",
   "app_sync_run",
   "app_sync_opt_in",
+  "app_webhook_save",
+  "app_webhook_list",
+  "app_webhook_delete",
+  "app_server_runs",
+  "app_server_run",
   "app_files_list",
   "app_files_upload",
   "app_files_delete",
@@ -1343,6 +1353,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sql_reset",
   "app_export",
   "app_install",
+  "app_upgrade",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -4785,6 +4796,34 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
+  const payload = await signedDelegatedAccessTokenPayload(secret, token);
+  if (
+    !payload ||
+    payload.exp < nowSeconds ||
+    payload.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
+  ) {
+    return null;
+  }
+  return payload;
+}
+
+/**
+ * The claims of a delegated access token whose signature, prefix and shape
+ * verify, whatever its expiry. It names who sent a refused token (request
+ * telemetry) and is never authority: only `verifyDelegatedAccessToken` admits
+ * a token.
+ */
+export async function signedDelegatedAccessTokenClaims(
+  secret: string,
+  token: string,
+): Promise<DelegatedAccessTokenPayload | null> {
+  return await signedDelegatedAccessTokenPayload(secret, token);
+}
+
+async function signedDelegatedAccessTokenPayload(
+  secret: string,
+  token: string,
+): Promise<DelegatedAccessTokenPayload | null> {
   const prefix = token.startsWith(delegatedRestrictedAccessTokenPrefix)
     ? delegatedRestrictedAccessTokenPrefix
     : token.startsWith(delegatedServiceAccessTokenPrefix)
@@ -4816,11 +4855,7 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   const payload = DelegatedAccessTokenPayload.safeParse(decoded);
-  if (
-    !payload.success ||
-    payload.data.exp < nowSeconds ||
-    payload.data.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
-  ) {
+  if (!payload.success) {
     return null;
   }
   if (
@@ -7079,7 +7114,9 @@ export type McpCredentialAuthNeededReason =
   | CredentialAuthNeededReason
   | "personal_authority_unavailable"
   | "unsupported_auth"
-  | "resource_scope_unavailable";
+  | "resource_scope_unavailable"
+  /** A shared key's vault item is missing or out of the connection's reach. */
+  | "designated_credential_unavailable";
 
 export type ConnectionCredentialPlacement = {
   carrier: "header" | "query" | "cookie";
@@ -9586,6 +9623,33 @@ export const SetSessionModelRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
 
+export const SessionModelSettings = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject({
+    model: z.string().min(1).max(512),
+    reasoningEffort: ReasoningEffort,
+    latencyMode: LatencyMode,
+  }),
+);
+export type SessionModelSettings = z.infer<typeof SessionModelSettings>;
+
+/** Replace the session defaults, optionally comparing fields from a session read. */
+export const SetSessionModelSettingsRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionModelSettings.extend({
+    expected: SessionModelSettings.partial().optional(),
+    idempotencyKey: primitives.uuid,
+  }),
+);
+export type SetSessionModelSettingsRequest = z.infer<typeof SetSessionModelSettingsRequest>;
+
+export const SetSessionModelSettingsResponse = /* @__PURE__ */ defineSchema(() =>
+  SessionModelSettings.extend({
+    sessionId: primitives.uuid,
+    effectiveFrom: z.literal("future_turns"),
+    releasedCapacityWaitTurnId: primitives.uuid.nullable(),
+  }),
+);
+export type SetSessionModelSettingsResponse = z.infer<typeof SetSessionModelSettingsResponse>;
+
 /**
  * Replace the complete durable session tool policy, or explicitly opt back in
  * to current workspace defaults. MCP servers and individual Opengeni tools
@@ -11255,6 +11319,21 @@ export const SteerSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
      * already-waiting Steer into an immediate one.
      */
     interrupt: primitives.optionalBoolean,
+    /**
+     * Other waiting prompts to Steer with this one. All of them keep their
+     * queue order and reach the agent together, with no extra interruption.
+     * Prompts that already left the queue (this one included) or wait for a
+     * personal machine's owner are skipped; a changed one refuses the command.
+     */
+    together: z
+      .array(
+        z.object({
+          turnId: primitives.uuid,
+          expectedTurnVersion: primitives.positiveInteger,
+        }),
+      )
+      .max(200)
+      .optional(),
   }),
 );
 export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
@@ -11696,8 +11775,12 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * waiter when a later check finds its reset later than the parent was told
  * (the time passed without capacity, or a longer limit binds) or unknown; its
  * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
+ *
+ * 5: new Codex wait notices can name an actionable cause or rate limit. If
+ * the cause changes, a new notice adds the child's waiting-event sequence to
+ * its dedupe key. Previously stored summaries keep their original text.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 5;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -13642,6 +13725,14 @@ export const ScheduledTaskMetadataInput =
     "scheduled task metadata",
   );
 
+/**
+ * Task metadata the server writes when an automation's agent changes while it
+ * has its own chat: that chat stays with the agent it began with, so the next
+ * run starts a new chat with the new agent. The value is `{ sessionId,
+ * agentId, changedAt }`: the previous chat, its agent (null: none) and when.
+ */
+export const SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY = "_opengeniAgentChatChange";
+
 /** A Slack public or private channel ID. Direct messages are not destinations. */
 export const ScheduledTaskSlackChannelId = /* @__PURE__ */ defineSchema(() =>
   primitives.string.regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789"),
@@ -13688,7 +13779,8 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
      * The workspace agent each run's chat is with (an agent's "Starts when"):
      * it runs with that agent's Instructions, Memory and Can use. Checked
      * against the task owner's access when the task is saved and at each
-     * run. Only for a task that starts its own chat.
+     * run. An existing chat must be bound to the agent; the automation's own
+     * chat is replaced when the agent changes.
      */
     agentId: primitives.uuid.optional(),
     bundledSkillIds: BundledSkillSelection.optional(),
@@ -14250,7 +14342,11 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       resolvedFirstPartyMcpPermissions: z.array(Permission),
       /** Agent configuration resolved for generated sessions; absent = legacy. */
       resolvedAgentConfig: ResolvedAgentConfig.optional(),
-      /** Effective instructions from the `agent.instructions` alias, when set. */
+      /**
+       * The generated chat's effective instructions: the `agent.instructions`
+       * alias, followed by the bound agent's Memory guidance when it has
+       * Memory on. The chat is created with exactly these.
+       */
       resolvedAgentInstructions: primitives.nonEmptyString
         .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
         .optional(),
@@ -14488,7 +14584,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`,
  * `session_usage_limit` (an existing-session task reached its per-task usage
  * limit; admitted again once a person raises or clears it)
- * (transient). Readers must tolerate new reasons.
+ * (transient), and for event runs `chain_limit` (too deep a chain of
+ * automations) and `duplicate_agent_run` (another automation of the same
+ * agent took the delivery). Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
@@ -14918,7 +15016,18 @@ export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
 
 /** Create a sync. */
 export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
-  AppSyncDefinition.extend({ status: ScheduledTaskStatus.default("active") }),
+  AppSyncDefinition.extend({
+    /** Optional with a Site SQL `target`: it defaults to the table's name. */
+    collection: AppSyncSettings.shape.collection.optional(),
+    status: ScheduledTaskStatus.default("active"),
+    /**
+     * Shared syncs: the owner's account to run on (an `id` from their
+     * accounts of the connector). Omitted, it runs on the route it was saved
+     * with, else the owner's first own account. Not part of a definition, so
+     * packages stay portable.
+     */
+    account: z.string().min(1).max(256).optional(),
+  }),
 );
 export type AppSyncCreateRequest = z.input<typeof AppSyncCreateRequest>;
 
@@ -14937,6 +15046,11 @@ export const AppSyncUpdateRequest = /* @__PURE__ */ defineSchema(() =>
       schedule: ScheduledTaskScheduleSpec,
       events: ScheduledTaskEventsInput,
       status: ScheduledTaskStatus,
+      target: AppSyncSettings.shape.target.unwrap().nullable(),
+      paging: AppSyncSettings.shape.paging.unwrap().nullable(),
+      maxRecords: AppSyncSettings.shape.maxRecords.unwrap().nullable(),
+      removeMissing: AppSyncSettings.shape.removeMissing.unwrap(),
+      account: z.string().min(1).max(256),
     })
     .partial(),
 );
@@ -14956,6 +15070,12 @@ export const AppSync = /* @__PURE__ */ defineSchema(() =>
     recordsPath: z.string().nullable(),
     key: z.string(),
     fields: z.array(z.string()).nullable(),
+    target: AppSyncSettings.shape.target.unwrap().nullable().optional(),
+    paging: AppSyncSettings.shape.paging.unwrap().nullable().optional(),
+    maxRecords: z.number().int().nullable().optional(),
+    removeMissing: z.boolean().optional(),
+    /** Shared syncs: the owner's chosen account, when they chose one. */
+    account: z.string().nullable().optional(),
     schedule: ScheduledTaskScheduleSpec,
     events: ScheduledTaskEvents.nullable(),
     ownerSubjectId: z.string(),
@@ -15039,10 +15159,12 @@ export const UpdateScheduledTaskRequest =
             prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
             model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
             reasoningEffort: ReasoningEffort.optional(),
+            /** The agent each run's chat is with; null runs without one. */
+            agentId: primitives.uuid.nullable().optional(),
           })
           .strict()
           .refine((patch) => Object.keys(patch).length > 0, {
-            message: "agentConfigPatch requires prompt, model or reasoningEffort",
+            message: "agentConfigPatch requires prompt, model, reasoningEffort or agentId",
           })
           .optional(),
         status: ScheduledTaskStatus.optional(),
@@ -15437,6 +15559,14 @@ export const ConnectionKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["oauth2", "api_key", "app_install", "delegated"]),
 );
 export type ConnectionKind = z.infer<typeof ConnectionKind>;
+
+/** Safe connection diagnostics written by MCP setup, also shown in connection settings. */
+export const MCP_DESTINATION_CONNECTION_ERRORS = {
+  blocked:
+    "This deployment does not allow the connector’s address. Use an allowed address, then reconnect.",
+  unresolvable:
+    "This deployment could not find the connector’s address. Check that the address is reachable from this deployment, then reconnect.",
+} as const;
 
 export const ConnectionStatus = /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "needs_reauth", "revoked", "error"]),
@@ -16319,6 +16449,12 @@ export const ListInstalledSkillsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ skills: z.array(InstalledSkillSummary).max(1000) }).strict(),
 );
 export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
+
+/** GET /v1/workspaces/:workspaceId/skills/library: reviewed library skills, `enabled` once added. */
+export const ListLibrarySkillsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ skills: z.array(CapabilityCatalogItem).max(1000) }).strict(),
+);
+export type ListLibrarySkillsResponse = z.infer<typeof ListLibrarySkillsResponse>;
 
 export const SkillUninstallPreview = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -17602,6 +17738,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * Absent when false and on older servers; treat absence as unhandled.
      */
     failureHandled: primitives.optionalBoolean,
+    /**
+     * True when this `requires_action` session waits only on questions it put
+     * to the agent that started it, which still has them, so it does not wait
+     * on a person. Absent when false and on older servers.
+     */
+    questionWithAgent: primitives.optionalBoolean,
     /** Personal power-user label for work the member intends to continue. */
     activelyWorking: primitives.boolean.default(false),
     /** Optimistic revision for unread/actively-working state. */
@@ -17637,6 +17779,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         runningDescendants: primitives.nonnegativeInteger,
         queuedDescendants: primitives.nonnegativeInteger,
         waitingDescendants: z.number().int().nonnegative().optional(),
+        /** Descendants waiting on a person (not those whose questions are with their agent). */
         attentionDescendants: primitives.nonnegativeInteger,
         pausedDescendants: primitives.nonnegativeInteger,
         /**
@@ -17670,6 +17813,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * null otherwise and omitted by older servers or detail reads.
      */
     requiresActionSince: z.string().nullable().optional(),
+    /**
+     * When the agent started waiting on a connection card (connect, reconnect
+     * or more access) in this chat that is still open; null when none is.
+     * While the session is idle it needs the person, as an approval does.
+     * Omitted by older servers.
+     */
+    awaitingConnectionSince: z.string().nullable().optional(),
     createdAt: primitives.string,
     updatedAt: primitives.string,
   }),
@@ -17838,6 +17988,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinVersion: true,
     unread: true,
     failureHandled: true,
+    questionWithAgent: true,
     activelyWorking: true,
     attentionVersion: true,
     archived: true,
@@ -17847,6 +17998,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
+    awaitingConnectionSince: true,
     admissionBlock: true,
     createdAt: true,
     updatedAt: true,
@@ -21978,6 +22130,8 @@ export const SessionHumanInputRequest = /* @__PURE__ */ defineSkillContractSchem
      */
     origin: z.enum(["tool_call", "secret_use_approval"]).optional(),
     questions: z.array(HumanInputQuestion).min(1).max(20),
+    /** Allowed destinations for a pending secret answer under this reader's authority. */
+    secretSaveTargets: z.array(SECRET_SAVE_TO).optional(),
     allowSkip: primitives.boolean,
     response: HumanInputResponse.nullable(),
     respondedBy: z.string().max(1024).nullable(),
@@ -22461,6 +22615,13 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       // safety switch). Sign-in for existing accounts stays available.
       newSignupsEnabled: primitives.boolean.default(true),
       signupChallengeSiteKey: z.string().optional(),
+      /** Email sign-in also needs the challenge (same site key); omitted means no. */
+      signInChallengeRequired: primitives.boolean.optional(),
+      /** Heedeo signup scoring's browser script; present only while scoring is on. */
+      heedeo: z
+        .object({ publishableKey: z.string(), scriptUrl: z.string() })
+        .optional()
+        .catch(undefined),
       // Sign in with a passkey, and add passkeys to an account in Security.
       passkeySignIn: primitives.boolean.default(false),
       // Create an account with only a passkey: no email address or password.
@@ -23737,7 +23898,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("deployment"),
-          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+          mechanism: z.enum(["api_key", "azure_ad_bearer", "aws_iam"]),
         })
         .strict(),
       z
@@ -24325,6 +24486,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Console agents (organization agents) are on for the caller's organization.
     // Absent on older servers and when off.
     orgAgents: primitives.optionalBoolean,
+    // Whether this deployment can export an editable artifact as an Office
+    // file (it runs the artifact materializer). Absent on older servers:
+    // clients then treat it as unknown.
+    artifactExport: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z

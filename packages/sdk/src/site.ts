@@ -30,8 +30,11 @@ import {
   type OpenGeniSiteData,
   type OpenGeniSiteDataChange,
   type OpenGeniSiteFiles,
+  type OpenGeniSiteNotifyInput,
+  type OpenGeniSiteNotifyResult,
 } from "./site-data";
 import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
+import { createOpenGeniSiteServer, type OpenGeniSiteServer } from "./site-server";
 import { createOpenGeniSiteAi, type OpenGeniSiteAi } from "./site-ai";
 import {
   isOpenGeniSiteConnectionStatus,
@@ -41,6 +44,7 @@ import {
 export {
   isOpenGeniSiteConnectionStatus,
   siteConnectCardDismissals,
+  siteConnectCardItemActionable,
   siteConnectCardLabel,
   siteConnectionStatus,
   SITE_CONNECT_CARD_DISMISSED_PREFIX,
@@ -55,6 +59,12 @@ export type {
   OpenGeniSiteAiWait,
 } from "./site-ai";
 export {
+  OpenGeniSiteServerError,
+  type OpenGeniSiteServer,
+  type OpenGeniSiteServerErrorCode,
+  type OpenGeniSiteServerInit,
+} from "./site-server";
+export {
   OpenGeniSiteSqlError,
   type OpenGeniSiteSql,
   type OpenGeniSiteSqlErrorCode,
@@ -65,6 +75,7 @@ export {
   OpenGeniSiteDataError,
   SITE_DATA_PATH_PREFIX,
   type OpenGeniAppSyncStatus,
+  type OpenGeniAppSyncs,
   type OpenGeniSiteData,
   type OpenGeniSiteDataChange,
   type OpenGeniSiteDataCollection,
@@ -79,6 +90,8 @@ export {
   type OpenGeniSiteDataWriteResult,
   type OpenGeniSiteFile,
   type OpenGeniSiteFiles,
+  type OpenGeniSiteNotifyInput,
+  type OpenGeniSiteNotifyResult,
 } from "./site-data";
 export {
   isSiteHttpRequest,
@@ -130,6 +143,12 @@ export const OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD = "data.watch" as const;
 export const OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD = "connections.status" as const;
 export const OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD = "connections.connect" as const;
 export const OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD = "connections.show" as const;
+/**
+ * Bridge request method that asks the host to confirm joining (or leaving) a
+ * personal data sync with the viewer (advertised by `syncs: 1`). The host
+ * shows its own confirmation; the App only hears the outcome.
+ */
+export const OPENGENI_SITE_BRIDGE_SYNCS_OPT_IN_METHOD = "syncs.optIn" as const;
 /** Host-to-Site notification on a connected port, such as a location change. */
 export const OPENGENI_SITE_BRIDGE_EVENT = "opengeni.site.event" as const;
 
@@ -285,6 +304,8 @@ export type OpenGeniSiteBridgeReadyMessage = {
   dataChanges?: 1;
   /** The host shows the platform's connect card and answers the `connections.*` methods. */
   connections?: 1;
+  /** The host confirms personal sync opt-ins with the viewer (`syncs.optIn`). */
+  syncs?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -324,6 +345,10 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD; payload: { key?: string } }
   | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD }
+  | {
+      method: typeof OPENGENI_SITE_BRIDGE_SYNCS_OPT_IN_METHOD;
+      payload: { syncId: string; optedIn: boolean };
+    }
   | {
       method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
       payload: { to: string; replace?: boolean };
@@ -369,7 +394,8 @@ export type OpenGeniSiteBridgeResponseMessage = {
         | { watching: boolean }
         | OpenGeniSiteConnectionStatus
         | { connected: boolean }
-        | { shown: boolean };
+        | { shown: boolean }
+        | { syncId: string; optedIn: boolean };
     }
   | {
       ok: false;
@@ -402,6 +428,12 @@ export type OpenGeniSiteClient = {
    * hosts bound to a published Site, like `data`; the owner turns it on.
    */
   readonly sql: OpenGeniSiteSql;
+  /**
+   * The app's own server code, when its version has some
+   * (`await site.server.fetch("/issues")` resolves with a `Response`). It runs
+   * as the app on the workspace's shared connections, never as the viewer.
+   */
+  readonly server: OpenGeniSiteServer;
   /**
    * The person viewing this Site, resolved once from the host and cached for
    * the life of the client (`await site.viewer`). In the console this is the
@@ -471,6 +503,16 @@ export type OpenGeniSiteClient = {
     /** Call `listener` when what the viewer has connected may have changed. Returns a stop function. */
     onChange(listener: () => void): () => void;
   };
+  /**
+   * Send a normal Opengeni notification (inbox and phone, following each
+   * person's settings) that opens this app at `path`. Signed-in workspace
+   * members only. To the viewer by default; to another member (`to`: email
+   * or subject id) who can open the app and allows other members to notify
+   * them; to `"workspace"` (everyone else who can open the app and allows
+   * it) only for the app's managers. Rate limited per sender and app; the
+   * same `key` updates the notification in place.
+   */
+  notify(input: OpenGeniSiteNotifyInput): Promise<OpenGeniSiteNotifyResult>;
   readonly auth: {
     /**
      * Ask the host to sign the viewer in. On a published Site the host
@@ -541,8 +583,13 @@ export function createOpenGeniSiteClient(
     (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
     () => transport.siteDataSupported(),
     (listener) => transport.subscribeDataChanges(listener),
+    (syncId, optedIn) => transport.syncsOptIn(syncId, optedIn),
   );
   const siteSql = createOpenGeniSiteSql(
+    (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
+    () => transport.siteDataSupported(),
+  );
+  const siteServer = createOpenGeniSiteServer(
     (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
     () => transport.siteDataSupported(),
   );
@@ -569,6 +616,7 @@ export function createOpenGeniSiteClient(
     data: siteData.data,
     files: siteData.files,
     sql: siteSql,
+    server: siteServer,
     get viewer() {
       if (!viewer) {
         const pending = transport.viewer();
@@ -596,6 +644,7 @@ export function createOpenGeniSiteClient(
       showCard: () => transport.connectionsShow(),
       onChange: onReadinessChange,
     },
+    notify: siteData.notify,
     auth: { signIn: () => transport.signIn() },
     close: () => transport.close(),
   };
@@ -611,7 +660,15 @@ type SiteLocationTransport = {
   connectionsStatus(): Promise<OpenGeniSiteConnectionStatus>;
   connectionsConnect(key?: string): Promise<{ connected: boolean }>;
   connectionsShow(): Promise<{ shown: boolean }>;
+  syncsOptIn(syncId: string, optedIn: boolean): Promise<{ syncId: string; optedIn: boolean }>;
 };
+
+function syncsOptInUnsupported(): OpenGeniSiteBridgeError {
+  return new OpenGeniSiteBridgeError(
+    "syncs_unsupported",
+    "This app host can't ask the viewer to join a sync; they can join it in Opengeni",
+  );
+}
 
 function readinessUnsupported(): OpenGeniSiteBridgeError {
   return new OpenGeniSiteBridgeError(
@@ -726,6 +783,11 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport, SiteL
 
   async connectionsShow(): Promise<{ shown: boolean }> {
     return { shown: false };
+  }
+
+  /** A local preview has no published Site, so no syncs to join. */
+  async syncsOptIn(): Promise<{ syncId: string; optedIn: boolean }> {
+    throw syncsOptInUnsupported();
   }
 
   /** A local preview has no published Site, so no data change hints. */
@@ -925,6 +987,12 @@ export function isOpenGeniSiteBridgeRequestMessage(
       isRecord(value.payload) &&
       (value.payload.key === undefined || typeof value.payload.key === "string")
     );
+  if (value.method === OPENGENI_SITE_BRIDGE_SYNCS_OPT_IN_METHOD)
+    return (
+      isRecord(value.payload) &&
+      typeof value.payload.syncId === "string" &&
+      typeof value.payload.optedIn === "boolean"
+    );
   if (value.method === OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD)
     return isRecord(value.payload) && typeof value.payload.to === "string";
   if (value.method === "readiness")
@@ -1025,6 +1093,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
   private toolReadiness = false;
   private dataChanges = false;
   private connections = false;
+  private syncs = false;
   private dataWatchSent = false;
   private readonly locationListeners = new Set<(location: OpenGeniSiteLocationValue) => void>();
   private readonly readinessListeners = new Set<() => void>();
@@ -1170,6 +1239,23 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
     return { shown: isRecord(value) && value.shown === true };
   }
 
+  async syncsOptIn(
+    syncId: string,
+    optedIn: boolean,
+  ): Promise<{ syncId: string; optedIn: boolean }> {
+    await this.connect();
+    if (!this.syncs) throw syncsOptInUnsupported();
+    // The viewer decides in the host's confirmation, so no short timeout.
+    const value = await this.request(
+      {
+        method: OPENGENI_SITE_BRIDGE_SYNCS_OPT_IN_METHOD,
+        payload: { syncId: String(syncId), optedIn: optedIn === true },
+      },
+      { timeoutMs: 30 * 60_000 },
+    );
+    return { syncId: String(syncId), optedIn: isRecord(value) && value.optedIn === true };
+  }
+
   subscribeToolReadiness(listener: () => void): () => void {
     this.readinessListeners.add(listener);
     // Connect so the host's events reach this client (see subscribeLocation).
@@ -1313,6 +1399,10 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         }
       | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD }
       | {
+          method: typeof OPENGENI_SITE_BRIDGE_SYNCS_OPT_IN_METHOD;
+          payload: { syncId: string; optedIn: boolean };
+        }
+      | {
           method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
           payload: { to: string; replace?: boolean };
         },
@@ -1423,6 +1513,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         this.toolReadiness = message.toolReadiness === 1;
         this.dataChanges = message.dataChanges === 1;
         this.connections = message.connections === 1;
+        this.syncs = message.syncs === 1;
         if (this.locationSupported || this.toolReadiness || this.dataChanges)
           channel.port1.addEventListener("message", (hostEvent: MessageEvent<unknown>) => {
             const data = hostEvent.data;

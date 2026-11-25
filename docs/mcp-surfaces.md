@@ -10,7 +10,7 @@ page exists so you pick the right one in one read.
 | **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing Opengeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | Opengeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval choices apply uniformly; capable clients receive durable pending handles for review | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
-| **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview. Saved data uses `site.data`/`site.files` over the same bridge, not tools; agents manage it with the first-party `app_data_*` and `app_files_*` tools ([Site Data](site-data.md)). The optional per-Site database is reached only through named queries (`site.sql.run`); owners manage its schema, queries and data with the `app_sql_*` tools (`app_sql_inspect`, `app_sql_enable`, `app_sql_migrate`, `app_sql_define_query`, `app_sql_query`, `app_sql_run`, `app_sql_execute`, `app_sql_export`, `app_sql_import`, `app_sql_reset`; [Site SQL](site-data.md#site-sql-optional-cloudflare-storage)). Agents move an App to another workspace with `app_export` and `app_install` ([App packages](app-packages.md)). Site HTTP is limited to the `SITE_OPERATIONS` allowlist. Agents publish Sites to their own hostname with `app_publication_get`, `app_publication_update`, `app_publication_apply_fix` (applies a readiness warning's safe fix) and `app_hostname_check`; on a published host the Sites gateway serves the same bridge over site-runtime ([Published Sites](published-sites.md)) |
+| **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview. Saved data uses `site.data`/`site.files` over the same bridge, not tools; agents manage it with the first-party `app_data_*` and `app_files_*` tools ([Site Data](site-data.md)). The optional per-Site database is reached only through named queries (`site.sql.run`); owners manage its schema, queries and data with the `app_sql_*` tools (`app_sql_inspect`, `app_sql_enable`, `app_sql_migrate`, `app_sql_define_query`, `app_sql_query`, `app_sql_run`, `app_sql_execute`, `app_sql_export`, `app_sql_import`, `app_sql_reset`; [Site SQL](site-data.md#site-sql-optional-cloudflare-storage)). Agents move an App to another workspace with `app_export` and `app_install`, and upgrade one from a newer package with `app_upgrade` ([App packages](app-packages.md)). Site HTTP is limited to the `SITE_OPERATIONS` allowlist. Agents publish Sites to their own hostname with `app_publication_get`, `app_publication_update`, `app_publication_apply_fix` (applies a readiness warning's safe fix) and `app_hostname_check`; on a published host the Sites gateway serves the same bridge over site-runtime ([Published Sites](published-sites.md)) |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Dedicated compatibility endpoint; the same Files implementation is also included in the unified gateway | Caller's bearer with `files:read` | A narrowly configured client needs only file materialization |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Hosted Slack MCP supports personal or workspace ownership; Gmail, Google Drive and Google Calendar connections are personal only. Personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
@@ -152,8 +152,11 @@ connection's access setting; none adds authority.
 | `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Find, read and control chats |
 | `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; `workspace_use` sets the connection's default workspace |
 | `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change app data ([App data](site-data.md)); `app_query` runs a named query when given `sqlQuery` |
-| `tools_search`, `tool_call` | Search and call the workspace's connected tools; results show which tools need approval |
-| `skills_sync`, `skills_list` | Upload local Skill folders (`direction: "upload"`) or pull the workspace's (`direction: "pull"`) |
+| `app_save` | Creates an app from `html`, `files` (a multi-file build, uploaded for the agent) or `uploadId` (`prepareUpload` first), saves a new version of one the person manages (`appId`), rolls back (`rollbackTo`, a version number) and defines its `collections`. A new app is Only me. Returns `appId`, `version` and `link` |
+| `app_publish` | Who can open an app: `only_me`, `workspace` or `public` (its own `hostname`), through the publication routes and their readiness check; `fixes` applies the warnings' safe fixes |
+| `file_save` | Saves a local file as a workspace file (Only me by default) and returns its `link`: inline up to 4 MB (`content` or `base64`), or `sizeBytes` for a `putUrl`, then `uploadId` |
+| `tools_search`, `tool_call` | Search and call the workspace's connected tools; each result's `approval` (`none`, `human`, `blocked`) and `approvalSource` (`tool`, or `policy` when the person's or workspace's tool settings decide) say whether a call needs approval |
+| `skills_sync`, `skills_list` | Upload local Skill folders (`direction: "upload"`), pull the workspace's (`direction: "pull"`), or sync every Skill folder of a GitHub repository (`direction: "repository"`, `repository`: a repository or folder URL) |
 | `knowledge_search`, `knowledge_get`, `knowledge_save` | Search, read and save Knowledge |
 
 `sites_list`, `site_describe`, `site_query`, `site_write` and
@@ -163,14 +166,27 @@ connection's access setting; none adds authority.
   workspace (set with `workspace_use`, or `defaultWorkspaceId` on the
   connection), else the only workspace the connection reaches. With several
   and no default, the error lists them.
-- **Retries.** `delegate`, `session_send`, `knowledge_save` and
-  `skills_sync` derive their idempotency key from the caller, workspace and
+- **Retries.** `delegate`, `session_send`, `knowledge_save`, `skills_sync`
+  and `app_save` derive their idempotency key from the caller, workspace and
   input when the agent sends none, so retrying the same call in the same
   clock hour doesn't start the same work twice (the returned
   `idempotencyKey` makes it exact across hours; a new key sends the same
-  text again on purpose). `tool_call` repeats safely with the same
+  text again on purpose). `app_save` keys a new version on the version it
+  builds on, so saving A, B, then A again makes three versions; a retry
+  whose first try already saved is recognised and answered as `replayed`.
+  A key the agent passes and reuses for different content is refused, and
+  nothing is saved. `file_save` returns the person's own file a try saved in
+  the last hour with the same name and content. `tool_call` repeats safely with the same
   `operationId`. Errors carry the key, `retrySafe` (repeating with it
   doesn't duplicate work) and `retryable` (whether repeating could help).
+- **Uploads.** For a multi-file `app_save` and an inline `file_save` the
+  server writes the bytes to the storage URL it prepared. Those URLs are
+  signed for the public storage address; where the server can't reach it
+  (some self-hosted storage), the error says to upload the bytes yourself
+  (`prepareUpload`, or `file_save` with `sizeBytes`).
+- **Sharing.** `app_publish` reads the app first and changes nothing when
+  it can't. `only_me` narrows visibility before taking the app off the web;
+  `public` restores the earlier visibility when the publication fails.
 - **Visibility.** A delegated chat uses the person's default chat visibility;
   Only me falls back to the workspace when the workspace doesn't allow it.
   Stopping a local wait only stops tracking; `session_pause` stops the chat.
@@ -201,26 +217,42 @@ connection's access setting; none adds authority.
   `unchanged`, `pending_review`, `invalid` with the YAML or frontmatter
   error, `conflict`, `failed`). Approving, rejecting or restoring a Skill
   revision is the person's review, so connected agents are refused those.
-  Pulling returns each Skill's files. Syncing straight from a Git repository
-  isn't supported; the agent reads the folders locally.
+  Pulling returns each Skill's files. `direction: "repository"` reads every
+  folder with a `SKILL.md` in a public GitHub repository (or one folder of
+  it, `/tree/<ref>/<path>`) at one commit, at most 50, and saves them the
+  same way, with "Synced from owner/repo@commit" as the change reason; the
+  result names the commit and each Skill's `path`, and lists folders it
+  couldn't read. It reads at most 40 files per sync: GitHub's public request
+  limit (about 60 an hour) is per server address and shared by everyone on
+  it, so folders past that are listed as skipped (sync a folder URL, or
+  upload). Private repositories are synced with `upload` from a local
+  checkout; self-hosted servers need outbound access to `api.github.com`.
 - **Rate limits.** Each connection (or personal key) may make 120 calls in a
   burst refilling at 2 per second, and 20 `delegate` calls refilling at one
   per 30 seconds (chats started through the generic action tools count only
   toward the first). Over the limit a call returns an error saying how many seconds to wait;
-  nothing ran, so the retry is safe. The limits are per API process.
+  nothing ran, so the retry is safe. The limits are shared by every API
+  process: each connection's buckets are kept in Postgres
+  (`mcp_connection_rate_limits`, migration `1530`), so more replicas don't
+  raise them. While Postgres can't be reached, each process counts on its
+  own.
 - **Not yet.** MCP Tasks (long-running calls) and MCP event notifications are
   not supported; use `wait_for`.
 
 `npx opengeni connect` adds the server to Claude Code, Codex, Cursor and VS
 Code with Copilot on the computer, and installs a short `opengeni` skill
-for each ([setup guide](../docs-site/guides/connect-coding-agents.mdx)).
+for each ([setup guide](../docs-site/guides/connect-coding-agents.mdx), which
+also gives the hand setup for each agent). The unscoped `opengeni` package is
+published best-effort with stable releases (`scripts/publish-unscoped-first.ts`)
+and never with canaries, so it can be missing from npm; the guide doesn't
+depend on it.
 Migration `1516` (rolling) adds the per-connection settings table
 `organization_mcp_connection_settings` and the Skill save that follows Agent
 learning.
 
 When self-hosted, sign-in needs `OPENGENI_PUBLIC_BASE_URL` set to the public
-origin (approval links use it too), the rate limits count per API replica,
-and `npx opengeni connect --base-url <origin>` points the agents at it.
+origin (approval links use it too), the rate limits are shared across API
+replicas through the deployment's Postgres, and `npx opengeni connect --base-url <origin>` points the agents at it.
 
 #### Auto-connect (Enterprise-Managed Authorization)
 
@@ -660,6 +692,8 @@ A project has a chat's two audiences (migration 1161). Shared projects are seen 
 
 For lossless scheduled-task model edits, use
 `scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
+The same patch changes the agent each run's chat is with (`agentName` or
+`agentId`; `agentId: null` removes it).
 The read tool's bounded projection is not full replacement input. Existing
 sessions keep their own model; see [scheduled-task update semantics](scheduled-task-access.md).
 
@@ -927,6 +961,32 @@ Ambiguous unions describe alternative corrections rather than presenting every
 branch's requirements as cumulative. Additional native contract refinements
 retain their preflight messages so cross-field failures explain the required
 relationship. Downstream provider and storage exceptions are separate failures.
+
+#### Reporting rejected arguments from an MCP server
+
+If a `tools/call` reaches your server but it refuses the caller's arguments
+before doing any work, return an MCP tool result with `isError: true` and
+the boolean `true` at `_meta["opengeni/argumentRejected"]`. This works for any
+MCP server; it needs no deployment configuration. Keep the explanation in
+the normal `content` field so the caller knows what to correct:
+
+```json
+{
+  "isError": true,
+  "content": [{ "type": "text", "text": "Pass exactly one of `start` or `cursor`." }],
+  "_meta": { "opengeni/argumentRejected": true }
+}
+```
+
+An external server's JSON-RPC error `-32602` (Invalid params) in response to
+`tools/call` also counts as `outcome="rejected"`. A client-generated validation
+error is not the same as a server response. Either signal only changes
+metrics: it does not change the result, protocol error, or retry behavior.
+The failure-ratio alert excludes rejections from both the failure count and
+the total. An unmarked `isError` result remains `provider_declared_error`.
+Do not use the mark for downstream failures or when the outcome is unknown.
+
+#### Failure diagnostics and Codemode receipts
 
 Unexpected failures in `session_create`, `session_queue_message`, and
 `session_steer` retain a bounded `error.diagnostic` in the ordinary failed-tool

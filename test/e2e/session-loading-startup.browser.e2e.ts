@@ -9,6 +9,7 @@ import { freePort } from "@opengeni/testing/compose";
 import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION, type BrowserSession } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
+import { hideWorkspace, openDockTab } from "./dock";
 
 const repo = new URL("../..", import.meta.url).pathname;
 const output =
@@ -795,6 +796,75 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
 }
 
 for (const width of [1280, 390]) {
+  if (width === 1280) {
+    test("a cold opening fills a tall conversation viewport and follows old search links", async () => {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 1600 } });
+      const page = await context.newPage();
+      const state = fixtures();
+      state.paginatedHistory = true;
+      state.events = [
+        ...Array.from({ length: 60 }, (_, index) => ({
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId: crypto.randomUUID(),
+          sequence: index + 1,
+          type: "user.message",
+          payload: { text: `Short question ${index + 1}`, resources: [] },
+          occurredAt: state.session.createdAt,
+        })),
+        // Activity that is present on the event page but draws no chat row.
+        ...Array.from({ length: 31 }, (_, index) => ({
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId: null,
+          sequence: 61 + index,
+          type: "session.title_set",
+          payload: { title: `Title ${index + 1}` },
+          occurredAt: state.session.createdAt,
+        })),
+      ];
+      state.session.lastSequence = 91;
+      for (const deferred of Object.values(state.gates)) deferred.release();
+      const path = `${base}/workspaces/${workspaceId}/sessions/${sessionId}`;
+      const scroller = page.locator("[data-og-timeline-scroller]");
+      try {
+        await installApi(page, state);
+        const older = page.waitForRequest(
+          (request) => {
+            const url = new URL(request.url());
+            return url.pathname.endsWith("/events") && url.searchParams.get("before") === "60";
+          },
+          { timeout: 10_000 },
+        );
+        await page.goto(path);
+        await older;
+        await page.getByText("Short question 59", { exact: true }).waitFor();
+        await page.waitForFunction(() => {
+          const root = document.querySelector("[data-og-timeline-scroller]");
+          return root && root.scrollHeight - root.clientHeight > 1;
+        });
+        assert.equal(await scroller.getAttribute("data-og-bottom-follow"), "true");
+        assert.equal(await scroller.getByText("Short question 4", { exact: true }).count(), 0);
+
+        await page.goto(`${path}?find=Short+question+4&matchSequence=4&matchOffset=0`);
+        const hit = scroller.locator('mark[data-og-search-sequence="4"]');
+        await hit.waitFor();
+        assert.equal(await hit.textContent(), "Short question 4");
+        await page.waitForFunction(() => {
+          const root = document.querySelector("[data-og-timeline-scroller]");
+          const match = root?.querySelector('mark[data-og-search-sequence="4"]');
+          if (!root || !match) return false;
+          const box = match.getBoundingClientRect();
+          const viewport = root.getBoundingClientRect();
+          return box.height > 0 && box.top >= viewport.top && box.bottom <= viewport.bottom;
+        });
+      } finally {
+        await context.close();
+      }
+    }, 60_000);
+  }
   test(`production refresh and truthful startup at ${width}px`, async () => {
     const context = await browser.newContext({
       viewport: { width, height: 900 },
@@ -1145,6 +1215,14 @@ for (const width of [1280, 390]) {
           state.gates.stream.release();
         } else await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
         await transcript.getByText("History question 5000", { exact: true }).waitFor();
+        // The first paint lands at the tip without mounting older turns.
+        // The search/older-page paths below must still reach them.
+        if (origin === "existing") {
+          assert.equal(
+            await transcript.getByText("History question 4900", { exact: true }).count(),
+            0,
+          );
+        }
         if (origin === "created") {
           // Ctrl/Cmd+F opens Find at every width (phones keep the button in "…").
           await page.keyboard.press("Control+f");
@@ -1518,16 +1596,12 @@ for (const width of [1280, 390]) {
     const openFiles = async () => {
       const open = page.getByRole("button", { name: "Open workspace", exact: true });
       if (await open.isVisible()) await open.click();
-      await page.getByRole("tab", { name: "Files", exact: true }).click();
+      await openDockTab(page, "Files");
     };
     const showChat = async () => {
       // A phone restores the dock as an overlay; close it before editing chat.
       // Its inert/aria-hidden primary pane is deliberately absent from role queries.
-      if (width < 1024)
-        await page
-          .locator("[data-dock-chrome]")
-          .getByRole("button", { name: "Hide workspace", exact: true })
-          .click();
+      if (width < 1024) await hideWorkspace(page);
       await input.waitFor();
     };
     try {
@@ -1556,10 +1630,7 @@ for (const width of [1280, 390]) {
         );
         await page.screenshot({ path: `${output}/${width}-files-load-error-${theme}.png` });
       }
-      await page
-        .locator("[data-dock-chrome]")
-        .getByRole("button", { name: "Hide workspace", exact: true })
-        .click();
+      await hideWorkspace(page);
       assert.equal(await input.inputValue(), "Draft survives optional Files failure");
       await input.fill("Still editable after Files failed");
       assert.equal(await input.inputValue(), "Still editable after Files failed");
@@ -1793,7 +1864,7 @@ test("a mounted tab refreshes a changed deployment while retaining its URL, draf
     const input = page.getByRole("textbox", { name: "Message the agent" });
     await input.waitFor();
     await page.getByRole("button", { name: "Open workspace", exact: true }).click();
-    await page.getByRole("tab", { name: "Browser", exact: true }).click();
+    await openDockTab(page, "Browser");
     await page.getByText("Retained browser", { exact: true }).first().waitFor();
     assert.equal(documents, 1);
     assert(browserReads > 0);
@@ -1819,7 +1890,11 @@ test("a mounted tab refreshes a changed deployment while retaining its URL, draf
     await page.screenshot({ path: `${output}/deployment-refresh-draft-protected.png` });
     await input.fill("");
     await page.clock.runFor(1_000);
-    await page.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
+    await page
+      .locator("header")
+      .getByRole("button", { name: "More session actions", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
     await pin.entered;
     const duringPin = page.waitForResponse((response) =>
       response.url().endsWith("/v1/config/client"),
@@ -1980,20 +2055,12 @@ for (const [mismatch, width] of [
       await page.screenshot({
         path: `${output}/contract-${mismatch}-${width}-notice-controls.png`,
       });
-      // Phones pin from the header's "…" menu; wider headers keep the button.
-      const phone = width < 640;
+      // Pin lives in the header's "…" menu at every width.
       const moreButton = page
         .locator("header")
         .getByRole("button", { name: "More session actions", exact: true });
-      if (phone) {
-        await moreButton.click();
-        await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
-      } else {
-        await page
-          .locator("header")
-          .getByRole("button", { name: "Pin session", exact: true })
-          .click();
-      }
+      await moreButton.click();
+      await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
       await pin.entered;
       assert.deepEqual(pinWrites, [true], "A real pointer click must reach the save exactly once");
       await input.fill("");
@@ -2012,14 +2079,10 @@ for (const [mismatch, width] of [
       pin.release();
       await pinned;
       await page.clock.runFor(1_000);
-      const unpinButton = phone
-        ? page.getByRole("menuitem", { name: "Unpin", exact: true })
-        : page.locator("header").getByRole("button", { name: "Unpin session", exact: true });
-      if (phone) {
-        await moreButton.focus();
-        await moreButton.press("Enter");
-        await unpinButton.waitFor();
-      }
+      const unpinButton = page.getByRole("menuitem", { name: "Unpin", exact: true });
+      await moreButton.focus();
+      await moreButton.press("Enter");
+      await unpinButton.waitFor();
       await unpinButton.focus();
       const unpinned = page.waitForResponse((response) =>
         response.url().endsWith(`/${sessionId}/pin`),

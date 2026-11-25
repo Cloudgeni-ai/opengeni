@@ -1052,6 +1052,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createAppWebhook",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks",
+    "request": [
+      "AppWebhookCreateRequest"
+    ],
+    "response": [
+      "AppWebhookSaveResponse"
+    ],
+    "secretFields": [
+      "response.secret"
+    ]
+  },
+  {
     "id": "createAutomationTemplate",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/automation-templates",
@@ -1954,6 +1968,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteAppSync",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteAppWebhook",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks/:webhookId",
     "request": [],
     "response": []
   },
@@ -3579,6 +3600,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getAppServerStatus",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/status",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "getAppSyncOptInReview",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/opt-in",
+    "request": [],
+    "response": [
+      "AppSyncOptInReview"
+    ]
+  },
+  {
     "id": "getAppSyncStatus",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/syncs",
@@ -4703,6 +4740,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionPullRequest",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links/:linkId/pull-request",
+    "request": [],
+    "query": [
+      "fresh"
+    ],
+    "response": [],
+    "permission": "sessions:read"
+  },
+  {
     "id": "getSessionRetainedArtifact",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId",
@@ -4755,6 +4803,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SidebarLayoutResponse"
     ],
+    "permission": "workspace:read"
+  },
+  {
+    "id": "getSidebarLinkIcon",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout/link-icon",
+    "request": [],
+    "query": [
+      "url"
+    ],
+    "response": [],
     "permission": "workspace:read"
   },
   {
@@ -5497,6 +5556,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "query": [
       "cursor",
+      "direct",
       "filter",
       "limit"
     ],
@@ -5620,12 +5680,44 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAppServerRuns",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/runs",
+    "request": [],
+    "query": [
+      "before",
+      "limit",
+      "status"
+    ],
+    "response": []
+  },
+  {
     "id": "listAppSyncs",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs",
     "request": [],
     "response": [
       "AppSyncListResponse"
+    ]
+  },
+  {
+    "id": "listAppTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/app-templates",
+    "request": [],
+    "response": [
+      "AppTemplate",
+      "ListAppTemplatesResponse"
+    ],
+    "permission": "artifacts:read"
+  },
+  {
+    "id": "listAppWebhooks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks",
+    "request": [],
+    "response": [
+      "AppWebhookListResponse"
     ]
   },
   {
@@ -6272,6 +6364,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listLibrarySkills",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/skills/library",
+    "request": [],
+    "response": [
+      "CapabilityCatalogItem",
+      "ListLibrarySkillsResponse"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "listMachines",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/machines",
@@ -6782,6 +6885,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks",
     "request": [],
     "query": [
+      "agentId",
       "limit",
       "offset",
       "sessionId"
@@ -7129,6 +7233,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "query": [
       "cursor",
       "limit",
+      "scope",
       "sessionId"
     ],
     "response": [],
@@ -7301,6 +7406,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:control",
     "secretFields": [
       "response.token"
+    ]
+  },
+  {
+    "id": "notifyFromApp",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/notify",
+    "request": [
+      "AppNotifyRequest"
+    ],
+    "response": [
+      "AppNotifyResponse"
     ]
   },
   {
@@ -7723,7 +7839,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/prepare",
     "request": [],
-    "response": []
+    "response": [],
+    "browserOnly": "it is the web app's confirmation step for redeeming a usage-limit reset",
+    "agentAlternative": "Redeem the reset with its reset-credits/redeem action, in one call: the person's approval of that call is the confirmation."
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/reset-credits/redeem",
@@ -7775,7 +7893,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/prepare",
     "request": [],
-    "response": []
+    "response": [],
+    "browserOnly": "it is the web app's confirmation step for redeeming a usage-limit reset",
+    "agentAlternative": "Redeem the reset with its reset-credits/redeem action, in one call: the person's approval of that call is the confirmation."
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
@@ -7965,6 +8085,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SiteTakedownRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/server",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server",
+    "request": [],
     "response": []
   },
   {
@@ -10691,6 +10818,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateAppWebhook",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks/:webhookId",
+    "request": [
+      "AppWebhookUpdateRequest"
+    ],
+    "response": [
+      "AppWebhookSaveResponse"
+    ],
+    "secretFields": [
+      "response.secret"
+    ]
+  },
+  {
     "id": "updateArtifactPin",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
@@ -11653,6 +11794,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceWebhook"
     ]
+  },
+  {
+    "id": "upgradeAppPackage",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/package/upgrade",
+    "request": [
+      "AppPackageUpgradeRequest"
+    ],
+    "response": []
   },
   {
     "id": "upgradeBillingSubscription",

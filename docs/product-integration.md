@@ -1073,6 +1073,8 @@ by an explicit selection and does not grant tool permissions.
 `builtin:event-triggers` does the same for event triggers when the session also
 has `event_sources_list`. Leave `event_sources_list` and `events_get` out of a
 session's `firstPartyMcpTools` to keep its agent from setting event triggers.
+`builtin:agents` guides creating an agent from a plain description when the
+session has `bot_template_save`.
 
 For an embedded support bot, start the agent from `capabilities: "none"`, which
 already omits the bundled guides; for any other agent, put
@@ -1441,6 +1443,51 @@ before any snapshot or version pin. Unsupported requests are refused with
 to share the live artifact link instead of promising a PDF or DOCX, so a host
 that needs file delivery of documents should plan on the artifact page rather
 than an export.
+
+## Live browser and computer viewers
+
+`BrowserViewer` and `ComputerViewer` from `@opengeni/react/interaction` use
+your product's session proxy to request an attachment and send user actions.
+The viewer opens the returned live frame endpoint directly.
+
+1. Set `interactionViewerOrigin: "https://app.example.com"` in
+   `createSessionProxyHandler` (or its framework adapter). Use the exact origin
+   where the viewer runs, with no trailing slash. Mount the proxy on the same origin.
+2. On the Opengeni API deployment, include that origin in
+   `OPENGENI_INTERACTION_VIEWER_ORIGINS` (comma-separated exact origins; in Helm,
+   set it in `api.extraEnv`). Do **not** add it to `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`.
+3. The external user and organization key must have `stream:view` for live
+   frames and `sessions:control` for input, in addition to ordinary session
+   access. Connected Machine desktop input still requires screen-control consent.
+   The browser must be able to reach the returned frame endpoint; if your product
+   uses a Content Security Policy, allow that endpoint in `connect-src`.
+
+The proxy checks the browser's `Origin` on each attachment POST and asserts the
+configured value on the authenticated server-to-server request. It doesn't
+accept a browser-provided assertion. The origin is not a credential; Opengeni
+still checks the source session and issues the same expiring view grants.
+
+For a compact browser viewer, pass `showAdvancedControls={false}`. You can
+also render `InteractionInterventionBanner` independently from the same
+subpath.
+
+`BrowserViewer` scales the existing frame by default, including in the console.
+An embed can pass `fitViewport` to reflow a managed Chromium page to the space
+below its toolbar without cropping. This can change the page layout, screenshot
+size and pointer coordinates the agent sees. An explicit viewport change takes
+precedence on its tab until reset; only a viewer-fitted size can carry to new
+tabs. Attached Chrome, other engines and controllers that do not support the
+fit request keep scaling their existing frame.
+
+### Secret question display labels
+
+Use React message overrides such as `humanInputModel.username`,
+`humanInputModel.password`, `humanInputModel.oneTimeCode` and
+`humanInputModel.apiKey` for the form, and `humanInputModel.privateVaultName`,
+`humanInputModel.sharedVaultName` and `humanInputModel.taskVaultName` for the
+built-in vault names in the answer timeline. Custom field and vault names are
+shown as written. None of these overrides renames a stored field or vault, or
+changes a secret reference.
 
 ## Browser and React integration
 

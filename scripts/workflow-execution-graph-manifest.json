@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "c5e0cbf842ba816c8fb9831d71a53961f731e687774a6c62dce651c7fd745bcd"
+      "sha256": "576a10a36b828daca7253d29188ece282226002f4eeaf3fbb208a759bad3fb52"
     },
     {
       "path": ".github/workflows/backup-image.yml",
@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ef6d01ad22d1d02da2a19faac082a0da98ca5c768e2f5d06e39d7fd6a942725d"
+      "sha256": "52c3548e6b7e0ae5d371c8be83f7494a3b6b210e638d7564a4695e2457b12d3a"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -102,7 +102,7 @@
     },
     {
       "path": ".github/workflows/publish-browser-extension.yml",
-      "sha256": "3176f27d6c0eed2e1065233b60dab28d3965fd72195512431e15bf1e85930c01"
+      "sha256": "d0653e3f0323442c9b8ea03d051159874956d3da472b4650030ee9d160bf11ad"
     },
     {
       "path": ".github/workflows/publish-canary-chart.yml",
@@ -113,8 +113,12 @@
       "sha256": "087cb13feba7bd66312488b80bc0bd49970d3838541fd415b8f1f1d5bc0398c6"
     },
     {
+      "path": ".github/workflows/publish-cli.yml",
+      "sha256": "d335ec053fa96a4f6cb421b1d8b5ab144c5329281ae63bad8b2d026b25b0b2c1"
+    },
+    {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "5e1712fb3dc3e9db15f0dfebfbc75baf8aba5154b3f3503f1ac7c52918f774fa"
+      "sha256": "fcc7112a455c2037c49b4cd0f9c5bac52e2bae43de67d54f0b6c809965fc3bbf"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -142,7 +146,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "ce74793436faf6dd993278cf3b523dc65f1af948539ab54820f4e49def4dd5b5"
+      "sha256": "a988a7fa7cc73f83d14680542c924e2786a4ca7c35e37763d11c2242b4a0a8a6"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -154,7 +158,7 @@
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
-      "sha256": "6991b859357d9807934d9e150bd4cd00e1db21d9c2af49832eecebc4cdd81d25"
+      "sha256": "0f6af1dc089547d836897b564b40dd24e7071f170458d5e17f75d173c6fd2a5d"
     },
     {
       "path": ".github/workflows/release.yml",
@@ -1608,20 +1612,32 @@
     {
       "workflow": ".github/workflows/publish-browser-extension.yml",
       "job": "publish",
+      "step": "Close the failed-publish issue",
+      "sha256": "aa955b1abb9542b75311ae53b7635acc964f376adbe64e9b0ff1a6407f487bbb"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
       "step": "Install dependencies",
       "sha256": "1cd1c6c436f7ed4dc025c83963fd1c032f0b4493bc78c225fcb0d1d76c6cfae8"
     },
     {
       "workflow": ".github/workflows/publish-browser-extension.yml",
       "job": "publish",
+      "step": "Report a failed publish",
+      "sha256": "1a6a0804095d971a8df67ca120ed1b9e551b721ca51e5b5f1a24e3e31df10ea7"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
       "step": "Test publisher",
-      "sha256": "732302fc33663d81adfe2bd6efd3941c356e9074eb74252ad68a00d7494f6d7a"
+      "sha256": "5cb27507a8dbb527e9e236a879acbc830da3909e1d74fe1d62ddd78275250d65"
     },
     {
       "workflow": ".github/workflows/publish-browser-extension.yml",
       "job": "publish",
       "step": "Upload and submit",
-      "sha256": "43ac13a8054a46653f52363073da632dede951e3b2e8fc019d83c591fd071b24"
+      "sha256": "21120175510879a4541670e4173b0f7b90ae293ca21d1756e8fbf095fcefd7c7"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",
@@ -1718,6 +1734,48 @@
       "job": "publish",
       "step": "Publish canary versions",
       "sha256": "9152611098866280b2e6eea496cf456998ba2813cd45610f7f80d90e093686e8"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Confirm npm serves the CLI as latest",
+      "sha256": "da550d3dc38af09e408b9ecd073d54b181c8f93f02e4f7d5a944415ece3ba718"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Install dependencies",
+      "sha256": "cc965da9232cf030bda3caef238c96bb7d8724be56167989ea31fac29e12a9b6"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Publish the CLI",
+      "sha256": "9032e98ba04ebe5d2c9bb46e23234fc17308715597f64cabffb15b70de58e70e"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Require successful protected source CI",
+      "sha256": "9bfdec38a5dcf4415e7d5cde38d4906b9885ca88852cafb0a4fb9c019e592ea6"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Stage, pack and smoke-test the bin-only CLI",
+      "sha256": "a905cc510835eacf91e7bf5e5900e7e5509af19f04ca0defaa8448355653178c"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Test the CLI",
+      "sha256": "cd48bfba2b403ea619e7eef71be16a6c40c965c813c450db8d29a030bb27b739"
+    },
+    {
+      "workflow": ".github/workflows/publish-cli.yml",
+      "job": "publish",
+      "step": "Verify exact main source",
+      "sha256": "764748ff8de5a4c69424f5f67f115b9df0a1512e9bd2a325490aeb5a149f31f5"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",
@@ -1897,13 +1955,13 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Make room for the desktop candidate",
-      "sha256": "ce761828efbc188840bd0759dafb03da008ca496b537335723ab06961e420469"
+      "sha256": "439ed690ac2281937c345aa6911952bb057ca68787b4e512efb7cbc5d08ba685"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Make room for the relay candidate",
-      "sha256": "803ae29c3c72c09e9c4ddd30eea67e45cbd715b1fe6cdf77888299744600a368"
+      "sha256": "3c05ccb542ccd45308c2cb501b6beb739b2a88515e856804639ed412d911ef93"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1920,8 +1978,14 @@
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
+      "step": "Plan hotfix image reuse",
+      "sha256": "024501c2fcefdc1845c3e724f5159d8706d23910c313ab79cf15abb0bdb24213"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
       "step": "Publish immutable source-SHA candidate receipt",
-      "sha256": "e03705f245936cdd193b72b00fb5e29fb0053860a84e493cff008df284585a72"
+      "sha256": "6770730f9c54128e4d85766994648f5b6089555900e7d2441236ca9b2cb78843"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -1945,55 +2009,55 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve API candidate digest",
-      "sha256": "14471804891efb9b5aa9e380b404441b6d5bae5f51e15ef710ad38961cdda475"
+      "sha256": "f8312e0905a1ee7ad8d5670c3231b9261c8c1165d3fd105b1df29fb26e498b3e"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve artifact materializer candidate digest",
-      "sha256": "b0cc8bbb09f96db09b5f04bf37ccec18974326d0f42204527a255cd2a19abe34"
+      "sha256": "c402fd786564903ade03d66326d7610eff859d694f4d716114582d2f04314d7b"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve artifact outbox dispatcher candidate digest",
-      "sha256": "db8bec6ffd48620c3d5f96f8277a060967b5d44644339761cda51ee3cb3fbbf0"
+      "sha256": "e78f5f245db9ca63a796411c56f1d3a9df27ab409985243b33ead84f6d6d5fff"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve candidate identity",
-      "sha256": "acc453965326f8aa632c3e648a347f5b46c4f209f5ae5e978a5978657b68bb7d"
+      "sha256": "be9b07f5d2731e0de01ed8310fe580a4ae0cb67405f0a364581f31b07ebce29b"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve desktop candidate digest",
-      "sha256": "3f23534d8dde68b4e264e59ff162a0c518aab3c1d03d7a01845da82b2a47d2bb"
+      "sha256": "67669fcdc78b6427b4f313e0e9b40269aa25524bb8d24436cbc8aeb1842db219"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve relay candidate digest",
-      "sha256": "352aa7bdc5d0b4c8aaea46a6f86290de502048f8f0c24006de6503973dda7e81"
+      "sha256": "0dbd2d8a285260d9e78af5624dda082b9fc1323783cd84a592729aa88abf3382"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve sandbox candidate digest",
-      "sha256": "3a0da3f5bac441003f22556b3c169596082eb2d9cf4f9370e02337c7ff50db3f"
+      "sha256": "ef2240aba95c9124c69cedc7b9d794f103399ab51c126211f402c958b369750f"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve web candidate digest",
-      "sha256": "b799321a09055039bfaa593b74b6b45f6fd58f7a650fc749f07665613f4626d4"
+      "sha256": "b3d3bb003e457be9e175b25d702ceccbaec26a00d732817fc989aa436c08b5be"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Resolve worker candidate digest",
-      "sha256": "6d69ec8f79a7cd9fd4c46f2a1ad1acd55486c859122aeac146000d554b5043fc"
+      "sha256": "f1cee98cd88d7a39c7b89a31e97f597cccaafcdc3c072538eac299fc91508773"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -2005,7 +2069,7 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Validate exact retained versioned main source",
-      "sha256": "e655c70e80fafae8f0e0b649999f37c8e0b6be79bc70ac41fa30c278f5fbbc0e"
+      "sha256": "e7dcde2554459862977802aa94fbed55d33fdd167447a5bf80cf3ce87b54389f"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
@@ -2179,13 +2243,13 @@
       "workflow": ".github/workflows/release-source-admission.yml",
       "job": "verify",
       "step": "Restore protected main history as Git data for the descendant merge audit",
-      "sha256": "69ac3710659e143481667807b4dbe8bfafe2cc82a729f0ab8007799889b54051"
+      "sha256": "41f82d94c98840efff61735c036ef06365ba23b96437ea6c4daa7e1886ec459a"
     },
     {
       "workflow": ".github/workflows/release-source-admission.yml",
       "job": "verify",
       "step": "Verify controller identity and exact reviewed merge provenance",
-      "sha256": "77094b22e5108af0dd359e7cb23ba329964a99ed564b527289a8cd106aae735e"
+      "sha256": "1a091cf77c14e341d61a7e8a9634e75c0735c2e4f0e9fd174d72311ade34d049"
     },
     {
       "workflow": ".github/workflows/release.yml",

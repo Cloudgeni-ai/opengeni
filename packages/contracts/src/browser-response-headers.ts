@@ -17,6 +17,7 @@ export const OPENGENI_BROWSER_RESPONSE_HEADERS = [
   "x-opengeni-actor-epoch",
   "x-opengeni-actor-state",
   "x-opengeni-browser-frame",
+  "x-opengeni-browser-frame-hidden-scrolled-height",
   "x-opengeni-browser-frame-note",
   "x-opengeni-computer-frame",
   "x-opengeni-conversation-filter",

@@ -48,7 +48,12 @@ Principals are abstract strings: `user:<subjectId>` for people and
 `service:<subjectId>` for personless keys. Agents are recorded as
 `agent:session:<sessionId>` (their own session) in `createdBy`/`updatedBy`;
 records they write belong to the person they act for (a chat's person or a
-schedule's owner). An agent without a person owns its records as
+schedule's owner). A connected agent (a coding agent signed in to the
+organization MCP server) is recorded as `agent:connection:<connectionId>`, the
+connection shown under Connected agents; its records belong to the person who
+connected it. A person's principal is `user:` plus their subject id, which is
+itself `user:<id>`, so `user:user:<id>` is the documented form; compare it
+whole. An agent without a person owns its records as
 `schedule:<taskId>` when a scheduled task's run created its session (found from
 the server-written run row, so it is stable across runs and cannot be claimed
 through session metadata), and as `agent:session:<sessionId>` otherwise, so
@@ -121,6 +126,14 @@ and pages keep their timed checks.
 Live hints do not cover Site SQL writes (the Durable Object commit is not
 atomic with Postgres, so no hint is published).
 
+### Webhook writes
+
+App webhooks ([app-webhooks.md](app-webhooks.md)) write deliveries from other
+services through this same write path, as the trusted manager-level principal
+`webhook:<id>` (writer kind `service`), into shared collections only. Their
+writes send live hints and the app change events below like any other write,
+with chain depth 1, and count toward the same quotas and metering.
+
 ### App change events for automations and webhooks
 
 Automations and workspace webhooks hear about app data changes through the
@@ -171,6 +184,10 @@ rendered like other "This workspace" events: summary `Record added in
 <App> / <collection>`, the App's console address, `data.appId`,
 `data.appTitle`, `data.writtenByYou`, and the fields above. Filter on
 `data.appId` and `data.collection` to listen to one collection.
+These events, not the page's `onChange`, are how an app gets work done while
+nobody has it open (for example a chat with an agent for each new record);
+the bundled apps Skill tells building agents so
+(`packages/runtime/src/bundled_site_skills/sites/references/site-data.md`).
 
 A [data sync](app-sync.md) writes through the same path, so its changes send
 these events with the sync run's chain depth. They are not marked as

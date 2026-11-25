@@ -519,6 +519,20 @@ export const VaultItem = /* @__PURE__ */ defineSchema(() =>
     createdBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
     generation: z.number().int(),
+    /**
+     * Use only: agents use the values by reference, and nobody can reveal,
+     * copy or download them, the creator and admins included. Never undone.
+     * Absent from servers before migration 1563.
+     */
+    useOnly: primitives.boolean.optional(),
+    /**
+     * Whether this caller may see the item's concealed, one-time-code and
+     * file values: false when the item is use-only, or when it is shared and
+     * the caller neither created it nor administers where it lives.
+     * Absent from servers before migration 1563 (they let everyone who may
+     * use a value reveal it).
+     */
+    canReveal: primitives.boolean.optional(),
   }),
 );
 export type VaultItem = z.infer<typeof VaultItem>;
@@ -626,6 +640,12 @@ const CreateVaultItemShape = /* @__PURE__ */ defineSchema(() =>
       expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
       fields: z.array(VaultFieldInput).max(VAULT_LIMITS.fieldsPerItem),
       primaryFieldName: z.string().optional(),
+      /**
+       * Make the item use-only: its values can be used by reference and
+       * replaced, but never shown again to anyone. Hosted vaults only; it
+       * cannot be turned off.
+       */
+      useOnly: z.literal(true).optional(),
     })
     .strict(),
 );

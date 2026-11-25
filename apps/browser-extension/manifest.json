@@ -12,11 +12,10 @@
     "nativeMessaging",
     "scripting",
     "storage",
-    "tabGroups",
     "tabs",
     "webNavigation"
   ],
-  "optional_permissions": ["contentSettings"],
+  "optional_permissions": ["contentSettings", "tabGroups"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "service-worker.js",

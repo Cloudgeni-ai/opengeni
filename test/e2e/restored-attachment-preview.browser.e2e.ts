@@ -113,17 +113,17 @@ describe("restored new-session attachment preview in Chromium", () => {
       "Preview requests: 1",
     );
 
-    // Visibility does not imply the lightbox's opacity animations have settled,
-    // even with reduced motion. Audit the fully presented dialog and backdrop.
+    // Visibility does not imply the panel opacity and backdrop color have
+    // settled, even with reduced motion. Audit the fully presented lightbox.
     await page.waitForFunction(
       () => {
         const content = document.querySelector('[role="dialog"][aria-label="Attachment preview"]');
-        const overlay = document.querySelector('.bg-black\\/90[data-state="open"]');
+        const overlay = content?.parentElement;
         return (
           content !== null &&
-          overlay !== null &&
+          overlay?.getAttribute("data-state") === "open" &&
           getComputedStyle(content).opacity === "1" &&
-          getComputedStyle(overlay).opacity === "1"
+          getComputedStyle(overlay).backgroundColor === "rgba(0, 0, 0, 0.9)"
         );
       },
       undefined,

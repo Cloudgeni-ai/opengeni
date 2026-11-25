@@ -11,6 +11,11 @@ import { RailFooter } from "@/components/rail/rail-footer";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
+import { appsPlacementChange } from "@/components/sidebar-layout/apps-placement-change";
+import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { toast } from "sonner";
+import type { SidebarAppsPlacement } from "@opengeni/sdk";
 import { AppPages } from "@opengeni/react/app/routes/app-page";
 import { PromotionReviewBanner } from "@/components/rail/promotion-review-banner";
 import { workspaceSectionForPath } from "@/components/rail/workspace-nav-data";
@@ -24,9 +29,57 @@ import {
   type SessionShellSlots,
 } from "@opengeni/react/app/components/rail/session-shell";
 
+/**
+ * The person's sidebar (docs/sidebar-layout.md) as the Sessions list uses it:
+ * whether apps are rows of their own there (null until known, so the list
+ * draws the right rows first), and "Add to sidebar" in an app row's menu.
+ */
+function useSessionsSidebarOptions(workspaceId: string) {
+  const { layout, options, update } = useSidebarLayout(workspaceId);
+  const sessionsShowApps = options ? options.sessionsShowApps : null;
+  const appsPlacement = options ? options.appsPlacement : null;
+  const personalAvailable = layout?.personal.available === true;
+  const onAppsPlacementChange = useMemo(
+    () =>
+      personalAvailable
+        ? (placement: SidebarAppsPlacement) =>
+            void update({
+              scope: "personal",
+              changes: [appsPlacementChange(placement)],
+            }).catch((error: unknown) =>
+              toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
+            )
+        : undefined,
+    [personalAvailable, update],
+  );
+  const sidebarApps = useMemo(() => {
+    if (!layout?.personal.available) return undefined;
+    const linked = new Set<string>();
+    for (const item of layout.items) {
+      if (item.type === "app") linked.add(item.appId.toLowerCase());
+      if (item.type === "group")
+        for (const child of item.items)
+          if (child.type === "app") linked.add(child.appId.toLowerCase());
+    }
+    return {
+      has: (appId: string) => linked.has(appId.toLowerCase()),
+      add: (appId: string) =>
+        void update({
+          scope: "personal",
+          changes: [{ op: "add", item: { type: "app", appId } }],
+        }).catch((error: unknown) =>
+          toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
+        ),
+    };
+  }, [layout, update]);
+  return { sessionsShowApps, appsPlacement, onAppsPlacementChange, sidebarApps };
+}
+
 function useWebShellSlots(): SessionShellSlots {
   const { collapsed, workspaceId } = useRail();
   const navigate = useNavigate();
+  const { sessionsShowApps, appsPlacement, onAppsPlacementChange, sidebarApps } =
+    useSessionsSidebarOptions(workspaceId);
   return useMemo(
     () => ({
       switcher: <SwitcherBlock />,
@@ -58,8 +111,20 @@ function useWebShellSlots(): SessionShellSlots {
           ? { label: section.label, onClick: () => void navigate({ to: section.path }) }
           : null;
       },
+      sessionsShowApps,
+      appsPlacement,
+      onAppsPlacementChange,
+      sidebarApps,
     }),
-    [collapsed, navigate, workspaceId],
+    [
+      collapsed,
+      navigate,
+      workspaceId,
+      sessionsShowApps,
+      appsPlacement,
+      onAppsPlacementChange,
+      sidebarApps,
+    ],
   );
 }
 

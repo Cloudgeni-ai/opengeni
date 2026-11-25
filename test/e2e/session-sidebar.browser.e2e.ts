@@ -1008,6 +1008,234 @@ async function expectEachConversationOnce(titles: string[]) {
   expect(await counts()).toEqual(titles.map(() => 1));
 }
 
+test("with apps not grouped, the list waits for that choice instead of drawing app rows first", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light&appRows=pending`, { timeout: 60_000 });
+  await sidebar().locator(".animate-pulse").first().waitFor();
+  // Record every Site row the list ever draws from here on.
+  await page.evaluate(() => {
+    const seen = { siteRows: 0 };
+    Object.assign(window, { appRowsSeen: seen });
+    new MutationObserver(() => {
+      seen.siteRows = Math.max(seen.siteRows, document.querySelectorAll("[data-site-row]").length);
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  // The list reads meanwhile but draws nothing until the choice is known.
+  await page.waitForTimeout(500);
+  expect(await sidebar().locator("[data-site-row], a[data-session-row]").count()).toBe(0);
+  await page.evaluate(() =>
+    (
+      window as unknown as { sessionSidebarAppRows: (value: boolean) => void }
+    ).sessionSidebarAppRows(false),
+  );
+  // An app's chats are ordinary chats; no app row was ever drawn.
+  await railConversation("Time filters across all graphs").waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(0);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { appRowsSeen: { siteRows: number } }).appRowsSeen.siteRows,
+    ),
+  ).toBe(0);
+}, 60_000);
+
+const appsSection = () => sidebar().getByRole("region", { name: "Apps", exact: true });
+const sessionsList = () => sidebar().getByRole("region", { name: "Sessions", exact: true });
+
+test("with apps in their own section, Apps is a peer section below Sessions", async () => {
+  await page.setViewportSize({ width: 1160, height: 900 });
+  await page.goto(`${url}?scenario=sites&theme=light&apps=section`, { timeout: 60_000 });
+  await railConversation("Slack community connection test").waitFor();
+  await appsSection().locator("[data-site-row]").first().waitFor();
+  // Sessions leaves the apps out, their chats with them; Apps lists only apps.
+  expect(await sessionsList().locator("[data-site-row]").count()).toBe(0);
+  for (const title of usageConversations)
+    expect(
+      await sessionsList()
+        .getByRole("link", { name: new RegExp(`^Open ${title}\\.`) })
+        .count(),
+    ).toBe(0);
+  expect(await appsSection().locator("a[data-session-row]:not([data-site-row] a)").count()).toBe(0);
+  expect(await appsSection().locator("[data-site-row]").count()).toBe(4);
+  // Below Sessions, with the same header and no divider; four apps need no Show more.
+  const header = (name: string) =>
+    sidebar()
+      .locator("span")
+      .filter({ hasText: new RegExp(`^${name}$`) })
+      .first();
+  const style = (name: string) =>
+    header(name).evaluate((node) => {
+      const css = getComputedStyle(node);
+      return [css.fontSize, css.fontWeight, css.color, node.getBoundingClientRect().left];
+    });
+  expect(await style("Apps")).toEqual(await style("Sessions"));
+  const appsBox = (await appsSection().boundingBox())!;
+  const sessionsBox = (await sessionsList().boundingBox())!;
+  expect(appsBox.y).toBeGreaterThanOrEqual(sessionsBox.y + sessionsBox.height);
+  expect(appsBox.y - (sessionsBox.y + sessionsBox.height)).toBeLessThan(16);
+  expect(
+    await appsSection().evaluate((node) => {
+      const css = getComputedStyle(node);
+      return [css.borderTopWidth, css.borderBottomWidth];
+    }),
+  ).toEqual(["0px", "0px"]);
+  expect(
+    await appsSection()
+      .getByRole("button", { name: /^Show / })
+      .count(),
+  ).toBe(0);
+  // An app's chats open under it, in the Apps section.
+  await appsSection()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations)
+    await appsSection()
+      .getByRole("link", { name: new RegExp(`^Open ${title}\\.`) })
+      .waitFor();
+  // The keyboard moves through its chats, and on from Sessions into the section.
+  const appChat = (title: string) =>
+    appsSection().getByRole("link", { name: new RegExp(`^Open ${title}\\.`) });
+  await appChat(usageConversations[0]!).focus();
+  await page.keyboard.press("ArrowDown");
+  await page.waitForFunction(
+    () => document.activeElement?.closest("[data-sessions-apps-section]") !== null,
+  );
+  expect(
+    await appChat(usageConversations[1]!).evaluate((row) => row === document.activeElement),
+  ).toBe(true);
+  await sessionsList().locator("a[data-session-row]").last().focus();
+  await page.keyboard.press("ArrowDown");
+  await page.waitForFunction(
+    () => document.activeElement?.closest("[data-sessions-apps-section]") !== null,
+  );
+  expect(
+    await appsSection()
+      .locator("a[data-session-row]")
+      .first()
+      .evaluate((row) => row === document.activeElement),
+  ).toBe(true);
+
+  // The view menu moves apps back into Sessions: no Apps section, app rows in the list.
+  await page.getByRole("button", { name: /^Session view/ }).click();
+  await page.getByRole("menuitem", { name: /^Apps/ }).click();
+  await page.getByRole("menuitemradio", { name: "In Sessions", exact: true }).click();
+  await sessionsList().locator("[data-site-row]").first().waitFor();
+  expect(await appsSection().count()).toBe(0);
+  // And Own section brings it back.
+  await page.getByRole("button", { name: /^Session view/ }).click();
+  await page.getByRole("menuitem", { name: /^Apps/ }).click();
+  await page.getByRole("menuitemradio", { name: "Own section", exact: true }).click();
+  await appsSection().locator("[data-site-row]").first().waitFor();
+  expect(await sessionsList().locator("[data-site-row]").count()).toBe(0);
+}, 90_000);
+
+test("the Apps section shows its first five apps and Show more for the rest", async () => {
+  await page.setViewportSize({ width: 1160, height: 900 });
+  await page.goto(`${url}?scenario=sites&theme=light&apps=section&manyApps=1`, {
+    timeout: 60_000,
+  });
+  await appsSection().locator("[data-site-row]").first().waitFor();
+  expect(await appsSection().locator("[data-site-row]").count()).toBe(5);
+  // Five apps and Show more stay in view below Sessions without scrolling.
+  await railConversation("Slack community connection test").waitFor();
+  const more = appsSection().getByRole("button", { name: "Show 2 more", exact: true });
+  const moreBox = (await more.boundingBox())!;
+  expect(moreBox.y + moreBox.height).toBeLessThanOrEqual(900);
+  await capture("apps-section-more");
+  await appsSection().getByRole("button", { name: "Show 2 more", exact: true }).click();
+  await appsSection().getByRole("button", { name: "Show less", exact: true }).waitFor();
+  expect(await appsSection().locator("[data-site-row]").count()).toBe(7);
+  await appsSection().getByRole("button", { name: "Show less", exact: true }).click();
+  await appsSection().getByRole("button", { name: "Show 2 more", exact: true }).waitFor();
+  expect(await appsSection().locator("[data-site-row]").count()).toBe(5);
+}, 90_000);
+
+test("with an Apps section, Sessions still fills the rail's spare height", async () => {
+  await page.setViewportSize({ width: 1160, height: 1400 });
+  for (const apps of ["hidden", "section"]) {
+    await page.goto(`${url}?scenario=sites&theme=light&apps=${apps}&fill=1`, { timeout: 60_000 });
+    await railConversation("Slack community connection test").waitFor();
+    // Every Default chat loads to use the spare height; none waits behind Show more.
+    await page.waitForFunction(
+      () =>
+        !document.querySelector(
+          '[role="group"][aria-label="Default"] button[aria-label^="Show "]',
+        ) &&
+        ![...document.querySelectorAll('[role="group"][aria-label="Default"] button')].some(
+          (button) => /^Show \d+ more/.test(button.textContent ?? ""),
+        ),
+    );
+  }
+  await appsSection().locator("[data-site-row]").first().waitFor();
+  // Filling leaves room for the Apps section below it.
+  const appsBox = (await appsSection().boundingBox())!;
+  expect(appsBox.y + appsBox.height).toBeLessThanOrEqual(1400);
+}, 90_000);
+
+test("the Apps section at desktop and phone widths", async () => {
+  for (const [name, size] of [
+    ["desktop", { width: 1160, height: 900 }],
+    ["narrow", { width: 390, height: 844 }],
+  ] as const) {
+    await page.setViewportSize(size);
+    await page.goto(`${url}?scenario=sites&theme=light&apps=section`, { timeout: 60_000 });
+    await railConversation("Slack community connection test").waitFor();
+    await appsSection().locator("[data-site-row]").first().waitFor();
+    // Its header and rows fit the sidebar's width.
+    const fits = await appsSection().evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      return [...node.querySelectorAll("a, button")].every((child) => {
+        const inner = child.getBoundingClientRect();
+        return inner.width === 0 || (inner.left >= box.left - 1 && inner.right <= box.right + 1);
+      });
+    });
+    expect(fits).toBe(true);
+    await capture(`apps-section-${name}`);
+  }
+}, 60_000);
+
+test("the Apps section follows the list's view: every grouping, Needs you and Archived", async () => {
+  await page.setViewportSize({ width: 1160, height: 900 });
+  await page.goto(`${url}?scenario=sites&theme=light&apps=section`, { timeout: 60_000 });
+  await appsSection().locator("[data-site-row]").first().waitFor();
+  for (const grouping of ["Last activity", "Created date", "Creator", "None", "Project"]) {
+    await selectView("Group by", grouping);
+    await appsSection()
+      .getByRole("link", { name: /^Open Opengeni usage\. App/ })
+      .waitFor();
+    expect(await sessionsList().locator("[data-site-row]").count()).toBe(0);
+  }
+  // Archived lists no apps, and Needs you only apps with a chat that needs
+  // the person (none here): the section takes no room then.
+  for (const status of ["Archived", "Needs you"]) {
+    await selectView("Status", status);
+    await appsSection().waitFor({ state: "detached" });
+    expect(await siteRow("Opengeni usage").count()).toBe(0);
+  }
+  await selectView("Status", "Active");
+  await appsSection().locator("[data-site-row]").first().waitFor();
+}, 90_000);
+
+test("the Apps section lists an app once when its chats are in several projects", async () => {
+  await page.setViewportSize({ width: 1160, height: 900 });
+  await page.goto(`${url}?scenario=sites&theme=light&apps=section&splitApp=1`, {
+    timeout: 60_000,
+  });
+  await appsSection().locator("[data-site-row]").first().waitFor();
+  await selectView("Group by", "Project");
+  await appsSection()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  expect(
+    await appsSection()
+      .getByRole("link", { name: /^Open Opengeni usage\. App/ })
+      .count(),
+  ).toBe(1);
+  // Its chats from both projects open under the one row.
+  for (const title of usageConversations)
+    await appsSection()
+      .getByRole("link", { name: new RegExp(`^Open ${title}\\.`) })
+      .waitFor();
+}, 90_000);
+
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteRow("Opengeni usage").waitFor();
@@ -1202,8 +1430,12 @@ test("the Site view starts below the desktop window bar", async () => {
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
     // Only the Site's own column: previews in its chat keep their spacing.
     expect(await page.locator("[data-site-column] [aria-label='Chat']").count()).toBe(0);
-    const toolbar = page.locator("[data-site-column] [data-artifact-toolbar]");
-    const first = await toolbar.locator(":scope > div > *").first().boundingBox();
+    // The Site's header row starts its column (this page has no window-bar
+    // row to lift it into).
+    const first = await page
+      .locator("[data-site-column] [data-site-header] > *")
+      .first()
+      .boundingBox();
     expect(first).not.toBeNull();
     await expectWindowTop(page, desktop);
     return first!;
@@ -1221,7 +1453,8 @@ test("the Site view starts below the desktop window bar", async () => {
     if (desktop === "macos" && rail === "collapsed") {
       await capture("site-view-macos-collapsed-rail");
       // Full screen starts below the bar too, with its usual spacing.
-      await page.getByRole("button", { name: "Open app full screen" }).click();
+      await page.getByRole("button", { name: "More app actions" }).click();
+      await page.getByRole("menuitem", { name: "Open app full screen" }).click();
       const back = await page.getByRole("button", { name: "Back", exact: true }).boundingBox();
       expect(back!.x).toBeLessThan(30);
       expect(back!.y).toBeGreaterThanOrEqual(WINDOW_BAR_HEIGHT);
@@ -1242,11 +1475,19 @@ test("the Site publish form starts below the desktop window bar in a narrow Site
         "og.site-view.chat:v1:sidebar-preview",
         JSON.stringify({ width: 720, collapsed: false }),
       );
+      // The chat is open for this person and Site.
+      localStorage.setItem(
+        "og.site-view.chat-open:v1:sidebar-preview",
+        JSON.stringify({ [path.split("/").pop()!]: true }),
+      );
       history.pushState(null, "", path);
       dispatchEvent(new PopStateEvent("popstate"));
     }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
-    await page.locator("[data-site-column]").getByRole("button", { name: "Publish" }).click();
+    await page
+      .locator("[data-site-column] [data-site-header]")
+      .getByRole("button", { name: "Share" })
+      .click();
     const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
     const header = form.locator(":scope > header");
     const back = header.getByRole("button").first();

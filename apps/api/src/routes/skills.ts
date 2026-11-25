@@ -3,6 +3,7 @@ import {
   InstallSkillRequest,
   InstalledSkill,
   ListInstalledSkillsResponse,
+  ListLibrarySkillsResponse,
   PreviewSkillImportRequest,
   SkillImportPreview,
   SkillUninstallPreview,
@@ -12,6 +13,7 @@ import {
 import {
   portableSkillCapabilityId,
   createPublicSkillSearchClient,
+  listLibrarySkillCatalogItems,
   PublicSkillSearchError,
   portableSkillPluginKey,
   requireAccessGrant,
@@ -75,6 +77,16 @@ export function registerSkillRoutes(
     return c.json(
       ListInstalledSkillsResponse.parse({
         skills: await listInstalledSkills(deps.db, workspaceId),
+      }),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/skills/library", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    return c.json(
+      ListLibrarySkillsResponse.parse({
+        skills: await listLibrarySkillCatalogItems(deps.db, workspaceId),
       }),
     );
   });

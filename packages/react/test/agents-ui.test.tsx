@@ -1,7 +1,11 @@
 import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ReactNode } from "react";
-import { agentInitialsAvatar } from "@opengeni/contracts";
+import {
+  agentInitialsAvatar,
+  NEW_AGENT_DEFAULT_INSTRUCTIONS,
+  NEW_AGENT_DEFAULT_TOOL_PERMISSIONS,
+} from "@opengeni/contracts";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -50,6 +54,8 @@ const kit = await import("./agents-test-kit");
 const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText } =
   await import("../src/app/components/agents/agents-page");
 const { AgentPage } = await import("../src/app/components/agents/agent-page");
+const { ReadyMadeApps } = await import("../src/app/components/artifacts/ready-made-apps");
+const { installReadyMadeApp } = await import("../src/app/lib/ready-made-apps");
 const {
   NewAgentPage,
   EditAgentPage,
@@ -68,9 +74,12 @@ const { duplicateAgentNames, parseAgentFile, agentErrorCode, agentFile, agentFil
 const { useComposerAgent, AGENT_ONLY_ME_UNAVAILABLE } =
   await import("../src/app/lib/composer-agent");
 const { buildCreateSessionRequest } = await import("../src/app/lib/session-create");
+const { userErrorText } = await import("../src/ui/api-error");
 const { composerLaunchAgentId, parseComposerLaunchSearch } =
   await import("../src/app/lib/composer-launch");
 const { sessionAgentRef, sessionAgentSourceLine } = await import("../src/app/lib/session-agent");
+const { AGENT_TRIGGER_SHARED_DENIED } =
+  await import("../src/app/components/agents/agent-trigger-model");
 
 const { WORKSPACE_ID, makeAgent, fakeAgentsClient, appContext, AgentsTestHost } = kit;
 
@@ -260,7 +269,7 @@ test("saving an agent whose Memory has no collection yet sends Memory again, so 
 
 // --- Agents page ---------------------------------------------------------------
 
-test("the Agents page lists agents with their Slack badge and the moved-here notes", async () => {
+test("the Agents page lists agents, marks Only me ones, and shows the moved-here notes", async () => {
   const client = fakeAgentsClient([
     makeAgent({ name: "Data team", origin: "slack_agent", slack: [slackAvailability()] }),
     makeAgent({ name: "Release manager", origin: "bot_template", visibility: "private" }),
@@ -275,8 +284,11 @@ test("the Agents page lists agents with their Slack badge and the moved-here not
   expect(container.textContent).toContain(BOT_TEMPLATES_MOVED);
   expect(container.textContent).toContain(SLACK_AGENTS_MOVED);
   expect(container.textContent).toContain("More than one agent is called “Release manager”.");
-  expect(container.textContent).toContain("Slack");
-  expect(container.textContent).toContain("Only me");
+  // Every shared agent is in Slack: no per-agent Slack badge, only Only me.
+  const badges = [...container.querySelectorAll('[data-slot="meta-chip"]')].map(
+    (chip) => chip.textContent,
+  );
+  expect(badges).toEqual(["Only me"]);
   // Dismissed notes stay dismissed.
   const dismiss = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
     (element) => element.getAttribute("aria-label") === "Dismiss",
@@ -410,6 +422,54 @@ test("readers who can't edit see no Edit or Delete, and Memory is read-only", as
   expect(memory?.getAttribute("aria-disabled")).toBe("true");
 });
 
+test("Who can edit: its creator changes it; an editor who can't manage sees it read-only", async () => {
+  const agent = makeAgent({ editAccess: "everyone" });
+  const client = fakeAgentsClient([agent]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLElement>("[data-agent-edit-access]")!;
+  expect(row.textContent).toContain("Who can edit");
+  expect(row.textContent).toContain("Everyone in workspace");
+  const offered = await chooseFrom(row, "Everyone in workspace", "Creator and admins");
+  expect(offered).toEqual(["Creator and admins", "Everyone in workspace"]);
+  expect(client.calls).toContainEqual([
+    "updateAgent",
+    WORKSPACE_ID,
+    agent.id,
+    { expectedVersion: 1, editAccess: "creator_and_admins" },
+  ]);
+  await act(async () => mounted!.unmount());
+  mounted = null;
+
+  const editor = makeAgent({
+    editAccess: "everyone",
+    viewer: { canEdit: true, canManage: false, canManageSlack: false, canOpenInSlack: false },
+  });
+  const other = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([editor]))}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={editor.id} />
+    </AgentsTestHost>,
+  );
+  const locked = other.querySelector<HTMLElement>("[data-agent-edit-access] [role='combobox']");
+  expect(locked?.hasAttribute("disabled") || locked?.getAttribute("aria-disabled") === "true").toBe(
+    true,
+  );
+  expect(other.textContent).not.toContain("Delete agent");
+});
+
+test("an Only me agent has no Who can edit", async () => {
+  const agent = makeAgent({ visibility: "private", ownerSubjectId: "user-kari" });
+  const container = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([agent]))}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  expect(container.querySelector("[data-agent-edit-access]")).toBeNull();
+});
+
 // --- Form ----------------------------------------------------------------------
 
 test("Make this an agent starts from the chat's name and links the new agent to it", async () => {
@@ -440,6 +500,8 @@ test("Make this an agent starts from the chat's name and links the new agent to 
     description: "Weekly release review",
     sourceSessionId: sessionId,
     visibility: "workspace",
+    // Opengeni's own form makes it editable by the whole workspace.
+    editAccess: "everyone",
     memoryEnabled: true,
   });
   expect(path).toMatch(new RegExp(`/workspaces/${WORKSPACE_ID}/agents/[0-9a-f-]{36}$`));
@@ -521,6 +583,91 @@ test("browsing the icon picker's tabs and colours chooses nothing", async () => 
     | Record<string, unknown>
     | undefined;
   expect(created?.avatar ?? null).toBeNull();
+});
+
+test("a new agent starts with Instructions, asks before merging, and adds the triggers switched on", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client, { githubStatus: { status: "bound" } })}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const instructions = container.querySelector<HTMLTextAreaElement>("textarea")!;
+  expect(instructions.value).toBe(NEW_AGENT_DEFAULT_INSTRUCTIONS);
+  const rows = [...container.querySelectorAll<HTMLElement>("[data-agent-common-trigger]")];
+  expect(rows.map((row) => row.getAttribute("data-agent-common-trigger"))).toEqual([
+    "pull_request_opened",
+    "mentioned_on_pull_request",
+    "weekday_morning",
+  ]);
+  // Every trigger starts off.
+  expect(
+    rows.every(
+      (row) => row.querySelector("[role='switch']")?.getAttribute("aria-checked") === "false",
+    ),
+  ).toBe(true);
+  const weekday = rows[2]!.querySelector<HTMLElement>("[role='switch']")!;
+  await act(async () => weekday.click());
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Standup"));
+  await act(async () => button(container, "Create agent").click());
+  await flush();
+  const created = client.calls.find((call) => call[0] === "createAgent")?.[2] as Record<
+    string,
+    any
+  >;
+  expect(created.instructions).toBe(NEW_AGENT_DEFAULT_INSTRUCTIONS);
+  expect(created.toolPermissions).toEqual([...NEW_AGENT_DEFAULT_TOOL_PERMISSIONS]);
+  const tasks = client.calls.filter((call) => call[0] === "createScheduledTask");
+  expect(tasks).toHaveLength(1);
+  expect((tasks[0]![2] as Record<string, any>).name).toBe("Standup: Every weekday morning");
+});
+
+test("without GitHub, a new agent offers only the weekday trigger", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client, { githubStatus: { status: "unbound" } })}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  expect(
+    [...container.querySelectorAll("[data-agent-common-trigger]")].map((row) =>
+      row.getAttribute("data-agent-common-trigger"),
+    ),
+  ).toEqual(["weekday_morning"]);
+});
+
+test("Add agent offers Create with chat first", async () => {
+  const client = fakeAgentsClient([]);
+  let opened = 0;
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} onCreateWithChat={() => (opened += 1)} />
+    </AgentsTestHost>,
+  );
+  const items = [...container.querySelectorAll<HTMLElement>("[role='menuitem']")];
+  expect(items[0]?.textContent).toBe("Create with chat");
+  const item = items[0]!;
+  await act(async () => item.click());
+  expect(opened).toBe(1);
+});
+
+test("a common trigger switched on in the agent page is added at once", async () => {
+  const agent = makeAgent({ name: "Standup" });
+  const client = fakeAgentsClient([agent]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client, { githubStatus: { status: "unbound" } })}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLElement>(
+    "[data-agent-common-trigger='weekday_morning']",
+  )!;
+  await act(async () => row.querySelector<HTMLElement>("[role='switch']")!.click());
+  await flush();
+  expect(createdTask(client)?.name).toBe("Standup: Every weekday morning");
+  expect(container.querySelector("[data-agent-common-trigger='weekday_morning']")).toBeNull();
+  expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
 });
 
 test("a name is the only required field", async () => {
@@ -955,6 +1102,51 @@ test("Anyone in the organization takes an organization admin, and says who can t
   expect(created?.visibility).toBe("organization");
 });
 
+test("an organization admin (not only the owner) can choose Anyone in the organization", async () => {
+  const optionDisabled = async (clientConfig: unknown) => {
+    const container = await render(
+      <AgentsTestHost
+        context={appContext(fakeAgentsClient([]), {
+          clientConfig,
+          accessContext: {
+            subjectId: "user-me",
+            subjectLabel: "Maja",
+            workspaceGrants: [],
+            accountGrants: [
+              {
+                accountId: "account-1",
+                subjectId: "user-me",
+                role: "admin",
+                // An admin's account permissions: no owner-only account:admin.
+                permissions: ["account:read", "members:manage", "workspace:create", "billing:read"],
+                metadata: { accountName: "Acme" },
+              },
+            ],
+          },
+        })}
+      >
+        <NewAgentPage workspaceId={WORKSPACE_ID} />
+      </AgentsTestHost>,
+    );
+    const option = [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
+      (element) => element.textContent?.trim() === "Anyone in Acme",
+    );
+    expect(option).toBeDefined();
+    const disabled =
+      option!.getAttribute("aria-disabled") === "true" || option!.hasAttribute("disabled");
+    const current = mounted!;
+    await act(async () => current.unmount());
+    current.container.remove();
+    return disabled;
+  };
+  // Signed in as themselves: the API's organization administration.
+  expect(
+    await optionDisabled({ auth: { mode: "managedSession" }, productAccessMode: "managed" }),
+  ).toBe(false);
+  // No signed-in session (an embedder's key): the role alone doesn't count.
+  expect(await optionDisabled(undefined)).toBe(true);
+});
+
 test("Only me is off with a reason where Only me chats aren't available", async () => {
   const container = await render(
     <AgentsTestHost context={appContext(fakeAgentsClient([], { canCreatePrivate: false }))}>
@@ -1126,7 +1318,12 @@ const TRIAGE_TEMPLATE = {
       name: "When a Linear issue is created",
       instructions: "Triage it.",
       schedule: null,
-      triggers: [{ source: { kind: "github" }, eventTypes: ["issues.opened"] }],
+      triggers: [
+        {
+          source: { kind: "webhook", adapter: "custom", preset: "linear" },
+          eventTypes: ["Issue.create"],
+        },
+      ],
     },
   ],
 };
@@ -1164,6 +1361,7 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
         tools: [{ kind: "mcp", id: "gmail" }],
       },
     ],
+    skills: ["release-notes"],
     memoryEntries: [
       {
         id: "m1",
@@ -1179,25 +1377,47 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
     </AgentsTestHost>,
   );
   // Only this agent's automations are its triggers, and a set-up suggestion isn't offered again.
+  // The server filters them by agent.
+  expect(client.calls).toContainEqual([
+    "listScheduledTasks",
+    WORKSPACE_ID,
+    { agentId: agent.id, limit: 200 },
+  ]);
   expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
   const suggested = [...container.querySelectorAll("[data-agent-suggested-trigger]")];
   expect(suggested.map((row) => row.textContent)).toEqual([
     expect.stringContaining("When a Linear issue is created"),
+    expect.stringContaining("When a pull request opens"),
+    expect.stringContaining("When mentioned on a PR"),
   ]);
+  // Set up opens the light dialog at the suggestion; the full form stays one link away.
   await act(async () => button(container, "Set up").click());
-  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1`);
-  // Can use lists each connection and Opengeni's own GitHub tools, whose row
-  // holds the ready-made agent's github.com rule.
-  expect(container.querySelector("[data-agent-can-use='gmail.com']")).not.toBeNull();
+  await flush();
+  const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+  expect(dialog.textContent).toContain("When a Linear issue is created");
+  await act(async () => button(dialog, "Open full form").click());
+  await flush();
+  expect(path).toBe(
+    `/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1&returnTo=agent`,
+  );
+  // Can use lists only connections with a rule: Opengeni's own GitHub tools,
+  // whose row holds the ready-made agent's github.com rule, and not Gmail.
+  expect(container.querySelector("[data-agent-can-use='gmail.com']")).toBeNull();
   const github = container.querySelector<HTMLElement>("[data-agent-can-use='github.com']")!;
   expect(github.textContent).toContain("GitHub");
-  expect(github.textContent).toContain("1 tool set on their own");
+  expect(github.querySelector("[data-slot='logo-tile']")).not.toBeNull();
+  // Tools show by readable name; the built-in and GitHub MCP names of one
+  // action share a row.
+  expect(github.textContent).toContain("Merge pull request");
+  expect(github.textContent).not.toContain("merge_pull_request");
   await act(async () =>
-    [...github.querySelectorAll("button")].find((b) => b.textContent?.includes("1 tool"))!.click(),
+    [...github.querySelectorAll("button")]
+      .find((b) => b.textContent?.includes("Choose per tool"))!
+      .click(),
   );
   await flush();
-  expect(github.textContent).toContain("pull_request_merge");
-  expect(github.textContent).toContain("merge_pull_request");
+  expect(github.textContent?.split("Merge pull request").length).toBe(2);
+  expect(github.textContent).not.toContain("pull_request_merge");
   expect(container.textContent).not.toContain("github.com · merge_pull_request");
   // Memory entries are listed and can be removed at the version read.
   expect(container.textContent).toContain("Releases go out on Tuesdays.");
@@ -1220,11 +1440,614 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   );
   await flush();
   expect(client.calls).toContainEqual(["pauseScheduledTask", WORKSPACE_ID, trigger.id]);
-  expect(container.textContent).toContain("release-notes");
+  // Skills show by name, linked to the Skill's page.
+  const skill = [...container.querySelectorAll("a")].find(
+    (link) => link.textContent === "Release notes",
+  )!;
+  expect(skill.getAttribute("href")).toBe(
+    `/workspaces/${WORKSPACE_ID}/plugins?section=skills&open=skill%3Askill-release-notes`,
+  );
+});
+
+const GITHUB_SOURCE = {
+  id: "source-gh",
+  name: "Acme GitHub",
+  kind: "github",
+  status: "active",
+} as {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  statusReason?: string | null;
+  statusReasonCode?: string | null;
+  [field: string]: unknown;
+};
+
+async function openAgentTrigger(
+  options: {
+    agent?: Parameters<typeof makeAgent>[0];
+    eventTriggers?: boolean;
+    eventSources?: (typeof GITHUB_SOURCE)[];
+    createTaskError?: unknown;
+    createSourceError?: unknown;
+    updateSourceError?: unknown;
+    chatsError?: unknown;
+    chatsPageSize?: number;
+    suggestion?: string;
+    githubStatus?: string;
+    githubRepos?: { id: number; fullName: string; [key: string]: unknown }[];
+    /** Chats in the workspace, given the agent's id. */
+    sessions?: (agentId: string) => { id: string; title: string; agentId?: string | null }[];
+  } = {},
+) {
+  const agent = makeAgent({ name: "Triage", templateKey: "triage", ...options.agent });
+  const client = fakeAgentsClient([agent], {
+    templates: [TRIAGE_TEMPLATE],
+    eventSources: options.eventSources ?? [],
+    createTaskError: options.createTaskError,
+    createSourceError: options.createSourceError,
+    updateSourceError: options.updateSourceError,
+    chatsError: options.chatsError,
+    chatsPageSize: options.chatsPageSize,
+    sessions: options.sessions?.(agent.id),
+  });
+  let path = "";
+  let state: Record<string, unknown> = {};
+  const container = await render(
+    <AgentsTestHost
+      context={appContext(client, {
+        clientConfig: { eventTriggers: { enabled: options.eventTriggers ?? true } },
+        ...(options.githubStatus ? { githubStatus: { status: options.githubStatus } } : {}),
+        ...(options.githubRepos ? { githubRepos: options.githubRepos } : {}),
+      })}
+      onLocation={(location) => {
+        path = location.href;
+        state = location.state;
+      }}
+    >
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  if (options.suggestion) {
+    const row = [...container.querySelectorAll<HTMLElement>("[data-agent-suggested-trigger]")].find(
+      (entry) => entry.textContent?.includes(options.suggestion!),
+    )!;
+    await act(async () => button(row, "Set up").click());
+  } else {
+    await act(async () => button(container, "Add trigger").click());
+  }
+  await flush();
+  const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+  return { agent, client, dialog, path: () => path, state: () => state };
+}
+
+function createdTask(client: { calls: unknown[][] }) {
+  return client.calls.find((call) => call[0] === "createScheduledTask")?.[2] as
+    | Record<string, any>
+    | undefined;
+}
+
+test("a suggested trigger is set up in place: its source is filled in and no message is needed", async () => {
+  const { agent, client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+  });
+  expect(dialog.textContent).toContain("When a GitHub issue opens");
+  expect(dialog.textContent).toContain("Visible to the workspace.");
+  expect(dialog.textContent).toContain("Acme GitHub");
+  // The message is optional and starts at the suggestion's.
+  expect(dialog.querySelector("textarea")!.value).toBe("Triage it.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.name).toBe("Triage: When a GitHub issue opens");
+  expect(request.visibility).toBe("workspace");
+  expect(request.runMode).toBe("new_session_per_run");
+  expect(request.schedule).toEqual({ type: "manual" });
+  expect(request.agentConfig.agentId).toBe(agent.id);
+  expect(request.agentConfig.prompt).toBe("Triage it.");
+  expect(request.events.triggers).toEqual([
+    expect.objectContaining({ sourceId: "source-gh", eventTypes: ["issues.opened"] }),
+  ]);
+  // The new trigger is listed and its suggestion isn't offered again.
+  expect(document.body.querySelector("[role='dialog']")).toBeNull();
+  expect(document.body.querySelectorAll("[data-agent-trigger]").length).toBe(1);
+  expect(
+    [...document.body.querySelectorAll("[data-agent-suggested-trigger]")].map(
+      (row) => row.textContent,
+    ),
+  ).toEqual([
+    expect.stringContaining("When a Linear issue is created"),
+    expect.stringContaining("When a pull request opens"),
+    expect.stringContaining("When mentioned on a PR"),
+  ]);
+});
+
+test("a suggestion's GitHub source is added on save once GitHub is connected", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "bound",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='create']")?.textContent).toContain(
+    "GitHub",
+  );
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const added = client.calls.find((call) => call[0] === "createEventSource");
+  expect(added?.[2]).toEqual({ kind: "github" });
+  expect(createdTask(client)!.events.triggers[0].sourceId).toEqual(expect.any(String));
+});
+
+test("without GitHub connected, connecting it is the one action", async () => {
+  const { client, dialog, path } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "unbound",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='connect_github']")).not.toBeNull();
+  expect(dialog.querySelector("textarea")).toBeNull();
+  await act(async () => button(dialog, "Connect GitHub").click());
+  await flush();
+  expect(decodeURIComponent(path())).toBe(
+    `/workspaces/${WORKSPACE_ID}/plugins?open=integration:github`,
+  );
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("a kind that needs its own setup opens Add a source at that kind", async () => {
+  const { client, dialog, path } = await openAgentTrigger({
+    suggestion: "When a Linear issue is created",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='add_source']")?.textContent).toContain(
+    "Linear",
+  );
+  await act(async () => button(dialog, "Add Linear").click());
+  await flush();
+  expect(path()).toBe(`/workspaces/${WORKSPACE_ID}/automations/sources/new?kind=linear`);
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("a blank trigger on a schedule saves with the default message, Only me like its agent", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    agent: { visibility: "private", ownerSubjectId: "user-me" },
+    eventTriggers: false,
+  });
+  expect(dialog.textContent).toContain("Each run starts a new chat with Triage. Only you see it.");
+  expect(dialog.querySelector("[role='radiogroup']")).toBeNull();
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.visibility).toBe("private");
+  expect(request.agentConfig.prompt).toBe("Do your scheduled work.");
+  expect(request.schedule.type).toBe("calendar");
+  expect(request.name).toStartWith("Triage: ");
+});
+
+function pickTrigger(dialog: HTMLElement, key: string) {
+  const tile = dialog.querySelector<HTMLButtonElement>(`[data-agent-trigger-option='${key}']`);
+  if (!tile) throw new Error(`no trigger option ${key}`);
+  return act(async () => tile.click());
+}
+
+test("the picker lists a schedule, the person's sources and every kind of source", async () => {
+  const { client, dialog } = await openAgentTrigger({ eventSources: [GITHUB_SOURCE] });
+  const options = [...dialog.querySelectorAll<HTMLElement>("[data-agent-trigger-option]")].map(
+    (tile) => tile.dataset.agentTriggerOption,
+  );
+  expect(options[0]).toBe("schedule");
+  expect(options).toContain("source:source-gh");
+  for (const kind of ["slack", "gmail", "linear", "webhook", "mcp"]) {
+    expect(options).toContain(`new:${kind}`);
+  }
+  // Nothing is picked yet; saving says so.
+  expect(dialog.querySelector("textarea")).toBeNull();
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).toContain("Choose what starts it.");
+  // A source asks for its events before saving.
+  await pickTrigger(dialog, "source:source-gh");
+  await flush();
+  expect(dialog.querySelector("textarea")?.placeholder).toBe("Handle this event.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("Create a webhook makes its URL right there, then its events start the agent", async () => {
+  const { client, dialog } = await openAgentTrigger({});
+  await pickTrigger(dialog, "new:webhook");
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-setup='create_webhook']")).not.toBeNull();
+  await act(async () => button(dialog, "Create webhook").click());
+  await flush();
+  expect(client.calls.find((call) => call[0] === "createEventSource")?.[2]).toEqual(
+    expect.objectContaining({ kind: "webhook", adapter: "standard", visibility: "workspace" }),
+  );
+  const shown = [
+    ...dialog.querySelectorAll<HTMLInputElement>("[data-agent-trigger-webhook] input"),
+  ].map((input) => input.value);
+  expect(shown).toEqual([expect.stringContaining("https://hooks.example.com/"), "whsec_test"]);
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+  expect(button(dialog, "Add trigger")).toBeTruthy();
+});
+
+test("Linear's webhook is made in place and takes its secret in one field, never shown again", async () => {
+  const { client, dialog } = await openAgentTrigger({});
+  await pickTrigger(dialog, "new:linear");
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-setup='create_pasted']")).not.toBeNull();
+  await act(async () => button(dialog, "Add Linear").click());
+  await flush();
+  const request = client.calls.find((call) => call[0] === "createEventSource")?.[2];
+  expect(request).toEqual(expect.objectContaining({ kind: "webhook", adapter: "custom" }));
+  expect(request).not.toHaveProperty("signingSecret");
+  // The URL to paste into Linear, and one field for the secret it shows.
+  const secretStep = dialog.querySelector<HTMLElement>("[data-agent-trigger-secret]")!;
+  expect(secretStep).not.toBeNull();
+  const url = secretStep.querySelector<HTMLTextAreaElement | HTMLInputElement>("textarea, input");
+  expect(url?.value).toContain("https://hooks.example.com/");
+  const field = secretStep.querySelector<HTMLInputElement>("input[type='password']")!;
+  expect(field).not.toBeNull();
+  expect(dialog.querySelector("textarea")).toBeNull();
+  // Too short: refused here, nothing sent.
+  await act(async () => setValue(field, "short"));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  expect(client.calls.some((call) => call[0] === "updateEventSource")).toBe(false);
+  expect(dialog.textContent).toContain("Paste the signing secret Linear shows.");
+  await act(async () => setValue(field, "  lin_wh_secret_value_123  "));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  const update = client.calls.find((call) => call[0] === "updateEventSource");
+  expect(update?.[3]).toEqual({ signingSecret: "lin_wh_secret_value_123" });
+  // Saved: the value is gone from the dialog; it only says the secret is set.
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).toBeNull();
+  expect(dialog.innerHTML).not.toContain("lin_wh_secret_value_123");
+  expect(dialog.querySelector("[data-agent-trigger-secret-set]")?.textContent).toContain(
+    "Signing secret set.",
+  );
+  expect(button(dialog, "Add trigger")).toBeTruthy();
+  // Replace opens an empty field again, and Keep current goes back.
+  await act(async () => button(dialog, "Replace").click());
+  await flush();
+  const again = dialog.querySelector<HTMLInputElement>(
+    "[data-agent-trigger-secret] input[type='password']",
+  );
+  expect(again?.value).toBe("");
+  await act(async () => button(dialog, "Keep current signing secret").click());
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).toBeNull();
+});
+
+/** A Linear webhook made earlier, still waiting for the secret Linear shows. */
+function waitingLinearSource(viewerAccess: "manage" | "use") {
+  return {
+    id: "source-linear",
+    name: "Team Linear",
+    kind: "webhook",
+    adapter: "custom",
+    format: { preset: "linear", signature: { scheme: "hmac_sha256" } },
+    status: "blocked",
+    statusReasonCode: "awaiting_secret",
+    statusReason: "Paste the signing secret Linear shows for this webhook.",
+    awaitingSigningSecret: true,
+    webhookUrl: "https://hooks.example.com/source-linear",
+    mcp: null,
+    viewerAccess,
+  };
+}
+
+test("a waiting webhook can be picked to paste its secret, then added as a trigger", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [waitingLinearSource("manage")],
+  });
+  await pickTrigger(dialog, "source:source-linear");
+  await flush();
+  const field = dialog.querySelector<HTMLInputElement>(
+    "[data-agent-trigger-secret] input[type='password']",
+  )!;
+  expect(field).not.toBeNull();
+  await act(async () => setValue(field, "lin_wh_secret_value_123"));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  expect(client.calls.find((call) => call[0] === "updateEventSource")?.[2]).toBe("source-linear");
+  expect(dialog.querySelector("[data-agent-trigger-secret-set] [role='status']")?.textContent).toBe(
+    "Signing secret set.",
+  );
+  expect(button(dialog, "Add trigger")).toBeTruthy();
+});
+
+test("someone who may only use a waiting webhook can't pick it to paste its secret", async () => {
+  const { dialog } = await openAgentTrigger({ eventSources: [waitingLinearSource("use")] });
+  await flush();
+  const option = dialog.querySelector<HTMLElement>(
+    "[data-agent-trigger-option='source:source-linear']",
+  );
+  expect(option?.textContent ?? dialog.textContent).toContain("Its owner pastes the secret.");
+});
+
+test("a refused secret stays on the field and nothing is kept on the page", async () => {
+  const refused = Object.assign(new Error("Opengeni API 422: signing secret is too short"), {
+    status: 422,
+  });
+  const { dialog } = await openAgentTrigger({
+    eventSources: [waitingLinearSource("manage")],
+    updateSourceError: refused,
+  });
+  await pickTrigger(dialog, "source:source-linear");
+  await flush();
+  const field = dialog.querySelector<HTMLInputElement>(
+    "[data-agent-trigger-secret] input[type='password']",
+  )!;
+  await act(async () => setValue(field, "lin_wh_secret_value_123"));
+  await act(async () => button(dialog, "Save signing secret").click());
+  await flush();
+  // Still on the field, which says what went wrong; the value is never an attribute.
+  expect(dialog.querySelector("[data-agent-trigger-secret]")).not.toBeNull();
+  expect(dialog.querySelector("[data-agent-trigger-secret-set]")).toBeNull();
+  expect(
+    dialog
+      .querySelector("[data-agent-trigger-secret] input[type='password']")
+      ?.getAttribute("aria-invalid"),
+  ).toBe("true");
+  expect(dialog.innerHTML).not.toContain("lin_wh_secret_value_123");
+});
+
+async function chooseFrom(dialog: HTMLElement, current: string, option: string) {
+  const trigger = [...dialog.querySelectorAll<HTMLElement>("[role='combobox']")].find((entry) =>
+    entry.textContent?.includes(current),
+  );
+  if (!trigger) throw new Error(`no menu showing ${current}`);
+  await act(async () => trigger.click());
+  await flush();
+  const items = [...document.querySelectorAll<HTMLElement>("[role='option']")];
+  const offered = items.map((entry) => entry.textContent);
+  const item = items.find((entry) => entry.textContent?.includes(option));
+  if (!item) throw new Error(`no option ${option}`);
+  await act(async () => item.click());
+  await flush();
+  return offered;
+}
+
+test("a GitHub trigger covers every repository, or only the chosen ones; runs open their event's", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    githubRepos: [
+      { id: 1, fullName: "acme/api" },
+      { id: 2, fullName: "acme/web" },
+      { id: 3, fullName: "acme/docs" },
+    ],
+  });
+  const field = dialog.querySelector<HTMLElement>("[data-agent-trigger-repositories]")!;
+  expect(field.textContent).toContain("All repositories");
+  await chooseFrom(dialog, "All repositories", "acme/api");
+  const offered = await chooseFrom(dialog, "Add a repository", "acme/web");
+  expect(offered).toEqual(["acme/web", "acme/docs"]);
+  await act(async () => button(dialog, "Remove acme/web").click());
+  await chooseFrom(dialog, "Add a repository", "acme/docs");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  // No repository is cloned for every run; the condition chooses them.
+  expect(request.agentConfig.resources).toEqual([]);
+  expect(request.events.triggers[0].conditions).toEqual([
+    { field: "data.repository.full_name", op: "in", value: ["acme/api", "acme/docs"] },
+  ]);
+});
+
+test("a GitHub trigger that continues one chat keeps its chosen repositories open there", async () => {
+  const repo = (id: number, fullName: string) => ({
+    id,
+    installationId: 9,
+    fullName,
+    cloneUrl: `https://github.com/${fullName}.git`,
+    defaultBranch: "main",
+  });
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    githubRepos: [repo(1, "acme/api"), repo(2, "acme/web")],
+  });
+  await chooseFrom(dialog, "New chat each run", "One chat for this trigger");
+  await chooseFrom(dialog, "All repositories", "acme/web");
+  expect(dialog.textContent).toContain("Fires for these, and the chat opens them.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.runMode).toBe("reusable_session");
+  expect(
+    request.agentConfig.resources.map((resource: { uri: string; githubRepositoryId: number }) => [
+      resource.uri,
+      resource.githubRepositoryId,
+    ]),
+  ).toEqual([["https://github.com/acme/web.git", 2]]);
+  expect(request.events.triggers[0].conditions).toEqual([
+    { field: "data.repository.full_name", op: "equals", value: "acme/web" },
+  ]);
+});
+
+test("a continued chat opens at most 5 repositories; more chosen wait for some to go", async () => {
+  const repo = (id: number) => ({
+    id,
+    installationId: 9,
+    fullName: `acme/r${id}`,
+    cloneUrl: `https://github.com/acme/r${id}.git`,
+    defaultBranch: "main",
+  });
+  const { client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    githubRepos: [1, 2, 3, 4, 5, 6].map(repo),
+  });
+  await chooseFrom(dialog, "All repositories", "acme/r1");
+  for (const id of [2, 3, 4, 5, 6]) await chooseFrom(dialog, "Add a repository", `acme/r${id}`);
+  await chooseFrom(dialog, "New chat each run", "One chat for this trigger");
+  expect(dialog.textContent).toContain("A chat opens at most 5. Remove 1.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  await act(async () => button(dialog, "Remove acme/r6").click());
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)!.agentConfig.resources).toHaveLength(5);
+});
+
+test("a trigger's runs start a new chat by default, or continue one of this agent's chats", async () => {
+  const { agent, client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessions: (agentId) => [
+      { id: "chat-triage", title: "Weekly triage", agentId },
+      { id: "chat-other", title: "Someone else's agent", agentId: "another-agent" },
+      { id: "chat-plain", title: "Plain chat", agentId: null },
+    ],
+  });
+  expect(dialog.textContent).toContain("Each run starts a new chat with Triage");
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  // Only chats with this agent are offered, and one must be picked.
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).toContain("Choose a chat.");
+  expect(await chooseFrom(dialog, "Choose a chat", "Weekly triage")).toEqual([
+    expect.stringContaining("Weekly triage"),
+  ]);
+  expect(dialog.textContent).toContain("Each run continues a chat with Triage");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.runMode).toBe("existing_session");
+  expect(request.targetSessionId).toBe("chat-triage");
+  expect(request.agentConfig.agentId).toBe(agent.id);
+});
+
+test("a shared trigger the person may not add says so in the dialog", async () => {
+  const forbidden = Object.assign(new Error("Opengeni API 403: missing permission"), {
+    status: 403,
+  });
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    createTaskError: forbidden,
+  });
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(dialog.textContent).toContain(AGENT_TRIGGER_SHARED_DENIED);
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+});
+
+test("a suggestion's source that can't be added says why, not the shared-automation refusal", async () => {
+  const forbidden = Object.assign(new Error("Opengeni API 403: missing permission"), {
+    status: 403,
+  });
+  const { client, dialog } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "bound",
+    createSourceError: forbidden,
+  });
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(client.calls.some((call) => call[0] === "createEventSource")).toBe(true);
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).not.toContain(AGENT_TRIGGER_SHARED_DENIED);
+  expect(dialog.textContent).toContain(userErrorText(forbidden));
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+});
+
+test("a paused GitHub source shows greyed with why, and GitHub isn't offered as new", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [
+      { ...GITHUB_SOURCE, status: "disabled", statusReasonCode: "turned_off", statusReason: null },
+    ],
+  });
+  const tile = dialog.querySelector<HTMLButtonElement>(
+    "[data-agent-trigger-option='source:source-gh']",
+  )!;
+  expect(tile.disabled).toBe(true);
+  expect(tile.textContent).toContain("Turned off.");
+  expect(dialog.querySelector("[data-agent-trigger-option='new:github']")).toBeNull();
+  await act(async () => tile.click());
+  await flush();
+  expect(tile.getAttribute("aria-checked")).toBe("false");
+});
+
+test("Open full form starts the form at the source picked", async () => {
+  const { dialog, path } = await openAgentTrigger({ eventSources: [GITHUB_SOURCE] });
+  await pickTrigger(dialog, "source:source-gh");
+  await flush();
+  const link = dialog.querySelector<HTMLButtonElement>("[data-agent-trigger-full-form]")!;
+  await act(async () => link.click());
+  await flush();
+  const url = new URL(path(), "https://example.test");
+  expect(url.pathname).toBe(`/workspaces/${WORKSPACE_ID}/automations/new`);
+  expect(url.searchParams.get("source")).toBe("source-gh");
+  expect(url.searchParams.get("returnTo")).toBe("agent");
+});
+
+test("Open full form keeps the note and chat choice, out of the address", async () => {
+  const { dialog, path, state } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessions: (agentId) => [{ id: "chat-3", title: "Old triage", agentId }],
+  });
+  const note = dialog.querySelector<HTMLTextAreaElement>("textarea")!;
+  await act(async () => {
+    const setNative = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+    setNative.call(note, "Label it and reply");
+    note.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  await chooseFrom(dialog, "Choose a chat", "Old triage");
+  const link = dialog.querySelector<HTMLButtonElement>("[data-agent-trigger-full-form]")!;
+  await act(async () => link.click());
+  await flush();
+  expect(state().agentTriggerStart).toEqual({
+    note: "Label it and reply",
+    chat: { mode: "existing_session", sessionId: "chat-3" },
+  });
+  expect(path()).not.toContain("Label");
+});
+
+test("An existing chat lists the agent's chats, filtered by the server, across pages", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    chatsPageSize: 2,
+    sessions: (agentId) => [
+      { id: "chat-1", title: "Other 1", agentId: "another-agent" },
+      { id: "chat-2", title: "Other 2", agentId: null },
+      { id: "chat-3", title: "New triage", agentId },
+      { id: "chat-4", title: "Mid triage", agentId },
+      { id: "chat-5", title: "Old triage", agentId },
+    ],
+  });
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  expect(await chooseFrom(dialog, "Choose a chat", "Old triage")).toEqual([
+    expect.stringContaining("New triage"),
+    expect.stringContaining("Mid triage"),
+    expect.stringContaining("Old triage"),
+  ]);
+});
+
+test("An existing chat that can't be read says so, not that there are none", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    chatsError: new Error("Opengeni API 500: down"),
+  });
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  expect(dialog.textContent).toContain("Couldn't load chats with Triage.");
+  expect(dialog.textContent).not.toContain("No chats with Triage yet.");
+  expect(button(dialog, "Try again")).toBeTruthy();
 });
 
 test("a listed GitHub connection's row also offers Opengeni's own GitHub tools", async () => {
-  const agent = makeAgent({ name: "Fixer" });
+  const agent = makeAgent({
+    name: "Fixer",
+    toolPermissions: [{ connector: "github.com", tool: "*", permission: "ask" }],
+  });
   const client = fakeAgentsClient([agent], {
     capabilities: [
       {
@@ -1248,17 +2071,57 @@ test("a listed GitHub connection's row also offers Opengeni's own GitHub tools",
   await flush();
   const rows = container.querySelectorAll<HTMLElement>("[data-agent-can-use='github.com']");
   expect(rows).toHaveLength(1);
-  await act(async () =>
-    [...rows[0]!.querySelectorAll("button")]
-      .find((b) => b.textContent?.includes("Choose per tool"))!
-      .click(),
-  );
+  const perTool = [...rows[0]!.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes("Choose per tool"),
+  )!;
+  await act(async () => perTool.click());
   await flush();
-  expect(rows[0]!.textContent).toContain("search_code");
-  expect(rows[0]!.textContent).toContain("pull_request_merge");
+  expect(rows[0]!.textContent).toContain("Search code");
+  // The toggle names the tool list it opens.
+  expect(document.getElementById(perTool.getAttribute("aria-controls")!)?.textContent).toContain(
+    "Search code",
+  );
+  expect(rows[0]!.textContent).toContain("Merge pull request");
 });
 
-test("Add an agent adds a ready-made agent once", async () => {
+test("Add agent offers every ready-made agent's content file not yet added here", async () => {
+  const keys = [
+    "triage",
+    "bug-fixer",
+    "pr-reviewer",
+    "cve-scanner",
+    "incident-responder",
+    "dependency-updater",
+    "product-analyst",
+  ];
+  const templates = await Promise.all(
+    keys.map(
+      async (key) =>
+        (await import(`../../core/src/agent-templates/${key}.agent.json`)).default as {
+          name: string;
+          description: string;
+        },
+    ),
+  );
+  const client = fakeAgentsClient([makeAgent({ name: "Triage", templateKey: "triage" })], {
+    templates,
+  });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  await flush();
+  const text = container.textContent ?? "";
+  // Triage is already here, so it isn't offered again.
+  expect(text).not.toContain(templates[0]!.description);
+  for (const template of templates.slice(1)) {
+    expect(text).toContain(template.name);
+    expect(text).toContain(template.description);
+  }
+});
+
+test("Add agent offers ready-made agents first and adds one", async () => {
   const client = fakeAgentsClient([], { templates: [TRIAGE_TEMPLATE] });
   let path = "";
   const container = await render(
@@ -1266,11 +2129,129 @@ test("Add an agent adds a ready-made agent once", async () => {
       <AgentsPage workspaceId={WORKSPACE_ID} />
     </AgentsTestHost>,
   );
-  expect(container.textContent).toContain("Add an agent");
+  expect(container.textContent).toContain("Add agent");
   expect(container.textContent).toContain("Sorts new issues");
-  await act(async () => button(container, "Add").click());
+  const triage = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(
+    (item) => item.textContent?.includes("Triage"),
+  )!;
+  await act(async () => triage.click());
   await flush();
   expect(client.calls).toContainEqual(["createAgentFromTemplate", WORKSPACE_ID, "triage"]);
   const created = [...client.agents.values()][0]!;
   expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/${created.id}`);
+});
+
+function canCreate(client: object) {
+  return appContext(client, {
+    accessContext: {
+      subjectId: "user-me",
+      subjectLabel: "Maja",
+      workspaceGrants: [
+        {
+          workspaceId: WORKSPACE_ID,
+          subjectId: "user-me",
+          principalKind: "human_session",
+          permissions: ["sessions:read", "sessions:create", "artifacts:read", "artifacts:publish"],
+        },
+      ],
+      accountGrants: [],
+    },
+  });
+}
+
+const REVIEWER_TEMPLATE = {
+  ...TRIAGE_TEMPLATE,
+  key: "pr-reviewer",
+  name: "PR reviewer",
+  description: "Reviews pull requests.",
+  suggestedTriggers: [],
+};
+
+test("Ready-made lists the agents not added yet under the workspace's, and adds one in one click", async () => {
+  const added = makeAgent({ name: "Triage", templateKey: "triage" });
+  const client = fakeAgentsClient([added], { templates: [TRIAGE_TEMPLATE, REVIEWER_TEMPLATE] });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)} onLocation={(location) => (path = location.href)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const rows = [...container.querySelectorAll<HTMLButtonElement>("[data-ready-made-agent]")];
+  expect(rows.map((row) => row.dataset.readyMadeAgent)).toEqual(["pr-reviewer"]);
+  await act(async () => rows[0]!.click());
+  await flush();
+  expect(client.calls).toContainEqual(["createAgentFromTemplate", WORKSPACE_ID, "pr-reviewer"]);
+  const created = [...client.agents.values()].find((agent) => agent.templateKey === "pr-reviewer")!;
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/${created.id}`);
+  expect(container.querySelector("[data-ready-made-agent]")).toBeNull();
+});
+
+test("Ready-made agents aren't offered to someone who can't add agents", async () => {
+  const client = fakeAgentsClient([], { templates: [TRIAGE_TEMPLATE] });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  expect(container.querySelector("[data-ready-made-agent]")).toBeNull();
+});
+
+const APP_TEMPLATE = {
+  key: "issue-tracker",
+  name: "Issue tracker",
+  description: "Track bugs and tasks.",
+  team: "Engineering",
+  package: { tools: [] },
+};
+
+function appInstaller(responses: { id: string; status: string; replayed: boolean }[]) {
+  const requests: { idempotencyKey: string }[] = [];
+  return {
+    requests,
+    async installAppPackage(_workspaceId: string, request: { idempotencyKey: string }) {
+      requests.push(request);
+      const next = responses.shift()!;
+      return {
+        app: { id: next.id, status: next.status },
+        replayed: next.replayed,
+        notInstalled: [],
+      } as never;
+    },
+  };
+}
+
+test("a ready-made app is added once; an archived copy is added fresh after it", async () => {
+  const installer = appInstaller([
+    { id: "app-1", status: "archived", replayed: true },
+    { id: "app-2", status: "active", replayed: false },
+  ]);
+  const installed = await installReadyMadeApp(installer, WORKSPACE_ID, APP_TEMPLATE as never);
+  expect(installed.app.id).toBe("app-2");
+  expect(installer.requests.map((request) => request.idempotencyKey)).toEqual([
+    "ready-made:issue-tracker",
+    "ready-made:issue-tracker:after:app-1",
+  ]);
+});
+
+test("Ready-made apps add in one click and open the app, which asks for its tools", async () => {
+  const installer = appInstaller([{ id: "app-9", status: "active", replayed: false }]);
+  const client = Object.assign(fakeAgentsClient([]), installer, {
+    async listAppTemplates() {
+      return [APP_TEMPLATE];
+    },
+  });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)} onLocation={(location) => (path = location.href)}>
+      <ReadyMadeApps workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLButtonElement>("[data-ready-made-app='issue-tracker']")!;
+  expect(row.textContent).toContain("Issue tracker");
+  await act(async () => row.click());
+  await flush();
+  expect(installer.requests.map((request) => request.idempotencyKey)).toEqual([
+    "ready-made:issue-tracker",
+  ]);
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/artifacts/app-9`);
 });

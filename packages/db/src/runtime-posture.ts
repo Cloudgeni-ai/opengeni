@@ -73,7 +73,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * unpaid sandbox fleet counts behind the fleet limits (1486), and the
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
  * (1487), and the managed warm box count fleet pressure reads (1492), and
- * the subscription needs-sign-in notice sync (1503).
+ * the subscription needs-sign-in notice sync (1503), and the one-statement
+ * lookup of the Slack event sources a shared Slack bot reaches (1552), and
+ * the inbox notice sync for a blocked automation with no chat (1562).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -117,6 +119,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
+  "deliver_app_notification_v1(uuid)",
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+  "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
 ] as const;
 
 /**
@@ -168,6 +173,10 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, only a status write by the tables' owner (the definer that records
  * a model request refused after refresh, and the migration's backfill) opens
  * or resolves a notice, and the person dismisses one left after a reconnect.
+ * 1552 withholds the shared Slack bot's one-statement source lookup; until it
+ * is granted, a Slack callback keeps 1538's per-workspace probe.
+ * 1562 withholds the inbox notice sync for a blocked automation with no chat;
+ * until it is granted, such an owner is told only on the automation's page.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -181,6 +190,9 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
+  "deliver_app_notification_v1(uuid)",
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+  "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -338,6 +350,23 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "opengeni_private.inbox_items",
     "opengeni_private.native_push_devices",
     "opengeni_private.native_push_deliveries",
+  ],
+  "sync_scheduled_task_blocker_inbox_notice_v1(uuid)": [
+    "scheduled_tasks",
+    "scheduled_task_blocker_reviews",
+    "opengeni_private.inbox_items",
+  ],
+  "deliver_app_notification_v1(uuid)": [
+    "app_notifications",
+    "auth_sessions",
+    "opengeni_private.inbox_items",
+    "opengeni_private.native_push_devices",
+    "opengeni_private.native_push_deliveries",
+  ],
+  "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)": [
+    "event_sources",
+    "connections",
+    "opengeni_private.organization_tenancy_inventory_capabilities",
   ],
 };
 
@@ -554,6 +583,11 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  // Migration 1557: called only behind the existing vault routine grants.
+  "vault_turn_context(uuid, uuid, uuid, uuid)",
+  "human_input_secret_target_reachable(jsonb, jsonb, text, uuid)",
+  "human_input_secret_save_targets(jsonb, uuid, uuid)",
+  "vault_secure_answer_matches(jsonb, vault_items)",
   "wake_teams_route_for_session_event()",
   // Migration 1213: clears a new session's archive marker; triggers fire
   // without the inserting role holding EXECUTE.
@@ -563,6 +597,14 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // holding EXECUTE.
   "stamp_subscription_connection_sign_in()",
   "subscription_connection_relogin_notice()",
+  // Migration 1543: the app notification trigger (an invoker trigger that
+  // calls deliver_app_notification_v1 once the runtime may). Triggers fire
+  // without the inserting role holding EXECUTE.
+  "deliver_app_notification()",
+  // Migration 1562: the blocked automation inbox notice trigger (an invoker
+  // trigger that calls sync_scheduled_task_blocker_inbox_notice_v1 once the
+  // runtime may). Triggers fire without the writing role holding EXECUTE.
+  "scheduled_task_blocker_inbox_notice()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -2049,8 +2091,13 @@ export const FORCE_RLS_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
+  "app_notifications",
+  "app_package_exports",
+  "app_server_runs",
+  "app_sync_keys",
   "app_sync_queue",
   "app_sync_subscriptions",
+  "app_webhooks",
   "attached_browser_devices",
   "attached_browser_inventories",
   "audit_events",
@@ -2250,6 +2297,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
   "managed_sign_in_method_operations",
+  "mcp_connection_rate_limits",
   "mcp_event_subscriptions",
   "mcp_operations",
   "memory_slack_publication_configurations",
@@ -2351,6 +2399,8 @@ export const FORCE_RLS_TABLES = [
   "recording_notes",
   "recording_people",
   "recording_segment_edits",
+  // 1570_recording_shares: the team workspace a Personal workspace meeting is shared with.
+  "recording_shares",
   "recording_speaker_assignments",
   "recording_speaker_voices",
   "recording_tracks",
@@ -2479,6 +2529,8 @@ export const FORCE_RLS_TABLES = [
   "site_sql_rate_windows",
   "site_sql_usage",
   "site_tool_allowances",
+  "site_tool_data_resets",
+  "site_tool_data_sources",
   "site_viewer_sessions",
   "skill_config_conversion_receipts",
   "skill_source_bindings",
@@ -2565,6 +2617,8 @@ export const FORCE_RLS_TABLES = [
   "vault_field_versions",
   "vault_item_fields",
   "vault_item_name_aliases",
+  // 1563_vault_item_use_only: marks that an item's values are never shown again.
+  "vault_item_use_only",
   "vault_items",
   "vault_name_aliases",
   "vault_passkey_leases",
@@ -2654,9 +2708,17 @@ export const RUNTIME_FULL_DML_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
+  // 1542_app_package_exports: stored app package files and their sweep.
+  "app_package_exports",
+  // 1554_app_server_code: runs of an app's server code (inserts, prune deletes).
+  "app_server_runs",
+  // 1541_app_sync_paging_and_leases: the keys each sync wrote (removeMissing).
+  "app_sync_keys",
   // 1520_app_data_sync: App data sync executor queue and personal opt-ins.
   "app_sync_queue",
   "app_sync_subscriptions",
+  // 1543_app_webhooks_and_notifications: an app's inbound webhook addresses.
+  "app_webhooks",
   "audit_events",
   "auth_identities",
   "auth_passkeys",
@@ -2733,6 +2795,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "mcp_connection_rate_limits",
   "mcp_event_subscriptions",
   "mcp_oauth_access_tokens",
   "mcp_oauth_authorization_codes",
@@ -2783,6 +2846,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "recording_notes",
   "recording_people",
   "recording_segment_edits",
+  // 1570_recording_shares: a meeting shared with a team workspace (owner adds, changes, removes).
+  "recording_shares",
   "recording_speaker_assignments",
   "recording_speaker_voices",
   "recording_tracks",
@@ -2873,6 +2938,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_rate_windows",
   "site_sql_usage",
   "site_tool_allowances",
+  // 1554_app_server_code: where an app stored shared-account tool data;
+  // 1557 lets a manager's reset remove stale marks.
+  "site_tool_data_sources",
   "site_viewer_sessions",
   "slack_agent_intro_posts",
   "slack_agent_proposals",
@@ -3044,6 +3112,8 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 export const RUNTIME_READ_INSERT_TABLES = [
   // 1243_agents: immutable agent revisions.
   "agent_revisions",
+  // 1543_app_webhooks_and_notifications: app notifications, delivered by an owner trigger.
+  "app_notifications",
   "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",
@@ -3101,6 +3171,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
+  // 1563_vault_item_use_only: a use-only mark is added, never changed or removed.
+  "vault_item_use_only",
   // Written by the invoker-rights 1105 triggers; read by the "This workspace" feed.
   "workspace_activity_events",
   "workspace_artifact_events",
@@ -3154,6 +3226,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "session_attempt_model_context_snapshots",
   "session_turn_startup_milestones",
   "site_auth_connections",
+  // 1557_sticky_tool_data_marks: when a manager last reset a target.
+  "site_tool_data_resets",
   "slack_user_link_access_requests",
   "workspace_interaction_revisions",
 ] as const;

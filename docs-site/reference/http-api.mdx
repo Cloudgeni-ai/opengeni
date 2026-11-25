@@ -37,6 +37,12 @@ API and embedded-product usage spends credits, not plan credit. Connected AI sub
 | Webhooks, credentials | `/v1/workspaces/:workspaceId/webhooks/...` and `.../credential-provider`, plus the same under `/v1/organizations/:organizationId/...` |
 | Usage allowances      | `.../allowance`, `.../usage/me` on a workspace (or `/v1/workspaces/external/:source/:externalId`)                                     |
 
+## Session model defaults
+
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/model-settings` updates `model`, `reasoningEffort`, and `latencyMode` without sending a message. It needs `sessions:control` and access to the session; a workspace API key can call it. Supply a UUID `idempotencyKey`; an exact retry returns the original result. Pass any of the current settings in `expected` to compare before writing. A mismatch returns `409` with all three current settings in `error.details.current`; an unsupported or disallowed setting returns `400` without substituting a value.
+
+The defaults apply to newly admitted turns, including scheduled turns that inherit the session defaults. Running and already queued turns keep their settings; a turn waiting on subscription capacity can continue on the new model. The response includes `releasedCapacityWaitTurnId` when that happens.
+
 ## Streaming
 
 The event stream is Server-Sent Events. Every event has a sequence number, so a client can reconnect with the last sequence it saw and fill any gap from the replay route. Disable proxy buffering and set read timeouts of at least an hour.

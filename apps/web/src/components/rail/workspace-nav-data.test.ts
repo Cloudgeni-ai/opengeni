@@ -9,7 +9,9 @@ import {
   isConfigItemActive,
   isWorkspaceConfigPath,
   itemDescription,
-  advancedWorkspaceItems,
+  groupedWorkspaceItems,
+  isNavItemActive,
+  navItemKey,
   primaryWorkspaceItems,
 } from "./workspace-nav-data";
 
@@ -73,9 +75,21 @@ describe("workspace rail destinations", () => {
 });
 
 describe("simplified interface navigation", () => {
-  test("without it every destination is listed", () => {
-    expect(primaryWorkspaceItems(false)).toEqual(PRIMARY_WORKSPACE_ITEMS);
-    expect(advancedWorkspaceItems(false)).toEqual([]);
+  test("without it every destination is listed: Agents and Apps up front, the rest under Setup", () => {
+    expect(primaryWorkspaceItems(false).map((item) => item.label)).toEqual(["Agents", "Apps"]);
+    const setup = groupedWorkspaceItems(false);
+    expect(setup.label).toBe("Setup");
+    expect(setup.items.map((item) => item.label)).toEqual([
+      "Get started",
+      "Capabilities",
+      "Automations",
+      "Knowledge",
+      "Artifacts",
+      "Meetings",
+    ]);
+    // Nothing is left out: every destination is up front or under Setup.
+    const listed = new Set([...primaryWorkspaceItems(false), ...setup.items].map(navItemKey));
+    for (const item of PRIMARY_WORKSPACE_ITEMS) expect(listed.has(navItemKey(item))).toBe(true);
     for (const item of WORKSPACE_CONFIG_GROUPS.flatMap((group) => group.items)) {
       expect(interfaceListsDestination(false, item.to)).toBe(true);
     }
@@ -83,6 +97,19 @@ describe("simplified interface navigation", () => {
     expect(interfaceListsSettingsSection(false, "api-keys")).toBe(true);
     expect(interfaceListsOrganizationSection(false, "developer")).toBe(true);
     expect(interfaceListsOrganizationSection(false, "insights")).toBe(true);
+  });
+
+  test("Apps is the Artifacts page's Apps tab and an app's own view; Artifacts is the rest", () => {
+    const apps = primaryWorkspaceItems(false).find((item) => item.label === "Apps")!;
+    const artifacts = PRIMARY_WORKSPACE_ITEMS.find((item) => item.label === "Artifacts")!;
+    const at = (pathname: string, kind?: string) => ({ pathname, kind });
+    expect(isNavItemActive(at("/workspaces/w/artifacts", "site"), "w", apps)).toBe(true);
+    expect(isNavItemActive(at("/workspaces/w/artifacts", "site"), "w", artifacts)).toBe(false);
+    expect(isNavItemActive(at("/workspaces/w/sites/s1"), "w", apps)).toBe(true);
+    expect(isNavItemActive(at("/workspaces/w/artifacts"), "w", apps)).toBe(false);
+    expect(isNavItemActive(at("/workspaces/w/artifacts"), "w", artifacts)).toBe(true);
+    expect(isNavItemActive(at("/workspaces/w/artifacts/a1"), "w", artifacts)).toBe(true);
+    expect(navItemKey(apps)).not.toBe(navItemKey(artifacts));
   });
 
   test("a destination's tooltip names the product the way the interface does", () => {
@@ -107,7 +134,7 @@ describe("simplified interface navigation", () => {
       "Agents",
       "Artifacts",
     ]);
-    expect(advancedWorkspaceItems(true).map((item) => item.label)).toEqual([
+    expect(groupedWorkspaceItems(true).items.map((item) => item.label)).toEqual([
       "Knowledge",
       "Automations",
     ]);

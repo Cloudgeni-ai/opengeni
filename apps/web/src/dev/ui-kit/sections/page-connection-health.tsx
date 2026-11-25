@@ -8,7 +8,7 @@ import {
 } from "@opengeni/react/app/lib/capabilities";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/react/app/types";
 
-import { CapabilityMark } from "@/components/capabilities/capability-page";
+import { CapabilityMark } from "@opengeni/react/ui/capability-page";
 import { CatalogItemPage } from "@/components/capabilities/catalog-item-page";
 import { connectorRowHealth } from "@/components/capabilities/connector-row-health";
 

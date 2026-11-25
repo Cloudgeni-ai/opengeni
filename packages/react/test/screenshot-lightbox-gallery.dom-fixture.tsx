@@ -239,7 +239,7 @@ describe("LightboxProvider gallery", () => {
       // Electron keeps window-drag regions of the page underneath (the session
       // header) live through an overlay unless the overlay opts out.
       const dialog = document.querySelector('[role="dialog"]')!;
-      const overlay = dialog.previousElementSibling!;
+      const overlay = dialog.parentElement!;
       for (const layer of [dialog, overlay]) {
         expect(layer.classList.contains("[-webkit-app-region:no-drag]")).toBe(true);
         expect(layer.classList.contains("[app-region:no-drag]")).toBe(true);

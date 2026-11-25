@@ -612,6 +612,339 @@ describe("ApprovalSurface", () => {
   });
 });
 
+describe("ApprovalSurface: an action whose account lacks access", () => {
+  const modify = "https://www.googleapis.com/auth/gmail.modify";
+  const accessNeeded = {
+    providerDomain: "gmailmcp.googleapis.com",
+    connectionId: "conn-1",
+    scopes: [modify],
+  };
+  const settle = async () => {
+    for (let index = 0; index < 4; index++) await act(async () => await Promise.resolve());
+  };
+  const approveButton = () =>
+    [...mounted!.container.querySelectorAll("button")].find((button) =>
+      /Approve|Waiting/.test(button.textContent ?? ""),
+    );
+
+  test("one Approve asks Google first, in the click, then approves only this call", async () => {
+    const order: string[] = [];
+    const consent = deferred<boolean>();
+    let calledInClick = false;
+    let clicking = false;
+    const other = { ...approval, id: "approval-2", arguments: { projectId: "project-2" } };
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval, other],
+        loadReview: async (value: PendingApproval) => ({
+          ...savedReview(),
+          id: value.id,
+          ...(value.id === approval.id ? { accessNeeded } : {}),
+        }),
+        onAllowAccess: (access) => {
+          calledInClick = clicking;
+          order.push(`allow:${access.connectionId}:${access.scopes.join(" ")}`);
+          return consent.promise;
+        },
+        onApprove: async (value) => {
+          order.push(`approve:${value.id}`);
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    expect(mounted.container.textContent).toContain(
+      "Google will ask you to allow Opengeni to organize your Gmail (one time).",
+    );
+    await act(async () => {
+      clicking = true;
+      approveButton()!.click();
+      clicking = false;
+      await Promise.resolve();
+    });
+    // The provider's window opens in the click itself, or the browser blocks it.
+    expect(calledInClick).toBe(true);
+    expect(approveButton()?.textContent).toContain("Waiting for Google");
+    expect(order).toEqual([`allow:conn-1:${modify}`]);
+    consent.resolve(true);
+    await settle();
+    // Allowing the access approves this one call: the other still waits.
+    expect(order).toEqual([`allow:conn-1:${modify}`, "approve:approval-1"]);
+  });
+
+  test("access the person didn't allow leaves the action waiting, unapproved", async () => {
+    let approved = 0;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: async () => false,
+        onApprove: async () => {
+          approved += 1;
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(approved).toBe(0);
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("a consent that fails leaves the action waiting, with the error shown", async () => {
+    let approved = 0;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: async () => {
+          throw new Error("Your browser blocked the sign-in window.");
+        },
+        onApprove: async () => {
+          approved += 1;
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(approved).toBe(0);
+    expect(mounted.container.querySelector('[role="alert"]')?.textContent).toBeTruthy();
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("Reject while the provider's window is open stops waiting for it and declines", async () => {
+    const decisions: string[] = [];
+    let signal: AbortSignal | undefined;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: (_access, _approval, abort) => {
+          signal = abort;
+          // Never settles on its own: the person closed Google's window.
+          return new Promise<boolean>((_resolve, reject) =>
+            abort.addEventListener("abort", () => reject(abort.reason)),
+          );
+        },
+        onApprove: async () => {
+          decisions.push("approve");
+        },
+        onReject: async () => {
+          decisions.push("reject");
+        },
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(approveButton()?.textContent).toContain("Waiting for Google");
+    const reject = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Decline",
+    );
+    expect(reject?.hasAttribute("disabled")).toBe(false);
+    await act(async () => {
+      reject!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(signal?.aborted).toBe(true);
+    expect(decisions).toEqual(["reject"]);
+  });
+
+  test("Approve waits for the review, so missing access is never skipped", async () => {
+    const review = deferred<ToolActionReview>();
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: () => review.promise,
+        onAllowAccess: async () => true,
+        onApprove: noDecision,
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    // No decision is offered until the review says what access it needs.
+    expect(approveButton()).toBeUndefined();
+    review.resolve({ ...savedReview(), accessNeeded } as ToolActionReview);
+    await settle();
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("a surface that can't ask the provider still says access is missing", async () => {
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onApprove: noDecision,
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    expect(mounted.container.textContent).toContain(
+      "Gmail hasn't given Opengeni access for this yet; you'll be asked to allow it.",
+    );
+  });
+
+  test("pressing Approve again while the provider's window is open asks again", async () => {
+    const signals: AbortSignal[] = [];
+    const second = deferred<boolean>();
+    const approved: string[] = [];
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: (_access, _approval, abort) => {
+          signals.push(abort);
+          if (signals.length === 2) return second.promise;
+          // The first window was closed: it never answers on its own.
+          return new Promise<boolean>((_resolve, reject) =>
+            abort.addEventListener("abort", () => reject(abort.reason)),
+          );
+        },
+        onApprove: async (value) => {
+          approved.push(value.id);
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(signals).toHaveLength(2);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals[1]!.aborted).toBe(false);
+    second.resolve(true);
+    await settle();
+    expect(approved).toEqual([approval.id]);
+  });
+
+  test("leaving the chat stops waiting for the provider's window", async () => {
+    let signal: AbortSignal | undefined;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: (_access, _approval, abort) => {
+          signal = abort;
+          return new Promise<boolean>(() => undefined);
+        },
+        onApprove: noDecision,
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(signal?.aborted).toBe(false);
+    const current = mounted;
+    mounted = null;
+    await current.unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test("one consent covers the account's other waiting actions", async () => {
+    const allowed: string[] = [];
+    const approved: string[] = [];
+    const items = ["a", "b", "c"].map((id) => ({ ...approval, id, arguments: { projectId: id } }));
+    const loadReview = async (value: PendingApproval) => ({
+      ...savedReview(),
+      id: value.id,
+      ...(value.id === "c" ? {} : { accessNeeded }),
+    });
+    const onAllowAccess = async (access: { connectionId: string }) => {
+      allowed.push(access.connectionId);
+      return true;
+    };
+    const onApprove = async (value: PendingApproval) => {
+      approved.push(value.id);
+    };
+    const surface = (approvals: PendingApproval[]) =>
+      createElement(ApprovalSurface, {
+        approvals,
+        loadReview,
+        onAllowAccess,
+        onApprove,
+        onReject: noDecision,
+      });
+    mounted = await renderComponent(surface(items));
+    await settle();
+    const allButton = () =>
+      [...mounted!.container.querySelectorAll("button")].find((button) =>
+        /^Approve all/.test(button.textContent ?? ""),
+      );
+    // Only "c" can be approved without asking Google, so there is no "all".
+    expect(allButton()).toBeUndefined();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(allowed).toEqual(["conn-1"]);
+    expect(approved).toEqual(["a"]);
+    // The host stops listing the approved action.
+    await mounted.rerender(surface(items.slice(1)));
+    await settle();
+    // "b" no longer asks: it joins approve all, and Google isn't asked again.
+    expect(allButton()?.textContent).toBe("Approve all 2");
+    await act(async () => {
+      allButton()!.click();
+    });
+    await settle();
+    expect(allowed).toEqual(["conn-1"]);
+    expect(approved).toEqual(["a", "b", "c"]);
+  });
+
+  test("approve all leaves it out, so its access is asked on its own card", async () => {
+    const approved: string[] = [];
+    const items = ["a", "b", "c"].map((id) => ({ ...approval, id, arguments: { projectId: id } }));
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: items,
+        loadReview: async (value: PendingApproval) => ({
+          ...savedReview(),
+          id: value.id,
+          ...(value.id === "a" ? { accessNeeded } : {}),
+        }),
+        onAllowAccess: async () => true,
+        onApprove: async (value) => {
+          approved.push(value.id);
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    const all = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Approve all 2",
+    );
+    expect(all).not.toBeUndefined();
+    await act(async () => {
+      all!.click();
+    });
+    await settle();
+    expect(approved).toEqual(["b", "c"]);
+  });
+});
+
 describe("ApprovalSurface: approve or decline all", () => {
   const item = (id: string): PendingApproval => ({
     id,

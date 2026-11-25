@@ -73,7 +73,12 @@ describe("planSubscriptionCoreRefusal", () => {
       planSubscriptionCoreRefusal(adapter, { kind: "entitlement_missing", modelId: "m" }, base),
     ).toMatchObject({
       kind: "settle",
-      health: { kind: "model_cooldown", modelId: "m", until: now + 3_600_000 },
+      health: {
+        kind: "model_cooldown",
+        modelId: "m",
+        until: now + 3_600_000,
+        cause: "entitlement",
+      },
     });
   });
 

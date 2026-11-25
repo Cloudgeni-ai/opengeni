@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { MCP_DESTINATION_CONNECTION_ERRORS } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniApiError } from "@opengeni/sdk";
@@ -150,6 +151,27 @@ function account(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadat
 }
 
 describe("catalog connected accounts", () => {
+  test("shows the safe destination explanation beside the affected account only", async () => {
+    const view = await render(
+      <CatalogConnectedAccounts
+        item={item}
+        connections={[
+          account({ status: "error", lastError: MCP_DESTINATION_CONNECTION_ERRORS.unresolvable }),
+          account({ status: "error", lastError: "raw provider diagnostic" }),
+          account({ status: "active" }),
+        ]}
+      />,
+    );
+    const rows = [...view.container.querySelectorAll("li")];
+    expect(
+      rows.filter((row) =>
+        row.textContent?.includes(MCP_DESTINATION_CONNECTION_ERRORS.unresolvable),
+      ),
+    ).toHaveLength(1);
+    expect(view.container.textContent).not.toContain("raw provider diagnostic");
+    await view.unmount();
+  });
+
   test("saved accounts remain visible when a connector is disabled", async () => {
     const view = await render(
       <CatalogConnectedAccounts

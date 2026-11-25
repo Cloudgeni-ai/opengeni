@@ -255,7 +255,11 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
       },
     ]);
   };
-  const agent = async (workspaceId: string, name: string, agentOptions: { open?: boolean } = {}) =>
+  const agent = async (
+    workspaceId: string,
+    name: string,
+    agentOptions: { open?: boolean; memoryEnabled?: boolean } = {},
+  ) =>
     (
       await createAgent(
         client.db,
@@ -269,7 +273,7 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
           avatar: null,
           instructions: `You are ${name}.`,
           firstMessage: "",
-          memoryEnabled: false,
+          memoryEnabled: agentOptions.memoryEnabled ?? false,
           origin: "app",
           sourceSessionId: null,
           createdBySubjectId: subject,
@@ -406,6 +410,37 @@ test("an agent is addressed by name, answers under its header, and an agent with
   );
   const [unknown] = await f.say("+nobody hello");
   expect(unknown).toStartWith("No agent called **nobody**.");
+});
+
+test("an agent with Memory gets its Memory guidance and tools, as in Slack and the app", async () => {
+  const f = await fixture();
+  const planner = await f.agent(f.research, "Planner", { memoryEnabled: true });
+  expect(await f.say("Planner: draft the roadmap")).toEqual([]);
+  await f.pump();
+  const session = await f.latestSession();
+  expect(session.session_agent_id).toBe(planner);
+  const [row] = await shared.admin<
+    {
+      instructions: string | null;
+      first_party_mcp_tools: string[];
+      tool_policy: { firstPartyAdditions?: string[] };
+    }[]
+  >`select instructions, first_party_mcp_tools, tool_policy from sessions where id=${session.session_id}`;
+  expect(row!.instructions).toStartWith("This conversation is delivered through Microsoft Teams");
+  expect(row!.instructions).toContain("check your other chats with slack_agent_chats");
+  expect(row!.first_party_mcp_tools).toContain("slack_agent_chats");
+  expect(row!.tool_policy.firstPartyAdditions).toEqual(["slack_agent_chats"]);
+
+  // Memory off: the chat is as before.
+  await f.agent(f.research, "Auditor");
+  expect(await f.say("+auditor check the books")).toEqual([]);
+  await f.pump();
+  const plain = await f.latestSession();
+  const [plainRow] = await shared.admin<
+    { instructions: string | null; first_party_mcp_tools: string[] }[]
+  >`select instructions, first_party_mcp_tools from sessions where id=${plain.session_id}`;
+  expect(plainRow!.instructions).not.toContain("slack_agent_chats");
+  expect(plainRow!.first_party_mcp_tools).not.toContain("slack_agent_chats");
 });
 
 test("an organization admin's reach limit hides a workspace and stops its chat", async () => {

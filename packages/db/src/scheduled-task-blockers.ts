@@ -181,7 +181,8 @@ export async function reviewScheduledTaskBlockers(
               and account_id = ${task.account_id}
               and trigger_type in ('scheduled', 'event') and action_kind = 'agent_turn'
               -- The chain limit leaving events out is not a blocker; it has its own notice.
-              and error is distinct from 'chain_limit'
+              -- Nor is another automation of the same agent taking a delivery.
+              and (error is null or error not in ('chain_limit', 'duplicate_agent_run'))
             order by created_at desc, id desc
             limit ${SCHEDULED_TASK_BLOCKER_REVIEW_RUNS}`,
       );

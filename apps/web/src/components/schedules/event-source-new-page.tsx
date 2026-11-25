@@ -5,6 +5,7 @@
  * and Linear, Sentry or another app show the URL to paste there and take their secret.
  */
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 
 import { t } from "@opengeni/react/app/lib/console-text";
@@ -45,7 +46,16 @@ import {
   useScheduleNavigation,
   type ScheduleNavigation,
 } from "./schedule-parts";
-import { PastedWebhookSteps, StandardWebhookHelp, WebhookUrlField } from "./event-source-setup";
+import {
+  ConnectGitHubFirst,
+  connectGitHubHref,
+  useGitHubConnected,
+} from "./event-source-connect-first";
+import {
+  SourcePastedWebhookSteps,
+  StandardWebhookHelp,
+  WebhookUrlField,
+} from "./event-source-setup";
 import { useEventSourceLogo, useEventTriggersEnabled } from "./use-event-sources";
 
 const NAME_MAX_LENGTH = 120;
@@ -122,6 +132,7 @@ function EventSourceForm({
   go: ScheduleNavigation;
 }) {
   const { client } = useAppContext();
+  const navigate = useNavigate();
   const meta = eventSourceChoiceMeta(t, choice);
   const [name, setName] = useState("");
   const [visibility, setVisibility] = useState<"private" | "workspace">("workspace");
@@ -131,6 +142,9 @@ function EventSourceForm({
   const [created, setCreated] = useState<Created | null>(null);
   const servers = useEventMcpServers(choice === "mcp");
   const gmailAccounts = useGmailAccounts(workspaceId, choice === "gmail");
+  const githubConnected = useGitHubConnected(workspaceId, choice === "github");
+  // Without GitHub connected, connecting it is the page's one action.
+  const needsGitHub = choice === "github" && githubConnected === false;
 
   if (created?.signingSecret) {
     return (
@@ -155,8 +169,8 @@ function EventSourceForm({
     <FormPage
       title={eventSourceAddLabel(t, choice)}
       description={meta.description}
-      submitLabel={eventSourceAddLabel(t, choice)}
-      pendingLabel="Adding…"
+      submitLabel={needsGitHub ? "Connect GitHub" : eventSourceAddLabel(t, choice)}
+      pendingLabel={needsGitHub ? "Opening…" : "Adding…"}
       back={{ label: "Add an event source", onClick: () => go.newSource() }}
       onCancel={go.sources}
       footerStart={
@@ -167,6 +181,10 @@ function EventSourceForm({
             : undefined
       }
       onSubmit={async () => {
+        if (needsGitHub) {
+          void navigate({ href: connectGitHubHref(workspaceId) });
+          return false;
+        }
         const next: typeof errors = {};
         if (name.trim().length > NAME_MAX_LENGTH) {
           next.name = `Keep the name under ${NAME_MAX_LENGTH} characters.`;
@@ -199,6 +217,7 @@ function EventSourceForm({
       }}
     >
       <FieldStack>
+        {needsGitHub ? <ConnectGitHubFirst /> : null}
         {choice === "mcp" ? (
           <Field
             label="MCP server"
@@ -386,7 +405,7 @@ function PastedWebhookConnect({
         return true;
       }}
     >
-      <PastedWebhookSteps
+      <SourcePastedWebhookSteps
         source={source}
         secret={secret}
         error={error}

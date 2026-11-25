@@ -2422,6 +2422,8 @@ const browserActionVariants = [
       height: z.number().int().min(240).max(4_096),
       mobile: primitives.boolean,
       deviceScaleFactor: z.number().min(0.5).max(4).optional(),
+      /** Fit a viewer panel without replacing an explicitly set viewport. */
+      mode: z.literal("fit").optional(),
     })
     .strict(),
   /** Ends viewport emulation: the tab returns to the window's own size and scale. */
@@ -2846,14 +2848,9 @@ export const BrowserWorkspaceFileAuthority = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       fileId: primitives.uuid,
-      safeFilename: z
-        .string()
-        .min(1)
-        .max(240)
-        .regex(/^[A-Za-z0-9._ -]+$/u)
-        .refine((value) => value !== "." && value !== "..", {
-          message: "safe filename must be one path segment",
-        }),
+      safeFilename: z.string().min(1).max(240).refine(isPortableUploadFilename, {
+        message: "safe filename must be one portable path segment",
+      }),
       sizeBytes: z.number().int().nonnegative().max(5_000_000_000),
       sha256: sha256Hex.nullable(),
       download: z
@@ -2866,6 +2863,20 @@ export const BrowserWorkspaceFileAuthority = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type BrowserWorkspaceFileAuthority = z.infer<typeof BrowserWorkspaceFileAuthority>;
+
+/** A file name a controller can write on any platform as one path segment,
+ * with letters of every script (`Rørføring – rev A (2).pdf`): no path
+ * separator, control character or character Windows forbids, not `.` or `..`,
+ * and at most 240 UTF-8 bytes. */
+export function isPortableUploadFilename(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value !== "." &&
+    value !== ".." &&
+    !/[\u0000-\u001f\u007f/\\<>:"|?*]/u.test(value) &&
+    new TextEncoder().encode(value).byteLength <= 240
+  );
+}
 
 export const BrowserWorkspaceFileStageRequest = /* @__PURE__ */ defineSchema(() =>
   z

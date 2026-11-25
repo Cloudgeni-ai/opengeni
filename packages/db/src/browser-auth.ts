@@ -65,7 +65,13 @@ import {
   type VerifyAuthRunRequest as VerifyAuthRunRequestValue,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
-import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
+import {
+  type Database,
+  rawRows,
+  setSubjectRlsContext,
+  withRlsContext,
+  withWorkspaceRls,
+} from "./database";
 import {
   advanceWorkspaceInteractionRevision,
   readWorkspaceInteractionRevision,
@@ -3475,21 +3481,29 @@ export async function getInteractionInterventionResumeForEvent(
   if (event.type !== "user.approvalDecision") return null;
   const payload = event.payload as { approvalId?: unknown; decision?: unknown };
   if (typeof payload.approvalId !== "string" || payload.decision !== "approve") return null;
-  const [row] = await db
-    .select()
-    .from(schema.interactionInterventions)
-    .where(
-      and(
-        eq(schema.interactionInterventions.workspaceId, workspaceId),
-        eq(schema.interactionInterventions.originatingSessionId, sessionId),
-        eq(schema.interactionInterventions.originatingToolCallId, payload.approvalId),
-      ),
-    )
-    .orderBy(asc(schema.interactionInterventions.createdAt))
-    .limit(1);
+  const approvalId = payload.approvalId;
+  // Interventions are under forced row security: read in the workspace's
+  // scope, or the row is invisible and the resumed call has no response.
+  const [row] = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select()
+        .from(schema.interactionInterventions)
+        .where(
+          and(
+            eq(schema.interactionInterventions.workspaceId, workspaceId),
+            eq(schema.interactionInterventions.originatingSessionId, sessionId),
+            eq(schema.interactionInterventions.originatingToolCallId, approvalId),
+          ),
+        )
+        .orderBy(asc(schema.interactionInterventions.createdAt))
+        .limit(1),
+  );
   if (!row || row.status !== "completed") return null;
   return {
-    toolCallId: payload.approvalId,
+    toolCallId: approvalId,
     intervention: interventionFromRow(row),
   };
 }

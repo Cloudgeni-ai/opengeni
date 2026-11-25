@@ -31,10 +31,12 @@ import {
   cachedSidebarLayout,
   refreshSidebarLayout,
   sidebarLayoutKey,
+  sidebarHiddenEntries,
   sidebarMenuSections,
   subscribeSidebarLayout,
 } from "@/sidebar-layout";
 import { SidebarLayoutSection } from "@/sidebar-layout-section";
+import { openOnWeb, webPaths } from "@/web-links";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
 
@@ -91,6 +93,10 @@ function Sessions() {
     return subscribeSidebarLayout(sidebarKey, setSidebar);
   }, [sidebarKey]);
   const sidebarSections = useMemo(() => sidebarMenuSections(sidebar?.items), [sidebar]);
+  const automationsHidden = useMemo(
+    () => sidebarHiddenEntries(sidebar).includes("automations"),
+    [sidebar],
+  );
   const loadSidebar = useCallback(async () => {
     if (sidebarKey && workspaceId) await refreshSidebarLayout(client, sidebarKey, workspaceId);
   }, [client, sidebarKey, workspaceId]);
@@ -261,12 +267,17 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
-        {searching ? null : (
+        {searching || automationsHidden ? null : (
           <RailRow icon="zap" label="Automations" onPress={() => router.push("/automations")} />
         )}
         {searching || !workspaceId ? null : (
           <SidebarLayoutSection
             sections={sidebarSections}
+            workspaceId={workspaceId}
+            client={client}
+            onOpenAgent={(row) => {
+              if (account) openOnWeb(account.baseUrl, webPaths.agent(workspaceId, row.agentId));
+            }}
             onOpenApp={(row) =>
               router.push(
                 viewerPath({

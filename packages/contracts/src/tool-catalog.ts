@@ -154,6 +154,19 @@ export const AttemptToolCatalogEntry = /* @__PURE__ */ defineSchema(() =>
       icons: z.array(AttemptToolCatalogIcon).max(16).optional(),
       source: z.enum(["opengeni", "files", "docs", "mcp", "codex_apps", "interaction"]),
       approval: z.enum(["none", "human", "policy"]),
+      /**
+       * The effective tool permission from the person's and workspace's tool
+       * settings, for a connection-backed tool (`approval: "policy"` or a
+       * setting that asks). `fromSetting` is false when no setting names the
+       * tool and the provider's recommendation applies. Absent elsewhere.
+       */
+      permission: z
+        .object({
+          decision: z.enum(["allow", "ask", "block"]),
+          fromSetting: z.boolean(),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );
@@ -823,6 +836,15 @@ export const ToolGatewaySiteSetupAction = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type ToolGatewaySiteSetupAction = z.infer<typeof ToolGatewaySiteSetupAction>;
+export const ToolGatewaySiteSetupSharedKey = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // The viewer is a workspace admin: they add one shared key from a vault.
+    "add",
+    // Someone else: a workspace admin has to add the key.
+    "ask_admin",
+  ]),
+);
+export type ToolGatewaySiteSetupSharedKey = z.infer<typeof ToolGatewaySiteSetupSharedKey>;
 export const ToolGatewaySiteSetupItem = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -839,6 +861,13 @@ export const ToolGatewaySiteSetupItem = /* @__PURE__ */ defineSchema(() =>
       account: primitives.string.max(320).nullable(),
       /** The account is shared with the workspace rather than the viewer's own. */
       shared: z.boolean(),
+      /**
+       * Set on the extra `connect` item for a connector that takes an API key
+       * when the app's shared syncs wait on it: the workspace connects it
+       * once, with a shared key from a vault (a shared service connection).
+       * Each person's own use keeps its ordinary `connect` item.
+       */
+      sharedKey: ToolGatewaySiteSetupSharedKey.optional(),
       /** The declared tools that wait on it. */
       tools: z.array(ToolGatewayIdentity).max(SITE_READINESS_TARGETS_MAX),
       /**

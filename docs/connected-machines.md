@@ -50,10 +50,16 @@ cannot recover work by impersonating the original process.
 The API/worker uses its shared NATS connection for control RPC, operation frames,
 and acknowledgements. The broker's five-minute credential bounds established
 access after enrollment revocation; fresh admission checks enrollment authority.
+The agent uses each socket's broker-reported remaining lifetime to authenticate
+and subscribe a replacement pair before the earlier expiry. NATS authenticates
+at connect, so it cannot renew the JWT in place. The brief subscription overlap
+shares an RPC queue; a request goes to only one socket. The serving loop hands
+over to the ready pair under the same runner identity.
 Ordinary enrollment-token renewal updates the next-dial bearer and the
 relay's future registrations in place, leaving accepted operations and healthy
 sockets untouched. Authority, consent, endpoint or authentication-state changes
-still replace the link.
+can replace the link, but a settings change that keeps the same runner scope
+does not announce its retirement.
 
 The native supervisor treats either control- or bulk-lane loss as a
 transport-generation change: it reconnects, authenticates again, resubscribes, and
@@ -211,13 +217,13 @@ connection:
   unavailable, and a lost one is ended. Output Opengeni has not stored is never
   ended: the API keeps it and collects it while the agent is talking, and
   collecting releases it in the same exchange.
-- An operation without a command (foreground work, or a command deleted with
-  its chat) is ended when it started under an earlier generation than the
-  current one, because its requester can no longer address it. Otherwise it is
-  kept, running or completed, however long ago it completed: no durable record
-  shows that a foreground requester finished with its output, and age never
-  shows it either, so the agent's own retention bound limits what it keeps. One
-  an older Opengeni started carries generation 0 and is kept.
+- A Connected Machine operation without a command record can still have a
+  foreground requester. Even if the generation advanced while the exact runner
+  was away, that requester can reattach when the runner reclaims its own address.
+  Neither generation nor age proves it gave up, so existing runner retention
+  applies. Compute keeps its generation fence for operations without a command
+  record: an operation from an earlier generation is ended, except one with
+  generation 0 (unknown).
 
 The agent cancels what it runs and drops what it retains; none of it runs again
 or writes into a settled record. So a process that comes back after another
@@ -382,6 +388,17 @@ complete catalog. `show <path>` returns the complete details/schema for one tool
 redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
+
+A process keeps the bearer it was started with, so one that outlives its turn
+(a script that calls the client in a loop) gets 403
+`agent_attempt_caller_stale`, and 401 once the bearer expires. Neither can
+clear for that bearer. The native client and `ogtool` therefore remember such
+a refusal across processes and fail later calls with the same bearer locally,
+with the same error, without contacting the API; a renewed bearer is sent
+normally. The memory is a private (0700) per-user directory
+`opengeni-codemode-refused-<uid>` in the temporary directory, holding only the
+refusal's status, code and message under a hash of the API base and bearer.
+Markers expire after 24 hours, the longest a bearer can live.
 
 Native `codemode call` accepts inline JSON (default `{}`), `-` to read one UTF-8
 JSON object from stdin through EOF, or `@path` to read it from a local file.

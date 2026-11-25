@@ -1,7 +1,47 @@
 import {
-  subscriptionCapacityWaitNeedsAction,
-  subscriptionCapacityWaitReasonText,
+  isProviderCapacityWaitReason,
+  providerCapacityWaitNeedsAction,
+  providerCapacityWaitReasonText,
+  type SubscriptionWaitAccount,
+} from "@opengeni/contracts/subscription-capacity-wait";
+import {
+  isPinnedAccountWaitReason,
+  subscriptionCapacityWaitNeedsAction as baseWaitNeedsAction,
+  subscriptionCapacityWaitReasonText as baseWaitReasonText,
 } from "@opengeni/subscriptions";
+
+export { isPinnedAccountWaitReason };
+
+/**
+ * The same wait guidance for worker events, parent notices and the inbox.
+ * `account` is the account the wait is about (a reconnect, or a pinned
+ * account); `resetText` only for a pinned account's notice (see the base).
+ */
+export function subscriptionCapacityWaitReasonText(
+  reason: string,
+  name: string,
+  account?: SubscriptionWaitAccount,
+  resetText?: string | null,
+): string | null {
+  return isProviderCapacityWaitReason(reason)
+    ? providerCapacityWaitReasonText(reason, account)
+    : baseWaitReasonText(reason, name, account, resetText);
+}
+
+export function subscriptionCapacityWaitNeedsAction(reason: string): boolean {
+  return isProviderCapacityWaitReason(reason)
+    ? providerCapacityWaitNeedsAction(reason)
+    : baseWaitNeedsAction(reason);
+}
+
+/**
+ * Whether a wait's explanation is its own, not the busy pool's: a provider
+ * diagnosis, or a wait on the chat's pinned account. Its notices and timeline
+ * event carry that explanation, and a changed one is restated.
+ */
+export function subscriptionCapacityWaitHasOwnExplanation(reason: string): boolean {
+  return isProviderCapacityWaitReason(reason) || isPinnedAccountWaitReason(reason);
+}
 
 /**
  * When a subscription capacity wait needs a person's (or a parent agent's)
@@ -12,7 +52,9 @@ import {
  * can fix, is announced once when it is armed: a worker's parent gets a
  * `child_waiting_capacity` notice, and a top-level chat's person gets an inbox
  * notification. Both carry the reset time and say how to continue sooner
- * (switch the chat's model, which releases the waiting turn onto it).
+ * (switch the chat's model, which releases the waiting turn onto it; for a
+ * chat pinned to one account, switch it back to automatic account choice,
+ * because placement keeps a pinned turn on its account whatever its model).
  * The person's notification never keeps promising a time that no longer
  * holds: when a later check finds the reset later than it said (its time
  * passed without capacity, or a longer limit binds) or unknown, the same
@@ -41,7 +83,9 @@ export function capacityWaitAttention(input: {
   healthRetryAt: Date | null;
   now: Date;
 }): CapacityWaitAttention | null {
-  const resetsAt = input.earliestResetAt ?? input.healthRetryAt ?? null;
+  const resetsAt = isProviderCapacityWaitReason(input.waitReason)
+    ? input.earliestResetAt
+    : (input.earliestResetAt ?? input.healthRetryAt ?? null);
   const long =
     subscriptionCapacityWaitNeedsAction(input.waitReason) ||
     resetsAt === null ||
@@ -73,30 +117,44 @@ export function capacityWaitNotificationKey(turnId: string): string {
  * A busy pool says plainly that the message will be answered as soon as an
  * account has room, and names a time only when placement knows the earliest
  * reset of an account that can serve the turn. Any other reason keeps its
- * own explanation.
+ * own explanation. A chat pinned to an account says so, names the account and
+ * when it has room again, and offers automatic account choice as the way to
+ * continue sooner; switching the model is not offered, since the pin holds.
  */
 export function capacityWaitNotificationPayload(input: {
   turnId: string;
   provider: string;
   resetsAt: Date | null;
   waitReason?: string;
+  waitAccount?: SubscriptionWaitAccount;
 }) {
   const name = capacityWaitProviderName(input.provider);
   const reset = capacityWaitResetText(input.resetsAt);
   const reason = input.waitReason ?? "no_eligible_capacity";
+  const pinned = isPinnedAccountWaitReason(reason);
+  // A pinned account's sentence names its reset itself.
+  const namesReset = reason === "pinned_account_unavailable";
   const explained =
-    reason === "no_eligible_capacity" ? null : subscriptionCapacityWaitReasonText(reason, name);
+    reason === "no_eligible_capacity"
+      ? null
+      : subscriptionCapacityWaitReasonText(
+          reason,
+          name,
+          input.waitAccount,
+          namesReset ? reset : null,
+        );
   const status = explained
-    ? `${explained}${reset ? ` Expected around ${reset}.` : ""}`
-    : `All ${name} subscriptions are busy. Your message will be answered as soon as one has room${
-        reset ? `, expected around ${reset}` : ""
-      }.`;
-  const sooner = subscriptionCapacityWaitNeedsAction(reason)
-    ? ""
-    : " To continue sooner, switch the chat to another model; its waiting turn continues on that model.";
+    ? `${explained}${reset && !namesReset ? ` Expected around ${reset}.` : ""}`
+    : `${input.provider === "codex" ? "No Codex subscription can serve this turn right now." : `All ${name} subscriptions are busy.`} Your message will be answered as soon as one has room${reset ? `, expected around ${reset}` : ""}.`;
+  const sooner =
+    subscriptionCapacityWaitNeedsAction(reason) || pinned
+      ? ""
+      : " To continue sooner, switch the chat to another model; its waiting turn continues on that model.";
   return {
     key: capacityWaitNotificationKey(input.turnId),
-    title: `Chat waiting for ${name} capacity`,
+    title: pinned
+      ? `Chat waiting for its pinned ${name} account`
+      : `Chat waiting for ${name} capacity`,
     body: `${status}${sooner}`,
     urgency: "normal" as const,
     replaced: false,
@@ -108,7 +166,11 @@ export function capacityWaitNotificationPayload(input: {
  * the person (ISO, or null for "no reset time is known"). `resetsAt` is
  * undefined for a marker written before the notice recorded it.
  */
-export type CapacityWaitNoticeMarker = { key: string; resetsAt?: string | null };
+export type CapacityWaitNoticeMarker = {
+  key: string;
+  resetsAt?: string | null;
+  explanation?: string;
+};
 
 export function readCapacityWaitNotice(
   metadata: Record<string, unknown> | null | undefined,
@@ -116,17 +178,28 @@ export function readCapacityWaitNotice(
 ): CapacityWaitNoticeMarker | null {
   const value = metadata?.[metadataKey];
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { key, resetsAt } = value as { key?: unknown; resetsAt?: unknown };
+  const { key, resetsAt, explanation } = value as {
+    key?: unknown;
+    resetsAt?: unknown;
+    explanation?: unknown;
+  };
   if (typeof key !== "string" || key.length === 0) return null;
-  if (resetsAt === null) return { key, resetsAt: null };
-  return typeof resetsAt === "string" && Number.isFinite(Date.parse(resetsAt))
-    ? { key, resetsAt }
-    : { key };
+  return {
+    key,
+    ...(resetsAt === null || (typeof resetsAt === "string" && Number.isFinite(Date.parse(resetsAt)))
+      ? { resetsAt }
+      : {}),
+    ...(typeof explanation === "string" ? { explanation } : {}),
+  };
 }
 
 /** The turn metadata marker of a notification that told the person `resetsAt`. */
-export function capacityWaitNoticeMarker(key: string, resetsAt: Date | null) {
-  return { key, resetsAt: resetsAt?.toISOString() ?? null } satisfies CapacityWaitNoticeMarker;
+export function capacityWaitNoticeMarker(key: string, resetsAt: Date | null, explanation?: string) {
+  return {
+    key,
+    resetsAt: resetsAt?.toISOString() ?? null,
+    ...(explanation ? { explanation } : {}),
+  } satisfies CapacityWaitNoticeMarker;
 }
 
 /**

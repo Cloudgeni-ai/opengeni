@@ -34,6 +34,7 @@ const nodeRecords = [
   "opengeni:kubelet_instance:info",
   "opengeni:node_memory_psi_stall_ratio",
   "opengeni:node_io_psi_stall_ratio",
+  "opengeni:node_system_disk_busy_ratio",
   "opengeni:node_swap_out_pages_per_second",
 ];
 const nodeAlerts = [
@@ -42,6 +43,14 @@ const nodeAlerts = [
   "OpenGeniNodeSwapThrashing",
   "OpenGeniNodeContainerRuntimeErrors",
   "OpenGeniNodeNotReady",
+];
+const runtimeFaultOperations = [
+  "create_container",
+  "start_container",
+  "stop_container",
+  "pull_image",
+  "run_podsandbox",
+  "stop_podsandbox",
 ];
 // The value each node alert renders into its notification annotations at the
 // 5m evaluation below: stall ratios, swap-out pages/s and the runtime-error
@@ -158,6 +167,26 @@ test.skipIf(!promtool)(
             series: series("node_pressure_io_stalled_seconds_total", { instance: `${node}:9100` }),
             values: node === "node-a" ? "0+18x5 90+0x7" : "0+0x13",
           },
+          // The root mount shows as /dev/root (no initramfs); the /boot
+          // partition on the same disk identifies the OS disk instead.
+          ...[
+            ["/dev/root", "/"],
+            ["/dev/sda16", "/boot"],
+          ].map(([device, mountpoint]) => ({
+            series: series("node_filesystem_size_bytes", {
+              instance: `${node}:9100`,
+              device: device!,
+              mountpoint: mountpoint!,
+            }),
+            values: "1e10+0x13",
+          })),
+          {
+            series: series("node_disk_io_time_seconds_total", {
+              instance: `${node}:9100`,
+              device: "sda",
+            }),
+            values: node === "node-a" ? "0+54x5 270+0x7" : "0+0x13",
+          },
           {
             series: series("node_vmstat_pswpout", { instance: `${node}:9100` }),
             values: node === "node-a" ? "0+60x5 300+0x7" : "0+0x13",
@@ -171,25 +200,30 @@ test.skipIf(!promtool)(
             }),
             values: "1+0x13",
           },
-          {
+          ...runtimeFaultOperations.map((operation_type) => ({
             series: series("kubelet_runtime_operations_errors_total", {
               job: "kubelet",
               instance: `${node}:10250`,
-              operation_type: "create_container",
+              operation_type,
             }),
             // Errors keep recurring on node-a, so the runtime alert holds and
-            // fires after its 10m `for`.
-            values: node === "node-a" ? "0+1x13" : "0+0x13",
-          },
+            // fires after its 10m `for`. One start failure on node-b clears.
+            values:
+              node === "node-a"
+                ? "0+1x13"
+                : operation_type === "start_container"
+                  ? "0 1+0x12"
+                  : "0+0x13",
+          })),
           {
-            // One rollout burst (kubelet retrying a removal the runtime is
-            // already doing) on node-b never pages.
+            // One status lookup failure every four minutes on a Ready node
+            // (15/hour) satisfies the old 5m window for the full 10m hold.
             series: series("kubelet_runtime_operations_errors_total", {
               job: "kubelet",
               instance: `${node}:10250`,
-              operation_type: "remove_container",
+              operation_type: "container_status",
             }),
-            values: node === "node-b" ? "0+0x1 2+0x12" : "0+0x13",
+            values: node === "node-b" ? "0 1+0x3 2+0x3 3+0x3 4" : "0+0x13",
           },
           {
             // Exec probes failing against containers that are starting or
@@ -257,6 +291,7 @@ test.skipIf(!promtool)(
             [
               ["opengeni:node_memory_psi_stall_ratio", 0.2],
               ["opengeni:node_io_psi_stall_ratio", 0.3],
+              ["opengeni:node_system_disk_busy_ratio", 0.9],
               ["opengeni:node_swap_out_pages_per_second", 1],
             ].flatMap(([name, value]) => [
               {
@@ -289,28 +324,30 @@ test.skipIf(!promtool)(
                   ? []
                   : selected
                       .filter((scope) => scope.node === "node-a")
-                      .map((scope) => ({
-                        exp_labels: {
-                          ...identity(scope),
-                          node: scope.node,
-                          severity:
-                            alertname === "OpenGeniNodeContainerRuntimeErrors"
-                              ? "warning"
-                              : "critical",
-                          ...(alertname === "OpenGeniNodeContainerRuntimeErrors"
-                            ? { operation_type: "create_container" }
-                            : {}),
-                        },
-                        exp_annotations: expandAlertAnnotations(
-                          groups[deployments.indexOf(scope)]!.rules.find(
-                            (rule) => rule.alert === alertname,
-                          )!.annotations!,
-                          {
-                            value: nodeAlertValues[alertname]!,
-                            labels: { node: scope.node, operation_type: "create_container" },
+                      .flatMap((scope) => {
+                        const runtimeAlert = alertname === "OpenGeniNodeContainerRuntimeErrors";
+                        return (runtimeAlert ? runtimeFaultOperations : [undefined]).map(
+                          (operation_type) => {
+                            const nodeLabels = {
+                              node: scope.node,
+                              ...(operation_type ? { operation_type } : {}),
+                            };
+                            return {
+                              exp_labels: {
+                                ...identity(scope),
+                                ...nodeLabels,
+                                severity: runtimeAlert ? "warning" : "critical",
+                              },
+                              exp_annotations: expandAlertAnnotations(
+                                groups[deployments.indexOf(scope)]!.rules.find(
+                                  (rule) => rule.alert === alertname,
+                                )!.annotations!,
+                                { value: nodeAlertValues[alertname]!, labels: nodeLabels },
+                              ),
+                            };
                           },
-                        ),
-                      })),
+                        );
+                      }),
             })),
           ),
         };
@@ -326,6 +363,165 @@ test.skipIf(!promtool)(
       });
       expect(result.signal).toBeNull();
       expect(result.status, result.stderr.slice(0, 2_000)).toBe(0);
+      expect(result.stdout).toContain("SUCCESS");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  120_000,
+);
+
+// Node I/O PSI also counts one pod waiting on its own attached volume. The
+// critical node alert must page only when the disk behind the OS, kubelet or
+// container runtime is busy too, and keep plain PSI where that disk cannot be
+// identified.
+const ioDiskCases: Array<{
+  node: string;
+  filesystems: Array<[device: string, mountpoint: string]>;
+  disks: Record<string, string>;
+  systemDiskBusy?: number;
+  fires: boolean;
+}> = [
+  {
+    // A search index rebuilding on its PVC: PVC disk ~62% busy, OS disk idle.
+    node: "node-pvc-only",
+    filesystems: [
+      ["/dev/root", "/"],
+      ["/dev/root", "/var/lib/kubelet"],
+      ["/dev/sda15", "/boot/efi"],
+      ["/dev/sda16", "/boot"],
+      ["tmpfs", "/run"],
+    ],
+    disks: { sda: "0+3x13", sdb: "0+0x13", sdc: "0+37x13" },
+    systemDiskBusy: 0.05,
+    fires: false,
+  },
+  {
+    node: "node-root-saturated",
+    filesystems: [["/dev/nvme0n1p1", "/"]],
+    disks: { nvme0n1: "0+57x13", nvme1n1: "0+0x13" },
+    systemDiskBusy: 0.95,
+    fires: true,
+  },
+  {
+    node: "node-runtime-disk-saturated",
+    filesystems: [
+      ["/dev/sda1", "/"],
+      ["/dev/nvme1n1", "/var/lib/containerd"],
+    ],
+    disks: { sda: "0+0x13", nvme1n1: "0+57x13" },
+    systemDiskBusy: 0.95,
+    fires: true,
+  },
+  {
+    // LVM root by mapper name cannot be joined to a disk: keep plain PSI.
+    node: "node-system-disk-unknown",
+    filesystems: [["/dev/mapper/vg-root", "/"]],
+    disks: { "dm-0": "0+0x13", sdc: "0+57x13" },
+    fires: true,
+  },
+];
+
+test.skipIf(!promtool)(
+  "node I/O pressure pages on a saturated system disk, not on one pod's saturated volume",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opengeni-node-io-disk-"));
+    try {
+      const scope = deployments[0]!;
+      const manifest = render(scope);
+      const group = nodeGroup(manifest);
+      const ruleFile = join(directory, "rules.json");
+      await writeFile(ruleFile, JSON.stringify({ groups: [group] }));
+      const input_series = ioDiskCases.flatMap(({ node, filesystems, disks }) => {
+        const instance = `${node}:9100`;
+        const pod = `${manifest.metadata.name}-worker-turns-${node}`;
+        return [
+          { series: series("node_uname_info", { instance, nodename: node }), values: "1+0x13" },
+          {
+            series: series("node_pressure_io_stalled_seconds_total", { instance }),
+            values: "0+12x13",
+          },
+          ...filesystems.map(([device, mountpoint]) => ({
+            series: series("node_filesystem_size_bytes", { instance, device, mountpoint }),
+            values: "1e10+0x13",
+          })),
+          ...Object.entries(disks).map(([device, values]) => ({
+            series: series("node_disk_io_time_seconds_total", { instance, device }),
+            values,
+          })),
+          {
+            series: series("kube_pod_info", { namespace: scope.namespace, pod, node }),
+            values: "1+0x13",
+          },
+          {
+            series: series("kube_pod_status_phase", {
+              namespace: scope.namespace,
+              pod,
+              phase: "Running",
+            }),
+            values: "1+0x13",
+          },
+          {
+            series: series("kube_pod_labels", {
+              namespace: scope.namespace,
+              pod,
+              label_app_kubernetes_io_instance: scope.release,
+            }),
+            values: "1+0x13",
+          },
+        ];
+      });
+      const record = "opengeni:node_system_disk_busy_ratio";
+      const annotations = group.rules.find(
+        (rule) => rule.alert === "OpenGeniNodeIoPressureStalled",
+      )!.annotations!;
+      const testFile = join(directory, "tests.json");
+      await writeFile(
+        testFile,
+        JSON.stringify({
+          rule_files: [ruleFile],
+          evaluation_interval: "1m",
+          tests: [
+            {
+              interval: "1m",
+              input_series,
+              promql_expr_test: [
+                {
+                  expr: series(record, identity(scope)),
+                  eval_time: "5m",
+                  exp_samples: ioDiskCases
+                    .filter(({ systemDiskBusy }) => systemDiskBusy !== undefined)
+                    .map(({ node, systemDiskBusy }) => ({
+                      labels: series(record, { ...identity(scope), node }),
+                      value: systemDiskBusy,
+                    })),
+                },
+              ],
+              alert_rule_test: [
+                {
+                  alertname: "OpenGeniNodeIoPressureStalled",
+                  eval_time: "5m",
+                  exp_alerts: ioDiskCases
+                    .filter(({ fires }) => fires)
+                    .map(({ node }) => ({
+                      exp_labels: { ...identity(scope), node, severity: "critical" },
+                      exp_annotations: expandAlertAnnotations(annotations, {
+                        value: 0.2,
+                        labels: { node },
+                      }),
+                    })),
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      const result = spawnSync(promtool!, ["test", "rules", testFile], {
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}\n${result.stderr}`.slice(0, 4_000)).toBe(0);
       expect(result.stdout).toContain("SUCCESS");
     } finally {
       await rm(directory, { recursive: true, force: true });

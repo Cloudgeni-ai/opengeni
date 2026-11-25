@@ -32,7 +32,8 @@ export type EventSourceChoice =
   | "slack"
   | "gmail"
   | "mcp"
-  | "workspace";
+  | "workspace"
+  | "github_personal";
 
 export interface EventSourceChoiceMeta {
   choice: EventSourceChoice;
@@ -63,10 +64,23 @@ const CHOICE_FACTS: readonly EventSourceChoiceFacts[] = [
   { choice: "webhook", providerDomain: null, setup: "paste", audience: "choice" },
 ];
 
+/**
+ * Kinds a client shows but "Add a source" doesn't offer: an agent adds
+ * "GitHub (your connection)" when it waits for a merge without the GitHub app.
+ */
+const SHOWN_CHOICE_FACTS: readonly EventSourceChoiceFacts[] = [
+  {
+    choice: "github_personal",
+    providerDomain: "github.com",
+    setup: "automatic",
+    audience: "personal",
+  },
+];
+
 function choiceFacts(choice: EventSourceChoice): EventSourceChoiceFacts {
   // A kind from a newer server than this client still shows, plainly.
   return (
-    CHOICE_FACTS.find((entry) => entry.choice === choice) ?? {
+    [...CHOICE_FACTS, ...SHOWN_CHOICE_FACTS].find((entry) => entry.choice === choice) ?? {
       choice,
       providerDomain: null,
       setup: "automatic",
@@ -96,6 +110,8 @@ export function eventSourceChoiceName(t: OpenGeniText, choice: EventSourceChoice
       return t("automations.source.webhook.name");
     case "workspace":
       return t("automations.source.workspace.name");
+    case "github_personal":
+      return t("automations.source.githubPersonal.name");
     default:
       return String(choice);
   }
@@ -121,6 +137,8 @@ function choiceDescription(t: OpenGeniText, choice: EventSourceChoice): string {
       return t("automations.source.webhook.description");
     case "workspace":
       return t("automations.source.workspace.description");
+    case "github_personal":
+      return t("automations.source.githubPersonal.description");
     default:
       return "";
   }
@@ -154,7 +172,7 @@ export function isEventSourceChoice(value: unknown): value is EventSourceChoice 
 const APP_WEBHOOK_CHOICES = ["linear", "sentry", "tailscale"] as const;
 type AppWebhookChoice = (typeof APP_WEBHOOK_CHOICES)[number];
 
-function isAppWebhookChoice(value: unknown): value is AppWebhookChoice {
+export function isAppWebhookChoice(value: unknown): value is AppWebhookChoice {
   return APP_WEBHOOK_CHOICES.includes(value as AppWebhookChoice);
 }
 
@@ -477,6 +495,9 @@ export function createEventSourceRequest(
     };
   }
   if (input.choice === "workspace") return { kind: "workspace", ...(name ? { name } : {}) };
+  if (input.choice === "github_personal") {
+    return { kind: "github_personal", ...(name ? { name } : {}) };
+  }
   return { kind: input.choice as "github" | "slack", ...(name ? { name } : {}) };
 }
 

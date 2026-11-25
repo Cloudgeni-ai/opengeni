@@ -1,5 +1,304 @@
 # @opengeni/core
 
+## 6.41.0
+
+### Patch Changes
+
+- ca5b614: A workspace admin who can turn off someone else's Workspace schedule or agent trigger can now turn it back on. Before, pausing worked but resuming was refused as owner-only. Resuming changes nothing else, so it runs as its owner again; changing or running it still belongs to its owner.
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/db@6.41.0
+  - @opengeni/documents@6.41.0
+  - @opengeni/runtime@6.41.0
+  - @opengeni/storage@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/events@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- 2a4f625: The **PR reviewer** template labels each finding Critical, Bug or Nit with the concrete case that triggers it, posts only Critical and Bug findings, and comments on conventions only where the repo has written rules. It replaces the template's Blocker/Bug/Nit labels and review levels. Agents already created from the template keep their instructions.
+- 8a8579a: Add `setSessionModelSettings` and its HTTP endpoint so integration servers can change future session model defaults without sending a message. An optional comparison protects against overwriting a concurrent change, and retrying with the same key does not apply the update twice.
+- Updated dependencies [928df9f]
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/runtime@6.40.0
+  - @opengeni/contracts@6.40.0
+  - @opengeni/db@6.40.0
+  - @opengeni/capabilities@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/documents@6.40.0
+  - @opengeni/events@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/storage@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+  - @opengeni/vaults@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [58b1b0e]
+- Updated dependencies [1f28f11]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/runtime@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/db@6.39.0
+  - @opengeni/documents@6.39.0
+  - @opengeni/events@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/storage@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- c05ba68: Automations that run an agent with Memory are no longer refused when they start. Microsoft Teams chats with an agent now get its Memory, as Slack and app chats do.
+  An automation whose agent was deleted or is no longer shared now stops with a clear reason instead of retrying.
+- b76dd79: A message is no longer refused when one of its connector accounts stopped working after the chat was opened (for example its sign-in expired). It is sent without that account: the connector keeps your other picks that still work, or runs without an account for that turn, and no other account is used in its place. The left-out account is recorded on the turn, logged, and an expired sign-in posts its reconnect notice in the chat, addressed to the person who sent the message (not the chat's owner in a shared chat) and posted once per break, so a dismissed notice stays dismissed while the account stays broken. The notice names the account only in a private chat or in its owner's own Personal workspace; anywhere else it names only the service. Work that continues the message narrows the same way, keeping your working picks rather than dropping the connector. An account id you can't see, or one that belongs to another connector, is still refused, and personal GitHub and social account picks stay strict because a repository or post can't be attached without that account. A chat left open re-reads its accounts when you return to it, and reconnect notices name the service (Atlassian, not "Mcp").
+
+  In the composer, a picked account that stopped working stays picked and shows "Reconnect required" on the connector and on the account, with a Reconnect action for that account. Send stays enabled.
+
+  If a server still refuses such a message, the chat re-reads its accounts and sends it again once on its own, leaving out a pick that stopped working only where the connector keeps another pick, with no failed message to resend. Only that resend is narrowed: your picks stay as you made them, so the account is used again once you reconnect it. It never adds, swaps or widens accounts: when no such resend exists, or the second send is refused too, the message shows as failed as before.
+
+  "Reconnect required" on a connector in + → Connectors now stays until you reconnect it, including after a reload and on other devices. In a Personal workspace, a connector carried from another workspace used to disappear from the connector list once its account stopped working; the list now keeps it as not runnable, marked as needing reconnecting, so it is never a default tool and chats never run it with that account. A new chat or tool selection that still names it is accepted instead of being refused, and keeps it chosen, with your account picks for it, so the chat gets it back once you reconnect and uses only the accounts you picked. The Open PR button no longer has a glow, matching the other primary buttons.
+
+- Updated dependencies [f1289fa]
+- Updated dependencies [969cb9b]
+- Updated dependencies [f9b646c]
+- Updated dependencies [14d9e24]
+- Updated dependencies [020a5df]
+- Updated dependencies [3e41dc8]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [bd4550b]
+- Updated dependencies [b193d0c]
+- Updated dependencies [66afd96]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b76dd79]
+- Updated dependencies [47f4951]
+- Updated dependencies [d1ecb10]
+- Updated dependencies [b902e4e]
+- Updated dependencies [262c8b2]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/capabilities@6.38.0
+  - @opengeni/runtime@6.38.0
+  - @opengeni/db@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/documents@6.38.0
+  - @opengeni/events@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/storage@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+  - @opengeni/vaults@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/runtime@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/db@6.37.3
+  - @opengeni/tool-gateway@6.37.3
+  - @opengeni/capabilities@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/documents@6.37.3
+  - @opengeni/events@6.37.3
+  - @opengeni/storage@6.37.3
+  - @opengeni/vaults@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [3fc742f]
+- Updated dependencies [9b5daaa]
+- Updated dependencies [c78d62c]
+- Updated dependencies [8ee5e81]
+  - @opengeni/runtime@6.37.2
+  - @opengeni/contracts@6.37.2
+  - @opengeni/db@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/documents@6.37.2
+  - @opengeni/events@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/storage@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: Require Node.js 22.15 or later (`engines.node`) for the packages that load `@opengeni/storage`, which uses zlib's zstd streams; on older Node versions the import fails.
+- e71502d: Require Node.js 22.19 or later (`engines.node`) for the packages that load `@opengeni/runtime`, whose `e2b` dependency requires it; installers that enforce engines refused them on 22.15.
+- 17783d3: Skill preview and install can read GitHub with a deployment token, so they no longer share GitHub's anonymous 60 requests/hour limit. Set the optional `OPENGENI_SKILL_IMPORT_GITHUB_TOKEN` to a fine-grained token with public-repository read access only; reads with it still refuse any repository that isn't public, and an invalid token now says so. Generated runtime artifacts carry the setting when it is set. Thanks to @hadialjurdi7-dot.
+- Updated dependencies [ae9c227]
+- Updated dependencies [3595193]
+- Updated dependencies [e71502d]
+- Updated dependencies [ae9c227]
+- Updated dependencies [e71502d]
+- Updated dependencies [bc538e2]
+- Updated dependencies [1d7c08a]
+- Updated dependencies [17783d3]
+- Updated dependencies [e71502d]
+  - @opengeni/runtime@6.37.1
+  - @opengeni/db@6.37.1
+  - @opengeni/storage@6.37.1
+  - @opengeni/documents@6.37.1
+  - @opengeni/config@6.37.1
+  - @opengeni/events@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- ee17f5d: The Agents page lists the ready-made agents not added yet under the workspace's own, each added in one click. The Artifacts page's Apps tab, and its empty state, offer ready-made apps the same way, opening the app once it's added (Capabilities' **Ready-made** tab now opens it too). Three new ready-made apps keep their own data: **Issue tracker**, **Incident log** and **Feedback board** (with votes), next to **Decision log**.
+
+  An agent's GitHub trigger now covers every repository the GitHub connection reaches, or only the repositories you choose, and each run checks out the repository its event is about. Before, the one repository picked in **Add trigger** was only checked out, so the trigger fired for every repository; existing agent triggers now fire only for that repository. An agent's GitHub trigger saved with no repository, which already fired for every repository, now also checks out each event's repository (from the workspace's GitHub allowlist) in its new chat. A trigger that continues a chat keeps the chosen repositories open there. Other automations are unchanged.
+
+  The pasted webhook secret steps are one component shared by Add a source, a source's page and Add trigger, and the Skills section on an agent's page has more room above **Add a Skill**.
+
+  New apps take the Opengeni look by default (`/__opengeni/ui.css`), single-file apps included, unless the person's design, the workspace's design system or the product the app is about comes first; the ready-made apps use it too. `ui.css` now sizes text in `rem`, so the reader's browser text size applies, and uses 16px inputs on touch screens so phones don't zoom when a field is tapped.
+
+- Updated dependencies [cc649c3]
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [19fe301]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [20daa38]
+- Updated dependencies [a0b9135]
+  - @opengeni/db@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/runtime@6.37.0
+  - @opengeni/capabilities@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/documents@6.37.0
+  - @opengeni/events@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/storage@6.37.0
+  - @opengeni/tool-gateway@6.37.0
+  - @opengeni/vaults@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+
+## 6.36.0
+
+### Minor Changes
+
+- f2c07c2: An agent's automation can now keep one chat (`reusable_session`) or post into an existing chat (`existing_session`), not only start a new chat each run. Its own chat is started with the agent; when the automation's agent changes, the chat is cleared so the next run starts a new one with the new agent, the task records the previous chat under `SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY` with the audit event `scheduled_task.agent_chat_changed`, and the automation form says so. An existing chat must be bound to the same agent and usable by the owner; otherwise saving returns 422 "That chat isn't with this agent", and the form marks other chats "Not a chat with this agent". Agent access checks and event limits are unchanged.
+- b1abd39: Ready-made content names the team it is for: `AgentTemplate` has an optional `team`, and new `AppTemplate` content (an app package with a name, a line and a team) is listed by `GET /v1/workspaces/:workspaceId/app-templates` (SDK `listAppTemplates`); add one with `installAppPackage` and its `package`. `GET /v1/workspaces/:workspaceId/skills/library` (SDK `listLibrarySkills`) lists every reviewed library skill to add, `enabled` once added.
+
+  `ConnectionInstalled` lists what you have in the same rows as the catalog: logo, name and one status line ("Installed · Workspace"), two columns where there is room. `CapabilityCatalogRow` takes an optional `statusLine` that replaces the description and drops the glyph unless the row needs attention. `ConnectionInstalledItem.showStatus` is deprecated: the status line always shows. The `.og-connection-installed-status` and `.capability-search-section` classes are removed. Embedding products that style these rows see a visible change; the row buttons no longer carry an `aria-label`, so their visible text is their name. Catalog rows carry `data-row-status` for styling; `data-status` is on the row only when it shows no indicator.
+
+- b1abd39: The sidebar is edited in place: drag rows to reorder (or drop an app from the Sessions list), **+** on a group adds an app, and row menus rename, set an icon, set how many apps a list shows, and remove. A project app's menu has **Add to sidebar**. Apps, links and groups take an optional `icon` from a curated set of lucide names (`SIDEBAR_ITEM_ICONS`); outside links without one show the site's icon through `GET /v1/workspaces/:workspaceId/sidebar-layout/link-icon` (`client.getSidebarLinkIcon`). The phone app shows item icons and site icons, and leaves out hidden built-in entries (Automations in the side menu; Artifacts, Meetings or Inbox in the tab bar). Layouts gain `options` (the `options` change): `sessionsShowApps`, `hiddenNavEntries` and `settingsMore`, set as the workspace default or per person; unset keeps today's behaviour. While a deploy rolls out, a write from an older API replica can drop saved `options`; set them again afterwards. Recent apps now count opens and the last 90 days of edits (read through a new index on app versions by author), and no longer come back empty: the read ran without the person's identity, so row-level security hid every open.
+
+### Patch Changes
+
+- f2c07c2: **Add an agent** now also offers three ready-made agents: **CVE scanner** (checks dependencies and container images for known vulnerabilities, fixes safe upgrades in one pull request for PR reviewer and reports the rest; suggested weekly and on new pull requests), **Incident responder** (investigates an alert or a Slack report, posts the likely cause and hands a fix to Bug fixer) and **Dependency updater** (one pull request of routine upgrades a week for PR reviewer). The Agents list no longer shows a Slack badge on every shared agent, since every shared agent is in Slack; only Only me agents are marked.
+- 837e58f: Connecting a coding agent starts in the organization you last worked in, with everyday work selected (chats, files, knowledge, apps and their data, automations, and using secrets, GitHub and sandbox environments; it never manages people, keys, billing, connections, capabilities, machines or terminals, controls live screens, and never reads secret values), shown as Custom so every permission stays visible. The permission list has an Apps and artifacts group, and read only connections can query app data. App data a connected agent writes is recorded as that connected agent (`agent:connection:<id>`) instead of as the person; the records still belong to the person, and app change events for those writes now show writer `agent` instead of `user`.
+- 53320fa: The **PR reviewer** template labels each finding Blocker, Bug or Nit and posts them at a review level set in its Instructions (`Review level: Bugs` by default; also `Blockers only` or `Everything`). At Bugs, nits come last in one collapsed section.
+- 55539f1: Show where recordings spend time between Stop and the transcript. The SDK measures storage uploads and finalize, React measures transcript delivery and composer insertion, and the API and worker emit recording stage timings with a shared recording key. Transcript long polling reports its intentional wait separately from active API work.
+- f2c07c2: The ready-made Triage agent suggests a Slack trigger (a new message in a channel), and Triage and Bug fixer start with what they can reach and hand off by name instead of asking for setup first. `scheduled_tasks_create` takes `agentConfig.agentName` (an agent's name or id), and the apps Skill tells agents to start work on new app records with an automation on app change events, not page code. Adding a GitHub event source without a GitHub connection offers Connect GitHub. The coding-agent setup guide shows how to add the Opengeni MCP server by hand when the `opengeni` npm package isn't available.
+- f2c07c2: A workspace that its organization shares an Opengeni Slack bot with can now add Slack as an automation event source, and the bot's channel events reach that workspace's automations as well as the home workspace's. Delivery follows the live sharing setting: turning sharing off or leaving the workspace out stops new events there. Migration 1538 adds the one lookup each Slack callback makes for this; the shared workspaces' deliveries never delay Slack's acknowledgement. A workspace's Slack source whose bot is no longer shared with it reads as blocked with "The Slack bot isn't shared with this workspace anymore" until the bot is shared again.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [9cfc4b7]
+- Updated dependencies [837e58f]
+- Updated dependencies [26b0190]
+- Updated dependencies [e765d11]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [b419673]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [23e52db]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [53320fa]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [0b36a4b]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/runtime@6.36.0
+  - @opengeni/db@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/documents@6.36.0
+  - @opengeni/events@6.36.0
+  - @opengeni/storage@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes

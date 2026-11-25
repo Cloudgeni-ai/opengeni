@@ -287,7 +287,7 @@
     "vite": "8.1.6",
     "ws": "8.21.1"
   },
-  "packageManager": "bun@1.4.4",
+  "packageManager": "bun@1.4.5",
   "patchedDependencies": {
     "modal@0.9.0": "patches/modal@0.9.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",

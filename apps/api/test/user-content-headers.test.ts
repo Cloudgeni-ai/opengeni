@@ -52,9 +52,9 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     why: "git receive-pack results that refuse a push, read by git",
   },
   "personal-github-gateway.ts": {
-    count: 2,
+    count: 4,
     userContent: false,
-    why: "GitHub API passthrough and JSON errors for gh, behind the session pass (sandboxed, nosniff)",
+    why: "GitHub API passthrough (including created pull requests read for linking) and JSON errors for gh, behind the session pass (sandboxed, nosniff)",
   },
   "personal-github-git-broker.ts": {
     count: 2,
@@ -65,6 +65,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     count: 1,
     userContent: false,
     why: "server-drawn PNG avatar for Slack; image avatars are re-encoded, never passed through",
+  },
+  "sidebar-layout.ts": {
+    count: 1,
+    userContent: true,
+    why: "an outside sidebar link's site icon (raster images only, sniffed)",
   },
   "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
   "site-runtime.ts": {
@@ -107,6 +112,9 @@ const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: n
   "site-data/operations.ts": { calls: 1, withUserContentOptions: 1 },
   // App package downloads for agents (app_export).
   "mcp/app-package-tools.ts": { calls: 1, withUserContentOptions: 1 },
+  // Server code modules the agent's sandbox downloads with an app's source
+  // (artifacts_get_source); JavaScript read by the sandbox, not a browser.
+  "mcp/server.ts": { calls: 1, withUserContentOptions: 0 },
 };
 
 async function sourceFiles(directory: URL, prefix = ""): Promise<string[]> {

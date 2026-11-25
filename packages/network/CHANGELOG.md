@@ -1,5 +1,27 @@
 # @opengeni/network
 
+## 6.41.0
+
+## 6.40.0
+
+## 6.39.0
+
+## 6.38.0
+
+## 6.37.3
+
+## 6.37.2
+
+## 6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- cf218c3: Report refused MCP destinations separately from connection failures. A native account that points to a blocked or unresolvable address now shows what went wrong in connection settings, while a temporary DNS failure still retries normally.
+
+## 6.36.0
+
 ## 6.35.0
 
 ## 6.34.0

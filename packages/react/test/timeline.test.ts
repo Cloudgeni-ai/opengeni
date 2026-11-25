@@ -430,8 +430,28 @@ describe("buildTimeline", () => {
   });
 
   test.each([
+    [
+      "codex_relogin_required",
+      "The Codex account “Primary” needs a new sign-in. An admin must reconnect it.",
+    ],
+    [
+      "codex_plan_no_capacity",
+      "The ChatGPT plans available to this chat don’t provide Codex capacity for this model.",
+    ],
+    [
+      "codex_rate_limited",
+      "Codex is rate-limited. This turn continues automatically when an account has capacity again.",
+    ],
+  ])("a %s wait keeps the recorded reason in the timeline", (waitReason, error) => {
+    reset();
+    const [item] = buildTimeline(englishText, [
+      event("codex.capacity.waiting", { waitReason, error }),
+    ]);
+    expect(item).toMatchObject({ text: error, capacityWait: { detail: error } });
+  });
+
+  test.each([
     [{ waitReason: "no_eligible_capacity" }],
-    [{ waitReason: "pinned_account_unavailable" }],
     [{ waitReason: "compaction_provider_locked" }],
     [{ code: "claude_account_rate_limited", provider: "claude" }],
   ] as const)(
@@ -448,6 +468,33 @@ describe("buildTimeline", () => {
       }
     },
   );
+
+  test("a wait on the chat's pinned account keeps its explanation, not the model-switch line", () => {
+    reset();
+    const explanation =
+      "This chat is pinned to the Claude account “Team”, which has no capacity right now. It continues by itself when that account has room again, or sooner on another account once the chat is switched back to automatic account choice.";
+    const [claude] = buildTimeline(englishText, [
+      event("turn.capacity_waiting", {
+        provider: "claude-subscription",
+        waitReason: "pinned_account_unavailable",
+        error: explanation,
+        detail: "internal note",
+      }),
+    ]);
+    expect(claude).toMatchObject({
+      text: explanation,
+      capacityWait: { label: "Waiting", detail: explanation },
+    });
+    expect(JSON.stringify(claude)).not.toContain("another model");
+    // Codex records its readable sentence as `detail`.
+    const [codex] = buildTimeline(englishText, [
+      event("codex.capacity.waiting", {
+        waitReason: "pinned_account_unavailable",
+        detail: explanation,
+      }),
+    ]);
+    expect(codex).toMatchObject({ text: explanation });
+  });
 
   test("a capacity wait row has no clock; approval and agent waits keep theirs", () => {
     reset();
@@ -4389,6 +4436,71 @@ describe("buildTimeline", () => {
       ["turn-4", null, true],
       ["turn-5", null, false],
     ]);
+  });
+
+  test("the same request for more access shows one card, finished once the person allows it", () => {
+    reset();
+    const modify = "https://www.googleapis.com/auth/gmail.modify";
+    const stepUp = (turnId: string, scopes = [modify], connectionId = "conn-1") =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "gmail",
+          toolName: "batch_modify_messages",
+          providerDomain: "gmailmcp.googleapis.com",
+          reason: "insufficient_scope",
+          connectionId,
+          scopes,
+        },
+        { turnId },
+      );
+    const first = stepUp("turn-1");
+    const retried = stepUp("turn-1");
+    const otherAccess = stepUp("turn-1", ["https://www.googleapis.com/auth/gmail.compose"]);
+    const otherAccount = stepUp("turn-1", [modify], "conn-2");
+    const askedAgain = stepUp("turn-2");
+    const cards = (events: SessionEvent[]) =>
+      buildTimeline(englishText, events)
+        .filter((item) => item.kind === "auth-needed")
+        .map((item) => [item.id, item.askedAgainLater ?? false, item.setupFinished ?? false]);
+    // Only the latest copy of the same ask stays a card; other access or
+    // another account is a separate request.
+    expect(cards([first, retried, otherAccess, otherAccount, askedAgain])).toEqual([
+      [otherAccess.id, false, false],
+      [otherAccount.id, false, false],
+      [askedAgain.id, false, false],
+    ]);
+    // The person allowed it from the latest card: that card is finished; the
+    // other requests are not.
+    const finishedFrom = (card: SessionEvent) =>
+      event(
+        "system.update.delivered",
+        {
+          historyItemId: "history-1",
+          count: 1,
+          members: [
+            {
+              id: "update-1",
+              kind: "capability_setup_completed",
+              classification: "success",
+              sourceId: card.id,
+              summary: "The person finished setting up Gmail from your request.",
+            },
+          ],
+        },
+        { turnId: "turn-3" },
+      );
+    const finished = finishedFrom(askedAgain);
+    expect(cards([first, retried, otherAccess, otherAccount, askedAgain, finished])).toEqual([
+      [otherAccess.id, false, false],
+      [otherAccount.id, false, false],
+      [askedAgain.id, false, true],
+    ]);
+    // Asked again after that (the access is still missing): the new card is live.
+    const later = stepUp("turn-4");
+    expect(cards([first, askedAgain, finished, later])).toEqual([[later.id, false, false]]);
+    // Finished from the only card there was: it stays, saying so.
+    expect(cards([first, finishedFrom(first)])).toEqual([[first.id, false, true]]);
   });
 
   test("only the newest card for the same connection stays a full card; a turn shows it once", () => {

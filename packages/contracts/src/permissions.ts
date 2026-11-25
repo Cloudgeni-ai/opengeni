@@ -60,7 +60,10 @@ export const Permission = /* @__PURE__ */ defineSchema(() =>
     /** Literal plaintext read through a tool or API key (agents lack it by default). */
     "secrets:read",
     "secrets:write",
-    /** Use secrets by reference; for humans, also reveal ("use = reveal"). */
+    /**
+     * Use secrets by reference. People also reveal items they may see: their
+     * own, ones they saved, or ones where they administer (docs/secrets.md).
+     */
     "secrets:use",
     "mcp_servers:attach",
     "codemode:call",

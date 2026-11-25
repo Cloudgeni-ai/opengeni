@@ -20,6 +20,7 @@ import { SECTION_TITLE_CLASS } from "./section";
 import { Sheet, SheetClose, SheetDescription, SheetTitle, SheetTrigger } from "./sheet";
 import { Skeleton } from "./skeleton";
 import { cn } from "../lib/cn";
+import { ModalLayer, useDialogModal } from "../lib/modal-layer";
 import { containedPortal } from "./portal-container";
 import {
   WindowBarOwnerReportContext,
@@ -102,50 +103,53 @@ export const DetailSheetContent = /* @__PURE__ */ forwardRef<
   // has nothing to return focus to. Remember what had focus as the sheet
   // opened (the row) and go back there on close.
   const returnTo = useRef<HTMLElement | null>(null);
+  const modal = useDialogModal();
   return (
     <DialogContainedPortal>
-      <DialogPrimitive.Overlay
+      <ModalLayer
+        modal={modal}
         data-slot="detail-sheet-overlay"
-        className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-200 starting:opacity-0"
-      />
-      <DialogPrimitive.Content
-        ref={ref}
-        data-slot="detail-sheet"
-        data-window-layer
-        {...props}
-        onOpenAutoFocus={(event) => {
-          // Focus hasn't moved yet: this is still the row that opened the sheet.
-          const active = document.activeElement;
-          returnTo.current =
-            active instanceof HTMLElement && active !== document.body ? active : null;
-          onOpenAutoFocus?.(event);
-          if (event.defaultPrevented) return;
-          // Land on the sheet itself: screen readers hear its title and
-          // description, and no control lights up before anyone asks.
-          event.preventDefault();
-          (event.currentTarget as HTMLElement | null)?.focus({ preventScroll: true });
-        }}
-        onCloseAutoFocus={(event) => {
-          onCloseAutoFocus?.(event);
-          if (event.defaultPrevented) return;
-          const target = returnTo.current;
-          returnTo.current = null;
-          if (target?.isConnected) {
-            event.preventDefault();
-            target.focus({ preventScroll: true });
-          }
-        }}
-        className={cn(
-          SHEET_PANEL,
-          "fixed inset-y-0 right-0 z-50 h-full w-full border-border outline-hidden sm:w-[520px] sm:max-w-[calc(100vw-2rem)] sm:border-l",
-          "transition-transform duration-200 ease-out starting:translate-x-full",
-          className,
-        )}
+        className="fixed inset-0 z-50 bg-black/50 transition-colors duration-200 starting:bg-transparent"
       >
-        <PresentationContext.Provider value="sheet">
-          <WindowBarTitleBoundary>{children}</WindowBarTitleBoundary>
-        </PresentationContext.Provider>
-      </DialogPrimitive.Content>
+        <DialogPrimitive.Content
+          ref={ref}
+          data-slot="detail-sheet"
+          data-window-layer
+          {...props}
+          onOpenAutoFocus={(event) => {
+            // Focus hasn't moved yet: this is still the row that opened the sheet.
+            const active = document.activeElement;
+            returnTo.current =
+              active instanceof HTMLElement && active !== document.body ? active : null;
+            onOpenAutoFocus?.(event);
+            if (event.defaultPrevented) return;
+            // Land on the sheet itself: screen readers hear its title and
+            // description, and no control lights up before anyone asks.
+            event.preventDefault();
+            (event.currentTarget as HTMLElement | null)?.focus({ preventScroll: true });
+          }}
+          onCloseAutoFocus={(event) => {
+            onCloseAutoFocus?.(event);
+            if (event.defaultPrevented) return;
+            const target = returnTo.current;
+            returnTo.current = null;
+            if (target?.isConnected) {
+              event.preventDefault();
+              target.focus({ preventScroll: true });
+            }
+          }}
+          className={cn(
+            SHEET_PANEL,
+            "fixed inset-y-0 right-0 z-50 h-full w-full border-border outline-hidden sm:w-[520px] sm:max-w-[calc(100vw-2rem)] sm:border-l",
+            "transition-transform duration-200 ease-out starting:translate-x-full",
+            className,
+          )}
+        >
+          <PresentationContext.Provider value="sheet">
+            <WindowBarTitleBoundary>{children}</WindowBarTitleBoundary>
+          </PresentationContext.Provider>
+        </DialogPrimitive.Content>
+      </ModalLayer>
     </DialogContainedPortal>
   );
 });

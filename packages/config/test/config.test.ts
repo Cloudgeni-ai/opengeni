@@ -30,6 +30,7 @@ import {
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
   getSettings,
+  interactionViewerOriginEntries,
   calculateVoiceInputCost,
   defaultVoiceInputPricing,
   parseStaticEntitlementsJson,
@@ -78,6 +79,22 @@ describe(".env.example", () => {
 
     expect(() => withEnv(sourcedEnv, () => getSettings())).not.toThrow();
   });
+});
+
+test("interaction viewer origins use a separate exact-origin deployment setting", () => {
+  expect(interactionViewerOriginEntries(undefined)).toEqual([]);
+  const raw = "https://app.example.test, http://127.0.0.1:5173";
+  const settings = withEnv({ OPENGENI_INTERACTION_VIEWER_ORIGINS: raw }, () => getSettings());
+  expect(interactionViewerOriginEntries(settings.interactionViewerOrigins)).toEqual([
+    "https://app.example.test",
+    "http://127.0.0.1:5173",
+  ]);
+  expect(new RegExp(settings.corsAllowOriginRegex).test("https://app.example.test")).toBe(false);
+  for (const invalid of ["null", "*", "https://*.example.test", "https://app.example.test/path"]) {
+    expect(() => interactionViewerOriginEntries(invalid)).toThrow(
+      "OPENGENI_INTERACTION_VIEWER_ORIGINS",
+    );
+  }
 });
 
 describe("API use of connected subscriptions", () => {

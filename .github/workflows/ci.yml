@@ -10,6 +10,10 @@ on:
       # main push (full suite, deployment artifacts and every workload image),
       # and never publish anything.
       - "batch/**"
+      # A fix built onto the live release by the ops hotfix lane
+      # (opengeni-ops docs/runbooks/ship-urgent-fix.md): new code, fully
+      # tested before it deploys. Publishes nothing.
+      - "hotfix-build/**"
   # Main PRs use pr-ci.yml and land through the merge batcher. Full CI is a separate,
   # non-cancelling release-candidate lane.
   pull_request:

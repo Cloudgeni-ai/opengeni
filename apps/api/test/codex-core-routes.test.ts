@@ -733,6 +733,49 @@ describe("Codex routes on the shared core", () => {
     });
   });
 
+  test("a live read with no windows keeps the account's saved reading", async () => {
+    coreRoutes();
+    const usageCheckedAt = new Date(Date.now() - 16 * 60 * 60_000);
+    mock("getSubscriptionCoreCodexWorkspaceProjection", async () => ({
+      ...projection,
+      accounts: [{ ...account, primaryUsedPercent: 71, secondaryUsedPercent: 61, usageCheckedAt }],
+    }));
+    // As a personal account reads when this caller's context can't read it live.
+    const noData = {
+      status: "no-data" as const,
+      planType: null,
+      fiveHour: null,
+      weekly: null,
+      limitReached: false,
+      fetchedAt: new Date().toISOString(),
+      rateLimitResetCredits: null,
+    };
+    mock("fetchSubscriptionCoreCodexUsage", async () => ({ usage: noData, recovered: false }));
+    mock("buildSubscriptionCoreCodexConnectionTokenResolver", () => ({
+      getToken: async () => {
+        throw new Error("reset details unavailable in this fixture");
+      },
+      refresh: async () => {
+        throw new Error("reset details unavailable in this fixture");
+      },
+    }));
+    const response = await app().request(`/v1/workspaces/${WS}/codex/overview`, {
+      headers: { authorization: await bearer(["workspace:read"]) },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      accounts: Record<string, { usage: Record<string, any> }>;
+    };
+    const usage = body.accounts[CONNECTION]!.usage;
+    expect(usage).toMatchObject({
+      source: "cache",
+      stale: true,
+      error: null,
+      fetchedAt: usageCheckedAt.toISOString(),
+      value: { status: "ok", fiveHour: { percent: 71 }, weekly: { percent: 61 } },
+    });
+  });
+
   test("the session account view and pin use the core binding", async () => {
     coreRoutes();
     const sessionId = crypto.randomUUID();

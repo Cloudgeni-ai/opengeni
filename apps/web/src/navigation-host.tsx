@@ -15,6 +15,8 @@ declare module "@tanstack/react-router" {
   interface HistoryState {
     /** Set only on the Settings "Back to sessions" link that reopens this session. */
     restoredSessionId?: string;
+    /** Add trigger's note and chat choice, for the full automation form it opens. */
+    agentTriggerStart?: unknown;
   }
 }
 

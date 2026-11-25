@@ -229,18 +229,16 @@ An App opened from the sidebar is a page of Opengeni: it fills the main area,
 its address (above) is the page URL, and it stays open when the person goes
 elsewhere. Make it feel native:
 
-- Follow `prefers-color-scheme`; inside Opengeni it is Opengeni's light or dark
-  theme and switches without a reload. Don't hard-code a white page.
-- For an App that should look like Opengeni (dashboards, tools, admin pages),
-  add `<link rel="stylesheet" href="/__opengeni/ui.css">` and use its `--og-*`
-  tokens (`--og-canvas`, `--og-surface`, `--og-border`, `--og-fg`,
-  `--og-fg-muted`, `--og-accent`, ...) and classes: `og-app` on `<body>`,
-  `og-page`, `og-title`, `og-heading`, `og-card`, `og-button`
-  (`og-button-primary`), `og-input`, `og-badge`, `og-table`. It styles only what
-  you mark, so a user's own design stays theirs. In a Bun + React app the
-  bundler can't resolve that link; put
-  `<style>@import "/__opengeni/ui.css";</style>` in `index.html` instead (the
-  build leaves it alone).
+- Its look is chosen as in the Skill's "Look": the Opengeni look unless a
+  design comes first. It follows `prefers-color-scheme` (Opengeni's light or
+  dark theme, switching without a reload); don't hard-code a white page.
+- The Opengeni look is `/__opengeni/ui.css`: `--og-*` tokens (`--og-canvas`,
+  `--og-surface`, `--og-border`, `--og-fg`, `--og-fg-muted`, `--og-accent`,
+  ...) and classes (`og-app` on `<body>`, `og-page`, `og-title`, `og-heading`,
+  `og-card`, `og-button`, `og-button-primary`, `og-input`, `og-badge`,
+  `og-table`). It styles only what you mark. A bundler can't resolve the
+  `<link>`, so a Bun + React app puts `<style>@import "/__opengeni/ui.css";</style>`
+  in `index.html` instead (the build leaves it alone).
 - Links to a page (`/releases`) work from the sidebar too: add one with
   `sidebar_layout_update` (an `app` item with the App's id and `path`).
 
@@ -340,8 +338,9 @@ access limitation. Missing publishing access itself still blocks publication.
 
 ## Completion gate (full apps)
 
-This gate applies to full apps. A single-file app is done when its saved link is in
-the reply (see "Single-file app" in SKILL.md).
+This gate applies to full apps. A single-file app is done when it passes its
+browser check and its saved link is in the reply (see "Single-file app" in
+SKILL.md).
 
 - Tests and the production browser build pass.
 - The compiled runtime is one self-contained HTML document within the published
@@ -350,12 +349,22 @@ the reply (see "Single-file app" in SKILL.md).
 - Desktop and mobile interactions were exercised in the sandbox-local preview.
 - Reading text, controls and tables follow the chosen readable type scale;
   mobile and 200% text scaling do not clip or shrink primary content.
+- A new or restyled app follows `references/design.md`: the first screen
+  leads with the thing people come for, empty, loading and error states are
+  designed, and nothing from its "Signs of a generated page" list remains
+  unasked.
 - Exercise live tools and SDK operations locally through `/__opengeni/site-tools/*`
   wherever the attempt's Codemode authority permits. Report remaining
   viewer-only checks explicitly; those do not by themselves block publication.
 - The authenticated parent-frame wrapper exists only in the hosted product.
   Do not build a synthetic parent-frame harness in the sandbox. After local
   validation and publication, use the returned app link for the hosted check.
+- In that hosted check, click through the app's main flows in the browser
+  (add, edit, delete, filter, each view) on one record clearly marked as a
+  test, then delete it; never edit or delete records you didn't create.
+  Every change shows without a reload or a Refresh click. A build, a parse
+  check or a screenshot is not this check; report any flow you couldn't
+  exercise.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.

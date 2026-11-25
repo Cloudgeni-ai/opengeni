@@ -1,5 +1,234 @@
 # @opengeni/db
 
+## 6.41.0
+
+### Minor Changes
+
+- dd6dd0b: A meeting recorded in your Personal workspace can be shared with one of your team workspaces (`PATCH …/recordings/:recordingId` with `{ visibility: "workspace", sharedWorkspaceId }`), from any workspace where you see it. Everyone in that workspace can open it read only, and agents there find it with `meetings_search`; `Recording.sharedWorkspaceId` says where it is shared. The meeting page's Share menu lists "Only me" and your team workspaces.
+
+### Patch Changes
+
+- bbbeecf: Add Heedeo signup scoring, off by default. An operator mode (`heedeoSignupMode`: `off`, `shadow` or `enforce`, through the signup network velocity setter) and the `OPENGENI_HEEDEO_*` keys turn it on. Shadow scores each new account once, just before it is created, and stores the verdict without acting on it; enforce refuses a signup in Heedeo's `block` band. Heedeo failures never block a signup. The client config gains an optional `auth.heedeo` (publishable key and script URL) while scoring is on.
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/codemode@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/subscriptions@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- 8a8579a: Add `setSessionModelSettings` and its HTTP endpoint so integration servers can change future session model defaults without sending a message. An optional comparison protects against overwriting a concurrent change, and retrying with the same key does not apply the update twice.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/codemode@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/subscriptions@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/codemode@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/subscriptions@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- bd4550b: A person finishing a browser or computer handoff now resumes the agent's `interaction_request_human` call with the settled handoff. The resumed turn read the handoff outside the workspace's row-security scope, so under a database role that enforces it the call failed with "Interaction intervention resumed without a durable response".
+- bfe5398: A chat pinned to one subscription account now says so when it waits for that account. The chat keeps honouring the pin: its turn still waits for the chosen account and never moves to another one by itself. But the wait no longer tells people to switch the chat to another model, which did not help, because the pin holds whatever the model.
+
+  - The composer shows "This chat is pinned to the Claude account “Team”, which is out of capacity. Resets Sat 18:00." with one button, **Use automatic account choice**. It switches the chat back to automatic account choice through the existing session account choice (`connectionId: null`), which applies to the waiting turn, so it continues at once on another account. People who can't manage the chat are told who can. A turned-off or no-longer-eligible pinned account gets the same notice and button.
+  - The timeline keeps the wait's own explanation instead of the generic "switch to another model" line.
+  - The person's inbox notification is titled "Chat waiting for its pinned Claude account", names the account and when it has room again, and offers automatic account choice instead of a model switch. It is still sent once per waiting turn and updated in place when what it said changes.
+  - A worker's parent agent is told the same, with the `setSessionModelAccount` action (`connectionId: null`) as the way to let the worker continue, instead of `session_set_model`.
+
+  The account is named by its label only when the label is not an email address. The internal wait field that named an account needing a new sign-in is now `waitAccount` (type `SubscriptionWaitAccount`; `SubscriptionReconnectAccount` remains as a deprecated alias) and also names a pinned account.
+
+- b76dd79: A message is no longer refused when one of its connector accounts stopped working after the chat was opened (for example its sign-in expired). It is sent without that account: the connector keeps your other picks that still work, or runs without an account for that turn, and no other account is used in its place. The left-out account is recorded on the turn, logged, and an expired sign-in posts its reconnect notice in the chat, addressed to the person who sent the message (not the chat's owner in a shared chat) and posted once per break, so a dismissed notice stays dismissed while the account stays broken. The notice names the account only in a private chat or in its owner's own Personal workspace; anywhere else it names only the service. Work that continues the message narrows the same way, keeping your working picks rather than dropping the connector. An account id you can't see, or one that belongs to another connector, is still refused, and personal GitHub and social account picks stay strict because a repository or post can't be attached without that account. A chat left open re-reads its accounts when you return to it, and reconnect notices name the service (Atlassian, not "Mcp").
+
+  In the composer, a picked account that stopped working stays picked and shows "Reconnect required" on the connector and on the account, with a Reconnect action for that account. Send stays enabled.
+
+  If a server still refuses such a message, the chat re-reads its accounts and sends it again once on its own, leaving out a pick that stopped working only where the connector keeps another pick, with no failed message to resend. Only that resend is narrowed: your picks stay as you made them, so the account is used again once you reconnect it. It never adds, swaps or widens accounts: when no such resend exists, or the second send is refused too, the message shows as failed as before.
+
+  "Reconnect required" on a connector in + → Connectors now stays until you reconnect it, including after a reload and on other devices. In a Personal workspace, a connector carried from another workspace used to disappear from the connector list once its account stopped working; the list now keeps it as not runnable, marked as needing reconnecting, so it is never a default tool and chats never run it with that account. A new chat or tool selection that still names it is accepted instead of being refused, and keeps it chosen, with your account picks for it, so the chat gets it back once you reconnect and uses only the accounts you picked. The Open PR button no longer has a glow, matching the other primary buttons.
+
+- 262c8b2: Pause, terminal Cancel and an explicit stop now stop an unsupervised session background command's process group. Before, such a command was only marked stopping and kept running, so a process that ignored interrupts could still write after it should have stopped. Slow turn settlements and Steer handovers are now logged with the time spent in each phase.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/subscriptions@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/subscriptions@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- 8ee5e81: Let verified users of an embedding host save secure-question answers to their own Only me vault when the host acts as them with `secrets:write` and their asking turn can use the vault.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/subscriptions@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- 3595193: Distinguish proven Codex model entitlement refusals from waits for capacity, so an entirely plan-blocked pool can fail a turn promptly.
+- e71502d: A sub-agent's question held for the agent that started it now reaches the person when that agent isn't woken by it (its goal is paused, the chat is paused or its admission is blocked), instead of waiting silently with no inbox item, push or list hint.
+- bc538e2: Deliver already accepted scheduled work when a shared connector has lapsed, without letting that work use the stale credential or a different account.
+- e71502d: Keep app data restricted when a manager resets it while server code or a sync is writing shared-account tool data to a target it marked long before: marking again right before a write restarts the mark's reset grace.
+- Updated dependencies [17783d3]
+  - @opengeni/config@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/subscriptions@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- cc649c3: Run app server code that an agent published on the authority of the person whose chat it acted for, instead of pausing it.
+- 36f5f96: Explain whether a Codex account needs a new sign-in, the available plans cannot serve the model, or an account is rate-limited, including the known reset time.
+- cf218c3: Report refused MCP destinations separately from connection failures. A native account that points to a blocked or unresolvable address now shows what went wrong in connection settings, while a temporary DNS failure still retries normally.
+- 9f7efdb: Offer only usable save destinations on secure questions, and keep task-scoped answers usable when delegated saved-logins access is off.
+- 20daa38: Keep app data that once held shared-account tool data restricted after its sync is switched to a personal account, pointed elsewhere or deleted, until a manager resets the data.
+- a0b9135: A sub-agent's question now goes first to the agent that started it. While that agent can still answer, you get no inbox item or phone notification for it, and Needs you and the attention counts leave it out. It reaches you as before if the agent's turn ends without an answer, the agent's turn fails, or the same pause also needs you. Questions only you can answer (passwords and other secrets, Skill reviews, approvals) still come straight to you. Sessions gain an optional `questionWithAgent` flag.
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/contracts@6.37.0
+  - @opengeni/subscriptions@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/codemode@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+
+## 6.36.0
+
+### Minor Changes
+
+- 27832fd: Upgrade an existing app from a newer package of it: a dry run returns the plan (new version, tools, collections, migrations, queries and syncs), and applying it publishes the package's version as a new version of the same app and runs only what is new. Nothing is deleted; destructive changes need `allowDestructive: true` and conflicts stop the upgrade. Adds `POST /v1/workspaces/:workspaceId/published-artifacts/:appId/package/upgrade`, `upgradeAppPackage` in the SDK, the `app_upgrade` agent tool and Upgrade from package in the app's menu. Package demo data now carries the app's shared files (`demoData.files`) and SQL blob values (`{ "$base64": "…" }`), and package files `app_export` stores are deleted after 24 hours. Older packages stay readable. See docs/app-packages.md.
+
+### Patch Changes
+
+- 23e52db: App packages carry a multi-file app's asset files, and install and upgrade restore them. Packages carry a `packageId`: installed copies record it, and upgrading from a different app's package needs `allowDestructive`. Install responses and upgrade plans include it.
+- 9cfc4b7: Keep Claude subscriptions out of automatic rotation after a model request is denied with HTTP 403. The account shows why it was skipped and returns to service after reconnecting. Model suspensions and stream errors do not quarantine the account.
+- 26b0190: Let idle chats archive when their only pending updates are background command results that cannot start a turn without an explicit wait. Preserve those results for the next turn if the chat is restored.
+- b419673: Settle a Modal sandbox create whose reply was lost once it is older than Modal's 24-hour maximum sandbox lifetime plus an hour. The lease then restarts cold from its archive, so the chat gets a fresh sandbox instead of waiting forever.
+- 23e52db: A personal app sync whose trigger is on its owner's own Gmail or GitHub (your connection) source now also runs when an opted-in person's own source of that kind fires, only for that person.
+- f2c07c2: A workspace that its organization shares an Opengeni Slack bot with can now add Slack as an automation event source, and the bot's channel events reach that workspace's automations as well as the home workspace's. Delivery follows the live sharing setting: turning sharing off or leaving the workspace out stops new events there. Migration 1538 adds the one lookup each Slack callback makes for this; the shared workspaces' deliveries never delay Slack's acknowledgement. A workspace's Slack source whose bot is no longer shared with it reads as blocked with "The Slack bot isn't shared with this workspace anymore" until the bot is shared again.
+- 53320fa: A Slack callback for a bot shared across an organization can find the shared workspaces' Slack sources in one indexed lookup (`list_shared_slack_event_sources_v2`, migrations 1551 and 1552) instead of one probe per workspace. The definer is withheld from the runtime for one release, so until a later migration grants it the existing per-workspace lookup stays in use; delivery and sharing rules are unchanged.
+- b1abd39: The sidebar is edited in place: drag rows to reorder (or drop an app from the Sessions list), **+** on a group adds an app, and row menus rename, set an icon, set how many apps a list shows, and remove. A project app's menu has **Add to sidebar**. Apps, links and groups take an optional `icon` from a curated set of lucide names (`SIDEBAR_ITEM_ICONS`); outside links without one show the site's icon through `GET /v1/workspaces/:workspaceId/sidebar-layout/link-icon` (`client.getSidebarLinkIcon`). The phone app shows item icons and site icons, and leaves out hidden built-in entries (Automations in the side menu; Artifacts, Meetings or Inbox in the tab bar). Layouts gain `options` (the `options` change): `sessionsShowApps`, `hiddenNavEntries` and `settingsMore`, set as the workspace default or per person; unset keeps today's behaviour. While a deploy rolls out, a write from an older API replica can drop saved `options`; set them again afterwards. Recent apps now count opens and the last 90 days of edits (read through a new index on app versions by author), and no longer come back empty: the read ran without the person's identity, so row-level security hid every open.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [9cfc4b7]
+- Updated dependencies [837e58f]
+- Updated dependencies [e765d11]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/subscriptions@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes

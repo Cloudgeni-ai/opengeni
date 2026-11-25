@@ -114,12 +114,20 @@ For exact complete message text, request `promptOffset: 0`, then follow
 pages preserve whitespace, Unicode and legacy text exactly. Restart the read if
 the task changes. Ordinary edits do not require recovering creation history.
 
-## Changing model defaults without replacing configuration
+## Changing model defaults or the agent without replacing configuration
 
 `scheduled_tasks_update`, the scheduled-task HTTP PATCH route and the SDK's
-`updateScheduledTask` accept `agentConfigPatch: { prompt?, model?, reasoningEffort? }`.
+`updateScheduledTask` accept `agentConfigPatch: { prompt?, model?, reasoningEffort?, agentId? }`.
 Supply at least one field. Omitted fields stay unchanged; null, unrelated fields,
 and combining the patch with a full `agentConfig` replacement are rejected.
+The exception is `agentId: null`, which runs the automation without an agent.
+A new `agentId` is checked like any change of agent: the owner must be able to
+use it, an Only me agent keeps the automation Only me, an existing-chat
+automation must post into one of that agent's chats (send `targetSessionId`
+with it to move), and an automation's own chat is replaced at its next run.
+The tool also takes `agentConfigPatch.agentName`, resolved like
+`scheduled_tasks_create`'s `agentConfig.agentName`. The automation form's
+agent picker sends the same change.
 The server merges against the complete stored configuration. Never reconstruct
 `agentConfig` from `scheduled_tasks_get`: that tool returns bounded text and
 previews, not a lossless replacement document.
@@ -203,6 +211,16 @@ organization allows Only me chats.
   With admin visibility off the list is empty and admins cannot pause them,
   exactly like private chats. A deployment can require it to stay on with
   `OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED=true`.
+- A workspace admin can pause and resume someone else's Workspace schedule, or
+  one locked to the app or key that created it
+  (`POST …/scheduled-tasks/:taskId/pause` and `…/resume`, and the
+  `scheduled_tasks_pause` and `scheduled_tasks_resume` tools), so turning it
+  off and on needs the same permission. Resuming changes nothing else: the
+  schedule runs as its owner again, exactly as before the pause, and its event
+  triggers are re-armed. This also turns on one its owner paused. Each admin
+  pause and resume is audited (`scheduled_task.admin_paused` and
+  `scheduled_task.admin_resumed`, with the owner). Changing or running it stays
+  with its owner.
 
 The audience is not execution configuration: like the name and status it is
 left out of the execution digest, so changing it never invalidates accepted

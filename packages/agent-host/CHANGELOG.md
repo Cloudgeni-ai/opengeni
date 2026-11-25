@@ -1,5 +1,96 @@
 # @opengeni/agent-host
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+  - @opengeni/sdk@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+  - @opengeni/sdk@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/sdk@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- Updated dependencies [f1289fa]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/sdk@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- @opengeni/sdk@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- @opengeni/sdk@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- @opengeni/sdk@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [a2ad192]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/sdk@6.37.0
+
+## 6.36.0
+
+### Patch Changes
+
+- 7c70b38: Show an app-managed computer as connecting while its local agent is running but the server reports it offline.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [e765d11]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+  - @opengeni/sdk@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

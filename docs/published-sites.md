@@ -41,6 +41,12 @@ Agents can do the same with the first-party tools `app_publication_get`,
 `app_publication_update` and `app_hostname_check`, within the same
 permissions as the person they act for.
 
+On a published address the gateway's own parts (the footer with **Report**,
+the connect and join cards, the join confirmation, the human check, and its
+sign-in, message, report and takedown pages) follow the viewer's system
+light or dark setting (`prefers-color-scheme`). The app's own frame keeps the
+colors the app sets.
+
 ## Access modes
 
 | Mode      | Who can open it                                               | Sign-in  |
@@ -569,8 +575,9 @@ in `packages/contracts/src/app-assets.ts`.
   Published multi-file apps need the Sites gateway, like any
   published app; deploy the gateway before the API so it knows the
   `/_og/a/` route when the first such version is published.
-- **Not supported yet.** App packages refuse to export a multi-file app;
-  downloading a version gives only its HTML; the readiness check and the
+- **App packages** carry a version's files ([App packages](app-packages.md));
+  install and upgrade store them again under a new token.
+- **Not supported yet.** Downloading a version gives only its HTML; the readiness check and the
   content scanner read only the HTML; files are kept with the workspace and
   are not removed when a version stops being used.
 

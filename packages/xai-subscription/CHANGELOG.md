@@ -1,5 +1,60 @@
 # @opengeni/xai-subscription
 
+## 6.41.0
+
+### Patch Changes
+
+- @opengeni/network@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- @opengeni/network@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- @opengeni/network@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- @opengeni/network@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- @opengeni/network@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- @opengeni/network@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- @opengeni/network@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- Updated dependencies [cf218c3]
+  - @opengeni/network@6.37.0
+
+## 6.36.0
+
+### Patch Changes
+
+- @opengeni/network@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

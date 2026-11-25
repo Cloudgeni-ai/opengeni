@@ -9,6 +9,7 @@ import { sql } from "drizzle-orm";
 import {
   VaultErrorCode,
   type SecretPrincipal,
+  type SecretSaveTo,
   type VaultFieldKind,
   type VaultItemType,
   type VaultMode,
@@ -19,7 +20,13 @@ import {
   type VaultSyncStatus,
   type VaultVersionCreatedByKind,
 } from "@opengeni/contracts";
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import {
+  rawRows,
+  setSubjectRlsContext,
+  withoutSessionRlsActor,
+  withRlsContext,
+  type Database,
+} from "./database";
 
 export type VaultDbContext =
   | { kind: "subject"; accountId: string; workspaceId: string; subjectId: string }
@@ -93,7 +100,10 @@ function contextScope(context: VaultDbContext): {
   return {
     accountId: principal.accountId,
     workspaceId: principal.workspaceId,
-    subjectId: principal.kind === "attempt" ? null : principal.subjectId,
+    subjectId:
+      principal.kind === "attempt" || principal.kind === "service_connection"
+        ? null
+        : principal.subjectId,
     principal: JSON.stringify(principal),
   };
 }
@@ -104,15 +114,23 @@ async function inVaultContext<T>(
   fn: (scoped: Database, principal: string | null) => Promise<T>,
 ): Promise<T> {
   const scope = contextScope(context);
-  try {
-    return await withRlsContext(
+  // A shared service connection reads as the workspace itself, never as
+  // whoever's request is running (an API route or a sync acting for a
+  // person): drop the ambient actor and any subject the caller set.
+  const asService = context.kind !== "subject" && context.principal.kind === "service_connection";
+  const run = async () =>
+    await withRlsContext(
       db,
       { accountId: scope.accountId, workspaceId: scope.workspaceId },
       async (scoped) => {
-        if (scope.subjectId) await setSubjectRlsContext(scoped, scope.subjectId);
+        if (asService)
+          await rawRows(scoped, sql`select set_config('opengeni.subject_id', '', true)`);
+        else if (scope.subjectId) await setSubjectRlsContext(scoped, scope.subjectId);
         return await fn(scoped, scope.principal);
       },
     );
+  try {
+    return asService ? await withoutSessionRlsActor(run) : await run();
   } catch (error) {
     throw vaultErrorFromDatabase(error) ?? error;
   }
@@ -558,14 +576,21 @@ export async function getVaultItem(
 export async function upsertVaultItem(
   db: Database,
   context: VaultDbContext,
-  input: VaultItemWrite & ({ itemId: string } | { vaultId: string; mode?: "create" | "upsert" }),
+  input: VaultItemWrite &
+    ({ itemId: string } | { vaultId: string; mode?: "create" | "upsert" }) & {
+      /** Also mark the written item use-only, in the same transaction (1563). */
+      useOnly?: true;
+    },
 ): Promise<VaultItemRow & { created: boolean }> {
-  return await inVaultContext(db, context, (scoped, principal) =>
-    one<VaultItemRow & { created: boolean }>(
+  const { useOnly, ...write } = input;
+  return await inVaultContext(db, context, async (scoped, principal) => {
+    const row = await one<VaultItemRow & { created: boolean }>(
       scoped,
-      sql`select upsert_vault_item(${JSON.stringify(input)}::jsonb, ${principal}::jsonb) as value`,
-    ),
-  );
+      sql`select upsert_vault_item(${JSON.stringify(write)}::jsonb, ${principal}::jsonb) as value`,
+    );
+    if (useOnly) await insertUseOnly(scoped, context, row.id);
+    return row;
+  });
 }
 
 export async function archiveVaultItem(
@@ -609,15 +634,78 @@ export async function deleteVaultItemPermanently(
 export async function moveVaultItem(
   db: Database,
   context: VaultDbContext,
-  input: { itemId: string; targetVaultId: string; mode: "move" | "copy"; newName?: string },
+  input: {
+    itemId: string;
+    targetVaultId: string;
+    mode: "move" | "copy";
+    newName?: string;
+    /** Also mark the moved item or the copy use-only, in the same transaction (1563). */
+    useOnly?: true;
+  },
 ): Promise<VaultItemRow> {
-  return await inVaultContext(db, context, (scoped, principal) =>
-    one<VaultItemRow>(
+  return await inVaultContext(db, context, async (scoped, principal) => {
+    const row = await one<VaultItemRow>(
       scoped,
       sql`select move_vault_item(${input.itemId}::uuid, ${input.targetVaultId}::uuid, ${input.mode},
         ${input.newName ?? null}, ${principal}::jsonb) as value`,
+    );
+    if (input.useOnly) {
+      await insertUseOnly(scoped, context, row.id);
+    } else if (row.id !== input.itemId) {
+      // A copy of a use-only item is use-only, decided in this transaction so
+      // a mark set meanwhile can't be missed.
+      const scope = contextScope(context);
+      await scoped.execute(
+        sql`insert into vault_item_use_only (account_id, item_id, set_by_subject_id)
+          select ${scope.accountId}::uuid, ${row.id}::uuid, ${scope.subjectId}
+          where exists (select 1 from vault_item_use_only
+            where account_id = ${scope.accountId}::uuid and item_id = ${input.itemId}::uuid)
+          on conflict do nothing`,
+      );
+    }
+    return row;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Use-only items (1563)
+// ---------------------------------------------------------------------------
+
+/** Adds the mark; an existing mark is kept as it is. Marks are never removed. */
+async function insertUseOnly(
+  scoped: Database,
+  context: VaultDbContext,
+  itemId: string,
+): Promise<void> {
+  const scope = contextScope(context);
+  await scoped.execute(
+    sql`insert into vault_item_use_only (account_id, item_id, set_by_subject_id)
+      values (${scope.accountId}::uuid, ${itemId}::uuid, ${scope.subjectId})
+      on conflict do nothing`,
+  );
+}
+
+/** Which of these items are use-only. */
+export async function listVaultItemsUseOnly(
+  db: Database,
+  context: VaultDbContext,
+  itemIds: readonly string[],
+): Promise<Set<string>> {
+  const ids = [...new Set(itemIds)];
+  if (ids.length === 0) return new Set();
+  const scope = contextScope(context);
+  const rows = await inVaultContext(db, context, (scoped) =>
+    rawRows<{ item_id: string }>(
+      scoped,
+      sql`select item_id::text as item_id from vault_item_use_only
+        where account_id = ${scope.accountId}::uuid
+          and item_id = any(ARRAY[${sql.join(
+            ids.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )}]::uuid[])`,
     ),
   );
+  return new Set(rows.map((row) => row.item_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +798,8 @@ export async function recordVaultSecretUse(
       destination?: string;
       /** The approvals (0952) this use relied on. */
       approvalIds?: string[];
+      /** Who and what caused a non-person use (audit only). */
+      onBehalfOf?: { subjectId?: string; sessionId?: string; turnId?: string };
     };
     items: Array<{
       itemId: string;
@@ -999,6 +1089,28 @@ export type SecretAnswerWrite = {
   vaultId?: string;
   item: VaultItemWrite & { name: string };
 };
+
+/** Where this person's answer could be read by the turn that asked for it. */
+export async function listHumanInputSecretSaveTargets(
+  db: Database,
+  context: Extract<VaultDbContext, { kind: "subject" }>,
+  input: { sessionId: string; turnId: string },
+): Promise<SecretSaveTo[]> {
+  const principal = JSON.stringify({
+    kind: "human",
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+    humanInputTurnId: input.turnId,
+  });
+  const result = await inVaultContext(db, context, (scoped) =>
+    one<{ secretSaveTargets?: SecretSaveTo[] }>(
+      scoped,
+      sql`select session_secrets_view(${input.sessionId}::uuid, ${principal}::jsonb) as value`,
+    ),
+  );
+  return result.secretSaveTargets ?? ["task"];
+}
 
 /**
  * Write secret ask-card answers inside the caller's transaction (the

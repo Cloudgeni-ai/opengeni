@@ -2,9 +2,11 @@ import { beforeEach, expect, test } from "bun:test";
 import type { SidebarLayoutResponse } from "@opengeni/sdk";
 import {
   cachedSidebarLayout,
+  loadSidebarLinkIcon,
   readSidebarLayout,
   refreshSidebarLayout,
   resetSidebarLayouts,
+  sidebarHiddenEntries,
   sidebarMenuSections,
   subscribeSidebarLayout,
 } from "./sidebar-layout";
@@ -87,6 +89,47 @@ test("groups are headed sections; top-level links share one; lists show at most 
   });
 });
 
+test("agents are rows with their avatar, at the top level and in groups", () => {
+  const avatar = { kind: "letters", letters: "RH", hue: 40 };
+  const agent = (id: string, agentId: string) => ({
+    id,
+    origin: "workspace",
+    type: "agent",
+    agentId,
+    label: `Agent ${id}`,
+    avatar,
+  });
+  const sections = sidebarMenuSections(
+    readSidebarLayout(
+      layout([
+        agent("helper", A),
+        link("status"),
+        {
+          id: "team",
+          origin: "workspace",
+          type: "group",
+          label: "Team",
+          collapsed: false,
+          items: [agent("reviewer", B)],
+        },
+      ]),
+    ).items,
+  );
+  expect(sections.map((section) => [section.heading, section.rows.map((row) => row.kind)])).toEqual(
+    [
+      [null, ["agent", "link"]],
+      ["Team", ["agent"]],
+    ],
+  );
+  expect(sections[0]!.rows[0]).toEqual({
+    key: "helper",
+    kind: "agent",
+    agentId: A,
+    label: "Agent helper",
+    avatar,
+  });
+});
+
 test("empty lists and groups, unknown types and non-https links are left out", () => {
   const sections = sidebarMenuSections(
     readSidebarLayout(
@@ -143,4 +186,56 @@ test("a failed read or a server without the sidebar keeps what is shown", async 
   };
   expect((await refreshSidebarLayout(failing, "k", "w"))?.items).toHaveLength(1);
   expect(await refreshSidebarLayout({}, "other", "w")).toBeNull();
+});
+
+test("rows and groups carry their icons; unknown icons fall back", () => {
+  const sections = sidebarMenuSections(
+    readSidebarLayout(
+      layout([
+        { ...app("releases", A), icon: "rocket" },
+        { ...link("status"), icon: "no-such-icon" },
+        {
+          id: "eng",
+          origin: "workspace",
+          type: "group",
+          label: "Engineering",
+          collapsed: false,
+          icon: "code",
+          items: [app("review", B)],
+        },
+      ]),
+    ).items,
+  );
+  expect(sections.map((section) => [section.icon, section.rows.map((row) => row.icon)])).toEqual([
+    [undefined, ["rocket", undefined]],
+    ["code", [undefined]],
+  ]);
+});
+
+test("hidden entries come from the layout's options; none before it loads", () => {
+  expect(sidebarHiddenEntries(null)).toEqual([]);
+  expect(
+    sidebarHiddenEntries({
+      ...layout([]),
+      options: { sessionsShowApps: true, hiddenNavEntries: ["automations"], settingsMore: null },
+    } as SidebarLayoutResponse),
+  ).toEqual(["automations"]);
+});
+
+test("site icons are read once per site and workspace; none without the route", async () => {
+  const asked: string[] = [];
+  const client = {
+    getSidebarLinkIcon: async (_workspaceId: string, url: string) => {
+      asked.push(url);
+      return url.includes("none") ? null : new Blob(["x"]);
+    },
+  };
+  const toDataUrl = async () => "data:image/png;base64,eA==";
+  expect(await loadSidebarLinkIcon(client, A, "https://docs.example.com/a", toDataUrl)).toBe(
+    "data:image/png;base64,eA==",
+  );
+  await loadSidebarLinkIcon(client, A, "https://docs.example.com/b", toDataUrl);
+  expect(asked).toEqual(["https://docs.example.com/a"]);
+  expect(await loadSidebarLinkIcon(client, A, "https://none.example.com", toDataUrl)).toBeNull();
+  expect(await loadSidebarLinkIcon({}, A, "https://docs.example.com", toDataUrl)).toBeNull();
 });

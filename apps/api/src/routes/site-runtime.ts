@@ -1,4 +1,4 @@
-import { appSyncStatusForSite } from "../app-sync/service";
+import { appSyncOptInReview, appSyncStatusForSite, setAppSyncOptIn } from "../app-sync/service";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ReasoningEffort,
@@ -145,6 +145,7 @@ import {
   sameSha256Hex,
   verifySiteGatewayRequest,
   type SiteGatewayFields,
+  type SiteGatewayRefusalReason,
 } from "../site-publishing/gateway-signature";
 import {
   capSiteConversationUsageLimit,
@@ -205,6 +206,10 @@ import {
   type SiteRuntimeViewer,
 } from "../site-publishing/viewer";
 import { runSiteSqlQuery } from "../site-sql/service";
+import { notifyFromApp } from "../app-notify/service";
+import { handleAppServerHostCall, runAppServerAs } from "../app-server/service";
+import { runAppServerRoute } from "./app-server";
+import { APP_SERVER_RUN_TOKEN_HEADER } from "@opengeni/contracts";
 import { siteDataHttpError } from "./site-data";
 import { runSiteSqlRoute } from "./site-sql";
 
@@ -301,6 +306,14 @@ function unsupported() {
     "This operation is not available to published apps",
   );
 }
+
+const SiteSyncOptInToolRequest = z
+  .object({
+    syncId: z.string().uuid(),
+    optedIn: z.boolean().optional(),
+    account: z.string().min(1).max(256).optional(),
+  })
+  .strict();
 
 function parseJson<S extends z.ZodType>(bytes: Uint8Array, schema: S): z.infer<S> {
   let value: unknown = null;
@@ -447,6 +460,7 @@ const SITE_SESSION_FIELDS = [
   "inputWait",
   "activelyWorking",
   "requiresActionSince",
+  "awaitingConnectionSince",
   "createdAt",
   "updatedAt",
 ] as const;
@@ -573,7 +587,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const url = new URL(context.req.url);
     const method = context.req.method.toUpperCase();
     const secrets = [deps.settings.sitesGatewaySecret, deps.settings.sitesGatewaySecretPrevious];
-    const refuse = (reason: string) =>
+    const refuse = (reason: SiteGatewayRefusalReason) =>
       sitePublishingError(
         401,
         "unauthenticated",
@@ -630,13 +644,43 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       return await platformRequests(request);
     if (method === "POST" && suffix === "/platform/timings") return await platformTimings(request);
     if (method === "POST" && suffix === "/live/admit") return await liveAdmit(request);
+    const serverHost = /^\/app-server\/([0-9a-f-]{36})\/([0-9a-f-]{36})\/host$/u.exec(suffix);
+    if (method === "POST" && serverHost)
+      return await appServerHost(request, serverHost[1]!, serverHost[2]!);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
-    const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
+    const tool = /^\/tools\/([a-z][a-z-]*)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
     const sitePath = suffix === "/v1/config/client" ? suffix : `/v1/workspaces/site-host${suffix}`;
     const matched = matchSiteOperation(method, sitePath);
     if (!matched) throw unsupported();
     return await operation(request, matched.operation.id);
+  };
+
+  /**
+   * A call back to Opengeni from an app's server code (docs/app-server-code.md),
+   * forwarded by the gateway's `AppServerHost` entrypoint and signed on the
+   * Sites domain apex with the isolate's own app and version in the path. The
+   * run's token must name the same app and version.
+   */
+  const appServerHost = async (
+    request: RuntimeRequest,
+    siteId: string,
+    versionId: string,
+  ): Promise<Response> => {
+    const apex = request.domain.toLowerCase();
+    if (request.fields.host.toLowerCase().replace(/\.$/u, "") !== apex)
+      throw invalid("App server calls are signed for the Sites domain");
+    const token = request.context.req.header(APP_SERVER_RUN_TOKEN_HEADER) ?? "";
+    return request.context.json(
+      await runAppServerRoute(() =>
+        handleAppServerHostCall(deps, {
+          siteId,
+          versionId,
+          token,
+          body: parseJson(request.body, z.unknown()),
+        }),
+      ),
+    );
   };
 
   /**
@@ -1061,6 +1105,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     } else if (method === "setup") {
       // The host's connect card; the page sends no body worth reading.
       result = await describeWorkspaceSiteToolSetup(deps, authorization, site, options);
+    } else if (method === "sync-review" || method === "sync-opt-in") {
+      // Only the host's own page reaches tool methods: it shows the platform's
+      // confirmation and posts the opt-in after the viewer confirms.
+      const input = parseJson(request.body, SiteSyncOptInToolRequest);
+      result = await runSiteData(() =>
+        method === "sync-review"
+          ? appSyncOptInReview(deps, authorization.grant, site.siteArtifactId, input.syncId)
+          : setAppSyncOptIn(
+              deps,
+              authorization.grant,
+              site.siteArtifactId,
+              input.syncId,
+              input.optedIn !== false,
+              {},
+              input.account ? { account: input.account } : {},
+            ),
+      );
     } else if (method === "invoke") {
       result = await withSiteSecretContext(
         { siteId: site.siteArtifactId, siteVersion: site.siteVersionId },
@@ -1078,7 +1139,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // Reject undeclared identities before any connector is prepared.
       if (call)
         await authorizeSite(deps.db, authorization.grant, { ...site, identity: call.identity });
-      const prepared = await prepareWorkspaceToolGateway(deps, authorization, options);
+      // A server that is down is left out of a listing; a call keeps only its
+      // own server required.
+      const prepared = await prepareWorkspaceToolGateway(
+        deps,
+        authorization,
+        call ? { ...options, callServerId: call.identity.serverId } : { ...options, listing: true },
+      );
       try {
         result = call
           ? await callWorkspaceToolGateway(
@@ -1277,6 +1344,51 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return await siteData(request, host, viewer, limits.guestWritesPerMinute);
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
+      case "server.fetch":
+        // The app's server code, told who is asking; it runs as the app. A
+        // guest's runs also count against the guest write limit, per visitor
+        // and per client address, like their data writes.
+        if (viewer.kind === "guest")
+          await enforceSiteRuntimeViewerRate(
+            deps,
+            host,
+            viewer,
+            request.fields,
+            "guest_writes",
+            limits.guestWritesPerMinute,
+          );
+        return context.json(
+          await runAppServerRoute(() =>
+            runAppServerAs(
+              deps,
+              publishedViewer(host, viewer),
+              host.site.id,
+              parseJson(request.body, z.unknown()),
+              {
+                frameSiteId: host.site.id,
+                viewer: {
+                  id: viewer.principal,
+                  email: viewer.kind === "guest" ? null : viewer.email,
+                  name: viewer.kind === "guest" ? null : viewer.name,
+                  kind: viewer.kind,
+                },
+              },
+            ),
+          ),
+        );
+      case "site.notify":
+        // Members only: notifyFromApp refuses guests and invited viewers.
+        return context.json(
+          await runSiteData(() =>
+            notifyFromApp(
+              deps,
+              publishedViewer(host, viewer),
+              host.site.id,
+              parseJson(request.body, z.unknown()),
+              { frameSiteId: host.site.id },
+            ),
+          ),
+        );
       default:
         if (id.startsWith("sessions.")) {
           const assistant = await agentViewing(host, viewer, limits);

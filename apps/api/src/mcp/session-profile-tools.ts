@@ -5,7 +5,10 @@ import {
   AGENT_FIRST_MESSAGE_MAX_LENGTH,
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   AGENT_NAME_MAX_LENGTH,
+  AGENT_SKILLS_MAX,
+  AGENT_TOOL_PERMISSIONS_MAX,
   CreateAgentRequest,
+  NEW_AGENT_DEFAULT_TOOL_PERMISSIONS,
   SESSION_AVATAR_ICONS,
   SESSION_DESCRIPTION_MAX_LENGTH,
   SessionAvatar,
@@ -171,12 +174,30 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat; a shared agent also works in every Slack workspace linked to this workspace, and the result's slack field says how people ask it there, so tell the person. If the result's memory status isn't ready, tell the person its note. avatar takes the same shapes as in set_session_title.",
+        "Save an agent when the person asks to make this chat an agent or a template, or to create an agent. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat; a shared agent also works in every Slack workspace linked to this workspace, and the result's slack field says how people ask it there, so tell the person. If the result's memory status isn't ready, tell the person its note. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(AGENT_NAME_MAX_LENGTH),
         description: z4.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
         avatar: AvatarInput,
         instructions: z4.string().max(AGENT_INSTRUCTIONS_MAX_LENGTH).optional(),
+        toolPermissions: z4
+          .array(
+            z4.object({
+              connector: z4.string().min(1).max(512),
+              tool: z4.string().min(1).max(256).optional(),
+              permission: z4.enum(["allow", "ask", "block"]),
+            }),
+          )
+          .max(AGENT_TOOL_PERMISSIONS_MAX)
+          .optional()
+          .describe(
+            "Can use rules for its chats: connector is a provider domain such as github.com, or * for every connection; tool is one tool name or * (default). ask asks a person first; block refuses. Omitted: it asks before merging a pull request, like new agents in Agents.",
+          ),
+        skills: z4
+          .array(z4.string().min(1).max(200))
+          .max(AGENT_SKILLS_MAX)
+          .optional()
+          .describe("Names of the Skills it relies on."),
         firstMessage: z4
           .string()
           .max(AGENT_FIRST_MESSAGE_MAX_LENGTH)
@@ -189,7 +210,16 @@ export function registerBotTemplateTools(input: {
           .describe("Older field; joins the instructions."),
       },
     },
-    async ({ name, description, avatar, instructions, firstMessage, setupInstructions }) => {
+    async ({
+      name,
+      description,
+      avatar,
+      instructions,
+      toolPermissions,
+      skills,
+      firstMessage,
+      setupInstructions,
+    }) => {
       await input.authorize();
       const exactAvatar = avatarFromToolInput(avatar) ?? null;
       // An agent is shared like the chat it was made from, so what an Only
@@ -206,6 +236,8 @@ export function registerBotTemplateTools(input: {
         instructions: instructions ?? "",
         firstMessage: firstMessage?.trim() ? firstMessage : (setupInstructions ?? ""),
         sourceSessionId: sessionId,
+        toolPermissions: toolPermissions ?? [...NEW_AGENT_DEFAULT_TOOL_PERMISSIONS],
+        skills: (skills ?? []).map((skill) => ({ name: skill })),
       });
       if (!parsed.success) {
         throw new HTTPException(422, {
@@ -256,6 +288,10 @@ export function registerBotTemplateTools(input: {
           firstMessage: request.firstMessage,
           // New agents remember by default, wherever they are made.
           memoryEnabled: true,
+          // Opengeni's own new agents are editable by the whole workspace.
+          editAccess: "everyone",
+          toolPermissions: request.toolPermissions,
+          skills: request.skills,
           origin: "app",
           sourceSessionId: sessionId,
           createdBySubjectId: viewer.subjectId,

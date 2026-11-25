@@ -10,6 +10,7 @@ import {
   type WorkspaceBotTemplate,
 } from "@opengeni/contracts";
 import {
+  AgentEditRefusedError,
   AgentLimitError,
   AgentPrivateOwnerError,
   createAgent,
@@ -25,7 +26,12 @@ import {
 import type { AccessGrant } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
-import { agentEditableBy, agentViewerCanMakePrivate, agentVisibleTo } from "./agents";
+import {
+  agentEditableBy,
+  agentManageableBy,
+  agentViewerCanMakePrivate,
+  agentVisibleTo,
+} from "./agents";
 import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
 
 /**
@@ -35,8 +41,10 @@ import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
  * message. Saving one makes an agent with that First message and no
  * Instructions.
  *
- * Who may change one follows the agents rule: whoever made it, an admin, or a
- * workspace-level caller. An Only me one exists only for its owner. The server
+ * Who may change one follows the agents rule: whoever made it, an admin, a
+ * workspace-level caller, or anyone in the workspace when its "Who can edit"
+ * is everyone; who can use it, and deleting it, stay with the first three.
+ * An Only me one exists only for its owner. The server
  * never starts a chat from one: the client opens a new chat with the setup
  * instructions as its first message.
  */
@@ -63,7 +71,9 @@ export async function botTemplateViewerForGrant(
 /** A template's access for the viewer: `manage` when they may change it. */
 export function botTemplateAccess(
   viewer: BotTemplateViewer,
-  agent: Pick<AgentRecord, "createdBySubjectId" | "ownerSubjectId" | "visibility">,
+  agent: Pick<AgentRecord, "createdBySubjectId" | "ownerSubjectId" | "visibility"> & {
+    editAccess?: AgentRecord["editAccess"];
+  },
 ): "manage" | "use" {
   return agentEditableBy(viewer, agent) ? "manage" : "use";
 }
@@ -130,12 +140,26 @@ function requireOwnerForPrivate(
   }
 }
 
+const EDIT_REFUSED = "Only whoever made this agent, or a workspace admin, can change it.";
+const MANAGE_REFUSED =
+  "Only whoever made this agent, or a workspace admin, can change who can use it or delete it.";
+
 function requireManage(viewer: BotTemplateViewer, agent: AgentRecord): void {
   if (botTemplateAccess(viewer, agent) !== "manage") {
-    throw new HTTPException(403, {
-      message: "Only whoever made this agent, or a workspace admin, can change it.",
-    });
+    throw new HTTPException(403, { message: EDIT_REFUSED });
   }
+}
+
+/** Changing who can use it, or deleting it: its creator or an admin. */
+function requireOwnerOrAdmin(viewer: BotTemplateViewer, agent: AgentRecord): void {
+  if (!agentManageableBy(viewer, agent)) {
+    throw new HTTPException(403, { message: MANAGE_REFUSED });
+  }
+}
+
+function editRefused(error: unknown, message: string): never {
+  if (error instanceof AgentEditRefusedError) throw new HTTPException(403, { message });
+  throw error;
 }
 
 export async function listBotTemplatesForViewer(
@@ -221,6 +245,7 @@ export async function updateBotTemplateForViewer(input: {
   }
   const changesVisibility =
     request.visibility !== undefined && request.visibility !== agent.visibility;
+  if (changesVisibility) requireOwnerOrAdmin(viewer, agent);
   const renamesSlackHandle =
     request.name !== undefined && slackAgentNameKey(request.name) !== slackAgentNameKey(agent.name);
   // Making it Only me takes it out of Slack (see updateAgent).
@@ -241,6 +266,9 @@ export async function updateBotTemplateForViewer(input: {
     agentId: agent.id,
     expectedVersion: null,
     actorSubjectId: viewer.subjectId,
+    // Rechecked under the row lock: who can edit it may have just changed.
+    authorize: (current) =>
+      changesVisibility ? agentManageableBy(viewer, current) : agentEditableBy(viewer, current),
     patch: {
       ...(request.name !== undefined ? { name: request.name } : {}),
       ...(request.description !== undefined ? { description: request.description } : {}),
@@ -259,7 +287,7 @@ export async function updateBotTemplateForViewer(input: {
     if (error instanceof AgentPrivateOwnerError) {
       throw new HTTPException(422, { message: error.message });
     }
-    throw error;
+    return editRefused(error, changesVisibility ? MANAGE_REFUSED : EDIT_REFUSED);
   });
   if (outcome.kind === "slack_name_taken") {
     throw new HTTPException(409, {
@@ -284,8 +312,11 @@ export async function deleteBotTemplateForViewer(input: {
     input.templateId,
     input.viewer,
   );
-  requireManage(input.viewer, agent);
-  if (!(await deleteAgent(input.db, home, agent.id))) {
+  requireOwnerOrAdmin(input.viewer, agent);
+  const deleted = await deleteAgent(input.db, home, agent.id, (current) =>
+    agentManageableBy(input.viewer, current),
+  ).catch((error: unknown) => editRefused(error, MANAGE_REFUSED));
+  if (!deleted) {
     throw new HTTPException(404, { message: "bot template not found" });
   }
 }

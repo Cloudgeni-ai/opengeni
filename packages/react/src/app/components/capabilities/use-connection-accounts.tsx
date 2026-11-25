@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem, ChatSession as Session } from "@opengeni/sdk";
+import type { McpConnectionAccountSelection } from "@opengeni/sdk";
 import { isConnectionAccountSubmissionError } from "../../../lib/format";
 import { userErrorText } from "../../../ui/api-error";
 import { isWorkspacePermissionDenied } from "../../lib/permissions";
@@ -12,11 +13,44 @@ import {
   TRANSIENT_RETRY_DELAYS_MS,
 } from "../../lib/transient-retry";
 import {
+  isLapsedAccount,
   selectedConnectionAccounts,
   sessionConnectedAccounts,
   type ConnectedAccountGroup,
   type ConnectionAccountChoices,
 } from "./session-connection-accounts";
+
+/** How old a chat's account list may get before returning to the chat re-reads it. */
+export const CONNECTION_ACCOUNTS_STALE_AFTER_MS = 60_000;
+
+/**
+ * The accounts a refused send can go again with: its picks minus those that
+ * stopped working or are no longer listed, but only where the connector keeps
+ * another pick. A connector left with no pick would mean "use its defaults",
+ * which could attach accounts the person did not pick, so its picks are sent
+ * as they were. Null when nothing can be dropped this way: the refusal stands.
+ */
+export function accountsWithoutUnusablePicks(
+  sent: readonly McpConnectionAccountSelection[],
+  groups: readonly ConnectedAccountGroup[],
+): McpConnectionAccountSelection[] | null {
+  const usable = (selection: McpConnectionAccountSelection) =>
+    groups.some(
+      (group) =>
+        group.serverId === selection.serverId &&
+        group.accounts.some(
+          (account) => account.id === selection.connectionId && !isLapsedAccount(account),
+        ),
+    );
+  const kept = sent.filter(
+    (selection) =>
+      usable(selection) ||
+      // Its connector's last usable pick is gone: dropping would widen.
+      !sent.some((other) => other.serverId === selection.serverId && usable(other)),
+  );
+  if (kept.length === sent.length) return null;
+  return kept;
+}
 
 export function useConnectionAccounts(
   client: ChatClient<OpenGeniBrowserClient>,
@@ -28,6 +62,8 @@ export function useConnectionAccounts(
     delaysMs?: readonly number[] | undefined;
     reconnectIntervalMs?: number | undefined;
   } = {},
+  /** A chat left open re-reads its accounts on return after this long. */
+  staleAfterMs = CONNECTION_ACCOUNTS_STALE_AFTER_MS,
 ) {
   const retryDelaysMs = transientRetry.delaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
   const reconnectIntervalMs = transientRetry.reconnectIntervalMs ?? TRANSIENT_RECONNECT_INTERVAL_MS;
@@ -71,12 +107,15 @@ export function useConnectionAccounts(
     unavailable: boolean;
   } | null>(null);
   const request = useRef(0);
+  /** When the last inventory read started, for re-reading a stale one on return. */
+  const lastRead = useRef(0);
   const refresh = useCallback(
-    async (quietRetries = true) => {
-      if (scope.current.epoch !== epoch) return;
+    async (quietRetries = true): Promise<ConnectedAccountGroup[] | null> => {
+      if (scope.current.epoch !== epoch) return null;
       const invocation = scope.current;
-      if (invocation.canReadConnections !== true) return;
+      if (invocation.canReadConnections !== true) return null;
       const revision = ++request.current;
+      lastRead.current = Date.now();
       const current = () =>
         request.current === revision &&
         scope.current.client === invocation.client &&
@@ -103,7 +142,9 @@ export function useConnectionAccounts(
             accessDenied: false,
             unavailable: false,
           });
+          return groups;
         }
+        return null;
       } catch (failure) {
         if (current()) {
           const accessDenied = isWorkspacePermissionDenied(failure);
@@ -118,6 +159,7 @@ export function useConnectionAccounts(
             unavailable: !accessDenied && isTransientServiceFailure(failure),
           });
         }
+        return null;
       }
     },
     // Inventory stays available when a connector is toggled off. Selection is
@@ -132,6 +174,23 @@ export function useConnectionAccounts(
       counter.current++;
     };
   }, [refresh]);
+  // An account can stop working while the chat sits open (its sign-in
+  // expires). Re-read when the person comes back to a chat whose list is
+  // old, so the connector shows as needing reconnecting before they send.
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") return;
+    const onReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastRead.current < staleAfterMs) return;
+      void refresh();
+    };
+    document.addEventListener("visibilitychange", onReturn);
+    window.addEventListener("focus", onReturn);
+    return () => {
+      document.removeEventListener("visibilitychange", onReturn);
+      window.removeEventListener("focus", onReturn);
+    };
+  }, [refresh, staleAfterMs]);
   const matches =
     canReadConnections === true &&
     result?.client === client &&
@@ -224,11 +283,31 @@ export function useConnectionAccounts(
     /** Opengeni was briefly unreachable; `error` is set and Send stays blocked until it returns. */
     unavailable: Boolean(hasNative && canReadConnections === true && unavailable),
     loading: hasNative && canReadConnections !== false && !matches,
-    refresh,
-    // Refresh inventory only. Explicit choices remain pinned, and the failed
-    // send keeps its original accounts until the human edits and sends again.
+    refresh: async (quietRetries?: boolean): Promise<void> => {
+      await refresh(quietRetries);
+    },
+    // Refresh inventory only. Explicit choices remain pinned; a refused send
+    // goes again only through `reviseRefusedAccounts`.
     onSelectionError: (error: unknown) => {
       if (isConnectionAccountSubmissionError(error)) void refresh();
+    },
+    /**
+     * For a send refused over its connector accounts: re-read them and give
+     * the picks to send again with, leaving out accounts that stopped working
+     * or are no longer listed only where the connector keeps another pick.
+     * Never adds, swaps or widens; null keeps the refusal. Only the retry is
+     * narrowed: the person's choices stay as they are, so an account they
+     * reconnect is picked again.
+     */
+    reviseRefusedAccounts: async (
+      error: unknown,
+      sent: readonly McpConnectionAccountSelection[] | undefined,
+    ): Promise<McpConnectionAccountSelection[] | null> => {
+      if (!isConnectionAccountSubmissionError(error) || !sent?.length) return null;
+      const groups = await refresh(false);
+      if (!groups) return null;
+      const kept = accountsWithoutUnusablePicks(sent, groups);
+      return kept;
     },
   };
 }

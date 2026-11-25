@@ -74,7 +74,9 @@ resolve are:
 
 A turn with no acting human (a service turn) gets the same set without Only me
 vaults. A turn whose acting human lacks `secrets:use` (for example a viewer)
-reaches only the task vault.
+reaches only the task vault. If the chat's delegated permissions disable saved
+logins, it can resolve only the Task answers to its own secure questions, not
+other items in its root task vault or answers supplied to another session.
 
 **Policy.** Sessions and scheduled tasks carry an optional vault policy,
 `{"mode":"all"}` (the default) or `{"mode":"selected","vaultIds":[…]}`. The
@@ -90,14 +92,64 @@ or from the session Secrets panel.
 | Permission | Grants |
 |---|---|
 | `secrets:list` | See vault and item metadata (names, websites, field names). |
-| `secrets:use` | Let agents resolve references under your authority. On by default for members. |
+| `secrets:use` | Let agents resolve references under your authority. On by default for members. Using a value never implies seeing it ([Who can see a value](#who-can-see-a-value)). |
 | `secrets:write` | Create, edit, move and archive items in vaults you can reach. |
-| `secrets:read` | Reveal plaintext through the API (`reveal`, agent `secret_get`). Humans also need a verified human session; API keys need this literal permission. Copying a value into an item with `fromReference` needs the same reveal authority. |
+| `secrets:read` | Reveal plaintext through the API (`reveal`, agent `secret_get`). Humans need a verified human session and `secrets:use` instead, and then only for items they may see; API keys need this literal permission. Copying a value into an item with `fromReference` needs the same reveal authority. |
 
 The old `variable-sets:*` permission names are aliases, so stored roles and API
 keys keep working without a rewrite. Viewers can list but not use or reveal.
 Every reveal and every resolution batch writes an audit row
 (`vault.field.revealed`, `vault.secret.used`); values are never audited.
+
+### Who can see a value
+
+Using a secret never implies seeing it. One rule
+(`packages/core/src/domain/vaults/reveal-policy.ts`) decides every surface that
+hands a value to a person or a model: the reveal route (Reveal, Copy, Download
+and one-time codes in the app), agent `secret_get`, `fromReference` copies, and
+moves or copies into a password manager.
+
+- **Only me** items: their owner, as before.
+- **Shared** items (workspace, task and organization vaults): the person who
+  saved the item, and whoever administers where it lives (workspace admins for
+  workspace and task vaults, the organization's owner and admins for
+  organization vaults). Everyone else who may use the item uses it by reference
+  only, and may still replace its values. Items from a connected password
+  manager have no Opengeni creator, so only admins see them here.
+- **API keys** with the literal `secrets:read` see any item that is not
+  use-only.
+- **Use only** items are shown to nobody, their creator and admins included.
+  Set it when saving or editing (`useOnly: true`); values can then be
+  replaced but never shown again, and it can't be turned off. Hosted vaults
+  only: a password manager keeps its values readable there
+  (`vault_operation_unsupported`).
+
+An agent sees no more than the person it acts for, and only what that person
+saved or owns: admin rights don't pass to agents. A refusal is
+`vault_permission_denied` (403) with `details.reason` `use_without_reveal` or
+`use_only`, and it reads nothing, so it writes no reveal audit row. Only
+someone who can see an item may make it use-only. A copy of a use-only item is
+use-only. Copying an item you may only use makes the copy use-only; moving it
+where you would see it (your Only me vault) is refused, since a move keeps the
+item; a move between shared vaults keeps it as it is; a move or copy into a
+password manager is refused. One-time codes
+count as values: people who may only use a login don't see its codes. Items
+carry `useOnly` and `canReveal` so apps can hide what would be refused. New
+shared items are not use-only by default:
+the rule above already keeps their values from everyone but the saver and
+admins, and use-only is irreversible, so it is a choice.
+
+**Remaining gap.** Use-only protects stored values, not what is done with them.
+Anyone who can use a secret can send it somewhere they can read: an agent told
+to print, encode or post it, or a webhook, connection header or tool call that
+carries the reference. Agent output is not masked
+([Agent-visible content](#agent-visible-content) forbids rewriting it). Choose
+who may use a secret accordingly, and rotate a value that leaked. The
+database refuses to reveal or read out a use-only item too
+(`read_vault_field_ciphertext`), so it holds during a rolling deploy; servers
+still on the previous release keep the old member rule, and their copies
+(`fromReference`, copy, copy into a password manager) aren't marked, until
+they are replaced.
 
 **Capability.** The `secrets` capability is on by default. When an agent
 configuration switches it off, the agent gets no secret tools, prompt block or
@@ -200,6 +252,63 @@ it needs full access, which already acts as the person.
 
 Stored and agent-visible content is otherwise kept exact
 ([Agent-visible content](#agent-visible-content)).
+
+### Shared service connections
+
+A tool without OAuth that authenticates with a header (an API-key MCP server)
+can be connected once for the whole workspace with a key from a vault: a
+**shared service connection**. A workspace admin (`capabilities:manage`,
+`connections:write` and `secrets:use`) connects it with ownership `workspace`
+and a header value that is a reference, for example
+`Authorization: Bearer {{secret:Team/Example key}}`, from the app connect
+card's **Add a shared key**, the connect flow (`mcp-headers` or
+`mcp-bearer` credentials) or `admin_action_call` on `advanceConnectAttempt`,
+which keeps the reference text.
+
+- **Stored as the reference.** The connection's encrypted credential holds the
+  header with the reference, never the value, and its metadata says
+  `credentialSource: "vault"` with the references (`credentialReferences`).
+  Responses, events, logs and audit rows never carry the value.
+- **Resolved only when Opengeni calls the tool**, for that one request, in the
+  API's workspace tool gateway (apps, syncs, Codemode over HTTP) and in agent
+  turns, through `resolveServiceConnectionHeaders`
+  (`packages/core/src/domain/vaults/service-connection-credentials.ts`). The
+  credential-free preflight resolves nothing.
+- **The connection's own reach.** It resolves as the `service_connection`
+  principal: the workspace's vaults and the organization vaults that work in
+  this workspace, never anyone's Only me vault, never a chat's task vault, and
+  never the reach of the person or agent whose call it is. Each use records
+  `vault.secret.used` with `principalKind: "service_connection"` and the
+  `connectionId`, plus `onBehalfOf` (the person, chat and turn whose call it
+  was, when known) for the audit trail only. An item set to ask before each
+  use can't be used here. Agents can't add a shared key through their prepared
+  connection setup; an admin adds it.
+- **Fails closed.** Adding one checks the key straight away: a missing item, an
+  item out of reach, or a malformed reference is refused with a readable
+  message that names nothing secret. If the item later disappears, calls stop
+  with the connection's "needs reconnecting" state
+  (`designated_credential_unavailable`), and nothing, not even the reference,
+  is sent to the tool.
+- **Approvals are unchanged.** Allow, ask first and block apply to its tools as
+  to any connection, on every path.
+- A personal connection can't hold a reference (422), and a literal key keeps
+  working as before. Installation headers given to the capability enable
+  route and a chat's own MCP server headers stay literal; use a shared
+  service connection for a vault key.
+- **This release never sends references as text.** A stored connection header
+  that holds a reference but isn't marked as a shared service connection (for
+  example a key saved by an older API replica while a rolling deploy is in
+  progress) fails closed with `designated_credential_unavailable` and sends
+  nothing; an admin adds the shared key again. Releases before this one don't
+  know shared keys: while one still serves requests (during a rolling deploy,
+  or after rolling back) it sends the stored reference text, which names the
+  vault item but holds no value, and the call fails authentication.
+- **Self-hosting.** Needs `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like every
+  stored connection credential and hosted vault value. Keys in connected
+  vaults (1Password, host, external providers) resolve in the API's tool
+  gateway and in agent turns. Listing a connector's tools for its permission
+  settings and MCP event sources read hosted Opengeni vaults only; with a key
+  in a connected vault those fail closed like a missing item.
 
 For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
 `target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
@@ -441,7 +550,12 @@ transaction as the answer; the agent receives only the reference, username and
 vault name.
 
 - Only hosted vaults can be the target. Saving to Only me needs a signed-in
-  human answering.
+  human answering for their own turn. A verified external person using an
+  embedding host's `asUser()` can do the same with `secrets:write`. This saves
+  in that external person's own vault, not a linked native user's vault or
+  a vault belonging to the host. The card shows only destinations the
+  person can save to and the asking turn can read. If saved logins are off
+  for the chat, the answer stays in This task.
 - `itemType` may be `login`, `api_key`, `note`, `card`, `identity` or
   `ssh_key`. An SSH key question takes a pasted private key and saves its
   public key and fingerprint with it; it offers no Generate button (agents

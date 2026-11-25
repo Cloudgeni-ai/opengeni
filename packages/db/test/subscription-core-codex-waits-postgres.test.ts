@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 import {
   applySessionTurnSettlement,
   armSubscriptionCoreCodexCapacityWait,
+  chooseSubscriptionCoreSessionAccount,
   initializeSessionStartAtomically,
   materializeGoalContinuation,
   claimSessionWorkForAttempt,
@@ -386,6 +387,115 @@ async function waiterRows(
 }
 
 describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core", () => {
+  test("a chat pinned to an exhausted account names it, tells its person once, and continues once switched back to automatic", async () => {
+    const org = await organization();
+    const pinned = await sharedConnection(org, "pinned-out");
+    const other = await sharedConnection(org, "pinned-other");
+    await shared!
+      .admin`update subscription_connections set label = 'Team Max' where id = ${pinned}::uuid`;
+    const resetAt = Date.now() + 4 * 86_400_000;
+    await exhaust(org, pinned, resetAt);
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const choose = (connectionId: string | null) =>
+      chooseSubscriptionCoreSessionAccount(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        sessionId: turn.identity.sessionId,
+        subjectId: org.ownerSubjectId,
+        provider: "codex",
+        connectionId,
+      });
+    // The person pins the chat to the account that is out of capacity.
+    expect(await choose(pinned)).toMatchObject({ outcome: "changed", appliedTo: "next_turn" });
+
+    // The pin is honoured: the other account has room, but the turn waits.
+    const waitAccount = { label: "“Team Max”", personal: false };
+    const placed = await place(turn);
+    expect(placed).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+      explicitConnectionId: pinned,
+      waitAccount,
+    });
+    if (placed.kind !== "wait") throw new Error("expected wait");
+    expect(placed.earliestResetAt?.getTime()).toBe(resetAt);
+    expect(await evaluate(turn)).toMatchObject({
+      kind: "wait",
+      reason: "pinned_account_unavailable",
+      waitAccount,
+    });
+
+    const armed = await armSubscriptionCoreCodexCapacityWait(client!.db, {
+      ...turn.identity,
+      attemptId: turn.attemptId,
+      waitReason: placed.reason,
+      earliestResetAt: placed.earliestResetAt,
+      waitAccount,
+      failurePayload: {
+        code: "subscription_capacity_unavailable",
+        waitReason: placed.reason,
+      },
+    });
+    if (armed.action !== "waiting") throw new Error("expected a parked turn");
+    const waiting = armed.events.find((event) => event.type === "codex.capacity.waiting");
+    expect(waiting?.payload).toMatchObject({
+      waitReason: "pinned_account_unavailable",
+      actionRequired: false,
+      earliestResetAt: new Date(resetAt).toISOString(),
+      error:
+        "This chat is pinned to the Codex account “Team Max”, which has no capacity right now. It continues by itself when that account has room again, or sooner on another account once the chat is switched back to automatic account choice.",
+    });
+    const notices = armed.events.filter((event) => event.type === "session.notification.posted");
+    expect(notices).toHaveLength(1);
+    const reset = `${new Date(resetAt).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    expect(notices[0]!.payload).toMatchObject({
+      key: `capacity-wait:${turn.identity.turnId}`,
+      title: "Chat waiting for its pinned Codex account",
+      body: `This chat is pinned to the Codex account “Team Max”, which has no capacity until about ${reset}. It continues by itself then, or sooner on another account once the chat is switched back to automatic account choice.`,
+    });
+    expect(JSON.stringify(notices[0]!.payload)).not.toContain("model");
+
+    // A later check that finds the same wait tells nobody again.
+    const recheck = await evaluate(turn);
+    if (recheck.kind !== "wait") throw new Error("expected wait");
+    const unchanged = await reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      waiterId: armed.waiter.waiterId,
+      generation: armed.waiter.generation,
+      evaluatedWakeRevision: armed.waiter.wakeRevision,
+      evaluation: { ...recheck, waitReason: recheck.reason },
+    });
+    expect(unchanged).toMatchObject({ action: "waiting", events: [] });
+
+    // Switching the chat back to automatic applies to the waiting turn, which
+    // the other account then serves.
+    expect(await choose(null)).toMatchObject({ outcome: "changed", appliedTo: "waiting_turn" });
+    expect(await evaluate(turn)).toMatchObject({ kind: "run", connectionId: other });
+    const current = await getSubscriptionCoreCodexCapacityWaitForSession(
+      client!.db,
+      org.sharedWorkspaceId,
+      turn.identity.sessionId,
+    );
+    if (!current) throw new Error("expected the waiter");
+    const resumed = await reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      waiterId: current.waiterId,
+      generation: current.generation,
+      evaluatedWakeRevision: current.wakeRevision,
+      evaluation: { kind: "run" },
+    });
+    expect(resumed.action).toBe("resumed");
+    expect(resumed.events.map((event) => event.type)).toContain("session.notification.withdrawn");
+    expect(await rowState(turn)).toMatchObject({
+      session_status: "recovering",
+      turn_status: "recovering",
+    });
+  });
+
   test("a disabled explicit pin needs action and an existing waiter publishes its changed reason once", async () => {
     const org = await organization();
     const pinned = await sharedConnection(org, "disabled-pin");
@@ -449,7 +559,12 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       action: "waiting",
       waiter: { waitReason: "pinned_account_disabled" },
     });
-    expect(updated.events).toHaveLength(1);
+    // The timeline's waiting event, and the person's open notification updated
+    // in place: it no longer says the account is merely out of capacity.
+    expect(updated.events.map((event) => event.type)).toEqual([
+      "codex.capacity.waiting",
+      "session.notification.posted",
+    ]);
     expect(updated.events[0]!.payload).toMatchObject({
       waitReason: "pinned_account_disabled",
       actionRequired: true,
@@ -458,6 +573,10 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       "error",
       expect.stringContaining("turned off"),
     );
+    expect(updated.events[1]!.payload).toMatchObject({
+      replaced: true,
+      body: expect.stringContaining("turned off"),
+    });
     expect((await reconcileSubscriptionCoreCodexCapacityWait(client!.db, input)).events).toEqual(
       [],
     );
@@ -761,7 +880,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     expect(unknown.events[0]!.payload).toMatchObject({ earliestResetAt: null });
     expect(unknown.events[1]!.payload).toMatchObject({
       body: expect.stringContaining(
-        "All Codex subscriptions are busy. Your message will be answered as soon as one has room.",
+        "No Codex subscription can serve this turn right now. Your message will be answered as soon as one has room.",
       ),
     });
     expect(String((unknown.events[1]!.payload as { body?: unknown }).body)).not.toMatch(
@@ -788,6 +907,161 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       type: "session.notification.withdrawn",
       payload: { key: `capacity-wait:${turn.identity.turnId}` },
     });
+  });
+
+  test("a Free plan refusal, a lost sign-in, and a real rate limit name different wait causes", async () => {
+    const org = await organization();
+    const free = await sharedConnection(org, "free");
+    await shared!
+      .admin`update subscription_connections set plan_type = 'free' where id = ${free}::uuid`;
+    const probe = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    // Missing quota is not evidence by itself. The normal allocator can still probe it.
+    expect(await place(probe)).toMatchObject({ kind: "run", connectionId: free });
+    expect(
+      await recordSubscriptionCoreCodexModelCooldown(
+        client!.db,
+        probe.identity,
+        leaseOf(probe, free),
+        {
+          modelId: MODEL,
+          until: new Date(Date.now() + 86_400_000),
+          refreshGeneration: 1,
+          cause: "entitlement",
+        },
+      ),
+    ).toBe(true);
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const plan = {
+      kind: "wait",
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
+      planRefusedModelId: MODEL,
+    };
+    expect(await place(turn)).toMatchObject(plan);
+    expect(await evaluate(turn)).toMatchObject(plan);
+
+    const paid = await sharedConnection(org, "paid");
+    await shared!
+      .admin`update subscription_connections set status = 'needs_relogin', label = 'Primary'
+      where id = ${paid}::uuid`;
+    const login = {
+      kind: "wait",
+      reason: "codex_relogin_required",
+      earliestResetAt: null,
+      waitAccount: { label: "“Primary”", personal: false },
+    };
+    expect(await place(turn)).toMatchObject(login);
+    expect(await evaluate(turn)).toMatchObject(login);
+    const armed = await arm(turn, null);
+    if (armed.action !== "waiting") throw new Error("expected a parked turn");
+    const reconcile = async () => {
+      const evaluation = await evaluate(turn);
+      if (evaluation.kind !== "wait") throw new Error(`expected wait, got ${evaluation.kind}`);
+      return reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+        accountId: org.accountId,
+        workspaceId: turn.identity.workspaceId,
+        sessionId: turn.identity.sessionId,
+        waiterId: armed.waiter.waiterId,
+        generation: armed.waiter.generation,
+        evaluatedWakeRevision: armed.waiter.wakeRevision,
+        evaluation: { ...evaluation, waitReason: evaluation.reason },
+      });
+    };
+    const relogin = await reconcile();
+    expect(relogin.events[0]).toMatchObject({
+      type: "codex.capacity.waiting",
+      payload: {
+        waitReason: login.reason,
+        actionRequired: true,
+        error: expect.stringContaining("An admin must reconnect it"),
+      },
+    });
+    expect(relogin.events[1]).toMatchObject({
+      type: "session.notification.posted",
+      payload: {
+        replaced: true,
+        body: expect.stringContaining("account “Primary” needs a new sign-in"),
+      },
+    });
+    expect((await reconcile()).events).toEqual([]);
+
+    const reset = new Date(Date.now() + 3_600_000);
+    await shared!
+      .admin`update subscription_connections set status = 'active' where id = ${paid}::uuid`;
+    await exhaust(org, paid, reset.getTime());
+    await shared!.admin`update subscription_connection_quota
+      set quota = quota || '{"exhaustedKind":"rate_limit"}'::jsonb where connection_id = ${paid}::uuid`;
+    expect(await evaluate(turn)).toMatchObject({
+      kind: "wait",
+      reason: "codex_rate_limited",
+      earliestResetAt: reset,
+    });
+    const limited = await reconcile();
+    expect(limited.events[0]).toMatchObject({
+      type: "codex.capacity.waiting",
+      payload: {
+        waitReason: "codex_rate_limited",
+        earliestResetAt: reset.toISOString(),
+        actionRequired: false,
+      },
+    });
+    expect(limited.events[1]).toMatchObject({
+      type: "session.notification.posted",
+      payload: {
+        replaced: true,
+        body: expect.stringContaining("Codex is rate-limited."),
+      },
+    });
+  });
+
+  test("only recorded plan refusals across the whole pool justify a terminal failure", async () => {
+    const org = await organization();
+    const first = await sharedConnection(org, "plan-first");
+    const second = await sharedConnection(org, "plan-second");
+    const until = new Date(Date.now() + 86_400_000);
+    const record = async (
+      turn: Awaited<ReturnType<typeof runningTurn>>,
+      id: string,
+      cause?: "entitlement",
+    ) =>
+      expect(
+        await recordSubscriptionCoreCodexModelCooldown(
+          client!.db,
+          turn.identity,
+          leaseOf(turn, id),
+          {
+            modelId: MODEL,
+            until: cause ? new Date(until.getTime() + 1_000) : until,
+            refreshGeneration: 1,
+            ...(cause ? { cause } : {}),
+          },
+        ),
+      ).toBe(true);
+    const probe = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const placed = await place(probe);
+    if (placed.kind !== "run") throw new Error("expected an available account");
+    const remaining = placed.connectionId === first ? second : first;
+    await record(probe, placed.connectionId, "entitlement");
+
+    const other = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(other)).toMatchObject({ kind: "run", connectionId: remaining });
+    await record(other, remaining); // an older, unclassified cooldown
+    const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(next)).not.toHaveProperty("planRefusedModelId");
+
+    await record(other, remaining, "entitlement");
+    expect(await place(next)).toMatchObject({
+      reason: "codex_plan_no_capacity",
+      planRefusedModelId: MODEL,
+    });
+
+    // A third authorized account that can run after a quota reset keeps the turn waiting.
+    const third = await sharedConnection(org, "quota-third");
+    const reset = Date.now() + 600_000;
+    await exhaust(org, third, reset);
+    const mixed = await place(next);
+    expect(mixed).toMatchObject({ kind: "wait", earliestResetAt: new Date(reset) });
+    expect(mixed).not.toHaveProperty("planRefusedModelId");
   });
 
   test("a redeemed reset credit resumes a turn parked on a stale weekly window without a usage read", async () => {
@@ -1532,6 +1806,47 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     );
   });
 
+  test("a model rate limit keeps its reset; an older untyped cooldown keeps its reset without guessing a cause", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "model limit");
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+    const ref = leaseOf(turn, connectionId);
+    const limit = new Date(Date.now() + 600_000);
+    expect(
+      await recordSubscriptionCoreCodexModelCooldown(client!.db, turn.identity, ref, {
+        modelId: MODEL,
+        until: limit,
+        refreshGeneration: 1,
+        cause: "rate_limit",
+      }),
+    ).toBe(true);
+    const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(next)).toMatchObject({
+      kind: "wait",
+      reason: "codex_rate_limited",
+      earliestResetAt: limit,
+    });
+    expect(await evaluate(next)).toMatchObject({
+      kind: "wait",
+      reason: "codex_rate_limited",
+      earliestResetAt: limit,
+    });
+    const later = new Date(limit.getTime() + 10_000);
+    expect(
+      await recordSubscriptionCoreCodexModelCooldown(client!.db, turn.identity, ref, {
+        modelId: MODEL,
+        until: later,
+        refreshGeneration: 1,
+      }),
+    ).toBe(true);
+    expect(await evaluate(next)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: later,
+    });
+  });
+
   test("a plan-entitlement refusal cools the model down; a rotated id_token with a new plan clears it", async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, "plan");
@@ -1544,6 +1859,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         modelId: MODEL,
         until,
         refreshGeneration: 2,
+        cause: "entitlement",
       }),
     ).toBe(false);
     expect(
@@ -1551,13 +1867,14 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         modelId: MODEL,
         until,
         refreshGeneration: 1,
+        cause: "entitlement",
       }),
     ).toBe(true);
     const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     expect(await place(next)).toMatchObject({
       kind: "wait",
-      reason: "no_eligible_capacity",
-      earliestResetAt: until,
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
     });
 
     // The same plan on refresh keeps the cooldown; a new plan clears it.
@@ -1616,7 +1933,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         client!.db,
         turn.identity,
         leaseOf(turn, connectionId),
-        { modelId: MODEL, until, refreshGeneration: 1 },
+        { modelId: MODEL, until, refreshGeneration: 1, cause: "entitlement" },
       ),
     ).toBe(true);
     const [stored] = await shared!.admin<{ generation: number | null; catalog: string[] }[]>`
@@ -1626,8 +1943,8 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     const next = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     expect(await place(next)).toMatchObject({
       kind: "wait",
-      reason: "no_eligible_capacity",
-      earliestResetAt: until,
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
     });
   });
 

@@ -1,5 +1,130 @@
 # @opengeni/browserd
 
+## 0.4.63
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/interaction@6.41.0
+
+## 0.4.62
+
+### Patch Changes
+
+- 8f8ea7f: A managed browser launched through the desktop image's browser wrapper from an image older than its profile fix is recorded with its process again. The controller now names its own profile to the wrapper, and the process check accepts that same profile switch repeated, so the browser can be continued after it stops instead of being refused as having no recorded browser process. Sandboxes keep the image they were created from, so this reaches them without an image change.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/interaction@6.40.0
+
+## 0.4.61
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/interaction@6.39.0
+
+## 0.4.60
+
+### Patch Changes
+
+- 741e273: In a person's own Chrome, clicking a login field and typing into it in one batch now completes when a password manager's inline menu ends the tab's debugging under the click. The click is finished on the new attachment once its press is known to have reached the field, and the rest of the batch runs there. Actions that all ran before such a detach are reported completed.
+- 87db5e9: A browser action on a page that keeps its main thread busy now answers within the time its caller waits, and says whether input was sent. Nearly every page read an action makes (finding its element, scrolling it into view, checking what is under the pointer) waits for the page's main thread, so on such a page one click's few dozen reads could take minutes. The caller gave up at its deadline with "may still be running", although the click often went through later. The action now keeps to that same deadline, less ten seconds for the reply. If the page was too slow before any input, it fails with `tab_not_responding` and says nothing was sent. If the input was already sent, it reports an unknown outcome that says so. Input events themselves keep their own bound, so a pressed button always gets its release.
+- c27dce8: A click or other action that opens a page whose website never answers now ends within the navigation deadline: the browser stops loading that page, the tab keeps the page the action ran on, and the action says the website did not answer. Before, Chromium held every read of the tab while it waited, so the action and the next observation timed out and reported the tab as not responding.
+- 1de0d24: A browser clipboard paste without text now fails when the BrowserSession clipboard is empty, and the error says that a page's own Copy button does not fill it. Before, the paste typed nothing and reported success.
+- 020a5df: `computer_open` with `applicationId` now works for a macOS app run from a folder macOS doesn't know, such as a downloaded app opened in place.
+
+  - When macOS can't find such an app to launch, the launch fails definitely instead of reporting an unknown outcome, since nothing ran.
+  - If the app is already running, the open then observes its listed window.
+  - When no window of the named app was observed, the screenshot shows only a screen, never another app's window. When there is no screen, it says why no screenshot was taken.
+
+- 5b2cd0d: A full-page browser screenshot now says when it leaves out content that scrolls inside the page's own areas (an app's main pane or a table), and by how many CSS pixels, with how to capture the rest. It is also exactly as wide as the viewport when the page hides content past its right edge, instead of widening to content no one can scroll to.
+- ff8e126: A viewport change on a page that stays busy with its own resize work now reports that within 10 s, instead of waiting 30 s and calling a working tab unresponsive. Touch emulation is sent before the new size, so it no longer waits behind the page's resize work, and a busy page is no longer sent the change a second time.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/interaction@6.38.0
+
+## 0.4.59
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/interaction@6.37.3
+
+## 0.4.58
+
+### Patch Changes
+
+- 9b5daaa: Record why a browser live view stopped getting frames. The browser controller now reports the state of its frame streams and live-view sockets (states, counts and times, never page content), and the API logs `browser.frame_stream.stalled` with that report when an open view's heartbeat finds a stream or view without a frame for ten seconds, so the reason survives the controller's sandbox stopping.
+- 953bbd7: An address typed into a new Chrome tab in the background now loads when Return is pressed. A Chromium window in the background reports no focused element until it is the key window, and the CUA driver checked for the browser's own field before making the window key, so right after `cmd+T` the address bar was missed: the text went in through accessibility, the bar showed it, and Return loaded nothing while every step reported success. The pinned driver now decides this once the window is key and types the address as keystrokes.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/interaction@6.37.2
+
+## 0.4.57
+
+### Patch Changes
+
+- @opengeni/contracts@6.37.1
+- @opengeni/interaction@6.37.1
+
+## 0.4.56
+
+### Patch Changes
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/contracts@6.37.0
+  - @opengeni/interaction@6.37.0
+
+## 0.4.55
+
+### Patch Changes
+
+- 4b65617: Text typed into a UTM virtual machine window now arrives as the letters sent, not as a row of "a". UTM passes each key event's key code to the guest's keyboard and drops the Unicode text a synthetic event carries, so text sent the usual way (Unicode on key code 0, the A key) reached the guest as "aaaa". The pinned CUA driver now treats UTM like Screen Sharing, the iOS Simulator and iPhone Mirroring and types into it as physical keys.
+- 4b5ccce: A tab a page opens itself (a link to a new tab, `window.open`) now gets the managed browser's passkey authenticator and passkey autofill withdrawal, like every other tab. Such a tab waits for its debugger and answers page commands only once it runs, but the controller waited for those answers before letting it run: they timed out after five seconds and the tab was left with no authenticator. A passkey request there then showed the browser's own passkey dialog, which holds the tab's input and cannot be reached through page actions. The controller now sends the page commands before the tab runs and checks their answers afterwards, and removes the authenticator again from a tab that could not take the withdrawal.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/interaction@6.36.0
+
 ## 0.4.54
 
 ### Patch Changes

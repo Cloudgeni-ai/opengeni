@@ -1,14 +1,14 @@
 ---
 name: sites
-description: Build, edit, and publish apps. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider apps only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
+description: Build, edit, and publish apps. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider apps only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices. For a new app or a restyle, read `references/design.md` in the same `skill_read` as `SKILL.md`.
 ---
 
 # Apps
 
 An app is a saved page or web app in the workspace: one HTML file (a large
 app adds build files) that the console shows, shares and can put on the web,
-plus optional editable source. Apps have no server of their own; Opengeni AI,
-tools and saved data come from the host.
+plus optional editable source. Opengeni AI, tools and saved data come from the
+host; optional server code runs as the app on Opengeni.
 
 Do not invent an app framework, deployment service, App Host, custom domain
 setup, provider-specific API wrapper, or platform-only build CLI. Putting a
@@ -21,8 +21,7 @@ app on the web is built in (see "Publish to the web").
   short report), or a small personal tool that keeps the viewer's own entries
   (a blood-pressure or habit log, a reading list, a form that collects
   answers). No workspace tools, no AI, no data that several people edit
-  together. Follow "Single-file app" below; nothing else in this Skill is
-  needed.
+  together. Follow "Single-file app" below.
 - **Full app**: needs React or a build, workspace tools, AI or chat, data several
   people share or edit, app SQL, or several views with their own state.
   Follow "Full apps" below and read only the reference files the app needs.
@@ -40,11 +39,11 @@ tool calls.
    tests, a preview server or a browser build for it.
 2. Write one `index.html` with inline CSS and script. Include
    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
-   follow the readable defaults below and let content reflow into one column
-   on a phone. Use system fonts, text, inline SVG or small data-URL images
-   such as icons and logos, so nothing has to load beside the file (draw a
-   chart as inline SVG). Photos and video go outside the HTML (see "Keep
-   the page small").
+   follow "Look" below and let content reflow into one column on a phone.
+   Use text, inline SVG or small data-URL images such as icons and logos, so
+   nothing else has to load beside the file. A dashboard or chart: read
+   `references/dashboards.md` first. Photos and video go outside the HTML
+   (see "Keep the page small").
 3. To keep entries, load the host client with this exact tag before your own
    script, and use app data:
 
@@ -70,53 +69,49 @@ tool calls.
   id, the same collection name and `accessMode`: `per_viewer` for each
   person's own entries (add `privateRecords: true` for health or other
   personal data), `append_only` for a form that collects answers. Skip
-  `jsonSchema`; check values in the page.
-6. Reply with the link as soon as it is saved, in the person's words: what
+  `jsonSchema`; check values in the page. Then add a test entry in the saved
+  app in a browser: it must show without a reload; delete it.
+6. Reply with the link once that works, in the person's words: what
    it does and how to use it. The link opens for workspace members only.
    When the person wants others to open it (family, customers, "on their
    phones"), offer to put it on the web and ask before making it public,
    then follow "Publish to the web".
 
-## Make new apps readable by default
+## Look
 
-Choose a clear type scale before building. For new apps without an explicit
-type scale, start main reading text at 16–18px, controls and table content at
-14–16px, and reserve smaller text for genuinely secondary metadata, not
-descriptions, navigation, labels needed to use a control, or key results.
-Use comfortable line heights (about 1.5–1.7 for prose) and reading widths of
-roughly 60–75 characters. Check the chosen font at its rendered size: a large
-headline does not make small body copy readable.
+Before writing markup for a new app or a restyle, read
+`references/design.md`. Every new app, single-file apps included, takes the
+first look that applies:
 
-Use `rem`/`em` for text, keep the browser's root font size, and allow browser
-zoom and user text scaling. Do not shrink primary copy on mobile to fit more
-columns; reflow the layout, wrap content, or scroll a wide table instead.
-Keep form text readable and let controls grow with their labels.
+1. The person's requested design, or the existing app's.
+2. A design system the workspace keeps in Knowledge or Skills, when one is in
+   context or a Skill applies; don't search for one.
+3. For an app about one product (a GitHub tracker, a PostHog dashboard), the
+   Opengeni look with that product's accent and logo; the product's own look
+   only when asked.
+4. For a page read by or shown to others (a landing page, invitation, menu,
+   portfolio), a design of its own.
+5. Otherwise the Opengeni look: `<link rel="stylesheet" href="/__opengeni/ui.css">`
+   in `<head>`, `og-app` on `<body>`, its classes (`og-page`, `og-title`,
+   `og-heading`, `og-card`, `og-button` with `og-button-primary`, `og-input`,
+   `og-badge`, `og-table`, `og-muted`) and `--og-*` tokens for anything else.
+   It follows `prefers-color-scheme` and loads in the console and on the web
+   (a downloaded copy is unstyled), so add no font, reset or hard-coded white
+   page.
 
-These are authoring defaults, not a mandatory theme or runtime CSS override.
-Honor a user's deliberate design, retain an existing app's type system, and
-leave embedded components such as `SessionConversation` on their own styles.
-Do not inject a blanket font-size rule into existing apps or use `!important`
-to force this scale onto a component library. If `frontend-design` is available,
-use it for visual direction alongside these readability defaults.
+Keep text readable: prose on a page meant for reading at 1–1.125rem, line
+height about 1.6 and about 70ch wide; `rem`/`em` for your own sizes; reflow on
+a phone instead of shrinking text; browser zoom and text scaling left working;
+small text only for secondary metadata. Don't restyle an existing app wholesale
+or force sizes with `!important`, and leave embedded components such as
+`SessionConversation` on their own styles.
 
-For a new page, this optional starting point applies only to elements you mark
-with these classes; adapt it to the design rather than importing a global reset.
-The sizes below assume the usual 16px browser default and scale with it.
-
-```css
-.site-copy { font-size: 1.0625rem; line-height: 1.6; max-width: 70ch; }
-.site-control { font: inherit; font-size: 1rem; line-height: 1.5; }
-.site-table { font-size: 0.9375rem; line-height: 1.5; }
-.site-meta { font-size: 0.8125rem; line-height: 1.5; }
-```
-
-A single-file app that follows these defaults needs no more checking than its
+A single-file app that follows this needs no more checking than its
 one optional phone-width look. For a full app, before publishing, inspect actual
 paragraphs, labels, inputs, buttons, table cells and empty/error states at
 desktop and narrow mobile widths, then with text enlarged to 200%. Check
 computed sizes and look for clipped or overlapping text; fix layout pressure
-rather than making the content smaller. A fixture can demonstrate a type
-scale, but does not prove every generated app follows it.
+rather than making the content smaller.
 
 ## Edit an existing app
 
@@ -218,10 +213,10 @@ tools, read `references/publish-to-web.md` and review who sees what.
 
 ## Full apps
 
-Full apps follow these two rules and read the references they need (Opengeni look:
-`references/build-and-preview.md`).
+Full apps follow these two rules and read the references they need (the
+Opengeni look in a bundled app: `references/build-and-preview.md`).
 
-### Apps have no server; AI comes from the host
+### AI and tools come from the host
 
 An app never needs its own server, API key, or hosting provider to reach
 the workspace. Model access, agent conversations, and workspace tools all come from
@@ -236,14 +231,14 @@ inside an app, that bridge is the design. Do not propose Vercel, another
 server, a tunnel, or a Connected Machine for workspace AI access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. Saved data needs no server either:
-app data gives every published app persistent collections and files,
-and a data sync (`app_sync_save`) refills them with no model run. A separate
-server is only
-relevant for a genuinely external need: a third-party API that requires a
-secret the viewer's browser must not hold, relational queries or volumes app
-Data cannot serve, or live server-side compute. If the request seems to need
-one of those, or you cannot tell where the user wants the AI to run,
-say which designs are possible and ask before building.
+app data gives every published app persistent collections and files. A page
+calling a connected tool usually shows data only to viewers with their own
+connection; for a team, a shared sync (`app_sync_save`) fills a collection on a
+schedule, and a webhook (`app_webhook_save`) takes in other services' events.
+
+Server code (`references/server-code.md`) runs as the app: shared-connection
+data for permitted members, an API key, or checked writes.
+Never another host for that. If unsure where the user wants it to run, ask.
 
 ### Start from the durable app
 
@@ -266,10 +261,12 @@ Read the references the app needs with `skill_read`, for example
 | The app | Read |
 | --- | --- |
 | Every full app: packages, build, local preview with live tools, pages and addresses (`/admin`, `?t=` links), requested tools, the completion gate | `references/build-and-preview.md` |
+| Dashboards, charts, KPIs or tables of numbers | `references/dashboards.md` |
 | Inline AI results, an embedded conversation, Opengeni UI components or the typed client | `references/ai-and-chat.md` |
-| Saves records or files (app data) | `references/site-data.md` |
+| Saves or reacts to records or files (app data, syncs, webhooks) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (app SQL) | `references/site-sql.md` |
 | Invited or public, with data, tools or an embedded agent | `references/publish-to-web.md` |
+| Runs as the app: shared connections, API keys, server-side writes | `references/server-code.md` |
 | Moves to another workspace | `references/app-packages.md` |
 
 ## Show a visualization or app inside chat
@@ -286,12 +283,9 @@ To embed a published app, use a fenced `opengeni-site` block containing JSON:
 Use the actual returned ids. `versionId` is optional: omitted, the embed loads
 the current version; included, it keeps that version. The viewer can pick
 another version in the embed without publishing or rolling back. The embed
-uses the same app renderer, reload/full-screen controls, tool declarations and
-viewer permissions as the app page, in the chat's workspace. Keep a normal app
+works like the app page (tools, viewer permissions), in the chat's workspace. Keep a normal app
 link when it helps the user reopen or share it. Archived or inaccessible apps
 show as unavailable.
 
 Use inline HTML for a visualization that belongs in this response. Use an app
-for a reusable app or durable page, and embed it when useful. Both can be small;
-neither requires a dashboard or full-page layout. React apps still use the
-normal build and publish workflow.
+for a reusable app or durable page, and embed it when useful.

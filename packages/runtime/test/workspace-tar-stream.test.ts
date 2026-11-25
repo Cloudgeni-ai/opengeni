@@ -4,12 +4,22 @@
 // workspace with the SDK's commands, exclusions and refusals.
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SandboxArchiveError, SandboxUnsupportedFeatureError } from "@openai/agents/sandbox";
 import type { WorkspaceArchiveSpool } from "../src/sandbox/archive-spool";
 import { installModalWorkspaceTarStreams } from "../src/sandbox/providers/modal-workspace-tar-stream";
+import { workspaceArchiveHydrationFailureSummary } from "../src/sandbox/workspace-archive";
 import {
   captureWorkspaceTarStreamToSpool,
   hydrateWorkspaceTarStreamFromSpool,
@@ -372,6 +382,41 @@ describe("streaming a verified spool into a session", () => {
     }
   });
 
+  test("symlinks restore, but nothing may be written through one", async () => {
+    const linked = tar(entry("a.txt", "a"), entry("link", "", { type: "2", linkname: "/tmp/x" }));
+    const through = tar(entry("l", "", { type: "2", linkname: "/etc" }), entry("l/passwd", "1"));
+    for (const [bytes, accepted] of [
+      [linked, true],
+      [through, false],
+    ] as const) {
+      const spool = await fileSpool(bytes);
+      try {
+        const { session, received } = collectingSession();
+        const hydration = hydrateWorkspaceTarStreamFromSpool(
+          session,
+          spool,
+          expected(bytes),
+          options,
+        );
+        if (accepted) {
+          await hydration;
+          expect(Buffer.concat(received)).toEqual(bytes);
+        } else {
+          const error = await hydration.then(
+            () => null,
+            (caught: unknown) => caught,
+          );
+          expect(error).toBeInstanceOf(SandboxArchiveError);
+          expect(workspaceArchiveHydrationFailureSummary(error)).toBe(
+            'SandboxArchiveError code=archive_error reason="archive path descends through non-directory"',
+          );
+        }
+      } finally {
+        await spool.dispose();
+      }
+    }
+  });
+
   test("a capture is validated and spooled to disk as it streams", async () => {
     const session: WorkspaceTarStreamSession = {
       async hydrateWorkspaceTarStream() {},
@@ -469,6 +514,8 @@ async function tree(root: string, prefix = ""): Promise<Record<string, string>> 
     if (item.isDirectory()) {
       result[`${path}/`] = "dir";
       Object.assign(result, await tree(root, path));
+    } else if (item.isSymbolicLink()) {
+      result[path] = `-> ${await readlink(join(root, path))}`;
     } else {
       result[path] = (await readFile(join(root, path))).toString("utf8");
     }
@@ -488,6 +535,10 @@ describe("Modal workspace tar streams", () => {
       await writeFile(join(source, "src/index.ts"), "export const answer = 42;\n");
       await writeFile(join(source, "tmp/cache"), "ephemeral\n");
       await writeFile(join(source, "with space [x].txt"), "space\n");
+      // Links a workspace really has: a tool shim and a dangling runtime link.
+      await mkdir(join(source, ".config/pulse"), { recursive: true });
+      await symlink("../../src/index.ts", join(source, ".config/pulse/shim"));
+      await symlink("/tmp/pulse-gone", join(source, ".config/pulse/abc-runtime"));
       await writeFile(join(target, "stale.txt"), "removed by the restore\n");
 
       const spool = await captureWorkspaceTarStreamToSpool(
@@ -502,6 +553,10 @@ describe("Modal workspace tar streams", () => {
           { rejectRelPaths: [] },
         );
         expect(await tree(target)).toEqual({
+          ".config/": "dir",
+          ".config/pulse/": "dir",
+          ".config/pulse/abc-runtime": "-> /tmp/pulse-gone",
+          ".config/pulse/shim": "-> ../../src/index.ts",
           "src/": "dir",
           "src/index.ts": "export const answer = 42;\n",
           "with space [x].txt": "space\n",

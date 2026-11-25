@@ -223,6 +223,29 @@ spec:
               * on (instance) group_left (node)
               opengeni:node_exporter_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             )
+        # Node I/O PSI also counts one pod waiting on its own attached volume
+        # (a PVC on a separate disk), which slows only that pod. Host-wide
+        # stalls come from the disks behind the OS, boot, kubelet, and
+        # container-runtime filesystems, so this records how busy the busiest
+        # of those disks is. Filesystem devices are partitions (sda1,
+        # nvme0n1p1) while node-exporter reports whole disks (sda, nvme0n1),
+        # so the partition suffix is stripped before the join. "/" is shown as
+        # /dev/root when the kernel mounts it without an initramfs (common on
+        # cloud images); /boot and /boot/efi then still identify the OS disk.
+        - record: opengeni:node_system_disk_busy_ratio
+          expr: |
+            max by (node) (
+              (
+                max by (instance, device) (rate(node_disk_io_time_seconds_total[2m]))
+                and on (instance, device)
+                label_replace(
+                  node_filesystem_size_bytes{mountpoint=~"/|/boot|/boot/efi|/var|/var/log|/var/lib/kubelet|/var/lib/containerd|/var/lib/docker|/var/lib/containers|/var/lib/rancher"},
+                  "device", "$1", "device", "/dev/((?:[hsv]|xv)d[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|dm-[0-9]+|md[0-9]+)(?:p?[0-9]+)?"
+                )
+              )
+              * on (instance) group_left (node)
+              opengeni:node_exporter_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+            )
         - record: opengeni:node_swap_out_pages_per_second
           expr: |
             max by (node) (
@@ -601,7 +624,7 @@ spec:
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniMcpStrictConnectFailed
           expr: |
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome="failed"}[5m])) > 0
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome=~"failed|refused_by_policy|auth_needed"}[5m])) > 0
           for: 1m
           labels:
             severity: critical
@@ -631,10 +654,10 @@ spec:
             (
               sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])), 1)
+              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!~"refused_by_policy|auth_needed"}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])) >= 5
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!~"refused_by_policy|auth_needed"}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
@@ -643,8 +666,8 @@ spec:
             headline: 'Optional tool connections failing'
             value: '{{ "{{ $value | humanizePercentage }}" }} of connections failed (10 min)'
             user_impact: 'Agents keep working but without some connected tools (for example a user''s integrations), so answers may be less capable.'
-            next_step: 'Check which connector is failing in the MCP lifecycle logs; usually an expired login or an outage on the connector''s side.'
-            description: Turns may continue with missing tools, but users are losing capabilities. Check connector authentication, endpoint health, and bounded MCP lifecycle logs.
+            next_step: 'Check which connector is failing in the MCP lifecycle logs; usually an outage or a rejected credential on the connector''s side.'
+            description: Turns may continue with missing tools, but users are losing capabilities. Check endpoint health, credentials the server rejects, and bounded MCP lifecycle logs. Accounts whose sign-in Opengeni already refused (outcome auth_needed, shown to the person as needing a reconnect) and destinations refused by policy are counted separately and never page.
         - alert: OpenGeniMcpToolFailureRatio
           expr: |
             (
@@ -1454,6 +1477,22 @@ spec:
             user_impact: 'Affected users'' next turn may hit a lost sandbox and continue from a checkpoint.'
             next_step: 'Check the lease''s capture and drain progress and provider-missing recovery.'
             description: A warm lease names an exact Modal instance that complete app listings keep not showing (draining leases are excluded; they lose their box mid-drain). The lease may keep metering warm time and its next turn or drain will hit provider loss. Check the lease's capture/drain progress and provider-missing recovery.
+        - alert: OpenGeniModalCreateOutcomeUnknown
+          # The reaper checks each expired warming lease whose create reply was
+          # lost about every 30 s. A receipt normally turns up within minutes;
+          # 15 minutes of checks held for 30 more means one stays unknown.
+          expr: |
+            sum(increase(opengeni_sandbox_modal_create_recovery_checks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="unresolved"}[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A Modal sandbox create has had an unknown outcome for over 45 minutes.'
+            headline: 'Sandbox create stuck with unknown outcome'
+            value: '{{ "{{ printf `%.0f` $value }}" }} unresolved check(s) in 15m'
+            user_impact: 'The affected chat waits for its sandbox and does not continue until the create settles, at most 25 hours after it started.'
+            next_step: 'Find the lease in the reaper''s "Modal create remains fenced pending discovery" warnings and check the Modal app for a sandbox named opengeni-create-<operation id>.'
+            description: A warming Modal lease recorded a create whose reply never arrived, and the reaper cannot find an exact provider receipt for it. The lease stays fenced so no second box is created, and it postpones every Modal orphan termination meanwhile. Once the attempt is older than Modal's 24-hour maximum sandbox lifetime plus an hour, the reaper settles it (outcome settled_expired) and the next turn creates a fresh box from the archive.
         - alert: OpenGeniModalInventoryStale
           expr: |
             min(
@@ -1656,20 +1695,35 @@ spec:
             description: Sustained memory PSI indicates reclaim or swap contention across the node, even when no pod has a finite memory limit.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeIoPressureStalled
+          # PSI alone also fires while a single pod saturates its own PVC and
+          # the rest of the node is unaffected. Require a busy system disk as
+          # well. Nodes whose system disk cannot be identified (for example
+          # LVM by mapper name) keep the plain PSI condition rather than losing
+          # the alert.
           expr: |
             opengeni:node_io_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.1
+            and on (node)
+            (
+              opengeni:node_system_disk_busy_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.5
+              or on (node)
+              (
+                opengeni:node_io_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+                unless on (node)
+                opengeni:node_system_disk_busy_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              )
+            )
             and on (node)
             opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
           for: 2m
           labels:
             severity: critical
           annotations:
-            summary: 'Server {{ "{{ $labels.node }}" }} is losing more than 10% of its time waiting on disk.'
-            headline: 'Server {{ "{{ $labels.node }}" }}: stalled on disk'
+            summary: 'Server {{ "{{ $labels.node }}" }} is losing more than 10% of its time waiting on disk while its system disk is busy.'
+            headline: 'Server {{ "{{ $labels.node }}" }}: system disk saturated'
             value: '{{ "{{ $value | humanizePercentage }}" }} of time stalled'
             user_impact: 'Everything on this server slows down; agents, the API and background services may stall.'
-            next_step: 'Find what is hammering the disk on the node (logs, images, databases) and move it, or replace the node.'
-            description: Sustained I/O PSI can stall the container runtime, DNS, NATS, Temporal, and every worker together on a single node.
+            next_step: 'Find what is hammering the OS/container disk on the node (container logs, image pulls, emptyDir or host-path writes) and move it, or replace the node.'
+            description: Sustained I/O PSI while the disk behind the OS, kubelet, or container-runtime filesystem is more than 50% busy can stall the container runtime, DNS, NATS, Temporal, and every worker together on a single node. A pod saturating only its own attached volume does not trigger this alert.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeSwapThrashing
           expr: |
@@ -1691,7 +1745,7 @@ spec:
         - alert: OpenGeniNodeContainerRuntimeErrors
           expr: |
             sum by (node, operation_type) (
-              increase(kubelet_runtime_operations_errors_total{operation_type!="exec_sync"}[5m])
+              increase(kubelet_runtime_operations_errors_total{operation_type=~"create_container|start_container|stop_container|pull_image|run_podsandbox|stop_podsandbox"}[5m])
               * on (job, instance) group_left (node)
               opengeni:kubelet_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             ) > 0
@@ -1706,7 +1760,7 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} error(s) (5 min)'
             user_impact: 'Pods on this server may fail to start or restart, making services look down.'
             next_step: 'Check the operation type and node health; confirm affected pods before replacing the node.'
-            description: Runtime errors have kept recurring on this node for at least 10 minutes. Persistent runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting. A single burst, such as kubelet retrying the removal of a container the runtime is already removing during a rollout, does not page. Exec probe failures (exec_sync) are excluded because they follow the container's own lifecycle (probes against containers that are starting or stopping during rollouts) and probe failures are already visible as readiness and restart signals; a broken runtime also fails the other operations.
+            description: A container lifecycle, pod sandbox lifecycle, or image pull operation has kept failing on this node for at least 10 minutes. Status lookups and exec probes do not page on their own because they can fail during normal container turnover.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeNotReady
           expr: |

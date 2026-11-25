@@ -74,6 +74,17 @@ const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
  * repetitions could not finish inside the control budget anyway.
  */
 export const CONTROL_FIXTURE_READY_MS = 45_000;
+/** How long the hostile Pause fixture sleeps after printing its ready marker
+ * before it writes its zombie artifact. Pause marks an adopted background
+ * command stopping and the sandbox lease reaper ends its process group on its
+ * next sweep (every 30 s by default, plus the sweep's own work), so the window
+ * must cover the time to click Pause plus one reaper period with room to
+ * spare. A shorter window would race the reaper instead of testing Pause. */
+export const PAUSE_FIXTURE_DELAYED_WRITE_SECONDS = 120;
+/** Zombie probes after Pause run only once the fixture's delayed write would
+ * have happened, plus this margin, so a process Pause failed to stop is caught
+ * by the first probe instead of slipping past it. */
+const PAUSE_ZOMBIE_PROBE_MARGIN_MS = 5_000;
 /** Default wall-clock budget for every Steer repetition plus the final Pause. */
 export const DEFAULT_CONTROL_BUDGET_MS = 25 * 60_000;
 /** How often a long wait reports that it is still waiting. */
@@ -832,7 +843,10 @@ export function assertFixtureModelPatch(
   if (completed.length !== 1) throw new Error("fixture model turn did not complete uniquely");
   // A correct final read is not authorship proof. Permit only bounded, exact
   // read-only inspection before the patch, then the patch and its final read.
-  // This is not a generic shell-read classifier: every other call still fails.
+  // The read may also be apply_patch's own `then` command, which runs inside
+  // the patch call and has no tool-call event of its own; a separate read after
+  // it is then optional but still verified. This is not a generic shell-read
+  // classifier: every other call still fails.
   const calls = events
     .filter(
       (event) =>
@@ -841,9 +855,14 @@ export function assertFixtureModelPatch(
         event.sequence < completed[0]!.sequence,
     )
     .sort((a, b) => a.sequence - b.sequence);
+  const patchIndexes = calls.flatMap((call, index) =>
+    (call.payload as any)?.name === "apply_patch" ? [index] : [],
+  );
+  const patchIndex = patchIndexes.length === 1 ? patchIndexes[0]! : -1;
   if (
-    calls.length < 2 ||
+    calls.length < 1 ||
     calls.length > 2 + fixtureInspectionCommands.length ||
+    (patchIndex !== -1 && calls.length - patchIndex > 2) ||
     calls.some(
       (call) =>
         call.turnId !== turn.turnId ||
@@ -878,8 +897,12 @@ export function assertFixtureModelPatch(
       ? outputs[0]
       : undefined;
   };
-  const patch = calls.at(-2)!;
-  const inspections = calls.slice(0, -2);
+  const patch = patchIndex === -1 ? calls.at(-2) : calls[patchIndex]!;
+  if (!patch) {
+    throw new Error("fixture lacks successful apply_patch proof owned by its accepted model turn");
+  }
+  const inspections = patchIndex === -1 ? calls.slice(0, -2) : calls.slice(0, patchIndex);
+  const reads = patchIndex === -1 ? calls.slice(-1) : calls.slice(patchIndex + 1);
   const inspectedCommands = new Set<string>();
   for (let index = 0; index < inspections.length; index += 1) {
     const inspection = inspections[index]!;
@@ -915,6 +938,29 @@ export function assertFixtureModelPatch(
   const patchOutput = outputOf(patch);
   const before = 'export const marker = "BASE";\nexport const status = 200;\n';
   const expected = 'export const marker = "' + marker + '";\nexport const status = 204;\n';
+  const verifiedRead = (result: unknown): boolean =>
+    typeof result === "string" &&
+    /^Process exited with code 0$/mu.test(result) &&
+    result.endsWith("Output:\n" + expected);
+  // `then` is the patch call's own verification read: exactly the fixture's
+  // read command, run after the patch applied, with its exec result appended
+  // after the runtime's `then:` header (packages/runtime/src/apply-patch-then.ts).
+  // A not-run note ("then: not run ...") never matches this prefix.
+  const readCommands = ["cat api/server.ts", "cat /workspace/api/server.ts"];
+  const hasThen = patchArgs != null && Object.hasOwn(patchArgs, "then");
+  const thenPrefix = "Patch applied.\n\nthen:\n";
+  const patchResult = (patchOutput?.payload as any)?.output;
+  const patchApplied =
+    typeof patchResult === "string" &&
+    (hasThen
+      ? patchResult.startsWith("Patch applied.\n\nthen:")
+      : patchResult === "Patch applied.");
+  const thenValid =
+    hasThen &&
+    readCommands.includes(patchArgs.then) &&
+    typeof patchResult === "string" &&
+    patchResult.startsWith(thenPrefix) &&
+    verifiedRead(patchResult.slice(thenPrefix.length));
   // Parse the bounded two-line patch grammar. Filenames in hunk content,
   // additions/deletions/moves, extra targets, and partial/context-only edits
   // cannot attest the requested transition. Both native path forms are valid.
@@ -923,7 +969,8 @@ export function assertFixtureModelPatch(
   const hunk = lines.slice(3, -1);
   const patchValid =
     patchArgs &&
-    Object.keys(patchArgs).length === 1 &&
+    Object.keys(patchArgs).every((key) => key === "patch" || key === "then") &&
+    Object.keys(patchArgs).length === (hasThen ? 2 : 1) &&
     lines[0] === "*** Begin Patch" &&
     ["*** Update File: api/server.ts", "*** Update File: /workspace/api/server.ts"].includes(
       lines[1]!,
@@ -944,27 +991,32 @@ export function assertFixtureModelPatch(
     (patch.payload as any)?.name !== "apply_patch" ||
     !patchValid ||
     !patchOutput ||
-    (patchOutput.payload as any)?.output !== "Patch applied."
+    !patchApplied
   ) {
     throw new Error("fixture lacks successful apply_patch proof owned by its accepted model turn");
   }
-  const read = calls.at(-1)!;
-  const args = argsOf(read);
-  const result = (outputOf(read)?.payload as any)?.output;
-  const verified =
-    (read.payload as any)?.name === "exec_command" &&
-    read.sequence > patchOutput.sequence &&
-    args?.cmd === "cat api/server.ts" &&
-    args.shell == null &&
-    [undefined, null, "", "/workspace"].includes(args.workdir) &&
-    Object.keys(args).every((key) =>
-      ["cmd", "workdir", "shell", "login", "tty", "yield_time_ms", "max_output_tokens"].includes(
-        key,
-      ),
-    ) &&
-    typeof result === "string" &&
-    /^Process exited with code 0$/mu.test(result) &&
-    result.endsWith("Output:\n" + expected);
+  if (hasThen && !thenValid) {
+    throw new Error("fixture apply_patch then command is not a successful verification read");
+  }
+  if (reads.length === 0 && !hasThen) {
+    throw new Error("fixture lacks successful read-only verification after its patch");
+  }
+  const verified = reads.every((read) => {
+    const args = argsOf(read);
+    return (
+      (read.payload as any)?.name === "exec_command" &&
+      read.sequence > patchOutput.sequence &&
+      readCommands.includes(args?.cmd) &&
+      args.shell == null &&
+      [undefined, null, "", "/workspace"].includes(args.workdir) &&
+      Object.keys(args).every((key) =>
+        ["cmd", "workdir", "shell", "login", "tty", "yield_time_ms", "max_output_tokens"].includes(
+          key,
+        ),
+      ) &&
+      verifiedRead((outputOf(read)?.payload as any)?.output)
+    );
+  });
   if (!verified) throw new Error("fixture lacks successful read-only verification after its patch");
 }
 export function fixtureShellQuote(value: string): string {
@@ -1027,7 +1079,7 @@ export function controlFixtureProgram(
     "if mkdir pause-stress/claimed 2>/dev/null; then",
     "printf '%s\\n' " + fixtureShellQuote(controlMarker),
     "trap '' INT TERM",
-    "sleep 30",
+    "sleep " + PAUSE_FIXTURE_DELAYED_WRITE_SECONDS,
     "printf zombie > " + fixtureShellQuote(zombiePath),
     "else",
     "printf '%s\\n' " + fixtureShellQuote("PAUSE_RESUMED_SAFE_" + marker),
@@ -3545,6 +3597,9 @@ async function proveLivePauseCancellation(input: {
     (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
     controlFixtureReadyLabel("Pause"),
   );
+  // The fixture prints its marker immediately before its delayed-write sleep.
+  const pauseZombieProbeAt =
+    performance.now() + PAUSE_FIXTURE_DELAYED_WRITE_SECONDS * 1_000 + PAUSE_ZOMBIE_PROBE_MARGIN_MS;
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("Pause fixture output was not bound to its owning turn attempt");
   }
@@ -3735,6 +3790,9 @@ async function proveLivePauseCancellation(input: {
   });
   await Bun.sleep(6_000);
   await auditCancelledPredecessorEvents(client, workspaceId, sessionId, audit);
+  // Probe only after the delayed write would have landed: an earlier probe
+  // cannot tell a stopped process from one that is still sleeping.
+  await Bun.sleep(Math.max(0, pauseZombieProbeAt - performance.now()));
   const zombieProbe = await client.terminalExec(workspaceId, sessionId, {
     command: `test ! -e '${zombiePath}'`,
     cwd: "",

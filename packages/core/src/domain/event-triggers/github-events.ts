@@ -78,6 +78,8 @@ function repository(payload: Json): Json | null {
   const repo = object(payload.repository);
   if (!repo) return null;
   return compact({
+    // The id lets a run attach the repository through the App allowlist.
+    id: int(repo.id),
     full_name: text(repo.full_name),
     name: text(repo.name),
     owner: login(repo.owner),
@@ -132,6 +134,8 @@ function comment(value: unknown): Json | null {
   return compact({
     id: int(found.id),
     user: login(found.user),
+    // OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE and so on.
+    author_association: text(found.author_association),
     path: text(found.path),
     line: int(found.line),
     html_url: text(found.html_url),
@@ -483,6 +487,13 @@ export function readGitHubDelivery(input: {
   const action = rawAction && /^[a-z_]{1,64}$/u.test(rawAction) ? rawAction : null;
   const type = action ? `${event}.${action}` : event;
   const shaped = shape(event, action, payload);
+  const mentioned = commentMentionsOwnApp(payload, input.ownLogins);
+  if (mentioned !== null) {
+    const shapedComment = object(shaped.data.comment);
+    if (shapedComment) {
+      shaped.data = { ...shaped.data, comment: { ...shapedComment, mentions_app: mentioned } };
+    }
+  }
   const sender = text(object(payload.sender)?.login);
   const normalized: NormalizedEventInput = {
     externalId: input.headers.get("x-github-delivery")?.trim() || null,
@@ -497,10 +508,70 @@ export function readGitHubDelivery(input: {
   return { kind: "events", events: [normalized] };
 }
 
+/**
+ * Whether a comment @mentions Opengeni's own GitHub App (`@slug` or
+ * `@slug[bot]`), read from the whole body before it is shortened. A mention
+ * in code or a quoted reply doesn't count, so quoting a request doesn't ask
+ * again. Null when the delivery carries no comment.
+ */
+function commentMentionsOwnApp(payload: Json, ownLogins: ReadonlySet<string>): boolean | null {
+  const found = object(payload.comment);
+  if (!found) return null;
+  const said = (text(found.body) ?? "")
+    .replace(/^ {0,3}(```|~~~)[^\n]*\n[\s\S]*?(^ {0,3}\1[^\n]*$|(?![\s\S]))/gmu, "")
+    .replace(/`+[^`]*`+/gu, "")
+    .replace(/^ {0,3}>.*$/gmu, "");
+  for (const own of ownLogins) {
+    const slug = own.endsWith("[bot]") ? own.slice(0, -"[bot]".length) : own;
+    if (!slug) continue;
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    if (new RegExp(`(^|[^\\w@/.-])@${escaped}(\\[bot\\])?(?![\\w-])`, "iu").test(said)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** The installation a delivery is for, if any. */
 export function githubDeliveryInstallationId(payload: Json): number | null {
   const id = readPath(payload, "installation.id");
   return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * An event read from GitHub's REST API instead of a webhook ("GitHub (your
+ * connection)"), shaped exactly like the webhook delivery GitHub would have
+ * sent, so the same triggers and conditions match it. `payload` holds what
+ * the webhook would carry: `repository`, `pull_request` or `release`, and
+ * `sender`.
+ */
+export function githubReadEvent(input: {
+  event: "pull_request" | "release";
+  action: string;
+  payload: Json;
+  externalId: string;
+  occurredAt: Date;
+}): NormalizedEventInput {
+  const shaped = shape(input.event, input.action, input.payload);
+  return {
+    externalId: input.externalId,
+    type: `${input.event}.${input.action}`,
+    occurredAt: shaped.occurredAt ?? input.occurredAt,
+    subject: shaped.subject,
+    summary: oneLine(shaped.summary, 300),
+    url: shaped.url,
+    actor: { kind: actorKind(input.payload, new Set()), name: login(input.payload.sender) },
+    data: shaped.data,
+  };
+}
+
+/** The event types "GitHub (your connection)" reads: merges and releases. */
+export const GITHUB_READ_EVENT_TYPES = ["pull_request.closed", "release.published"] as const;
+
+/** "GitHub (your connection)"'s event types; see GITHUB_READ_EVENT_TYPES. */
+export function githubReadEventTypeCatalog(): EventTypeDescriptor[] {
+  const wanted = new Set<string>(GITHUB_READ_EVENT_TYPES);
+  return githubEventTypeCatalog([], null).filter((entry) => wanted.has(entry.type));
 }
 
 /** The repository a delivery is about, if any. */
@@ -592,6 +663,10 @@ const GITHUB_TYPES: CatalogEntry[] = [
       REPOSITORY_FIELD,
       ["data.comment.path", "The file the comment is on"],
       ["data.comment.user", "Who commented"],
+      ["data.comment.author_association", "OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR or NONE"],
+      ["data.comment.mentions_app", "true when the comment @mentions Opengeni's GitHub App"],
+      ["data.comment.body", "The comment text"],
+      ["data.pull_request.number", "The pull request number"],
     ],
   },
   { type: "issues.opened", description: "An issue was opened", fields: ISSUE_FIELDS },
@@ -615,6 +690,8 @@ const GITHUB_TYPES: CatalogEntry[] = [
       ["data.issue.number", "The issue or pull request number"],
       ["data.issue.pull_request", "true when the comment is on a pull request"],
       ["data.comment.user", "Who commented"],
+      ["data.comment.author_association", "OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR or NONE"],
+      ["data.comment.mentions_app", "true when the comment @mentions Opengeni's GitHub App"],
       ["data.comment.body", "The comment text"],
     ],
   },

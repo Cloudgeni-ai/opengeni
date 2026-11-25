@@ -26,6 +26,11 @@ const webSocketFactory =
     : undefined;
 
 async function renderHarness() {
+  if (client instanceof MockOpenGeniClient && params.get("sleeping") === "1") {
+    await client.suspendBrowserSession(workspaceId, DEMO_BROWSER_SESSION_ID, {
+      operationId: crypto.randomUUID(),
+    });
+  }
   if (client instanceof MockOpenGeniClient && params.get("lost") === "1") {
     const session = await client.getBrowserSession(workspaceId, DEMO_BROWSER_SESSION_ID);
     client.listBrowserSessions = async () => ({
@@ -78,6 +83,7 @@ async function renderHarness() {
         </header>
         <BrowserViewer
           sessionId={sessionId}
+          fitViewport={params.get("fitViewport") === "1"}
           {...(webSocketFactory ? { webSocketFactory } : {})}
           className="min-h-0 flex-1"
         />

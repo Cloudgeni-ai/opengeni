@@ -9,9 +9,14 @@
  * name providers; a guard test enforces this.
  */
 import type { SQL } from "drizzle-orm";
-import type { SubscriptionCoreAdapter } from "@opengeni/subscriptions";
+import type {
+  PlacementDecision,
+  PlacementInput,
+  SubscriptionCoreAdapter,
+} from "@opengeni/subscriptions";
 import { subscriptionCoreProvider } from "../subscription-core-providers";
 import type { SubscriptionCoreErrors } from "./errors";
+import type { SubscriptionCoreWaitPresentation } from "./wait-reason";
 
 export type SubscriptionCoreProvider<Credential = unknown> = {
   readonly adapter: SubscriptionCoreAdapter<Credential>;
@@ -23,6 +28,11 @@ export type SubscriptionCoreProvider<Credential = unknown> = {
   readonly sessionCompactionLock: SQL | null;
   /** The errors the core raises to this provider's callers. */
   readonly errors: SubscriptionCoreErrors;
+  /** An optional diagnosis of the allocator's wait; never changes its placement decision. */
+  readonly projectWait?: (
+    input: PlacementInput,
+    decision: Extract<PlacementDecision, { kind: "wait" }>,
+  ) => SubscriptionCoreWaitPresentation | null;
   readonly settings: {
     /**
      * The `subscription_settings` column holding this provider's primary

@@ -142,6 +142,10 @@ export type VaultItem = VaultItemSummary & {
   createdBySubjectId: string | null;
   createdAt: string;
   generation: number;
+  /** Use only: values are used by reference and never shown to anyone again. */
+  useOnly?: boolean | undefined;
+  /** Whether this caller may reveal, copy or download the item's values. */
+  canReveal?: boolean | undefined;
 };
 
 export type VaultVersionCreatedByKind =
@@ -208,6 +212,8 @@ export type CreateVaultItemRequest = {
   expiresAt?: string | null | undefined;
   fields: VaultFieldInput[];
   primaryFieldName?: string | undefined;
+  /** Make the item use-only (hosted vaults only). It cannot be turned off. */
+  useOnly?: true | undefined;
 };
 
 export type UpdateVaultItemRequest = Partial<CreateVaultItemRequest> & {

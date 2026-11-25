@@ -10,10 +10,10 @@ import { ConnectionInstalled, PluginDiscovery as Catalog } from "@opengeni/react
 import { BoxesIcon } from "lucide-react";
 import type { PluginDiscoveryItem } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { CapabilityMark } from "./capability-page";
+import { CapabilityMark } from "@opengeni/react/ui/capability-page";
 import { CapabilitySlotPage, useCapabilityPageSlot } from "./capability-page-slot";
 import { PluginPage, type PluginManageActions } from "./plugin-page";
-import { humanizeName } from "./skill-copy";
+import { humanizeName } from "@opengeni/react/app/lib/skill-names";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
 const EMPTY_INSTALLED_PLUGINS: PluginInstallationSummary[] = [];
@@ -234,7 +234,8 @@ export function PluginDiscovery({
             .map((plugin) => ({
               id: plugin.pluginKey,
               name: humanizeName(plugin.name),
-              status: plugin.status === "needs_attention" ? "Needs attention" : "Installed",
+              status:
+                plugin.status === "needs_attention" ? "Needs attention" : "Installed · Workspace",
               needsAttention: plugin.status === "needs_attention",
               onOpen: () => void openInstalled(plugin),
               icon: (

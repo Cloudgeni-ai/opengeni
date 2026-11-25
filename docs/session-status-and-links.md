@@ -51,13 +51,21 @@ Changes publish `session.waiting_on.changed`, so open chats refresh at once.
 
 The Linked tab in the chat's side panel lists what the chat works on: issues,
 pull requests, Slack threads, App records and any URL (at most 30).
+In the app, the chat's GitHub pull request gets its own **PR** tab (below)
+and Linked, in the dock's menu, lists the rest, including other pull
+requests; it appears only when something else is linked.
 
 - The agent adds items with `session_links_add` (`url`, optional `title`) and
   removes them with `session_links_remove`. People with `sessions:control`
   can remove items from the panel, and the HTTP API
   (`GET/POST /v1/workspaces/:ws/sessions/:id/links`,
   `DELETE .../links/:linkId`) does both.
-- A pull request the chat opens through the GitHub tools is added by itself.
+- A pull request the chat opens through the GitHub tools is added by itself,
+  and so is one it opens with `gh` (or another client) in the sandbox through
+  Your GitHub: the sandbox's GitHub gateway sees GitHub accept the create
+  (`POST /repos/:owner/:repo/pulls`, or the `createPullRequest` GraphQL
+  mutation) and links the returned pull request (`addedBy: "automatic"`).
+  Linking is best effort and never changes what GitHub returned.
 - Adding a URL that is already linked updates its title instead of adding it
   twice. Changes publish `session.links.changed`.
 
@@ -75,10 +83,14 @@ seconds):
 | Anything else | Title only. |
 
 GitHub status is read through the workspace's GitHub App installation for the
-repository's owner (not the viewer's own GitHub account), and only for
-repositories the workspace chose for that installation; that choice is checked
-on every read. An item the deployment cannot read shows its title only;
-reading never fails the list.
+repository's owner, and only for repositories the workspace chose for that
+installation; that choice is checked on every read. Where the app can't read
+the repository (or the workspace has no GitHub app), it is read as the viewer
+through their own GitHub connection (Your GitHub,
+[personal-github.md](personal-github.md)), only for repositories they allowed
+Opengeni to use, and cached for that viewer alone: someone else opening the
+chat sees it only through their own connection. An item the deployment
+cannot read shows its title only; reading never fails the list.
 
 Linear issues and Slack threads are read as the viewer, through the viewer's
 own Linear or Slack connection (`get_issue`, `slack_read_thread`), or one the
@@ -116,13 +128,38 @@ open after that answer for the woken one, then settles as usual. Recurring event
 leave the thread alone.
 
 `wakeWhen` needs automations with event triggers in the chat (otherwise the
-tool refuses it), a GitHub event source the chat's owner can use, and the
-workspace's GitHub App able to read the repository. Otherwise, or for a link
-that is not a GitHub pull request, the link is added and the result says why
-no wake was set (`wakeNotSet`). A workspace has at most one GitHub event
-source, so the wake always uses it.
+tool refuses it) and either the workspace's GitHub app able to read the
+repository, with a GitHub event source the chat's owner can use (a workspace
+has at most one, so the wake uses it), or the chat's person's own GitHub
+connection able to read it. In that second case (also when the app reads the
+repository but the workspace has no GitHub event source) the wake uses their
+"GitHub (your connection)" event source (kind `github_personal`, private to
+them, added on first use; migrations `1533` to `1536`): it reads the pull
+request, and the repository's releases, with their connection every two
+minutes while the automation waits, and fires once for a merge or release
+from shortly before the wake was set up on (so up to two minutes after it
+happens). It reads the 25 newest pull requests and 10 newest repositories its
+automations name; a repository that fails to read is retried without holding
+up the others. Otherwise,
+or for a link that is not a GitHub pull request, the link is added and the
+result says why no wake was set (`wakeNotSet`).
 
 ## Workbench
+
+When the chat has a linked GitHub pull request, the side panel opens a **PR**
+tab with the essentials: the title, one line with its state, repository and
+number, branches and checks, one action (**Merge**, or **View on GitHub**) and
+a menu for Description, Discussion, Commits, Checks and removing the link. The
+body is its Changes. It reads
+`GET /v1/workspaces/:ws/sessions/:id/links/:linkId/pull-request`
+(`sessions:read`, `?fresh=true` to re-read) through the workspace GitHub App,
+then the viewer's own GitHub, like the live status. `pullRequest` is null
+where neither can read it, and the tab then shows the link only; a failed
+GitHub read answers 502 and the tab offers Retry. Lists are one GitHub page
+(100) each, and patch text is capped per pull request.
+**Merge** asks the agent to merge it with its own GitHub tools, so the
+connection's Can use and approval settings apply; it shows only to people who
+can message the chat.
 
 The Changes tab draws one collapsible header per file (unified or split
 diff); this applies to every embedder of the workbench. When the chat has an open linked pull request it shows **View on
@@ -134,14 +171,21 @@ its own GitHub tools and permissions. Embedders control both with the
 
 ## Self-hosted limits
 
-- Live GitHub status and merge wakes need the GitHub App
-  ([github-app.md](github-app.md)) installed on the repository's owner, and
-  merge wakes need its webhooks reaching the deployment. Without it, items show
-  titles only, and `wakeWhen` adds the link without a wake (`wakeNotSet`).
+- Live GitHub status and merge wakes use the GitHub app
+  ([github-app.md](github-app.md)) installed on the repository's owner, with
+  its webhooks reaching the deployment. Without it they use the viewer's (for
+  a wake, the chat's person's) own GitHub connection, which needs Your GitHub
+  configured (`OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED` and its OAuth app,
+  [personal-github.md](personal-github.md)) and the repository allowed in it.
+  With neither, items show titles only and `wakeWhen` adds the link without a
+  wake (`wakeNotSet`). A wake through the person's connection polls, so it
+  can fire up to two minutes late, and stops if they disconnect (its
+  automation is blocked with a reconnect reason).
 - Live Linear and Slack status needs the Linear and Slack connectors in the
   deployment's catalog and the viewer connected to them. A Slack MCP server
   whose results don't include the thread's messages leaves the thread
   title-only. App records show their title only.
-- A pull request opened outside the GitHub tools (for example with `gh` in the
-  sandbox) is not added automatically; the agent adds it with
-  `session_links_add`.
+- A pull request opened with `gh` in the sandbox is added automatically only
+  when it goes through Your GitHub; one opened with another token (for
+  example a token the sandbox brings itself) is not, and the agent adds it
+  with `session_links_add`.

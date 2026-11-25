@@ -117,11 +117,13 @@ export type UseSessionEventsResult = {
   error: Error | null;
 };
 
-// First paint stays inside the server's single-query page (255 rows plus its
-// one-row continuation lookahead). A larger request is read in sequential
-// 256-row database batches, and on a long conversation whose rows are no
-// longer cached that walk took tens of seconds before anything rendered.
-const SESSION_FIRST_WINDOW_PAGE_SIZE = 255;
+// Opening at the tip only needs the newest exchange and some scrollback.
+// The server can return 255 rows in one query, but that can give React many
+// screens of formatted answers to lay out before it can show the bottom.
+const SESSION_FIRST_WINDOW_PAGE_SIZE = 32;
+// If those rows all belong to one dense turn, look further back in one
+// server query for the prompt that owns them, rather than dropping the turn.
+const SESSION_FIRST_WINDOW_BOUNDARY_PAGE_SIZE = 255;
 // Pages the reader asks for by scrolling or catching up are larger and may
 // span a few database batches; they never block the first paint.
 const SESSION_HISTORY_PAGE_SIZE = 1000;
@@ -961,6 +963,7 @@ export function useSessionEvents(
         targetGroups: Number.POSITIVE_INFINITY,
         maxFetches: INITIAL_FETCH_CAP,
         boundaryPageCap: BOUNDARY_PAGE_CAP,
+        boundaryPageSize: SESSION_FIRST_WINDOW_BOUNDARY_PAGE_SIZE,
         signal: scope.signal,
         ...(scope.progress ? { progress: scope.progress } : {}),
         filter: CONVERSATION_FILTER,
@@ -2318,6 +2321,8 @@ async function loadEventWindow(
     targetGroups: number;
     maxFetches: number;
     boundaryPageCap?: number;
+    /** Read further to find an owning prompt when the first page is mid-turn. */
+    boundaryPageSize?: number;
     /** Pages kept nothing of that do not count against the caps. */
     filteredPageCap?: number;
     signal?: AbortSignal;
@@ -2379,7 +2384,7 @@ async function loadEventWindow(
     snapPages < (options.boundaryPageCap ?? 0)
   ) {
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
-      pageSize: options.pageSize,
+      pageSize: options.boundaryPageSize ?? options.pageSize,
       filter: options.filter,
       ...(options.signal ? { signal: options.signal } : {}),
     });

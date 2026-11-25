@@ -97,6 +97,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     pinVersion: session.pinVersion ?? 0,
     unread: session.unread ?? false,
     ...(session.failureHandled ? { failureHandled: true } : {}),
+    ...(session.questionWithAgent ? { questionWithAgent: true } : {}),
     activelyWorking: session.activelyWorking ?? false,
     attentionVersion: session.attentionVersion ?? 0,
     archived: session.archived ?? false,
@@ -106,6 +107,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     archiveVersion: session.archiveVersion ?? 0,
     treeStats: session.treeStats,
     requiresActionSince: session.requiresActionSince,
+    awaitingConnectionSince: session.awaitingConnectionSince,
     // Lets lists tell a runtime-held session apart from one waiting on a person.
     ...(session.admissionBlock !== undefined ? { admissionBlock: session.admissionBlock } : {}),
     createdAt: session.createdAt,

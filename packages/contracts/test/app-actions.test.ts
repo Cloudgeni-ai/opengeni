@@ -614,7 +614,7 @@ test("actions that handle secrets are marked in the catalog, so the chat route l
     expect([id, appActionCallHandlesSecrets({ id })]).toEqual([id, true]);
   }
   // Bounded: most of the app stays reachable.
-  expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(80);
+  expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(90);
 });
 
 test("secret inputs are only the filled request fields an action marks as secret", () => {
@@ -661,6 +661,21 @@ test("secret inputs are only the filled request fields an action marks as secret
   expect(
     appActionCallSecretInputs({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
   ).toEqual(["x"]);
+  // A connect attempt's headers keep reference text: a shared key is stored
+  // as the reference and read from the vault only at call time.
+  expect(
+    appActionCallSecretInputs({
+      id: "advanceConnectAttempt",
+      body: {
+        expectedRevision: 1,
+        idempotencyKey: "k",
+        action: {
+          type: "credentials",
+          values: { mcpUrl: "https://x.test/mcp", headers: '{"Authorization":"Bearer ref"}' },
+        },
+      },
+    }),
+  ).toEqual([]);
   // Only creating or updating a vault item keeps its body in the vault.
   expect(
     appActionCallStoresVaultItem({ id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items" }),
@@ -693,5 +708,32 @@ test("no action's secret request fields nest inside each other", () => {
         expect([entry.id, outer, inner, nested]).toEqual([entry.id, outer, inner, false]);
       }
     }
+  }
+});
+
+test("a chat redeems a usage-limit reset with one approval card, naming the account", () => {
+  for (const scope of ["workspaces/:workspaceId", "organizations/:organizationId"]) {
+    // The web app's prepare step is never a card in a chat: an agent can't use it.
+    const prepare = `POST /v1/${scope}/codex/accounts/:accountId/reset-credits/prepare`;
+    expect(findAppAction(prepare)?.browserOnly).toBeTruthy();
+    expect(findAppAction(prepare)?.agentAlternative).toContain("reset-credits/redeem");
+    expect(appActionCallNeedsConfirmation({ id: prepare })).toBe(false);
+    // Redeeming asks once.
+    const redeem = `POST /v1/${scope}/codex/accounts/:accountId/reset-credits/redeem`;
+    expect(findAppAction(redeem)?.browserOnly).toBeUndefined();
+    expect(appActionCallNeedsConfirmation({ id: redeem })).toBe(true);
+    const call = {
+      id: redeem,
+      pathParameters: { workspaceId: "ws-1", organizationId: "org-1", accountId: "acct-1" },
+      body: { attemptId: crypto.randomUUID(), creditId: "credit-1" },
+    };
+    expect(
+      appActionConfirmationTitle(call, here, {
+        accountId: { kind: "account", name: "Work", account: "bendik@example.com" },
+      }),
+    ).toBe("Redeem a usage-limit reset for “Work · bendik@example.com”?");
+    expect(appActionConfirmationTitle(call, here)).toBe(
+      "Redeem a usage-limit reset for this ChatGPT account?",
+    );
   }
 });

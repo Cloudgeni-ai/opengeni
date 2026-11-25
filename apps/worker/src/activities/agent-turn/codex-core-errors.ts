@@ -1,9 +1,16 @@
-import { CODEX_CREDENTIAL_LEASE_TTL_MS } from "@opengeni/db";
 import {
+  CODEX_CREDENTIAL_LEASE_TTL_MS,
   subscriptionCapacityWaitReasonText,
   subscriptionCapacityWaitNeedsAction,
-  type WaitReason,
-} from "@opengeni/subscriptions";
+} from "@opengeni/db";
+import type {
+  ProviderCapacityWaitReason,
+  SubscriptionWaitAccount,
+} from "@opengeni/contracts/subscription-capacity-wait";
+import type { WaitReason } from "@opengeni/subscriptions";
+import { productLabelForModelId } from "@opengeni/config";
+
+type SubscriptionCapacityWaitReason = WaitReason | ProviderCapacityWaitReason;
 
 /*
  * Failures of a chat turn on the shared subscription core, for any provider.
@@ -27,9 +34,11 @@ export type SubscriptionCoreCodexFailurePayload = {
   retryable: boolean;
   detail?: string;
   /** Placement wait reason when `code` is `subscription_capacity_unavailable`. */
-  waitReason?: WaitReason;
+  waitReason?: SubscriptionCapacityWaitReason;
   /** Refusal class when `code` is `subscription_account_refused`. */
   refusal?: SubscriptionCoreAccountRefusal;
+  /** Model refused by every eligible account in the placement pool. */
+  model?: string;
   /** ISO time the earliest known capacity returns, when placement knows it. */
   resetsAt?: string;
   /**
@@ -64,9 +73,12 @@ export class SubscriptionCoreCodexTurnError extends Error {
   }
 }
 
-const WAIT_COPY = (name: string): Record<WaitReason, string> => ({
+const WAIT_COPY = (
+  name: string,
+  account?: SubscriptionWaitAccount,
+): Partial<Record<SubscriptionCapacityWaitReason, string>> & Record<WaitReason, string> => ({
   pinned_account_disabled: `The ${name} account pinned to this chat is turned off. Turn it back on, choose another account, or switch the chat to automatic. Waiting alone will not fix this.`,
-  pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. Send a new message once it is available again, or switch the session back to automatic.`,
+  pinned_account_unavailable: `This chat is pinned to the ${name} account${account ? ` ${account.label}` : ""}, which has no capacity right now. Switch the chat back to automatic account choice to continue on another account, or send a new message once that account has room again.`,
   pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. Choose another account or switch the session back to automatic.`,
   no_eligible_capacity: `No ${name} subscription has capacity for this turn right now. Send a new message once an account is available again.`,
   model_not_allowed: `This model is not allowed for the ${name} subscriptions available here.`,
@@ -82,12 +94,13 @@ const WAIT_COPY = (name: string): Record<WaitReason, string> => ({
  * earliest known reset.
  */
 export function subscriptionCoreCapacityWaitPayload(
-  reason: WaitReason,
+  reason: SubscriptionCapacityWaitReason,
   earliestResetAt: Date | null,
   displayName: string = DEFAULT_DISPLAY_NAME,
+  account?: SubscriptionWaitAccount,
 ): Record<string, unknown> {
   return {
-    error: subscriptionCapacityWaitReasonText(reason, displayName),
+    error: subscriptionCapacityWaitReasonText(reason, displayName, account),
     code: "subscription_capacity_unavailable",
     waitReason: reason,
     ...(subscriptionCapacityWaitNeedsAction(reason) ? { actionRequired: true } : {}),
@@ -136,13 +149,16 @@ export function subscriptionCoreServingFailoverExhaustedFailure(
  * cannot wait.
  */
 export function subscriptionCoreCapacityFailure(
-  reason: WaitReason,
+  reason: SubscriptionCapacityWaitReason,
   earliestResetAt: Date | null,
   displayName: string = DEFAULT_DISPLAY_NAME,
+  account?: SubscriptionWaitAccount,
 ): SubscriptionCoreCodexTurnError {
   return new SubscriptionCoreCodexTurnError(
     {
-      error: WAIT_COPY(displayName)[reason],
+      error:
+        WAIT_COPY(displayName, account)[reason] ??
+        subscriptionCapacityWaitReasonText(reason, displayName, account)!,
       code: "subscription_capacity_unavailable",
       retryable: false,
       waitReason: reason,
@@ -272,6 +288,19 @@ export function subscriptionCoreAccountRefusedFailure(
     },
     displayName,
   );
+}
+
+/** A plan refusal on every usable candidate is not a capacity reset. */
+export function subscriptionCoreCodexPlanBlockedFailure(
+  modelId: string,
+): SubscriptionCoreCodexTurnError {
+  return new SubscriptionCoreCodexTurnError({
+    error: `None of the Codex subscriptions available to this turn can run ${productLabelForModelId(modelId)}. Choose another model or connect a subscription whose plan includes it.`,
+    code: "subscription_account_refused",
+    retryable: false,
+    refusal: "entitlement",
+    model: modelId,
+  });
 }
 
 /** A Codex consumer that has not moved to the core yet (PR 2) must not read legacy tables. */

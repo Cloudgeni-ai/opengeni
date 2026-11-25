@@ -29,6 +29,25 @@ export const secretApprovalRules = pgTable(
   (table) => [primaryKey({ columns: [table.accountId, table.itemId, table.fieldKey] })],
 );
 
+/**
+ * Migration 1563: items whose values are never revealed again ("use only").
+ * The runtime role can read and insert rows, never update or delete them;
+ * deleting the item removes its row (foreign keys live in the migration).
+ */
+export const vaultItemUseOnly = pgTable(
+  "vault_item_use_only",
+  {
+    accountId: uuid("account_id").notNull(),
+    itemId: uuid("item_id").notNull(),
+    setBySubjectId: text("set_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.accountId, table.itemId] }),
+    index("vault_item_use_only_item_idx").on(table.itemId),
+  ],
+);
+
 export const secretUseApprovals = pgTable(
   "secret_use_approvals",
   {

@@ -60,7 +60,7 @@ export {
   type OrgAgentPublishMoveOutcome,
   type OrgAgentResolveOutcome,
 } from "./org-agent-metrics";
-export { failureDiagnostic } from "./failure-diagnostic";
+export { failureDiagnostic, fatalErrorLogCause } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 import {
   projectTemporalFailureFacts,
@@ -531,6 +531,16 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["rejectionCode", HTTP_REJECTION_CODE_PATTERN],
   ["rejectionReason", HTTP_REJECTION_REASON_PATTERN],
   ["rejectionFingerprint", /^m_[0-9a-f]{10}$/],
+  // A refusal's closed sub-reason, such as a site-runtime gateway signature
+  // check (`missing_headers`, `skew`). Log only, never a metric label.
+  ["rejectionDetail", /^[a-z][a-z_]{0,31}$/],
+  // Who sent a refused request (apps/api rejectedCallerLogAttributes): the
+  // hashed attempt key the worker logs as `correlationId`, a domain-separated
+  // credential hash, and the User-Agent's first product token. Never a raw
+  // identifier or credential. Log only, never a metric label.
+  ["callerCorrelationId", /^turn_[0-9a-f]{32}$/],
+  ["callerCredentialKey", /^cred_[0-9a-f]{32}$/],
+  ["callerAgent", /^[A-Za-z][A-Za-z0-9._-]{0,47}(?:\/[0-9A-Za-z][0-9A-Za-z.+_-]{0,31})?$/],
   // Web error beacon: a route PATTERN of lowercase literal and `$param`
   // segments (never a concrete path or id) and the bundle revision token, in
   // the exact wire grammar the API route admits.
@@ -723,6 +733,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "HostExportOperationError",
   "HttpOperationError",
   "IndependentSessionTitleError",
+  "InteractionControllerOperationError",
   "KnowledgeIndexOperationError",
   "McpLifecycleError",
   "McpOperationError",
@@ -783,6 +794,7 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "independent_session_title_provider_request_failed",
   "independent_session_title_response_failed",
   "independent_session_title_settlement_failed",
+  "interaction_controller_create_refused",
   "internal_error",
   "knowledge_index_defer_failed",
   "knowledge_index_embedding_failed",
@@ -2030,6 +2042,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     return {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
+      ...projectInteractionControllerDiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
@@ -2099,6 +2112,21 @@ function projectContextCompactionAttributes(attributes: Attributes): Attributes 
       projected[key] = value;
   }
   return projected;
+}
+
+/**
+ * A browser or computer create the controller refused is settled as a failed
+ * receipt, not an HTTP failure, so this is where its reviewed cause (driver
+ * error class and code frame, never text from the machine) is logged.
+ */
+function projectInteractionControllerDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "InteractionControllerOperationError") return {};
+  const op = attributes.op;
+  return {
+    ...(op === "browser.create" || op === "computer.create" ? { op } : {}),
+    ...(attributes.outcome === "failed" ? { outcome: "failed" } : {}),
+    ...projectErrorCauseAttributes(attributes),
+  };
 }
 
 function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {

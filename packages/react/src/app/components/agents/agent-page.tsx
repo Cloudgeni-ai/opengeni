@@ -24,6 +24,7 @@ import { MetaChip } from "../../../ui/meta-chip";
 import { RelativeTime } from "../../../ui/relative-time";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { SettingDangerRow, SettingRow } from "../../../ui/setting-row";
+import { RowSelect } from "../settings/row-select";
 import { Switch } from "../../../ui/switch";
 import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
@@ -35,6 +36,7 @@ import { toast } from "../../lib/toast";
 import { slackLogo } from "../new-session-starter-logos";
 import { SessionAvatar } from "../session/session-avatar";
 import { DestructiveConfirm } from "../ui/destructive-confirm";
+import { useAgentCostText } from "./agent-cost";
 import {
   AgentCanUse,
   AgentMemoryEntries,
@@ -76,6 +78,69 @@ export function agentAudienceLabel(
   if (visibility === "private") return "Only me";
   if (visibility === "organization") return organizationPeopleLabel(names.organizationName);
   return workspacePeopleLabel(names.workspaceName);
+}
+
+/** "Who can edit": the two choices, as the agent page offers them. */
+export const AGENT_EDIT_ACCESS_OPTIONS = [
+  { value: "creator_and_admins", label: "Creator and admins" },
+  { value: "everyone", label: "Everyone in workspace" },
+] as const satisfies readonly { value: Agent["editAccess"]; label: string }[];
+
+/** Who may change who can use or edit it, and delete it; older servers said `canEdit`. */
+export function agentViewerCanManage(agent: Pick<Agent, "viewer">): boolean {
+  return agent.viewer.canManage ?? agent.viewer.canEdit;
+}
+
+/** "Who can edit" a shared agent: its creator and admins, or everyone in the workspace. */
+function EditAccessRow({
+  agent,
+  workspaceId,
+  onSaved,
+}: {
+  agent: Agent;
+  workspaceId: string;
+  onSaved: (agent: Agent) => void;
+}) {
+  const { client } = useAppContext();
+  const [pending, setPending] = useState<Agent["editAccess"] | null>(null);
+  const canManage = agentViewerCanManage(agent);
+  return (
+    <SettingRow
+      label="Who can edit"
+      controlWidth="select"
+      data-agent-edit-access=""
+      control={
+        <RowSelect
+          options={AGENT_EDIT_ACCESS_OPTIONS}
+          value={pending ?? agent.editAccess}
+          disabled={!canManage || pending !== null}
+          {...(canManage
+            ? {}
+            : { disabledReason: "Only whoever made it, or a workspace admin, can change this." })}
+          onValueChange={(next) => {
+            if (next === agent.editAccess) return;
+            setPending(next);
+            client
+              .updateAgent(workspaceId, agent.id, {
+                expectedVersion: agent.version,
+                editAccess: next,
+              })
+              .then(
+                (saved) => onSaved(saved),
+                (error: unknown) =>
+                  toast.error("Couldn't change who can edit it", {
+                    description:
+                      agentErrorCode(error) === "agent_version_conflict"
+                        ? AGENT_VERSION_CONFLICT
+                        : userErrorText(error),
+                  }),
+              )
+              .finally(() => setPending(null));
+          }}
+        />
+      }
+    />
+  );
 }
 
 function SourceIcon({ chat }: { chat: Pick<AgentChat, "source"> }) {
@@ -273,6 +338,8 @@ export function AgentPage({
     onClick: () =>
       void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } }),
   };
+  // What it cost, for people who may see Usage; read before the agent loads.
+  const costText = useAgentCostText({ id: agentId }, workspaceId);
   const agent = state.agent;
   if (agent === undefined) {
     return (
@@ -309,6 +376,16 @@ export function AgentPage({
   const organizationName = workspace
     ? orgName(workspace.accountId, accessContext.accountGrants)
     : null;
+  const meta = [
+    ...(agent.description ? [agent.description] : []),
+    ...(costText
+      ? [
+          <span key="cost" className="tabular-nums" data-agent-cost="">
+            {costText}
+          </span>,
+        ]
+      : []),
+  ];
   const saved = (next: Agent) => {
     state.set(next);
     forgetSessionAgent(workspaceId, next.id);
@@ -340,7 +417,7 @@ export function AgentPage({
         chips={
           agent.visibility === "private" ? <MetaChip variant="soft">Only me</MetaChip> : undefined
         }
-        meta={agent.description ? [agent.description] : undefined}
+        meta={meta.length > 0 ? meta : undefined}
         actions={
           <>
             <Button
@@ -390,6 +467,9 @@ export function AgentPage({
               organizationName,
             })}
           </p>
+          {agent.visibility !== "private" ? (
+            <EditAccessRow agent={agent} workspaceId={workspaceId} onSaved={saved} />
+          ) : null}
           {/* The host's Slack rows name the app as each Slack workspace knows it. */}
           {agent.slack.length > 0 && !renderSlack ? (
             <p className="m-0 text-sm text-fg-muted" data-agent-slack-line="">
@@ -403,7 +483,7 @@ export function AgentPage({
         </DetailSection>
         <AgentSkills agent={agent} workspaceId={workspaceId} onSaved={saved} />
         <AgentChats agent={agent} workspaceId={workspaceId} />
-        {agent.viewer.canEdit ? (
+        {agentViewerCanManage(agent) ? (
           <SettingDangerRow
             label="Delete agent"
             description="Its chats stay as ordinary chats."

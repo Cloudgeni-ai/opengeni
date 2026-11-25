@@ -24,6 +24,17 @@ describe("integration names in a query", () => {
     expect(integrationVendorWord("x.ai")).toBeNull();
   });
 
+  test("the platform's own domain names none of its built-in integrations", () => {
+    expect(integrationVendorWord("opengeni.ai")).toBeNull();
+    expect(
+      kinds("count the issues in the current Opengeni app", "Connected Machine", "opengeni.ai"),
+    ).toEqual([]);
+    // Its own name still names it.
+    expect(kinds("set up a Connected Machine", "Connected Machine", "opengeni.ai")).toEqual([
+      "name",
+    ]);
+  });
+
   test("a subdomain word is never the vendor's word", () => {
     expect(kinds("read the docs for this API", "Voice Agents", "docs.synthflow.ai")).toEqual([]);
     expect(kinds("ask the developers", "Intercom", "developers.intercom.com")).toEqual([]);

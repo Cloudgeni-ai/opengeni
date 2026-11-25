@@ -1,5 +1,62 @@
 import { describe, expect, test } from "bun:test";
-import { SITE_UI_CSS, resolveSiteUiStylesheet } from "./site-ui";
+import { SITE_CHARTS_JS, SITE_UI_CSS, resolveSiteUiStylesheet } from "./site-ui";
+
+describe("chart helpers", () => {
+  test("inline the opt-in script tag and leave other scripts alone", () => {
+    for (const tag of [
+      '<script src="/__opengeni/charts.js"></script>',
+      "<script src='/__opengeni/charts.js' defer></script>",
+      "<SCRIPT src=/__opengeni/charts.js></SCRIPT>",
+    ]) {
+      const out = resolveSiteUiStylesheet(`<head>${tag}</head>`);
+      expect(out).toContain("<script data-opengeni-charts>");
+      expect(out).not.toContain("/__opengeni/charts.js");
+    }
+    const html = [
+      '<script src="/__opengeni/charts.jsx"></script>',
+      '<script src="/__opengeni/charts.js">alert(1)</script>',
+      '<!-- <script src="/__opengeni/charts.js"></script> -->',
+      "<script>const s = '<script src=\"/__opengeni/charts.js\"><\\/script>';</script>",
+    ].join("");
+    expect(resolveSiteUiStylesheet(html)).toBe(html);
+  });
+
+  test("the runtime defines og once with formats that read well", () => {
+    const scope = globalThis as unknown as { window?: Record<string, unknown> };
+    const previous = scope.window;
+    scope.window = {};
+    try {
+      new Function(SITE_CHARTS_JS)();
+      type Format = (v: unknown, o?: unknown) => unknown;
+      const og = scope.window.og as {
+        fmt: Record<"pct" | "money" | "compact" | "ms" | "num" | "delta", Format>;
+      } & Record<string, unknown>;
+      for (const name of ["kpis", "bars", "line", "scatter", "table"])
+        expect(typeof og[name]).toBe("function");
+      new Function(SITE_CHARTS_JS)();
+      expect(scope.window.og).toBe(og);
+      expect(og.fmt.pct(56.14)).toBe("56.1%");
+      expect(og.fmt.money(0.531)).toBe("$0.53");
+      expect(og.fmt.money(3_120_000)).toBe("$3.1M");
+      expect(og.fmt.compact(2_286_002)).toBe("2.3M");
+      expect(og.fmt.ms(1840)).toBe("1.8 s");
+      expect(og.fmt.num(null)).toBe("\u2014");
+      expect(og.fmt.delta(-18, { better: "lower" })).toEqual({
+        text: "\u25BC \u221218%",
+        tone: "good",
+      });
+      expect(og.fmt.delta(1.7, { unit: "pp" })).toEqual({ text: "\u25B2 +1.7 pp", tone: "good" });
+    } finally {
+      if (previous === undefined) delete scope.window;
+      else scope.window = previous;
+    }
+  });
+
+  test("the stylesheet defines every series colour for light and both dark forms", () => {
+    for (let i = 1; i <= 6; i++)
+      expect(SITE_UI_CSS.match(new RegExp(`--og-series-${i}:`, "g"))).toHaveLength(3);
+  });
+});
 
 describe("resolveSiteUiStylesheet", () => {
   test("inlines the opt-in stylesheet tag in any attribute order", () => {
@@ -67,5 +124,10 @@ describe("resolveSiteUiStylesheet", () => {
     expect(SITE_UI_CSS).toContain("@media (prefers-color-scheme:dark)");
     expect(SITE_UI_CSS).toContain(":root[data-og-theme=dark]");
     expect(SITE_UI_CSS).not.toMatch(/(^|[}\s])(body|html|\*)\s*\{/);
+  });
+
+  test("sizes text in rem, so the reader's text size applies, and keeps phone inputs at 16px", () => {
+    expect(SITE_UI_CSS).not.toMatch(/(font-size|line-height):\s*[\d.]+px|font:[^;}]*\d+px/);
+    expect(SITE_UI_CSS).toContain("@media (pointer:coarse){.og-input{font-size:1rem}}");
   });
 });

@@ -12,13 +12,21 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
-import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
+import {
+  AGENT_LIST_CHATS_TOOL,
+  assertGoalResumeAllowed,
+  createGitHubPersonalEventSource,
+  MissingPermissionRefusal,
+  personalGitHubReader,
+} from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { registerSidebarLayoutTools } from "./sidebar-layout-tools";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { listEventSources as listSessionLinkEventSources } from "@opengeni/db";
+import { getAppServerManifest } from "@opengeni/db";
+import { appServerObjectKey } from "@opengeni/contracts";
 import { sessionLinkGitHubWakeTarget } from "../integrations/session-link-status";
 import {
   registerSessionCoordinationTools,
@@ -37,6 +45,7 @@ import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./use
 import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
+  inlineAppSource,
   workspaceArtifactDownloads,
 } from "../site-uploads";
 import {
@@ -136,6 +145,7 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   appendTurnCapabilityCardOnce,
+  withConnectionCardNotice,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   getSandbox,
@@ -221,6 +231,8 @@ import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-er
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
 import { registerAppSyncTools } from "./app-sync-tools";
+import { registerAppServerTools } from "./app-server-tools";
+import { registerAppWebhookTools } from "./app-webhook-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerAppPackageTools } from "./app-package-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
@@ -234,6 +246,10 @@ import {
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
   scheduledTaskOverlapPolicyToolInput,
+  scheduledTaskAgentNameRefusal,
+  scheduledTaskAgentNameToolInput,
+  scheduledTaskUpdateToolValidation,
+  withResolvedScheduledTaskAgent,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
 import {
@@ -505,6 +521,9 @@ import {
   scheduledTaskForGrant,
   pauseScheduledTaskAsAdmin,
   pausePrivateScheduledTaskAsAdmin,
+  resumeScheduledTaskAsAdmin,
+  scheduledTaskTogglesAsAdmin,
+  scheduledTaskFinishedOnce,
   requirePausableScheduledTask,
   requireVisibleScheduledTask,
   scheduledTaskAccess,
@@ -696,8 +715,10 @@ import {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   agentRefToolInput,
+  delegatedChatHasListChatsTool,
   delegatedChatInstructions,
   resolveDelegationAgent,
+  delegationAgentSubject,
 } from "../agent-delegation";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -1064,6 +1085,16 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
           .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
           .strict()
           .optional(),
+        agentConfigPatch: z4
+          .object({
+            ...UpdateScheduledTaskRequest.out.shape.agentConfigPatch.unwrap().shape,
+            agentName: scheduledTaskAgentNameToolInput(),
+          })
+          .strict()
+          .optional()
+          .describe(
+            "Change prompt, model, reasoningEffort or the agent (agentName or agentId; null removes it) without replacing agentConfig.",
+          ),
         ...(events ? { events: scheduledTaskEventsToolInput() } : {}),
       })
       // Only a person pins connector accounts; agents never do.
@@ -1075,7 +1106,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         ...(events ? {} : { events: true as const }),
       })
       .strict(),
-    UpdateScheduledTaskRequest,
+    scheduledTaskUpdateToolValidation(),
   );
 const scheduledTaskUpdateToolInputs = {
   withEvents: staticToolInput(() => buildScheduledTaskUpdateToolInput(true)),
@@ -1687,7 +1718,11 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       wake: () => sessionLinkWake,
-      wakeTarget: (link) => sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link),
+      wakeTarget: async (link) =>
+        await sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link, async () => {
+          const { subjectId } = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+          return subjectId ? { accountId: grant.accountId, subjectId } : null;
+        }),
       json,
     });
   }
@@ -1825,6 +1860,26 @@ export function buildOpenGeniMcpServer(
       siteAgent,
     );
     registerAppSyncTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
+    registerAppWebhookTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
+    registerAppServerTools(
       server,
       deps,
       grant,
@@ -2625,11 +2680,21 @@ export function buildOpenGeniMcpServer(
         ),
       },
       async (rawArgs) => {
-        const { input: args, timeZoneDefault } = await withAgentScheduleTimeZone(
+        const { input: zonedArgs, timeZoneDefault } = await withAgentScheduleTimeZone(
           deps.db,
           grant,
           rawArgs,
         );
+        // An agent named by name runs as the person this chat acts for may use it.
+        const args = await withResolvedScheduledTaskAgent(zonedArgs, async (ref) => {
+          const resolved = await resolveDelegationAgent(deps, grant, grant.workspaceId, ref);
+          return resolved.ok
+            ? { ok: true, agentId: resolved.agent.id }
+            : {
+                ok: false,
+                message: scheduledTaskAgentNameRefusal(ref, resolved) ?? resolved.message,
+              };
+        });
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -2696,13 +2761,61 @@ export function buildOpenGeniMcpServer(
           return { automationId: pending.id, name: pending.name, once: true, existing: true };
         }
         const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
-        const source = (
-          await listSessionLinkEventSources(deps.db, grant.workspaceId, viewer.subjectId)
-        ).find(
-          (candidate) =>
-            candidate.kind === "github" &&
-            sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+        // The workspace's GitHub App source, or, where only the person's own
+        // GitHub connection can read the repository, their "GitHub (your
+        // connection)" source, added on first use.
+        const sources = await listSessionLinkEventSources(
+          deps.db,
+          grant.workspaceId,
+          viewer.subjectId,
         );
+        const usable = (kind: "github" | "github_personal") =>
+          sources.find(
+            (candidate) =>
+              candidate.kind === kind &&
+              (kind === "github" || candidate.ownerSubjectId === viewer.subjectId) &&
+              sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+          );
+        let kind: "github" | "github_personal" =
+          wake.via === "personal" ? "github_personal" : "github";
+        let source: { id: string } | undefined = usable(kind);
+        // The App reads the repository but the workspace has no GitHub event
+        // source: the person's own connection can still watch it.
+        const repository = wake.conditions.find(
+          (condition) => condition.field === "data.repository.full_name",
+        )?.value;
+        if (
+          !source &&
+          kind === "github" &&
+          viewer.subjectId &&
+          typeof repository === "string" &&
+          (await personalGitHubReader(
+            { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              subjectId: viewer.subjectId,
+              repository,
+            },
+          ).catch(() => null))
+        ) {
+          kind = "github_personal";
+          source = usable(kind);
+        }
+        if (!source && kind === "github_personal" && viewer.subjectId) {
+          source = await createGitHubPersonalEventSource({
+            db: deps.db,
+            settings: deps.settings,
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            createdBySubjectId: grant.subjectId,
+            ownerSubjectId: viewer.subjectId,
+          }).catch((error: unknown) => {
+            throw new ToolArgumentError(
+              `${errorMessage(error)} The link was added without a wake.`,
+            );
+          });
+        }
         if (!source) {
           throw new ToolArgumentError(
             "No GitHub event source is available. A person adds it in Automations (it needs the workspace's GitHub app); the link was added without a wake.",
@@ -2772,7 +2885,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_update",
       {
         description:
-          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top." +
+          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. To change the model, reasoning or agent of each run use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input. A schedule whose configuration.connectors is workspace_default keeps following the workspace's default connectors; its agentConfig.tools lists only connectors added on top." +
           (eventTriggers
             ? " events replaces the event triggers and their run policy; triggers: [] removes them."
             : ""),
@@ -2781,11 +2894,27 @@ export function buildOpenGeniMcpServer(
       async ({ id, ...requested }) => {
         const existing = await requireVisibleTask(id);
         const previous: ScheduledTaskRestoreState = { task: existing };
-        const { input: raw, timeZoneDefault } = await withAgentScheduleTimeZone(
+        const { input: zoned, timeZoneDefault } = await withAgentScheduleTimeZone(
           deps.db,
           grant,
           requested,
           existing.schedule,
+        );
+        // An agent named by name runs as the person this chat acts for may use it.
+        const raw = await withResolvedScheduledTaskAgent(
+          zoned,
+          async (ref) => {
+            const resolved = await resolveDelegationAgent(deps, grant, grant.workspaceId, ref);
+            return resolved.ok
+              ? { ok: true, agentId: resolved.agent.id }
+              : {
+                  ok: false,
+                  message:
+                    scheduledTaskAgentNameRefusal(ref, resolved, "agentConfigPatch") ??
+                    resolved.message,
+                };
+          },
+          "agentConfigPatch",
         );
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>
@@ -2878,11 +3007,8 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
-        const adminPause =
-          viewer.admin &&
-          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
-        const task = adminPause
-          ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
+        const task = scheduledTaskTogglesAsAdmin(viewer, existing)
+          ? await pauseScheduledTaskAsAdmin(deps.db, grant, existing)
           : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
           db: deps.db,
@@ -2902,10 +3028,23 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireVisibleTask(id);
-        if (existing.status === "active") {
+        // An active one is already on, unless it ran once and needs re-arming.
+        if (existing.status === "active" && !(await scheduledTaskFinishedOnce(deps.db, existing))) {
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
+        // Admins resume what they may pause; editing and running stay with the owner.
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+        if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
+          const task = await resumeScheduledTaskAsAdmin(deps.db, grant, existing);
+          await syncUpdatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            previous,
+            task,
+          });
+          return json(scheduledTaskReceipt("scheduled_tasks_resume", task, "updated", true));
+        }
         const update = await validatedScheduledTaskUpdate({
           githubPersonalFetch: deps.githubPersonalFetch,
           settings: deps.settings,
@@ -4471,7 +4610,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_prepare_upload",
     {
       description:
-        "Get signed upload URLs for an app's HTML, optional source JSON and, for a multi-file build, optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.",
+        'Get signed upload URLs for an app\'s HTML, optional source JSON, for a multi-file build optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML, and optional server code JSON {main, files: [{path, content}], tools?, egress?, secrets?} (see the sites Skill; omit it to keep the current code, {"files": []} removes it). Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.',
       inputSchema: {},
     },
     async () => {
@@ -4484,7 +4623,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_get_source",
     {
       description:
-        "Get artifact metadata, version id, and signed download URLs for HTML and optional source JSON. Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
+        "Get artifact metadata, version id, and the version's source: its source JSON (or HTML when source is null; edit the HTML then) and its server code files (server, null without code). Each comes with a signed download URL, and with its text in content when the whole app is small; download only what has no content, with curl or Bun. Omit versionId for the current version.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         versionId: z4.string().uuid().optional(),
@@ -4510,11 +4649,55 @@ function registerWorkspaceArtifactTools(
         projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
         projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
       ]);
-      const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
+      const storage = deps.objectStorage;
+      const [downloads, serverManifest] = await Promise.all([
+        workspaceArtifactDownloads(storage, ref, "sandbox"),
+        getAppServerManifest(deps.db, grant.workspaceId, artifactId, ref.version.id),
+      ]);
+      const inline = await inlineAppSource(
+        storage,
+        ref,
+        (serverManifest?.files ?? []).map((file) => ({
+          key: appServerObjectKey(grant.workspaceId, file.sha256),
+          sizeBytes: file.sizeBytes,
+        })),
+      );
+      if (inline.page !== null) {
+        if (downloads.source) Object.assign(downloads.source, { content: inline.page });
+        else Object.assign(downloads.html, { content: inline.page });
+      }
+      // The version's server code: download each file to edit it, then upload
+      // the whole bundle again ({main, files, tools, egress, secrets,
+      // toolResults}); keeping toolResults keeps what env.tools.call returns.
+      const serverCode = serverManifest
+        ? {
+            main: serverManifest.main,
+            tools: serverManifest.tools ?? [],
+            egress: serverManifest.egress,
+            secrets: serverManifest.secrets,
+            toolResults: serverManifest.toolResults ?? "raw",
+            files: await Promise.all(
+              serverManifest.files.map(async (file, index) => {
+                const signed = await storage.createGetUrl({
+                  key: appServerObjectKey(grant.workspaceId, file.sha256),
+                  audience: "sandbox",
+                });
+                const content = inline.server[index] ?? null;
+                return {
+                  path: file.path,
+                  url: signed.url,
+                  expiresAt: signed.expiresAt,
+                  ...(content === null ? {} : { content }),
+                };
+              }),
+            ),
+          }
+        : null;
       return json({
         detail,
         version: projectedVersion,
         downloads,
+        server: serverCode,
         artifactReference: `[Open app](artifact:${artifactId})`,
       });
     },
@@ -7198,6 +7381,13 @@ function registerWorkspaceOrchestrationTools(
           const { machineTarget, title, projectId, agentName, ...request } = args;
           // Delegation by name: the child is a chat with that agent.
           let delegated: { agentId: string; instructions?: string } | null = null;
+          // Its Memory's `slack_agent_chats`, added like an app chat's
+          // addition. Only a chat created without a calling chat follows the
+          // defaults and takes additions; a child sees only what its parent
+          // sees.
+          let delegatedFirstPartyAdditions: FirstPartyMcpToolName[] = [];
+          // Whose agents the child may run, when not the grant's subject.
+          let agentAccessSubjectId: string | undefined;
           if (agentName !== undefined) {
             // The child inherits the calling chat's privacy; its Memory
             // guidance must match what the knowledge tools will allow.
@@ -7218,17 +7408,37 @@ function registerWorkspaceOrchestrationTools(
               caller,
             );
             if (!resolved.ok) return agentDelegationFailureResult(resolved.code, resolved.message);
+            const createRequest = request as {
+              firstPartyMcpTools?: FirstPartyMcpToolName[];
+              firstPartyMcpPermissions?: Permission[];
+            };
+            const listChatsTool =
+              resolved.agent.memoryEnabled &&
+              (await delegatedChatHasListChatsTool(deps, {
+                workspaceId: grant.workspaceId,
+                callerSessionId,
+                requestedTools: createRequest.firstPartyMcpTools,
+                requestedPermissions: createRequest.firstPartyMcpPermissions,
+              }));
             const instructions = delegatedChatInstructions(resolved.agent, {
               instructions: request.instructions,
               ownerSubjectId: caller?.ownerSubjectId ?? grant.subjectId ?? null,
               private: caller?.private ?? false,
               slackDm: caller?.slackDm ?? false,
               memoryOff: request.memoryScope === "off" || (caller?.memoryOff ?? false),
+              listChatsTool,
             });
+            if (listChatsTool && callerSessionId === null) {
+              delegatedFirstPartyAdditions = [AGENT_LIST_CHATS_TOOL];
+            }
             delegated = {
               agentId: resolved.agent.id,
               ...(instructions !== undefined ? { instructions } : {}),
             };
+            const agentSubject = delegationAgentSubject(grant, caller);
+            if (agentSubject && agentSubject !== grant.subjectId) {
+              agentAccessSubjectId = agentSubject;
+            }
           }
           const rawRequest = {
             ...request,
@@ -7255,6 +7465,12 @@ function registerWorkspaceOrchestrationTools(
             rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
+            {
+              ...(agentAccessSubjectId ? { agentAccessSubjectId } : {}),
+              ...(delegatedFirstPartyAdditions.length
+                ? { firstPartyMcpToolAdditions: delegatedFirstPartyAdditions }
+                : {}),
+            },
           );
           return json(
             sessionCreateMutationReceipt(
@@ -8900,7 +9116,7 @@ function registerCapabilityDiscoveryTools(
         claims.callerTurnId,
         claims.callerExecutionGeneration,
         claims.callerAttemptId,
-        [{ type: "tool.auth_needed", payload }],
+        withConnectionCardNotice([{ type: "tool.auth_needed" as const, payload }]),
       );
       if (!appended.accepted) {
         throw new Error("The calling turn was replaced before the setup request committed.");
@@ -9205,7 +9421,7 @@ async function appendCapabilityCardEvent(
     claims.callerTurnId,
     claims.callerExecutionGeneration,
     claims.callerAttemptId,
-    [{ type: "tool.auth_needed", payload }],
+    withConnectionCardNotice([{ type: "tool.auth_needed" as const, payload }]),
   );
   if (!appended.accepted) {
     throw new Error("The calling turn was replaced before the authorization request committed.");

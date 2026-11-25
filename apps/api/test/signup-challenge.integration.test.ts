@@ -412,7 +412,7 @@ test("broker OAuth persists the pass in server state and replays without consumi
   }
 }, 120_000);
 
-test("email sign-in requires the challenge when it is enabled, and not when it is off", async () => {
+test("email sign-in requires the challenge when its setting is on, and not when it is off", async () => {
   if (!shared || !client) return;
   const enabled = testSettings({
     databaseUrl: shared.appUrl,
@@ -420,9 +420,13 @@ test("email sign-in requires the challenge when it is enabled, and not when it i
     publicBaseUrl: "http://opengeni.test",
     betterAuthSecret: "signin-challenge-test-secret-at-least-32-bytes",
     signupChallengeEnabled: true,
+    signInChallengeEnabled: true,
     signupChallengeHostnames: "opengeni.test",
     signupChallengeSecretKey: "mock-secret",
   });
+  // Sign-up's challenge alone (the default) leaves sign-in as it was, and so
+  // does the sign-in setting without sign-up's challenge.
+  const signupOnly = { ...enabled, signInChallengeEnabled: false };
   const disabled = { ...enabled, signupChallengeEnabled: false };
   const transport = {
     sender: "auth@example.test",
@@ -541,12 +545,23 @@ test("email sign-in requires the challenge when it is enabled, and not when it i
         })
       ).status,
     ).toBe(401);
-    // With the challenge off, sign-in needs no token and never calls Siteverify.
-    const before = verifications;
-    const plain = await post(appFor(disabled), "/v1/auth/sign-in/email", { email, password });
-    expect(plain.status).toBe(200);
-    expect(plain.headers.getSetCookie().some((v) => v.includes("session_token="))).toBe(true);
-    expect(verifications).toBe(before);
+    // With either setting off, sign-in needs no token and never calls Siteverify.
+    for (const settings of [signupOnly, disabled]) {
+      const before = verifications;
+      const plain = await post(appFor(settings), "/v1/auth/sign-in/email", { email, password });
+      expect(plain.status).toBe(200);
+      expect(plain.headers.getSetCookie().some((v) => v.includes("session_token="))).toBe(true);
+      expect(verifications).toBe(before);
+    }
+    // The client config tells the sign-in form whether to show the widget.
+    const configOf = async (settings: typeof enabled) =>
+      (
+        (await (await appFor(settings).request("/v1/config/client")).json()) as {
+          auth: { signInChallengeRequired?: boolean };
+        }
+      ).auth.signInChallengeRequired;
+    expect(await configOf(enabled)).toBe(true);
+    expect(await configOf(signupOnly)).toBeUndefined();
   } finally {
     globalThis.fetch = originalFetch;
   }

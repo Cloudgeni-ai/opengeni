@@ -91,7 +91,14 @@ test("expected tool waits and retained interactions do not page; failed and unce
   const faultCases = [
     { outcome: "timeout", failed: 15, success: 45, rejected: 0, rule: failure, value: 0.25 },
     // Refused arguments neither page nor dilute real failures.
-    { outcome: "timeout", failed: 15, success: 45, rejected: 300, rule: failure, value: 0.25 },
+    {
+      outcome: "provider_declared_error",
+      failed: 15,
+      success: 45,
+      rejected: 300,
+      rule: failure,
+      value: 0.25,
+    },
     {
       outcome: "outcome_uncertain",
       failed: 1,
@@ -105,15 +112,15 @@ test("expected tool waits and retained interactions do not page; failed and unce
     interval: "1m",
     input_series: [
       {
-        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="${outcome}"}`,
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},tool="external",outcome="${outcome}"}`,
         values: `0+${failed}x30`,
       },
       {
-        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="success"}`,
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},tool="external",outcome="success"}`,
         values: `0+${success}x30`,
       },
       {
-        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="rejected"}`,
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},tool="external",outcome="rejected"}`,
         values: `0+${rejected}x30`,
       },
     ],
@@ -133,15 +140,15 @@ test("expected tool waits and retained interactions do not page; failed and unce
   // A tool refusing the agent's own arguments is the caller's mistake, not a
   // tool failure: even when most calls are refused, nothing pages.
   const rejectedCase = {
-    name: "argument rejections do not page",
+    name: "external argument rejections do not page",
     interval: "1m",
     input_series: [
       {
-        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="rejected"}`,
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},tool="external",outcome="rejected"}`,
         values: "0+30x30",
       },
       {
-        series: `opengeni_mcp_tool_calls_total{${scopeLabels},outcome="success"}`,
+        series: `opengeni_mcp_tool_calls_total{${scopeLabels},tool="external",outcome="success"}`,
         values: "0+10x30",
       },
     ],

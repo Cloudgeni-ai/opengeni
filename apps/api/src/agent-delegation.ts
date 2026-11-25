@@ -2,9 +2,23 @@ import {
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   type AccessGrant,
   type AgentErrorCode,
+  type FirstPartyMcpToolName,
+  type Permission,
 } from "@opengeni/contracts";
-import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
-import { resolveWorkspaceAgentRef, type AgentRecord } from "@opengeni/db";
+import { resolveFirstPartyMcpToolPolicy, resolveSessionFirstPartyMcpTools } from "@opengeni/config";
+import {
+  AGENT_LIST_CHATS_TOOL,
+  agentListChatsToolPermitted,
+  agentMemoryAccess,
+  agentMemoryGuidance,
+  type ApiRouteDeps,
+} from "@opengeni/core";
+import {
+  getSession,
+  requireWorkspace,
+  resolveWorkspaceAgentRef,
+  type AgentRecord,
+} from "@opengeni/db";
 import * as z4 from "zod/v4";
 
 import { isOpenSlackAgentSubject } from "./integrations/slack-open-agents";
@@ -27,7 +41,7 @@ export function agentRefToolInput() {
 
 export type DelegationAgentOutcome =
   | { ok: true; agent: AgentRecord }
-  | { ok: false; code: AgentErrorCode; message: string };
+  | { ok: false; code: AgentErrorCode; message: string; agentIds?: string[] };
 
 /**
  * The calling chat's privacy. The delegated chat inherits the session row's
@@ -42,11 +56,28 @@ export type DelegationCallerChat = {
 };
 
 /**
+ * Whose agents a delegated chat may run: the owner of an Only me calling chat
+ * (its child is the same owner's Only me chat, whoever runs the turn, such as
+ * an Only me automation's run), otherwise the person the grant acts for.
+ */
+export function delegationAgentSubject(
+  grant: Pick<AccessGrant, "subjectId">,
+  caller?: DelegationCallerChat | null,
+): string | null {
+  if (caller && (caller.onlyMe ?? caller.private) && caller.ownerSubjectId) {
+    return caller.ownerSubjectId;
+  }
+  return grant.subjectId ?? null;
+}
+
+/**
  * The agent a delegation names, as the person the grant acts for may use it.
  * An open Slack chat acts for someone outside the workspace: only agents
  * anyone in the organization can use are reachable from it. A shared calling
  * chat makes a shared child, which can't run an Only me agent, so only shared
- * agents are considered (and an ambiguous name never lists Only me ones).
+ * agents are considered (and an ambiguous name never lists Only me ones). An
+ * Only me calling chat considers its owner's agents (see
+ * delegationAgentSubject).
  */
 export async function resolveDelegationAgent(
   deps: Pick<ApiRouteDeps, "db">,
@@ -62,7 +93,7 @@ export async function resolveDelegationAgent(
     { accountId: grant.accountId, workspaceId },
     {
       ref,
-      viewerSubjectId: openUse || sharedChild ? null : (grant.subjectId ?? null),
+      viewerSubjectId: openUse || sharedChild ? null : delegationAgentSubject(grant, caller),
       // Filtered before the ambiguity check, so an outsider never sees ids
       // of agents they can't use.
       ...(openUse ? { organizationAccessOnly: true } : {}),
@@ -72,6 +103,7 @@ export async function resolveDelegationAgent(
     return {
       ok: false,
       code: "agent_name_ambiguous",
+      agentIds: outcome.agentIds,
       message: `More than one agent is named "${ref.trim()}". Use one of these ids: ${outcome.agentIds.join(", ")}.`,
     };
   }
@@ -86,9 +118,49 @@ export async function resolveDelegationAgent(
 }
 
 /**
+ * Whether the delegated chat will have `slack_agent_chats`. A chat created
+ * from a chat is its child: it sees only what its parent sees (its explicit
+ * list may only narrow the parent's effective selection) under the parent's
+ * permission ceiling, so it has the tool only when its parent does. A chat
+ * created without a calling chat follows the defaults, where session creation
+ * adds the tool as an app chat's addition, unless the request names its own
+ * list without it.
+ */
+export async function delegatedChatHasListChatsTool(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    callerSessionId: string | null;
+    requestedTools: readonly FirstPartyMcpToolName[] | undefined;
+    requestedPermissions: readonly Permission[] | undefined;
+  },
+): Promise<boolean> {
+  if (!resolveFirstPartyMcpToolPolicy(deps.settings).allowed.includes(AGENT_LIST_CHATS_TOOL)) {
+    return false;
+  }
+  const requested = input.requestedTools?.includes(AGENT_LIST_CHATS_TOOL) ?? true;
+  if (input.callerSessionId === null) {
+    return requested && agentListChatsToolPermitted(input.requestedPermissions);
+  }
+  const parent = await getSession(deps.db, input.workspaceId, input.callerSessionId);
+  if (!parent) return false;
+  const parentTools = resolveSessionFirstPartyMcpTools(
+    deps.settings,
+    parent,
+    (await requireWorkspace(deps.db, input.workspaceId)).settings,
+  );
+  return (
+    requested &&
+    parentTools.includes(AGENT_LIST_CHATS_TOOL) &&
+    agentListChatsToolPermitted(input.requestedPermissions ?? parent.firstPartyMcpPermissions)
+  );
+}
+
+/**
  * The delegated chat's Memory guidance, joined to its own instructions, the
- * way an app chat with the agent gets it. Unchanged when Memory is off or
- * there is no room: the knowledge tools still enforce the rules.
+ * way an app chat with the agent gets it. The `slack_agent_chats` sentence is
+ * left out when the chat won't have that tool. Unchanged when Memory is off
+ * or there is no room: the knowledge tools still enforce the rules.
  */
 export function delegatedChatInstructions(
   agent: AgentRecord,
@@ -98,6 +170,7 @@ export function delegatedChatInstructions(
     private: boolean;
     slackDm?: boolean;
     memoryOff?: boolean;
+    listChatsTool: boolean;
   },
 ): string | undefined {
   if (!agent.memoryEnabled) return input.instructions;
@@ -108,6 +181,7 @@ export function delegatedChatInstructions(
       memoryOff: input.memoryOff ?? false,
       slackDm: input.slackDm ?? false,
     }),
+    { listChatsTool: input.listChatsTool },
   );
   if (!guidance) return input.instructions;
   const own = input.instructions?.trim() ?? "";

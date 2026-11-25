@@ -139,6 +139,56 @@ export function shouldPublishToolAuthNeededForTurn(
 }
 
 /**
+ * Remembers which connection cards a turn already posted. A tool that hits
+ * the same missing or lapsed access again in the same turn (the agent
+ * retried, or ran several calls that need it) reuses the card already in the
+ * chat instead of posting an identical one. Agent capability requests and
+ * host cards are never folded together. A repeat waits for the first card;
+ * when that one failed to post, the repeat posts it.
+ */
+export function createToolAuthNeededCardLedger(): {
+  post(payload: ToolAuthNeededPayload, publish: () => Promise<void>): Promise<void>;
+} {
+  const posted = new Map<string, Promise<void>>();
+  return {
+    async post(payload, publish) {
+      // Agent requests are their own cards; a host's card carries a freshly
+      // minted sign-in link, so each one is posted.
+      if (payload.capability || payload.setupRequest || payload.authoritySource === "host") {
+        return await publish();
+      }
+      const key = JSON.stringify([
+        payload.serverId,
+        payload.providerDomain.trim().toLowerCase(),
+        payload.connectionId ?? null,
+        payload.reason,
+        [...new Set(payload.scopes ?? [])].sort(),
+        payload.resource ?? null,
+      ]);
+      // After a failed post, a concurrent repeat may already be posting it
+      // again: wait for that one rather than posting another copy.
+      for (let earlier = posted.get(key); earlier; earlier = posted.get(key)) {
+        try {
+          await earlier;
+          return;
+        } catch {
+          // That card never posted: unless another ask took over, this one posts it.
+          if (posted.get(key) === earlier) posted.delete(key);
+        }
+      }
+      const current = publish();
+      posted.set(key, current);
+      try {
+        await current;
+      } catch (error) {
+        if (posted.get(key) === current) posted.delete(key);
+        throw error;
+      }
+    },
+  };
+}
+
+/**
  * Keep host-owned auth events inert in browsers from before authoritySource
  * existed. Those bundles treat unsupported_auth as unavailable and therefore
  * do not invoke native OAuth; upgraded clients read hostReason and the

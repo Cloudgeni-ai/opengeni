@@ -732,3 +732,105 @@ test("a composer that mounts again opens Connectors from the last rows, refreshi
   await act(async () => againRoot.unmount());
   again.remove();
 });
+
+test("Reconnect required comes from the server, so it survives a reload or another device until reconnected", async () => {
+  // A Personal workspace's connector carried from another workspace: the
+  // catalog keeps listing it while the person's account there needs
+  // reconnecting, and the account inventory says so.
+  const entry = {
+    id: "mcp:atlassian",
+    name: "Atlassian",
+    kind: "mcp",
+    enabled: true,
+    // Listed, not runnable, while the account needs reconnecting.
+    runtime: { available: false, mcpServerId: "atlassian" },
+    lifecycle: { readiness: "attention" },
+    connectionRef: {
+      providerDomain: "mcp.atlassian.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    },
+  } as CapabilityCatalogItem;
+  const account = {
+    id: "atlassian-account",
+    providerDomain: "mcp.atlassian.com",
+    kind: "oauth2",
+    subjectId: "user-a",
+    authorityId: "authority-a",
+    turnedOnHere: true,
+    status: "needs_reauth",
+  } as ConnectionMetadata;
+  const server = {
+    items: [entry],
+    connections: [account],
+  };
+  // Each mount gets its own client, as after a reload or on another device:
+  // nothing is remembered between them.
+  const freshClient = () =>
+    ({
+      listCapabilities: async () => ({ items: server.items }),
+      listOwnConnectionAccounts: async () => server.connections,
+      catalogAssetUrl: () => null,
+    }) as unknown as ChatClient<OpenGeniBrowserClient>;
+  const props = {
+    workspaceId: "workspace-a",
+    servers: [{ id: "atlassian", name: "Atlassian" }],
+    selection: { mcpServerIds: new Set(["atlassian"]), firstPartyToolIds: new Set() },
+    firstPartyTools: [],
+    fileUploadsEnabled: false,
+    onToolSelectionChange: () => {},
+  } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  const status = () =>
+    composer!.servers.find((candidate) => candidate.id === "atlassian")?.connectionStatus;
+  const mount = async (mountProps = props) => {
+    context.client = freshClient();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<WorkspaceComposerPlus {...mountProps} />);
+      await Bun.sleep(0);
+    });
+    return async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    };
+  };
+  const refocus = async () =>
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Bun.sleep(0);
+    });
+
+  let unmount = await mount();
+  expect(status()).toBe("reconnect");
+  expect(composer!.connectorActions?.onReconnect).toBeDefined();
+  await refocus();
+  await refocus();
+  expect(status()).toBe("reconnect");
+  await unmount();
+
+  // A reload (or another device) reads it again from the server.
+  unmount = await mount();
+  expect(status()).toBe("reconnect");
+
+  // Reconnected: the account works again and the connector can run.
+  server.connections = [{ ...account, status: "active" } as ConnectionMetadata];
+  server.items = [
+    {
+      ...entry,
+      runtime: { ...entry.runtime, available: true },
+      lifecycle: { ...entry.lifecycle, readiness: "ready" },
+    } as CapabilityCatalogItem,
+  ];
+  await refocus();
+  expect(status()).toBe("ready");
+  await unmount();
+
+  // A connector gone from both the chat's connectors and the catalog leaves no row.
+  server.items = [];
+  server.connections = [account];
+  unmount = await mount({ ...props, servers: [] } as typeof props);
+  expect(status()).toBeUndefined();
+  await unmount();
+});

@@ -12,6 +12,8 @@ const id = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")
 
 let permissions = ["sessions:create"];
 let subjectId = "me";
+/** The router's location state, as the route that navigated here left it. */
+let routerLocationState: Record<string, unknown> | undefined;
 let conversations: Session[] = [];
 let listPage: ((options: SessionListPageOptions) => object) | null = null;
 let fullSessions: Record<string, Session> = {};
@@ -93,8 +95,9 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({
   useAppApi: () => ({
     request: async (path: string, init?: RequestInit) => {
-      // The App connect card reads its own list; these tests count the rest.
+      // The App connect and sync join cards read their own lists; these tests count the rest.
       if (path.endsWith("/tools/site-setup")) return { version: 1, items: [] };
+      if (path.endsWith("/data/syncs")) return { syncs: [] };
       requests.push({ path, init });
       return { id: id(99) };
     },
@@ -105,20 +108,22 @@ mock.module("../lib/navigation", () => ({
   useSearch: () => ({}),
   useStringifySearch: () => () => "",
   // The window bar's module imports these; its title never calls them.
-  usePage: () => null,
-  useRouter: () => ({ state: { location: { pathname: "/" } } }),
+  usePage: () => ({ opensBeside: false, origin: () => "https://console.example" }),
+  useRouter: () => ({ state: { location: { pathname: "/", state: routerLocationState } } }),
   useRouterState: () => undefined,
   Link: ({
     children,
     to,
     params,
     search,
+    state,
     ...props
   }: {
     children: ReactNode;
     to: string;
     params: Record<string, string>;
     search?: Record<string, string>;
+    state?: Record<string, string>;
     "aria-label"?: string;
     "aria-current"?: "page";
   }) => (
@@ -128,7 +133,7 @@ mock.module("../lib/navigation", () => ({
       aria-current={props["aria-current"]}
       onClick={(event) => {
         event.preventDefault();
-        navigations.push({ to, params, search });
+        navigations.push({ to, params, search, ...(state ? { state } : {}) });
       }}
     >
       {children}
@@ -174,6 +179,10 @@ mock.module("../../artifacts", () => ({
       </div>
     );
   },
+}));
+// The same frame, as an app opened as a page draws it.
+mock.module("../../components/artifacts/site-view", () => ({
+  SiteView: (props: { siteId: string }) => <div data-site-view={props.siteId} />,
 }));
 // The Site's own publish form and its management, as the Settings tab uses
 // them; the form's own behaviour is tested with it.
@@ -359,6 +368,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   permissions = ["sessions:create"];
   subjectId = "me";
+  routerLocationState = undefined;
   fullSessions = {};
   siteDetails = async () => siteAt(4);
   siteReads = 0;
@@ -406,7 +416,7 @@ async function render(selected?: string, { startNew }: { startNew?: boolean } = 
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  const draw = async (next?: string, nextStartNew = startNew) => {
+  const draw = async (next?: string, nextStartNew = startNew, publishing = false) => {
     await act(async () => {
       root!.render(
         <module.SiteViewRoute
@@ -414,13 +424,19 @@ async function render(selected?: string, { startNew }: { startNew?: boolean } = 
           siteId={siteId}
           conversation={next}
           startNew={nextStartNew}
+          publishing={publishing}
         />,
       );
     });
     await settle();
   };
   await draw(selected);
-  return { container, rerender: draw };
+  // The publish form is in the address: follow the route's last move to it.
+  const follow = async () => {
+    const last = navigations.at(-1) as { search?: { publishing?: true } } | undefined;
+    await draw(selected, startNew, last?.search?.publishing === true);
+  };
+  return { container, rerender: draw, follow };
 }
 const openConversation = (container: HTMLElement) =>
   container.querySelector("[data-conversation]")?.getAttribute("data-conversation");
@@ -430,6 +446,11 @@ const heading = (container: HTMLElement) => panel(container).querySelector("h2")
 const separator = (container: HTMLElement) =>
   container.querySelector<HTMLElement>("[role='separator']")!;
 const storageKey = "og.site-view.chat:v1:me";
+/** Whether each app's chat is open, per person. */
+const openKey = "og.site-view.chat-open:v1:me";
+const openChoices = (key = openKey) => JSON.parse(localStorage.getItem(key) ?? "{}");
+const leaveClosed = (key = openKey) =>
+  localStorage.setItem(key, JSON.stringify({ [siteId]: false }));
 const press = (element: HTMLElement, key: string, shiftKey = false) =>
   act(async () => {
     element.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey, bubbles: true }));
@@ -459,10 +480,10 @@ test("shows the app with its newest conversation open as a regular chat, without
   expect(hintOptions).toEqual({ siteConversations: true });
   // The sidebar lists the Site's conversations; the panel doesn't repeat them.
   expect(panel(container).querySelector("nav")).toBeNull();
-  // Only the menu's two links; no rows to switch conversations.
+  // Only Open as a full chat; no rows to switch conversations.
   expect(
-    [...panel(container).querySelectorAll("a")].filter((a) => !a.closest("[role='menu']")),
-  ).toHaveLength(0);
+    [...panel(container).querySelectorAll("a")].map((a) => a.getAttribute("aria-label")),
+  ).toEqual(["Open as a full chat"]);
   expect(heading(container)).toBe("Time filters across all graphs");
   // The regular chat route, laid out for a narrow panel.
   expect(conversationProps.at(-1)).toMatchObject({
@@ -639,12 +660,14 @@ test("choosing a conversation ends composing", async () => {
   expect(openConversation(container)).toBe(id(2));
 });
 
-test("the menu opens the conversation as a full chat or the app's details", async () => {
+test("the chat opens as a full chat in one click, and the app's menu opens its settings", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
-  await act(async () => link(container, "Open as a full chat")!.click());
-  await act(async () => link(container, "App details")!.click());
+  await act(async () =>
+    container.querySelector<HTMLElement>("a[aria-label='Open as a full chat']")!.click(),
+  );
+  await act(async () => link(container, "Settings")!.click());
   expect(navigations).toEqual([
     {
       to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -655,11 +678,36 @@ test("the menu opens the conversation as a full chat or the app's details", asyn
       params: { workspaceId, artifactId: siteId },
       // Without a tab the address opens the Site view again.
       search: { tab: "settings" },
+      // Its Back returns to this app.
+      state: { artifactDetailFromSite: siteId },
     },
   ]);
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-archived-message")).toBe(
-    "This app is archived. Restore it from app details.",
+    "This app is archived. Restore it from its settings.",
   );
+});
+
+test("the chat panel copies a link to its conversation", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const written: string[] = [];
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => void written.push(text) },
+  });
+  try {
+    const { container } = await render();
+    const copy = panel(container).querySelectorAll<HTMLElement>("[data-site-chat-copy-link]");
+    expect(copy).toHaveLength(1);
+    expect(copy[0]!.getAttribute("aria-label")).toBe("Copy link to this chat");
+    await act(async () => copy[0]!.click());
+    expect(written).toEqual([
+      `https://console.example/workspaces/${workspaceId}/sessions/${id(1)}`,
+    ]);
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
 });
 
 test("an archived app links to its details, where it can be restored", async () => {
@@ -672,11 +720,12 @@ test("an archived app links to its details, where it can be restored", async () 
   const { container } = await render();
   expect(container.querySelector("[data-site-view]")).toBeNull();
   expect(container.textContent).toContain("This app is archived.");
-  await act(async () => link(container, "Restore it from app details")!.click());
+  await act(async () => link(container, "Restore it from its settings")!.click());
   expect(navigations.at(-1)).toEqual({
     to: "/workspaces/$workspaceId/artifacts/$artifactId",
     params: { workspaceId, artifactId: siteId },
     search: { tab: "settings" },
+    state: { artifactDetailFromSite: siteId },
   });
 });
 
@@ -689,13 +738,13 @@ test("someone who can't restore an archived app isn't told to restore it", async
   const { container } = await render();
   expect(container.textContent).toContain("This app is archived.");
   expect(container.textContent).not.toContain("Restore");
-  await act(async () => link(container, "View app details")!.click());
-  // Without a tab the address opens the Site view again; details pick the
-  // first tab this person can see.
+  await act(async () => link(container, "View its settings")!.click());
+  // Without a tab the address opens the Site view again.
   expect(navigations.at(-1)).toEqual({
     to: "/workspaces/$workspaceId/artifacts/$artifactId",
     params: { workspaceId, artifactId: siteId },
     search: { tab: "settings" },
+    state: { artifactDetailFromSite: siteId },
   });
 });
 
@@ -726,7 +775,7 @@ test("an empty app waits for its details, and offers to retry when they fail", a
 
 test("the panel's width is remembered per person and resized from the keyboard", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
+  localStorage.setItem(storageKey, JSON.stringify({ width: 512 }));
   const { container } = await render();
   const handle = separator(container);
   expect(handle.getAttribute("aria-label")).toBe("Resize chat");
@@ -740,7 +789,6 @@ test("the panel's width is remembered per person and resized from the keyboard",
   expect(separator(container).getAttribute("aria-valuenow")).toBe("528");
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
     width: 528,
-    collapsed: false,
     position: "right",
   });
   await press(separator(container), "ArrowRight", true);
@@ -764,19 +812,19 @@ test("the chat can be hidden and shown again, and stays as it was left", async (
   const { container } = await render();
   const hide = container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!;
   expect(hide.getAttribute("aria-expanded")).toBe("true");
+  // Open, with nothing to bring it back.
+  expect(container.querySelector("button[aria-label='Show chat']")).toBeNull();
   await act(async () => hide.click());
   // Hidden, not unmounted: the conversation keeps its place.
   expect(panel(container).hidden).toBe(true);
   expect(openConversation(container)).toBe(id(1));
+  // No strip is left beside the app: the control is in the app's header.
   const show = container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!;
+  expect(show.closest("[data-site-header]")).not.toBeNull();
   expect(show.getAttribute("aria-expanded")).toBe("false");
   expect(document.activeElement).toBe(show);
-  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
-    width: 400,
-    collapsed: true,
-    position: "right",
-  });
-  // Opening another Site, or this one later, keeps it hidden.
+  expect(openChoices()).toEqual({ [siteId]: false });
+  // Opening this app later keeps it hidden.
   act(() => root?.unmount());
   const again = await render();
   expect(panel(again.container).hidden).toBe(true);
@@ -785,36 +833,98 @@ test("the chat can be hidden and shown again, and stays as it was left", async (
   );
   expect(panel(again.container).hidden).toBe(false);
   expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide chat");
-  expect(JSON.parse(localStorage.getItem(storageKey)!).collapsed).toBe(false);
+  expect(openChoices()).toEqual({ [siteId]: true });
   // Enter on the handle hides it too, as a window splitter collapses its pane.
   await press(separator(again.container), "Enter");
   expect(panel(again.container).hidden).toBe(true);
 });
 
-test("choosing a conversation shows a hidden chat; opening the page keeps it hidden", async () => {
+test("every app offers its chat beside it in a wide window, until the person closes it", async () => {
+  conversations = [];
+  const { container } = await render();
+  expect(panel(container).hidden).toBe(false);
+  expect(container.querySelector("button[aria-label='Show chat']")).toBeNull();
+  // Nothing is remembered until the person chooses.
+  expect(localStorage.getItem(openKey)).toBeNull();
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  expect(panel(container).hidden).toBe(true);
+  // Closed, one labelled button in the app's header brings it back.
+  const show = container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!;
+  expect(show.textContent).toBe("Chat");
+  expect(show.closest("[data-site-header]")).not.toBeNull();
+  expect(openChoices()).toEqual({ [siteId]: false });
+});
+
+test("in a narrow window the chat starts closed on an app no one has chatted with, open on one they have", async () => {
+  const matchMedia = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+  try {
+    conversations = [];
+    const { container } = await render();
+    expect(panel(container).hidden).toBe(true);
+    expect(container.querySelector("button[aria-label='Show chat']")).not.toBeNull();
+    // Nothing is remembered until the person chooses.
+    expect(localStorage.getItem(openKey)).toBeNull();
+    act(() => root?.unmount());
+    conversations = [conversation(1, "Time filters across all graphs", 2)];
+    const chatted = await render();
+    expect(panel(chatted.container).hidden).toBe(false);
+    expect(localStorage.getItem(openKey)).toBeNull();
+    // The default is kept, so the next visit starts open instead of opening late.
+    expect(JSON.parse(localStorage.getItem("og.site-view.chat-default:v1:me")!)).toEqual({
+      [siteId]: true,
+    });
+  } finally {
+    window.matchMedia = matchMedia;
+  }
+});
+
+test("arriving from a chat, or choosing one, shows a hidden chat", async () => {
   conversations = [
     conversation(1, "Time filters across all graphs", 2),
     conversation(2, "Weekly active users by plan", 180),
   ];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
-  const { container, rerender } = await render(id(1));
+  leaveClosed();
+  const { container, rerender } = await render();
   expect(panel(container).hidden).toBe(true);
   // The sidebar is where conversations are chosen now.
   await rerender(id(2));
   expect(panel(container).hidden).toBe(false);
   expect(openConversation(container)).toBe(id(2));
-  expect(JSON.parse(localStorage.getItem(storageKey)!).collapsed).toBe(false);
+  expect(openChoices()).toEqual({ [siteId]: true });
   // Back to the Site itself: it stays as the person left it.
   await act(async () =>
     container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
   );
   await rerender(undefined);
   expect(panel(container).hidden).toBe(true);
+  // Opened from one of its chats by someone who never chose, it shows that chat…
+  act(() => root?.unmount());
+  localStorage.clear();
+  conversations = [];
+  const arrived = await render(id(1));
+  expect(panel(arrived.container).hidden).toBe(false);
+  expect(openConversation(arrived.container)).toBe(id(1));
+  // Unless the person closed it: a reload or Back keeps it closed.
+  await act(async () =>
+    arrived.container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  act(() => root?.unmount());
+  const reloaded = await render(id(1));
+  expect(panel(reloaded.container).hidden).toBe(true);
+  expect(openChoices()).toEqual({ [siteId]: false });
 });
 
 test("the chat never takes the room the app needs, unless the window is narrower still", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 720, collapsed: false }));
+  localStorage.setItem(storageKey, JSON.stringify({ width: 720 }));
   const measure = HTMLElement.prototype.getBoundingClientRect;
   let frameWidth = 900;
   HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
@@ -845,11 +955,9 @@ test("the chat never takes the room the app needs, unless the window is narrower
 
 test("another person signing in on the page gets their own layout", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
-  localStorage.setItem(
-    "og.site-view.chat:v1:someone",
-    JSON.stringify({ width: 336, collapsed: true }),
-  );
+  localStorage.setItem(storageKey, JSON.stringify({ width: 512 }));
+  localStorage.setItem("og.site-view.chat:v1:someone", JSON.stringify({ width: 336 }));
+  leaveClosed("og.site-view.chat-open:v1:someone");
   const { container, rerender } = await render();
   expect(separator(container).getAttribute("aria-valuenow")).toBe("512");
   subjectId = "someone";
@@ -860,8 +968,9 @@ test("another person signing in on the page gets their own layout", async () => 
   await act(async () =>
     container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!.click(),
   );
-  expect(JSON.parse(localStorage.getItem("og.site-view.chat:v1:someone")!).collapsed).toBe(false);
-  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ width: 512, collapsed: false });
+  expect(openChoices("og.site-view.chat-open:v1:someone")).toEqual({ [siteId]: true });
+  expect(localStorage.getItem(openKey)).toBeNull();
+  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ width: 512 });
 });
 
 const shownVersion = (container: HTMLElement) =>
@@ -979,7 +1088,7 @@ test("someone who can't publish the app gets no editing context, as from the API
 test("Edit with Opengeni opens a new conversation beside the app, composer focused", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   // Even with the chat hidden last time.
-  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
+  leaveClosed();
   const { container } = await render(undefined, { startNew: true });
   await settle();
   expect(panel(container).hidden).toBe(false);
@@ -1014,14 +1123,10 @@ test("Edit with Opengeni on an app already open starts a new conversation once",
   expect(navigations).toHaveLength(1);
 });
 
+/** The header's publication control, or nothing where there is none. */
 const publicationSlot = (container: HTMLElement) =>
-  container.querySelector<HTMLElement>("[data-live-status-slot]")!;
-/** The publication control's own text, without the Site's "…" menu beside it. */
-const publicationText = (container: HTMLElement) => {
-  const slot = publicationSlot(container).cloneNode(true) as HTMLElement;
-  for (const menu of slot.querySelectorAll("[data-site-actions-root]")) menu.remove();
-  return slot.textContent;
-};
+  container.querySelector<HTMLElement>("[data-site-publication-slot]");
+const publicationText = (container: HTMLElement) => publicationSlot(container)?.textContent ?? "";
 const siteHidden = (container: HTMLElement) =>
   container.querySelector("[data-site-view]")!.parentElement!.classList.contains("hidden");
 
@@ -1029,11 +1134,19 @@ test("an unpublished app offers Publish, which opens its publish form beside the
   conversations = [conversation(1, "Make the header blue", 2)];
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = notPublished;
-  const { container } = await render();
-  expect(publicationText(container)).toBe("Publish");
+  const { container, follow } = await render(id(1));
+  expect(publicationText(container)).toBe("Share");
   expect(container.querySelector("[data-publish-page]")).toBeNull();
 
-  await act(async () => button(container, "Publish")!.click());
+  await act(async () => button(container, "Share")!.click());
+  // The form is in the address, so Back closes it.
+  expect(navigations.at(-1)).toEqual({
+    to: "/workspaces/$workspaceId/sites/$siteId",
+    params: { workspaceId, siteId },
+    search: { conversation: id(1), publishing: true },
+    state: { sitePublishingFromSite: `${workspaceId}/${siteId}` },
+  });
+  await follow();
   // The form's code loads when it opens.
   await settle();
   // The Site's own publish form, as a page in place of the Site; the Site
@@ -1059,11 +1172,11 @@ test("an unpublished app offers Publish, which opens its publish form beside the
 
   // Publishing returns to the Site, which now says Published at once.
   await act(async () => button(container, "Publish now")!.click());
-  await settle();
+  await follow();
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(siteHidden(container)).toBe(false);
   expect(publications).toHaveLength(1);
-  expect(publicationText(container)).toContain("Published");
+  expect(publicationText(container)).toContain("Share");
   expect(publicationText(container)).toContain("usage-4k9x.sites.example");
   // Focus goes back to the control that opened the form.
   expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
@@ -1077,38 +1190,56 @@ test("in the macOS app the publish form names the window bar, and the app takes 
   document.body.append(container);
   root = createRoot(container);
   // As the session shell wraps every page but a chat in the macOS app.
-  await act(async () => {
-    root!.render(
-      <windowBar.WindowBarPageTitle enabled>
-        <module.SiteViewRoute workspaceId={workspaceId} siteId={siteId} />
-      </windowBar.WindowBarPageTitle>,
-    );
-  });
-  await settle();
+  const draw = async (publishing: boolean) => {
+    await act(async () => {
+      root!.render(
+        <windowBar.WindowBarPageTitle enabled>
+          <module.SiteViewRoute workspaceId={workspaceId} siteId={siteId} publishing={publishing} />
+        </windowBar.WindowBarPageTitle>,
+      );
+    });
+    await settle();
+  };
+  await draw(false);
   const bar = () => container.querySelector("[data-window-bar-title]")?.textContent ?? null;
   expect(bar()).toBe("Opengeni usage");
-  // The Site's name is in the bar, so its toolbar doesn't repeat it.
-  expect(siteViewProps.at(-1)!.showTitle).toBe(false);
+  // The Site's name is in the bar, and its controls join the bar: no row of
+  // their own above the Site.
+  const header = () => document.querySelector<HTMLElement>("[data-site-header]");
+  expect(header()?.closest("[data-window-bar-controls]")).not.toBeNull();
+  expect(container.contains(header())).toBe(false);
+  expect(header()?.textContent).not.toContain("Opengeni usage");
 
-  await act(async () => button(container, "Publish")!.click());
-  await settle();
+  await act(async () => button(document.body, "Share")!.click());
+  expect((navigations.at(-1) as { search: object }).search).toEqual({ publishing: true });
+  await draw(true);
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
   expect(bar()).toBe("Publish to web");
+  expect(header()).toBeNull();
 
   await act(async () => button(container, "Back to the app")!.click());
+  expect(navigations.at(-1)).toMatchObject({ search: {}, replace: true });
+  await draw(false);
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(bar()).toBe("Opengeni usage");
-  expect(siteViewProps.at(-1)!.showTitle).toBe(false);
+  expect(header()?.closest("[data-window-bar-controls]")).not.toBeNull();
 });
 
 test("a published app's settings open the same form; its back link returns to the app", async () => {
   conversations = [];
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = async () => published;
-  const { container } = await render();
-  const slot = publicationSlot(container);
-  expect(slot.textContent).toContain("Published");
+  const { container, follow } = await render();
+  const slot = publicationSlot(container)!;
+  expect(slot.textContent).toContain("Share");
   expect(slot.querySelector("a")?.getAttribute("href")).toBe("https://usage-4k9x.sites.example/");
+  // Copy link has one place, the Published menu: no separate link button.
+  expect(container.querySelector("[data-artifact-copy-link]")).toBeNull();
+  expect(
+    [...container.querySelectorAll("[data-site-header] button")].filter(
+      (element) => element.getAttribute("aria-label") === "Copy link",
+    ),
+  ).toHaveLength(0);
 
   // From full screen, the form first leaves it.
   await act(async () =>
@@ -1116,23 +1247,82 @@ test("a published app's settings open the same form; its back link returns to th
   );
   expect(siteViewProps.at(-1)!.fullScreen).toBe(true);
   await act(async () => button(container, "Publishing settings")!.click());
-  await settle();
+  await follow();
   expect(siteViewProps.at(-1)!.fullScreen).toBe(false);
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
   expect(document.activeElement?.textContent).toBe("Publish to web");
 
   await act(async () => button(container, "Back to the app")!.click());
+  // Back from the form returns to the app (opened by link, it replaces the form).
+  expect(navigations.at(-1)).toEqual({
+    to: "/workspaces/$workspaceId/sites/$siteId",
+    params: { workspaceId, siteId },
+    search: {},
+    replace: true,
+  });
+  await follow();
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(siteHidden(container)).toBe(false);
   expect(publications).toHaveLength(0);
   expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
 });
 
+test("opened from the app, the form's back link is the browser's Back", async () => {
+  conversations = [];
+  permissions = ["sessions:create", "artifacts:publish"];
+  publicationLink = async () => published;
+  routerLocationState = { sitePublishingFromSite: `${workspaceId}/${siteId}` };
+  const backBefore = window.history.back;
+  let backs = 0;
+  window.history.back = () => void (backs += 1);
+  try {
+    const { container, rerender } = await render(undefined, {});
+    await rerender(undefined, false, true);
+    await settle();
+    expect(container.querySelector("[data-publish-page]")).not.toBeNull();
+    const before = navigations.length;
+    await act(async () => button(container, "Back to the app")!.click());
+    // No new entry: the history doesn't keep the form.
+    expect(backs).toBe(1);
+    expect(navigations).toHaveLength(before);
+    // The browser's Back closes it, and focus returns to the control that opens it.
+    await rerender(undefined, false, false);
+    expect(container.querySelector("[data-publish-page]")).toBeNull();
+    expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
+  } finally {
+    window.history.back = backBefore;
+  }
+});
+
+test("a shared publishing link opens just the app for people who can't publish", async () => {
+  conversations = [];
+  publicationLink = async () => published;
+  const { container, rerender } = await render();
+  await rerender(undefined, false, true);
+  await settle();
+  expect(container.querySelector("[data-publish-page]")).toBeNull();
+  expect(siteHidden(container)).toBe(false);
+});
+
+test("choosing a conversation keeps the publish form open", async () => {
+  conversations = [
+    conversation(1, "Time filters across all graphs", 2),
+    conversation(2, "Weekly active users by plan", 180),
+  ];
+  permissions = ["sessions:create", "artifacts:publish"];
+  publicationLink = async () => published;
+  const { container, rerender } = await render(id(1));
+  await rerender(id(1), false, true);
+  await settle();
+  await act(async () => button(container, "New")!.click());
+  expect(navigations.at(-1)).toMatchObject({ search: { publishing: true } });
+});
+
 test("people who can't publish see Published and its address, with no Publish or settings", async () => {
   conversations = [];
   publicationLink = async () => published;
   const { container } = await render();
-  expect(publicationText(container)).toContain("Published");
+  expect(publicationText(container)).toContain("Share");
   expect(button(container, "Publishing settings")).toBeUndefined();
   act(() => root?.unmount());
   publicationLink = notPublished;
@@ -1150,25 +1340,24 @@ test("the header never says Live, also where publishing isn't available", async 
   expect(publicationText(container)).toBe("");
 });
 
-const menuItem = (container: HTMLElement, text: string) =>
-  [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(
-    (element) => element.textContent === text,
-  );
+const moveButton = (container: HTMLElement, label: string) =>
+  panel(container).querySelector<HTMLButtonElement>(`button[aria-label='${label}']`) ?? undefined;
 const layoutRoot = (container: HTMLElement) =>
   container.querySelector<HTMLElement>("[data-site-chat-position]")!;
 
-test("the chat moves to the left from its menu, and stays there for this person", async () => {
+test("the chat moves to the left in one click, and stays there for this person", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
+  localStorage.setItem(storageKey, JSON.stringify({ width: 512 }));
   const { container } = await render();
   // On the right by default.
   expect(layoutRoot(container).getAttribute("data-site-chat-position")).toBe("right");
   expect(layoutRoot(container).className).not.toContain("lg:flex-row-reverse");
   expect(panel(container).className).toContain("lg:border-l");
-  expect(menuItem(container, "Move chat to right")).toBeUndefined();
+  // One click, no menu.
+  expect(moveButton(container, "Move chat to right")).toBeUndefined();
   const site = container.querySelector("[data-site-view]");
   const chat = container.querySelector("[data-conversation]");
-  await act(async () => menuItem(container, "Move chat to left")!.click());
+  await act(async () => moveButton(container, "Move chat to left")!.click());
   expect(layoutRoot(container).getAttribute("data-site-chat-position")).toBe("left");
   // The page only reverses: neither the Site nor the chat is drawn again.
   expect(layoutRoot(container).className).toContain("lg:flex-row-reverse");
@@ -1178,7 +1367,6 @@ test("the chat moves to the left from its menu, and stays there for this person"
   expect(panel(container).className).toContain("lg:border-r");
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
     width: 512,
-    collapsed: false,
     position: "left",
   });
   // The handle is now on the panel's right edge, toward the Site: Right widens it.
@@ -1194,18 +1382,18 @@ test("the chat moves to the left from its menu, and stays there for this person"
   );
   expect(panel(container).hidden).toBe(true);
   const show = container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!;
-  expect(show.parentElement!.parentElement!.className).toContain("lg:border-r");
+  // At the header's start, the side the chat opens on.
+  expect(show.closest("[data-site-header]")!.firstElementChild).toBe(show);
   await act(async () => show.click());
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
     width: 528,
-    collapsed: false,
     position: "left",
   });
   // Another visit opens it on the left, and the menu offers the way back.
   act(() => root?.unmount());
   const again = await render();
   expect(layoutRoot(again.container).getAttribute("data-site-chat-position")).toBe("left");
-  await act(async () => menuItem(again.container, "Move chat to right")!.click());
+  await act(async () => moveButton(again.container, "Move chat to right")!.click());
   expect(layoutRoot(again.container).getAttribute("data-site-chat-position")).toBe("right");
   expect(JSON.parse(localStorage.getItem(storageKey)!).position).toBe("right");
 });
@@ -1272,7 +1460,7 @@ test("a drag that leaves the app clears the chat's highlight; text drags are lef
 
 test("with the chat hidden, or no chat to take files, the app keeps its drops", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
+  leaveClosed();
   const shot = new File(["png"], "Screenshot.png", { type: "image/png" });
   const hidden = await render();
   await act(async () => void fireFileDrag(document.body, "dragenter", [shot]));
@@ -1295,7 +1483,7 @@ const siteActions = (container: HTMLElement) =>
     ),
   ].map((item) => item.textContent);
 
-test("the app's own menu copies its title, duplicates it and opens its details", async () => {
+test("the app's own menu keeps the common actions; the rare ones are in its settings", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
@@ -1303,23 +1491,18 @@ test("the app's own menu copies its title, duplicates it and opens its details",
     "More app actions",
   );
   // Without a sidebar listing the Site, its Pin and Archive have nowhere to act.
-  expect(siteActions(container)).toEqual([
-    "Copy title",
-    "Duplicate",
-    "App details",
-    "Reset allowed actions",
-  ]);
-  // The chat's menu keeps to the chat.
-  const chatMenu = [...container.querySelectorAll("[role='menu']")].filter(
-    (menu) => !menu.closest("[data-site-actions-root]"),
+  expect(siteActions(container)).toEqual(["Open app full screen", "Reload app", "Settings"]);
+  // The chat's header has no menu of its own.
+  const chatMenus = [...container.querySelectorAll("[role='menu']")].filter(
+    (menu) => !menu.closest("[data-site-actions-root]") && panel(container).contains(menu),
   );
-  for (const menu of chatMenu) expect(menu.textContent).not.toContain("App details");
+  expect(chatMenus).toHaveLength(0);
 });
 
-test("people who can't publish get no Duplicate in the app's menu", async () => {
+test("people who can't publish get the same short menu", async () => {
   permissions = ["sessions:create"];
   const { container } = await render();
-  expect(siteActions(container)).toEqual(["Copy title", "App details", "Reset allowed actions"]);
+  expect(siteActions(container)).toEqual(["Open app full screen", "Reload app", "Settings"]);
 });
 
 test("the app's menu pins and archives through the sidebar's own actions", async () => {
@@ -1335,10 +1518,10 @@ test("the app's menu pins and archives through the sidebar's own actions", async
   try {
     const { container } = await render();
     expect(siteActions(container)).toEqual([
-      "Copy title",
+      "Open app full screen",
+      "Reload app",
       "Unpin",
-      "App details",
-      "Reset allowed actions",
+      "Settings",
       "Archive",
     ]);
     await act(async () => button(container, "Unpin")!.click());
@@ -1350,13 +1533,134 @@ test("the app's menu pins and archives through the sidebar's own actions", async
   }
 });
 
-test("an app with nothing published yet offers no Duplicate", async () => {
-  permissions = ["sessions:create", "artifacts:publish"];
-  siteDetails = async () => ({
-    artifact: { title: "Opengeni usage", status: "active", currentVersion: null },
-    versions: [],
-    events: [],
+// An app opened as a page from the sidebar (app-page-view.tsx): the app alone,
+// with one corner button for the same chat panel.
+async function renderAppPage() {
+  const { AppPage } = await import("./app-page-view");
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(<AppPage workspaceId={workspaceId} appId={siteId} siteHref="/" active />);
   });
-  const { container } = await render();
-  expect(siteActions(container)).toEqual(["Copy title", "App details"]);
+  await settle();
+  return container;
+}
+const chatButton = (container: HTMLElement) =>
+  container.querySelector<HTMLButtonElement>("[data-app-page-chat-show]");
+/** Opens the page's chat and waits for its panel, loaded on first open. */
+async function openAppPageChat(container: HTMLElement) {
+  await act(async () => chatButton(container)!.click());
+  for (let tries = 0; tries < 50 && !container.querySelector("aside[aria-label='Chat']"); tries++)
+    await settle();
+  await settle();
+}
+
+test("an app opened as a page offers its chat from one button above it, and hides it again", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const container = await renderAppPage();
+  expect(container.querySelector("[data-site-view]")?.getAttribute("data-site-view")).toBe(siteId);
+  // Only the app and one icon button; the chat isn't loaded until asked for.
+  expect([...container.querySelectorAll("button")]).toHaveLength(1);
+  const show = chatButton(container)!;
+  expect(show.getAttribute("aria-label")).toBe("Open chat");
+  expect(show.getAttribute("aria-expanded")).toBe("false");
+  expect(show.textContent).toBe("");
+  // In its own slim row above the app, never drawn over the app's frame,
+  // so it can't cover the app's own controls.
+  const row = show.closest("[data-app-page-chat-row]")!;
+  expect(row).not.toBeNull();
+  expect(row.contains(container.querySelector("[data-site-view]"))).toBe(false);
+  expect(row.nextElementSibling?.hasAttribute("data-site-view")).toBe(true);
+  expect(container.querySelector("aside")).toBeNull();
+  expect(listCalls).toHaveLength(0);
+
+  await openAppPageChat(container);
+  // The Site view's own panel: its newest conversation, New, Copy link and
+  // Open as a full chat.
+  expect(panel(container).hidden).toBe(false);
+  expect(openConversation(container)).toBe(id(1));
+  expect(heading(container)).toBe("Time filters across all graphs");
+  expect(button(container, "New")).toBeDefined();
+  expect(panel(container).querySelector("[data-site-chat-copy-link]")).not.toBeNull();
+  expect(
+    [...panel(container).querySelectorAll("a")].map((a) => a.getAttribute("aria-label")),
+  ).toEqual(["Open as a full chat"]);
+  // The row stays, empty, while the chat is open, so the app keeps its size.
+  expect(chatButton(container)).toBeNull();
+  expect(container.querySelector("[data-app-page-chat-row]")?.childElementCount).toBe(0);
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide chat");
+
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  await settle();
+  // Hidden, not unmounted: the conversation keeps its place.
+  expect(panel(container).hidden).toBe(true);
+  expect(openConversation(container)).toBe(id(1));
+  expect(document.activeElement).toBe(chatButton(container));
+  // The page's address stays the app's own throughout.
+  expect(navigations).toEqual([]);
+});
+
+test("on a phone the app page's chat button sits in the top strip, not over the app", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  // The shell's top strip on a phone (menu and brand), with room at its end.
+  const strip = document.createElement("header");
+  const stripEnd = document.createElement("div");
+  stripEnd.setAttribute("data-canvas-strip-end", "");
+  strip.append(stripEnd);
+  document.body.append(strip);
+  const container = await renderAppPage();
+  const show = chatButton(document.body)!;
+  expect(show.parentElement).toBe(stripEnd);
+  expect(container.querySelector("[data-app-page-chat-row]")).toBeNull();
+  expect(container.contains(show)).toBe(false);
+  await openAppPageChat(document.body);
+  expect(panel(container).hidden).toBe(false);
+  expect(stripEnd.childElementCount).toBe(0);
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  await settle();
+  expect(document.activeElement).toBe(chatButton(document.body));
+  expect(chatButton(document.body)!.parentElement).toBe(stripEnd);
+});
+
+test("a chat started from an app page opens in its panel, and the address stays the app's", async () => {
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  fullSessions = { [id(99)]: conversation(99, "Why did spend rise?", 0) };
+  const container = await renderAppPage();
+  await openAppPageChat(container);
+  await act(async () => button(container, "New")!.click());
+  await settle();
+  const composer = container.querySelector<HTMLButtonElement>("[data-composer]")!;
+  expect(composer.getAttribute("data-composer")).toBe("Ask about Opengeni usage");
+  await act(async () => {
+    composer.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  await settle();
+  // Created as the app's own chat, as from the Site view.
+  expect(requests[0]!.init?.headers).toEqual({
+    "x-opengeni-site-id": siteId,
+    "x-opengeni-site-version": "version-4",
+  });
+  expect(openConversation(container)).toBe(id(99));
+  expect(navigations).toEqual([]);
+});
+
+test("an app page offers no chat to people who can't start one, or for an archived app", async () => {
+  permissions = [];
+  let container = await renderAppPage();
+  expect(container.querySelector("[data-site-view]")).not.toBeNull();
+  expect(chatButton(container)).toBeNull();
+  act(() => root?.unmount());
+  permissions = ["sessions:create"];
+  siteDetails = async () => ({
+    ...siteAt(4),
+    artifact: { ...siteAt(4).artifact, status: "archived" },
+  });
+  container = await renderAppPage();
+  expect(chatButton(container)).toBeNull();
 });

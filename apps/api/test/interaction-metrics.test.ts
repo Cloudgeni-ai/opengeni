@@ -16,6 +16,7 @@ import {
   observeComputerActionResult,
   observeInteractionRouteOutcome,
   observeInterventionMutation,
+  observeLifecycleControllerFailure,
   observeLifecycleResult,
 } from "../src/interaction-metrics";
 
@@ -30,6 +31,47 @@ const settings = {
 };
 
 describe("interaction metrics projection", () => {
+  test("a refused create logs the controller's content-free driver cause", () => {
+    const observed: string[] = [];
+    const warn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const observability = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "api" },
+      );
+      observeLifecycleControllerFailure(
+        observability,
+        "computer.create",
+        new BrowserControlRequestError(
+          500,
+          {
+            code: "driver_failed",
+            message: "interaction controller request failed",
+            retryable: false,
+          },
+          { errorClass: "SQLiteError", frame: "open" },
+        ),
+      );
+    } finally {
+      console.warn = warn;
+    }
+    expect(observed).toHaveLength(1);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      level: "warn",
+      message: "Interaction controller refused a create",
+      errorClass: "InteractionControllerOperationError",
+      errorCode: "interaction_controller_create_refused",
+      op: "computer.create",
+      outcome: "failed",
+      causeName: "BrowserControlRequestError",
+      causeCode: "driver_failed",
+      causeStatus: 500,
+      causeDriverClass: "SQLiteError",
+      causeDriverFrame: "open",
+    });
+  });
+
   test("classifies semantic, keyboard, clipboard, permission, coordinate, and stale outcomes", async () => {
     const observability = createObservability(settings, { component: "api" });
     const browserReceipt = actionReceipt("browser", "completed") as BrowserActionReceipt;

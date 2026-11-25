@@ -11,6 +11,7 @@ import {
   assertSessionIsNotImported,
   requireSession,
   type Database,
+  type RepositoryAttachRequester,
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -25,6 +26,8 @@ export type SessionRepositoryAttachResult = {
   /** True when a person had removed the repository from the chat earlier. */
   reattached: boolean;
   session: Session;
+  /** The events written; already published unless the caller deferred them. */
+  events: Awaited<ReturnType<typeof appendSessionEventsWithLockedSessionUpdate>>;
 };
 
 /**
@@ -43,12 +46,22 @@ export type SessionRepositoryAttachResult = {
 export async function attachSessionRepositoryResource(
   deps: { db: Database; bus: EventBus },
   input: { workspaceId: string; sessionId: string; resource: RepositoryResourceRef },
+  options: {
+    /** A caller in a transaction publishes the returned events after it commits. */
+    deferPublication?: boolean;
+    /**
+     * Who asks (default a person). Anyone else, such as the scheduler, can't
+     * undo a person's removal: a removed repository throws
+     * `SessionRepositoryRemovedError`.
+     */
+    requester?: RepositoryAttachRequester;
+  } = {},
 ): Promise<SessionRepositoryAttachResult> {
   const { workspaceId, sessionId, resource } = input;
   const current = await requireSession(deps.db, workspaceId, sessionId);
   assertSessionIsNotImported(current);
   if (resourcesIncludeRepository(current.resources, resource.uri)) {
-    return { attached: false, reattached: false, session: current };
+    return { attached: false, reattached: false, session: current, events: [] };
   }
   // Only the new repository: the chat's others were checked when they were
   // attached, and one the App has since lost must not block every attach.
@@ -74,7 +87,7 @@ export async function attachSessionRepositoryResource(
       const admission = admitRequestedRepositories({
         removedRepositories: session.removedRepositories ?? [],
         requested: [resource],
-        requester: "person",
+        requester: options.requester ?? "person",
       });
       attached = true;
       reattached = admission.changed;
@@ -93,12 +106,13 @@ export async function attachSessionRepositoryResource(
     },
     { activity: "semantic" },
   );
-  if (events.length > 0) {
+  if (events.length > 0 && !options.deferPublication) {
     await publishDurableSessionEvents(deps.bus, workspaceId, sessionId, events);
   }
   return {
     attached,
     reattached,
     session: attached ? await requireSession(deps.db, workspaceId, sessionId) : current,
+    events,
   };
 }

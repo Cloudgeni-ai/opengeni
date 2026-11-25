@@ -12,6 +12,7 @@ import {
   pageCsp,
   shellCsp,
 } from "../src/headers";
+import { messagePage } from "../src/pages";
 import { exitPreviewHref, shellHtml } from "../src/shell";
 import { SITE_GATEWAY_SHELL_SCRIPT } from "../src/shell/shell-script.gen";
 
@@ -35,6 +36,18 @@ describe("shell page", () => {
     expect(html).toContain('src="/_og/v/11111111-1111-4111-8111-111111111111"');
     expect(html).toContain('<a href="/_og/report"');
     expect(html).toContain('<meta name="robots" content="noindex">');
+  });
+
+  test("its chrome and the gateway's pages follow the viewer's light or dark setting", async () => {
+    const style = /<style nonce="[^"]+">([^<]*)<\/style>/u;
+    const pageHtml = await messagePage({ hsts: false }, 404, "Nothing", "Gone").text();
+    for (const css of [html.match(style)?.[1], pageHtml.match(style)?.[1]]) {
+      expect(css).toContain("color-scheme:light dark");
+      expect(css).toContain("@media (prefers-color-scheme:dark)");
+    }
+    // Every color of the shell's chrome comes from the scheme's variables.
+    const rules = html.match(style)![1]!.replace(/^.*?prefers-color-scheme:dark\)\{.*?\}\}/u, "");
+    expect(rules).not.toMatch(/(?:color|background|border(?:-top)?(?:-color)?):#/u);
   });
 
   test("escapes the title and keeps embedded config inert", () => {
@@ -129,6 +142,7 @@ test("the committed shell bundle is up to date and small", async () => {
     "utf8",
   );
   expect(committed).toBe(await buildShellModule());
-  // It is inlined in every App page; the platform's connect card brought it past 40 KiB.
-  expect(committed.length).toBeLessThan(44 * 1024);
+  // It is inlined in every App page; the platform's connect card brought it
+  // past 40 KiB, and the personal sync join card and confirmation past 48 KiB.
+  expect(committed.length).toBeLessThan(52 * 1024);
 });

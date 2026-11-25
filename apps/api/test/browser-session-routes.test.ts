@@ -6,6 +6,7 @@ import { HTTPException } from "hono/http-exception";
 import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
+import { ApiHttpError } from "../src/http/api-error";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import {
@@ -21,10 +22,90 @@ import {
   browserCreateInput,
   agentBrowserClosingNotice,
   withInitialView,
+  browserUploadFilename,
+  stageBrowserUploadFiles,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
+
+describe("browser upload file names", () => {
+  const original = "Rørføring etg. 2 – rev A (SIM).pdf";
+  const ascii = "R_rf_ring etg. 2 _ rev A _SIM_.pdf";
+  const upload = {
+    filename: original,
+    safeFilename: ascii,
+    authority: {
+      fileId: "8a6428f0-a94f-4c4a-ae12-c1b158cb888f",
+      sizeBytes: 7,
+      sha256: null,
+      download: { url: "https://objects.example.test/f", expiresAt: "2026-11-22T21:00:00.000Z" },
+    },
+  };
+
+  test("keeps the file's own name, in any script, as one portable segment", () => {
+    expect(browserUploadFilename(original, ascii)).toBe(original);
+    expect(browserUploadFilename("見積書 v2.xlsx", "_ v2.xlsx")).toBe("見積書 v2.xlsx");
+    expect(browserUploadFilename("plan/a:b?.pdf", "plan_a_b_.pdf")).toBe("plan_a_b_.pdf");
+    expect(browserUploadFilename("notes. ", "notes.")).toBe("notes");
+    expect(browserUploadFilename("..", "..")).toBe("file");
+    const long = browserUploadFilename("ø".repeat(300), "_");
+    expect(new TextEncoder().encode(long).byteLength).toBeLessThanOrEqual(240);
+  });
+
+  test("stages own names, and the ASCII names for a controller that refuses them", async () => {
+    const staged: string[][] = [];
+    await stageBrowserUploadFiles(
+      async (files) => {
+        staged.push(files.map((file) => file.safeFilename));
+      },
+      [upload],
+    );
+    expect(staged).toEqual([[original]]);
+
+    staged.length = 0;
+    const refusing = async (files: { safeFilename: string }[]) => {
+      staged.push(files.map((file) => file.safeFilename));
+      if (files.some((file) => file.safeFilename === original)) {
+        throw new BrowserControlRequestError(400, {
+          code: "invalid_action",
+          message: "workspace-file staging authority is invalid",
+          retryable: false,
+        });
+      }
+    };
+    await stageBrowserUploadFiles(refusing, [upload]);
+    expect(staged).toEqual([[original], [ascii]]);
+
+    // Any other failure, or a refusal of names that are already ASCII, is
+    // not retried.
+    staged.length = 0;
+    const unavailable = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "workspace file download was truncated",
+      retryable: true,
+    });
+    await expect(
+      stageBrowserUploadFiles(
+        async (files) => {
+          staged.push(files.map((file) => file.safeFilename));
+          throw unavailable;
+        },
+        [upload],
+      ),
+    ).rejects.toBe(unavailable);
+    await expect(
+      stageBrowserUploadFiles(async () => {
+        throw new BrowserControlRequestError(400, {
+          code: "invalid_action",
+          message: "workspace-file staging authority is invalid",
+          retryable: false,
+        });
+      }, [{ ...upload, filename: "report.pdf", safeFilename: "report.pdf" }]),
+    ).rejects.toBeInstanceOf(BrowserControlRequestError);
+    expect(staged).toEqual([[original]]);
+  });
+});
 
 const FILE_ID = "33333333-3333-4333-8333-333333333333";
 
@@ -1224,6 +1305,63 @@ describe("BrowserSession route discipline", () => {
     expect(browserTabDiagnosisError(uncertain)).toBe(uncertain);
   });
 
+  test("publishes a page that did not load in time as the website's failure, not a workspace outage", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const notAnswered = new BrowserControlRequestError(
+      504,
+      {
+        code: "timeout",
+        message:
+          "browser could not load the requested URL: its server did not respond within 20 seconds",
+        retryable: false,
+      },
+      null,
+      "destination_not_answered",
+    );
+    app.post("/v1/test/open-tab-not-answered", () => {
+      throw browserRouteError(notAnswered);
+    });
+    const response = await app.request("http://localhost/v1/test/open-tab-not-answered", {
+      method: "POST",
+      headers: { "x-opengeni-correlation-id": "open-tab-request" },
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 504,
+        code: "upstream_unavailable",
+        message:
+          "browser could not load the requested URL: its server did not respond within 20 seconds",
+        retryable: false,
+        requestId: "open-tab-request",
+      },
+    });
+    for (const message of [
+      "browser navigation did not commit a new page in time and was stopped; the tab still shows its previous page",
+      "browser navigation timed out",
+    ]) {
+      const projected = browserRouteError(
+        new BrowserControlRequestError(504, { code: "timeout", message, retryable: false }),
+      );
+      expect(projected).toBeInstanceOf(ApiHttpError);
+      expect(projected.message).toBe(message);
+    }
+    // Any other controller timeout keeps the ordinary envelope, which never
+    // publishes a driver's free-form message.
+    const other = new BrowserControlRequestError(504, {
+      code: "timeout",
+      message: "browser navigation timed out at PRIVATE /home/user/profile",
+      retryable: true,
+    });
+    expect(browserTabDiagnosisError(other)).toBe(other);
+  });
+
   test("publishes a crashed tab as its own definite diagnosis, not a retryable outage", async () => {
     const app = createApp({
       settings: testSettings(),
@@ -1497,6 +1635,23 @@ describe("BrowserSession route discipline", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
+  test("browser screenshot response relays what a full-page capture left out", async () => {
+    const frame = {
+      data: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+      mediaType: "image/jpeg" as const,
+      metadataHeader: "frame-metadata",
+    };
+    const full = browserScreenshotResponse({
+      ...frame,
+      inexactScrollbars: true,
+      hiddenScrolledHeight: 1604,
+    });
+    expect(full.headers.get("x-opengeni-browser-frame-note")).toBe("inexact-scrollbars");
+    expect(full.headers.get("x-opengeni-browser-frame-hidden-scrolled-height")).toBe("1604");
+    const viewport = browserScreenshotResponse(frame);
+    expect(viewport.headers.get("x-opengeni-browser-frame-hidden-scrolled-height")).toBeNull();
+  });
+
   test("registers the complete lifecycle, semantic control, diagnostics, and frame surface", async () => {
     const source = await readFile(routeUrl, "utf8");
     for (const route of [
@@ -1556,7 +1711,13 @@ describe("BrowserSession route discipline", () => {
       ),
       source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/heartbeat"'),
     );
-    expect(attachment).toContain("requestOrigin(context, deps.settings)");
+    const access = /\brequireInteractionAttachmentAccess\(\s*context,\s*deps,?\s*\)/.exec(
+      attachment,
+    );
+    expect(access).not.toBeNull();
+    expect(access!.index).toBeLessThan(
+      attachment.indexOf("parseJsonBody(context, BrowserSessionAttachmentRequest)"),
+    );
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
     expect(attachment).toContain("placementUsesInteractionFrameProxy(placement.lease?.backend, {");
     expect(attachment).toContain(
@@ -2517,6 +2678,39 @@ test("working copy routes carry the browser record's exact authority, and only a
           "This browser was lost without a working copy that its controller still keeps, so there is nothing to inspect or adopt. Resume it to restore its last saved state.",
         provisioned: 0,
       },
+      // The chat that opened the browser moved to another machine. An agent
+      // chat working on the browser's machine (a child given its parent's
+      // browser) reaches it by its own route, authorized as itself; one
+      // working anywhere else is refused as before.
+      {
+        scenario: "child-on-machine",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+        routedThroughChild: true,
+      },
+      {
+        scenario: "child-elsewhere",
+        status: 409,
+        calls: [],
+        exactAuthority: true,
+        audits: [],
+        routedThroughChild: false,
+      },
+      {
+        scenario: "lost-child-on-machine",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+        provisioned: 1,
+        routedThroughChild: true,
+      },
     ]);
   } finally {
     if (child.exitCode === null) child.kill();
@@ -2547,22 +2741,29 @@ async function workingCopyRoutesFixture() {
     workspaceId = randomUUID(),
     browserSessionId = randomUUID(),
     sourceSessionId = randomUUID(),
+    childSessionId = randomUUID(),
     machineId = randomUUID(),
     instanceId = randomUUID(),
     controllerGeneration = randomUUID(),
     operationId = randomUUID(),
     rootSecret = "synthetic-controller-authority",
     digest = "d".repeat(64);
-  const grant = {
+  const personGrant = {
     accountId,
     workspaceId,
     subjectId: "synthetic-user",
     permissions: ["sessions:control"],
   };
+  const agentGrant = {
+    ...personGrant,
+    principalKind: "agent_attempt",
+    metadata: { sessionId: childSessionId },
+  };
   const placement = { kind: "connected_machine", sandboxId: machineId };
   let scenario = "inspect";
   let calls: string[] = [];
   let audits: string[] = [];
+  let authorized: string[] = [];
   let exactAuthority = true;
   let provisioned = 0;
   const tokenGeneration = () => (scenario === "adopt-token-rotated" ? 2 : 1);
@@ -2595,11 +2796,19 @@ async function workingCopyRoutesFixture() {
         associations: [],
       },
     }),
-    getSession: async () => ({
-      id: sourceSessionId,
-      workspaceId,
-      activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
-    }),
+    getSession: async (_db: unknown, _workspaceId: string, sessionId: string) =>
+      sessionId === childSessionId
+        ? {
+            id: childSessionId,
+            workspaceId,
+            activeSandboxId: scenario === "child-elsewhere" ? randomUUID() : machineId,
+          }
+        : {
+            id: sourceSessionId,
+            workspaceId,
+            activeSandboxId:
+              scenario === "machine-moved" || scenario.includes("child") ? randomUUID() : machineId,
+          },
     touchBrowserSessionController: async () => scenario !== "holder-lost",
     getExpiredBrowserSessionResume: async () =>
       scenario === "lost-no-copy" ? null : { controllerGeneration, settleable: false },
@@ -2611,14 +2820,15 @@ async function workingCopyRoutesFixture() {
   }));
   mock.module(resolveFromApi("@opengeni/core"), () => ({
     ...core,
-    requireAccessGrant: async () => grant,
+    requireAccessGrant: async () => (scenario.includes("child") ? agentGrant : personGrant),
     requireSessionAuthorization: async (
       _deps: unknown,
       _grant: unknown,
-      input: { operation: string },
+      input: { operation: string; sessionId: string },
     ) => {
       if (input.operation !== "session.control") throw new Error("synthetic operation mismatch");
       if (scenario === "access-revoked") throw new core.SessionAuthorizationDeniedError("revoked");
+      authorized.push(input.sessionId);
       return {};
     },
   }));
@@ -2790,32 +3000,40 @@ async function workingCopyRoutesFixture() {
       "lost-inspect",
       "lost-adopt",
       "lost-no-copy",
+      "child-on-machine",
+      "child-elsewhere",
+      "lost-child-on-machine",
     ]) {
       scenario = next;
       calls = [];
       audits = [];
+      authorized = [];
       exactAuthority = true;
       provisioned = 0;
-      const response =
-        next === "inspect" || next === "lost-inspect" || next === "lost-no-copy"
-          ? await app.request(`${base}/inspection`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: "{}",
-            })
-          : next === "status"
-            ? await app.request(`${base}/adoptions/${operationId}`)
-            : next === "revert"
-              ? await app.request(`${base}/adoptions/${operationId}/revert`, {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: "{}",
-                })
-              : await app.request(`${base}/adoptions`, {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ operationId, manifestDigest: digest }),
-                });
+      const inspection =
+        next === "inspect" ||
+        next === "lost-inspect" ||
+        next === "lost-no-copy" ||
+        next.includes("child");
+      const response = inspection
+        ? await app.request(`${base}/inspection`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          })
+        : next === "status"
+          ? await app.request(`${base}/adoptions/${operationId}`)
+          : next === "revert"
+            ? await app.request(`${base}/adoptions/${operationId}/revert`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: "{}",
+              })
+            : await app.request(`${base}/adoptions`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ operationId, manifestDigest: digest }),
+              });
       const body = (await response.json()) as Record<string, any>;
       const result: Record<string, unknown> = {
         scenario: next,
@@ -2830,7 +3048,7 @@ async function workingCopyRoutesFixture() {
             next === "lost-adopt",
         ),
       };
-      if (response.status === 200 && (next === "inspect" || next === "lost-inspect")) {
+      if (response.status === 200 && inspection) {
         result.adoptable = body.adoptable;
         result.explainsExclusions = String(body.explanation).includes(
           "chrome-launch, working-runtime.sqlite-shm",
@@ -2840,8 +3058,9 @@ async function workingCopyRoutesFixture() {
       }
       if (next.startsWith("lost")) {
         result.provisioned = provisioned;
-        if (response.status !== 200) result.message = body.message;
+        if (response.status !== 200 && !next.includes("child")) result.message = body.message;
       }
+      if (next.includes("child")) result.routedThroughChild = authorized.includes(childSessionId);
       results.push(result);
     }
     console.log(JSON.stringify(results));

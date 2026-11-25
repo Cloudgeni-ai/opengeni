@@ -1,5 +1,437 @@
 # @opengeni/api-router
 
+## 6.41.0
+
+### Minor Changes
+
+- dd6dd0b: A meeting recorded in your Personal workspace can be shared with one of your team workspaces (`PATCH …/recordings/:recordingId` with `{ visibility: "workspace", sharedWorkspaceId }`), from any workspace where you see it. Everyone in that workspace can open it read only, and agents there find it with `meetings_search`; `Recording.sharedWorkspaceId` says where it is shared. The meeting page's Share menu lists "Only me" and your team workspaces.
+
+### Patch Changes
+
+- ca5b614: A workspace admin who can turn off someone else's Workspace schedule or agent trigger can now turn it back on. Before, pausing worked but resuming was refused as owner-only. Resuming changes nothing else, so it runs as its owner again; changing or running it still belongs to its owner.
+- Updated dependencies [ca5b614]
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/core@6.41.0
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/db@6.41.0
+  - @opengeni/documents@6.41.0
+  - @opengeni/github@6.41.0
+  - @opengeni/runtime@6.41.0
+  - @opengeni/storage@6.41.0
+  - @opengeni/artifact-tool@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codemode@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/decisions@6.41.0
+  - @opengeni/events@6.41.0
+  - @opengeni/interaction@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/vaults-bitwarden@6.41.0
+  - @opengeni/vaults-keeper@6.41.0
+  - @opengeni/vaults-onepassword@6.41.0
+  - @opengeni/vaults-protonpass@6.41.0
+  - @opengeni/agent-proto@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Minor Changes
+
+- 8a8579a: Add `setSessionModelSettings` and its HTTP endpoint so integration servers can change future session model defaults without sending a message. An optional comparison protects against overwriting a concurrent change, and retrying with the same key does not apply the update twice.
+
+### Patch Changes
+
+- Updated dependencies [2a4f625]
+- Updated dependencies [928df9f]
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/core@6.40.0
+  - @opengeni/runtime@6.40.0
+  - @opengeni/contracts@6.40.0
+  - @opengeni/db@6.40.0
+  - @opengeni/artifact-tool@6.40.0
+  - @opengeni/capabilities@6.40.0
+  - @opengeni/codemode@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/decisions@6.40.0
+  - @opengeni/documents@6.40.0
+  - @opengeni/events@6.40.0
+  - @opengeni/github@6.40.0
+  - @opengeni/interaction@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/storage@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+  - @opengeni/vaults@6.40.0
+  - @opengeni/vaults-bitwarden@6.40.0
+  - @opengeni/vaults-keeper@6.40.0
+  - @opengeni/vaults-onepassword@6.40.0
+  - @opengeni/vaults-protonpass@6.40.0
+  - @opengeni/agent-proto@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- 9012657: A script that keeps calling `ogtool` or the native `codemode` client after its turn ended no longer hammers the API: a bearer refused with 401, or with 403 `agent_attempt_caller_stale`, is remembered across processes in a private per-user marker (a hash, never the bearer), and later calls with it fail locally with the same error. A refused API request now also logs who sent it: the worker's hashed attempt key (`callerCorrelationId`) for an agent-attempt bearer, a hashed credential key otherwise, and the User-Agent product.
+- 7b76136: A turn someone else started (such as meeting notes) that waits for Codex usage in your Personal workspace now says it can't use your own ChatGPT account, and offers "Continue on my account" when that account has room. The button takes over the wait as you, also after you paused the chat.
+
+  A ChatGPT account that Opengeni saw used no longer reads "No usage yet". When a live usage check returns no windows (for example a personal account the viewer can't read live), the Codex overview keeps the saved reading, and list rows show an older reading with its age ("Checked 16 hours ago"), or "No recent reading" when none is left.
+
+- a190e2a: A refused site-runtime request now logs which gateway check failed as `rejectionDetail` (for example `missing_headers` for unsigned traffic, `bad_signature` or `skew` for a gateway secret or clock problem), so direct probes are told apart from a real gateway fault from the API log alone.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [58b1b0e]
+- Updated dependencies [1f28f11]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/codemode@6.39.0
+  - @opengeni/runtime@6.39.0
+  - @opengeni/core@6.39.0
+  - @opengeni/artifact-tool@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/db@6.39.0
+  - @opengeni/decisions@6.39.0
+  - @opengeni/documents@6.39.0
+  - @opengeni/events@6.39.0
+  - @opengeni/github@6.39.0
+  - @opengeni/interaction@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/storage@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/vaults-bitwarden@6.39.0
+  - @opengeni/vaults-keeper@6.39.0
+  - @opengeni/vaults-onepassword@6.39.0
+  - @opengeni/vaults-protonpass@6.39.0
+  - @opengeni/agent-proto@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
+## 6.38.0
+
+### Minor Changes
+
+- b193d0c: Editable artifacts no longer show a Download button on a deployment that cannot export them. The client configuration now reports `artifactExport` (whether the artifact materializer is deployed), and the web console offers Download only when it is not `false`. Before, the button was always shown: each click saved a named version, then failed with "Download failed. Try again."
+
+### Patch Changes
+
+- 5b2cd0d: A full-page browser screenshot now says when it leaves out content that scrolls inside the page's own areas (an app's main pane or a table), and by how many CSS pixels, with how to capture the rest. It is also exactly as wide as the viewport when the page hides content past its right edge, instead of widening to content no one can scroll to.
+- c05ba68: Automations that run an agent with Memory are no longer refused when they start. Microsoft Teams chats with an agent now get its Memory, as Slack and app chats do.
+  An automation whose agent was deleted or is no longer shared now stops with a clear reason instead of retrying.
+- Updated dependencies [f1289fa]
+- Updated dependencies [969cb9b]
+- Updated dependencies [f9b646c]
+- Updated dependencies [14d9e24]
+- Updated dependencies [020a5df]
+- Updated dependencies [3e41dc8]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [bd4550b]
+- Updated dependencies [b193d0c]
+- Updated dependencies [66afd96]
+- Updated dependencies [279ae6e]
+- Updated dependencies [bfe5398]
+- Updated dependencies [c05ba68]
+- Updated dependencies [b76dd79]
+- Updated dependencies [47f4951]
+- Updated dependencies [d1ecb10]
+- Updated dependencies [b902e4e]
+- Updated dependencies [262c8b2]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/capabilities@6.38.0
+  - @opengeni/runtime@6.38.0
+  - @opengeni/db@6.38.0
+  - @opengeni/config@6.38.0
+  - @opengeni/core@6.38.0
+  - @opengeni/codemode@6.38.0
+  - @opengeni/artifact-tool@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/decisions@6.38.0
+  - @opengeni/documents@6.38.0
+  - @opengeni/events@6.38.0
+  - @opengeni/github@6.38.0
+  - @opengeni/interaction@6.38.0
+  - @opengeni/observability@6.38.0
+  - @opengeni/storage@6.38.0
+  - @opengeni/tool-gateway@6.38.0
+  - @opengeni/vaults@6.38.0
+  - @opengeni/vaults-bitwarden@6.38.0
+  - @opengeni/vaults-keeper@6.38.0
+  - @opengeni/vaults-onepassword@6.38.0
+  - @opengeni/vaults-protonpass@6.38.0
+  - @opengeni/agent-proto@6.38.0
+  - @opengeni/network@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- e93d6d4: Include a bounded error class, code, and reviewed source locations in API fatal logs even when protected diagnostics are disabled. Exception messages and unreviewed paths are never copied to the log. Keep an early Connected Machine replay failure attached to its caller instead of leaking an unhandled rejection while the initial attach is still in progress.
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- 556abe5: A custom MCP server that can't be reached no longer fails calls to other tools. Tool calls without a remembered catalog, approvals, the MCP endpoints, the MCP sign-in consent screen and app tool calls now leave that server out, as the tool list already does. A call to that server's own tool still reports its failure.
+- Updated dependencies [e93d6d4]
+- Updated dependencies [556abe5]
+- Updated dependencies [556abe5]
+  - @opengeni/observability@6.37.3
+  - @opengeni/runtime@6.37.3
+  - @opengeni/contracts@6.37.3
+  - @opengeni/db@6.37.3
+  - @opengeni/core@6.37.3
+  - @opengeni/tool-gateway@6.37.3
+  - @opengeni/artifact-tool@6.37.3
+  - @opengeni/capabilities@6.37.3
+  - @opengeni/codemode@6.37.3
+  - @opengeni/codex@6.37.3
+  - @opengeni/config@6.37.3
+  - @opengeni/decisions@6.37.3
+  - @opengeni/documents@6.37.3
+  - @opengeni/events@6.37.3
+  - @opengeni/github@6.37.3
+  - @opengeni/interaction@6.37.3
+  - @opengeni/storage@6.37.3
+  - @opengeni/vaults@6.37.3
+  - @opengeni/vaults-bitwarden@6.37.3
+  - @opengeni/vaults-keeper@6.37.3
+  - @opengeni/vaults-onepassword@6.37.3
+  - @opengeni/vaults-protonpass@6.37.3
+  - @opengeni/agent-proto@6.37.3
+  - @opengeni/network@6.37.3
+  - @opengeni/xai-subscription@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- 9b5daaa: Record why a browser live view stopped getting frames. The browser controller now reports the state of its frame streams and live-view sockets (states, counts and times, never page content), and the API logs `browser.frame_stream.stalled` with that report when an open view's heartbeat finds a stream or view without a frame for ten seconds, so the reason survives the controller's sandbox stopping.
+- c78d62c: An agent redeems a ChatGPT usage-limit reset with one call and one approval in the chat, which works however long the person takes to approve it. The web app's prepare step is no longer offered to agents.
+- 8ee5e81: Let verified users of an embedding host save secure-question answers to their own Only me vault when the host acts as them with `secrets:write` and their asking turn can use the vault.
+- 210d4cd: Allow body-less same-origin browser mutations such as letting an organization Anthropic API key serve again or removing it. Origin and Fetch Metadata checks still apply, and payloads still require JSON.
+- Updated dependencies [3fc742f]
+- Updated dependencies [9b5daaa]
+- Updated dependencies [c78d62c]
+- Updated dependencies [8ee5e81]
+  - @opengeni/runtime@6.37.2
+  - @opengeni/contracts@6.37.2
+  - @opengeni/db@6.37.2
+  - @opengeni/core@6.37.2
+  - @opengeni/artifact-tool@6.37.2
+  - @opengeni/capabilities@6.37.2
+  - @opengeni/codemode@6.37.2
+  - @opengeni/codex@6.37.2
+  - @opengeni/config@6.37.2
+  - @opengeni/decisions@6.37.2
+  - @opengeni/documents@6.37.2
+  - @opengeni/events@6.37.2
+  - @opengeni/github@6.37.2
+  - @opengeni/interaction@6.37.2
+  - @opengeni/observability@6.37.2
+  - @opengeni/storage@6.37.2
+  - @opengeni/tool-gateway@6.37.2
+  - @opengeni/vaults@6.37.2
+  - @opengeni/vaults-bitwarden@6.37.2
+  - @opengeni/vaults-keeper@6.37.2
+  - @opengeni/vaults-onepassword@6.37.2
+  - @opengeni/vaults-protonpass@6.37.2
+  - @opengeni/agent-proto@6.37.2
+  - @opengeni/network@6.37.2
+  - @opengeni/xai-subscription@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- ae9c227: App server code: publishing refuses tool names that aren't tools in the workspace and names the id to use, and an agent's `app_server_run` and run logs act for the person whose turn it is.
+- e71502d: An app's tool list no longer fails when one custom MCP server in the workspace can't be reached. `GET /tools/catalog` and `/tools/declarations` now leave that server out, as an agent turn does, instead of answering 500 for every tool. A call aimed at that server still reports its own failure.
+- ae9c227: Require Node.js 22.15 or later (`engines.node`) for the packages that load `@opengeni/storage`, which uses zlib's zstd streams; on older Node versions the import fails.
+- e71502d: Require Node.js 22.19 or later (`engines.node`) for the packages that load `@opengeni/runtime`, whose `e2b` dependency requires it; installers that enforce engines refused them on 22.15.
+- 2a8b173: Apps (Sites) can call API integrations such as OneDrive and SharePoint again. The last check before a targeted tool call compared the connection's last-used time, which the call itself had just updated, so every such call was refused and shown as "Couldn't confirm this finished".
+- Updated dependencies [ae9c227]
+- Updated dependencies [3595193]
+- Updated dependencies [e71502d]
+- Updated dependencies [ae9c227]
+- Updated dependencies [e71502d]
+- Updated dependencies [bc538e2]
+- Updated dependencies [1d7c08a]
+- Updated dependencies [17783d3]
+- Updated dependencies [e71502d]
+  - @opengeni/runtime@6.37.1
+  - @opengeni/db@6.37.1
+  - @opengeni/core@6.37.1
+  - @opengeni/storage@6.37.1
+  - @opengeni/documents@6.37.1
+  - @opengeni/config@6.37.1
+  - @opengeni/events@6.37.1
+  - @opengeni/github@6.37.1
+  - @opengeni/agent-proto@6.37.1
+  - @opengeni/artifact-tool@6.37.1
+  - @opengeni/capabilities@6.37.1
+  - @opengeni/codemode@6.37.1
+  - @opengeni/codex@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/decisions@6.37.1
+  - @opengeni/interaction@6.37.1
+  - @opengeni/network@6.37.1
+  - @opengeni/observability@6.37.1
+  - @opengeni/tool-gateway@6.37.1
+  - @opengeni/vaults@6.37.1
+  - @opengeni/vaults-bitwarden@6.37.1
+  - @opengeni/vaults-keeper@6.37.1
+  - @opengeni/vaults-onepassword@6.37.1
+  - @opengeni/vaults-protonpass@6.37.1
+  - @opengeni/xai-subscription@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- 9eee30c: A workspace file uploaded into a page through a browser now keeps its own name in any script. Before, every character other than ASCII letters, digits, spaces, dots, underscores and dashes became `_`, so `Rørføring etg. 2 – rev A (SIM).pdf` reached the page as `R_rf_ring etg. 2 _ rev A _SIM_.pdf`. The staged copy is now named from the file's original name, with only path separators, control characters and characters Windows forbids replaced, a trailing dot or space removed, and the name kept within 240 UTF-8 bytes. A browser controller from before this change refuses such names as invalid; it is sent the ASCII names it has always accepted instead, so uploads keep working while machines update.
+- 9f7efdb: Offer only usable save destinations on secure questions, and keep task-scoped answers usable when delegated saved-logins access is off.
+- 20daa38: Keep app data that once held shared-account tool data restricted after its sync is switched to a personal account, pointed elsewhere or deleted, until a manager resets the data.
+- Updated dependencies [cc649c3]
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [19fe301]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [20daa38]
+- Updated dependencies [a0b9135]
+  - @opengeni/db@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/runtime@6.37.0
+  - @opengeni/capabilities@6.37.0
+  - @opengeni/network@6.37.0
+  - @opengeni/core@6.37.0
+  - @opengeni/documents@6.37.0
+  - @opengeni/events@6.37.0
+  - @opengeni/codemode@6.37.0
+  - @opengeni/artifact-tool@6.37.0
+  - @opengeni/codex@6.37.0
+  - @opengeni/config@6.37.0
+  - @opengeni/decisions@6.37.0
+  - @opengeni/github@6.37.0
+  - @opengeni/interaction@6.37.0
+  - @opengeni/observability@6.37.0
+  - @opengeni/storage@6.37.0
+  - @opengeni/tool-gateway@6.37.0
+  - @opengeni/vaults@6.37.0
+  - @opengeni/vaults-bitwarden@6.37.0
+  - @opengeni/vaults-keeper@6.37.0
+  - @opengeni/vaults-onepassword@6.37.0
+  - @opengeni/vaults-protonpass@6.37.0
+  - @opengeni/xai-subscription@6.37.0
+  - @opengeni/agent-proto@6.37.0
+
+## 6.36.0
+
+### Minor Changes
+
+- 27832fd: Upgrade an existing app from a newer package of it: a dry run returns the plan (new version, tools, collections, migrations, queries and syncs), and applying it publishes the package's version as a new version of the same app and runs only what is new. Nothing is deleted; destructive changes need `allowDestructive: true` and conflicts stop the upgrade. Adds `POST /v1/workspaces/:workspaceId/published-artifacts/:appId/package/upgrade`, `upgradeAppPackage` in the SDK, the `app_upgrade` agent tool and Upgrade from package in the app's menu. Package demo data now carries the app's shared files (`demoData.files`) and SQL blob values (`{ "$base64": "…" }`), and package files `app_export` stores are deleted after 24 hours. Older packages stay readable. See docs/app-packages.md.
+- 92fb3ca: The chat's side panel shows only the essentials. Tabs run across the top; in the app the strip shows the PR when one is linked, Changes when there are changes and Artifacts when the chat has some; a "+" menu holds everything else (Files, Terminal, Browser, Desktop, Linked, expand and hide), and a tab opened from it stays on the strip for that chat until closed. Switching tabs keeps each panel's scroll and selection and no longer re-renders every panel. A linked GitHub pull request gets a PR tab: title, one status line, one action (Merge, which asks the agent, or View on GitHub) and a menu for Description, Discussion, Commits and Checks, read from the new `GET .../sessions/:id/links/:linkId/pull-request` route (`client.getSessionPullRequest`). Linked shows only when something else is linked. A chat with nothing to show starts with the panel closed; new content puts a small dot on the panel toggle, and an opened empty panel offers Files, Terminal and Browser (`WorkspaceDock` `landing`/`onStripEmptied`/`headerAccessoryPinned`, `openTabRequest.expand`).
+
+  Changes has one quiet header per file, a folder tree with +/− change bars in the app (`WorkbenchChanges` `navigation="tree"`), and one view menu (comparison and unified/split), and switching files no longer stalls: diff highlighting can run in web workers (`enablePierreDiffs({ worker })` or `enableWorkbench({ diffsWorker })`), and file rows and sections no longer re-render on every scroll or stream update. `WorkspaceTab.optional`, the `essentials` and `tabScope` dock props, `WorkbenchChanges` `comparison`/`hideSummary`/`navigation` and `SandboxWorkspace` `tabVisibility` are new and additive; embedders keep today's tabs by default.
+
+  Opening an app or artifact shows one way back (the window-bar breadcrumb) and restores the list's scroll position on return. The Agents page has one **Add agent** menu at the top with the ready-made agents, a blank agent and import.
+
+### Patch Changes
+
+- 581d1cc: A browser on a Connected Machine can be used by another agent chat working on that machine (a child given its parent's browser, say) after the chat that opened it has moved to another machine, as a Desktop already can. Before, opening, resuming, controlling or saving it was refused with "this task now runs on another machine", even though the calling chat was on the browser's machine, because only the opening chat's route counted. The request now goes through the calling chat's own route when it works on that machine, authorized for that chat. Requests from a chat on another machine are refused as before.
+- 1608c81: When computers are already connected, the Connected Machine card result now tells the agent which of the person's computers are connected and their state, instead of a generic "machines are connected" line. It no longer promises that the person can connect another computer from the card, since that depends on the app and the device they're on, and it tells the agent that a computer the person means but isn't listed is not connected. The Chrome extension it names is the deployment's own, linked only when the link is for that extension.
+- 7b6eb1d: Log the content-free cause of a browser or computer create that the controller refused, so operators can see the driver error class and code frame without the machine's own logs.
+- c5f3f57: A browser or desktop placed on a session's own managed box stays reachable while that session routes to a Connected Machine. Sessions whose home is a machine used to follow the selected machine for every direct operation, so reopening such a browser failed with "home placement is unavailable" even though its box still existed. Requests for a controller placed on the managed box now go to that box, the same way they already do when no machine is selected.
+- 55539f1: Show where recordings spend time between Stop and the transcript. The SDK measures storage uploads and finalize, React measures transcript delivery and composer insertion, and the API and worker emit recording stage timings with a shared recording key. Transcript long polling reports its intentional wait separately from active API work.
+- f2c07c2: A workspace that its organization shares an Opengeni Slack bot with can now add Slack as an automation event source, and the bot's channel events reach that workspace's automations as well as the home workspace's. Delivery follows the live sharing setting: turning sharing off or leaving the workspace out stops new events there. Migration 1538 adds the one lookup each Slack callback makes for this; the shared workspaces' deliveries never delay Slack's acknowledgement. A workspace's Slack source whose bot is no longer shared with it reads as blocked with "The Slack bot isn't shared with this workspace anymore" until the bot is shared again.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- 684587a: Every app opened in the workspace now offers its Opengeni chat beside it: the chat opens by default wherever the window has room for both (until you close it, which is remembered per app), and a closed chat comes back from a labelled Chat button in the app's header or the macOS window bar. A new chat there starts on the app's configured model when the workspace allows it (`SitePublicationLink.agentModel`, `useNewConversation({ defaultModel })`). The app header's publication control reads **Share**, and a published app shows a loading screen until it has loaded. "Let people chat" now says the app's own chat uses the agent, and the apps guidance has the agent add a chat that suits the app when chat is turned on.
+
+  The workbench tab strip shows Changes, Files, Terminal, Browser and Desktop directly while they fit and moves only the ones that don't into "+"; Settings and Debug stay in "+". This changes `WorkspaceTab.optional`: an optional tab now fills spare room on the strip. Add `inMenu: true` to keep a tab in "+" as before. The strip has one maximize/restore button (Esc also restores), and the session header's Pin moved into its … menu.
+
+  The Files tab leaves tool and cache folders (`.bun`, `.cache`, `.npm`, `node_modules` and the like, and the sandbox home's dot folders) out of the tree by default; one Show hidden files toggle in its toolbar brings them back, and opening a file inside one shows them in that view. `hideToolFolders={false}` on `SandboxWorkspace` or `SandboxFiles` turns this off.
+
+- Updated dependencies [f2c07c2]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [bede91b]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [9cfc4b7]
+- Updated dependencies [837e58f]
+- Updated dependencies [26b0190]
+- Updated dependencies [e765d11]
+- Updated dependencies [7b6eb1d]
+- Updated dependencies [b419673]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [23e52db]
+- Updated dependencies [53320fa]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [53320fa]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [0b36a4b]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/core@6.36.0
+  - @opengeni/config@6.36.0
+  - @opengeni/runtime@6.36.0
+  - @opengeni/db@6.36.0
+  - @opengeni/observability@6.36.0
+  - @opengeni/artifact-tool@6.36.0
+  - @opengeni/capabilities@6.36.0
+  - @opengeni/codemode@6.36.0
+  - @opengeni/codex@6.36.0
+  - @opengeni/decisions@6.36.0
+  - @opengeni/documents@6.36.0
+  - @opengeni/events@6.36.0
+  - @opengeni/github@6.36.0
+  - @opengeni/interaction@6.36.0
+  - @opengeni/storage@6.36.0
+  - @opengeni/tool-gateway@6.36.0
+  - @opengeni/vaults@6.36.0
+  - @opengeni/vaults-bitwarden@6.36.0
+  - @opengeni/vaults-keeper@6.36.0
+  - @opengeni/vaults-onepassword@6.36.0
+  - @opengeni/vaults-protonpass@6.36.0
+  - @opengeni/agent-proto@6.36.0
+  - @opengeni/network@6.36.0
+  - @opengeni/xai-subscription@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes

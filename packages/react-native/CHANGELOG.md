@@ -1,5 +1,176 @@
 # @opengeni/react-native
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/react@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- 71fd8b6: Long chat messages in the native app render formatted again, like on the web: bold,
+  lists, links, math and inline `opengeni-html` / `opengeni-site` previews, instead of
+  raw text pages. A long message is cut where markdown-it starts a top-level block
+  (display math counted as one block), so each chunk parses to the same blocks as in the
+  whole message (apart from rare inputs where the math pass's simpler fence rule
+  disagrees with markdown-it). Each chunk is math-normalized and parsed on its own (at
+  most 8,192 characters per parse) and mounted one chunk-sized slice per frame. A visual
+  too long to share a chunk goes to the preview renderer whole; other code blocks longer
+  than one chunk show as pages. While a message streams, only its last blocks are parsed
+  again. Messages over 65,536 characters, and a single text block too long for one
+  chunk, still show as selectable plain-text pages.
+
+  Math in chat Markdown (web and native) finds display blocks in linear time: many
+  unclosed `$$` or `\[` openers no longer make the math pass quadratic. Output is
+  unchanged.
+
+- Updated dependencies [2a4f625]
+- Updated dependencies [71fd8b6]
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/react@6.40.0
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [6b4d423]
+- Updated dependencies [9012657]
+- Updated dependencies [7b76136]
+- Updated dependencies [d6f3b77]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/react@6.39.0
+
+## 6.38.0
+
+### Patch Changes
+
+- Updated dependencies [de3d320]
+- Updated dependencies [f1289fa]
+- Updated dependencies [2148132]
+- Updated dependencies [f9b646c]
+- Updated dependencies [c498f66]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [fe66f1c]
+- Updated dependencies [4abb2b9]
+- Updated dependencies [c05ba68]
+- Updated dependencies [b76dd79]
+- Updated dependencies [47f4951]
+- Updated dependencies [4122dc5]
+- Updated dependencies [b902e4e]
+  - @opengeni/react@6.38.0
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- Updated dependencies [556abe5]
+- Updated dependencies [d12b623]
+- Updated dependencies [d12b623]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/react@6.37.3
+  - @opengeni/sdk@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- Updated dependencies [3fc742f]
+- Updated dependencies [c78d62c]
+  - @opengeni/react@6.37.2
+  - @opengeni/contracts@6.37.2
+  - @opengeni/sdk@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- Updated dependencies [601f949]
+- Updated dependencies [a102af1]
+  - @opengeni/react@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/sdk@6.37.1
+
+## 6.37.0
+
+### Patch Changes
+
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [daaaaae]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/sdk@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/react@6.37.0
+
+## 6.36.0
+
+### Patch Changes
+
+- 1ecd2d1: When an agent asks for the same connection more than once, only the newest card stays a full card. Earlier copies from the same turn leave the timeline, Connected Machine requests included; copies from earlier turns are marked `AuthNeededItem.askedAgainLater`, which now applies to every connection card, and the stock chat and `AuthNeededRow` show them as one line. Cards with inputs are never folded.
+- b1abd39: The sidebar is edited in place: drag rows to reorder (or drop an app from the Sessions list), **+** on a group adds an app, and row menus rename, set an icon, set how many apps a list shows, and remove. A project app's menu has **Add to sidebar**. Apps, links and groups take an optional `icon` from a curated set of lucide names (`SIDEBAR_ITEM_ICONS`); outside links without one show the site's icon through `GET /v1/workspaces/:workspaceId/sidebar-layout/link-icon` (`client.getSidebarLinkIcon`). The phone app shows item icons and site icons, and leaves out hidden built-in entries (Automations in the side menu; Artifacts, Meetings or Inbox in the tab bar). Layouts gain `options` (the `options` change): `sessionsShowApps`, `hiddenNavEntries` and `settingsMore`, set as the workspace default or per person; unset keeps today's behaviour. While a deploy rolls out, a write from an older API replica can drop saved `options`; set them again afterwards. Recent apps now count opens and the last 90 days of edits (read through a new index on app versions by author), and no longer come back empty: the read ran without the person's identity, so row-level security hid every open.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [53320fa]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [7b90e00]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [e765d11]
+- Updated dependencies [e3a0a3d]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [1ecd2d1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [837e58f]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [fa84236]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [684587a]
+  - @opengeni/react@6.36.0
+  - @opengeni/contracts@6.36.0
+  - @opengeni/sdk@6.36.0
+
 ## 6.35.0
 
 ### Patch Changes

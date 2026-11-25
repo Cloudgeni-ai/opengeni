@@ -5,7 +5,7 @@
 import { t } from "./console-text";
 import { creatorIdentityKey, creatorType, machineCreatorLabel } from "./creator-initials";
 import { formatWaitingSince } from "./format";
-import { awaitsPerson } from "./needs-you";
+import { awaitingPersonSince, awaitsPerson } from "./needs-you";
 import { failureHandledByAgent, needsFailureReview } from "./session-failure";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
@@ -166,7 +166,7 @@ function ownRailStatusCounts(
     total: 1,
     sendFailed: localDeliveryAttention.get(session.id) ?? 0,
     attention: awaitsPerson(session) ? 1 : 0,
-    attentionSince: awaitsPerson(session) ? (session.requiresActionSince ?? null) : null,
+    attentionSince: awaitsPerson(session) ? awaitingPersonSince(session) : null,
     // Failed is a review signal in the rail, not a permanent copy of the
     // lifecycle badge. Opening the session acknowledges the failure together
     // with the unread frontier; a failure its parent agent consumed is that
@@ -1485,6 +1485,33 @@ export function buildPinnedRailSections(
           }),
       now,
     ),
+  };
+}
+
+/**
+ * The rail sections one part of the list shows when apps have a section of
+ * their own: the Apps section keeps only app rows, Sessions everything else.
+ * Without a part (null) the sections are unchanged. `complete` stays whole
+ * for lookups.
+ */
+export function railSectionsFor(
+  sections: PinnedRailSections,
+  part: "sessions" | "apps" | null,
+  /** Rows the part also leaves out (the Apps section's Needs you). */
+  also: ((node: SessionTreeNode) => boolean) | null = null,
+): PinnedRailSections {
+  if (part === null) return sections;
+  const keep = (node: SessionTreeNode) =>
+    Boolean(node.siteGroup) === (part === "apps") && (also === null || also(node));
+  return {
+    complete: sections.complete,
+    pinned: sections.pinned.filter(keep),
+    ordinary: {
+      running: sections.ordinary.running.filter(keep),
+      grouped: sections.ordinary.grouped
+        .map((bucket) => ({ ...bucket, sessions: bucket.sessions.filter(keep) }))
+        .filter((bucket) => bucket.sessions.length > 0),
+    },
   };
 }
 

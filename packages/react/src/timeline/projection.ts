@@ -2270,6 +2270,9 @@ export function buildTimeline(
   }
   if (pendingTurnSteps) items.push(pendingTurnSteps);
   markRepeatedCapabilityRequests(items);
+  markRepeatedAccessRequests(items);
+  markFinishedAuthCards(items);
+  dropRepeatedAccessRequests(items);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2694,6 +2697,87 @@ function markRepeatedCapabilityRequests(items: TimelineItem[]): void {
       kept.set(key, item.turnId);
     }
   }
+}
+
+/**
+ * The same connected account asked again for the same additional access
+ * (an OAuth step-up), or null for any other card.
+ */
+function accessRequestKey(item: TimelineItem): string | null {
+  if (
+    item.kind !== "auth-needed" ||
+    item.reason !== "insufficient_scope" ||
+    !item.connectionId ||
+    item.capability ||
+    item.setupRequest
+  )
+    return null;
+  return `${item.connectionId}\u0000${[...new Set(item.scopes)].sort().join(" ")}`;
+}
+
+/**
+ * An agent that hits the same missing access again (it retried, or a later
+ * message asked for the same action) shows one card: the latest, where the
+ * person is reading and which the finished setup continues from. Earlier
+ * copies of the same ask are hidden.
+ */
+function markRepeatedAccessRequests(items: TimelineItem[]): void {
+  const seen = new Set<string>();
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    const key = accessRequestKey(item);
+    if (key === null || item.kind !== "auth-needed") continue;
+    if (seen.has(key)) item.askedAgainLater = true;
+    else seen.add(key);
+  }
+}
+
+/**
+ * A card the person finished from: the chat recorded that setup from it
+ * finished (the "capability_setup_completed" input names the card), so the
+ * card says it is done instead of offering its action again after a reload.
+ * A repeated access request finished from any copy is finished.
+ */
+function markFinishedAuthCards(items: TimelineItem[]): void {
+  const finishedCards = new Set<string>();
+  for (const item of items) {
+    if (item.kind !== "machine-input-batch") continue;
+    for (const member of item.members) {
+      if (member.kind === "capability_setup_completed") finishedCards.add(member.sourceId);
+    }
+  }
+  if (finishedCards.size === 0) return;
+  // Per access request, the position of the last card finished from.
+  const finishedThrough = new Map<string, number>();
+  items.forEach((item, index) => {
+    if (item.kind !== "auth-needed" || !finishedCards.has(item.id)) return;
+    item.setupFinished = true;
+    const key = accessRequestKey(item);
+    if (key !== null) finishedThrough.set(key, index);
+  });
+  // Only copies asked up to the finished one: a later ask means the account
+  // still lacked the access, and that card stays actionable.
+  items.forEach((item, index) => {
+    if (item.kind !== "auth-needed") return;
+    const key = accessRequestKey(item);
+    const through = key === null ? undefined : finishedThrough.get(key);
+    if (through !== undefined && index <= through) item.setupFinished = true;
+  });
+}
+
+/**
+ * Earlier copies of a repeated access request leave the timeline, so no
+ * renderer (the stock row or a host's) shows them and they don't hold an
+ * older turn open.
+ */
+function dropRepeatedAccessRequests(items: TimelineItem[]): void {
+  let kept = 0;
+  for (const item of items) {
+    if (item.kind === "auth-needed" && item.askedAgainLater && accessRequestKey(item) !== null)
+      continue;
+    items[kept++] = item;
+  }
+  items.length = kept;
 }
 
 /**
@@ -4795,6 +4879,8 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
   "pinned_account_disabled",
   "pinned_account_ineligible",
   "model_not_allowed",
+  "codex_relogin_required",
+  "codex_plan_no_capacity",
   // Only sending the work again ends it (design 5.3 decision 4).
   "accepted_authority_unavailable",
 ]);
@@ -4811,8 +4897,9 @@ const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|accou
  * line: the message is answered as soon as there is room (the waiting turn
  * stays queued and resumes by itself when an account can serve it), or
  * sooner on another model. It names no time: the timeline cannot keep a
- * time current. Only a wait that a person must resolve (reconnect,
- * re-enable, choose another account) keeps its recorded, actionable reason.
+ * time current. Named rate limits and waits that a person must resolve
+ * keep their recorded explanation, and so does a wait on the account the chat
+ * is pinned to: another model would not help it, automatic account choice does.
  */
 function capacityWaitPresentation(
   t: OpenGeniText,
@@ -4822,6 +4909,8 @@ function capacityWaitPresentation(
 ): { turnId: string | null; label: string; detail: string; text: string } {
   if (
     ACTION_CAPACITY_WAIT_REASONS.has(stringValue(payload.waitReason)) ||
+    payload.waitReason === "pinned_account_unavailable" ||
+    payload.waitReason === "codex_rate_limited" ||
     ACTION_CAPACITY_WAIT_CODE.test(stringValue(payload.code))
   ) {
     // Claude/SuperGrok waits record the readable sentence as `error` and an

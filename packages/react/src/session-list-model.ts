@@ -419,11 +419,19 @@ export const SESSION_STATUS_TONE: Record<SessionDisplayStatus, SessionStatusTone
   archived: "cancelled",
 };
 
-/** The status dot of a recent-session row: a background command reads as running. */
+/**
+ * The status dot of a recent-session row: a background command reads as
+ * running, and a connection card the agent waits on reads as waiting on you.
+ */
 export function recentSessionStatus(
   session: Pick<
     SessionListRow,
-    "status" | "backgroundCommandActivity" | "admissionBlock" | "archived" | "retention"
+    | "status"
+    | "backgroundCommandActivity"
+    | "admissionBlock"
+    | "archived"
+    | "retention"
+    | "awaitingConnectionSince"
   >,
 ): { tone: SessionStatusTone; pulse: boolean } {
   const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;

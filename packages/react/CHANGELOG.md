@@ -1,5 +1,292 @@
 # @opengeni/react
 
+## 6.41.0
+
+### Minor Changes
+
+- dd6dd0b: A meeting recorded in your Personal workspace can be shared with one of your team workspaces (`PATCH …/recordings/:recordingId` with `{ visibility: "workspace", sharedWorkspaceId }`), from any workspace where you see it. Everyone in that workspace can open it read only, and agents there find it with `meetings_search`; `Recording.sharedWorkspaceId` says where it is shared. The meeting page's Share menu lists "Only me" and your team workspaces.
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/connect@6.41.0
+
+## 6.40.0
+
+### Minor Changes
+
+- 2a4f625: The sidebar layout's options add `appsPlacement`: apps as rows in the Sessions list (`sessions`, the default), in an Apps section of their own below Sessions (`section`), or hidden (`hidden`). `sessionsShowApps` stays and follows it (`false` is `hidden`), so saved layouts and existing callers keep working; a `tab` a preview saved reads as `section`. With `SessionShellSlots.appsPlacement` `section`, the Sessions list draws an Apps section below the list, with the same header style as Sessions, showing the first five apps and Show more for the rest; its view menu offers the choice when the surface passes `onAppsPlacementChange`. The agent page's Can use lists tools by readable name (the tool's own title, a curated GitHub name, or its code name in words); one GitHub action is one row covering Opengeni's built-in name and GitHub MCP's, so a choice there sets both.
+
+### Patch Changes
+
+- 2a4f625: Automation run history explains the `duplicate_agent_run` skip: one event delivery starts at most one run per agent, so when several automations of the same agent match it, the others record a skipped run with that reason.
+- 71fd8b6: Long chat messages in the native app render formatted again, like on the web: bold,
+  lists, links, math and inline `opengeni-html` / `opengeni-site` previews, instead of
+  raw text pages. A long message is cut where markdown-it starts a top-level block
+  (display math counted as one block), so each chunk parses to the same blocks as in the
+  whole message (apart from rare inputs where the math pass's simpler fence rule
+  disagrees with markdown-it). Each chunk is math-normalized and parsed on its own (at
+  most 8,192 characters per parse) and mounted one chunk-sized slice per frame. A visual
+  too long to share a chunk goes to the preview renderer whole; other code blocks longer
+  than one chunk show as pages. While a message streams, only its last blocks are parsed
+  again. Messages over 65,536 characters, and a single text block too long for one
+  chunk, still show as selectable plain-text pages.
+
+  Math in chat Markdown (web and native) finds display blocks in linear time: many
+  unclosed `$$` or `\[` openers no longer make the math pass quadratic. Output is
+  unchanged.
+
+- 2a4f625: A sub-session that waits only on a connection card no longer says "needs you" forever: completing a session's goal withdraws its open connection cards, and the parent's line for such a wait has Dismiss, which hides it until that sub-session waits again. Questions and approvals stay as they are.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/connect@6.40.0
+
+## 6.39.0
+
+### Minor Changes
+
+- e4598af: Insights usage can group by agent (`groupBy=agent`) and filter by `agentId`; a worker's usage counts toward its root chat's agent, and responses add `facets.agents`. An agent's page shows what it cost in the last 30 days and per run to people who can see Usage.
+- e4598af: Agents are easier to set up. **Add agent ▾ → Create with chat** opens a chat that drafts the agent from a plain description and creates it once the person confirms, using the new bundled `agents` Skill (`builtin:agents`); `bot_template_save` also accepts `toolPermissions` and `skills`. New agents in the form start with short Instructions and ask before merging pull requests. The form and the agent's page offer common triggers as switches: when a pull request opens, when mentioned on a PR, and every weekday morning (`commonAgentTriggers()`).
+- d6f3b77: Paying for a plan through Stripe checkout now confirms it when you return, from Billing or from onboarding. A short message says your plan is activating, then names it once it's active, for example "Pro is active". A cancelled plan checkout shows nothing new. A checkout return is still confirmed when a redirect or an unfinished setup step changes the address first.
+
+### Patch Changes
+
+- 6b4d423: An organization's admins, not only its owner, can choose "Anyone in <organization>" for an agent, matching the API's organization administration rule.
+- 7b76136: A turn someone else started (such as meeting notes) that waits for Codex usage in your Personal workspace now says it can't use your own ChatGPT account, and offers "Continue on my account" when that account has room. The button takes over the wait as you, also after you paused the chat.
+
+  A ChatGPT account that Opengeni saw used no longer reads "No usage yet". When a live usage check returns no windows (for example a personal account the viewer can't read live), the Codex overview keeps the saved reading, and list rows show an older reading with its age ("Checked 16 hours ago"), or "No recent reading" when none is left.
+
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/connect@6.39.0
+
+## 6.38.0
+
+### Minor Changes
+
+- 4abb2b9: Add `@opengeni/react/skills`, a packaged Skills page for any host: list, view, a folder editor with save and remove, version history and restore when the client can read them, and upload of a SKILL.md, a skill folder or a .zip. Also exports `@opengeni/react/ui/capability-page`, and `ConnectionInstalled` takes `title={null}`, an `aria-label` and a per-item `statusTone`. `SkillsPanel` takes `refusalCodes` to show a host relay's own refusal sentences.
+
+### Patch Changes
+
+- de3d320: When another account signs in on the same browser, an open tab notices (on a refused request or when the tab comes back to the front), drops everything it held for the previous person and opens the new person's own workspace, with one short notice. A link to a workspace the person can't open also says why it opened theirs instead. `AppStateHost.subscribeSignInLost` listeners now receive a reason: `"signed_out"` for a lapsed sign-in (401) or `"forbidden"` for a 403.
+- f1289fa: Shared agents have a **Who can edit** setting: "Creator and admins" or "Everyone in workspace". Agents made in Opengeni's apps start as everyone in the workspace; existing agents, and API creates that leave it out, keep today's rule (creator and admins). Agents gain `editAccess` and `viewer.canManage`, and `createAgent`, `createAgentFromTemplate` and `updateAgent` accept `editAccess`. The ready-made PR reviewer can now be set to review a pull request in one click when someone on the team mentions it there. When a pull request event's automation run is refused before it starts, Opengeni says why in a comment on that pull request.
+- 2148132: An app opened as a page from the sidebar has one small chat button in its corner. It opens the same chat panel as the app view, with New, Copy link and Open as a full chat, and the chat can be hidden again. People who can't start chats see no button.
+- c498f66: A `FormPage` footer now rests on the bottom edge of what is visible, even when the page scrolls inside a container with bottom padding. On the agent sign-in page ("Connect … to Opengeni") the Cancel and Allow bar used to stop above the bottom, with the permission list showing beneath it.
+- bfe5398: A chat pinned to one subscription account now says so when it waits for that account. The chat keeps honouring the pin: its turn still waits for the chosen account and never moves to another one by itself. But the wait no longer tells people to switch the chat to another model, which did not help, because the pin holds whatever the model.
+
+  - The composer shows "This chat is pinned to the Claude account “Team”, which is out of capacity. Resets Sat 18:00." with one button, **Use automatic account choice**. It switches the chat back to automatic account choice through the existing session account choice (`connectionId: null`), which applies to the waiting turn, so it continues at once on another account. People who can't manage the chat are told who can. A turned-off or no-longer-eligible pinned account gets the same notice and button.
+  - The timeline keeps the wait's own explanation instead of the generic "switch to another model" line.
+  - The person's inbox notification is titled "Chat waiting for its pinned Claude account", names the account and when it has room again, and offers automatic account choice instead of a model switch. It is still sent once per waiting turn and updated in place when what it said changes.
+  - A worker's parent agent is told the same, with the `setSessionModelAccount` action (`connectionId: null`) as the way to let the worker continue, instead of `session_set_model`.
+
+  The account is named by its label only when the label is not an email address. The internal wait field that named an account needing a new sign-in is now `waitAccount` (type `SubscriptionWaitAccount`; `SubscriptionReconnectAccount` remains as a deprecated alias) and also names a pinned account.
+
+- fe66f1c: Keep modal content above its backdrop when an extension reorders body children.
+
+  If you customize a Dialog or Sheet content exit animation, set `--og-modal-exit-duration` on its overlay to at least the full exit time so the overlay stays mounted until the content animation finishes. Use the matching SDK `Dialog` or `Sheet` root for non-modal dialogs rather than a raw Radix root.
+
+- c05ba68: Automations that run an agent with Memory are no longer refused when they start. Microsoft Teams chats with an agent now get its Memory, as Slack and app chats do.
+  An automation whose agent was deleted or is no longer shared now stops with a clear reason instead of retrying.
+- b76dd79: A message is no longer refused when one of its connector accounts stopped working after the chat was opened (for example its sign-in expired). It is sent without that account: the connector keeps your other picks that still work, or runs without an account for that turn, and no other account is used in its place. The left-out account is recorded on the turn, logged, and an expired sign-in posts its reconnect notice in the chat, addressed to the person who sent the message (not the chat's owner in a shared chat) and posted once per break, so a dismissed notice stays dismissed while the account stays broken. The notice names the account only in a private chat or in its owner's own Personal workspace; anywhere else it names only the service. Work that continues the message narrows the same way, keeping your working picks rather than dropping the connector. An account id you can't see, or one that belongs to another connector, is still refused, and personal GitHub and social account picks stay strict because a repository or post can't be attached without that account. A chat left open re-reads its accounts when you return to it, and reconnect notices name the service (Atlassian, not "Mcp").
+
+  In the composer, a picked account that stopped working stays picked and shows "Reconnect required" on the connector and on the account, with a Reconnect action for that account. Send stays enabled.
+
+  If a server still refuses such a message, the chat re-reads its accounts and sends it again once on its own, leaving out a pick that stopped working only where the connector keeps another pick, with no failed message to resend. Only that resend is narrowed: your picks stay as you made them, so the account is used again once you reconnect it. It never adds, swaps or widens accounts: when no such resend exists, or the second send is refused too, the message shows as failed as before.
+
+  "Reconnect required" on a connector in + → Connectors now stays until you reconnect it, including after a reload and on other devices. In a Personal workspace, a connector carried from another workspace used to disappear from the connector list once its account stopped working; the list now keeps it as not runnable, marked as needing reconnecting, so it is never a default tool and chats never run it with that account. A new chat or tool selection that still names it is accepted instead of being refused, and keeps it chosen, with your account picks for it, so the chat gets it back once you reconnect and uses only the accounts you picked. The Open PR button no longer has a glow, matching the other primary buttons.
+
+- 4122dc5: The Skills page numbers a skill's versions within that skill (Version 1, 2, ...) instead of showing the shared revision counter, and the docs say to import `@opengeni/react/connect.css` for it.
+- b902e4e: Steer on the collapsed queue now steers every queued message, including ones still being sent, in one command: the agent gets them in the order sent, with one interruption. The button shows the count when more than one message waits. Steer on a row in the open queue still steers just that message.
+
+  `steerQueueItem` accepts an optional `together` list of other waiting prompts (`{ turnId, expectedTurnVersion }`) to steer in the same command, and `useTurnQueue` adds `steerTurns`.
+
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+  - @opengeni/connect@6.38.0
+
+## 6.37.3
+
+### Patch Changes
+
+- 556abe5: App server code: `env.tools.call` returns the tool's JSON value, read the same way app syncs read it, and throws `tool_error` when the tool fails. `{ raw: true }` returns the MCP result. Code uploaded before this change keeps getting the MCP result. The chat panel inside an app can copy a link to its conversation.
+- d12b623: Keep formatted chat history from re-parsing and re-typesetting on unrelated interface updates while preserving live Markdown and link behavior.
+- d12b623: Open long chats at the newest messages without rendering several screens of scrollback first. Older messages remain available by scrolling or using Find in conversation.
+- Updated dependencies [556abe5]
+  - @opengeni/contracts@6.37.3
+  - @opengeni/sdk@6.37.3
+  - @opengeni/connect@6.37.3
+
+## 6.37.2
+
+### Patch Changes
+
+- 3fc742f: Apps can use Your GitHub tools (`github_personal`): each viewer runs them on their own GitHub account with All my repositories, is offered Your GitHub settings to connect or reconnect, and may read the app's stored GitHub data once they have it.
+- Updated dependencies [c78d62c]
+  - @opengeni/contracts@6.37.2
+  - @opengeni/sdk@6.37.2
+  - @opengeni/connect@6.37.2
+
+## 6.37.1
+
+### Patch Changes
+
+- 601f949: The browser viewer no longer shows a frozen picture as live. A live view whose connection stays open but stops sending frames for 15 seconds opens a new stream; after the automatic retries it says the browser stopped sending its picture and offers to reconnect.
+- a102af1: Keep the host's model and reasoning choice on every new chat. The draft uses the first available level as a fallback without changing the order of the level picker.
+  - @opengeni/connect@6.37.1
+  - @opengeni/contracts@6.37.1
+  - @opengeni/sdk@6.37.1
+
+## 6.37.0
+
+### Minor Changes
+
+- c778f4a: Apps can carry server code. A version's JavaScript modules run on Cloudflare Dynamic Workers when the page calls `site.server.fetch(path, init)` in `@opengeni/sdk/site`, as the app rather than the viewer: tool calls (listed in the server bundle's `tools`) use only the workspace's shared connector accounts, outbound fetches may carry listed vault secrets, and app data writes are the app's. Code that uses tools or secrets runs only for signed-in workspace members who may use them; everyone else is refused. Data stored from shared accounts, by server code or by shared app syncs (including existing ones), is likewise shown only to workspace members who may use that connector: invited people and public visitors no longer see it, whatever the collection or sharing settings say. Code versions and rolls back with the app. Managers read runs with `getAppServerStatus` and `listAppServerRuns` in the SDK client and the `app_server_runs` and `app_server_run` agent tools; the app header shows one line while the newest run fails or the code is paused. Off unless `OPENGENI_SITES_SERVER_CODE_ENABLED` is set and the sites gateway has a `LOADER` binding. See docs/app-server-code.md.
+- a2ad192: Add the opt-in `fitViewport` prop to `BrowserViewer`. An embed can fit a managed Chromium page to its panel without cropping or overriding an explicitly set viewport. The console still scales its existing frame. Only viewer-fitted sizes carry to new tabs.
+
+### Patch Changes
+
+- 36f5f96: Explain whether a Codex account needs a new sign-in, the available plans cannot serve the model, or an account is rate-limited, including the known reset time.
+- daaaaae: Show a still icon while a browser sleeps and explain that the open page reloads and unsaved form entries are lost when the browser reopens.
+- ee17f5d: The Agents page lists the ready-made agents not added yet under the workspace's own, each added in one click. The Artifacts page's Apps tab, and its empty state, offer ready-made apps the same way, opening the app once it's added (Capabilities' **Ready-made** tab now opens it too). Three new ready-made apps keep their own data: **Issue tracker**, **Incident log** and **Feedback board** (with votes), next to **Decision log**.
+
+  An agent's GitHub trigger now covers every repository the GitHub connection reaches, or only the repositories you choose, and each run checks out the repository its event is about. Before, the one repository picked in **Add trigger** was only checked out, so the trigger fired for every repository; existing agent triggers now fire only for that repository. An agent's GitHub trigger saved with no repository, which already fired for every repository, now also checks out each event's repository (from the workspace's GitHub allowlist) in its new chat. A trigger that continues a chat keeps the chosen repositories open there. Other automations are unchanged.
+
+  The pasted webhook secret steps are one component shared by Add a source, a source's page and Add trigger, and the Skills section on an agent's page has more room above **Add a Skill**.
+
+  New apps take the Opengeni look by default (`/__opengeni/ui.css`), single-file apps included, unless the person's design, the workspace's design system or the product the app is about comes first; the ready-made apps use it too. `ui.css` now sizes text in `rem`, so the reader's browser text size applies, and uses 16px inputs on touch screens so phones don't zoom when a field is tapped.
+
+- 9f7efdb: Offer only usable save destinations on secure questions, and keep task-scoped answers usable when delegated saved-logins access is off.
+- a0b9135: A sub-agent's question now goes first to the agent that started it. While that agent can still answer, you get no inbox item or phone notification for it, and Needs you and the attention counts leave it out. It reaches you as before if the agent's turn ends without an answer, the agent's turn fails, or the same pause also needs you. Questions only you can answer (passwords and other secrets, Skill reviews, approvals) still come straight to you. Sessions gain an optional `questionWithAgent` flag.
+- Updated dependencies [c778f4a]
+- Updated dependencies [9eee30c]
+- Updated dependencies [a2ad192]
+- Updated dependencies [36f5f96]
+- Updated dependencies [cf218c3]
+- Updated dependencies [ee17f5d]
+- Updated dependencies [9f7efdb]
+- Updated dependencies [a0b9135]
+  - @opengeni/sdk@6.37.0
+  - @opengeni/contracts@6.37.0
+  - @opengeni/connect@6.37.0
+
+## 6.36.0
+
+### Minor Changes
+
+- 8ace4d4: Run Claude on Amazon Bedrock with the deployment's AWS identity: set `OPENGENI_BEDROCK_REGION` to use the native Messages transport against Bedrock, with `eu.`/`us.`/`global.` inference profiles, inference-profile ARNs, model discovery, Bedrock pricing and opt-in per-user cost attribution through an assumed role. The deployment model credential source (`ModelCredentialSourceV1` `mechanism`) gains the value `aws_iam`; clients that switch on it should treat unknown values as a deployment credential. While Bedrock is on, `OPENGENI_MODEL_PROVIDERS_JSON` cannot use the provider id `bedrock`.
+- 27832fd: Upgrade an existing app from a newer package of it: a dry run returns the plan (new version, tools, collections, migrations, queries and syncs), and applying it publishes the package's version as a new version of the same app and runs only what is new. Nothing is deleted; destructive changes need `allowDestructive: true` and conflicts stop the upgrade. Adds `POST /v1/workspaces/:workspaceId/published-artifacts/:appId/package/upgrade`, `upgradeAppPackage` in the SDK, the `app_upgrade` agent tool and Upgrade from package in the app's menu. Package demo data now carries the app's shared files (`demoData.files`) and SQL blob values (`{ "$base64": "…" }`), and package files `app_export` stores are deleted after 24 hours. Older packages stay readable. See docs/app-packages.md.
+- 27832fd: App data syncs can page through a tool's results (`paging`, `maxRecords`), remove records the tool no longer returns (`removeMissing`), fill an app's SQL table (`target`), and run on a chosen account (`account`). Apps ask people to join a personal sync with `site.data.syncs.optIn(id)` / `optOut(id)`: Opengeni shows its own confirmation in the console and on published apps, and lists personal syncs a member hasn't joined next to the connect card. Adds `getAppSyncOptInReview` and an `account` option to `setAppSyncOptIn`.
+
+  Calling `site.data.syncs()` works as before. Code that implements `OpenGeniSiteData` itself (for example a test double) now gives `syncs` as a function with `optIn` and `optOut` methods (`OpenGeniAppSyncs`).
+
+- b1abd39: Ready-made content names the team it is for: `AgentTemplate` has an optional `team`, and new `AppTemplate` content (an app package with a name, a line and a team) is listed by `GET /v1/workspaces/:workspaceId/app-templates` (SDK `listAppTemplates`); add one with `installAppPackage` and its `package`. `GET /v1/workspaces/:workspaceId/skills/library` (SDK `listLibrarySkills`) lists every reviewed library skill to add, `enabled` once added.
+
+  `ConnectionInstalled` lists what you have in the same rows as the catalog: logo, name and one status line ("Installed · Workspace"), two columns where there is room. `CapabilityCatalogRow` takes an optional `statusLine` that replaces the description and drops the glyph unless the row needs attention. `ConnectionInstalledItem.showStatus` is deprecated: the status line always shows. The `.og-connection-installed-status` and `.capability-search-section` classes are removed. Embedding products that style these rows see a visible change; the row buttons no longer carry an `aria-label`, so their visible text is their name. Catalog rows carry `data-row-status` for styling; `data-status` is on the row only when it shows no indicator.
+
+- e765d11: Enable live browser and computer viewing through a product session proxy with an explicit viewer origin, without changing console CORS. Embedders can also hide advanced browser controls, render the intervention banner separately, and translate the task vault display name.
+- 66fc51d: Linked items show live status for Linear issues (state, assignee, title) and Slack threads (first message, replies, last reply), read through the viewer's own connections; links the viewer can't read carry an optional `connect` (`SessionLinkConnect`), and `SessionLinkLiveStatus` gains optional `assignee`, `replies` and `lastReplyAt`. `LinkedList` and `SessionLinkedPanel` accept an optional `connectHref`. The built-in sidebar default is a Pinned apps live list, shown only when the workspace has pinned apps. The agent page's Can use has a GitHub row for Opengeni's own GitHub tools, and `gh` reads are refused when the agent blocks every built-in GitHub read.
+- 27832fd: Shared keys from a vault for API-key tools. A workspace admin can connect a tool that authenticates with a header once for the workspace, with a reference to a workspace or organization vault item; Opengeni stores the reference and reads the value only when it calls the tool, for apps, syncs and agents. People keep their own Connect for such tools; when an app's shared syncs need one, the connect card adds a separate item with `sharedKey` (`add` or `ask_admin`), and `siteConnectCardItemActionable` tells whether the viewer can act on one.
+- b1abd39: The sidebar is edited in place: drag rows to reorder (or drop an app from the Sessions list), **+** on a group adds an app, and row menus rename, set an icon, set how many apps a list shows, and remove. A project app's menu has **Add to sidebar**. Apps, links and groups take an optional `icon` from a curated set of lucide names (`SIDEBAR_ITEM_ICONS`); outside links without one show the site's icon through `GET /v1/workspaces/:workspaceId/sidebar-layout/link-icon` (`client.getSidebarLinkIcon`). The phone app shows item icons and site icons, and leaves out hidden built-in entries (Automations in the side menu; Artifacts, Meetings or Inbox in the tab bar). Layouts gain `options` (the `options` change): `sessionsShowApps`, `hiddenNavEntries` and `settingsMore`, set as the workspace default or per person; unset keeps today's behaviour. While a deploy rolls out, a write from an older API replica can drop saved `options`; set them again afterwards. Recent apps now count opens and the last 90 days of edits (read through a new index on app versions by author), and no longer come back empty: the read ran without the person's identity, so row-level security hid every open.
+- 92fb3ca: The chat's side panel shows only the essentials. Tabs run across the top; in the app the strip shows the PR when one is linked, Changes when there are changes and Artifacts when the chat has some; a "+" menu holds everything else (Files, Terminal, Browser, Desktop, Linked, expand and hide), and a tab opened from it stays on the strip for that chat until closed. Switching tabs keeps each panel's scroll and selection and no longer re-renders every panel. A linked GitHub pull request gets a PR tab: title, one status line, one action (Merge, which asks the agent, or View on GitHub) and a menu for Description, Discussion, Commits and Checks, read from the new `GET .../sessions/:id/links/:linkId/pull-request` route (`client.getSessionPullRequest`). Linked shows only when something else is linked. A chat with nothing to show starts with the panel closed; new content puts a small dot on the panel toggle, and an opened empty panel offers Files, Terminal and Browser (`WorkspaceDock` `landing`/`onStripEmptied`/`headerAccessoryPinned`, `openTabRequest.expand`).
+
+  Changes has one quiet header per file, a folder tree with +/− change bars in the app (`WorkbenchChanges` `navigation="tree"`), and one view menu (comparison and unified/split), and switching files no longer stalls: diff highlighting can run in web workers (`enablePierreDiffs({ worker })` or `enableWorkbench({ diffsWorker })`), and file rows and sections no longer re-render on every scroll or stream update. `WorkspaceTab.optional`, the `essentials` and `tabScope` dock props, `WorkbenchChanges` `comparison`/`hideSummary`/`navigation` and `SandboxWorkspace` `tabVisibility` are new and additive; embedders keep today's tabs by default.
+
+  Opening an app or artifact shows one way back (the window-bar breadcrumb) and restores the list's scroll position on return. The Agents page has one **Add agent** menu at the top with the ready-made agents, a blank agent and import.
+
+- 684587a: Every app opened in the workspace now offers its Opengeni chat beside it: the chat opens by default wherever the window has room for both (until you close it, which is remembered per app), and a closed chat comes back from a labelled Chat button in the app's header or the macOS window bar. A new chat there starts on the app's configured model when the workspace allows it (`SitePublicationLink.agentModel`, `useNewConversation({ defaultModel })`). The app header's publication control reads **Share**, and a published app shows a loading screen until it has loaded. "Let people chat" now says the app's own chat uses the agent, and the apps guidance has the agent add a chat that suits the app when chat is turned on.
+
+  The workbench tab strip shows Changes, Files, Terminal, Browser and Desktop directly while they fit and moves only the ones that don't into "+"; Settings and Debug stay in "+". This changes `WorkspaceTab.optional`: an optional tab now fills spare room on the strip. Add `inMenu: true` to keep a tab in "+" as before. The strip has one maximize/restore button (Esc also restores), and the session header's Pin moved into its … menu.
+
+  The Files tab leaves tool and cache folders (`.bun`, `.cache`, `.npm`, `node_modules` and the like, and the sandbox home's dot folders) out of the tree by default; one Show hidden files toggle in its toolbar brings them back, and opening a file inside one shows them in that view. `hideToolFolders={false}` on `SandboxWorkspace` or `SandboxFiles` turns this off.
+
+### Patch Changes
+
+- f2c07c2: **Add trigger** and a suggested trigger's **Set up** on an agent's page now open a small dialog instead of the full New automation form. Pick what starts the agent: a schedule, one of your event sources, or any kind of source you can still add, each with its logo. GitHub, Slack and This workspace are added right there, a webhook is created right there and shows its URL, and if GitHub isn't connected yet the one button is **Connect GitHub**. The note is optional: each run gets the event and the agent's Instructions do the rest. Runs start a new chat with the agent by default, or keep one chat for the trigger, or continue an existing chat with the agent. A trigger is shared with the workspace unless the agent is Only me, and the dialog says so when you can't add a shared one. **Open full form** still opens every setting, and now comes back to the agent's page on Cancel and Save.
+- f2c07c2: The agent page's Can use lists only the connections that have a rule, each with the logo the chat composer's Connectors picker shows (or its initial), and one **Add rule** picks a connection or one of its tools from a searchable list with logos, then Allow, Ask first or Block. Existing rules, per-tool rules and rules for connections not set up here stay reachable and removable.
+
+  Its Skills are added from one searchable list showing each Skill's name and short description, and chosen Skills show by name, linked to the Skill's page. A chosen Skill written in Opengeni no longer shows its generated `authored-<id>` key: names now come from the workspace's Skill catalog.
+
+- f2c07c2: An agent's **Add trigger** keeps a paused or blocked source in the picker, greyed with why, instead of hiding that kind of source. **An existing chat** reads past your newest chats to find the agent's, and says when chats can't be read. A source that can't be added says why, rather than the shared-automation message. **Open full form** starts at the source you picked.
+- 53320fa: **Add trigger** now sets up a Linear, Sentry or Tailscale webhook in place: it creates the webhook URL to paste into the app, then takes the secret the app shows in one field with a Save button. The secret is sent once, stored encrypted on the server and never shown again; the dialog then says the secret is set, with **Replace**. A webhook still waiting for its secret can be picked to paste it by someone who can manage it. Gmail and MCP sources keep their Add a source step.
+- f2c07c2: **Add an agent** now also offers three ready-made agents: **CVE scanner** (checks dependencies and container images for known vulnerabilities, fixes safe upgrades in one pull request for PR reviewer and reports the rest; suggested weekly and on new pull requests), **Incident responder** (investigates an alert or a Slack report, posts the likely cause and hands a fix to Bug fixer) and **Dependency updater** (one pull request of routine upgrades a week for PR reviewer). The Agents list no longer shows a Slack badge on every shared agent, since every shared agent is in Slack; only Only me agents are marked.
+- 7b90e00: The app view is quieter: its header is one slim row on the page with no frame around the app (in the macOS app its controls join the window bar), Copy link lives only in the Published menu, the "…" keeps full screen, Reload, Pin, Settings and Archive, and the chat panel moves sides, opens as a full chat or hides in one click. A hidden chat leaves no strip: the app takes the whole width and Show chat sits in its header. Whether the chat is open is remembered per person and app, opening by default only for apps you have chatted with or reach from a chat (an earlier choice to hide the chat on every app no longer applies). Publishing settings are in the address, so Back returns to the app, and Settings opened from the app goes back to it. An app's Settings use one row style, with search engines and reports collapsed in the publish form and duplicate, export, resetting allowed actions and archive under a collapsed More; everyone who can open an app sees its Settings.
+- 59235cb: The Branch view in Changes and the branch comparison stored with workspace captures now show only the changes made on the current branch, measured from where it left the default branch, like a pull request. Before, a checkout that had fallen behind the default branch also listed every later change on the default branch, reversed. Git diff requests take a new optional `mergeBase` flag for this.
+- e3a0a3d: Localize common secret question field labels and the display names of built-in vaults without changing custom names, stored values or secret references.
+- 4e1a07f: Big apps stay fast: an app version can be a split build (Bun `--splitting` or Vite with `base: "./"`) instead of one HTML file, so each page loads only its own code. Upload the build's other files as JSON `{files: [{path, base64}]}` to the new `assets.putUrl` of `POST .../published-artifacts/uploads` (`artifacts_prepare_upload`). Published apps load them from their own host (`/_og/a/...`) and the console from the API (`/v1/app-assets/...`), cached for a year. `GET .../content` gains an optional `assetBaseUrl` for multi-file versions. New `@opengeni/contracts/app-assets`. Single-file apps are unchanged.
+- 86bef5d: An automation's agent can now be changed after it's created: pick another agent in the automation form, or pass `agentConfigPatch.agentId` (`agentName` in the automation tool) on update. **Open full form** in Add trigger now keeps the note and the chat choice. The existing-chat pickers list a person's chats with the agent from the server, so older chats show up too; `listAgentChats` takes `direct: true` to keep only open chats that are with the agent itself.
+
+  In `@opengeni/react/app/lib/agent-chats`, `listAgentChats` now reads through the client's `listAgentChats` (the SDK client has it) and returns `AgentChat` rows; the `enough` option is gone. `ComposerAgentChip`'s `onBrowse` is optional: without it the menu lists every agent.
+
+- 55539f1: Show where recordings spend time between Stop and the transcript. The SDK measures storage uploads and finalize, React measures transcript delivery and composer insertion, and the API and worker emit recording stage timings with a shared recording key. Transcript long polling reports its intentional wait separately from active API work.
+- 1ecd2d1: When an agent asks for the same connection more than once, only the newest card stays a full card. Earlier copies from the same turn leave the timeline, Connected Machine requests included; copies from earlier turns are marked `AuthNeededItem.askedAgainLater`, which now applies to every connection card, and the stock chat and `AuthNeededRow` show them as one line. Cards with inputs are never folded.
+- db606a9: `listScheduledTasks` takes `agentId` to list only an agent's automations, and the agent page uses it. `ToolActionReview.agentRule` names the agent and Can use rule that made a call ask or blocked it; tool catalog entries carry the `permission` that tool settings give them. Event sources gain the `github_personal` kind ("GitHub (your connection)"), which reads merges and releases with a person's own GitHub connection where the workspace has no GitHub app.
+- f2c07c2: The sidebar can link to an agent's page. An agent link shows the agent's name and avatar, opens its page in place and is hidden from people who can't see that agent. Older clients skip the new item type.
+
+  Sidebar groups can be renamed inline on the Sidebar page, for the workspace default and for a person's own groups.
+
+  The Sidebar page is easier to find: settings search finds it, and the sidebar's layout section has a small Customize row.
+
+- 188cef1: Sidebar layouts keep what a newer version wrote: options, layout fields and the layout version a replica doesn't know stay in storage through its writes (only Reset clears them), and answers carry only the options it knows, so API replicas of different versions no longer drop each other's saved options during a rolling deploy. The rail draws the sidebar options this browser last saw while the layout loads, so the Sessions list no longer draws app rows and then redraws without them; the shell slot `sessionsShowApps` accepts `null` for "not known yet", which holds the Sessions list on its loading state. A settings rail entry's button now reads **Move to More** or **Show at top** on hover instead of an unlabeled arrow.
+- 267e190: Sidebar links to archived apps are kept when the layout changes, so restoring an app brings them back, unless a change would go over a limit (`SidebarLayoutLimitError`); links to apps that no longer exist are dropped. A person's own link to an app that became someone else's Only me is dropped on their next change. `sidebarLayoutIsOlder` tells a client when an answer is older than the layout it shows, and the `my-` id prefix and placement rules are documented. The embedded Site view keeps the Site's own address as it navigates.
+- b7b28cf: Giving a connected account more access is now one clear step. When an action set to Ask first needs access its account doesn't have yet (for example marking Gmail messages as read on a read-only connection), its approval card says so in one line ("Google will ask you to allow Opengeni to organize your Gmail (one time).") and Approve opens Google's consent first, then approves that one call. Later calls still ask according to your approval settings. The action's review carries the missing access as `accessNeeded`.
+
+  When no approval is involved, the access card names the action ("Allow Opengeni to organize your Gmail"), says what it includes and that your approval settings still decide what runs without asking. It shows the service's logo, and its button goes straight to the provider's consent page ("Allow in Google"), shows that it is waiting, and says "Allowed" when done, with no setup dialog in between. Sign-in popups for these cards close themselves when finished instead of loading the app inside the popup. When an agent hits the same missing access more than once, the chat shows one card.
+
+  An email to be sent is still shown in full on that card. If the provider's window is closed, pressing Decline or Approve again stops waiting for it. One consent covers the account's other waiting actions, so they no longer ask the provider again and can be approved together. If the person unticks the added access on Google's page, the sign-in fails and the account is unchanged, instead of showing "Allowed". Slack links an action whose account still needs access to the chat, where it is approved or declined, instead of offering the buttons.
+
+  For hosts: `ApprovalSurface` takes `onAllowAccess(access, approval, signal)`, called in the Approve click for an action with `review.accessNeeded`; the signal aborts when the person presses again. Without it, the card says the access is still missing (`approvalSurface.accessStillMissing`). `MessageTimeline`'s `onReconnect` may now return `{ outcome: "done" }` and receives an abort `signal`; the types are exported as `AuthNeededRecoveryHandler`, `AuthNeededRecoveryOptions`, `AuthNeededRecoveryResult` and `ToolReviewAccessNeeded`. The unused message keys `messageTimeline.accessDraftAndSendEmail`, `accessOrganizeMailbox`, `allowAccess`, `giveProviderMoreAccess` and `itNeedsPermissionTo` were removed; overrides of them no longer apply. `@opengeni/connect/browser-navigation` exports the popup reservation on its own.
+
+  A chat whose agent waits on a connection card (connect, reconnect or more access) now shows as needing you, like an approval: in Needs you, with the orange dot, and on the parent chat's "needs you" bar for a sub-agent. The card stays pinned above the composer meanwhile. It clears when the card is done or the agent works again (for example after your next message); a card it still needs is posted again. Agents can't post or withdraw `connection-card:` notices themselves. Without `onAllowAccess` (for example `SessionConversation` hosts), approving such an action runs it without the access, and the agent then posts the access card as before. Sessions and list entries carry `awaitingConnectionSince`.
+
+- fa84236: The "Your computer" conversation card no longer looks done when the ready computer may not be the one the person means. Outside the desktop app, a ready computer on another system than this browser's is named as another computer, and connecting this device stays the main action. When the host offers no way to connect this device, the card keeps the host's own text for it beside the ready line instead of showing a check mark. On a phone, a ready computer still completes the card.
+- Updated dependencies [f2c07c2]
+- Updated dependencies [8ace4d4]
+- Updated dependencies [27832fd]
+- Updated dependencies [23e52db]
+- Updated dependencies [27832fd]
+- Updated dependencies [27832fd]
+- Updated dependencies [59235cb]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [e765d11]
+- Updated dependencies [4e1a07f]
+- Updated dependencies [86bef5d]
+- Updated dependencies [55539f1]
+- Updated dependencies [66fc51d]
+- Updated dependencies [db606a9]
+- Updated dependencies [27832fd]
+- Updated dependencies [f2c07c2]
+- Updated dependencies [b1abd39]
+- Updated dependencies [837e58f]
+- Updated dependencies [188cef1]
+- Updated dependencies [267e190]
+- Updated dependencies [837e58f]
+- Updated dependencies [b7b28cf]
+- Updated dependencies [92fb3ca]
+- Updated dependencies [684587a]
+  - @opengeni/contracts@6.36.0
+  - @opengeni/sdk@6.36.0
+  - @opengeni/connect@6.36.0
+
 ## 6.35.0
 
 ### Minor Changes

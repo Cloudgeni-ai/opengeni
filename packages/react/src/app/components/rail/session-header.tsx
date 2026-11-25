@@ -136,6 +136,7 @@ export function SessionHeader({
   keyAuthRequired,
   onForgetAccessKey,
   inspectorOpen,
+  inspectorHint = false,
   onToggleInspector,
   onRename,
   onPin,
@@ -173,6 +174,8 @@ export function SessionHeader({
   keyAuthRequired: boolean;
   onForgetAccessKey: () => void;
   inspectorOpen: boolean;
+  /** Something new is waiting in the closed panel: a small dot on the toggle. */
+  inspectorHint?: boolean | undefined;
   /** Absent: the surface shows no session panel, so no toggle. */
   onToggleInspector?: (() => void) | undefined;
   onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
@@ -236,6 +239,7 @@ export function SessionHeader({
   const displayStatus = sessionDisplayStatus({
     status,
     admissionBlock: session.admissionBlock,
+    awaitingConnectionSince: session.awaitingConnectionSince,
     archived: session.archived,
     retention: session.retention,
   });
@@ -517,7 +521,7 @@ export function SessionHeader({
             )}
           </div>
         )}
-        {/* Below lg, machine, find and pin live in the "…" menu. */}
+        {/* Below lg, machine and find live in the "…" menu; pin is always there. */}
         {sandboxSlot && !inMenu("machine") ? (
           <span ref={part("machine")} className="hidden items-center lg:flex">
             {sandboxSlot}
@@ -536,22 +540,6 @@ export function SessionHeader({
             className="hidden pointer-coarse:size-11 lg:inline-flex"
           >
             <SearchIcon className="size-4" />
-          </Button>
-        )}
-        {inMenu("pin") || !canPin ? null : (
-          <Button
-            ref={part("pin")}
-            type="button"
-            variant={session.pinned ? "secondary" : "ghost"}
-            size="icon-sm"
-            aria-label={session.pinned ? "Unpin session" : "Pin session"}
-            aria-pressed={Boolean(session.pinned)}
-            aria-busy={pin.busy}
-            disabled={pin.busy}
-            className="hidden pointer-coarse:size-11 lg:inline-flex"
-            onClick={pin.toggle}
-          >
-            <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
           </Button>
         )}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -616,18 +604,26 @@ export function SessionHeader({
             size="icon-sm"
             onClick={onToggleInspector}
             aria-label={inspectorOpen ? "Hide workspace" : "Open workspace"}
+            aria-description={inspectorHint && !inspectorOpen ? "Something new" : undefined}
             aria-keyshortcuts={panelKeys?.ariaKeys}
             title={
               (inspectorOpen ? "Hide workspace" : "Open workspace") +
               (panelKeys ? ` (${panelKeys.label})` : "")
             }
-            className="pointer-coarse:size-11"
+            className="relative pointer-coarse:size-11"
+            data-inspector-hint={inspectorHint && !inspectorOpen ? "" : undefined}
           >
             {inspectorOpen ? (
               <PanelRightCloseIcon className="size-4" />
             ) : (
               <PanelRightOpenIcon className="size-4" />
             )}
+            {inspectorHint && !inspectorOpen ? (
+              <span
+                aria-hidden
+                className="absolute right-1 top-1 size-1.5 rounded-full bg-og-accent shadow-[0_0_0_2px_var(--og-color-bg)] motion-safe:animate-in motion-safe:zoom-in-50 motion-safe:fade-in-0"
+              />
+            ) : null}
           </Button>
         ) : null}
         <DropdownMenu>
@@ -731,7 +727,6 @@ export function SessionHeader({
             ) : null}
             {canPin ? (
               <DropdownMenuItem
-                className={inMenu("pin") ? undefined : "lg:hidden"}
                 aria-keyshortcuts={pinKeys?.ariaKeys}
                 disabled={pin.busy}
                 onSelect={() => pin.toggle()}

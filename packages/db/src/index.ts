@@ -16,6 +16,10 @@ import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./app-sync";
+export * from "./app-webhooks";
+export * from "./app-server";
+export * from "./site-tool-data";
+export * from "./app-package-exports";
 export * from "./organization-connectors";
 import {
   organizationConnectorLogin,
@@ -70,10 +74,7 @@ export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
-import {
-  subscriptionCapacityWaitReasonText,
-  subscriptionCapacityWaitNeedsAction,
-} from "@opengeni/subscriptions";
+import type { SubscriptionWaitAccount } from "@opengeni/contracts/subscription-capacity-wait";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -664,6 +665,7 @@ import {
 export { pinSubscriptionCoreSessionCodexAccount } from "./subscription-core-codex-compat";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
+export { admitMcpConnectionRateLimit } from "./mcp-connection-rate-limits";
 export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -841,6 +843,8 @@ import {
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   SessionNotificationPostedPayload,
+  ToolAuthNeededPayload,
+  connectionCardNotice,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -1344,6 +1348,7 @@ import {
   childRequiresActionSummary,
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
+  humanInputQuestionIsPersonOnly,
 } from "./child-lifecycle-notices";
 import {
   CAPACITY_WAIT_NOTICE_KEY,
@@ -1354,6 +1359,9 @@ import {
   capacityWaitNoticeWithdrawal,
   capacityWaitNotificationPayload,
   readCapacityWaitNotice,
+  subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitHasOwnExplanation,
+  subscriptionCapacityWaitReasonText,
   withoutCapacityWaitNotice,
 } from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
@@ -1468,6 +1476,7 @@ export * from "./session-share-links";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./signup-heedeo";
 export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
@@ -17193,46 +17202,20 @@ export async function closeSlackInteractionDelivery(
      * If a wake was marked meanwhile (see reopenSlackInteractionDeliveryAfter)
      * and its update is still pending, or went to a turn that has not ended
      * by `sequence`, the delivery stays open for the woken answer, skipping to
-     * the wake. A wake whose turn already ended here closes as usual. Omitted
-     * (a failed delivery): always closes.
+     * the wake. A wake whose turn already ended here closes as usual. The
+     * database decides that (trigger slack_interactions_delivery_stays_open_for_wake_v1,
+     * migration 1532), so every release's close behaves the same; a close
+     * with an `errorCode` (a failed delivery) always closes. Kept for callers.
      */
     settledTurn?: boolean;
   },
 ): Promise<boolean> {
-  // Qualified by hand: inside UPDATE ... SET the outer row's columns must not
-  // resolve to the subquery's same-named ones.
-  const reopen =
-    input.settledTurn !== true
-      ? sql`false`
-      : sql`("slack_interactions"."delivery_reopen_after_sequence" is not null and exists (
-          select 1 from session_events wake
-          join session_system_updates wake_update
-            on wake_update.workspace_id = wake.workspace_id
-            and wake_update.session_id = wake.session_id
-            and wake_update.id::text = wake.payload ->> 'updateId'
-          where wake.workspace_id = "slack_interactions"."workspace_id"
-            and wake.session_id = "slack_interactions"."session_id"
-            and wake.sequence = "slack_interactions"."delivery_reopen_after_sequence" + 1
-            and wake.type = 'system.update.pending'
-            and (wake_update.state = 'pending'
-              or (wake_update.state = 'delivered'
-                and wake_update.delivered_turn_id is not null
-                and not exists (
-                  select 1 from session_events done
-                  where done.workspace_id = wake.workspace_id
-                    and done.session_id = wake.session_id
-                    and done.turn_id = wake_update.delivered_turn_id
-                    and done.type in ('turn.completed', 'turn.failed', 'turn.cancelled')
-                    and done.sequence <= ${Math.trunc(input.sequence)}
-                )))
-        ))`;
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.slackInteractions)
       .set({
-        lastDeliveredSessionEventSequence: sql`case when ${reopen} then greatest(${input.sequence}, ${schema.slackInteractions.deliveryReopenAfterSequence}) else ${input.sequence} end`,
-        // A wake asked to reopen after the run this pass settled: stay open for its answer.
-        terminalDeliveryState: sql`case when ${reopen} then 'open' else ${input.state}::text end`,
+        lastDeliveredSessionEventSequence: input.sequence,
+        terminalDeliveryState: input.state,
         deliveryReopenAfterSequence: null,
         deliveryClaimHolderId: null,
         deliveryClaimExpiresAt: null,
@@ -22522,6 +22505,8 @@ export async function listScheduledTasks(
    * null reads shared schedules only.
    */
   viewerSubjectId?: string | null,
+  /** Only automations whose runs are chats with this agent (`agentConfig.agentId`). */
+  filters: { agentId?: string } = {},
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -22531,6 +22516,9 @@ export async function listScheduledTasks(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           isNull(schema.scheduledTasks.deletedAt),
+          ...(filters.agentId
+            ? [sql`${schema.scheduledTasks.agentConfig} ->> 'agentId' = ${filters.agentId}`]
+            : []),
           ...(viewerSubjectId === undefined
             ? []
             : [
@@ -28061,6 +28049,7 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
   goalId?: string | null;
   goalVersion?: number | null;
   waitReason: string;
+  waitAccount?: SubscriptionWaitAccount;
   earliestResetAt: Date | null;
   healthRetryAt?: Date | null;
   /** From a fresh failover-aware accepted-turn evaluation; never caller authority.
@@ -28228,6 +28217,10 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
+        const explanation = subscriptionCapacityWaitHasOwnExplanation(input.waitReason)
+          ? (subscriptionCapacityWaitReasonText(input.waitReason, label, input.waitAccount) ??
+            undefined)
+          : undefined;
         const attention = capacityWaitAttention({
           waitReason: input.waitReason,
           earliestResetAt: input.earliestResetAt,
@@ -28242,6 +28235,7 @@ export async function armSubscriptionCoreCapacityWait(
                   provider,
                   resetsAt: attention.resetsAt,
                   waitReason: input.waitReason,
+                  ...(input.waitAccount ? { waitAccount: input.waitAccount } : {}),
                 }),
               )
             : null;
@@ -28257,6 +28251,7 @@ export async function armSubscriptionCoreCapacityWait(
                 [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
                   personNotice.key,
                   attention!.resetsAt,
+                  explanation,
                 ),
               }
             : {}),
@@ -28362,6 +28357,13 @@ export async function armSubscriptionCoreCapacityWait(
                   payload: {
                     ...input.failurePayload,
                     ...vocabulary.waitingPayload,
+                    ...(explanation
+                      ? {
+                          error: explanation,
+                          waitReason: input.waitReason,
+                          actionRequired: subscriptionCapacityWaitNeedsAction(input.waitReason),
+                        }
+                      : {}),
                     waiterId: waiter.waiterId,
                     generation: waiter.generation,
                     goalId,
@@ -28433,6 +28435,7 @@ export async function armSubscriptionCoreCapacityWait(
                         waiterId: waiter.waiterId,
                       }),
                       attention.resetsAt,
+                      explanation,
                     ),
                   }
                 : waitingMetadata,
@@ -28475,6 +28478,8 @@ export async function armSubscriptionCoreCapacityWait(
             provider,
             nextCheckAt,
             resetsAt: attention.resetsAt,
+            waitReason: input.waitReason,
+            ...(explanation ? { explanation } : {}),
           });
         }
         if (input.leaseFence) {
@@ -28499,6 +28504,7 @@ export type SubscriptionCoreCodexWaitEvaluation =
   | {
       kind: "wait";
       waitReason: string;
+      waitAccount?: SubscriptionWaitAccount;
       earliestResetAt: Date | null;
       healthRetryAt: Date | null;
       /** Entire freshly derived candidate set, not a union with stored hints. */
@@ -28785,10 +28791,14 @@ export async function reconcileSubscriptionCoreCapacityWait(
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
           );
           if (!row) return { action: "stale", events: [] } as const;
-          const changedReasonText =
-            waiter.waitReason !== waitEvaluation.waitReason
-              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
-              : null;
+          const reasonText = subscriptionCapacityWaitReasonText(
+            waitEvaluation.waitReason,
+            vocabulary.label,
+            waitEvaluation.waitAccount,
+          );
+          const explanation = subscriptionCapacityWaitHasOwnExplanation(waitEvaluation.waitReason)
+            ? (reasonText ?? undefined)
+            : undefined;
           // Whoever was told when the wait ends (a top-level chat's person,
           // or a worker's parent) is told again once the reset they heard no
           // longer holds (it passed without capacity, or a longer limit
@@ -28797,22 +28807,27 @@ export async function reconcileSubscriptionCoreCapacityWait(
           // the reset that now holds. Only an evaluation that found no
           // capacity says when it returns; a held false-resumption delay or
           // legacy evaluation restates nothing.
-          const attention =
-            evaluation.kind !== "wait"
-              ? null
-              : capacityWaitAttention({
-                  waitReason: waitEvaluation.waitReason,
-                  earliestResetAt: waitEvaluation.earliestResetAt,
-                  healthRetryAt: waitEvaluation.healthRetryAt,
-                  now,
-                });
           const toldKey = session.parentSessionId
             ? CAPACITY_WAIT_PARENT_NOTICE_KEY
             : CAPACITY_WAIT_NOTICE_KEY;
           const told = readCapacityWaitNotice(blockedTurn.metadata, toldKey);
+          const attention =
+            evaluation.kind !== "wait"
+              ? null
+              : (capacityWaitAttention({
+                  waitReason: waitEvaluation.waitReason,
+                  earliestResetAt: waitEvaluation.earliestResetAt,
+                  healthRetryAt: waitEvaluation.healthRetryAt,
+                  now,
+                }) ?? (told?.explanation ? { resetsAt: waitEvaluation.earliestResetAt } : null));
+          const explanationChanged = attention !== null && told?.explanation !== explanation;
+          const changedReason =
+            waiter.waitReason !== waitEvaluation.waitReason || explanationChanged;
           const restate =
             attention !== null &&
-            (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+            (!told ||
+              explanationChanged ||
+              capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
           // What agents see (a worker's parent woken by a notice, the
           // session's own timeline) is restated only for a real change: the
           // first long wait, a told time that passed without capacity, a
@@ -28826,6 +28841,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           const restateToAgents =
             restate &&
             (!told ||
+              explanationChanged ||
               toldTimePassed ||
               waitEvaluation.earliestResetAt !== null ||
               attention!.resetsAt === null);
@@ -28838,16 +28854,15 @@ export async function reconcileSubscriptionCoreCapacityWait(
                     provider: waiter.provider,
                     resetsAt: attention!.resetsAt,
                     waitReason: waitEvaluation.waitReason,
+                    ...(waitEvaluation.waitAccount
+                      ? { waitAccount: waitEvaluation.waitAccount }
+                      : {}),
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
                 })
               : null;
-          const waitingText =
-            changedReasonText ??
-            (restateToAgents
-              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
-              : null);
+          const waitingText = changedReason || restateToAgents ? reasonText : null;
           const restated = [
             ...(waitingText
               ? [
@@ -28911,12 +28926,17 @@ export async function reconcileSubscriptionCoreCapacityWait(
           // A worker's parent hears the restated reset in a new notice (the
           // system-update outbox delivers it), keyed by that reset so it never
           // collides with the arm's notice or an earlier restatement.
+          const restatedReasonSequence = explanationChanged ? session.lastSequence + 1 : undefined;
+          const restatement = {
+            ...(restatedReasonSequence === undefined ? {} : { restatedReasonSequence }),
+            restatedResetsAt: attention?.resetsAt?.toISOString() ?? null,
+          };
           const parentNoticeKey =
             restateToAgents && session.parentSessionId
               ? childWaitingCapacityDedupeKey({
                   childSessionId: session.id,
                   waiterId: waiter.waiterId,
-                  restatedResetsAt: attention!.resetsAt?.toISOString() ?? null,
+                  ...restatement,
                 })
               : null;
           if (parentNoticeKey) {
@@ -28926,7 +28946,9 @@ export async function reconcileSubscriptionCoreCapacityWait(
               provider: waiter.provider,
               nextCheckAt,
               resetsAt: attention!.resetsAt,
-              restated: true,
+              waitReason: waitEvaluation.waitReason,
+              restatement,
+              ...(explanation ? { explanation } : {}),
             });
           }
           const noticeKey = personNotice?.key ?? parentNoticeKey;
@@ -28938,7 +28960,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
               .set({
                 metadata: {
                   ...blockedTurn.metadata,
-                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt),
+                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt, explanation),
                 },
                 version: blockedTurn.version + 1,
                 updatedAt: now,
@@ -31418,6 +31440,8 @@ export type ConnectorActionInvocation = {
    * explicit Block still blocks; nothing here loosens a decision.
    */
   minimumDecision?: "ask" | "block";
+  /** The agent's Can use rule behind `minimumDecision`, recorded on its request. */
+  minimumDecisionBy?: import("@opengeni/contracts").ToolReviewAgentRule;
   /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation). It is admitted once, from
@@ -31434,6 +31458,8 @@ export type PrepareConnectorActionApprovalResult =
       requestId?: string;
       approvalStatus?: string;
       actionFingerprint: string;
+      /** The agent's Can use rule that made it ask or blocked it. */
+      agentRule?: import("@opengeni/contracts").ToolReviewAgentRule;
     };
 
 export type BeginConnectorActionExecutionResult =
@@ -31456,6 +31482,8 @@ export type BeginConnectorActionExecutionResult =
         | "not_executed";
       requestId: string;
       actionFingerprint: string;
+      /** With `blocked`, the agent's Can use rule that blocked it. */
+      agentRule?: import("@opengeni/contracts").ToolReviewAgentRule;
     };
 
 const CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX = 2048;
@@ -31797,6 +31825,7 @@ async function insertConnectorActionRequest(
       policyVersion: entry?.version ?? null,
       policySource: input.resolved.source,
       policyDecision: connectorActionPolicyDecision(input.resolved),
+      agentRule: input.resolved.source === "default" ? (input.resolved.agentRule ?? null) : null,
       actionFingerprint: input.invocation.actionFingerprint!,
       ...(input.status === "pending"
         ? {
@@ -32329,6 +32358,7 @@ async function priorConnectorActionPreparation(
     approvalStatus: row.status,
     requestId: row.id,
     actionFingerprint: row.actionFingerprint,
+    ...(row.agentRule ? { agentRule: row.agentRule } : {}),
   };
 }
 
@@ -32413,6 +32443,7 @@ export async function prepareConnectorActionApproval(
         }),
         invocation.minimumDecision,
         normalized.toolName,
+        invocation.minimumDecisionBy,
       );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
@@ -32451,6 +32482,7 @@ export async function prepareConnectorActionApproval(
         approvalStatus: row.status,
         requestId: row.id,
         actionFingerprint: row.actionFingerprint,
+        ...(row.agentRule ? { agentRule: row.agentRule } : {}),
       } as const;
     },
   );
@@ -32485,6 +32517,7 @@ export async function previewConnectorActionApproval(
         }),
         invocation.minimumDecision,
         normalized.toolName,
+        invocation.minimumDecisionBy,
       );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
@@ -32496,6 +32529,9 @@ export async function previewConnectorActionApproval(
         managed: true,
         decision: connectorActionPolicyDecision(resolved),
         actionFingerprint: durable.actionFingerprint,
+        ...(resolved.source === "default" && resolved.agentRule
+          ? { agentRule: resolved.agentRule }
+          : {}),
       } as const;
     },
   );
@@ -32555,7 +32591,12 @@ export async function beginConnectorActionExecution(
         ? { defaultDecision: normalized.defaultDecision }
         : {}),
     });
-    return withMinimumConnectorDecision(resolved, invocation.minimumDecision, normalized.toolName);
+    return withMinimumConnectorDecision(
+      resolved,
+      invocation.minimumDecision,
+      normalized.toolName,
+      invocation.minimumDecisionBy,
+    );
   };
   return await runConnectorActionLedgerTransaction(
     db,
@@ -32738,6 +32779,7 @@ export async function beginConnectorActionExecution(
         reason,
         requestId: row.id,
         actionFingerprint: row.actionFingerprint,
+        ...(reason === "blocked" && row.agentRule ? { agentRule: row.agentRule } : {}),
       } as const;
     },
   );
@@ -33846,6 +33888,8 @@ async function sessionAgentBinding(
   tx: Database,
   input: Pick<SessionCreateInput, "workspaceId" | "parentSessionId" | "subjectId" | "visibility">,
   agentId: string,
+  /** The Only me chat's owner, when it is one. */
+  privateOwnerSubjectId: string | null = null,
 ): Promise<{ agentId: string; revision: number }> {
   const subjectId = input.subjectId ?? null;
   const [row] = await rawRows<{ id: string; current_revision: number; visibility: string }>(
@@ -33860,6 +33904,11 @@ async function sessionAgentBinding(
   // Others in a shared chat would run on the owner's private Instructions.
   if (row.visibility !== "workspace" && input.visibility !== "user_private") {
     throw new SessionAgentNotFoundError(agentId, "requires_private_chat");
+  }
+  // An Only me agent runs only in its owner's own Only me chat, whoever's
+  // access (`agent.subjectId`, such as an Only me automation's owner) found it.
+  if (row.visibility !== "workspace" && privateOwnerSubjectId !== subjectId) {
+    throw new SessionAgentNotFoundError(agentId);
   }
   return { agentId: row.id, revision: Number(row.current_revision) };
 }
@@ -34158,6 +34207,7 @@ async function createSessionInTransaction(
         tx as unknown as Database,
         input.agent.subjectId ? { ...input, subjectId: input.agent.subjectId } : input,
         input.agent.id,
+        privateCreateOwnerSubjectId,
       )
     : null;
   if (agentBinding && input.orgAgent) {
@@ -36505,6 +36555,8 @@ type SessionRow = typeof schema.sessions.$inferSelect & {
   meaningfulSequence?: number;
   /** See sessionFailureHandledByParentSql. */
   failureHandled?: boolean;
+  /** See sessionQuestionsWithAgentSql. */
+  questionWithAgent?: boolean;
 };
 
 /** A session row with its Skill folders, which a complete `Session` carries. */
@@ -36912,6 +36964,7 @@ async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
   const handledFailures = await sessionIdsWithHandledFailure(db, workspaceId, rows);
+  const questionsWithAgent = await sessionIdsWithQuestionsWithAgent(db, workspaceId, rows);
   const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
     const cursor = cursorBySessionId.get(row.id);
     if (
@@ -36927,6 +36980,7 @@ async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
       lastSequence: cursor.lastSequence,
       meaningfulSequence: cursor.meaningfulSequence,
       ...(handledFailures.has(row.id) ? { failureHandled: true } : {}),
+      ...(questionsWithAgent.has(row.id) ? { questionWithAgent: true } : {}),
     };
   });
   return includeEffectivePolicy
@@ -37122,6 +37176,84 @@ async function sessionIdsWithHandledFailure(
 }
 
 /**
+ * Whether a session waits only on questions still with the agent that
+ * started it (`held_for_agent`, see migration 1553): their notice is on its
+ * way, queued, or in a turn that has not ended, and that agent can act.
+ * Person-facing attention leaves such a session out.
+ */
+function sessionQuestionsWithAgentSql(workspaceId: string | SQL, sessionId: SQL): SQL {
+  return sql`(exists (
+      select 1 from ${schema.sessionHumanInputRequests} asked
+      where asked.workspace_id = ${workspaceId}
+        and asked.session_id = ${sessionId}
+        and asked.status = 'pending'
+    )
+    and not exists (
+      select 1 from ${schema.sessionHumanInputRequests} asked
+      where asked.workspace_id = ${workspaceId}
+        and asked.session_id = ${sessionId}
+        and asked.status = 'pending'
+        and not (asked.held_for_agent and exists (
+          select 1
+          from ${schema.sessionSystemUpdateOutbox} notice
+          join ${schema.sessions} agent
+            on agent.workspace_id = notice.workspace_id
+           and agent.id = notice.target_session_id
+          left join ${schema.sessionSystemUpdates} received
+            on received.workspace_id = notice.workspace_id
+           and received.session_id = notice.target_session_id
+           and received.dedupe_key = notice.dedupe_key
+          where notice.workspace_id = ${workspaceId}
+            and notice.dedupe_key = ${childRequiresActionDedupeKeySql(
+              sql`asked.session_id`,
+              sql`asked.turn_id`,
+              sql`asked.turn_generation`,
+            )}
+            and agent.status not in ('failed', 'cancelled', 'waiting_capacity')
+            and (
+              received.state = 'pending'
+              or (received.id is null and notice.status = 'pending')
+              or (received.state = 'delivered' and exists (
+                select 1 from ${schema.sessionTurns} answering
+                where answering.workspace_id = ${workspaceId}
+                  and answering.session_id = notice.target_session_id
+                  and answering.id = received.delivered_turn_id
+                  and answering.finished_at is null
+              ))
+            )
+        ))
+    ))`;
+}
+
+/** `requires_action` sessions among `rows` whose questions are with their agent. */
+async function sessionIdsWithQuestionsWithAgent(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Pick<SessionRow, "id" | "status" | "parentSessionId">[],
+): Promise<Set<string>> {
+  const waitingChildIds = [
+    ...new Set(
+      rows
+        .filter((row) => row.status === "requires_action" && row.parentSessionId)
+        .map((row) => row.id),
+    ),
+  ];
+  if (waitingChildIds.length === 0) return new Set();
+  const withAgent = await rawRows<{ id: string }>(
+    db,
+    sql`
+      select child.id
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and ${anyOf(sql`child.id`, waitingChildIds, "uuid")}
+        and child.status = 'requires_action'
+        and ${sessionQuestionsWithAgentSql(workspaceId, sql`child.id`)}
+    `,
+  );
+  return new Set(withAgent.map((row) => row.id));
+}
+
+/**
  * Remove control metadata derived from sessions other than the exact target.
  * Effective state and the opaque OCC etag remain usable without exposing
  * ancestor ids/titles/actors/reasons or descendant settlement facts.
@@ -37308,6 +37440,7 @@ export async function sessionTreeStatsForSessions(
           active_turn_id,
           input_wait_until,
           input_wait_turn_id,
+          awaiting_connection_since,
           last_sequence,
           effective_pause_revision,
           depth
@@ -37319,6 +37452,7 @@ export async function sessionTreeStatsForSessions(
             root.active_turn_id,
             root.input_wait_until,
             root.input_wait_turn_id,
+            root.awaiting_connection_since,
             root_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -37348,6 +37482,7 @@ export async function sessionTreeStatsForSessions(
             child.active_turn_id,
             child.input_wait_until,
             child.input_wait_turn_id,
+            child.awaiting_connection_since,
             child_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -37382,7 +37517,8 @@ export async function sessionTreeStatsForSessions(
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
           select id, parent_session_id, status, active_turn_id, input_wait_until,
-            input_wait_turn_id, last_sequence, effective_pause_revision, depth
+            input_wait_turn_id, awaiting_connection_since, last_sequence,
+            effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
@@ -37415,7 +37551,11 @@ export async function sessionTreeStatsForSessions(
                 workspaceId,
                 sql`numbered.id`,
                 sql`numbered.parent_session_id`,
-              )} else false end as failure_handled
+              )} else false end as failure_handled,
+            case when numbered.status = 'requires_action' then not ${sessionQuestionsWithAgentSql(
+              workspaceId,
+              sql`numbered.id`,
+            )} else false end as awaits_person
           from numbered
           left join ${schema.sessionPins} personal
             on ${subjectId ?? null}::text is not null
@@ -37458,7 +37598,10 @@ export async function sessionTreeStatsForSessions(
                 order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
               )
           )::int as "waitingDescendants",
-          count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
+          count(*) filter (
+            where awaits_person
+              or ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
+          )::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
           count(*) filter (
             where effective_pause_revision is not null
@@ -37477,17 +37620,22 @@ export async function sessionTreeStatsForSessions(
           )::int as "unreadFailedDescendants",
           count(*) filter (where unread and not failure_handled)::int as "unreadDescendants",
           count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
-          -- Oldest still-open requires_action turn among the counted attention
-          -- descendants. The correlated lookup runs only for rows passing the
-          -- FILTER and walks session_turns_workspace_queue_idx
-          -- (workspace_id, session_id, status, position).
-          min((
-            select min(waiting_turn.updated_at)
-            from ${schema.sessionTurns} waiting_turn
-            where waiting_turn.workspace_id = ${workspaceId}
-              and waiting_turn.session_id = counted.id
-              and waiting_turn.status = 'requires_action'
-          )) filter (where status = 'requires_action') as "attentionSince",
+          -- Oldest still-open requires_action turn, or connection card wait,
+          -- among the counted attention descendants. The correlated lookup
+          -- runs only for rows passing the FILTER and walks
+          -- session_turns_workspace_queue_idx (workspace_id, session_id, status, position).
+          least(
+            min((
+              select min(waiting_turn.updated_at)
+              from ${schema.sessionTurns} waiting_turn
+              where waiting_turn.workspace_id = ${workspaceId}
+                and waiting_turn.session_id = counted.id
+                and waiting_turn.status = 'requires_action'
+            )) filter (where awaits_person),
+            min(awaiting_connection_since) filter (
+              where ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
+            )
+          ) as "attentionSince",
           (
             -- The lookahead row proves more descendants than the budget.
             exists (
@@ -37666,24 +37814,42 @@ function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefine
 /** Exact target grants never imply visibility of relatives. */
 function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): SQL {
   return sql`(
-    ${schema.sessions.status} in ('requires_action', 'failed')
+    ${schema.sessions.status} = 'failed'
+    or (
+      ${schema.sessions.status} = 'requires_action'
+      and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`${schema.sessions.id}`)}
+    )
+    or ${sessionAwaitsConnectionSql(schema.sessions.status, schema.sessions.awaitingConnectionSince)}
     or (
       ${schema.sessions.parentSessionId} is null
       and ${sessionRelatedListScope(scope)}
       and exists (
-        with recursive attention_tree(id, status) as (
-          select child.id, child.status from ${schema.sessions} child
+        with recursive attention_tree(id, status, awaiting_connection_since) as (
+          select child.id, child.status, child.awaiting_connection_since
+          from ${schema.sessions} child
           where child.workspace_id = ${schema.sessions.workspaceId}
             and child.parent_session_id = ${schema.sessions.id}
           union
-          select child.id, child.status from attention_tree parent
+          select child.id, child.status, child.awaiting_connection_since from attention_tree parent
           join ${schema.sessions} child on child.parent_session_id = parent.id
           where child.workspace_id = ${schema.sessions.workspaceId}
         )
-        select 1 from attention_tree where status = 'requires_action'
+        select 1 from attention_tree
+        where (status = 'requires_action'
+            and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`attention_tree.id`)})
+          or ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
       )
     )
   )`;
+}
+
+/**
+ * An idle session whose agent waits on a connection card (connect, reconnect
+ * or more access) needs the person, as an approval does. Its status stays
+ * idle: nothing runs and new messages are admitted as usual.
+ */
+function sessionAwaitsConnectionSql(status: SQLWrapper, awaitingSince: SQLWrapper): SQL {
+  return sql`(${status} = 'idle' and ${awaitingSince} is not null)`;
 }
 
 /**
@@ -37812,6 +37978,7 @@ async function sessionListTotalsInScope(
         ${schema.sessions.activeTurnId} as active_turn_id,
         ${schema.sessions.inputWaitUntil} as input_wait_until,
         ${schema.sessions.inputWaitTurnId} as input_wait_turn_id,
+        ${schema.sessions.awaitingConnectionSince} as awaiting_connection_since,
         ${schema.sessions.siteId} as site_id,
         ${schema.sessions.siteAccessRootId} is not null as site_conversation,
         ${schema.sessions.updatedAt} as updated_at,
@@ -37833,7 +38000,8 @@ async function sessionListTotalsInScope(
       -- Retain each child's RLS check and materialize once, so depth cannot
       -- multiply base-table or personal-state scans.
       select child.id, child.parent_session_id, child.account_id, child.status, child.active_turn_id,
-        child.input_wait_until, child.input_wait_turn_id, child.subtree_run_override_revision,
+        child.input_wait_until, child.input_wait_turn_id, child.awaiting_connection_since,
+        child.subtree_run_override_revision,
         child.direct_control_state, child.direct_pause_revision,
         coalesce(personal.pinned, false) as pinned,
         coalesce(case when personal.manually_unread_through is not null then -1
@@ -37846,10 +38014,11 @@ async function sessionListTotalsInScope(
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, parent_session_id, account_id, status, active_turn_id,
-        input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
-        acknowledged_sequence, actively_working) as (
+        input_wait_until, input_wait_turn_id, awaiting_connection_since, pause_revision,
+        pinned_path, related, acknowledged_sequence, actively_working) as (
       select root.id, root.channel_id, root.id, null::uuid, root.account_id, root.status,
         root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
+        root.awaiting_connection_since,
         greatest(
           case when control.workspace_state = 'paused' and
             (root.subtree_run_override_revision is null or
@@ -37864,6 +38033,7 @@ async function sessionListTotalsInScope(
       select parent.root_id, parent.channel_id, child.id, child.parent_session_id,
         child.account_id, child.status,
         child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
+        child.awaiting_connection_since,
         greatest(
           case when child.subtree_run_override_revision is null or
               child.subtree_run_override_revision <= parent.pause_revision
@@ -37876,11 +38046,15 @@ async function sessionListTotalsInScope(
         on child.parent_session_id = parent.id
       where parent.related
     ), attention_roots as (
-      select root_id, bool_or(status = 'requires_action') as attention
+      select root_id, bool_or(case when status = 'requires_action'
+        then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
+        else ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)} end) as attention
       from nodes group by root_id
     ), root_attention as materialized (
       select root.id, not root.archived and (
-        root.status in ('requires_action', 'failed') or coalesce(attention.attention, false)
+        root.status in ('requires_action', 'failed')
+        or ${sessionAwaitsConnectionSql(sql`root.status`, sql`root.awaiting_connection_since`)}
+        or coalesce(attention.attention, false)
       ) as needs_you
       from roots root left join attention_roots attention on attention.root_id = root.id
     ), measured as (
@@ -37902,7 +38076,12 @@ async function sessionListTotalsInScope(
           select min(turn.updated_at) from ${schema.sessionTurns} turn
           where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
             and turn.status = 'requires_action'
-        ) end as attention_since,
+        ) when ${sessionAwaitsConnectionSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
+          then nodes.awaiting_connection_since end as attention_since,
+        case when nodes.status = 'requires_action'
+          then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
+          else ${sessionAwaitsConnectionSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
+          end as needs_person,
         nodes.status = 'idle' and nodes.active_turn_id is null
           and nodes.input_wait_until is not null
           and nodes.input_wait_turn_id = (
@@ -37941,8 +38120,8 @@ async function sessionListTotalsInScope(
         }
     ), grouped as (
       select channel_id as "channelId", count(*)::int as total,
-        count(*) filter (where status = 'requires_action')::int as attention,
-        min(attention_since) as "attentionSince",
+        count(*) filter (where needs_person)::int as attention,
+        min(attention_since) filter (where needs_person) as "attentionSince",
         count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
           (status in ('running', 'recovering') or input_wait))::int as active,
@@ -38075,8 +38254,8 @@ async function sessionListTotalsInScope(
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
-        count(*) filter (where node.status = 'requires_action')::int as attention,
-        min(node.attention_since) as "attentionSince",
+        count(*) filter (where node.needs_person)::int as attention,
+        min(node.attention_since) filter (where node.needs_person) as "attentionSince",
         count(*) filter (where node.status = 'failed' and node.unread
           and not node.failure_handled)::int as failed,
         count(*) filter (where node.pause_revision is null and
@@ -39750,12 +39929,16 @@ export async function getSessionForSubject(
     const handledFailure = (
       await sessionIdsWithHandledFailure(scopedDb, workspaceId, [row.session])
     ).has(sessionId);
+    const questionWithAgent = (
+      await sessionIdsWithQuestionsWithAgent(scopedDb, workspaceId, [row.session])
+    ).has(sessionId);
     const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
       {
         ...row.session,
         lastSequence: row.cursor.lastSequence,
         meaningfulSequence: row.cursor.lastMeaningfulSequence,
         ...(handledFailure ? { failureHandled: true } : {}),
+        ...(questionWithAgent ? { questionWithAgent: true } : {}),
       },
     ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
@@ -44818,8 +45001,10 @@ export async function acceptSessionHumanInputResponse(
     requestId: string;
     response: unknown;
     respondedBy: string;
-    /** API-owned verified managed/local browser stamp, never a submitted principal shape. */
+    /** API-owned sign-in proof for Skill review and existing native secret answers. */
     canonicalHumanSession?: boolean;
+    /** API-owned proof for saving a secret answer to Only me. Not a proof for any other card. */
+    privateSecretAnswerAuthorized?: boolean;
     /**
      * API-owned: the response comes from the person's own Opengeni sign-in
      * (browser, desktop or phone app), not an agent, personal key or
@@ -45176,7 +45361,8 @@ export async function acceptSessionHumanInputResponse(
         if (response.outcome === "answered" && secretAnswers.length > 0) {
           if (
             secretAnswers.some((answer) => answer.saveTo === "user") &&
-            input.canonicalHumanSession !== true
+            input.canonicalHumanSession !== true &&
+            input.privateSecretAnswerAuthorized !== true
           ) {
             throw new HumanInputResponseValidationError(
               "HUMAN_AUTH_REQUIRED",
@@ -45522,6 +45708,8 @@ export async function adoptManagedSessionBackgroundCommand(
     processId: string;
     expected: SandboxRetainedProcessIdentity;
     command: string;
+    /** Turn shell marker path of an unsupervised command (migration 1560). */
+    processGroupMarker?: string | undefined;
   },
 ) {
   return await withRlsContext(
@@ -45575,6 +45763,7 @@ export async function adoptManagedSessionBackgroundCommand(
           commandId: input.processId,
           retainedProcessId: input.processId,
           command: input.command,
+          processGroupMarker: input.processGroupMarker,
           turnId: input.turnId,
           attemptId: input.attemptId,
           executionGeneration: input.executionGeneration,
@@ -57598,6 +57787,55 @@ export async function claimModalProviderCreateRecovery(
   });
 }
 
+/** Modal ends every sandbox within 24 hours, its maximum lifetime (and the
+ * most `modalTimeoutSeconds` allows). An unresolved create that started longer
+ * ago than that plus an hour for dispatch and scheduling can own no running
+ * box. The database guard enforces the same horizon (migration 1549). */
+export const MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS = 25 * 60 * 60 * 1000;
+
+export function modalProviderCreateOutlivedProvider(
+  attempt: Pick<SandboxProviderCreateAttempt, "startedAt">,
+  nowMs: number = Date.now(),
+): boolean {
+  const startedAtMs = Date.parse(attempt.startedAt);
+  return (
+    Number.isFinite(startedAtMs) && nowMs - startedAtMs > MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS
+  );
+}
+
+/** Clear an unresolved create that no receipt attributed within the provider's
+ * maximum sandbox lifetime. Only the exact attempt on its own expired warming
+ * epoch is cleared; the ordinary expired-warming reset then moves the lease to
+ * cold with a new epoch, keeping its archive, so the next turn creates afresh. */
+export async function settleExpiredModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    attempt: SandboxProviderCreateAttempt;
+  },
+): Promise<boolean> {
+  if (input.attempt.instanceId !== null || !modalProviderCreateOutlivedProvider(input.attempt))
+    return false;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ id: string }>(sql`
+      update sandbox_leases set provider_create_attempt = null,
+        provider_create_recovery_after = null,
+        updated_at = now()
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and lease_epoch = ${input.attempt.leaseEpoch}
+        and provider_create_attempt = ${JSON.stringify(input.attempt)}::jsonb
+        and expires_at < now()
+        and (provider_create_attempt->>'startedAt')::timestamptz
+          <= now() - (${String(MODAL_PROVIDER_CREATE_SETTLE_AFTER_MS)} || ' milliseconds')::interval
+      returning id
+    `);
+    return rows.length > 0;
+  });
+}
+
 /** Attribute a positively identified late receipt, preserving expiry and every
  * checkpoint. Ordinary holder/epoch-fenced draining owns all physical cleanup. */
 export async function recordRecoveredModalProviderCreate(
@@ -61885,7 +62123,9 @@ export async function reapStaleLeaseHolders(
         let warmingReset = 0;
         for (const row of expiredWarming) {
           // A lost reply can still name a live provider. Keep the same epoch
-          // available for late attribution; time is not termination proof.
+          // available for late attribution; expiry alone is not termination
+          // proof. Only the provider's maximum sandbox lifetime is, and
+          // settleExpiredModalProviderCreate clears the attempt once it passes.
           if (row.provider_create_attempt?.instanceId === null) continue;
           const resetResumeState = warmingResetResumeState(row, new Date().toISOString());
           const reset = await tx.execute<{ id: string }>(sql`
@@ -79324,38 +79564,64 @@ export async function setSessionGoalStatusWithEvent(
                 reason: "api",
               };
       const now = new Date();
-      const [event] = await tx
+      // A finished goal waits on nothing: withdraw the connection cards its
+      // chat still has open (a card the agent worked around mid-turn), so the
+      // chat and its parent stop showing it as needing the person.
+      const [open] =
+        input.event.type === "goal.completed"
+          ? await tx
+              .select({ keys: schema.sessions.awaitingConnectionKeys })
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, workspaceId),
+                  eq(schema.sessions.id, sessionId),
+                ),
+              )
+          : [];
+      const rows: Array<{ type: SessionEventType; payload: Record<string, unknown> }> = [
+        { type: input.event.type, payload },
+        ...[...new Set(open?.keys ?? [])].map((key) => ({
+          type: "session.notification.withdrawn" as const,
+          payload: { key },
+        })),
+      ];
+      const appended = await tx
         .insert(schema.sessionEvents)
         .values(
-          withLosslessContentWriteVersion(
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: session.lastSequence + 1,
-              type: input.event.type,
-              payload: payload,
-              ...(input.commandActor
-                ? {
-                    turnId: input.commandActor.turnId,
-                    turnGeneration: input.commandActor.executionGeneration,
-                    turnAttemptId: input.commandActor.attemptId,
-                    turnAssociation: "current",
-                  }
-                : {}),
-              occurredAt: now,
-            },
-            "payload",
-            "payloadCodecVersion",
+          rows.map((row, index) =>
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: session.lastSequence + 1 + index,
+                type: row.type,
+                payload: row.payload,
+                ...(input.commandActor
+                  ? {
+                      turnId: input.commandActor.turnId,
+                      turnGeneration: input.commandActor.executionGeneration,
+                      turnAttemptId: input.commandActor.attemptId,
+                      turnAssociation: "current" as const,
+                    }
+                  : {}),
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
           ),
         )
         .returning();
-      if (!event) throw new Error(`Failed to append ${input.event.type} event`);
+      if (appended.length !== rows.length)
+        throw new Error(`Failed to append ${input.event.type} event`);
+      appended.sort((left, right) => left.sequence - right.sequence);
       await tx
         .update(schema.sessions)
-        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .set({ lastSequence: session.lastSequence + rows.length, updatedAt: now })
         .where(eq(schema.sessions.id, sessionId));
-      return { ...result, events: [mapEvent(event)] };
+      return { ...result, events: appended.map(mapEvent) };
     }),
   );
 }
@@ -80429,6 +80695,15 @@ export type InitializeSessionStartInput = {
    */
   initialOpeningTools?: readonly string[];
   /**
+   * Picked connector accounts the first message runs without because they
+   * stopped working, recorded on the initial turn like any other turn's gaps.
+   */
+  initialConnectionAccountGaps?: ReadonlyArray<{
+    serverId: string;
+    connectionId: string | null;
+    reason: string;
+  }>;
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -80487,7 +80762,10 @@ export type InitializeSessionStartResult = {
 
 /** Trusted per-message facts the create request froze for the initial turn. */
 function initialTurnMetadata(
-  input: Pick<InitializeSessionStartInput, "initialTimeZone" | "initialOpeningTools">,
+  input: Pick<
+    InitializeSessionStartInput,
+    "initialTimeZone" | "initialOpeningTools" | "initialConnectionAccountGaps"
+  >,
 ): Record<string, unknown> {
   const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
   const openingTools = openingToolsFromTurnMetadata({
@@ -80496,6 +80774,9 @@ function initialTurnMetadata(
   return {
     ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
     ...(openingTools.length ? { [OPENING_TOOLS_METADATA_KEY]: openingTools } : {}),
+    ...(input.initialConnectionAccountGaps?.length
+      ? { connectionAccountGaps: input.initialConnectionAccountGaps.slice(0, 32) }
+      : {}),
   };
 }
 
@@ -91573,12 +91854,83 @@ export type ApplySessionTurnSettlementResult =
       events: [];
     };
 
+/**
+ * Where one settlement spent its time, in milliseconds. Phases describe the
+ * last transaction attempt; `admissionMs` also covers earlier retried attempts.
+ * `validateMs`, `writeMs` and `commitMs` pass while the session row is locked.
+ */
+export type SessionTurnSettlementTiming = {
+  action: ApplySessionTurnSettlementResult["action"];
+  attempts: number;
+  /** From the call until the row locks were requested (pool, BEGIN, RLS setup). */
+  admissionMs: number;
+  /** Waiting for the control, workspace, session, turn and attempt row locks. */
+  lockWaitMs: number;
+  /** Fence checks, reads and run-state writes after the locks, before the turn writes. */
+  validateMs: number | null;
+  /** Settlement writes and their triggers. */
+  writeMs: number | null;
+  /** From the transaction body's return until COMMIT was acknowledged. */
+  commitMs: number;
+  totalMs: number;
+};
+
 export type ApplySessionTurnSettlementHooks = {
   /** Test-only failure injection after terminal projection but before commit. */
   afterRealtimeDelegationProjection?:
     | ((projection: { entryId: string; turnId: string }) => void | Promise<void>)
     | undefined;
+  /** Observes where a resolved settlement spent its time. A throw or a
+   * rejected promise is ignored. */
+  onTiming?: ((timing: SessionTurnSettlementTiming) => unknown) | undefined;
 };
+
+type SessionTurnSettlementPhases = {
+  startedAt: number;
+  attempts: number;
+  lockRequestedAt: number | null;
+  lockedAt: number | null;
+  writeStartedAt: number | null;
+  bodyReturnedAt: number | null;
+};
+
+function markSessionTurnSettlementPhase(
+  phase: SessionTurnSettlementPhases,
+  mark: "lockRequestedAt" | "lockedAt" | "writeStartedAt" | "bodyReturnedAt",
+): void {
+  phase[mark] = performance.now();
+}
+
+function reportSessionTurnSettlementTiming(
+  onTiming: ApplySessionTurnSettlementHooks["onTiming"],
+  phase: SessionTurnSettlementPhases,
+  action: SessionTurnSettlementTiming["action"],
+): void {
+  if (!onTiming) return;
+  const finishedAt = performance.now();
+  const span = (from: number | null, to: number | null) =>
+    from === null || to === null ? null : Math.max(0, Math.round(to - from));
+  // An early (stale) return leaves later marks unset: its remaining time is
+  // reported as commit, during which the row locks were still held.
+  const bodyEnd = phase.bodyReturnedAt ?? phase.lockedAt ?? finishedAt;
+  const timing: SessionTurnSettlementTiming = {
+    action,
+    attempts: phase.attempts,
+    admissionMs: span(phase.startedAt, phase.lockRequestedAt ?? finishedAt) ?? 0,
+    lockWaitMs: span(phase.lockRequestedAt, phase.lockedAt ?? finishedAt) ?? 0,
+    validateMs: span(phase.lockedAt, phase.writeStartedAt ?? phase.bodyReturnedAt),
+    writeMs: span(phase.writeStartedAt, phase.bodyReturnedAt),
+    commitMs: span(bodyEnd, finishedAt) ?? 0,
+    totalMs: span(phase.startedAt, finishedAt) ?? 0,
+  };
+  // Timing is diagnostic; neither a throw nor a rejection from the observer
+  // changes the settlement's outcome or escapes as an unhandled rejection.
+  try {
+    void Promise.resolve(onTiming(timing)).catch(() => {});
+  } catch {
+    // Ignored, as above.
+  }
+}
 
 function attemptOutcomeForTurnStatus(status: SessionTurnStatus): SessionTurnAttemptOutcome | null {
   switch (status) {
@@ -91921,7 +92273,17 @@ export async function applySessionTurnSettlement(
         input.runState.pendingApprovals,
       )
     : null;
-  return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+  const phase: SessionTurnSettlementPhases = {
+    startedAt: performance.now(),
+    attempts: 0,
+    lockRequestedAt: null,
+    lockedAt: null,
+    writeStartedAt: null,
+    bodyReturnedAt: null,
+  };
+  const settled = await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+    phase.attempts += 1;
+    phase.lockRequestedAt = phase.lockedAt = phase.writeStartedAt = phase.bodyReturnedAt = null;
     // A terminal settlement cancels the turn's still-pending human-input rows.
     // Their parent resolution notices need the parent locked with the child,
     // so peek (unlocked) for such rows first; they are created only by this
@@ -91947,6 +92309,7 @@ export async function applySessionTurnSettlement(
           .limit(1)
       ).length > 0;
     return await scopedDb.transaction(async (tx) => {
+      markSessionTurnSettlementPhase(phase, "lockRequestedAt");
       const locks =
         input.turnStatus === "failed" ||
         input.turnStatus === "requires_action" ||
@@ -91963,6 +92326,7 @@ export async function applySessionTurnSettlement(
               turnIds: [input.turnId],
               attemptIds: [input.attemptId],
             });
+      markSessionTurnSettlementPhase(phase, "lockedAt");
       const session = locks.sessions.find((row) => row.id === input.sessionId);
       const turn = locks.turns.find((row) => row.id === input.turnId);
       const attempt = locks.attempts.find((row) => row.id === input.attemptId);
@@ -92125,6 +92489,7 @@ export async function applySessionTurnSettlement(
             "pendingApprovalsCodecVersion",
           ),
         );
+        const newHumanInputRequestIds: string[] = [];
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
             if (request.questions.length === 1 && request.questions[0]!.skillReview) {
@@ -92199,12 +92564,16 @@ export async function applySessionTurnSettlement(
                     is not distinct from ${request.expiresAt?.toISOString() ?? null}::timestamptz
                 `,
               })
-              .returning({ id: schema.sessionHumanInputRequests.id });
+              .returning({
+                id: schema.sessionHumanInputRequests.id,
+                inserted: sql<boolean>`(xmax = 0)`,
+              });
             if (!persistedRequest) {
               throw new Error(
                 `Human-input request ${request.id} changed contract or settled before re-freeze`,
               );
             }
+            if (persistedRequest.inserted) newHumanInputRequestIds.push(persistedRequest.id);
           }
         }
         for (const request of interactionInterventionRequests) {
@@ -92255,6 +92624,7 @@ export async function applySessionTurnSettlement(
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               humanInputRequests,
+              newHumanInputRequestIds,
               pendingApprovals: input.runState.pendingApprovals.filter(undecided),
             },
           );
@@ -92371,6 +92741,7 @@ export async function applySessionTurnSettlement(
         });
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
+      markSessionTurnSettlementPhase(phase, "writeStartedAt");
       const now = new Date();
       const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       const attemptOutcome = attemptOutcomeForTurnStatus(input.turnStatus);
@@ -92933,6 +93304,7 @@ export async function applySessionTurnSettlement(
           });
         }
       }
+      markSessionTurnSettlementPhase(phase, "bodyReturnedAt");
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -92941,6 +93313,8 @@ export async function applySessionTurnSettlement(
       };
     });
   });
+  reportSessionTurnSettlementTiming(hooks.onTiming, phase, settled.action);
+  return settled;
 }
 
 import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";
@@ -95088,6 +95462,8 @@ async function enqueueChildRequiresActionOutboxTx(
     turnId: string;
     turnGeneration: number;
     humanInputRequests: Parameters<typeof buildChildRequiresActionPayload>[0]["humanInputRequests"];
+    /** Requests this freeze created; only these can be held. */
+    newHumanInputRequestIds: readonly string[];
     pendingApprovals: readonly unknown[];
   },
 ): Promise<boolean> {
@@ -95107,12 +95483,13 @@ async function enqueueChildRequiresActionOutboxTx(
     parentSessionId: session.parentSessionId,
   });
   const summary = childRequiresActionSummary(session.id, payload);
-  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
-    dedupeKey: childRequiresActionDedupeKey({
-      childSessionId: session.id,
-      turnId: input.turnId,
-      turnGeneration: input.turnGeneration,
-    }),
+  const dedupeKey = childRequiresActionDedupeKey({
+    childSessionId: session.id,
+    turnId: input.turnId,
+    turnGeneration: input.turnGeneration,
+  });
+  const enqueued = await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey,
     kind: "child_requires_action",
     classification: "action_required",
     summary: route.escalatedFromSessionId
@@ -95122,6 +95499,30 @@ async function enqueueChildRequiresActionOutboxTx(
     lineage: { turnId: input.turnId },
     route,
   });
+  // The agent gets the whole pause or none of it.
+  const hold =
+    enqueued &&
+    route.targetCanAct &&
+    !payload.truncated &&
+    payload.requests.length === input.humanInputRequests.length &&
+    input.humanInputRequests.every((request) =>
+      request.questions.every((question) => !humanInputQuestionIsPersonOnly(question)),
+    );
+  if (hold && input.newHumanInputRequestIds.length > 0) {
+    // Before the pause's request events: the inbox and push triggers skip a
+    // held question, and release it when the agent no longer has it (1553).
+    await tx
+      .update(schema.sessionHumanInputRequests)
+      .set({ heldForAgent: true })
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, session.id),
+          inArray(schema.sessionHumanInputRequests.id, [...input.newHumanInputRequestIds]),
+        ),
+      );
+  }
+  return enqueued;
 }
 
 async function enqueueChildRequiresActionResolvedOutboxTx(
@@ -95205,8 +95606,9 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
-    /** A later notice restating the reset of a wait the parent already heard of. */
-    restated?: boolean;
+    waitReason: string;
+    explanation?: string;
+    restatement?: { restatedResetsAt: string | null; restatedReasonSequence?: number };
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -95222,11 +95624,13 @@ async function enqueueChildWaitingCapacityOutboxTx(
     dedupeKey: childWaitingCapacityDedupeKey({
       childSessionId: session.id,
       waiterId: input.waiterId,
-      ...(input.restated ? { restatedResetsAt: payload.resetsAt } : {}),
+      ...input.restatement,
     }),
     kind: "child_waiting_capacity",
     classification: "info",
-    summary: childWaitingCapacitySummary(session.id, payload),
+    summary: childWaitingCapacitySummary(session.id, payload, input.explanation, {
+      waitReason: input.waitReason,
+    }),
     payload,
     lineage: { turnId: input.turnId },
   });
@@ -95316,6 +95720,15 @@ export function childFailedTurnDedupeKey(childSessionId: string, turnId: string)
 /** SQL form of childFailedTurnDedupeKey; keep the two in step. */
 function childFailedTurnDedupeKeySql(childSessionId: SQL, turnId: SQL): SQL {
   return sql`('child-completion:' || (${childSessionId})::text || ':turn:' || (${turnId})::text)`;
+}
+
+/** SQL twin of childRequiresActionDedupeKey. */
+function childRequiresActionDedupeKeySql(
+  childSessionId: SQL,
+  turnId: SQL,
+  turnGeneration: SQL,
+): SQL {
+  return sql`('child-requires-action:' || (${childSessionId})::text || ':' || (${turnId})::text || ':' || (${turnGeneration})::text)`;
 }
 
 async function enqueueFailedChildOutboxWithoutTurnTx(
@@ -99429,6 +99842,23 @@ export async function appendSessionEventsForTurnAttempt(
 }
 
 /**
+ * A connection card's events with the notice that tells the person they are
+ * needed (`connectionCardNotice`), after the card so the card stays first.
+ */
+export function withConnectionCardNotice<T extends { type: string; payload?: unknown }>(
+  events: readonly T[],
+): Array<T | { type: "session.notification.posted"; payload: SessionNotificationPostedPayload }> {
+  return events.flatMap((event) => {
+    if (event.type !== "tool.auth_needed") return [event];
+    const parsed = ToolAuthNeededPayload.safeParse(event.payload);
+    const notice = parsed.success ? connectionCardNotice(parsed.data) : null;
+    return notice
+      ? [event, { type: "session.notification.posted" as const, payload: notice }]
+      : [event];
+  });
+}
+
+/**
  * Append a capability card for the calling turn unless that turn already shows
  * a current card for the same capability (and, for a card that names the
  * machine it asks for, the same machine, and for a card with a purpose such as
@@ -99476,7 +99906,8 @@ export async function appendTurnCapabilityCardOnce(
     turnId,
     executionGeneration,
     attemptId,
-    [input],
+    // The card needs the person: its notice reaches the inbox and the phone.
+    withConnectionCardNotice([input]),
     {
       rowProjection: "event",
       mutate: async (tx) => {
@@ -101110,6 +101541,7 @@ function mapSessionFields(
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,
     ...(row.failureHandled ? { failureHandled: true } : {}),
+    ...(row.questionWithAgent ? { questionWithAgent: true } : {}),
     nestedAgentDepth: row.nestedAgentDepth,
     maxNestedAgentDepthOverride: row.maxNestedAgentDepthOverride ?? null,
     effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,
@@ -101140,6 +101572,10 @@ function mapSessionFields(
     ...attention,
     ...sessionRowArchive(row),
     ...archive,
+    // Only while a connection card waits, so other sessions keep their bytes.
+    ...(row.awaitingConnectionSince
+      ? { awaitingConnectionSince: new Date(row.awaitingConnectionSince).toISOString() }
+      : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -102217,6 +102653,7 @@ export {
   type ConnectionStatusGuard,
   type ConnectionTokenRefreshInput,
   type ConnectionTokenResolverOptions,
+  type CredentialReferenceResolution,
   type PermanentConnectionRefreshFailure,
   type RefreshTransportOptions,
   type ResolveConnectionCredentialInput,

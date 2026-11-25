@@ -87,6 +87,7 @@ import {
   CLAUDE_CONNECTION_KINDS,
   claudeProviderId,
   canonicalizeConfiguredModelId,
+  resolveModelProviderForTurn,
   configuredAllowedModels,
   withCodexCatalogProvider,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
@@ -106,6 +107,8 @@ import {
   policyChargesCreditsForModel,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
+  TurnExecutionPolicyModelUnavailableError,
+  UnsupportedLatencyModeError,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
@@ -171,6 +174,7 @@ import {
   type SessionEvent,
   SessionMcpApprovalPolicy,
   SetSessionModelRequest,
+  type SetSessionModelSettingsRequest,
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
@@ -326,7 +330,10 @@ import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   personalWorkspaceExtensionMcpServers,
   personalWorkspaceExtensionSubject,
+  lapsedPersonalCarriedConnectors,
+  type LapsedCarriedConnector,
 } from "./personal-workspace-connectors";
+import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 import {
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
@@ -344,7 +351,9 @@ import { requireEnvironmentEncryption } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
+  type OmittedConnectionAccount,
 } from "./personal-connection-delegations";
+import { reportOmittedConnectionAccounts } from "./connections-needing-reconnect";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import {
@@ -969,6 +978,73 @@ export function validateSessionMcpCredentialUpdates(input: {
   return encryptedUpdates;
 }
 
+/** A connector account a turn runs without, recorded in its metadata. */
+type ConnectionAccountGap = { serverId: string; connectionId: string | null; reason: string };
+
+/** Picked accounts left out at admission, as turn gaps (never their account details). */
+/**
+ * Picks for a lapsed carried connector are left out of the turn's own
+ * resolution but stay in its saved intent, so a continuation after the
+ * account is reconnected binds only what the person picked, never every
+ * eligible account.
+ */
+function withLapsedConnectorPicks(
+  intent: ConnectionAccountIntent | null,
+  picks: readonly McpConnectionAccountSelection[] | undefined,
+  lapsed: readonly LapsedCarriedConnector[],
+): ConnectionAccountIntent | null {
+  if (!intent || !picks?.length || lapsed.length === 0) return intent;
+  assertOwnLapsedConnectorPicks(picks, lapsed);
+  const kept = picks.filter(
+    (pick) =>
+      lapsed.some((omitted) => omitted.serverId === pick.serverId) &&
+      !intent.selections.some((selection) => selection.serverId === pick.serverId),
+  );
+  return kept.length ? { ...intent, selections: [...intent.selections, ...kept] } : intent;
+}
+
+/**
+ * A pick for a lapsed carried connector is kept only when it names one of the
+ * person's own accounts for that connector; anything else is refused exactly
+ * as a pick for a running connector would be.
+ */
+function assertOwnLapsedConnectorPicks(
+  picks: readonly McpConnectionAccountSelection[] | undefined,
+  lapsed: readonly LapsedCarriedConnector[],
+): void {
+  const refused = (picks ?? []).flatMap((pick) => {
+    const connector = lapsed.find((omitted) => omitted.serverId === pick.serverId);
+    if (!connector || connector.ownAccountIds.includes(pick.connectionId)) return [];
+    return [
+      {
+        serverId: pick.serverId,
+        connectionId: pick.connectionId,
+        reason: lapsed.some((other) => other.ownAccountIds.includes(pick.connectionId))
+          ? ("account_mismatch" as const)
+          : ("account_not_visible" as const),
+      },
+    ];
+  });
+  if (refused.length > 0)
+    throw new ConnectionAccountSelectionError(
+      "An attached connector account is unavailable. Review its connection settings.",
+      { version: 1, reason: "selected_account_unavailable", accounts: refused },
+    );
+}
+
+/** Left-out connectors as recorded on the turn, without the account list. */
+function lapsedAsOmitted(lapsed: readonly LapsedCarriedConnector[]): OmittedConnectionAccount[] {
+  return lapsed.map(({ ownAccountIds: _ownAccountIds, ...omitted }) => omitted);
+}
+
+function connectionAccountGaps(
+  omitted: readonly OmittedConnectionAccount[],
+): ConnectionAccountGap[] {
+  return omitted
+    .slice(0, 32)
+    .map(({ serverId, connectionId, reason }) => ({ serverId, connectionId, reason }));
+}
+
 export type CreateSessionOutcome = {
   session: CreateSessionResponse;
   /** The committed create/start effect represented by this request. */
@@ -1016,6 +1092,14 @@ export type SessionCreateRequestOptions = {
    * Trusted entry points only; not part of the public create request.
    */
   firstPartyMcpToolAdditions?: readonly FirstPartyMcpToolName[];
+  /**
+   * Whose agents the new chat may be bound to, when that is not the grant's
+   * subject: the owner of the Only me chat that delegates (an Only me
+   * automation's run acts as a service, yet its chat is its owner's). The
+   * database still requires an Only me agent's chat to be Only me. Trusted
+   * entry points only; not part of the public create request.
+   */
+  agentAccessSubjectId?: string;
 };
 
 const AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY = "agentChildAutomaticTitle" as const;
@@ -1132,6 +1216,8 @@ export async function createAndStartSessionWithOutcome(input: {
   unattended?: boolean;
   /** The agent (agents.id) the chat starts with, at its current revision. */
   boundAgentId?: string;
+  /** Whose agents count for `boundAgentId`, when not the creator (`subjectId`). */
+  boundAgentSubjectId?: string;
   /** The organization agent version the chat runs (`sessions.agent_version`). */
   boundOrgAgent?: {
     agentId: string;
@@ -1191,6 +1277,8 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   /** The creator's account intent, carried by work that continues the first turn. */
   connectionAccountIntent?: ConnectionAccountIntent | null;
+  /** Picked accounts the first message runs without because they stopped working. */
+  initialConnectionAccountGaps?: ConnectionAccountGap[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
@@ -1429,7 +1517,14 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
-          ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+          ...(input.boundAgentId
+            ? {
+                agent: {
+                  id: input.boundAgentId,
+                  ...(input.boundAgentSubjectId ? { subjectId: input.boundAgentSubjectId } : {}),
+                },
+              }
+            : {}),
           ...(input.boundOrgAgent ? { orgAgent: input.boundOrgAgent } : {}),
           ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
@@ -1549,7 +1644,14 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
-        ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+        ...(input.boundAgentId
+          ? {
+              agent: {
+                id: input.boundAgentId,
+                ...(input.boundAgentSubjectId ? { subjectId: input.boundAgentSubjectId } : {}),
+              },
+            }
+          : {}),
         ...(input.boundOrgAgent ? { orgAgent: input.boundOrgAgent } : {}),
         ...(input.unattended ? { unattended: true } : {}),
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
@@ -1704,6 +1806,7 @@ async function finishStartSession(
     modelContext?: string | null;
     timeZone?: string | null;
     openingTools?: readonly string[];
+    initialConnectionAccountGaps?: ConnectionAccountGap[];
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -1795,6 +1898,9 @@ async function finishStartSession(
       turnExecutionPolicy: input.turnExecutionPolicy,
       ...(initialTimeZone ? { initialTimeZone } : {}),
       ...(input.openingTools?.length ? { initialOpeningTools: [...input.openingTools] } : {}),
+      ...(input.initialConnectionAccountGaps?.length
+        ? { initialConnectionAccountGaps: input.initialConnectionAccountGaps }
+        : {}),
       surface: input.surface ?? null,
       billingOrigin: input.billingOrigin ?? null,
       createdEventPayload: {
@@ -2138,6 +2244,8 @@ type PostUserMessageTurnInput = {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   /** The sender's account intent, carried by work that continues this turn. */
   connectionAccountIntent?: ConnectionAccountIntent | null;
+  /** Picked accounts the message runs without because they stopped working. */
+  connectionAccountGaps?: ConnectionAccountGap[];
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -2291,6 +2399,9 @@ export async function postUserMessageTurn(
   const turnMetadata = {
     ...(siteOrigin ? { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } : {}),
     ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
+    ...(input.connectionAccountGaps?.length
+      ? { connectionAccountGaps: input.connectionAccountGaps.slice(0, 32) }
+      : {}),
   };
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
@@ -3595,10 +3706,38 @@ async function createSessionForRequestInFileScope(
   // written rows without it. Compare it only when the create request supplied
   // the field explicitly; the parsed schema default must not manufacture a
   // mismatch for a legacy draft.
-  const requestedTools = validateToolRefs(
-    toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
+  const submittedTools = toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools);
+  // The person's own connector carried into their Personal workspace whose
+  // account stopped working is left out, as a lapsed account pick is, rather
+  // than refusing the chat; any other unknown id is still refused below.
+  const lapsedToolOmissions = await lapsedPersonalCarriedConnectors(db, {
+    workspaceId,
+    subjectId: grant.subjectId,
+    accountId: grant.accountId,
+    serverIds: submittedTools.flatMap((tool) =>
+      tool.kind === "mcp" && !runtimeSettings.mcpServers.some((server) => server.id === tool.id)
+        ? [tool.id]
+        : [],
+    ),
+    ownServers: runtimeSettings.mcpServers,
+  });
+  // Only a person's own request may pick accounts for it; agent-created work
+  // passes its picks through unchanged, so they're refused as usual below.
+  const lapsedPickConnectors =
+    connectionDelegationSource.kind === "subject" ? lapsedToolOmissions : [];
+  assertOwnLapsedConnectorPicks(payload.connectionAccounts, lapsedPickConnectors);
+  const lapsedToolIds = new Set(lapsedToolOmissions.map((omitted) => omitted.serverId));
+  const isLapsedToolRef = (tool: ToolRef) => tool.kind === "mcp" && lapsedToolIds.has(tool.id);
+  const runnableRequestedTools = validateToolRefs(
+    submittedTools.filter((tool) => !isLapsedToolRef(tool)),
     runtimeSettings,
   );
+  // The lapsed ref stays chosen in the stored tools, as a policy update keeps
+  // it, so the chat gets it back once the account is reconnected; it is left
+  // out only of this turn's runtime and account binding below.
+  const requestedTools = lapsedToolIds.size
+    ? [...runnableRequestedTools, ...submittedTools.filter(isLapsedToolRef)]
+    : runnableRequestedTools;
   let selectedTools: ToolRef[];
   let toolPolicy: SessionToolPolicy;
   if (parentSession) {
@@ -3618,9 +3757,19 @@ async function createSessionForRequestInFileScope(
         tool.id === "opengeni" || !parentSession.toolPolicy.excludedMcpServerIds?.includes(tool.id),
     );
     if (toolsProvided) {
+      // Every requested ref, a lapsed one included, must already be the
+      // parent's: a lapsed ref counts as allowed only when the parent itself
+      // keeps it chosen, so a child can't widen through a lapsed connector.
       assertToolRefsSubset(
         requestedTools,
-        parentEffective,
+        [
+          ...parentEffective,
+          ...parentSession.tools.filter(
+            (tool) =>
+              isLapsedToolRef(tool) &&
+              !parentSession.toolPolicy.excludedMcpServerIds?.includes(tool.id),
+          ),
+        ],
         "child tools may only narrow the parent session tool policy",
       );
       selectedTools = requestedTools;
@@ -4030,27 +4179,46 @@ async function createSessionForRequestInFileScope(
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
   const connectionAccountTools = sessionToolsForConnectionAccounts({
-    session: { tools, toolPolicy },
+    session: { tools: tools.filter((tool) => !isLapsedToolRef(tool)), toolPolicy },
     runtimeMcpServers: runtimeSettings.mcpServers,
     defaultMcpServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
       capabilityRuntimeSettings.mcpServers,
       workspace.settings,
     ),
   });
-  const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
-    await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
-      freezeConnectionAccounts({
-        db,
-        accountId: grant.accountId,
-        workspaceId,
-        settings: runtimeSettings,
-        tools: connectionAccountTools,
-        resources,
-        source: connectionDelegationSource,
-        authoritySelections: payload.connectionAccounts,
-        autoConnect: { settings: unresolvedDeps.settings },
-      }),
-    );
+  const {
+    personalConnectionDelegations,
+    mcpAccountBindings,
+    connectionAccountIntent: frozenConnectionAccountIntent,
+    omittedSelections: omittedPicks,
+  } = await measureSessionStartPhase(unresolvedDeps.observability, "connection_freeze", () =>
+    freezeConnectionAccounts({
+      db,
+      accountId: grant.accountId,
+      workspaceId,
+      settings: runtimeSettings,
+      tools: connectionAccountTools,
+      resources,
+      source: connectionDelegationSource,
+      // Picks for a lapsed carried connector left out above go with it.
+      authoritySelections: lapsedPickConnectors.length
+        ? payload.connectionAccounts?.filter(
+            (selection) =>
+              !lapsedPickConnectors.some((omitted) => omitted.serverId === selection.serverId),
+          )
+        : payload.connectionAccounts,
+      autoConnect: { settings: unresolvedDeps.settings },
+      // An account picked from a list loaded earlier may have stopped
+      // working since: start without it instead of refusing the message.
+      unusableSelections: "omit",
+    }),
+  );
+  const connectionAccountIntent = withLapsedConnectorPicks(
+    frozenConnectionAccountIntent,
+    payload.connectionAccounts,
+    lapsedPickConnectors,
+  );
+  const omittedSelections = [...lapsedAsOmitted(lapsedToolOmissions), ...omittedPicks];
   if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
@@ -4538,7 +4706,14 @@ async function createSessionForRequestInFileScope(
       instructions: payload.instructions ?? null,
       // The agent the chat starts with: its Instructions are a prompt layer
       // of their own, never copied into `instructions`.
-      ...(payload.agentId ? { boundAgentId: payload.agentId } : {}),
+      ...(payload.agentId
+        ? {
+            boundAgentId: payload.agentId,
+            ...(requestOptions.agentAccessSubjectId
+              ? { boundAgentSubjectId: requestOptions.agentAccessSubjectId }
+              : {}),
+          }
+        : {}),
       ...(orgAgent
         ? {
             boundOrgAgent: {
@@ -4570,6 +4745,9 @@ async function createSessionForRequestInFileScope(
       personalConnectionDelegations,
       mcpAccountBindings,
       connectionAccountIntent,
+      ...(omittedSelections.length
+        ? { initialConnectionAccountGaps: connectionAccountGaps(omittedSelections) }
+        : {}),
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
@@ -4646,6 +4824,13 @@ async function createSessionForRequestInFileScope(
     }
     throw error;
   }
+  if (omittedSelections.length > 0 && createOutcome.outcome === "created")
+    await reportOmittedConnectionAccounts(unresolvedDeps, {
+      workspaceId,
+      sessionId: createOutcome.session.id,
+      turnId: createOutcome.session.initialTurnId,
+      omitted: omittedSelections,
+    });
   return await withSessionCreateUsageRecording({
     deps,
     grant,
@@ -5094,19 +5279,71 @@ async function acceptSessionUserMessageInFileScope(
         connectionWorkspace.settings,
       ),
     });
-    const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
-      await freezeConnectionAccounts({
-        db,
-        accountId: grant.accountId,
-        workspaceId,
-        settings: runtimeSettings,
-        tools: connectionAccountTools,
-        resources: [...existingSession.resources, ...requestedResources],
-        source: connectionDelegationSource,
-        targetSessionId: sessionId,
-        ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
-        autoConnect: { settings: deps.settings },
-      });
+    // A pick for the person's own carried connector whose account stopped
+    // working (so this turn doesn't run it) is left out like the connector,
+    // not refused, and kept in the intent (see withLapsedConnectorPicks).
+    const lapsedPickOmissions =
+      input.connectionAccounts?.length && connectionDelegationSource.kind === "subject"
+        ? await lapsedPersonalCarriedConnectors(db, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            accountId: grant.accountId,
+            serverIds: [
+              ...new Set(
+                input.connectionAccounts.flatMap((pick) =>
+                  !connectionAccountTools.some(
+                    (tool) => tool.kind === "mcp" && tool.id === pick.serverId,
+                  ) &&
+                  (existingSession.toolPolicy.mode === "workspace_default" ||
+                    existingSession.tools.some(
+                      (tool) => tool.kind === "mcp" && tool.id === pick.serverId,
+                    ))
+                    ? [pick.serverId]
+                    : [],
+                ),
+              ),
+            ],
+            ownServers: runtimeSettings.mcpServers,
+          })
+        : [];
+    assertOwnLapsedConnectorPicks(input.connectionAccounts, lapsedPickOmissions);
+    const frozen = await freezeConnectionAccounts({
+      db,
+      accountId: grant.accountId,
+      workspaceId,
+      settings: runtimeSettings,
+      tools: connectionAccountTools,
+      resources: [...existingSession.resources, ...requestedResources],
+      source: connectionDelegationSource,
+      targetSessionId: sessionId,
+      ...(input.connectionAccounts
+        ? {
+            authoritySelections: lapsedPickOmissions.length
+              ? input.connectionAccounts.filter(
+                  (pick) =>
+                    !lapsedPickOmissions.some((omitted) => omitted.serverId === pick.serverId),
+                )
+              : input.connectionAccounts,
+          }
+        : {}),
+      autoConnect: { settings: deps.settings },
+      // The composer's account list is loaded when the chat opens, so a
+      // picked account may have stopped working since (its sign-in
+      // expired). Send without it instead of refusing the message; its
+      // connector gets no other account, and the turn says it needs
+      // reconnecting.
+      unusableSelections: "omit",
+    });
+    const { personalConnectionDelegations, mcpAccountBindings } = frozen;
+    const connectionAccountIntent = withLapsedConnectorPicks(
+      frozen.connectionAccountIntent,
+      input.connectionAccounts,
+      lapsedPickOmissions,
+    );
+    const omittedSelections = [
+      ...lapsedAsOmitted(lapsedPickOmissions),
+      ...frozen.omittedSelections,
+    ];
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const surface = resolveTurnSurface({
@@ -5160,6 +5397,9 @@ async function acceptSessionUserMessageInFileScope(
       personalConnectionDelegations,
       mcpAccountBindings,
       connectionAccountIntent,
+      ...(omittedSelections.length
+        ? { connectionAccountGaps: connectionAccountGaps(omittedSelections) }
+        : {}),
       ...(timeZone ? { timeZone } : {}),
 
       captureTurnAuthority: async (tx: Database, turnId: string) => {
@@ -5211,6 +5451,14 @@ async function acceptSessionUserMessageInFileScope(
         : {}),
     });
     if (!replay) recordUserMessageAccepted(deps.observability, { surface });
+    if (!replay && omittedSelections.length > 0)
+      await reportOmittedConnectionAccounts(deps, {
+        workspaceId,
+        sessionId,
+        turnId: turn.id,
+        turnGeneration: turn.executionGeneration,
+        omitted: omittedSelections,
+      });
     return {
       accepted,
       turn,
@@ -5486,11 +5734,15 @@ export async function setSessionModel(
     Partial<Pick<ApiRouteDeps, "workflowClient">>,
   grant: AccessGrant,
   sessionId: string,
-  request: SetSessionModelRequest,
+  request: SetSessionModelRequest &
+    Partial<Pick<SetSessionModelSettingsRequest, "latencyMode" | "expected">>,
   surface: SessionAuthorizationSurface = "core",
 ) {
   requirePermission(grant, "sessions:control");
-  const input = SetSessionModelRequest.parse(request);
+  const { latencyMode, expected, ...base } = request;
+  // The MCP contract deliberately still rejects the REST-only fields.
+  const input = SetSessionModelRequest.parse(surface === "first_party_mcp" ? request : base);
+  const extended = latencyMode !== undefined || expected !== undefined;
   const authorization = await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: "session.model.write",
@@ -5499,8 +5751,12 @@ export async function setSessionModel(
   const settings = await resolveWorkspaceModelBoundarySettings(deps, grant, grant.workspaceId, [
     input.model,
   ]);
-  const model = canonicalConfiguredModel(settings, input.model)!;
-  await assertWorkspaceModelPolicyAllows(deps.db, settings, grant.workspaceId, model);
+  const model = extended
+    ? canonicalizeConfiguredModelId(settings, input.model)
+    : canonicalConfiguredModel(settings, input.model)!;
+  if (!extended) {
+    await assertWorkspaceModelPolicyAllows(deps.db, settings, grant.workspaceId, model);
+  }
   const caller = authorization?.actor;
   const service = serviceInitiatorForGrant(grant);
   const actor: SessionCommandActor =
@@ -5520,6 +5776,8 @@ export async function setSessionModel(
     model,
     requestedModel: input.model,
     reasoningEffort: input.reasoningEffort,
+    deferValidation: extended,
+    ...(latencyMode !== undefined ? { latencyMode } : {}),
   });
   const result = await runIdempotentPersistenceTransaction(
     {
@@ -5540,9 +5798,18 @@ export async function setSessionModel(
           actor,
           operationKey: input.idempotencyKey,
           model,
+          ...(extended ? { requestedModel: input.model } : {}),
           reasoningEffort: input.reasoningEffort,
+          ...(latencyMode !== undefined ? { latencyMode } : {}),
+          ...(expected !== undefined ? { expected } : {}),
           ...(capacityRelease ? { capacityRelease } : {}),
-          validate: (session) => {
+          validate: async (replacement) => {
+            if (extended) {
+              // A committed retry must not be rejected by a newer model policy,
+              // and a failed comparison must return the locked current settings.
+              canonicalConfiguredModel(settings, input.model);
+              await assertWorkspaceModelPolicyAllows(tx, settings, grant.workspaceId, model);
+            }
             try {
               // Validate fresh selection/provider and preserved latency exactly as
               // prompt admission does; never silently clamp requested settings.
@@ -5552,9 +5819,19 @@ export async function setSessionModel(
                 modelSource: "explicit",
                 reasoningEffort: input.reasoningEffort,
                 reasoningSource: "explicit",
-                latencyMode: session.latencyMode as Session["latencyMode"],
-                latencyModeSource: "session",
+                latencyMode: replacement.latencyMode,
+                latencyModeSource: latencyMode === undefined ? "session" : "explicit",
               });
+              if (latencyMode !== undefined) {
+                const reasoning = resolveModelProviderForTurn(settings, model)!.model.capabilities
+                  .reasoning;
+                const allowed = reasoning.runnable ? reasoning.efforts : ["none"];
+                if (!allowed.includes(replacement.reasoningEffort)) {
+                  throw new Error(
+                    `Reasoning effort ${replacement.reasoningEffort} is not runnable for model ${model} (allowed: ${allowed.join(", ")})`,
+                  );
+                }
+              }
             } catch (error) {
               throw new HTTPException(422, {
                 message: error instanceof Error ? error.message : "Invalid model settings",
@@ -5608,10 +5885,14 @@ async function capacityWaitReleaseForModelSwitch(
     model: string;
     requestedModel: string;
     reasoningEffort: SetSessionModelRequest["reasoningEffort"];
+    latencyMode?: Session["latencyMode"];
+    deferValidation: boolean;
   },
 ): Promise<{ turnId: string; executionPolicy: TurnExecutionPolicyV1 } | null> {
-  const session = await requireSession(deps.db, grant.workspaceId, input.sessionId);
-  if (!session.activeTurnId) return null;
+  const session = input.deferValidation
+    ? await getSession(deps.db, grant.workspaceId, input.sessionId)
+    : await requireSession(deps.db, grant.workspaceId, input.sessionId);
+  if (!session?.activeTurnId) return null;
   const turn = await getSessionTurn(deps.db, grant.workspaceId, session.activeTurnId);
   if (
     !turn ||
@@ -5629,8 +5910,8 @@ async function capacityWaitReleaseForModelSwitch(
         modelSource: "explicit",
         reasoningEffort: input.reasoningEffort,
         reasoningSource: "explicit",
-        latencyMode: turn.latencyMode,
-        latencyModeSource: "session",
+        latencyMode: input.latencyMode ?? turn.latencyMode,
+        latencyModeSource: input.latencyMode === undefined ? "session" : "explicit",
       }),
       { grant, trustedMetadata: [session.metadata, turn.metadata] },
     );
@@ -5663,6 +5944,15 @@ async function capacityWaitReleaseForModelSwitch(
     return { turnId: turn.id, executionPolicy };
   } catch (error) {
     if (error instanceof HTTPException) return null;
+    // REST compares and checks replay under the lock before validating the
+    // replacement. An optional capacity release must not preempt that result.
+    if (
+      input.deferValidation &&
+      (error instanceof TurnExecutionPolicyModelUnavailableError ||
+        error instanceof UnsupportedLatencyModeError)
+    ) {
+      return null;
+    }
     throw error;
   }
 }
@@ -5933,16 +6223,34 @@ export async function updateSessionToolPolicy(
     request.mode === "workspace_default" && request.excludedMcpServerIds !== undefined;
   const requestedExclusions =
     request.mode === "workspace_default" ? (request.excludedMcpServerIds ?? []) : [];
+  const availableIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
+  // The person's own carried connector whose account stopped working is kept
+  // like a disconnected stored selection: chosen, but not run until reconnected.
+  const lapsedCarriedIds = explicitRequest
+    ? new Set(
+        (
+          await lapsedPersonalCarriedConnectors(deps.db, {
+            workspaceId: grant.workspaceId,
+            subjectId: grant.subjectId,
+            accountId: grant.accountId,
+            serverIds: explicitRequest.tools.flatMap((tool) =>
+              tool.kind === "mcp" && !availableIds.has(tool.id) ? [tool.id] : [],
+            ),
+            ownServers: runtimeSettings.mcpServers,
+          })
+        ).map((omitted) => omitted.serverId),
+      )
+    : new Set<string>();
   const explicitRequestedTools = explicitRequest
     ? (() => {
         // A disconnected stored selection remains policy truth, not executable
         // authority. Preserve exact existing refs while validating every new or
         // changed ref against the current runtime registry.
-        const availableIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
         const retainedUnavailableRefs = explicitRequest.tools.filter(
           (tool) =>
             !availableIds.has(tool.id) &&
-            existingSession.tools.some((existing) => stableJson(existing) === stableJson(tool)),
+            (existingSession.tools.some((existing) => stableJson(existing) === stableJson(tool)) ||
+              (tool.kind === "mcp" && lapsedCarriedIds.has(tool.id))),
         );
         const retainedIds = new Set(retainedUnavailableRefs.map((tool) => tool.id));
         const validatedCurrentRefs = validateToolRefs(

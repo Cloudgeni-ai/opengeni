@@ -1,11 +1,21 @@
 import { observedSdkVersion } from "./http/sdk-version";
 import {
+  emailSignInChallengeRequired,
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
   verifyEmailSignInChallenge,
   verifySignupChallenge,
   verifySocialSignupChallenge,
 } from "./auth/signup-challenge";
+import {
+  heedeoClientConfig,
+  heedeoKeysConfigured,
+  heedeoOAuthState,
+  heedeoSignupRequestFrom,
+  heedeoToken,
+  heedeoTokenFromOAuthState,
+  runWithHeedeoSignup,
+} from "./auth/heedeo-signup";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
@@ -60,6 +70,7 @@ import {
   httpRejectionFactsFromEnvelope,
   httpRejectionFactsFromError,
   readRejectionEnvelope,
+  rejectedCallerLogAttributes,
   type HttpRejectionFacts,
 } from "./http/rejection-telemetry";
 import {
@@ -82,6 +93,7 @@ import {
   environmentsEncryptionKeyBytes,
   landingOriginEntries,
   orgAgentsEnabledForAccount,
+  resolveFirstPartyDelegationSecret,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -151,7 +163,9 @@ import {
   withBillingOriginOverride,
   getOrganizationMcpConnectionSettings,
   updateOrganizationMcpConnectionSettings,
+  admitMcpConnectionRateLimit,
   type OrganizationMcpConnectionSettings,
+  readHeedeoSignupMode,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -220,6 +234,7 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
+import { createGitHubSkillSourceClient, readSkillRepository } from "@opengeni/core";
 import {
   eventTriggersEnabled,
   PersonalWorkspacesOffError,
@@ -313,6 +328,7 @@ import {
   prepareAttestedWorkspaceToolGateway,
   prepareMcpOAuthWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
+  prepareWorkspaceToolGatewayForMcpRequest,
   requireWorkspaceToolApprovalAuthorization,
   workspaceToolGatewayDeclarations,
   workspaceToolGatewayServerTiming,
@@ -331,7 +347,7 @@ import {
 } from "./mcp-oauth";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
 import { claimsStoredApproval } from "./mcp/stored-approval-claim";
-import { createConnectionRateLimiter } from "./mcp/connection-rate-limit";
+import { createSharedConnectionRateLimiter } from "./mcp/connection-rate-limit";
 import type { ActionAuditProvenance } from "./http/disconnect-audit-actor";
 import {
   CodemodeAuthorityError,
@@ -438,6 +454,7 @@ import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSessionShareLinkRoutes } from "./routes/session-share-links";
 import { registerSessionLinkRoutes } from "./routes/session-links";
+import { registerSessionLinkPullRequestRoutes } from "./routes/session-link-pull-request";
 import {
   archivedSessionImportErrorResponse,
   isSessionHistoryImportRequest,
@@ -459,12 +476,15 @@ import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
 import { registerAppSyncRoutes } from "./routes/app-sync";
+import { registerAppWebhookRoutes } from "./routes/app-webhooks";
+import { registerAppServerRoutes } from "./routes/app-server";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerSiteSqlRoutes } from "./routes/site-sql";
 import { registerAppPackageRoutes } from "./routes/app-packages";
+import { registerAppTemplateRoutes } from "./routes/app-templates";
 import { setAppSyncHooks } from "./app-packages/syncs";
 import { APP_PACKAGE_SYNC_HOOKS } from "./app-sync/package-hooks";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
@@ -1206,6 +1226,12 @@ export function createAppComposition(
             correlationId,
             ...(sdkVersion ? { sdkVersion } : {}),
             ...(rejection ? rejectionLogAttributes(rejection) : {}),
+            ...(rejection
+              ? await rejectedCallerLogAttributes(
+                  c.req.raw.headers,
+                  resolveFirstPartyDelegationSecret(deps.settings),
+                )
+              : {}),
           });
         } catch (error) {
           const status = httpStatusForError(error);
@@ -1394,16 +1420,26 @@ export function createAppComposition(
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
       let signupChallengeVerified = false;
-      if (deps.settings.signupChallengeEnabled && oauthCallbackProvider) {
+      // The browser's Heedeo token for this attempt (docs/signup-abuse-protection.md,
+      // "Heedeo shadow scoring"); only the user-create hook sends it.
+      let heedeoSignupToken: string | null = null;
+      const heedeoConfigured = heedeoKeysConfigured(deps.settings);
+      if ((deps.settings.signupChallengeEnabled || heedeoConfigured) && oauthCallbackProvider) {
         const state = new URL(c.req.url).searchParams.get("state");
         const stored = state ? await findManagedAuthOAuthState(managedAuth, state) : null;
         if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
-          signupChallengeVerified = oauthSignupChallengeVerified(
-            stored.value,
-            oauthCallbackProvider,
-          );
+          signupChallengeVerified =
+            deps.settings.signupChallengeEnabled &&
+            oauthSignupChallengeVerified(stored.value, oauthCallbackProvider);
+          if (heedeoConfigured) {
+            heedeoSignupToken = heedeoTokenFromOAuthState(stored.value, oauthCallbackProvider);
+          }
         }
       }
+      const runSignup = <T>(operation: () => T): T =>
+        runWithHeedeoSignup(heedeoSignupRequestFrom(c.req.raw, heedeoSignupToken), () =>
+          runWithSignupChallenge(signupChallengeVerified, operation),
+        );
       if (
         pathname === "/v1/auth/sign-up/email" &&
         c.req.method === "POST" &&
@@ -1426,8 +1462,15 @@ export function createAppComposition(
         await verifySignupChallenge(deps.settings, input?.signupChallengeToken);
         signupChallengeVerified = true;
       }
+      if (heedeoConfigured && pathname === "/v1/auth/sign-up/email" && c.req.method === "POST") {
+        const input = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        heedeoSignupToken = heedeoToken(input?.heedeoToken);
+      }
       if (
-        deps.settings.signupChallengeEnabled &&
+        emailSignInChallengeRequired(deps.settings) &&
         pathname === "/v1/auth/sign-in/email" &&
         c.req.method === "POST"
       ) {
@@ -1478,8 +1521,13 @@ export function createAppComposition(
           opengeniSignupChallenge: verified
             ? { provider: body.provider, expiresAt: Date.now() + 600_000 }
             : null,
+          // Server-owned: a browser-sent value is always replaced.
+          opengeniHeedeo: heedeoConfigured
+            ? (heedeoOAuthState(body.provider, body.heedeoToken) ?? null)
+            : null,
         };
         delete body.signupChallengeToken;
+        delete body.heedeoToken;
         signupProviderRequest = new Request(c.req.raw, { body: JSON.stringify(body) });
       }
       if (oauthCallbackProvider) {
@@ -1517,14 +1565,9 @@ export function createAppComposition(
         return oauthCallbackProvider
           ? await runManagedAuthProvider(
               oauthCallbackProvider,
-              async () =>
-                await runWithSignupChallenge(signupChallengeVerified, () =>
-                  managedAuth.handler(signupProviderRequest),
-                ),
+              async () => await runSignup(() => managedAuth.handler(signupProviderRequest)),
             )
-          : await runWithSignupChallenge(signupChallengeVerified, () =>
-              managedAuth.handler(signupProviderRequest),
-            );
+          : await runSignup(() => managedAuth.handler(signupProviderRequest));
       }
       requireManagedAuthProviderRouteAllowed(c.req.method, pathname);
       // Provider authentication/recovery is isolated from whichever actor the
@@ -1549,9 +1592,7 @@ export function createAppComposition(
           attempt.transactionId,
           oauthCallbackProvider,
           async () => {
-            const response = await runWithSignupChallenge(signupChallengeVerified, () =>
-              managedAuth.handler(isolated.request),
-            );
+            const response = await runSignup(() => managedAuth.handler(isolated.request));
             return {
               response,
               authSessionId: currentManagedAuthCreatedSessionId(),
@@ -1619,14 +1660,9 @@ export function createAppComposition(
           deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
         providerResponse = discardProviderSession
           ? await runManagedAuthDiscardedProviderSession(
-              async () =>
-                await runWithSignupChallenge(signupChallengeVerified, () =>
-                  managedAuth.handler(providerRequest),
-                ),
+              async () => await runSignup(() => managedAuth.handler(providerRequest)),
             )
-          : await runWithSignupChallenge(signupChallengeVerified, () =>
-              managedAuth.handler(providerRequest),
-            );
+          : await runSignup(() => managedAuth.handler(providerRequest));
       }
       let replacementCookies: readonly string[] | undefined;
       if (deps.settings.managedAuthSessionSetMode === "broker") {
@@ -1912,6 +1948,7 @@ export function createAppComposition(
           : {}),
         connectedMachines: deps.settings.sandboxSelfhostedEnabled,
         ...(orgAgentsEnabled ? { orgAgents: true } : {}),
+        artifactExport: deps.settings.artifactMaterializerDeployed,
         browserExtension: browserExtension(deps.settings),
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
@@ -1995,6 +2032,9 @@ export function createAppComposition(
           deps.settings.productAccessMode === "managed"
             ? await managedAuthNewSignupsGate.signupsOpen()
             : true,
+          deps.settings.productAccessMode === "managed" && heedeoKeysConfigured(deps.settings)
+            ? heedeoClientConfig(deps.settings, await readHeedeoSignupMode(deps.db))
+            : undefined,
         ),
         documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
@@ -2009,15 +2049,23 @@ export function createAppComposition(
     );
   });
 
-  // Per connection: calls in general, and new delegated chats.
-  const organizationMcpCallLimiter = createConnectionRateLimiter({
-    capacity: 120,
-    refillPerSecond: 2,
-  });
-  const organizationMcpDelegateLimiter = createConnectionRateLimiter({
-    capacity: 20,
-    refillPerSecond: 1 / 30,
-  });
+  // Per connection: calls in general, and new delegated chats. Counted in
+  // Postgres so every API process shares one budget per connection.
+  const sharedMcpLimiter = (budget: string, capacity: number, refillPerSecond: number) =>
+    createSharedConnectionRateLimiter({
+      capacity,
+      refillPerSecond,
+      admitShared: (input) => admitMcpConnectionRateLimit(routeDeps.db, { ...input, budget }),
+      onFallback: (error) =>
+        observability.warn("MCP rate limit fell back to this process", {
+          budget,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    });
+  const organizationMcpCallLimiter = sharedMcpLimiter("call", 120, 2);
+  const organizationMcpDelegateLimiter = sharedMcpLimiter("delegate", 20, 1 / 30);
+  // skills_sync from a repository reads public GitHub, like a Skill import.
+  const skillRepositoryReader = createGitHubSkillSourceClient(routeDeps.settings);
   // The organization MCP server: every public action, as a person who signed
   // in (capped by their connection's access setting) or as an organization
   // API key. Each action runs the real route in this process.
@@ -2122,6 +2170,8 @@ export function createAppComposition(
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // The organization whose account context holds the shared bucket.
+    const rateAccountId = caller.kind === "person" ? caller.accountId : organizationKeyAccountId!;
     // This reaches every workspace of the organization: EU-only content stays
     // in EU-only workspaces when another Opengeni workspace calls.
     await requireCallingWorkspaceContentExchange(routeDeps.db, c.req.raw, {
@@ -2162,6 +2212,8 @@ export function createAppComposition(
         ? {
             outsideAgent: {
               appData: connectionSettings?.settings.appDataAccess ?? "viewer",
+              // Its writes are recorded as this connected agent, not as the person.
+              ...(connectionSettings ? { connectionId: connectionSettings.id } : {}),
             },
           }
         : {}),
@@ -2181,11 +2233,13 @@ export function createAppComposition(
             },
           }
         : {}),
-      admit: (toolName) =>
-        Math.max(
-          organizationMcpCallLimiter.admit(rateKey),
-          toolName === "delegate" ? organizationMcpDelegateLimiter.admit(rateKey) : 0,
-        ),
+      readSkillRepository: async (url) => await readSkillRepository(url, skillRepositoryReader),
+      admit: async (toolName) => {
+        const bucket = { accountId: rateAccountId, key: rateKey };
+        const call = await organizationMcpCallLimiter.admit(bucket);
+        if (call > 0 || toolName !== "delegate") return call;
+        return await organizationMcpDelegateLimiter.admit(bucket);
+      },
       dispatch: async (request) => {
         stampRequestBillingOrigin(
           request,
@@ -2284,10 +2338,13 @@ export function createAppComposition(
     if (oauthAccess) {
       return await withAccessGrantSessionRlsContext(routeDeps, oauthAccess.grant, async () => {
         if (c.req.method === "GET") return unsupportedGet();
-        const prepared = await prepareMcpOAuthWorkspaceToolGateway(
-          routeDeps,
-          oauthAccess.grant,
-          oauthAccess.allowedToolIdentities,
+        const prepared = await prepareWorkspaceToolGatewayForMcpRequest(boundedRequest, (options) =>
+          prepareMcpOAuthWorkspaceToolGateway(
+            routeDeps,
+            oauthAccess.grant,
+            oauthAccess.allowedToolIdentities,
+            options,
+          ),
         );
         const transport = createApiMcpTransport({
           enableJsonResponse: true,
@@ -2381,7 +2438,10 @@ export function createAppComposition(
           await authorizeBoundSession();
           if (c.req.method === "GET") return unsupportedGet();
           reads.handOffToToolDispatch();
-          const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+          const prepared = await prepareWorkspaceToolGatewayForMcpRequest(
+            boundedRequest,
+            (options) => prepareWorkspaceToolGateway(routeDeps, authorization, options),
+          );
           const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
           try {
             await mcp.connect(transport);
@@ -2720,7 +2780,11 @@ export function createAppComposition(
       { status: 400, message: "Invalid tool gateway approval" },
     );
     requireWorkspaceToolApprovalAuthorization(authorization);
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    // The catalog only checks the digest: another server that is down is left
+    // out, and the approved tool's own server stays required.
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, {
+      callServerId: parsed.identity.serverId,
+    });
     try {
       return c.json(
         await approveWorkspaceToolGatewayCall(
@@ -2896,12 +2960,15 @@ export function createAppComposition(
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
   registerAppSyncRoutes(app, routeDeps);
+  registerAppWebhookRoutes(app, routeDeps);
+  registerAppServerRoutes(app, routeDeps);
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
   registerSiteSqlRoutes(app, routeDeps);
   setAppSyncHooks(APP_PACKAGE_SYNC_HOOKS);
   registerAppPackageRoutes(app, routeDeps);
+  registerAppTemplateRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
@@ -2939,6 +3006,7 @@ export function createAppComposition(
   registerSessionShareLinkRoutes(app, routeDeps);
   // The Linked panel, after the session module for the same reason.
   registerSessionLinkRoutes(app, routeDeps);
+  registerSessionLinkPullRequestRoutes(app, routeDeps);
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
@@ -3103,6 +3171,7 @@ function rejectionLogAttributes(rejection: HttpRejectionFacts) {
     rejectionCode: rejection.code,
     rejectionReason: rejection.reason,
     ...(rejection.fingerprint ? { rejectionFingerprint: rejection.fingerprint } : {}),
+    ...(rejection.detail ? { rejectionDetail: rejection.detail } : {}),
   };
 }
 
@@ -3283,7 +3352,11 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
+function clientAuthConfig(
+  settings: AppDependencies["settings"],
+  newSignupsEnabled: boolean,
+  heedeo?: { publishableKey: string; scriptUrl: string },
+) {
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
@@ -3295,6 +3368,8 @@ function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabl
       ...(settings.signupChallengeEnabled
         ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
         : {}),
+      ...(emailSignInChallengeRequired(settings) ? { signInChallengeRequired: true } : {}),
+      ...(heedeo ? { heedeo } : {}),
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
           ? (["google"] as const)
@@ -3848,6 +3923,10 @@ const routeLabelPatterns: Array<{
   { pattern: /^\/v1\/webhooks\/events\/[^/]+$/, label: "/v1/webhooks/events/:routeId" },
   { pattern: /^\/v1\/webhooks\/github$/, label: "/v1/webhooks/github" },
   {
+    pattern: /^\/v1\/webhooks\/apps\/[^/]+\/[^/]+$/,
+    label: "/v1/webhooks/apps/:workspaceId/:webhookId",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
     label: "/v1/workspaces/:workspaceId/mcp",
   },
@@ -4091,7 +4170,7 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(visibility|forks)$/,
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(visibility|forks|model-settings)$/,
     label: (match) => `/v1/workspaces/:workspaceId/sessions/:id/${match[1]}`,
   },
   {

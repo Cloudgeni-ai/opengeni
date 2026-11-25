@@ -18,6 +18,7 @@ import {
 import { userContentSignedGetUrlOptions } from "./http/user-content";
 import { declareSiteToolsForEveryViewer } from "./site-tool-routing";
 import { freezeSiteAssets } from "./site-assets";
+import { freezeAppServerBundle, requireAppServerPublishable } from "./app-server/service";
 type Storage = NonNullable<ObjectStorageDependency>;
 export const MAX_SITE_SOURCE_BYTES = 64 * 1024 * 1024;
 
@@ -49,9 +50,11 @@ function keys(workspaceId: string, id: string) {
     html: `${base}/uploads/${id}/index.html`,
     source: `${base}/uploads/${id}/source.json`,
     assets: `${base}/uploads/${id}/assets.json`,
+    server: `${base}/uploads/${id}/server.json`,
     frozenHtml: `${base}/blobs/${id}.html`,
     frozenSource: `${base}/sources/${id}.json`,
     frozenAssets: `${base}/asset-manifests/${id}.json`,
+    frozenServer: `${base}/app-server-manifests/${id}.json`,
   };
 }
 function owner(grant: AccessGrant) {
@@ -67,7 +70,9 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
     expired.flatMap((row) => {
       const paths = keys(row.workspaceId, row.id);
       return (
-        row.status === "published" ? [paths.html, paths.source, paths.assets] : Object.values(paths)
+        row.status === "published"
+          ? [paths.html, paths.source, paths.assets, paths.server]
+          : Object.values(paths)
       ).map((key) => storage.deleteObject(key));
     }),
   );
@@ -78,10 +83,11 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
   });
   const paths = keys(grant.workspaceId, row.id);
   const audience = grant.principalKind === "agent_attempt" ? "sandbox" : "public";
-  const [html, source, assets] = await Promise.all([
+  const [html, source, assets, server] = await Promise.all([
     storage.createPutUrl({ key: paths.html, contentType: "text/html", audience }),
     storage.createPutUrl({ key: paths.source, contentType: "application/json", audience }),
     storage.createPutUrl({ key: paths.assets, contentType: "application/json", audience }),
+    storage.createPutUrl({ key: paths.server, contentType: "application/json", audience }),
   ]);
   return {
     uploadId: row.id,
@@ -90,8 +96,16 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
     // A multi-file build: every file beside the entry HTML, as JSON
     // {files: [{path, base64}]} (see @opengeni/contracts/app-assets).
     assets: { putUrl: assets.url, requiredHeaders: assets.requiredHeaders },
+    // App server code (docs/app-server-code.md): JSON {main, files: [{path,
+    // content}], tools?, egress?, secrets?}; omit to keep the current version's code.
+    server: { putUrl: server.url, requiredHeaders: server.requiredHeaders },
     expiresAt: new Date(
-      Math.min(html.expiresAt.getTime(), source.expiresAt.getTime(), assets.expiresAt.getTime()),
+      Math.min(
+        html.expiresAt.getTime(),
+        source.expiresAt.getTime(),
+        assets.expiresAt.getTime(),
+        server.expiresAt.getTime(),
+      ),
     ).toISOString(),
   };
 }
@@ -223,6 +237,12 @@ export async function prepareWorkspaceArtifactPublication(
     // Like source: an upload first published without assets stays without them.
     published: row.status === "published",
   });
+  const serverManifest = await freezeAppServerBundle(storage, grant.workspaceId, {
+    upload: paths.server,
+    frozen: paths.frozenServer,
+    published: row.status === "published",
+  });
+  if (serverManifest) await requireAppServerPublishable(deps, grant, serverManifest);
   return {
     uploadId: row.id,
     contentKey: paths.frozenHtml,
@@ -232,6 +252,7 @@ export async function prepareWorkspaceArtifactPublication(
     sourceSha256: null,
     sourceSizeBytes,
     assetManifest,
+    ...(serverManifest === undefined ? {} : { serverManifest }),
     ...(input.requestedTools === undefined ? {} : { requestedTools: input.requestedTools }),
     ...declared,
     persistContent: async () => {},
@@ -259,4 +280,45 @@ export async function workspaceArtifactDownloads(
       ? { url: source.url, expiresAt: source.expiresAt, format: "source-bundle-json" }
       : null,
   };
+}
+
+/**
+ * How much of a version's source artifacts_get_source returns inline. A
+ * typical app (its source JSON or HTML and its server code) fits, so an agent
+ * reads it in one call, without a sandbox or a fetch of the signed URLs.
+ */
+export const INLINE_APP_SOURCE_MAX_BYTES = 128 * 1024;
+
+/**
+ * The text of a version's source and server files, when together they fit
+ * INLINE_APP_SOURCE_MAX_BYTES: the source JSON, or the HTML of an app without
+ * one, then the server files in order. A file that does not fit, or cannot be
+ * read, is left out; its signed URL still serves it.
+ */
+export async function inlineAppSource(
+  storage: Pick<Storage, "getObjectBytes">,
+  ref: {
+    contentKey: string;
+    sourceKey: string | null;
+    version: { sizeBytes: number; sourceSizeBytes: number | null };
+  },
+  serverFiles: readonly { key: string; sizeBytes: number }[],
+): Promise<{ page: string | null; server: (string | null)[] }> {
+  let budget = INLINE_APP_SOURCE_MAX_BYTES;
+  const read = async (key: string, sizeBytes: number): Promise<string | null> => {
+    if (sizeBytes > budget) return null;
+    budget -= sizeBytes;
+    try {
+      const object = await storage.getObjectBytes(key);
+      return object ? new TextDecoder("utf-8", { fatal: true }).decode(object.bytes) : null;
+    } catch {
+      return null;
+    }
+  };
+  const page = ref.sourceKey
+    ? await read(ref.sourceKey, ref.version.sourceSizeBytes ?? Number.POSITIVE_INFINITY)
+    : await read(ref.contentKey, ref.version.sizeBytes);
+  const server: (string | null)[] = [];
+  for (const file of serverFiles) server.push(await read(file.key, file.sizeBytes));
+  return { page, server };
 }

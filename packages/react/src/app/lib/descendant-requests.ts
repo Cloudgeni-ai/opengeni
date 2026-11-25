@@ -14,6 +14,8 @@ import { approvalsDecidable, projectPendingApprovals, type PendingApproval } fro
 import { humanInputRequestFromEvent } from "../../human-input";
 import { awaitsPerson } from "./needs-you";
 
+export { awaitsConnection } from "./needs-you";
+
 /**
  * Every event that opens or closes a question or an approval. A sub-session's
  * newest page of these is enough to rebuild what it waits on, exactly as its
@@ -77,7 +79,11 @@ export function waitingDescendants(
   };
   visit(nodes);
   const since = (session: SessionSummary) =>
-    session.requiresActionSince ?? session.updatedAt ?? session.createdAt ?? "";
+    session.requiresActionSince ??
+    session.awaitingConnectionSince ??
+    session.updatedAt ??
+    session.createdAt ??
+    "";
   return waiting.sort(
     (left, right) => since(left).localeCompare(since(right)) || left.id.localeCompare(right.id),
   );

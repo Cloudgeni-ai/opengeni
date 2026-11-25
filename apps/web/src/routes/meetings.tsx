@@ -79,11 +79,17 @@ export function MeetingDetailRoute({
     hasAccountPermission(accessContext, workspace?.accountId ?? "", "billing:manage");
   const canConnectModels = hasWorkspacePermission(accessContext, workspaceId, "connections:write");
   // Where the person's own Only me meetings can work: their workspaces in
-  // this organization, their Personal workspace marked.
+  // this organization, their Personal workspace marked, and those they can
+  // share a meeting with.
   const reachWorkspaces = workspace
     ? workspaces
         .filter((candidate) => candidate.accountId === workspace.accountId)
-        .map(({ id, name, kind }) => ({ id, name, personal: kind === "personal" }))
+        .map(({ id, name, kind }) => ({
+          id,
+          name,
+          personal: kind === "personal",
+          shareable: hasWorkspacePermission(accessContext, id, "sessions:create"),
+        }))
     : undefined;
   const organizationName = workspace
     ? orgLabel(t, workspace.accountId, accessContext.accountGrants)

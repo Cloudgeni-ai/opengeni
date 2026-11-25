@@ -1,7 +1,9 @@
 // Sidebar: the links and groups above your chats (docs/sidebar-layout.md).
 // "Yours" is the workspace default with your own changes (add, hide,
 // reorder, reset); admins also edit the "Workspace default" everyone starts
-// from.
+// from. Items you can change are renamed in place and take an icon. The
+// header's More holds the rest: whether chats group under their app in the
+// Sessions list, which menu entries show, and Reset.
 import {
   AppWindowIcon,
   ArrowDownIcon,
@@ -13,7 +15,15 @@ import {
   PlusIcon,
 } from "lucide-react";
 import { useRouter } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 import type {
   NewSidebarItem,
@@ -21,14 +31,33 @@ import type {
   SidebarLayoutChange,
   SidebarLiveListKind,
 } from "@opengeni/sdk";
-import { isSidebarAppPath, isSidebarExternalUrl } from "@opengeni/contracts/sidebar-layout";
+import { agentInitialsAvatar } from "@opengeni/contracts";
+import {
+  isSidebarAppPath,
+  isSidebarExternalUrl,
+  readResolvedSidebarOptions,
+  SIDEBAR_LABEL_MAX_CHARS,
+  SIDEBAR_NAV_ENTRIES,
+  type SidebarAppsPlacement,
+  type SidebarNavEntry,
+} from "@opengeni/contracts/sidebar-layout";
+import { AppsPlacementSubmenu } from "@opengeni/react/app/components/rail/session-browse-order-controls";
+import { appsPlacementChange } from "@/components/sidebar-layout/apps-placement-change";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -40,13 +69,17 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
+import { IconMenu, SidebarIcon } from "@/components/sidebar-layout/sidebar-icons";
+import { MoveToGroupMenu, type SidebarGroupChoice } from "@/components/sidebar-layout/group-menu";
+import { appPagePaths, typedPagePath } from "@/components/sidebar-layout/app-pages";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 
 type Scope = "personal" | "workspace";
-type AddKind = "app" | "link" | "group" | "live_list";
+type AddKind = "app" | "agent" | "link" | "group" | "live_list";
 
 const ADD_LABELS: Record<AddKind, string> = {
   app: "App",
+  agent: "Agent",
   link: "Link",
   group: "Group",
   live_list: "List",
@@ -59,8 +92,24 @@ const LIST_OPTIONS: { value: SidebarLiveListKind; label: string }[] = [
 
 const TOP_LEVEL = "__top";
 
-function itemIcon(item: ResolvedSidebarItem, hasPage: (pathname: string) => boolean) {
+function itemIcon(
+  item: ResolvedSidebarItem,
+  hasPage: (pathname: string) => boolean,
+  workspaceId: string,
+) {
   const className = "size-4 shrink-0 text-fg-muted";
+  if ((item.type === "app" || item.type === "link" || item.type === "group") && item.icon)
+    return <SidebarIcon name={item.icon} fallback={AppWindowIcon} className={className} />;
+  if (item.type === "agent")
+    return (
+      <SessionAvatar
+        avatar={item.avatar}
+        name={item.label}
+        workspaceId={workspaceId}
+        seed={item.agentId}
+        size="xs"
+      />
+    );
   if (item.type === "group") return <FolderIcon aria-hidden="true" className={className} />;
   if (item.type === "link")
     return inAppLinkPath(item.url, window.location.origin, hasPage) !== null ? (
@@ -79,26 +128,92 @@ function itemDetail(item: ResolvedSidebarItem): string | null {
   return null;
 }
 
+/** An item's name, edited in place: Enter or leaving the field saves, Escape cancels. */
+export function RenameField({
+  label,
+  group = true,
+  onSave,
+  onDone,
+}: {
+  label: string;
+  /** A group's name (the default) or another item's. */
+  group?: boolean;
+  onSave: (label: string) => void;
+  onDone: () => void;
+}) {
+  const [value, setValue] = useState(label);
+  const input = useRef<HTMLInputElement>(null);
+  // The menu that opened it hands focus back to its button as it closes;
+  // take it after that.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      input.current?.focus();
+      input.current?.select();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  // Enter saves and closes the field; the blur that may follow must not save again.
+  const finished = useRef(false);
+  const finish = (next: string | null) => {
+    if (finished.current) return;
+    finished.current = true;
+    if (next && next !== label) onSave(next);
+    onDone();
+  };
+  const save = () => finish(value.trim());
+  return (
+    <TextInput
+      ref={input}
+      aria-label={group ? "Group name" : "Name"}
+      value={value}
+      maxLength={SIDEBAR_LABEL_MAX_CHARS}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={save}
+      onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          save();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+        }
+      }}
+      className="h-8"
+    />
+  );
+}
+
 function ItemRow({
   item,
   siblings,
+  parentId,
+  groups,
   indent,
   scope,
+  workspaceId,
   onChange,
 }: {
   item: ResolvedSidebarItem;
   /** The ids of the item's level, in order; moves name a neighbour. */
   siblings: readonly string[];
+  /** The item's group, or null at the top level. */
+  parentId: string | null;
+  /** The groups at this scope, for Move to group. */
+  groups: readonly SidebarGroupChoice[];
   indent?: boolean;
   scope: Scope;
+  workspaceId: string;
   onChange: (changes: SidebarLayoutChange[]) => void;
 }) {
   const router = useRouter();
+  const [renaming, setRenaming] = useState(false);
   const detail = itemDetail(item);
   const index = siblings.indexOf(item.id);
   const previous = index > 0 ? siblings[index - 1] : undefined;
   const following = index >= 0 ? siblings[index + 1] : undefined;
   const fromWorkspace = scope === "personal" && item.origin === "workspace";
+  // The default's items are edited in the workspace default; yours, here.
+  const canEdit = !fromWorkspace;
   return (
     <div
       className={
@@ -107,15 +222,26 @@ function ItemRow({
           : "flex min-h-12 items-center gap-3 py-2"
       }
     >
-      {itemIcon(item, (path) => pathHasAppPage(router, path))}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium text-fg">{item.label}</div>
-        {detail || fromWorkspace ? (
-          <div className="truncate text-xs text-fg-muted">
-            {[fromWorkspace ? "Workspace" : null, detail].filter(Boolean).join(" · ")}
-          </div>
-        ) : null}
-      </div>
+      {itemIcon(item, (path) => pathHasAppPage(router, path), workspaceId)}
+      {renaming ? (
+        <div className="min-w-0 flex-1">
+          <RenameField
+            label={item.label}
+            group={item.type === "group"}
+            onSave={(label) => onChange([{ op: "update", itemId: item.id, label }])}
+            onDone={() => setRenaming(false)}
+          />
+        </div>
+      ) : (
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium text-fg">{item.label}</div>
+          {detail || fromWorkspace ? (
+            <div className="truncate text-xs text-fg-muted">
+              {[fromWorkspace ? "Workspace" : null, detail].filter(Boolean).join(" · ")}
+            </div>
+          ) : null}
+        </div>
+      )}
       <Button
         type="button"
         variant="ghost"
@@ -138,7 +264,46 @@ function ItemRow({
       >
         <ArrowDownIcon />
       </Button>
-      <MoreMenu label={`More for ${item.label}`} quiet>
+      <MoreMenu
+        label={`More for ${item.label}`}
+        quiet
+        onCloseAutoFocus={(event) => {
+          // Rename focuses its field instead.
+          if (renaming) event.preventDefault();
+        }}
+      >
+        {canEdit ? (
+          <DropdownMenuItem onSelect={() => setRenaming(true)}>Rename</DropdownMenuItem>
+        ) : null}
+        {canEdit && (item.type === "app" || item.type === "link" || item.type === "group") ? (
+          <IconMenu
+            value={item.icon}
+            onSelect={(icon) => onChange([{ op: "update", itemId: item.id, icon }])}
+          />
+        ) : null}
+        {canEdit && item.type === "live_list" ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Show</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="min-w-28">
+              {[3, 5, 10, 20].map((size) => (
+                <DropdownMenuItem
+                  key={size}
+                  onSelect={() => onChange([{ op: "update", itemId: item.id, limit: size }])}
+                >
+                  <span className="flex-1">{size} apps</span>
+                  <DropdownMenuCheck checked={item.limit === size} />
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : null}
+        {canEdit && item.type !== "group" ? (
+          <MoveToGroupMenu
+            groups={groups}
+            current={parentId}
+            onSelect={(groupId) => onChange([{ op: "move", itemId: item.id, groupId }])}
+          />
+        ) : null}
         <DropdownMenuItem
           variant={fromWorkspace ? "default" : "destructive"}
           onSelect={() => onChange([{ op: "remove", itemId: item.id }])}
@@ -153,17 +318,31 @@ function ItemRow({
 function ItemRows({
   items,
   scope,
+  workspaceId,
   onChange,
 }: {
   items: ResolvedSidebarItem[];
   scope: Scope;
+  workspaceId: string;
   onChange: (changes: SidebarLayoutChange[]) => void;
 }) {
   const rows: ReactNode[] = [];
   const topIds = items.map((item) => item.id);
+  const groups = items.flatMap((item) =>
+    item.type === "group" ? [{ id: item.id, label: item.label }] : [],
+  );
   items.forEach((item) => {
     rows.push(
-      <ItemRow key={item.id} item={item} siblings={topIds} scope={scope} onChange={onChange} />,
+      <ItemRow
+        key={item.id}
+        item={item}
+        siblings={topIds}
+        parentId={null}
+        groups={groups}
+        scope={scope}
+        workspaceId={workspaceId}
+        onChange={onChange}
+      />,
     );
     if (item.type === "group") {
       const childIds = item.items.map((child) => child.id);
@@ -173,8 +352,11 @@ function ItemRows({
             key={child.id}
             item={child}
             siblings={childIds}
+            parentId={item.id}
+            groups={groups}
             indent
             scope={scope}
+            workspaceId={workspaceId}
             onChange={onChange}
           />,
         ),
@@ -217,7 +399,128 @@ function useAppOptions(workspaceId: string, query: string) {
   return { options, loading };
 }
 
-function AddForm({
+/** The pages the chosen app's current version links to, for the Page picker. */
+function useAppPages(workspaceId: string, appId: string | null) {
+  const { client } = useAppContext();
+  const [pages, setPages] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    setPages([]);
+    if (!appId) return;
+    const abort = new AbortController();
+    setLoading(true);
+    void client
+      .getWorkspaceArtifactCurrent(workspaceId, appId, { signal: abort.signal })
+      .then(({ artifact }) => {
+        const versionId = artifact.currentVersion?.id;
+        return versionId
+          ? client.getWorkspaceArtifactHtml(workspaceId, appId, {
+              versionId,
+              signal: abort.signal,
+            })
+          : "";
+      })
+      .then((html) => {
+        if (!abort.signal.aborted) setPages(appPagePaths(html));
+      })
+      // The list is a convenience; typing a page still works without it.
+      .catch(() => undefined)
+      .finally(() => {
+        if (!abort.signal.aborted) setLoading(false);
+      });
+    return () => abort.abort();
+  }, [appId, client, workspaceId]);
+  return { pages, loading };
+}
+
+const HOME_PAGE = "/";
+
+/** One control for an app's page: its known pages, or any typed path. Home is the app's start. */
+function AppPagePicker({
+  pages,
+  loading,
+  value,
+  onChange,
+  disabled,
+}: {
+  pages: string[];
+  loading: boolean;
+  value: string;
+  onChange: (path: string) => void;
+  disabled: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const typed = typedPagePath(query);
+  const listed = new Set([HOME_PAGE, ...pages]);
+  const extra = [value, typed].filter(
+    (path): path is string => !!path && !listed.has(path) && path !== HOME_PAGE,
+  );
+  const options = [
+    { value: HOME_PAGE, label: "Home", meta: HOME_PAGE },
+    ...[...pages, ...new Set(extra)].map((path) => ({ value: path, label: path })),
+  ];
+  return (
+    <SelectMenu
+      variant="combobox"
+      options={options}
+      value={value || HOME_PAGE}
+      onValueChange={(next) => onChange(next === HOME_PAGE ? "" : next)}
+      searchPlaceholder="Search or type a page"
+      onSearchChange={setQuery}
+      searching={loading}
+      disabled={disabled}
+      emptyMessage="Type a page, such as /releases"
+    />
+  );
+}
+
+/** The agents this person can see, to link one. */
+function useAgentOptions(workspaceId: string, enabled: boolean) {
+  const { client } = useAppContext();
+  const [options, setOptions] = useState<{ value: string; label: string; leading: ReactNode }[]>(
+    [],
+  );
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    setLoading(true);
+    setError(null);
+    void client
+      .listAgents(workspaceId)
+      .then((agents) => {
+        if (!current) return;
+        setOptions(
+          agents.map((agent) => ({
+            value: agent.id,
+            label: agent.name,
+            leading: (
+              <SessionAvatar
+                avatar={agent.avatar ?? agentInitialsAvatar(agent.name, agent.id)}
+                name={agent.name}
+                workspaceId={workspaceId}
+                seed={agent.id}
+              />
+            ),
+          })),
+        );
+      })
+      .catch((caught: unknown) => {
+        if (current) setError(userErrorText(caught));
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [attempt, client, enabled, workspaceId]);
+  return { options, loading, error, retry: () => setAttempt((value) => value + 1) };
+}
+
+export function AddForm({
   kind,
   workspaceId,
   groups,
@@ -232,7 +535,10 @@ function AddForm({
 }) {
   const [appQuery, setAppQuery] = useState("");
   const apps = useAppOptions(workspaceId, appQuery);
+  const agents = useAgentOptions(workspaceId, kind === "agent");
   const [appId, setAppId] = useState<string | null>(null);
+  const appPages = useAppPages(workspaceId, kind === "app" ? appId : null);
+  const [agentId, setAgentId] = useState<string | null>(null);
   const [path, setPath] = useState("");
   const [label, setLabel] = useState("");
   const [url, setUrl] = useState("https://");
@@ -249,6 +555,7 @@ function AddForm({
   const labelError =
     submitted && (kind === "link" || kind === "group") && !label.trim() ? "Add a name" : undefined;
   const appError = submitted && kind === "app" && !appId ? "Choose an app" : undefined;
+  const agentError = submitted && kind === "agent" && !agentId ? "Choose an agent" : undefined;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     setSubmitted(true);
@@ -261,6 +568,8 @@ function AddForm({
         ...(path.trim() ? { path: path.trim() } : {}),
         ...(name ? { label: name } : {}),
       };
+    else if (kind === "agent" && agentId)
+      item = { type: "agent", agentId, ...(name ? { label: name } : {}) };
     else if (kind === "link" && name && isSidebarExternalUrl(url.trim()))
       item = { type: "link", url: url.trim(), label: name };
     else if (kind === "group" && name) item = { type: "group", label: name };
@@ -275,7 +584,7 @@ function AddForm({
   return (
     <form
       onSubmit={submit}
-      className="grid gap-4 rounded-[14px] border border-border bg-surface px-5 py-4"
+      className="grid max-w-[32rem] gap-4 py-2"
       aria-label={`Add ${ADD_LABELS[kind].toLowerCase()}`}
     >
       {kind === "app" ? (
@@ -285,7 +594,10 @@ function AddForm({
               variant="combobox"
               options={apps.options}
               value={appId}
-              onValueChange={setAppId}
+              onValueChange={(next) => {
+                setAppId(next);
+                setPath("");
+              }}
               placeholder="Choose an app"
               searchPlaceholder="Search apps"
               onSearchChange={setAppQuery}
@@ -294,19 +606,44 @@ function AddForm({
               emptyMessage="No apps found"
             />
           </Field>
-          <Field
-            label="Page"
-            optional
-            hint="A page inside the app, such as /releases"
-            error={pathError}
-          >
-            <TextInput
+          <Field label="Page" optional error={pathError}>
+            <AppPagePicker
+              pages={appPages.pages}
+              loading={appPages.loading}
               value={path}
-              onChange={(event) => setPath(event.target.value)}
-              placeholder="/"
+              onChange={setPath}
+              disabled={!appId}
             />
           </Field>
         </>
+      ) : null}
+      {kind === "agent" ? (
+        <Field
+          label="Agent"
+          error={
+            agents.error ? (
+              <>
+                {`Couldn't load agents. ${agents.error} `}
+                <button type="button" className="og-link" onClick={agents.retry}>
+                  Try again
+                </button>
+              </>
+            ) : (
+              agentError
+            )
+          }
+        >
+          <SelectMenu
+            variant="combobox"
+            options={agents.options}
+            value={agentId}
+            onValueChange={setAgentId}
+            placeholder="Choose an agent"
+            searchPlaceholder="Search agents"
+            searching={agents.loading}
+            emptyMessage={agents.error ? "Couldn't load agents" : "No agents found"}
+          />
+        </Field>
       ) : null}
       {kind === "link" ? (
         <Field label="Address" error={urlError}>
@@ -323,7 +660,11 @@ function AddForm({
           <SelectMenu options={LIST_OPTIONS} value={list} onValueChange={setList} />
         </Field>
       ) : null}
-      <Field label="Name" optional={kind === "app" || kind === "live_list"} error={labelError}>
+      <Field
+        label="Name"
+        optional={kind === "app" || kind === "agent" || kind === "live_list"}
+        error={labelError}
+      >
         <TextInput
           value={label}
           onChange={(event) => setLabel(event.target.value)}
@@ -351,11 +692,74 @@ function AddForm({
   );
 }
 
+const NAV_ENTRY_LABELS: Record<SidebarNavEntry, string> = {
+  inbox: "Inbox",
+  capabilities: "Capabilities",
+  knowledge: "Knowledge",
+  automations: "Automations",
+  agents: "Agents",
+  meetings: "Meetings",
+  artifacts: "Artifacts",
+  apps: "Apps",
+  get_started: "Get started",
+};
+
+/**
+ * The page's More, for the scope shown: chats grouped under their app in the
+ * Sessions list, which built-in menu entries show, and Reset for your own.
+ */
+function PageMoreMenu({
+  options,
+  onChange,
+  onReset,
+}: {
+  options: { appsPlacement: SidebarAppsPlacement; hiddenNavEntries: string[] };
+  onChange: (changes: SidebarLayoutChange[]) => void;
+  onReset: (() => void) | null;
+}) {
+  const hidden = new Set(options.hiddenNavEntries);
+  return (
+    <MoreMenu label="More sidebar options">
+      <AppsPlacementSubmenu
+        value={options.appsPlacement}
+        onChange={(appsPlacement) => onChange([appsPlacementChange(appsPlacement)])}
+      />
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger>Menu entries</DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="min-w-40">
+          {SIDEBAR_NAV_ENTRIES.map((entry) => (
+            <DropdownMenuCheckboxItem
+              key={entry}
+              checked={!hidden.has(entry)}
+              onSelect={(event) => {
+                event.preventDefault();
+                const next = SIDEBAR_NAV_ENTRIES.filter((each) =>
+                  each === entry ? !hidden.has(entry) : hidden.has(each),
+                );
+                onChange([{ op: "options", hiddenNavEntries: next }]);
+              }}
+            >
+              {NAV_ENTRY_LABELS[entry]}
+            </DropdownMenuCheckboxItem>
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      {onReset ? (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onReset}>Reset to workspace default</DropdownMenuItem>
+        </>
+      ) : null}
+    </MoreMenu>
+  );
+}
+
 export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
-  const { layout, failed, update } = useSidebarLayout(workspaceId);
+  const { layout, failed, update, reload } = useSidebarLayout(workspaceId);
   const [scope, setScope] = useState<Scope>("personal");
   const [adding, setAdding] = useState<AddKind | null>(null);
+  const [confirmingReset, setConfirmingReset] = useState(false);
   const canEditWorkspace = layout?.workspace.canEdit === true;
   const personalAvailable = layout?.personal.available !== false;
   const effectiveScope: Scope =
@@ -371,11 +775,13 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
   const groups = items
     .filter((item) => item.type === "group")
     .map((item) => ({ value: item.id, label: item.label }));
-  const change = async (changes: SidebarLayoutChange[]) => {
+  const change = async (changes: SidebarLayoutChange[], target: Scope = effectiveScope) => {
     try {
-      await update({ scope: effectiveScope, changes });
+      await update({ scope: target, changes });
     } catch (error) {
-      toast.error("Couldn't change the sidebar", { description: userErrorText(error) });
+      toast.error("Couldn't change the sidebar", {
+        description: userErrorText(error),
+      });
       throw error;
     }
   };
@@ -406,7 +812,26 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
             ? "What everyone in this workspace starts with."
             : "Links and groups above your chats."
         }
-        actions={addMenu}
+        actions={
+          <div className="flex items-center gap-2">
+            {addMenu}
+            {layout && (effectiveScope === "workspace" || personalAvailable) ? (
+              <PageMoreMenu
+                options={
+                  effectiveScope === "workspace"
+                    ? readResolvedSidebarOptions(layout.workspace.options)
+                    : readResolvedSidebarOptions(layout.options)
+                }
+                onChange={onChange}
+                onReset={
+                  effectiveScope === "personal" && layout.personal.customized
+                    ? () => setConfirmingReset(true)
+                    : null
+                }
+              />
+            ) : null}
+          </div>
+        }
       />
       {canEditWorkspace && personalAvailable ? (
         <SegmentedControl
@@ -440,21 +865,31 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
         {layout ? (
           items.length ? (
             <Section variant="group" aria-label="Sidebar items">
-              <ItemRows items={items} scope={effectiveScope} onChange={onChange} />
+              <ItemRows
+                items={items}
+                scope={effectiveScope}
+                workspaceId={workspaceId}
+                onChange={onChange}
+              />
             </Section>
           ) : (
             <p className="text-sm text-fg-muted">
-              Nothing here yet. Add an app, a link or a group.
+              Nothing here yet. Add an app, an agent, a link or a group.
             </p>
           )
         ) : failed ? (
-          <p className="text-sm text-fg-muted">Couldn't load the sidebar. Try again shortly.</p>
+          <p className="text-sm text-fg-muted">
+            {"Couldn't load the sidebar. "}
+            <button type="button" className="og-link" onClick={reload}>
+              Try again
+            </button>
+          </p>
         ) : null}
         {effectiveScope === "personal" && layout && layout.hidden.length > 0 ? (
           <Section title="Hidden" variant="group">
             {layout.hidden.map(({ item }) => (
               <div key={item.id} className="flex min-h-12 items-center gap-3 py-2">
-                {itemIcon(item, (path) => pathHasAppPage(router, path))}
+                {itemIcon(item, (path) => pathHasAppPage(router, path), workspaceId)}
                 <div className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
                   {item.label}
                 </div>
@@ -465,14 +900,22 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
             ))}
           </Section>
         ) : null}
-        {effectiveScope === "personal" && layout?.personal.customized ? (
-          <div>
-            <RowButton onClick={() => onChange([{ op: "reset" }])}>
-              Reset to workspace default
-            </RowButton>
-          </div>
-        ) : null}
       </div>
+      <ConfirmDialog
+        open={confirmingReset}
+        onOpenChange={setConfirmingReset}
+        title="Reset your sidebar?"
+        description="Your own links, groups and changes are removed and you see the workspace default."
+        confirmLabel="Reset"
+        cancelAutoFocus
+        onConfirm={() =>
+          // Reset only ever clears your own changes, never the workspace default.
+          change([{ op: "reset" }], "personal").then(
+            () => true,
+            () => false,
+          )
+        }
+      />
     </ContentPage>
   );
 }

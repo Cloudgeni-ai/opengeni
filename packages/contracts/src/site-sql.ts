@@ -1029,7 +1029,14 @@ export type SiteDbInsertRequest = SiteDbBase & {
   table: string;
   columns: string[];
   rows: SiteSqlValue[][];
-  onConflict: "fail" | "replace" | "ignore";
+  /**
+   * `update` upserts: a row whose `conflictColumn` value exists updates that
+   * row's other given columns (the column must be the primary key or unique).
+   * Older gateways treat it as `fail`.
+   */
+  onConflict: "fail" | "replace" | "ignore" | "update";
+  /** With `update`: the key column (one of `columns`). */
+  conflictColumn?: string;
   maxDatabaseBytes: number;
 };
 
@@ -1130,4 +1137,48 @@ export function siteSqlBlobValue(bytes: Uint8Array): { $base64: string } {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return { $base64: btoa(binary) };
+}
+
+/** Schema objects whose DROP loses no rows: indexes, views and triggers. */
+const SITE_SQL_DROP_WITHOUT_DATA = new Set(["INDEX", "VIEW", "TRIGGER"]);
+
+/**
+ * What in a migration could delete or overwrite existing rows: `DROP TABLE`,
+ * `ALTER TABLE … DROP COLUMN` or `RENAME`, and `DELETE`, `UPDATE`, `REPLACE`
+ * or `TRUNCATE` statements. Creating or dropping indexes, views and triggers,
+ * and `ON DELETE` clauses, are not listed. Words inside strings, quoted names
+ * and comments are ignored. SQL that can't be read is reported as
+ * `unreadable SQL`. Empty when nothing destructive was found.
+ */
+export function siteSqlDestructiveChanges(sql: string): string[] {
+  let statements: Token[][];
+  try {
+    statements = splitStatements(tokenize(sql));
+  } catch {
+    return ["unreadable SQL"];
+  }
+  const found = new Set<string>();
+  for (const statement of statements) {
+    const words = significant(statement)
+      .filter((token) => token.kind === "word")
+      .map((token) => token.value);
+    const [first, second] = words;
+    if (first === "CREATE") continue;
+    if (first === "DROP") {
+      if (!SITE_SQL_DROP_WITHOUT_DATA.has(second ?? "")) found.add(`DROP ${second ?? ""}`.trim());
+      continue;
+    }
+    if (first === "ALTER") {
+      if (words.includes("DROP")) found.add("ALTER TABLE … DROP");
+      if (words.includes("RENAME")) found.add("ALTER TABLE … RENAME");
+      continue;
+    }
+    for (const [index, word] of words.entries()) {
+      // `ON DELETE` / `ON UPDATE` name what a foreign key does, not a statement.
+      if ((word === "DELETE" || word === "UPDATE") && words[index - 1] === "ON") continue;
+      if (word === "DELETE" || word === "UPDATE" || word === "REPLACE" || word === "TRUNCATE")
+        found.add(word);
+    }
+  }
+  return [...found];
 }

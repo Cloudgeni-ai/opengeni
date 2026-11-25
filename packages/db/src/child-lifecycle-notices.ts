@@ -16,7 +16,11 @@ import {
   type HumanInputQuestion,
   secretUseApprovalIdFromQuestionId,
 } from "@opengeni/contracts";
-import { capacityWaitProviderName, capacityWaitResetText } from "./capacity-wait-attention";
+import {
+  capacityWaitProviderName,
+  capacityWaitResetText,
+  isPinnedAccountWaitReason,
+} from "./capacity-wait-attention";
 
 /**
  * Child lifecycle notices (`child_requires_action`,
@@ -99,11 +103,15 @@ export function childWaitingCapacityDedupeKey(input: {
    * waiter has no suffix.
    */
   restatedResetsAt?: string | null;
+  /** Sequence of the child's new waiting event when the explanation changes. */
+  restatedReasonSequence?: number;
 }): string {
   const base = `${CHILD_LIFECYCLE_DEDUPE_PREFIX.waitingCapacity}:${input.childSessionId}:${input.waiterId}`;
-  return input.restatedResetsAt === undefined
-    ? base
-    : `${base}:${input.restatedResetsAt ?? "unknown"}`;
+  return input.restatedReasonSequence !== undefined
+    ? `${base}:reason:${input.restatedReasonSequence}`
+    : input.restatedResetsAt === undefined
+      ? base
+      : `${base}:${input.restatedResetsAt ?? "unknown"}`;
 }
 
 export function childProgressDedupeKey(input: {
@@ -125,6 +133,18 @@ function approvalToolName(value: unknown): string | null {
   return typeof candidate === "string" && candidate.length > 0
     ? boundedChildNoticeText(candidate, 128).text
     : null;
+}
+
+/**
+ * A question only a person can answer, never the agent above: a secret, a
+ * Skill review confirmation, or Opengeni's own secret-use approval.
+ */
+export function humanInputQuestionIsPersonOnly(question: HumanInputQuestion): boolean {
+  return (
+    question.kind === "secret" ||
+    question.skillReview != null ||
+    secretUseApprovalIdFromQuestionId(question.id) !== null
+  );
 }
 
 /** Compact, secret-free copy of one question: ids, kind, prompt and option labels. */
@@ -288,6 +308,8 @@ export function childPausedSummary(childSessionId: string, payload: ChildPausedP
 export function childWaitingCapacitySummary(
   childSessionId: string,
   payload: ChildWaitingCapacityPayload,
+  explanation?: string,
+  options: { waitReason?: string } = {},
 ): string {
   const name = capacityWaitProviderName(payload.provider);
   // Rows from before `resetsAt` existed keep their original wording.
@@ -295,6 +317,18 @@ export function childWaitingCapacitySummary(
     return `Worker ${childSessionId} is waiting for ${payload.provider === "codex" ? "Codex" : "xAI"} provider capacity${payload.nextCheckAt ? ` (next check ${payload.nextCheckAt})` : ""}; its turn resumes automatically.`;
   }
   const reset = capacityWaitResetText(payload.resetsAt);
+  if (explanation && options.waitReason && isPinnedAccountWaitReason(options.waitReason)) {
+    // The pin keeps the turn on its account whatever the model, so a model
+    // switch is no way out: returning the worker to automatic account choice is.
+    const roomAgain =
+      reset && options.waitReason === "pinned_account_unavailable"
+        ? ` That account is expected to have room again around ${reset}.`
+        : "";
+    return `Worker ${childSessionId} is blocked. ${explanation}${roomAgain} To switch the worker back to automatic account choice, call the setSessionModelAccount action for it with connectionId null and provider ${payload.provider}; its waiting turn then continues on another account.`;
+  }
+  if (explanation) {
+    return `Worker ${childSessionId} is blocked. ${explanation}${reset ? ` Expected around ${reset}.` : ""} To continue on a different model, use session_set_model; its waiting turn then continues on that model.`;
+  }
   return `Worker ${childSessionId} is blocked: no ${name} subscription has capacity ${reset ? `until about ${reset}` : "and no reset time is known"}. Its turn resumes by itself then. To continue sooner, switch the worker to a model with capacity with session_set_model; its waiting turn then continues on that model.`;
 }
 

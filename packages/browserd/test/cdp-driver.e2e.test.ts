@@ -900,7 +900,7 @@ e2e(
 );
 
 e2e(
-  "a tab opened after a viewport change has the size the agent set, and earlier tabs keep theirs",
+  "explicit viewport changes win over panel fits, and only fitted sizes carry to new tabs",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-viewport-tab-");
     const runner = await ManagedBrowserRunner.create({
@@ -932,15 +932,50 @@ e2e(
         }),
         observationMode: "none",
       });
-      const opened = await driver.openTarget(page("Later"));
-      expect([opened.viewport?.width, opened.viewport?.height]).toEqual([1600, 1000]);
+      const dimensions = (observation: BrowserObservation) => [
+        observation.viewport?.width,
+        observation.viewport?.height,
+      ];
+      const fit = {
+        type: "viewport",
+        width: 440,
+        height: 680,
+        mobile: false,
+        mode: "fit",
+      } as const;
+      const explicit = await driver.observe(first.target.id);
+      await driver.dispatch({ ...command(explicit, fit), observationMode: "none" });
+      expect(dimensions(await driver.observe(first.target.id))).toEqual([1600, 1000]);
+
+      const native = await driver.openTarget(page("After explicit change"));
+      expect(dimensions(native)).toEqual(earlierSize);
+      await driver.dispatch({ ...command(native, fit), observationMode: "none" });
+      expect(dimensions(await driver.observe(native.target.id))).toEqual([440, 680]);
+      const opened = await driver.openTarget(page("After fit"));
+      expect(dimensions(opened)).toEqual([440, 680]);
       const shot = await driver.captureScreenshot(opened.target.id, {
         format: "jpeg",
         quality: 50,
       });
-      expect([shot.width, shot.height]).toEqual([1600, 1000]);
+      expect([shot.width, shot.height]).toEqual([440, 680]);
       const unchanged = await driver.observe(earlier.target.id);
-      expect([unchanged.viewport?.width, unchanged.viewport?.height]).toEqual(earlierSize);
+      expect(dimensions(unchanged)).toEqual(earlierSize);
+
+      // Even with the same frame fence, the explicit action takes priority
+      // over a later fit on this tab and does not replace the inherited size.
+      const current = await driver.observe(opened.target.id);
+      await Promise.all([
+        driver.dispatch({
+          ...command(current, { type: "viewport", width: 960, height: 640, mobile: false }),
+          observationMode: "none",
+        }),
+        driver.dispatch({
+          ...command(current, { ...fit, width: 500 }),
+          observationMode: "none",
+        }),
+      ]);
+      expect(dimensions(await driver.observe(opened.target.id))).toEqual([960, 640]);
+      expect(dimensions(await driver.openTarget(page("After both")))).toEqual([440, 680]);
     } finally {
       await driver.close();
       await rm(directory, { recursive: true, force: true });
@@ -2550,6 +2585,168 @@ chromiumE2e(
     } finally {
       silent.stop(true);
       await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+chromiumE2e(
+  "pasting an empty browser clipboard after a page's own Copy button fails instead of typing nothing",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-empty-paste-");
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    try {
+      let page = await driver.start(
+        dataUrl(`<!doctype html><title>Code</title>
+          <p id="code">CODE-1234</p>
+          <button onclick="navigator.clipboard.writeText('CODE-1234').catch(() => {})">Copy code</button>
+          <label>Code field <input id="field"></label>`),
+      );
+      // A website's Copy button writes to the browser's own clipboard, which
+      // this BrowserSession's clipboard never reads.
+      page = await driver.dispatch(
+        command(page, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Copy code", exact: true },
+        }),
+      );
+      expect(driver.readClipboard()).toMatchObject({ revision: 0, text: "" });
+      const paste = driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "paste",
+          locator: { kind: "label", text: "Code field" },
+        }),
+      );
+      await expect(paste).rejects.toMatchObject({ code: "invalid_action" });
+      await expect(paste).rejects.toThrow("browser clipboard is empty, so nothing was pasted");
+      // The supported route: copy the page's text, then paste it.
+      page = await driver.observe(page.target.id);
+      page = await driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "copy",
+          locator: { kind: "css", selector: "#code" },
+          content: "text",
+        }),
+      );
+      page = await driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "paste",
+          locator: { kind: "label", text: "Code field" },
+        }),
+      );
+      // The field holds the pasted text, not only the clipboard.
+      page = await driver.dispatch(command(page, { type: "clipboard", operation: "clear" }));
+      const field = await driver.dispatch(
+        command(page, {
+          type: "clipboard",
+          operation: "copy",
+          locator: { kind: "label", text: "Code field" },
+          content: "value",
+        }),
+      );
+      expect(field.target.id).toBe(page.target.id);
+      expect(driver.readClipboard().text).toBe("CODE-1234");
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+chromiumE2e(
+  "a link whose website never answers ends the click within the commit deadline and keeps the tab usable",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-silent-link-");
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+      navigationCommitTimeoutMs: 2_000,
+    });
+    // Same site as the page, as a link to another part of one website is.
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      idleTimeout: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/silent") {
+          await Bun.sleep(120_000);
+          return new Response("too late");
+        }
+        if (path === "/slow") {
+          await Bun.sleep(500);
+          return new Response("<!doctype html><title>Slow</title><h1>Slow page</h1>", {
+            headers: { "content-type": "text/html" },
+          });
+        }
+        return new Response(
+          '<!doctype html><title>Start</title><h1>Start page</h1><a href="/silent">Silent link</a> <a href="/slow">Slow link</a>',
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const initial = await driver.start(`${origin}/`);
+      const started = Date.now();
+      // Chromium holds every read of the page while the link's request waits
+      // for an answer; the click must not wait for its own read deadline.
+      const click = driver.dispatch(
+        command(initial, {
+          type: "click",
+          locator: { kind: "role", role: "link", name: "Silent link", exact: true },
+        }),
+      );
+      await expect(click).rejects.toMatchObject({
+        code: "outcome_unknown",
+        failureReason: "destination_not_answered",
+      });
+      await expect(click).rejects.toThrow(
+        `timeout: the page it opened (${origin}) did not load: its website did not answer within 2 seconds, so the browser stopped loading it and the tab still shows the previous page`,
+      );
+      expect(Date.now() - started).toBeLessThan(15_000);
+      // The tab answers at once and still shows the page the click ran on.
+      const reading = Date.now();
+      const after = await driver.observe(initial.target.id);
+      expect(Date.now() - reading).toBeLessThan(5_000);
+      expect(after.target.url).toBe(`${origin}/`);
+      expect(names(after)).toContain("Start page");
+      // A website that answers within the deadline loads as before.
+      const slow = await driver.dispatch(
+        command(after, {
+          type: "click",
+          locator: { kind: "role", role: "link", name: "Slow link", exact: true },
+        }),
+      );
+      expect(slow.target.url).toBe(`${origin}/slow`);
+      expect(names(slow)).toContain("Slow page");
+    } finally {
+      await driver.close();
+      server.stop(true);
       await rm(directory, { recursive: true, force: true });
     }
   },

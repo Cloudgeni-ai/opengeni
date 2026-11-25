@@ -492,6 +492,33 @@ describe("Codex capacity on the shared core", () => {
     expect(deps.providerTurn.codexSubscriptionCore).toBeNull();
   });
 
+  test("a proven plan-only placement refusal fails before arming a capacity waiter", async () => {
+    scopedDb();
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    const arm = spy(db, "armSubscriptionCoreCodexCapacityWait");
+    spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({
+      kind: "wait",
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
+      healthRetryAt: null,
+      explicitConnectionId: null,
+      planRefusedModelId: "codex/gpt-5.5",
+    });
+    const deps = capacityDeps();
+    const error = await selectCodexTurnCapacity(deps).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({
+      payload: {
+        code: "subscription_account_refused",
+        refusal: "entitlement",
+        model: "codex/gpt-5.5",
+        retryable: false,
+        error:
+          "None of the Codex subscriptions available to this turn can run GPT-5.5. Choose another model or connect a subscription whose plan includes it.",
+      },
+    });
+    expect(arm).not.toHaveBeenCalled();
+  });
+
   test.each(["pinned_account_unavailable", "no_eligible_capacity"] as const)(
     "accepted recovery with no live funding reaches %s instead of a credit/access terminal",
     async (reason) => {
@@ -1218,6 +1245,42 @@ describe("core Codex failure settlement", () => {
     placedRefreshGeneration: 5,
     personal: false,
   };
+
+  test("plan-only placement failure settles the exact turn without scheduling a retry", async () => {
+    scopedDb();
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
+    spy(db, "placeSubscriptionCoreCodexTurn").mockResolvedValue({
+      kind: "wait",
+      reason: "codex_plan_no_capacity",
+      earliestResetAt: null,
+      healthRetryAt: null,
+      explicitConnectionId: null,
+      planRefusedModelId: "codex/gpt-5.5",
+    });
+    spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined);
+    const placement = await selectCodexTurnCapacity(capacityDeps()).catch(
+      (error: unknown) => error,
+    );
+    const { settle, deps } = failureDeps(placement, null);
+    expect(await settleTurnFailure(deps as never)).toEqual({ status: "idle", turnId: "turn-1" });
+    expect(settle).toHaveBeenCalledWith({
+      events: [
+        {
+          type: "turn.failed",
+          payload: expect.objectContaining({
+            code: "subscription_account_refused",
+            model: "codex/gpt-5.5",
+            recovery: "user_message",
+            retryable: false,
+          }),
+        },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+    });
+  });
 
   test.each([
     [false, true],
@@ -2215,7 +2278,11 @@ describe("core Codex failure settlement", () => {
         expect(quarantine).not.toHaveBeenCalled();
         const call = cooldown.mock.calls[0]!;
         expect(call.slice(0, 3)).toEqual([{}, identity, ref]);
-        expect(call[3]).toMatchObject({ modelId: "codex/gpt-5.5", refreshGeneration: 5 });
+        expect(call[3]).toMatchObject({
+          modelId: "codex/gpt-5.5",
+          refreshGeneration: 5,
+          cause: "entitlement",
+        });
         expect((call[3] as { until: Date }).until.getTime()).toBeGreaterThan(
           Date.now() + 23 * 3_600_000,
         );

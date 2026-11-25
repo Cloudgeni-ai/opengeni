@@ -1,3 +1,4 @@
+import { preloadHeedeo, type HeedeoClientConfig } from "@/lib/heedeo";
 import { SignupChallenge, useSocialSignupChallenge } from "./signup-challenge";
 import { CheckIcon, KeyRoundIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -88,6 +89,10 @@ export function ManagedAuthPanel(props: {
    */
   newSignupsEnabled?: boolean;
   signupChallengeSiteKey?: string;
+  /** Email sign-in also needs the challenge (the deployment's `signInChallengeRequired`). */
+  signInChallengeRequired?: boolean;
+  /** Heedeo signup scoring's script, loaded on this page while scoring is on. */
+  heedeo?: HeedeoClientConfig | undefined;
   /** An expired or invalid email-verification link returned the person here. */
   verificationLinkError?: VerificationLinkError | null;
   /**
@@ -184,10 +189,19 @@ export function ManagedAuthPanel(props: {
   useEffect(() => {
     if (ownsLocationLinkError) clearVerificationLinkErrorFromLocation(window);
   }, [ownsLocationLinkError]);
+  const heedeoScript = props.heedeo?.scriptUrl;
+  const heedeoKey = props.heedeo?.publishableKey;
+  useEffect(() => {
+    if (heedeoScript && heedeoKey)
+      preloadHeedeo({ scriptUrl: heedeoScript, publishableKey: heedeoKey });
+  }, [heedeoScript, heedeoKey]);
   const [signupChallengeToken, setSignupChallengeToken] = useState<string>();
   const [challengeReset, setChallengeReset] = useState(0);
   // Email sign-in carries the same challenge as sign-up while it is enabled.
-  const challengeRequired = !emailOnlyMode && Boolean(props.signupChallengeSiteKey);
+  const challengeRequired =
+    !emailOnlyMode &&
+    Boolean(props.signupChallengeSiteKey) &&
+    (mode === "signup" || props.signInChallengeRequired === true);
   // Google or GitHub may sign someone in or create their account, so a click
   // on either tab carries a challenge token while new accounts are open.
   const socialChallenge = useSocialSignupChallenge(
