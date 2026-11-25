@@ -110,7 +110,7 @@ describe("an answered approval", () => {
   };
   const notice = (items: ReturnType<typeof buildTimeline>) =>
     items.find((item): item is NoticeItem => item.kind === "notice" && item.approval === true)!;
-  // Decisions carry no turn id on the wire.
+  // Older decisions carry no turn id; current ones carry their turn's.
   const decide = (sequence: number, approvalId: string, decision: "approve" | "reject") =>
     event(sequence, "user.approvalDecision", { approvalId, decision }, null as unknown as string);
 
@@ -368,6 +368,72 @@ describe("an answered approval", () => {
     expect(noticeDisplayText(englishText, done[1]!)).toBe(
       "You approved “Send email”.\nYou declined “Deploy”.",
     );
+  });
+
+  test("a new MCP question round on the same call waits for its own answer", () => {
+    const question = (round: number) => ({
+      ...sendEmail,
+      elicitation: { server: "linear", round, requests: [] },
+    });
+    const items = buildTimeline(englishText, [
+      ...asking([question(1)]),
+      event(4, "user.approvalDecision", {
+        approvalId: "call-1",
+        decision: "approve",
+        elicitationRound: 1,
+      }),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "session.requiresAction", { approvals: [question(2)] }),
+      event(7, "session.status.changed", { status: "requires_action" }),
+    ]);
+    const [first, second] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, first!)).toBe("You approved “Send email”.");
+    expect(second!.resolvedAt).toBeUndefined();
+    const answered = buildTimeline(englishText, [
+      ...asking([question(1)]),
+      event(4, "user.approvalDecision", {
+        approvalId: "call-1",
+        decision: "approve",
+        elicitationRound: 1,
+      }),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "session.requiresAction", { approvals: [question(2)] }),
+      event(7, "user.approvalDecision", {
+        approvalId: "call-1",
+        decision: "reject",
+        elicitationRound: 2,
+      }),
+    ]).filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true);
+    expect(answered.map((item) => noticeDisplayText(englishText, item))).toEqual([
+      "You approved “Send email”.",
+      "You declined “Send email”.",
+    ]);
+  });
+
+  test("a later turn's answer to a reused call id is not an earlier turn's answer", () => {
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "turn.cancelled"),
+      event(5, "turn.started", {}, "turn-2"),
+      event(6, "session.requiresAction", { approvals: [sendEmail] }, "turn-2"),
+      event(7, "user.approvalDecision", { approvalId: "call-1", decision: "approve" }, "turn-2"),
+    ]);
+    const [first, second] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, first!)).toBe("Not answered.");
+    expect(noticeDisplayText(englishText, second!)).toBe("You approved “Send email”.");
+  });
+
+  test("a turn cancelled while it waits ends its approval unanswered", () => {
+    const item = notice(
+      buildTimeline(englishText, [...asking([sendEmail]), event(4, "turn.cancelled")]),
+    );
+    expect(item.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, item)).toBe("Not answered.");
+    expect(noticeApprovalAnswered(item)).toBe(false);
   });
 
   test("parallel app-action approvals say what was decided, one line each, told apart", () => {
