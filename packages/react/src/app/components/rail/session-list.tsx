@@ -1816,6 +1816,14 @@ export function SessionList() {
   }, [appsSection, browseStatus, browseSortBy, needsYouOnly, railSections]);
   // The Apps section shows its first rows and a Show more for the rest; an
   // open app or app chat beyond them shows too.
+  // The open app: its own page, or the app one of its chats belongs to.
+  const openSiteId =
+    activeSiteId ??
+    (activeSessionId &&
+    context.session?.id === activeSessionId &&
+    context.session.parentSessionId === null
+      ? (sessionSiteOrigin(context.session)?.siteId ?? null)
+      : null);
   const [appsShowAll, setAppsShowAll] = useState(false);
   const appsSectionNodes = useMemo(() => {
     if (!appNodes) return null;
@@ -1827,12 +1835,12 @@ export function SessionList() {
       .slice(APPS_SECTION_ROWS)
       .find(
         (node) =>
-          (activeSiteId !== null && node.siteGroup?.siteId === activeSiteId) ||
+          (openSiteId !== null && node.siteGroup?.siteId === openSiteId) ||
           findSessionTreeNode([node], activeSessionId) !== null,
       );
     const hidden = all.length - shown.length - (open ? 1 : 0);
     return { shown: open ? [...shown, open] : shown, hidden, more: hidden > 0 };
-  }, [appNodes, appsShowAll, activeSessionId, activeSiteId]);
+  }, [appNodes, appsShowAll, activeSessionId, openSiteId]);
   // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
   const pinnedChatNodes = useMemo(
     () => pinnedNodes.filter((node) => !node.siteGroup),
@@ -2810,13 +2818,6 @@ export function SessionList() {
   // to that Site, as a person's own expansion would: it stays open when
   // another session is selected, and closing it again is respected while
   // switching between the Site's conversations.
-  const openSiteId =
-    activeSiteId ??
-    (activeSessionId &&
-    context.session?.id === activeSessionId &&
-    context.session.parentSessionId === null
-      ? (sessionSiteOrigin(context.session)?.siteId ?? null)
-      : null);
   const siteRouteExpansion = useRef<string | null>(null);
   useEffect(() => {
     if (!hierarchyMode || !openSiteId) {
