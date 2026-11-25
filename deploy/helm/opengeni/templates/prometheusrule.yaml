@@ -624,7 +624,7 @@ spec:
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniMcpStrictConnectFailed
           expr: |
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome=~"failed|refused_by_policy"}[5m])) > 0
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome=~"failed|refused_by_policy|auth_needed"}[5m])) > 0
           for: 1m
           labels:
             severity: critical
@@ -654,10 +654,10 @@ spec:
             (
               sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!="refused_by_policy"}[10m])), 1)
+              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!~"refused_by_policy|auth_needed"}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!="refused_by_policy"}[10m])) >= 5
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome!~"refused_by_policy|auth_needed"}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
@@ -666,8 +666,8 @@ spec:
             headline: 'Optional tool connections failing'
             value: '{{ "{{ $value | humanizePercentage }}" }} of connections failed (10 min)'
             user_impact: 'Agents keep working but without some connected tools (for example a user''s integrations), so answers may be less capable.'
-            next_step: 'Check which connector is failing in the MCP lifecycle logs; usually an expired login or an outage on the connector''s side.'
-            description: Turns may continue with missing tools, but users are losing capabilities. Check connector authentication, endpoint health, and bounded MCP lifecycle logs.
+            next_step: 'Check which connector is failing in the MCP lifecycle logs; usually an outage or a rejected credential on the connector''s side.'
+            description: Turns may continue with missing tools, but users are losing capabilities. Check endpoint health, credentials the server rejects, and bounded MCP lifecycle logs. Accounts whose sign-in Opengeni already refused (outcome auth_needed, shown to the person as needing a reconnect) and destinations refused by policy are counted separately and never page.
         - alert: OpenGeniMcpToolFailureRatio
           expr: |
             (
