@@ -566,6 +566,8 @@ export const englishMessages = {
     "The chat's tools or settings changed after the automation was set up.",
   "automations.run.error.chatEnded": "Its chat has ended, so the run couldn't start there.",
   "automations.run.error.chatGone": "The chat it runs in no longer exists.",
+  "automations.run.error.duplicateAgentRun":
+    "Skipped because another automation of the same agent took this event.",
   "automations.run.error.chatPaused":
     "Skipped because the chat was paused. Resume the chat to let later runs start; skipped runs aren't replayed.",
   "automations.run.error.machineUnavailable":
@@ -2663,7 +2665,6 @@ export const englishMessages = {
   "meetings.detailPage.displaynameSVoiceWillBe": "{displayName}'s voice will be remembered",
   "meetings.detailPage.enterAWholeNumberFrom": "Enter a whole number from 1 to 32.",
   "meetings.detailPage.error": "Error",
-  "meetings.detailPage.everyoneInThisWorkspaceCan": "Everyone in the workspace can open it.",
   "meetings.detailPage.failed": "Failed",
   "meetings.detailPage.itMayHaveBeenDeleted":
     "It may have been deleted, or only the person who recorded it can open it.",
@@ -2699,7 +2700,6 @@ export const englishMessages = {
   "meetings.detailPage.onlyDoThisIfValue":
     "Only do this if {value} agreed. Later meetings will suggest their name when they speak. Only a voice profile is kept, never audio, and it can be forgotten in Settings.",
   "meetings.detailPage.onlyMe": "Only me",
-  "meetings.detailPage.onlyYouCanOpenIt": "Only you can open it.",
   "meetings.detailPage.onlyYouCanSeeThis": "Only you can see this now",
   "meetings.detailPage.preview": "Preview",
   "meetings.detailPage.rememberMyVoice": "Remember my voice",
@@ -2719,6 +2719,9 @@ export const englishMessages = {
   "meetings.detailPage.couldnTTryAgainReload":
     "Couldn't try again from here. Reload the page and the upload carries on.",
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
+  /** The heading over the workspaces a meeting can be shared with. */
+  "meetings.detailPage.shareWith": "Share with",
+  "meetings.detailPage.sharedWithWorkspace": "Shared with {workspace}",
   /** A person's own Only me meeting opened from another workspace of the same organization. */
   "meetings.detailPage.onlyMeRecordedIn": "Only me · recorded in {workspace}",
   /** The meeting menu item that opens where the owner's Only me meeting works. */
@@ -2870,6 +2873,8 @@ export const englishMessages = {
   "meetings.notes.empty": "No notes yet.",
   "meetings.notes.markdownHint": "Markdown works here.",
   "meetings.notes.notepad": "Notepad",
+  /** A meeting shared with you whose notepad nobody wrote in. */
+  "meetings.notes.notepadEmpty": "Nothing in the notepad.",
   "meetings.notes.notepadFailed": "Couldn't save",
   "meetings.notes.notepadPlaceholder": "Jot down notes as you go",
   "meetings.notes.notepadRetry": "Try saving again",

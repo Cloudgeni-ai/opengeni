@@ -241,8 +241,9 @@ and other integrations (Teams) read the same way.
 
 - Choosing it, through the form, `POST`/`PATCH /agents` or the older `open`
   field of `PUT /agents/:id/slack/:connectionId` and the Slack agents API,
-  needs an organization admin (the request's verified `account:admin`), as
-  the switch did. Narrowing it back needs only the usual edit rights. Making
+  needs organization administration: the organization's owner or one of its
+  admins, signed in as themselves (or a literal `account:admin`). Narrowing it
+  back needs only the usual edit rights. Making
   an agent Only me turns it off. Personal workspaces don't offer it, and an
   imported `.agent.json` is never opened on its own.
 - Who may use it from an integration is unchanged from Slack's open agents
@@ -551,7 +552,12 @@ whole.
   run mode, chat and visibility after the edit. Any trigger type in the catalog works,
   including types added later, because the trigger is the automation's own.
   Event runs keep the automation limits: the chain limit, the storm guard
-  (`maxRunsPerHour`) and usage limits. The page lists the automations with
+  (`maxRunsPerHour`) and usage limits. Each event starts at most one run per
+  agent and owner: when several of a person's (or the workspace's)
+  automations of one agent match it, one takes it (not one held back by the
+  storm guard or a known blocker, then the oldest), and one left with none of
+  the delivery's events records a skipped run with reason
+  `duplicate_agent_run`, once per streak. The page lists the automations with
   an on/off switch (pause/resume) and remove. **Add trigger** opens a small
   dialog on the page (`agent-trigger-dialog.tsx`, the picker in
   `agent-trigger-picker.tsx`, pure parts in `agent-trigger-model.ts`). Its
@@ -699,7 +705,7 @@ adds one as an ordinary agent with `templateKey` set (SDK
 `listAgentTemplates`, `createAgentFromTemplate`). They are content files in
 `packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`),
 listed in gallery order in its `index.ts`: Triage, Bug fixer, PR reviewer,
-CVE scanner, Incident responder and Dependency updater, general for any software team, with
+CVE scanner, Incident responder, Dependency updater and Product analyst, general for any software team, with
 Instructions written for autonomy with judgment (pick up work with what they
 can reach instead of asking for setup first, hand off to each other by name,
 and involve a person only when blocked or a decision needs one), suggested Can use rules
@@ -714,6 +720,7 @@ Opengeni's own GitHub tools) and suggested triggers:
 | CVE scanner | Checks lockfiles and container images against known advisories (GitHub advisories, or osv-scanner or trivy in its sandbox), ranks by reachability and severity, fixes safe upgrades in one pull request, reports the rest | PR reviewer | Every Monday at 08:00; a pull request opens or is ready for review |
 | Incident responder | Gathers logs, metrics and recent deploys from connected tools, posts the likely cause and a mitigation | Bug fixer | Any event on a webhook (`*`, for alerts from monitoring); a new message in a Slack channel |
 | Dependency updater | Batches patch and minor upgrades into one pull request a week | PR reviewer | Every Monday at 09:00 |
+| Product analyst | Reads product analytics in PostHog and writes a short weekly report of what changed and why | None | Every Monday at 09:00 |
 
 GitHub events carry no changed file paths, so CVE scanner's pull request
 trigger fires for every pull request and its run stops at once when no
@@ -721,7 +728,8 @@ lockfile, dependency manifest or Dockerfile changed. The Agents page lists
 the ones not added here yet under the workspace's agents, as **Ready-made**
 (each one click to add, then its page), for someone who can add agents; **Add
 agent** offers the same. A new ready-made agent
-is one more content file; no product code names any of them. Suggested triggers are
+is one more content file; the only product code that names any of them is the
+guided setups on the Get started page ([Guided setups](#guided-setups)). Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the same dialog filled in from the suggestion (its events,
 conditions, note and name) so the person only picks the source and, for
@@ -739,6 +747,29 @@ true (the comment @mentions Opengeni's GitHub App, as `@slug` or
 `MEMBER` or `COLLABORATOR`; the App's own comments never start it. Ready-made agents
 name no internal Skills. Each names the `team` it is for ("Engineering"); Capabilities
 **Ready-made** groups by it.
+
+### Guided setups
+
+The workspace's **Get started** page (`/workspaces/<id>/get-started`, under
+the rail's Setup group) offers three engineering setups, each three steps that
+end with an agent at work: connect a tool, add a ready-made agent, turn on one
+of its suggested triggers.
+
+| Setup | Connect | Agent | Trigger |
+| --- | --- | --- | --- |
+| Review pull requests | GitHub | PR reviewer | When a pull request opens |
+| Triage issues | Linear | Triage | When a Linear issue is created |
+| Track product analytics | PostHog | Product analyst | Every Monday morning |
+
+They are a list in `apps/web/src/components/get-started/guided-setups.ts` and
+add no machinery: Connect opens GitHub's connect page or the connector's
+Capabilities page (found by its MCP address; a deployment that doesn't offer it
+says so; so does GitHub without its app here), Add is the Agents page's
+ready-made add (for people who may start chats), and Turn on adds a one-click
+suggestion at once or opens the agent page's Add trigger dialog with it. Each
+step reads its state from the workspace, so work done elsewhere shows as done;
+a paused trigger isn't on. Onboarding's **Software engineer** choice ends on
+this page.
 
 ### Delegation by name
 
@@ -782,6 +813,38 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   repeat.
 - Agents page: **Add an agent** lists ready-made agents not yet added here,
   each with **Add**, which opens the new agent's page.
+- Agents page: **Add agent ▾** starts with **Create with chat**. It asks
+  "What should the agent do?" and opens a new chat with that request
+  (`agentChatOpeningMessage`, the dialog in `apps/web` shared with
+  automations' Create with Opengeni). The chat follows the bundled `agents`
+  Skill (`builtin:agents`, offered when the chat has `bot_template_save`): it
+  drafts the name, Instructions, Can use, Skills and triggers, asks once with
+  `request_human_input` (one optional multi-select of common triggers;
+  submitting creates the agent), saves with `bot_template_save` (which also
+  takes `toolPermissions` and `skills`; left out, `toolPermissions` is the
+  form's ask-before-merging default) and adds each picked trigger with
+  `scheduled_tasks_create`, named "<agent>: <trigger>", with
+  `agentConfig: { agentId, prompt }`. The Skill spells out each trigger's
+  JSON; `agents-skill.test.ts` keeps it equal to `commonAgentTriggers()`. No
+  new storage or endpoint: the agent and its triggers are the ordinary ones.
+- Common triggers (`commonAgentTriggers()` in contracts): **When a pull
+  request opens**, **When mentioned on a PR** (the same events and team-only
+  conditions as the PR reviewer's one-click trigger, plus
+  `data.comment.body contains <agent name>`, so one mention of the GitHub App
+  starts only the agents it names; the row says so) and **Every weekday
+  morning** (09:00 Monday to Friday, in the browser's time zone). GitHub ones
+  are offered only when the workspace's GitHub isn't disconnected and the
+  agent's Can use doesn't block GitHub. They cover every repository the GitHub
+  connection reaches; the full automation form narrows them. On the agent page
+  **Starts when** lists the agent's own ready-made suggestions first, then the
+  common triggers they don't already cover and no automation of the agent
+  already listens to (by name or by event types), at most three, as off switches
+  (`agentTriggerOffers`); turning one on adds the automation at once, or opens
+  the trigger dialog when its source needs setup. That dialog's Open full form
+  passes `?agentCommonTrigger=<key>`, so the automation form starts from the
+  trigger's events. A shared agent in Slack shows
+  a read-only "When mentioned in Slack" row: Slack mentions reach it natively,
+  so there is no Slack trigger to add.
 - Agent page: **Chat** (`/sessions?agent=<id>`), **Export** (an `.agent.json`
   file with its name, icon, description, Instructions and Memory switch; no
   ids, chats, Memory contents or Slack; an older file's First message joins
@@ -794,13 +857,30 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   workspaces at once. Controls follow the agent's `viewer` access. Choosing
   Only me in the form says it stops answering in Slack; a Slack name refusal
   shows at the name.
+- Agent page cost: people who may see Insights > Usage (workspace settings
+  authority) see it in the header's meta line, "Last 30 days: $12.40 · $0.31
+  per run", or "No runs in the last 30 days" (`agent-cost.tsx`). It reads
+  `.../insights/usage?range=30d&agentId=<id>&groupBy=rootSession`: the spend is
+  the Usage page's (credits charged plus the list-price estimate of usage paid
+  by plans or your own keys), a run is one root chat, and workers count toward
+  their root chat's agent. Only usage the viewer can see in Usage counts;
+  others' Only me chats stay in their private amounts. Without access, on an
+  older server or on an error it shows nothing. Insights > Usage also groups
+  and filters by **Agent** (see insights-raw-usage-api.md).
 - Form: icon, name, what it helps with, Instructions, **Remember across
-  chats** (a switch, on for a new agent) and who can use it: Only me, people
+  chats** (a switch, on for a new agent), **Starts when** (new agents only:
+  the common triggers as switches, all off; those switched on are added after
+  the agent is created, and any that need setup are named in the success
+  message) and who can use it: Only me, people
   in the workspace, or anyone in the organization (offered for an
   organization's workspaces, chosen only by an organization admin, with a hint
   saying what it opens). Only the name is required. Lengths are checked on save with a count
   near each limit, never cut while typing. **Only me** is off with a reason
   where Only me chats aren't available.
+  A new agent starts with three short working rules as its Instructions
+  (`NEW_AGENT_DEFAULT_INSTRUCTIONS`) and Can use that asks before merging a
+  GitHub pull request (`NEW_AGENT_DEFAULT_TOOL_PERMISSIONS`); Skills start
+  empty. API creates keep their own defaults (empty).
 - Composer: an agent chip ("Opengeni ▾" with a **Chat with** list and
   **Browse agents**) sets `?agent=<id>`; `?botTemplateId=` still works. The
   agent is selected and the composer is left as it is (empty for a new chat);

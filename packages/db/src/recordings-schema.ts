@@ -483,3 +483,28 @@ export const recordingEvents = pgTable(
   },
   (table) => [index("recording_events_workspace_idx").on(table.workspaceId, table.occurredAt)],
 );
+
+// Migration 1570. The team workspace a meeting stored in its owner's Personal
+// workspace is shared with: its members open it there, read only.
+export const recordingShares = pgTable(
+  "recording_shares",
+  {
+    accountId: uuid("account_id").notNull(),
+    recordingWorkspaceId: uuid("recording_workspace_id").notNull(),
+    recordingId: uuid("recording_id").primaryKey(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sharedBySubjectId: text("shared_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("recording_shares_workspace_idx").on(
+      table.workspaceId,
+      table.recordingWorkspaceId,
+      table.sharedBySubjectId,
+    ),
+    index("recording_shares_recording_workspace_idx").on(
+      table.recordingWorkspaceId,
+      table.recordingId,
+    ),
+  ],
+);

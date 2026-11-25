@@ -38,8 +38,11 @@ import {
   readResolvedSidebarOptions,
   SIDEBAR_LABEL_MAX_CHARS,
   SIDEBAR_NAV_ENTRIES,
+  type SidebarAppsPlacement,
   type SidebarNavEntry,
 } from "@opengeni/contracts/sidebar-layout";
+import { AppsPlacementSubmenu } from "@opengeni/react/app/components/rail/session-browse-order-controls";
+import { appsPlacementChange } from "@/components/sidebar-layout/apps-placement-change";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { Button } from "@opengeni/react/ui/button";
@@ -697,6 +700,8 @@ const NAV_ENTRY_LABELS: Record<SidebarNavEntry, string> = {
   agents: "Agents",
   meetings: "Meetings",
   artifacts: "Artifacts",
+  apps: "Apps",
+  get_started: "Get started",
 };
 
 /**
@@ -708,19 +713,17 @@ function PageMoreMenu({
   onChange,
   onReset,
 }: {
-  options: { sessionsShowApps: boolean; hiddenNavEntries: string[] };
+  options: { appsPlacement: SidebarAppsPlacement; hiddenNavEntries: string[] };
   onChange: (changes: SidebarLayoutChange[]) => void;
   onReset: (() => void) | null;
 }) {
   const hidden = new Set(options.hiddenNavEntries);
   return (
     <MoreMenu label="More sidebar options">
-      <DropdownMenuCheckboxItem
-        checked={options.sessionsShowApps}
-        onSelect={() => onChange([{ op: "options", sessionsShowApps: !options.sessionsShowApps }])}
-      >
-        Group chats under their app
-      </DropdownMenuCheckboxItem>
+      <AppsPlacementSubmenu
+        value={options.appsPlacement}
+        onChange={(appsPlacement) => onChange([appsPlacementChange(appsPlacement)])}
+      />
       <DropdownMenuSub>
         <DropdownMenuSubTrigger>Menu entries</DropdownMenuSubTrigger>
         <DropdownMenuSubContent className="min-w-40">

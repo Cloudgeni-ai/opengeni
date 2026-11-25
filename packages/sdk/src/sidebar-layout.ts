@@ -18,6 +18,13 @@ export type SidebarLiveListKind = "pinned_apps" | "recent_apps";
  */
 export type SidebarItemIcon = string;
 
+/**
+ * Where apps show: as rows in the Sessions list (`sessions`), in an Apps
+ * section of their own below Sessions (`section`), or not as rows, their chats
+ * listed as ordinary chats (`hidden`).
+ */
+export type SidebarAppsPlacement = "sessions" | "section" | "hidden";
+
 /** The primary rail's built-in entries a person (or the default) can hide. */
 export type SidebarNavEntry =
   | "inbox"
@@ -26,12 +33,16 @@ export type SidebarNavEntry =
   | "automations"
   | "agents"
   | "meetings"
-  | "artifacts";
+  | "artifacts"
+  | "apps"
+  | "get_started";
 
 /** Navigation options as set; unset ones keep today's behaviour (or follow the default). */
 export type SidebarLayoutOptions = {
-  /** Apps show as rows of their own in the Sessions list (default true). */
+  /** Apps show as rows of their own in the Sessions list (default true); false is the same as appsPlacement `hidden`. */
   sessionsShowApps?: boolean;
+  /** Where apps show (default `sessions`). */
+  appsPlacement?: SidebarAppsPlacement;
   /** Built-in rail entries left out (default none). */
   hiddenNavEntries?: SidebarNavEntry[];
   /** Settings rail entry ids moved under More; the rest stay at the top (default none). */
@@ -40,7 +51,10 @@ export type SidebarLayoutOptions = {
 
 /** The navigation options in effect for this person. */
 export type ResolvedSidebarLayoutOptions = {
+  /** False only when apps are hidden. */
   sessionsShowApps: boolean;
+  /** Absent from servers from before it: read sessionsShowApps then. */
+  appsPlacement?: SidebarAppsPlacement;
   hiddenNavEntries: string[];
   /** Null: no settings entry is under More. */
   settingsMore: string[] | null;
@@ -205,7 +219,10 @@ export type SidebarLayoutChange =
   /** Navigation options for the scope; null clears one (personal: back to the default's). */
   | {
       op: "options";
+      /** Also sets appsPlacement: false is `hidden`, true is `sessions`. */
       sessionsShowApps?: boolean | null;
+      /** Also sets sessionsShowApps; wins over it in the same change. */
+      appsPlacement?: SidebarAppsPlacement | null;
       hiddenNavEntries?: SidebarNavEntry[] | null;
       settingsMore?: string[] | null;
     };

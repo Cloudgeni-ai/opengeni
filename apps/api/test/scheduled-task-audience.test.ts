@@ -511,3 +511,91 @@ test("only its owner's schedules can run on a personal machine, Only me or share
   });
   expect(renamed.status).toBe(200);
 });
+
+test("an admin turns someone else's shared schedule off and on again with the same permission", async () => {
+  const f = await fixture();
+  const created = await f.create(f.owner.headers, { name: "Review when mentioned on a PR" });
+  expect(created.status).toBe(201);
+  const task = (await created.json()) as { id: string; ownerSubjectId: string | null };
+  expect(task.ownerSubjectId).toBe(f.owner.subjectId);
+  const toggle = async (headers: Record<string, string>, action: "pause" | "resume") =>
+    await f.app.request(`${f.base}/${task.id}/${action}`, { method: "POST", headers });
+  const status = async () =>
+    (
+      (await (
+        await f.app.request(`${f.base}/${task.id}`, { headers: f.owner.headers })
+      ).json()) as {
+        status: string;
+      }
+    ).status;
+
+  // The case that triggered it: off worked, on was refused as owner-only.
+  const off = await toggle(f.admin.headers, "pause");
+  expect(off.status).toBe(200);
+  expect(await status()).toBe("paused");
+  const on = await toggle(f.admin.headers, "resume");
+  expect(on.status).toBe(200);
+  expect(((await on.json()) as { status: string }).status).toBe("active");
+  expect(await status()).toBe("active");
+  // Off and on again, and resuming an active one changes nothing.
+  expect((await toggle(f.admin.headers, "pause")).status).toBe(200);
+  expect((await toggle(f.admin.headers, "resume")).status).toBe(200);
+  expect((await toggle(f.admin.headers, "resume")).status).toBe(200);
+  expect(await status()).toBe("active");
+  // Each admin toggle is audited with who did it and whose schedule it is.
+  const audited = await shared.admin<{ action: string; subject_id: string; owner: string }[]>`
+    select action, subject_id, metadata->>'ownerSubjectId' as owner from audit_events
+    where target_type = 'scheduled_task' and target_id = ${task.id} order by occurred_at`;
+  expect(audited.map((row) => row.action)).toEqual([
+    "scheduled_task.admin_paused",
+    "scheduled_task.admin_resumed",
+    "scheduled_task.admin_paused",
+    "scheduled_task.admin_resumed",
+  ]);
+  expect(new Set(audited.map((row) => row.subject_id))).toEqual(new Set([f.admin.subjectId]));
+  expect(new Set(audited.map((row) => row.owner))).toEqual(new Set([f.owner.subjectId]));
+
+  // Editing it still belongs to its owner.
+  const renamed = await f.app.request(`${f.base}/${task.id}`, {
+    method: "PATCH",
+    headers: f.admin.headers,
+    body: JSON.stringify({ name: "Mine now" }),
+  });
+  expect(renamed.status).toBe(403);
+
+  // A member who is neither owner nor admin can do neither.
+  expect((await toggle(f.other.headers, "pause")).status).toBe(403);
+  expect((await toggle(f.owner.headers, "pause")).status).toBe(200);
+  expect((await toggle(f.other.headers, "resume")).status).toBe(403);
+  expect(await status()).toBe("paused");
+  // The owner turns their own off and on as before.
+  expect((await toggle(f.owner.headers, "resume")).status).toBe(200);
+  expect(await status()).toBe("active");
+
+  // An admin's own schedule locked to the app or key that created it: they can
+  // pause it, so they can resume it too, though editing stays with that creator.
+  const lockedCreated = await f.create(f.admin.headers, { name: "Made by an app" });
+  expect(lockedCreated.status).toBe(201);
+  const locked = (await lockedCreated.json()) as { id: string };
+  // Recorded directly: the creator columns are immutable once written.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update scheduled_tasks set creator_locked = true, created_by_subject_id = 'app:creator'
+      where id = ${locked.id}`;
+  });
+  const lockedToggle = async (action: "pause" | "resume") =>
+    await f.app.request(`${f.base}/${locked.id}/${action}`, {
+      method: "POST",
+      headers: f.admin.headers,
+    });
+  expect((await lockedToggle("pause")).status).toBe(200);
+  const lockedOn = await lockedToggle("resume");
+  expect(lockedOn.status).toBe(200);
+  expect(((await lockedOn.json()) as { status: string }).status).toBe("active");
+  const lockedRename = await f.app.request(`${f.base}/${locked.id}`, {
+    method: "PATCH",
+    headers: f.admin.headers,
+    body: JSON.stringify({ name: "Mine now" }),
+  });
+  expect(lockedRename.status).toBe(403);
+});

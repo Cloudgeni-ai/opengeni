@@ -1,5 +1,36 @@
 # @opengeni/contracts
 
+## 6.41.0
+
+### Minor Changes
+
+- bbbeecf: Add Heedeo signup scoring, off by default. An operator mode (`heedeoSignupMode`: `off`, `shadow` or `enforce`, through the signup network velocity setter) and the `OPENGENI_HEEDEO_*` keys turn it on. Shadow scores each new account once, just before it is created, and stores the verdict without acting on it; enforce refuses a signup in Heedeo's `block` band. Heedeo failures never block a signup. The client config gains an optional `auth.heedeo` (publishable key and script URL) while scoring is on.
+- dd6dd0b: A meeting recorded in your Personal workspace can be shared with one of your team workspaces (`PATCH …/recordings/:recordingId` with `{ visibility: "workspace", sharedWorkspaceId }`), from any workspace where you see it. Everyone in that workspace can open it read only, and agents there find it with `meetings_search`; `Recording.sharedWorkspaceId` says where it is shared. The meeting page's Share menu lists "Only me" and your team workspaces.
+
+## 6.40.0
+
+### Minor Changes
+
+- 8a8579a: Add `setSessionModelSettings` and its HTTP endpoint so integration servers can change future session model defaults without sending a message. An optional comparison protects against overwriting a concurrent change, and retrying with the same key does not apply the update twice.
+- 2a4f625: The sidebar layout's options add `appsPlacement`: apps as rows in the Sessions list (`sessions`, the default), in an Apps section of their own below Sessions (`section`), or hidden (`hidden`). `sessionsShowApps` stays and follows it (`false` is `hidden`), so saved layouts and existing callers keep working; a `tab` a preview saved reads as `section`. With `SessionShellSlots.appsPlacement` `section`, the Sessions list draws an Apps section below the list, with the same header style as Sessions, showing the first five apps and Show more for the rest; its view menu offers the choice when the surface passes `onAppsPlacementChange`. The agent page's Can use lists tools by readable name (the tool's own title, a curated GitHub name, or its code name in words); one GitHub action is one row covering Opengeni's built-in name and GitHub MCP's, so a choice there sets both.
+
+### Patch Changes
+
+- 2a4f625: Settings → Sidebar and the rail's own items load again in the web app. An agent link's avatar and an app package's sidebar path are now read when parsing, so they no longer depend on which bundle chunk loads first; the web build's chunk-order check now also catches reads inside schema factories.
+
+## 6.39.0
+
+### Minor Changes
+
+- e4598af: Insights usage can group by agent (`groupBy=agent`) and filter by `agentId`; a worker's usage counts toward its root chat's agent, and responses add `facets.agents`. An agent's page shows what it cost in the last 30 days and per run to people who can see Usage.
+- e4598af: Agents are easier to set up. **Add agent ▾ → Create with chat** opens a chat that drafts the agent from a plain description and creates it once the person confirms, using the new bundled `agents` Skill (`builtin:agents`); `bot_template_save` also accepts `toolPermissions` and `skills`. New agents in the form start with short Instructions and ask before merging pull requests. The form and the agent's page offer common triggers as switches: when a pull request opens, when mentioned on a PR, and every weekday morning (`commonAgentTriggers()`).
+
+### Patch Changes
+
+- 9012657: A script that keeps calling `ogtool` or the native `codemode` client after its turn ended no longer hammers the API: a bearer refused with 401, or with 403 `agent_attempt_caller_stale`, is remembered across processes in a private per-user marker (a hash, never the bearer), and later calls with it fail locally with the same error. A refused API request now also logs who sent it: the worker's hashed attempt key (`callerCorrelationId`) for an agent-attempt bearer, a hashed credential key otherwise, and the User-Agent product.
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- b8a49e1: Using a shared secret no longer implies seeing it. In workspace, task and organization vaults, only the person who saved an item and admins can reveal, copy or download its values or see its one-time codes; everyone else who may use it, including on existing items and items from connected password managers, uses it by reference and can still replace it. Only me secrets work as before. A new **Use only** setting makes a secret unrevealable for everyone, its creator and admins included; it can't be undone. Vault items gain `useOnly` and `canReveal`, and item create and update accept `useOnly: true`.
+
 ## 6.38.0
 
 ### Minor Changes

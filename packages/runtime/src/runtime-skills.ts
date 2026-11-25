@@ -56,6 +56,8 @@ export type NativeToolSkillSet = Readonly<{
   editableArtifacts: boolean;
   sites?: boolean;
   schedules?: boolean;
+  /** The agent-saving tool (`bot_template_save`). */
+  agents?: boolean;
   /** Secret references and the `secret_*` tools (capability `secrets`). */
   secrets?: boolean;
   videoGeneration: boolean;
@@ -133,6 +135,7 @@ export function loadNativeToolSkillArtifacts(
   if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
   if (nativeTools.sites) directories.push("bundled_site_skills");
   if (nativeTools.secrets) directories.push("bundled_secret_skills");
+  if (nativeTools.agents) directories.push("bundled_agent_skills");
   if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
   return directories.flatMap((directory) => packagedSkillArtifacts(directory));
 }
@@ -427,6 +430,12 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
     sources.push({
       names: skillDirNames(packagedSkillDirectory("bundled_secret_skills")),
       reason: "native secrets tool surface",
+    });
+  }
+  if (nativeTools.agents) {
+    sources.push({
+      names: skillDirNames(packagedSkillDirectory("bundled_agent_skills")),
+      reason: "native agent-saving tool surface",
     });
   }
   if (nativeTools.videoGeneration) {

@@ -79,6 +79,7 @@ export type BundledSkillId =
   | "builtin:sites"
   | "builtin:video-generation"
   | "builtin:secrets"
+  | "builtin:agents"
   | LegacyBundledSkillId;
 /**
  * @deprecated Renamed to the neutral ids above; still accepted and resolved to them.
@@ -1884,6 +1885,12 @@ export type SessionTenancyPublicProjection = {
     forkedAt: string;
   } | null;
 };
+
+export type {
+  SessionModelSettings,
+  SetSessionModelSettingsRequest,
+  SetSessionModelSettingsResponse,
+} from "@opengeni/contracts";
 
 export type UpdateSessionVisibilityRequest = {
   visibility: SessionVisibility;
@@ -6462,6 +6469,8 @@ export type ClientAuthConfig =
        */
       newSignupsEnabled?: boolean;
       signupChallengeSiteKey?: string | undefined;
+      /** Heedeo signup scoring's browser script; present only while scoring is on. */
+      heedeo?: { publishableKey: string; scriptUrl: string } | undefined;
       /** Sign in with a passkey, and add passkeys in Security; omitted (false) by older deployments. */
       passkeySignIn?: boolean;
       /** Create an account with only a name and a passkey; omitted (false) by older deployments. */

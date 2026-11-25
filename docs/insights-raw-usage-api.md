@@ -33,6 +33,17 @@ not returned per hidden call. Private/Personal rows are not identity-filterable;
 facets contain only visible metadata. Deleted and restricted usage are distinct.
 Call details are visible-only, with filtering before cursor and limit.
 
+Usage groups by agent (`groupBy=agent`) and filters by `agentId` (migration
+1564). A row's agent is its ROOT chat's `sessions.agent_id`, so child workers
+count toward the agent of the chat that started them. Only visible rows carry
+`agentId`; `agentName` is set only for a shared agent or an Only me agent the
+caller (or the person a turn acts for) owns, otherwise the group reads
+"Unavailable agent". Chats without an agent are one `unfiled` "No agent" group.
+Like the other identity filters, `agentId` matches visible usage only; hidden
+rows never reveal which agent a hidden chat used. `facets.agents` lists the
+visible agents with usage and marks servers that answer the agent dimension.
+The calls endpoint does not accept `agentId`.
+
 Charged amounts come only from negative `model_usage_debit` / `model_response`
 credit-ledger entries, matched by `turnId:sourceKey`. Requested fact prices are
 not actual debits. Unmatched workspace/account charges retain their money in
@@ -42,7 +53,7 @@ amounts can be up to 60 seconds stale. Cache hits preserve `generatedAt` and
 `dataThrough`. Every request reauthenticates and reauthorizes; keys partition by
 account/workspace, normalized query, authenticated credential/principal and
 current selected-workspace/session-read ceilings. The existing committed
-session-activity revision plus current shared inventory/project/schedule metadata
+session-activity revision plus current shared inventory/project/schedule/agent metadata
 fences private/deleted/moved identities before a hit. Unavailable fence metadata
 disables caching. Credentials are HMAC-digested, not retained as cache keys.
 The cache holds at most 128 entries/8 MiB, with a 1 MiB per-response limit; hits

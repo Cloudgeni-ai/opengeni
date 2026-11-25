@@ -2775,18 +2775,23 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   // its workspace's new chat); go there while access revalidates, so the app
   // opens on it. Resolves once the destination is the current location.
   const completeOrganizationOnboarding = useCallback(
-    async (destination?: { workspaceId: string; sessionId?: string }) => {
+    async (destination?: { workspaceId: string; sessionId?: string; page?: "get-started" }) => {
       const arrived = destination?.sessionId
         ? navigate({
             to: "/workspaces/$workspaceId/sessions/$sessionId",
             params: { workspaceId: destination.workspaceId, sessionId: destination.sessionId },
           })
-        : destination
+        : destination?.page === "get-started"
           ? navigate({
-              to: "/workspaces/$workspaceId/sessions",
+              to: "/workspaces/$workspaceId/get-started",
               params: { workspaceId: destination.workspaceId },
             })
-          : null;
+          : destination
+            ? navigate({
+                to: "/workspaces/$workspaceId/sessions",
+                params: { workspaceId: destination.workspaceId },
+              })
+            : null;
       revalidatePrincipalAccess();
       await arrived;
     },

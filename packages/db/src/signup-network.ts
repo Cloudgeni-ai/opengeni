@@ -117,6 +117,11 @@ export type SignupNetworkVelocitySettings = {
    * "Card verification"); "off" until set. Older databases omit it.
    */
   cardVerificationMode?: "off" | "enforce";
+  /**
+   * Migration 1566: Heedeo signup scoring (docs/signup-abuse-protection.md,
+   * "Heedeo shadow scoring"); "off" until set. Older databases omit it.
+   */
+  heedeoSignupMode?: "off" | "shadow" | "enforce";
   operator: string | null;
   changedAt: string | null;
 };
@@ -146,6 +151,7 @@ export type SignupNetworkVelocityChanges = Partial<
     | "slowDomainHoldThreshold"
     | "slowDomainWindowHours"
     | "cardVerificationMode"
+    | "heedeoSignupMode"
   >
 >;
 

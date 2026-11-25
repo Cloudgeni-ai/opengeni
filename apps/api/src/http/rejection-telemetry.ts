@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { ErrorCode, Permission } from "@opengeni/contracts";
+import { ErrorCode, Permission, signedDelegatedAccessTokenClaims } from "@opengeni/contracts";
+import { turnExecutionTelemetryKey } from "@opengeni/observability";
+import { SITE_GATEWAY_REFUSAL_REASONS } from "../site-publishing/gateway-signature";
 
 /**
  * Bounded, content-free classification of a rejected (4xx/5xx) API response,
@@ -18,11 +20,15 @@ import { ErrorCode, Permission } from "@opengeni/contracts";
  *   numbers normalized away. It groups identical refusals in logs; resolve it
  *   back to source text with `bun run scripts/resolve-rejection-fingerprint.ts`.
  *   It never becomes a metric label.
+ * - `detail` is the closed sub-reason of a refusal whose reason has one (a
+ *   site-runtime gateway signature refusal: `missing_headers`, `skew`, ...).
+ *   Logged only, never a metric label.
  */
 export type HttpRejectionFacts = {
   code: string;
   reason: string;
   fingerprint?: string;
+  detail?: string;
 };
 
 const ERROR_CODES: ReadonlySet<string> = new Set(ErrorCode.options);
@@ -33,8 +39,71 @@ const CONTROL_CODE = /^[a-z][a-z0-9_]{0,31}$/;
 /** A route's own authored top-level code, such as `SESSION_CREATE_REJECTED`. */
 const ROUTE_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
 const MAX_ENVELOPE_BYTES = 32 * 1024;
+/** Reasons whose `details.reason` is a closed, content-free sub-reason. */
+const CLOSED_DETAIL_REASONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["site_gateway_signature_invalid", new Set<string>(SITE_GATEWAY_REFUSAL_REASONS)],
+]);
 
 export const UNCLASSIFIED_REJECTION_REASON = "unclassified";
+
+/**
+ * Who sent a refused request, without publishing an identifier or a credential,
+ * so a client that keeps calling with a dead credential can be found:
+ *
+ * - `callerCorrelationId`: for a signed agent-attempt bearer (also an expired
+ *   one), the same hashed attempt key the worker logs as `correlationId`
+ *   (`turnExecutionTelemetryKey`), naming the turn attempt whose process is
+ *   still calling.
+ * - `callerCredentialKey`: for any other bearer, a domain-separated one-way
+ *   hash that groups requests sent with the same credential.
+ * - `callerAgent`: the first User-Agent product token, such as
+ *   `opengeni-agent/1.2.3`.
+ *
+ * Log only, never a metric label.
+ */
+export type RejectedCallerAttributes = {
+  callerCorrelationId?: string;
+  callerCredentialKey?: string;
+  callerAgent?: string;
+};
+
+const BEARER = /^Bearer ([^\s]{1,16384})$/;
+const USER_AGENT_PRODUCT =
+  /^([A-Za-z][A-Za-z0-9._-]{0,47})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=[\s;(]|$)/;
+
+export async function rejectedCallerLogAttributes(
+  headers: Headers,
+  delegationSecret: string | undefined,
+): Promise<RejectedCallerAttributes> {
+  const attributes: RejectedCallerAttributes = {};
+  const product = USER_AGENT_PRODUCT.exec(headers.get("user-agent")?.trim() ?? "");
+  if (product) attributes.callerAgent = product[2] ? `${product[1]}/${product[2]}` : product[1]!;
+  const bearer = BEARER.exec(headers.get("authorization")?.trim() ?? "")?.[1];
+  if (!bearer) return attributes;
+  const claims = delegationSecret
+    ? await signedDelegatedAccessTokenClaims(delegationSecret, bearer).catch(() => null)
+    : null;
+  if (claims?.principalKind === "agent_attempt" && claims.sessionId && claims.attemptId) {
+    attributes.callerCorrelationId = turnExecutionTelemetryKey(
+      claims.workspaceId,
+      claims.sessionId,
+      claims.attemptId,
+    );
+  } else {
+    attributes.callerCredentialKey = rejectedCredentialTelemetryKey(bearer);
+  }
+  return attributes;
+}
+
+/** Groups requests sent with one credential; the domain separator keeps it
+ * from matching any stored credential digest. */
+export function rejectedCredentialTelemetryKey(credential: string): string {
+  return `cred_${createHash("sha256")
+    .update("opengeni:rejected-credential-telemetry:v1\0")
+    .update(credential)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
 
 export function rejectionFingerprint(message: string): string {
   return `m_${createHash("sha256").update(normalizeRejectionMessage(message)).digest("hex").slice(0, 10)}`;
@@ -61,6 +130,14 @@ function permissionReason(permission: unknown): string | null {
   return typeof permission === "string" && PERMISSIONS.has(permission)
     ? `permission:${permission}`
     : null;
+}
+
+/** The closed sub-reason for `reason`, from `details.reason`; never free text. */
+function closedDetail(reason: string, details: Record<string, unknown> | undefined) {
+  const value = details?.reason;
+  return typeof value === "string" && CLOSED_DETAIL_REASONS.get(reason)?.has(value)
+    ? { detail: value }
+    : {};
 }
 
 /**
@@ -101,16 +178,18 @@ export function httpRejectionFactsFromEnvelope(
     routeShaped && typeof record.code === "string" && !ERROR_CODES.has(record.code)
       ? record.code
       : null;
+  const reason =
+    permissionReason(details?.permission) ??
+    rejectionReasonFromMessage(message) ??
+    detailCode ??
+    controlCode ??
+    routeCode ??
+    UNCLASSIFIED_REJECTION_REASON;
   return {
     code,
-    reason:
-      permissionReason(details?.permission) ??
-      rejectionReasonFromMessage(message) ??
-      detailCode ??
-      controlCode ??
-      routeCode ??
-      UNCLASSIFIED_REJECTION_REASON,
+    reason,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
+    ...closedDetail(reason, details),
   };
 }
 
@@ -128,6 +207,8 @@ export function httpRejectionFactsFromError(
     error && typeof error === "object" ? (error as { details?: unknown }).details : undefined;
   const detailCode =
     details && typeof details === "object" ? (details as { code?: unknown }).code : undefined;
+  // No `detail` here: this path logs through the failure logger, which does
+  // not carry rejection attributes; refusals reach the envelope path first.
   return {
     code: fallbackCode,
     reason:

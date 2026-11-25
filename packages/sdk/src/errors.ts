@@ -426,7 +426,8 @@ const PUBLIC_BILLING_ACTIONS: ReadonlySet<string> = new Set([
 
 function boundedApiDetails(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const entries = Object.entries(value as Record<string, unknown>).slice(0, 16);
+  const record = value as Record<string, unknown>;
+  const entries = Object.entries(record).slice(0, 16);
   const details: Record<string, unknown> = {};
   for (const [key, entry] of entries) {
     if (!/^[a-zA-Z][\w.-]{0,63}$/.test(key)) continue;
@@ -441,6 +442,19 @@ function boundedApiDetails(value: unknown): Record<string, unknown> | undefined 
         .slice(0, 16)
         .map((item) => boundedApiField(item))
         .filter((item): item is string => item !== undefined);
+    } else if (
+      key === "current" &&
+      record.reason === "model_settings_mismatch" &&
+      typeof entry === "object" &&
+      !Array.isArray(entry)
+    ) {
+      const current = entry as Record<string, unknown>;
+      const model = boundedApiField(current.model);
+      const reasoningEffort = boundedApiField(current.reasoningEffort);
+      const latencyMode = boundedApiField(current.latencyMode);
+      if (model && reasoningEffort && latencyMode) {
+        details.current = { model, reasoningEffort, latencyMode };
+      }
     } else if (
       key === "action" &&
       typeof entry === "object" &&

@@ -132,6 +132,8 @@ const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-toke
 const { clearPendingDeveloperSetup, pendingDeveloperSetupFor } =
   await import("@/lib/pending-developer-setup");
 const { signupStarterSet } = await import("@opengeni/react/app/lib/signup-starter-set");
+const { SimplifiedInterfaceProvider } =
+  await import("@opengeni/react/app/lib/simplified-interface");
 const VALID_FRAGMENT_SETUP_TOKEN = "A".repeat(43);
 const VALID_QUERY_SETUP_TOKEN = "B".repeat(43);
 
@@ -1747,7 +1749,7 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("signup asks how to use Opengeni first, and the cloud path ends at home", async () => {
+  test("signup asks what the person does first, and the engineer path ends at the guided setups", async () => {
     const onComplete = mock((_destination?: unknown) => undefined);
     const createOrganizationApiKey = mock(async () => {
       throw new Error("the cloud path creates no key");
@@ -1767,19 +1769,21 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
+      expect(container.querySelector("h1")!.textContent).toBe("What do you do?");
       expect(container.querySelector("#organization-onboarding-name")).toBeNull();
       const choices = Array.from(container.querySelectorAll("li button")).map(
         (button) => button.querySelector("span.font-medium")?.textContent,
       );
-      expect(choices).toEqual([
-        "Get help with everyday things",
-        "Add AI agents to my product",
-        "Run agents in the cloud",
-      ]);
+      expect(choices).toEqual(["Software engineer", "Not an engineer"]);
+      // Adding agents to a product is a small link, not a third choice.
+      expect(
+        Array.from(container.querySelectorAll("button")).some(
+          (button) => button.textContent === "Adding agents to your own product?",
+        ),
+      ).toBe(true);
       await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Software engineer"))!
           .click(),
       );
       // No organization form: one named after the person is created right away.
@@ -1791,7 +1795,9 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       expect(onComplete).toHaveBeenCalledTimes(1);
-      expect(onComplete.mock.calls[0]).toEqual([]);
+      expect(onComplete.mock.calls[0]).toEqual([
+        { workspaceId: "preview-workspace", page: "get-started" },
+      ]);
       expect(createOrganizationApiKey).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
@@ -1823,8 +1829,8 @@ describe("organization onboarding UI", () => {
       );
       await flush();
       await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Software engineer"))!
           .click(),
       );
       await flush();
@@ -1836,11 +1842,11 @@ describe("organization onboarding UI", () => {
         "Your organization is called Anna Berg. You can rename it any time in Organization settings.",
       );
       await clickButton(container, "Back");
-      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
+      expect(container.querySelector("h1")!.textContent).toBe("What do you do?");
       // Choosing the developer path now skips its name form: the organization exists.
       await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Add AI agents to my product"))!
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Adding agents to your own product?"))!
           .click(),
       );
       await flush();
@@ -1866,8 +1872,8 @@ describe("organization onboarding UI", () => {
       );
       await clickButton(container, "Back");
       await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Software engineer"))!
           .click(),
       );
       await flush();
@@ -1880,8 +1886,8 @@ describe("organization onboarding UI", () => {
       expect(pendingDeveloperSetupFor("anna@example.test")).toBeNull();
       await clickButton(container, "Back");
       await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Add AI agents to my product"))!
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Adding agents to your own product?"))!
           .click(),
       );
       await flush();
@@ -1924,8 +1930,8 @@ describe("organization onboarding UI", () => {
       );
       await flush();
       await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Get help with everyday things"))!
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Not an engineer"))!
           .click(),
       );
       await flush();
@@ -1943,6 +1949,43 @@ describe("organization onboarding UI", () => {
       expect(onComplete).toHaveBeenCalledTimes(1);
       expect(createOrganizationApiKey).not.toHaveBeenCalled();
     } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Not an engineer turns the simplified interface on in this browser, and keeps the product link", async () => {
+    window.localStorage.removeItem("opengeni.simplifiedInterface");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <SimplifiedInterfaceProvider>
+            <OrganizationOnboardingPanel
+              client={setupClient as never}
+              billingMode="stripe"
+              activeName="Anna Berg"
+              activeEmail="anna@example.test"
+              onComplete={() => undefined}
+            />
+          </SimplifiedInterfaceProvider>,
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain("Adding agents to your own product?");
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Not an engineer"))!
+          .click(),
+      );
+      await flush();
+      expect(window.localStorage.getItem("opengeni.simplifiedInterface")).toBe("on");
+    } finally {
+      window.localStorage.removeItem("opengeni.simplifiedInterface");
+      window.localStorage.removeItem("opengeni.signupUseCase.v1");
+      window.sessionStorage.clear();
       await act(async () => root.unmount());
       container.remove();
     }
@@ -1996,8 +2039,8 @@ describe("organization onboarding UI", () => {
         ),
       );
       await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Add AI agents to my product"))!
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+          .find((button) => button.textContent?.includes("Adding agents to your own product?"))!
           .click(),
       );
       expect(createOrganizationApiKey).not.toHaveBeenCalled();
@@ -2428,7 +2471,7 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       await flush();
-      expect(container.textContent).toContain("How do you want to use Opengeni?");
+      expect(container.textContent).toContain("What do you do?");
       expect(container.textContent).toContain("Signed in as ada@example.test");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
@@ -3213,6 +3256,12 @@ describe("onboarding leads with Pro where plans are sold", () => {
       const first = createSubscriptionCheckout.mock.calls[0]![0];
       expect(first).toMatchObject({ accountId: "organization-a", planKey: "pro" });
       expect(String(first.successUrl)).toContain("/workspaces/personal-workspace/sessions");
+      // The new-chat page confirms the plan once it is active; cancelling returns plainly.
+      const success = new URL(String(first.successUrl)).searchParams;
+      expect(success.get("checkoutReturn")).toBe("success");
+      expect(success.get("checkoutAccount")).toBe("organization-a");
+      expect(success.get("checkoutPlan")).toBe("pro");
+      expect(String(first.cancelUrl)).not.toContain("checkout");
       // A retry of the same plan reuses its key; Max is its own checkout.
       await act(async () => getPro.click());
       await flush();
@@ -3225,6 +3274,7 @@ describe("onboarding leads with Pro where plans are sold", () => {
       await flush();
       const max = createSubscriptionCheckout.mock.calls[2]![0];
       expect(max).toMatchObject({ planKey: "max" });
+      expect(new URL(String(max.successUrl)).searchParams.get("checkoutPlan")).toBe("max");
       expect(max.idempotencyKey).not.toBe(first.idempotencyKey);
     } finally {
       await unmount();

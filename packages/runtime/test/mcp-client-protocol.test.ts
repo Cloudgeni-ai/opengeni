@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { MCPServerStreamableHttp } from "@openai/agents";
 import { Client as LegacyClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport as LegacyClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -12,6 +12,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { McpServer as ModernMcpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
+import { PrefixedMcpServer, configureRuntimeMetricsHooks } from "../src/index";
 import { mcpStreamableHttpClientOptions } from "../src/mcp-client";
 
 // Tool definitions with deliberately unusual key order, nested schemas,
@@ -55,16 +56,31 @@ const LEGACY_TOOLS = [
     inputSchema: { type: "object" },
   },
 ];
+const INVALID_OUTPUT_TOOL = {
+  name: "invalid-output",
+  inputSchema: { type: "object" },
+  outputSchema: {
+    type: "object",
+    properties: { hits: { type: "number" } },
+    required: ["hits"],
+  },
+};
 
 type Started = { url: string; methods: string[]; stop: () => void };
 const started: Started[] = [];
 
 afterEach(() => {
   for (const server of started.splice(0)) server.stop();
+  configureRuntimeMetricsHooks(null);
 });
 
 function startLegacyServer(
-  options: { probeStatus?: number; answersDiscover?: boolean } = {},
+  options: {
+    probeStatus?: number;
+    answersDiscover?: boolean;
+    invalidOutput?: boolean;
+    sse?: boolean;
+  } = {},
 ): Started {
   const methods: string[] = [];
   // Like some hosted servers: it answers the 2026-07-28 `server/discover`
@@ -105,11 +121,14 @@ function startLegacyServer(
         { name: "legacy-fixture", version: "1.0.0" },
         { capabilities: { tools: {} } },
       );
-      mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: LEGACY_TOOLS }));
+      mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: options.invalidOutput ? [...LEGACY_TOOLS, INVALID_OUTPUT_TOOL] : LEGACY_TOOLS,
+      }));
       mcp.setRequestHandler(CallToolRequestSchema, async (call) => {
         if (call.params.name === "fail") {
           throw new McpError(ErrorCode.InvalidParams, "the filters are not valid", {
             field: "filters",
+            status: 422,
           });
         }
         if (call.params.name === "slow") {
@@ -120,7 +139,7 @@ function startLegacyServer(
           structuredContent: { hits: ["one", "two"] },
         };
       });
-      const transport = new LegacyServerTransport({ enableJsonResponse: true });
+      const transport = new LegacyServerTransport({ enableJsonResponse: !options.sse });
       await mcp.connect(transport);
       return await transport.handleRequest(request);
     },
@@ -322,6 +341,71 @@ test("server errors and timeouts keep their v1 shapes and model-visible text", a
   } finally {
     await server.close();
   }
+});
+
+test.each([false, true])(
+  "external tool metrics distinguish wire Invalid params from client output validation (SSE: %s)",
+  async (sse) => {
+    const fixture = startLegacyServer({ invalidOutput: true, sse });
+    const expected = await withLegacyClient(fixture.url, async (client) =>
+      client.callTool({ name: "fail", arguments: {} }).catch((error: unknown) => error),
+    );
+    fixture.methods.length = 0;
+    const client = connectV2(fixture.url);
+    const server = new PrefixedMcpServer(client, "fixture");
+    const outcomes: string[] = [];
+    configureRuntimeMetricsHooks({ onMcpToolCall: ({ outcome }) => outcomes.push(outcome) });
+    await server.connect();
+    try {
+      await server.listTools();
+      // Run concurrently to ensure the wire reply is attributed to its own call.
+      const [failure, invalidOutput] = await Promise.all([
+        server.executeCatalogTool("fail", {}).catch((error: unknown) => error),
+        server.executeCatalogTool("invalid-output", {}).catch((error: unknown) => error),
+      ]);
+      expect(errorShape(failure)).toEqual(errorShape(expected));
+      expect(errorShape(failure).code).toBe(ErrorCode.InvalidParams);
+      expect(errorShape(invalidOutput)).toEqual(
+        errorShape(
+          await client.callToolResult("invalid-output", {}).catch((error: unknown) => error),
+        ),
+      );
+      expect(errorShape(invalidOutput).code).toBe(ErrorCode.InvalidParams);
+      expect(errorShape(invalidOutput).message).toContain(
+        "does not match the tool's output schema",
+      );
+    } finally {
+      await server.close();
+    }
+    expect(fixture.methods.filter((method) => method === "tools/call")).toHaveLength(3);
+    expect(outcomes.sort()).toEqual(["rejected", "thrown_protocol_error"]);
+  },
+);
+
+test("wire Invalid params does not change best-effort error content or retry the call", async () => {
+  const fixture = startLegacyServer();
+  const server = new PrefixedMcpServer(connectV2(fixture.url), "fixture", undefined, true);
+  const outcomes: string[] = [];
+  configureRuntimeMetricsHooks({ onMcpToolCall: ({ outcome }) => outcomes.push(outcome) });
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  await server.connect();
+  try {
+    expect(await server.executeCatalogTool("fail", {})).toEqual({
+      isError: true,
+      content: [
+        { type: "text", text: "MCP error -32602: MCP error -32602: the filters are not valid" },
+        {
+          type: "text",
+          text: "This tool is unavailable for the rest of this turn. Do not retry it — continue without it or use another approach.",
+        },
+      ],
+    });
+  } finally {
+    warn.mockRestore();
+    await server.close();
+  }
+  expect(fixture.methods.filter((method) => method === "tools/call")).toHaveLength(1);
+  expect(outcomes).toEqual(["rejected"]);
 });
 
 test("a 2026-07-28 server negotiates the modern era", async () => {

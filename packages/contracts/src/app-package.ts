@@ -80,7 +80,10 @@ export type AppPackageSync = z.infer<typeof AppPackageSync>;
  */
 export const AppPackageSidebarItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    path: SidebarAppPath.optional(),
+    // A getter, read when parsing: the sidebar's chunk can import this one back.
+    get path() {
+      return SidebarAppPath.optional();
+    },
     label: primitives.string.trim().min(1).max(SIDEBAR_LABEL_MAX_CHARS).optional(),
     group: primitives.string.trim().min(1).max(SIDEBAR_LABEL_MAX_CHARS).optional(),
   }),

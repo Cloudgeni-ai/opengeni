@@ -1,5 +1,37 @@
 # @opengeni/browserd
 
+## 0.4.63
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/interaction@6.41.0
+
+## 0.4.62
+
+### Patch Changes
+
+- 8f8ea7f: A managed browser launched through the desktop image's browser wrapper from an image older than its profile fix is recorded with its process again. The controller now names its own profile to the wrapper, and the process check accepts that same profile switch repeated, so the browser can be continued after it stops instead of being refused as having no recorded browser process. Sandboxes keep the image they were created from, so this reaches them without an image change.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/interaction@6.40.0
+
+## 0.4.61
+
+### Patch Changes
+
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/interaction@6.39.0
+
 ## 0.4.60
 
 ### Patch Changes

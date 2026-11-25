@@ -24,6 +24,9 @@ import {
 type View = "list" | "meeting" | "settings";
 /** The fixture's 31-minute meeting still being transcribed. */
 const TRANSCRIBING_RECORDING_ID = "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5";
+/** The viewer's team workspaces beside the fixture's, for ?share=personal|shared. */
+const SALES_WORKSPACE_ID = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
+const DESIGN_WORKSPACE_ID = "c3d4e5f6-a7b8-4c9d-8e0f-2a3b4c5d6e7f";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "stopped" | "denied";
 type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
 /** A track whose device went away mid-recording: the microphone waiting for one, or shared audio that ended. */
@@ -217,6 +220,12 @@ export default function PageMeetingsSection() {
   // silent together. ?gaps=long: the microphone dropped an hour in.
   const gapsParam = initial.get("gaps");
   const gaps = gapsParam === "on" || gapsParam === "all" || gapsParam === "long";
+  // ?share=personal: the fixture workspace is the viewer's Personal one and the
+  // ready meeting is Only me, so Share lists their team workspaces.
+  // ?share=shared: the same, already shared with Sales. ?share=member: a
+  // teammate shared the ready meeting from their Personal workspace, read only.
+  const shareParam = initial.get("share");
+  const sharePersonal = shareParam === "personal" || shareParam === "shared";
   const fixture = useMemo(() => {
     const base = createMeetingsFixture({
       state: data,
@@ -224,7 +233,18 @@ export default function PageMeetingsSection() {
       otherWorkspaces,
       creditsOnly,
       subscription,
+      sharedFromPersonal: shareParam === "member",
     });
+    if (sharePersonal) {
+      // The fixture applies the change before its first await.
+      void base.client.updateRecording(
+        base.workspaceId,
+        base.readyId,
+        shareParam === "shared"
+          ? { visibility: "workspace", sharedWorkspaceId: SALES_WORKSPACE_ID }
+          : { visibility: "private" },
+      );
+    }
     if (!failure && !elsewhereAudio && !gaps) return base;
     const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
       const recording = await base.client.getRecording(workspaceId, id);
@@ -277,7 +297,16 @@ export default function PageMeetingsSection() {
     elsewhereAudio,
     gaps,
     gapsParam,
+    shareParam,
+    sharePersonal,
   ]);
+  const reachWorkspaces = sharePersonal
+    ? [
+        { id: fixture.workspaceId, name: "Personal", personal: true },
+        { id: SALES_WORKSPACE_ID, name: "Sales" },
+        { id: DESIGN_WORKSPACE_ID, name: "Design" },
+      ]
+    : undefined;
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.
@@ -409,6 +438,7 @@ export default function PageMeetingsSection() {
                 viewerSubjectId={fixture.viewerSubjectId}
                 viewerName="Ingrid Solberg"
                 voiceRecognition={settings.voiceprints === true}
+                reachWorkspaces={reachWorkspaces}
                 onOpenSettings={() => setView("settings")}
                 onOpenBilling={() => toast("Opens the organization's billing")}
                 onConnectModels={() => toast("Opens the workspace's models")}

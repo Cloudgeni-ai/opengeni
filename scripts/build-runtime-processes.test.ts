@@ -25,6 +25,7 @@ test("production process bundles retain every runtime skill asset directory", as
       "bundled_site_skills",
       "bundled_secret_skills",
       "bundled_video_skills",
+      "bundled_agent_skills",
       "bundled_management_skills",
     ]);
     for (const [directoryName, skillName] of [
@@ -37,6 +38,7 @@ test("production process bundles retain every runtime skill asset directory", as
       ["bundled_site_skills", "sites"],
       ["bundled_secret_skills", "secrets"],
       ["bundled_video_skills", "video-generation"],
+      ["bundled_agent_skills", "agents"],
       ["bundled_management_skills", "skill-management"],
     ] as const) {
       const skill = await readFile(

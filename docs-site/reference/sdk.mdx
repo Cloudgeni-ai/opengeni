@@ -87,6 +87,8 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 
 In a chat UI, wire Stop to `pauseSession`. Messages sent while paused queue until `resumeSession`. `cancelSession` permanently stops the session and its children.
 
+Use `og.setSessionModelSettings(workspaceId, sessionId, request)` from your server to change a chat's model defaults without adding a message. `request` takes `model`, `reasoningEffort`, `latencyMode`, a UUID `idempotencyKey`, and optional `expected` settings. A comparison mismatch throws `OpenGeniApiError` with status `409` and the current settings in `error.details.current`. See [Session model defaults](/reference/http-api#session-model-defaults) for turn behavior and retries.
+
 The complete method list is in [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
 
 ### Workspace member inventory

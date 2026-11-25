@@ -38,6 +38,7 @@ import {
   ownMeetingsReaching,
   ownRecordingWorkspaces,
   recordingVisible,
+  sharedRecordingHome,
   RecordingConflictError,
   RecordingNotFoundError,
   saveRecordingNote,
@@ -241,21 +242,40 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
   async function actorForMeeting(
     meetingId: string,
     permission: "sessions:read" | "sessions:create",
-  ): Promise<{ who: RecordingActor & { only: string | null }; recordedIn: string | null }> {
+  ): Promise<{
+    who: RecordingActor & { only: string | null };
+    recordedIn: string | null;
+    /** Shared with this workspace to read: only its owner changes it. */
+    readOnly?: boolean;
+  }> {
     const who = await actor();
     // A meeting-summary chat reaches its one meeting, here, and nothing else.
     if (who.only) return { who, recordedIn: null };
     if (await recordingVisible(deps.db, { ...who, recordingId: meetingId })) {
       return { who, recordedIn: null };
     }
+    // Shared with this workspace from its owner's Personal workspace: read
+    // there, and changed only by its owner.
+    const shared = await sharedRecordingHome(deps.db, { ...who, recordingId: meetingId });
+    if (shared && shared.ownerSubjectId !== who.subjectId) {
+      return permission === "sessions:read"
+        ? { who: { ...who, workspaceId: shared.workspaceId }, recordedIn: null }
+        : { who, recordedIn: null, readOnly: true };
+    }
+    const workspaces = await ownElsewhere(who, permission);
     const home = await ownRecordingHome(deps.db, {
       subjectId: who.subjectId,
       recordingId: meetingId,
-      workspaces: await ownElsewhere(who, permission),
+      workspaces,
       reachingWorkspaceId: await reachingHere(who),
     });
-    return home
-      ? { who: { ...who, workspaceId: home.id }, recordedIn: home.name }
+    const own =
+      home ??
+      (shared
+        ? (workspaces.find((workspace) => workspace.id === shared.workspaceId) ?? null)
+        : null);
+    return own
+      ? { who: { ...who, workspaceId: own.id }, recordedIn: own.name }
       : { who, recordedIn: null };
   }
 
@@ -269,7 +289,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meetings_search",
     {
       description:
-        "Find recorded meetings the person you act for can see: those shared with the workspace and their own, including their own Only me meetings from their other workspaces of this organization (marked recordedIn). Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
+        "Find recorded meetings the person you act for can see: those shared with the workspace (including from members' Personal workspaces) and their own, including their own Only me meetings from their other workspaces of this organization (marked recordedIn). Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
       inputSchema: {
         query: z
           .string()
@@ -554,7 +574,14 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (new TextEncoder().encode(request.notes).length > RECORDING_NOTE_MAX_BYTES) {
         return failure(json, "notes_too_long", "Notes can be at most 256 KiB; shorten them.");
       }
-      const { who } = await actorForMeeting(request.meetingId, "sessions:create");
+      const { who, readOnly } = await actorForMeeting(request.meetingId, "sessions:create");
+      if (readOnly) {
+        return failure(
+          json,
+          "read_only",
+          "This meeting is shared with the workspace to read; only the person who recorded it can change it.",
+        );
+      }
       if (who.only && who.only !== request.meetingId) return notVisible();
       // A summary chat writes the first notes and may revise only its own,
       // whatever revision it passes; the revision check below then refuses

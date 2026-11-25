@@ -9954,6 +9954,19 @@
     },
     {
       "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-settings",
+      "sdk": [
+        "OpenGeniEmbeddingClient.setSessionModelSettings"
+      ],
+      "request": [
+        "SetSessionModelSettingsRequest"
+      ],
+      "response": [
+        "SetSessionModelSettingsResponse"
+      ]
+    },
+    {
+      "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/pin",
       "sdk": [
         "OpenGeniClient.updateSessionPin"
@@ -15470,7 +15483,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:event-triggers\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:agents\\\"\",\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:event-triggers\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
       }
     },
     "CancelBillingSubscriptionRequest": {
@@ -16232,6 +16245,9 @@
         "$.auth|mode=configuredToken.scheme": "const!=[\"\\\"bearer\\\"\"]",
         "$.auth|mode=managedSession": "object",
         "$.auth|mode=managedSession.emailVerificationRequired": "boolean!",
+        "$.auth|mode=managedSession.heedeo": "object?",
+        "$.auth|mode=managedSession.heedeo.publishableKey": "string!",
+        "$.auth|mode=managedSession.heedeo.scriptUrl": "string!",
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
         "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
         "$.auth|mode=managedSession.passkeySignIn": "boolean!",
@@ -22413,6 +22429,10 @@
       ],
       "shape": {
         "$": "object",
+        "$.agents": "array?",
+        "$.agents[]": "object",
+        "$.agents[].id": "string!",
+        "$.agents[].name": "string!",
         "$.models": "array!",
         "$.models[]": "ref(InsightsModelFacet)",
         "$.payers": "array!",
@@ -22465,7 +22485,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"model\\\"\",\"\\\"payer\\\"\",\"\\\"person\\\"\",\"\\\"plan\\\"\",\"\\\"project\\\"\",\"\\\"provider\\\"\",\"\\\"rootSession\\\"\",\"\\\"schedule\\\"\",\"\\\"session\\\"\",\"\\\"source\\\"\",\"\\\"workspace\\\"\"]"
+        "$": "enum=[\"\\\"agent\\\"\",\"\\\"model\\\"\",\"\\\"payer\\\"\",\"\\\"person\\\"\",\"\\\"plan\\\"\",\"\\\"project\\\"\",\"\\\"provider\\\"\",\"\\\"rootSession\\\"\",\"\\\"schedule\\\"\",\"\\\"session\\\"\",\"\\\"source\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "InsightsUsageMeasures": {
@@ -28217,6 +28237,7 @@
         "$.purpose": "ref(RecordingPurpose)!",
         "$.reachWorkspaceIds": "array? null",
         "$.reachWorkspaceIds[]": "string",
+        "$.sharedWorkspaceId": "string? null",
         "$.sourceWorkspace": "object? null",
         "$.sourceWorkspace.id": "string!",
         "$.sourceWorkspace.name": "string!",
@@ -29040,6 +29061,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appsPlacement": "ref(SidebarAppsPlacement)!",
         "$.hiddenNavEntries": "array!",
         "$.hiddenNavEntries[]": "string",
         "$.sessionsShowApps": "boolean!",
@@ -32270,6 +32292,36 @@
         "$.provider": "string! null"
       }
     },
+    "SetSessionModelSettingsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expected": "object?",
+        "$.expected.latencyMode": "ref(LatencyMode)?",
+        "$.expected.model": "string?",
+        "$.expected.reasoningEffort": "ref(ReasoningEffort)?",
+        "$.idempotencyKey": "string!",
+        "$.latencyMode": "ref(LatencyMode)!",
+        "$.model": "string!",
+        "$.reasoningEffort": "ref(ReasoningEffort)!"
+      }
+    },
+    "SetSessionModelSettingsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.effectiveFrom": "const!=[\"\\\"future_turns\\\"\"]",
+        "$.latencyMode": "ref(LatencyMode)!",
+        "$.model": "string!",
+        "$.reasoningEffort": "ref(ReasoningEffort)!",
+        "$.releasedCapacityWaitTurnId": "string! null",
+        "$.sessionId": "string!"
+      }
+    },
     "SetSessionUsageLimitRequest": {
       "io": [
         "input"
@@ -32355,6 +32407,15 @@
         "$.text": "string!"
       }
     },
+    "SidebarAppsPlacement": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"hidden\\\"\",\"\\\"section\\\"\",\"\\\"sessions\\\"\"]"
+      }
+    },
     "SidebarItemIcon": {
       "io": [
         "input"
@@ -32411,6 +32472,7 @@
         "$|op=reset": "object",
         "$|op=reset.op": "const!=[\"\\\"reset\\\"\"]",
         "$|op=options": "object",
+        "$|op=options.appsPlacement": "ref(SidebarAppsPlacement)? null",
         "$|op=options.hiddenNavEntries": "array? null",
         "$|op=options.hiddenNavEntries[]": "ref(SidebarNavEntry)",
         "$|op=options.op": "const!=[\"\\\"options\\\"\"]",
@@ -32425,6 +32487,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appsPlacement": "ref(SidebarAppsPlacement)?",
         "$.hiddenNavEntries": "array?",
         "$.hiddenNavEntries[]": "ref(SidebarNavEntry)",
         "$.sessionsShowApps": "boolean?",
@@ -32472,7 +32535,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agents\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
+        "$": "enum=[\"\\\"agents\\\"\",\"\\\"apps\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"get_started\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
       }
     },
     "SiteAuthAuthorizeRequest": {
@@ -35573,6 +35636,7 @@
         "$.metadata{}|4{}": "ref(__schema0)",
         "$.reachWorkspaceIds": "array? null",
         "$.reachWorkspaceIds[]": "string",
+        "$.sharedWorkspaceId": "string? null",
         "$.title": "string?",
         "$.visibility": "ref(SessionVisibility)?"
       }
@@ -40240,6 +40304,7 @@
       "SessionMessageSearchResponse": "type",
       "SessionModelAccountChoiceResponse": "type",
       "SessionModelContextResponse": "type",
+      "SessionModelSettings": "type",
       "SessionOrgAgent": "type",
       "SessionPendingInputPreview": "type",
       "SessionPromptRouting": "type",
@@ -40305,12 +40370,15 @@
       "SetOwnResourceReachResponse": "type",
       "SetSessionModelAccountChoiceRequest": "type",
       "SetSessionModelAccountChoiceResponse": "type",
+      "SetSessionModelSettingsRequest": "type",
+      "SetSessionModelSettingsResponse": "type",
       "SetVaultItemApprovalRequest": "type",
       "SetWorkspaceAllowanceRequest": "type",
       "SetWorkspaceArtifactStatusRequest": "type",
       "SetWorkspaceModelKeyListPriceRequest": "type",
       "SharedSession": "type",
       "SharedSessionMessage": "type",
+      "SidebarAppsPlacement": "type",
       "SidebarItemIcon": "type",
       "SidebarItemOrigin": "type",
       "SidebarLayoutChange": "type",
@@ -44088,6 +44156,7 @@
       "WINDOW_LABEL": "value"
     },
     "@opengeni/react/markdown-math": {
+      "displayMathRanges": "value",
       "mayContainMath": "value",
       "PreparedMathMarkdown": "type",
       "prepareMathMarkdown": "value"
@@ -44910,7 +44979,8 @@
       "FAILED_RECORDING_ID": "value",
       "LIVE_LINES": "value",
       "LIVE_RECORDING_ID": "value",
-      "MeetingsFixture": "type"
+      "MeetingsFixture": "type",
+      "TEAMMATE_SUBJECT_ID": "value"
     },
     "@opengeni/react/this-computer": {
       "AppIcon": "value",
@@ -48714,6 +48784,7 @@
       "setOwnResourceReach",
       "setSessionInboxMute",
       "setSessionModelAccount",
+      "setSessionModelSettings",
       "setSessionUsageLimit",
       "setSiteSessionAccess",
       "setSuperGrokAccountAllocator",
@@ -51697,6 +51768,9 @@
       ],
       "setSessionModelAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelAccountChoiceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelAccountChoiceResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setSessionModelSettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelSettingsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelSettingsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setSessionUsageLimit": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionUsageLimitRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionUsageLimit\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

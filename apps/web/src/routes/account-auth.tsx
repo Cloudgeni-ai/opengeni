@@ -1,3 +1,4 @@
+import { heedeoSignupToken, preloadHeedeo } from "@/lib/heedeo";
 import { useSocialSignupChallenge } from "@/components/signup-challenge";
 import { BrowserAccountsApiError, createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { Loader2Icon } from "lucide-react";
@@ -156,6 +157,7 @@ export function AccountAuthRoute({
         if (config.auth.newSignupsEnabled !== false) {
           setChallengeSiteKey(config.auth.signupChallengeSiteKey);
         }
+        preloadHeedeo(config.auth.heedeo);
       })
       .catch(() => undefined);
     return () => {
@@ -235,6 +237,8 @@ export function AccountAuthRoute({
       // First-touch campaign tokens the opener carried into this window's URL;
       // the server counts them only if the provider callback creates an account.
       const attribution = signupAttribution();
+      // Fresh for every click: it may create an account.
+      const heedeoToken = await heedeoSignupToken();
       const result = await client.startSocialTransaction({
         operationId: attempt.operationId,
         expectedGeneration: attempt.expectedGeneration,
@@ -243,6 +247,7 @@ export function AccountAuthRoute({
         ...(attempt.signupChallengeToken
           ? { signupChallengeToken: attempt.signupChallengeToken }
           : {}),
+        ...(heedeoToken ? { heedeoToken } : {}),
         ...(attribution ? { attribution } : {}),
       });
       socialStartAttempt.current = null;

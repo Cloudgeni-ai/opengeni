@@ -167,10 +167,13 @@ export function MeetingSummary({
   notes,
   onOpenChat,
   mentions,
+  readOnly = false,
 }: {
   notes: UseRecordingNotesResult;
   onOpenChat?: ((sessionId: string) => void) | undefined;
   mentions: MeetingMentionResolver | null;
+  /** Shared from someone's Personal workspace: only its owner changes it. */
+  readOnly?: boolean;
 }) {
   const msg = useOpenGeniText();
   const [editing, setEditing] = useState(false);
@@ -187,23 +190,25 @@ export function MeetingSummary({
             <CopyNotesButton
               text={() => (mentions ? meetingNotesForCopy(note.body, mentions) : note.body)}
             />
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => setEditing(true)}
-              className="pointer-coarse:h-11"
-            >
-              <PencilIcon aria-hidden="true" />
-              {msg("meetings.notes.edit")}
-            </Button>
+            {readOnly ? null : (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setEditing(true)}
+                className="pointer-coarse:h-11"
+              >
+                <PencilIcon aria-hidden="true" />
+                {msg("meetings.notes.edit")}
+              </Button>
+            )}
           </div>
         </div>
       ) : null}
       <WrittenNotes
         note={note}
-        editing={editing}
-        onEdit={() => setEditing(true)}
+        editing={editing && !readOnly}
+        onEdit={readOnly ? null : () => setEditing(true)}
         onDone={() => setEditing(false)}
         save={(body) => notes.save("notes", body)}
         refresh={notes.refresh}
@@ -216,8 +221,24 @@ export function MeetingSummary({
 }
 
 /** The Notepad tab: what people jot down, saved as they type. */
-export function MeetingNotepad({ notes }: { notes: UseRecordingNotesResult }) {
+export function MeetingNotepad({
+  notes,
+  readOnly = false,
+}: {
+  notes: UseRecordingNotesResult;
+  /** Shared from someone's Personal workspace: only its owner changes it. */
+  readOnly?: boolean;
+}) {
+  const msg = useOpenGeniText();
   if (notes.loading && !notes.notepad) return <NotesSkeleton />;
+  if (readOnly) {
+    const body = notes.notepad?.body.trim() ?? "";
+    return body ? (
+      <p className="text-sm leading-6 whitespace-pre-wrap text-fg">{body}</p>
+    ) : (
+      <p className="text-sm leading-5 text-fg-muted">{msg("meetings.notes.notepadEmpty")}</p>
+    );
+  }
   return (
     <Notepad
       note={notes.notepad}
@@ -321,7 +342,8 @@ function WrittenNotes({
 }: {
   note: RecordingNote | null;
   editing: boolean;
-  onEdit: () => void;
+  /** Null when only the owner may write them. */
+  onEdit: (() => void) | null;
   onDone: () => void;
   save: (body: string) => Promise<RecordingNote>;
   refresh: () => Promise<void>;
@@ -420,16 +442,18 @@ function WrittenNotes({
     return (
       <div className="grid justify-items-start gap-3">
         <p className="text-sm leading-5 text-fg-muted">{msg("meetings.notes.empty")}</p>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={onEdit}
-          className="pointer-coarse:h-11"
-        >
-          <PencilIcon aria-hidden="true" />
-          {msg("meetings.notes.write")}
-        </Button>
+        {onEdit ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={onEdit}
+            className="pointer-coarse:h-11"
+          >
+            <PencilIcon aria-hidden="true" />
+            {msg("meetings.notes.write")}
+          </Button>
+        ) : null}
       </div>
     );
   }

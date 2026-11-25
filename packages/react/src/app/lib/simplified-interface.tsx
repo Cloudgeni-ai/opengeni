@@ -11,8 +11,9 @@ import {
 /**
  * The simplified interface: the same product with the same capabilities,
  * shown under the Geni name with fewer destinations, one model and credits
- * only. It is for people who arrive from gogeni.ai; everyone else gets the
- * full Opengeni console.
+ * only. It is for people who arrive from gogeni.ai and people who answer
+ * "Not an engineer" in onboarding; everyone else gets the full Opengeni
+ * console.
  *
  * It is presentation only, like the light or dark appearance. The flag is
  * kept in this browser, never sent to the server, and it changes no

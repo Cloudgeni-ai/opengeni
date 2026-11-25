@@ -837,6 +837,16 @@ BEGIN
               AND attnum>0 AND NOT attisdropped),runtime_table,${literal(role)});
       END LOOP;
     END IF;
+    -- Migration 1566's Heedeo signup scoring: the runtime reads the mode and
+    -- appends verdicts (deleting only expired ones under the table's policy).
+    -- The migration grants this to roles that already exist; converge it for
+    -- roles provisioned after it.
+    IF to_regclass('opengeni_private.signup_heedeo_mode_revisions') IS NOT NULL THEN
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.signup_heedeo_mode_revisions TO %I', ${literal(role)});
+    END IF;
+    IF to_regclass('opengeni_private.signup_heedeo_evaluations') IS NOT NULL THEN
+      EXECUTE format('GRANT INSERT, DELETE ON TABLE opengeni_private.signup_heedeo_evaluations TO %I', ${literal(role)});
+    END IF;
     -- Migration 0300's tenancy backfill ledger seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not
     -- yet exist, and these three live in the data schema rather than

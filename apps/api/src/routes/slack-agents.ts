@@ -41,9 +41,10 @@ import {
   type SlackAgentRecord,
 } from "@opengeni/db";
 import {
+  authorizationHoldsOrganizationAdministration,
   hasPermission,
   knowledgeContextForAccess,
-  requireAccountAdminAuthorizationStamp,
+  MissingPermissionRefusal,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type ApiRouteDeps,
@@ -343,17 +344,24 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   /**
    * Opening an agent to the organization in Slack lets people outside its
-   * workspace use what the workspace shares, so it takes the request's verified
-   * organization admin proof (`account:admin` for the agent's organization).
+   * workspace use what the workspace shares, so it takes organization
+   * administration (its owner or one of its admins, signed in as themselves),
+   * as the agent's own "Anyone in <organization>" does.
    * Turning it off only needs the workspace admin every edit already needs.
    */
   const requireOrganizationAdmin = async (
     c: Parameters<typeof requireAccessGrantAuthorization>[0],
     workspaceId: string,
   ) => {
-    requireAccountAdminAuthorizationStamp(
-      await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin"),
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:admin",
     );
+    if (!authorizationHoldsOrganizationAdministration(authorization)) {
+      throw new MissingPermissionRefusal("account:admin");
+    }
   };
 
   app.patch(`${base}/:agentId`, async (c) => {

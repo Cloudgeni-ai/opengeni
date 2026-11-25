@@ -73,9 +73,10 @@ import {
   agentVisibilityRecord,
   agentVisibilityValue,
   agentVisibleTo,
+  authorizationHoldsOrganizationAdministration,
   knowledgeContextForAccess,
+  MissingPermissionRefusal,
   requireAccessGrantAuthorization,
-  requireAccountAdminAuthorizationStamp,
   type AccessGrantAuthorization,
   type AgentViewContext,
   type AgentViewer,
@@ -243,11 +244,12 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   /**
    * Letting anyone in the organization use an agent opens it beyond its
-   * workspace, so it takes an organization admin (as Slack's open use did).
+   * workspace, so it takes the organization's owner or one of its admins
+   * (organization administration, not the owner-only `account:admin`).
    * Narrowing it back does not.
    */
   function requireOrganizationAccessAdmin(context: RequestContext): void {
-    requireAccountAdminAuthorizationStamp(context.access);
+    if (!isOrganizationAdmin(context)) throw new MissingPermissionRefusal("account:admin");
   }
 
   async function memoryReviewFirst(context: RequestContext): Promise<boolean> {
@@ -262,13 +264,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  /** The organization's owner or one of its admins, signed in as themselves. */
   function isOrganizationAdmin(context: RequestContext): boolean {
-    try {
-      requireAccountAdminAuthorizationStamp(context.access);
-      return true;
-    } catch {
-      return false;
-    }
+    return authorizationHoldsOrganizationAdministration(context.access);
   }
 
   /** Slack workspace names by installation, read from each installation's own workspace. */

@@ -87,6 +87,9 @@ import { AgentTriggerRepositories } from "./agent-trigger-repositories";
 import { gitHubRepositoryResource } from "../../lib/session-tools";
 import { AgentTriggerChatField } from "./agent-trigger-chat-field";
 
+// The one-click add beside the dialog, for pages outside this package (Get started).
+export { addAgentSuggestedTrigger, agentTriggerSaveError } from "./agent-trigger-model";
+
 export interface AgentTriggerDialogProps {
   agent: Agent;
   workspaceId: string;

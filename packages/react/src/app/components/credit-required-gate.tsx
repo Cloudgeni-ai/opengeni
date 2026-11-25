@@ -2,7 +2,12 @@ import { lazy, Suspense, useEffect, useState } from "react";
 
 import type { AccessContext } from "../types";
 import { useAppContext } from "../app-context";
-import { CHECKOUT_RETURN_QUERY, readCheckoutPageReturn } from "../lib/credit-checkout";
+import {
+  CHECKOUT_RETURN_QUERY,
+  forgetCheckoutPageReturn,
+  readCheckoutPageReturn,
+  rememberedCheckoutPageReturn,
+} from "../lib/credit-checkout";
 import { usePage } from "../lib/navigation";
 import { hasAccountPermission } from "../lib/permissions";
 import type { PaymentRefusalCode } from "../lib/model-access";
@@ -60,19 +65,29 @@ export function CreditRequiredGate(props: {
 
 /**
  * Back from a checkout that started on this page: drop the return keys from
- * the address and confirm the credits. The query is read on the first render,
- * before a route rewrites its own keys.
+ * the address and confirm the credits or plan. The query is read on the first
+ * render, before a route rewrites its own keys. When a host redirect or a
+ * setup step already rewrote the address, the return the app remembered at
+ * launch is used instead.
  */
 function useCheckoutPageReturn(): void {
   const page = usePage();
   const client = useAppContext().client;
-  const [query] = useState(() => page.readQuery());
+  const [query] = useState(() => {
+    const current = page.readQuery();
+    return current.has(CHECKOUT_RETURN_QUERY.outcome)
+      ? current
+      : (rememberedCheckoutPageReturn() ?? current);
+  });
   useEffect(() => {
     if (!query.has(CHECKOUT_RETURN_QUERY.outcome)) return;
+    forgetCheckoutPageReturn();
     const checkout = readCheckoutPageReturn(query);
     const current = page.readQuery();
-    for (const key of Object.values(CHECKOUT_RETURN_QUERY)) current.delete(key);
-    page.replaceQuery(current, { keepHistoryState: true });
+    if (current.has(CHECKOUT_RETURN_QUERY.outcome)) {
+      for (const key of Object.values(CHECKOUT_RETURN_QUERY)) current.delete(key);
+      page.replaceQuery(current, { keepHistoryState: true });
+    }
     if (!checkout) return;
     void import("./credits/checkout-return").then(({ followCheckoutPageReturn }) =>
       followCheckoutPageReturn(client, checkout),

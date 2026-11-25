@@ -69,7 +69,7 @@ import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
 import { withCallingWorkspaceProof } from "./calling-workspace";
-import { mcpStreamableHttpClientOptions } from "./mcp-client";
+import { McpToolCallObservation, mcpStreamableHttpClientOptions } from "./mcp-client";
 import {
   repositoryRemovalCommand,
   repositoryRemovalPlan,
@@ -9568,29 +9568,32 @@ function exactErrorMessage(error: unknown): string {
   }
 }
 
-/**
- * Read and remove the first-party server's mark that it refused the caller's
- * arguments. The mark is honored only from the first-party server, and is
- * removed so the result every caller sees is unchanged.
- */
-function takeFirstPartyArgumentRejection(
-  result: AttemptToolResultValue,
-  firstParty: boolean,
-): { result: AttemptToolResultValue; argumentRejected: boolean } {
+/** Preserve the existing first-party result projection; do not strip external metadata. */
+function stripFirstPartyArgumentRejection(result: AttemptToolResultValue): AttemptToolResultValue {
   const meta = result._meta;
-  if (!firstParty || !meta || !Object.hasOwn(meta, FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY)) {
-    return { result, argumentRejected: false };
+  if (!meta || !Object.hasOwn(meta, FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY)) {
+    return result;
   }
-  const { [FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY]: mark, ...rest } = meta;
+  const { [FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY]: _mark, ...rest } = meta;
   const { _meta: _removed, ...withoutMeta } = result;
-  return {
-    result: Object.keys(rest).length > 0 ? { ...withoutMeta, _meta: rest } : withoutMeta,
-    argumentRejected: mark === true && result.isError === true,
-  };
+  return Object.keys(rest).length > 0 ? { ...withoutMeta, _meta: rest } : withoutMeta;
 }
 
-function mcpThrownToolCallOutcome(error: unknown, signal?: AbortSignal): McpToolCallOutcome {
+function hasMcpArgumentRejectionMark({ _meta: meta }: AttemptToolResultValue): boolean {
+  return (
+    !!meta &&
+    Object.hasOwn(meta, FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY) &&
+    meta[FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY] === true
+  );
+}
+
+function mcpThrownToolCallOutcome(
+  error: unknown,
+  wireInvalidParams: boolean,
+  signal?: AbortSignal,
+): McpToolCallOutcome {
   try {
+    if (wireInvalidParams && signal?.aborted !== true) return "rejected";
     // The MCP SDK owns a precise timeout marker; check it before cancellation
     // because a timeout implementation may also abort its underlying request.
     if (isMcpRequestTimeoutError(error)) return "timeout";
@@ -11130,7 +11133,11 @@ export class PrefixedMcpServer implements MCPServer {
     } catch (error) {
       outcome = mcpDestinationRefusal(this.destinationPolicyFailure?.reason)
         ? "refused_by_policy"
-        : "failed";
+        : // The broker already refused this account a credential and told the
+          // person it needs attention; the server itself was not the problem.
+          this.setupAuthNeededReasons?.has(this.registryId)
+          ? "auth_needed"
+          : "failed";
       await this.reportDestinationPolicyFailure();
       // The SDK logs its rejected Error directly. Keep exact internal truth
       // out-of-band and reject only a structural public lifecycle error.
@@ -11699,6 +11706,8 @@ export class PrefixedMcpServer implements MCPServer {
     const exchange =
       recordsPhysicalCall && this.inner.callToolResult ? requestedExchange : undefined;
     const startedAt = recordsPhysicalCall ? performance.now() : 0;
+    const toolCallObservation =
+      recordsPhysicalCall && !this.firstPartyCatalog ? new McpToolCallObservation() : undefined;
     let metricRecorded = false;
     const recordOutcome = (outcome: McpToolCallOutcome): void => {
       if (!recordsPhysicalCall || metricRecorded) return;
@@ -11763,7 +11772,7 @@ export class PrefixedMcpServer implements MCPServer {
         throw new McpAccountParameterChoiceError(accountFill.parameter, accountFill.choices);
       }
       const providerArgs = accountFill?.arguments ?? args ?? {};
-      const physicalCall = async (callArgs: Record<string, unknown>) => {
+      const dispatch = async (callArgs: Record<string, unknown>) => {
         if (!exchange) {
           return this.inner.callToolResult
             ? await this.inner.callToolResult(unprefixed, callArgs, meta, innerOptions)
@@ -11788,6 +11797,9 @@ export class PrefixedMcpServer implements MCPServer {
           return MCP_INPUT_PENDING_RESULT;
         }
       };
+      const physicalCall = toolCallObservation
+        ? (callArgs: Record<string, unknown>) => toolCallObservation.run(() => dispatch(callArgs))
+        : dispatch;
       const projectedOutput =
         this.refreshOwnedCommand && (unprefixed === "command_read" || unprefixed === "command_wait")
           ? await executeCommandReadWithRefresh({
@@ -11826,10 +11838,8 @@ export class PrefixedMcpServer implements MCPServer {
           });
         },
       });
-      const { result, argumentRejected } = takeFirstPartyArgumentRejection(
-        AttemptToolResult.parse(output),
-        this.firstPartyCatalog,
-      );
+      const parsed = AttemptToolResult.parse(output);
+      const result = this.firstPartyCatalog ? stripFirstPartyArgumentRejection(parsed) : parsed;
       assertMcpPayloadWithinBytes(
         result,
         options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
@@ -11838,7 +11848,7 @@ export class PrefixedMcpServer implements MCPServer {
       recordOutcome(
         result.isError !== true || exchange?.requested
           ? "success"
-          : argumentRejected
+          : hasMcpArgumentRejectionMark(parsed)
             ? "rejected"
             : "provider_declared_error",
       );
@@ -11876,7 +11886,11 @@ export class PrefixedMcpServer implements MCPServer {
             ? "outcome_uncertain"
             : isAuthNeededMcpError(error)
               ? "auth_needed"
-              : mcpThrownToolCallOutcome(error, options?.signal),
+              : mcpThrownToolCallOutcome(
+                  error,
+                  toolCallObservation?.wireInvalidParams === true,
+                  options?.signal,
+                ),
         );
         throw error;
       }
@@ -11950,7 +11964,13 @@ export class PrefixedMcpServer implements MCPServer {
           structuredContent: { ok: false, error: integrationFailure },
         });
       }
-      recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
+      recordOutcome(
+        mcpThrownToolCallOutcome(
+          error,
+          toolCallObservation?.wireInvalidParams === true,
+          options?.signal,
+        ),
+      );
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
       // other reason — a raw transport 401/403 that never became the broker's
@@ -11975,6 +11995,7 @@ export class PrefixedMcpServer implements MCPServer {
       }
       throw error;
     } finally {
+      toolCallObservation?.close();
       completeWait?.(false);
       if (operationId) {
         this.connectorAttachmentAuthority?.releaseOperation(operationId);

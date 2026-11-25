@@ -4796,6 +4796,34 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
+  const payload = await signedDelegatedAccessTokenPayload(secret, token);
+  if (
+    !payload ||
+    payload.exp < nowSeconds ||
+    payload.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
+  ) {
+    return null;
+  }
+  return payload;
+}
+
+/**
+ * The claims of a delegated access token whose signature, prefix and shape
+ * verify, whatever its expiry. It names who sent a refused token (request
+ * telemetry) and is never authority: only `verifyDelegatedAccessToken` admits
+ * a token.
+ */
+export async function signedDelegatedAccessTokenClaims(
+  secret: string,
+  token: string,
+): Promise<DelegatedAccessTokenPayload | null> {
+  return await signedDelegatedAccessTokenPayload(secret, token);
+}
+
+async function signedDelegatedAccessTokenPayload(
+  secret: string,
+  token: string,
+): Promise<DelegatedAccessTokenPayload | null> {
   const prefix = token.startsWith(delegatedRestrictedAccessTokenPrefix)
     ? delegatedRestrictedAccessTokenPrefix
     : token.startsWith(delegatedServiceAccessTokenPrefix)
@@ -4827,11 +4855,7 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   const payload = DelegatedAccessTokenPayload.safeParse(decoded);
-  if (
-    !payload.success ||
-    payload.data.exp < nowSeconds ||
-    payload.data.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
-  ) {
+  if (!payload.success) {
     return null;
   }
   if (
@@ -9598,6 +9622,33 @@ export const SetSessionModelRequest = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
+
+export const SessionModelSettings = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject({
+    model: z.string().min(1).max(512),
+    reasoningEffort: ReasoningEffort,
+    latencyMode: LatencyMode,
+  }),
+);
+export type SessionModelSettings = z.infer<typeof SessionModelSettings>;
+
+/** Replace the session defaults, optionally comparing fields from a session read. */
+export const SetSessionModelSettingsRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionModelSettings.extend({
+    expected: SessionModelSettings.partial().optional(),
+    idempotencyKey: primitives.uuid,
+  }),
+);
+export type SetSessionModelSettingsRequest = z.infer<typeof SetSessionModelSettingsRequest>;
+
+export const SetSessionModelSettingsResponse = /* @__PURE__ */ defineSchema(() =>
+  SessionModelSettings.extend({
+    sessionId: primitives.uuid,
+    effectiveFrom: z.literal("future_turns"),
+    releasedCapacityWaitTurnId: primitives.uuid.nullable(),
+  }),
+);
+export type SetSessionModelSettingsResponse = z.infer<typeof SetSessionModelSettingsResponse>;
 
 /**
  * Replace the complete durable session tool policy, or explicitly opt back in
@@ -14533,7 +14584,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`,
  * `session_usage_limit` (an existing-session task reached its per-task usage
  * limit; admitted again once a person raises or clears it)
- * (transient). Readers must tolerate new reasons.
+ * (transient), and for event runs `chain_limit` (too deep a chain of
+ * automations) and `duplicate_agent_run` (another automation of the same
+ * agent took the delivery). Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
@@ -22562,6 +22615,11 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       // safety switch). Sign-in for existing accounts stays available.
       newSignupsEnabled: primitives.boolean.default(true),
       signupChallengeSiteKey: z.string().optional(),
+      /** Heedeo signup scoring's browser script; present only while scoring is on. */
+      heedeo: z
+        .object({ publishableKey: z.string(), scriptUrl: z.string() })
+        .optional()
+        .catch(undefined),
       // Sign in with a passkey, and add passkeys to an account in Security.
       passkeySignIn: primitives.boolean.default(false),
       // Create an account with only a passkey: no email address or password.

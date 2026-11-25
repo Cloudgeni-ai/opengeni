@@ -36,7 +36,6 @@ const legacyBrowserUnusedMethods = [
   "getLatestEventResult",
   "getLatestStartedTurn",
   // Shared Insights methods are adopted by the separately owned Insights UI.
-  "getWorkspaceInsightsUsage",
   "getOrganizationInsightsUsage",
   // The overloaded Insights call-list API predates this boundary too. Erasing
   // type signatures must not mistake its overloads for runtime consumers.
@@ -306,6 +305,12 @@ async function readBrowserProductionSources(): Promise<string> {
 }
 
 describe("browser client runtime surface", () => {
+  test("session model defaults are on the public integration client, not the browser client", () => {
+    const options = { baseUrl: "https://api.example.test" };
+    expect(new OpenGeniClient(options).setSessionModelSettings).toBeFunction();
+    expect(new OpenGeniBrowserClient(options)).not.toHaveProperty("setSessionModelSettings");
+  });
+
   test.each(["getOrganizationApiKey", "updateOrganizationApiKey"] as const)(
     "keeps %s on all non-browser public clients but out of the browser client",
     (methodName) => {

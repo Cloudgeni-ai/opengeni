@@ -36,6 +36,8 @@ export type ReachWorkspace = {
   name: string;
   /** The viewer's own Personal workspace, listed like the others. */
   personal?: boolean | undefined;
+  /** False where the viewer can't start work, so can't share a meeting with it. */
+  shareable?: boolean | undefined;
 };
 
 /** Who owns a thing, and so who manages it. */

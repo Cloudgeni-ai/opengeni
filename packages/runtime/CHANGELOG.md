@@ -1,5 +1,78 @@
 # @opengeni/runtime
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codemode@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/decisions@6.41.0
+  - @opengeni/interaction@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/jev@6.41.0
+  - @opengeni/agent-proto@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- 928df9f: Exclude MCP argument rejections from the tool failure ratio regardless of server. Any MCP server can mark an `isError: true` result with `_meta["opengeni/argumentRejected"]: true`, and external JSON-RPC Invalid params errors (`-32602`) also count as rejections. This changes metrics only, not tool results or retry behavior.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/capabilities@6.40.0
+  - @opengeni/codemode@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/decisions@6.40.0
+  - @opengeni/interaction@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+  - @opengeni/vaults@6.40.0
+  - @opengeni/jev@6.40.0
+  - @opengeni/agent-proto@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- 58b1b0e: Count an optional tool connection whose sign-in Opengeni already refused (expired, revoked or not usable for the turn) as its own `auth_needed` lifecycle outcome instead of a connection failure. The person already sees that account needs a reconnect, so the best-effort connection failure alert no longer pages for it on every turn, and those refusals no longer dilute the ratio of real connection failures.
+- 1f28f11: The agent is told which message is its reply: text written before a tool call is a progress update, and only the message after its last tool call is the final response, so follow-up tool work such as saving notes comes before the answer. Before, an agent could write its answer, save a note, and end with only a short trailer such as a progress bar; the reply then showed only the trailer, with the answer folded into the work log.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/codemode@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/decisions@6.39.0
+  - @opengeni/interaction@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/jev@6.39.0
+  - @opengeni/agent-proto@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
 ## 6.38.0
 
 ### Patch Changes

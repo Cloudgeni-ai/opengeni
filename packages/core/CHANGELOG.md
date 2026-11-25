@@ -1,5 +1,79 @@
 # @opengeni/core
 
+## 6.41.0
+
+### Patch Changes
+
+- ca5b614: A workspace admin who can turn off someone else's Workspace schedule or agent trigger can now turn it back on. Before, pausing worked but resuming was refused as owner-only. Resuming changes nothing else, so it runs as its owner again; changing or running it still belongs to its owner.
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/db@6.41.0
+  - @opengeni/documents@6.41.0
+  - @opengeni/runtime@6.41.0
+  - @opengeni/storage@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/events@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- 2a4f625: The **PR reviewer** template labels each finding Critical, Bug or Nit with the concrete case that triggers it, posts only Critical and Bug findings, and comments on conventions only where the repo has written rules. It replaces the template's Blocker/Bug/Nit labels and review levels. Agents already created from the template keep their instructions.
+- 8a8579a: Add `setSessionModelSettings` and its HTTP endpoint so integration servers can change future session model defaults without sending a message. An optional comparison protects against overwriting a concurrent change, and retrying with the same key does not apply the update twice.
+- Updated dependencies [928df9f]
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/runtime@6.40.0
+  - @opengeni/contracts@6.40.0
+  - @opengeni/db@6.40.0
+  - @opengeni/capabilities@6.40.0
+  - @opengeni/codex@6.40.0
+  - @opengeni/config@6.40.0
+  - @opengeni/documents@6.40.0
+  - @opengeni/events@6.40.0
+  - @opengeni/observability@6.40.0
+  - @opengeni/storage@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+  - @opengeni/vaults@6.40.0
+  - @opengeni/network@6.40.0
+  - @opengeni/xai-subscription@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [58b1b0e]
+- Updated dependencies [1f28f11]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/runtime@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/db@6.39.0
+  - @opengeni/documents@6.39.0
+  - @opengeni/events@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/storage@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
 ## 6.38.0
 
 ### Patch Changes

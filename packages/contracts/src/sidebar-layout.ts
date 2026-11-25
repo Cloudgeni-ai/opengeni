@@ -119,6 +119,8 @@ export const SIDEBAR_NAV_ENTRIES = [
   "agents",
   "meetings",
   "artifacts",
+  "apps",
+  "get_started",
 ] as const;
 export const SidebarNavEntry = /* @__PURE__ */ defineSchema(() => z.enum(SIDEBAR_NAV_ENTRIES));
 export type SidebarNavEntry = (typeof SIDEBAR_NAV_ENTRIES)[number];
@@ -136,6 +138,29 @@ const SettingsEntryId = /* @__PURE__ */ defineSchema(() =>
 );
 
 /**
+ * Where apps show in the sidebar: as rows in the Sessions list (`sessions`,
+ * today's behaviour), in an Apps section of their own below Sessions
+ * (`section`), or not as rows at all, their chats listed as ordinary chats
+ * (`hidden`).
+ */
+export const SIDEBAR_APPS_PLACEMENTS = ["sessions", "section", "hidden"] as const;
+export const SidebarAppsPlacement = /* @__PURE__ */ defineSchema(() =>
+  z.enum(SIDEBAR_APPS_PLACEMENTS),
+);
+export type SidebarAppsPlacement = (typeof SIDEBAR_APPS_PLACEMENTS)[number];
+
+/**
+ * A stored placement as this version reads it: `tab`, what a preview of apps
+ * in a tab beside Sessions saved, is `section`; anything else unknown is unset.
+ */
+export function readSidebarAppsPlacement(value: unknown): SidebarAppsPlacement | undefined {
+  if (value === "tab") return "section";
+  return (SIDEBAR_APPS_PLACEMENTS as readonly unknown[]).includes(value)
+    ? (value as SidebarAppsPlacement)
+    : undefined;
+}
+
+/**
  * How the rest of the navigation looks, beside the items: each is unset by
  * default, which keeps today's behaviour, and a person's own choice wins
  * over the workspace default's.
@@ -143,8 +168,14 @@ const SettingsEntryId = /* @__PURE__ */ defineSchema(() =>
 export const SidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      /** Apps show as rows of their own in the Sessions list, their chats under them (default true). */
+      /**
+       * Apps show as rows of their own in the Sessions list, their chats under
+       * them (default true). Kept beside appsPlacement, which it follows:
+       * false is `hidden`, true is `sessions` (or `section` when that is set).
+       */
       sessionsShowApps: z.boolean().optional(),
+      /** Where apps show: in the Sessions list, in their own section, or hidden (default `sessions`). */
+      appsPlacement: SidebarAppsPlacement.optional(),
       /** Built-in rail entries left out (default none). */
       hiddenNavEntries: z.array(SidebarNavEntry).max(SIDEBAR_NAV_ENTRIES.length).optional(),
       /** Settings entries moved under More in the settings rail; the rest stay at the top (default none). */
@@ -157,7 +188,9 @@ export type SidebarLayoutOptions = z.infer<typeof SidebarLayoutOptions>;
 /** The options in effect for a person, after their own choices and the default's. */
 export const ResolvedSidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /** False only when apps are hidden; older clients show apps in their own section as Sessions rows. */
     sessionsShowApps: z.boolean(),
+    appsPlacement: SidebarAppsPlacement,
     hiddenNavEntries: z.array(z.string()),
     /** Null: no settings entry is under More. */
     settingsMore: z.array(z.string()).nullable(),
@@ -167,6 +200,7 @@ export type ResolvedSidebarLayoutOptions = z.infer<typeof ResolvedSidebarLayoutO
 
 export const DEFAULT_SIDEBAR_LAYOUT_OPTIONS: ResolvedSidebarLayoutOptions = {
   sessionsShowApps: true,
+  appsPlacement: "sessions",
   hiddenNavEntries: [],
   settingsMore: null,
 };
@@ -201,6 +235,8 @@ export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
     ...value,
     ...(hidden ? { hiddenNavEntries: hidden as SidebarNavEntry[] } : {}),
     ...(more ? { settingsMore: more } : {}),
+    // A preview gave apps a tab beside Sessions; a tab it saved is a section.
+    ...(value.appsPlacement === "tab" ? { appsPlacement: "section" } : {}),
   } as SidebarLayoutOptions;
 }
 
@@ -211,14 +247,33 @@ export function mergeSidebarOptions(
 ): ResolvedSidebarLayoutOptions {
   const own = knownSidebarOptions(personal);
   const shared = knownSidebarOptions(workspace);
+  const appsPlacement =
+    scopeAppsPlacement(own) ??
+    scopeAppsPlacement(shared) ??
+    DEFAULT_SIDEBAR_LAYOUT_OPTIONS.appsPlacement;
   return {
-    sessionsShowApps:
-      own?.sessionsShowApps ??
-      shared?.sessionsShowApps ??
-      DEFAULT_SIDEBAR_LAYOUT_OPTIONS.sessionsShowApps,
+    sessionsShowApps: appsPlacement !== "hidden",
+    appsPlacement,
     hiddenNavEntries: [...(own?.hiddenNavEntries ?? shared?.hiddenNavEntries ?? [])],
     settingsMore: own?.settingsMore ?? shared?.settingsMore ?? null,
   };
+}
+
+/**
+ * One scope's apps placement, or undefined when it sets none. appsPlacement
+ * counts only while it agrees with sessionsShowApps: a version from before
+ * appsPlacement changes only sessionsShowApps, and that later choice wins.
+ * This version always stores the two together, so appsPlacement alone is
+ * what an older version's clear of sessionsShowApps left: unset.
+ */
+function scopeAppsPlacement(
+  options: SidebarLayoutOptions | undefined,
+): SidebarAppsPlacement | undefined {
+  const showApps = options?.sessionsShowApps;
+  if (showApps === undefined) return undefined;
+  const placement = options?.appsPlacement;
+  if (placement && showApps === (placement !== "hidden")) return placement;
+  return showApps ? "sessions" : "hidden";
 }
 
 /** Read a layout answer's options leniently: a server from before them shows today's behaviour. */
@@ -236,8 +291,13 @@ export function knownSidebarOptions(
 ): SidebarLayoutOptions | undefined {
   if (!options) return undefined;
   const known: SidebarLayoutOptions = {};
-  const { sessionsShowApps, hiddenNavEntries, settingsMore } = options as Record<string, unknown>;
+  const { sessionsShowApps, appsPlacement, hiddenNavEntries, settingsMore } = options as Record<
+    string,
+    unknown
+  >;
   if (typeof sessionsShowApps === "boolean") known.sessionsShowApps = sessionsShowApps;
+  const placement = readSidebarAppsPlacement(appsPlacement);
+  if (placement) known.appsPlacement = placement;
   if (Array.isArray(hiddenNavEntries))
     known.hiddenNavEntries = hiddenNavEntries.filter((entry): entry is SidebarNavEntry =>
       (SIDEBAR_NAV_ENTRIES as readonly unknown[]).includes(entry),
@@ -830,7 +890,10 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
          * behaviour (workspace).
          */
         op: z.literal("options"),
+        /** Sets appsPlacement too: false is `hidden`, true is `sessions`. */
         sessionsShowApps: z.boolean().nullable().optional(),
+        /** Sets sessionsShowApps too, for older clients; wins over sessionsShowApps in the same change. */
+        appsPlacement: SidebarAppsPlacement.nullable().optional(),
         hiddenNavEntries: z
           .array(SidebarNavEntry)
           .max(SIDEBAR_NAV_ENTRIES.length)
@@ -1108,6 +1171,20 @@ function applyOptions(
       next[key] = Array.isArray(value)
         ? [...new Set([...value, ...unknownEntries(key, next[key])])]
         : value;
+  }
+  // The two apps options move together, so every version reads the same choice.
+  const given = (change as Record<string, unknown>).appsPlacement;
+  const placement = readSidebarAppsPlacement(given);
+  if (given === null) {
+    delete next.appsPlacement;
+    delete next.sessionsShowApps;
+  } else if (placement) {
+    next.appsPlacement = placement;
+    next.sessionsShowApps = placement !== "hidden";
+  } else if (change.sessionsShowApps === null) {
+    delete next.appsPlacement;
+  } else if (typeof change.sessionsShowApps === "boolean") {
+    next.appsPlacement = change.sessionsShowApps ? "sessions" : "hidden";
   }
   return Object.keys(next).length ? (next as SidebarLayoutOptions) : undefined;
 }
@@ -1442,7 +1519,11 @@ export const ResolvedSidebarAgentLink = /* @__PURE__ */ defineSchema(() =>
     /** Its own label, else the agent's name. */
     label: z.string(),
     /** The agent's avatar, or its initials when it has none. */
-    avatar: SessionAvatar,
+    // A getter, read when parsing: in the web bundle this module's chunk and
+    // the avatar's can import each other, so it may not exist yet while loading.
+    get avatar() {
+      return SessionAvatar;
+    },
   }),
 );
 export const ResolvedSidebarChild = /* @__PURE__ */ defineSchema(() =>

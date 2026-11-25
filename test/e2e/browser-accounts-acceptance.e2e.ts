@@ -75,7 +75,7 @@ import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-searc
 // Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
 const test = quarantineTest(bunTest, import.meta.path);
 
-const USE_CASE_HEADING = "How do you want to use Opengeni?";
+const USE_CASE_HEADING = "What do you do?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
@@ -2328,7 +2328,7 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         { cause: error },
       );
     }
-    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
+    await page.getByRole("button", { name: /^Software engineer/ }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
     await page

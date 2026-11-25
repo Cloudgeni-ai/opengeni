@@ -7,7 +7,11 @@ import { Link } from "@tanstack/react-router";
  * -> an optional Name -> one closed Settings section.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY } from "@opengeni/contracts";
+import {
+  type CommonAgentTrigger,
+  commonAgentTriggers,
+  SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY,
+} from "@opengeni/contracts";
 import type { Agent, AgentChat, AgentTemplate } from "@opengeni/sdk";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
@@ -129,6 +133,8 @@ export type ScheduleFormMode =
       agentId?: string;
       /** Start from this one of the agent's suggested triggers. */
       agentTrigger?: number;
+      /** Start from this common trigger, named for the agent. */
+      agentCommonTrigger?: CommonAgentTrigger["key"] | undefined;
       /** Cancel and Save go back to the agent's page (its "Starts when"). */
       returnTo?: "agent";
       /** What Add trigger had when it opened this form: its note and chat choice. */
@@ -157,7 +163,24 @@ export function agentTriggerTemplate(
   agent: Pick<Agent, "name" | "templateKey">,
   templates: readonly AgentTemplate[],
   index: number | undefined,
+  common?: CommonAgentTrigger["key"] | undefined,
 ): AutomationTemplate | undefined {
+  if (common) {
+    const found = commonAgentTriggers({ agentName: agent.name }).find(
+      (entry) => entry.key === common,
+    );
+    if (!found) return undefined;
+    const suggestion = found.trigger;
+    return {
+      id: `agent-common-${common}`,
+      name: `${agent.name}: ${suggestion.name}`,
+      description: suggestion.name,
+      instructions: suggestion.instructions,
+      schedule: suggestion.schedule,
+      triggers: suggestion.triggers,
+      when: suggestion.name,
+    };
+  }
   if (index === undefined || !agent.templateKey) return undefined;
   const suggestion = templates.find((entry) => entry.key === agent.templateKey)?.suggestedTriggers[
     index
@@ -219,6 +242,7 @@ export function ScheduleFormPage({
   );
   const agentId = mode.kind === "create" ? mode.agentId : undefined;
   const agentTrigger = mode.kind === "create" ? mode.agentTrigger : undefined;
+  const agentCommonTrigger = mode.kind === "create" ? mode.agentCommonTrigger : undefined;
   const [agentBinding, setAgentBinding] = useState<AgentBinding>(() =>
     agentId ? { status: "loading" } : { status: "none" },
   );
@@ -236,7 +260,10 @@ export function ScheduleFormPage({
         agentTrigger !== undefined && agent.templateKey
           ? await client.listAgentTemplates(workspaceId)
           : [];
-      return { agent, template: agentTriggerTemplate(agent, templates, agentTrigger) };
+      return {
+        agent,
+        template: agentTriggerTemplate(agent, templates, agentTrigger, agentCommonTrigger),
+      };
     })().then(
       (ready) => {
         if (live) setAgentBinding({ status: "ready", ...ready });
@@ -253,7 +280,7 @@ export function ScheduleFormPage({
     return () => {
       live = false;
     };
-  }, [agentId, agentTrigger, attempt, client, workspaceId]);
+  }, [agentId, agentTrigger, agentCommonTrigger, attempt, client, workspaceId]);
 
   useEffect(() => {
     if (!savedTemplateId) {

@@ -478,6 +478,7 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
       return context.mediaAttachments?.get(session.id)?.video === true;
     }
     if (id === "builtin:secrets") return tools.has("secret_search");
+    if (id === "builtin:agents") return tools.has("bot_template_save");
     if (id === "builtin:event-triggers") {
       return tools.has("scheduled_tasks_create") && tools.has("event_sources_list");
     }

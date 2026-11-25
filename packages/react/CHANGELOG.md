@@ -1,5 +1,77 @@
 # @opengeni/react
 
+## 6.41.0
+
+### Minor Changes
+
+- dd6dd0b: A meeting recorded in your Personal workspace can be shared with one of your team workspaces (`PATCH …/recordings/:recordingId` with `{ visibility: "workspace", sharedWorkspaceId }`), from any workspace where you see it. Everyone in that workspace can open it read only, and agents there find it with `meetings_search`; `Recording.sharedWorkspaceId` says where it is shared. The meeting page's Share menu lists "Only me" and your team workspaces.
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/connect@6.41.0
+
+## 6.40.0
+
+### Minor Changes
+
+- 2a4f625: The sidebar layout's options add `appsPlacement`: apps as rows in the Sessions list (`sessions`, the default), in an Apps section of their own below Sessions (`section`), or hidden (`hidden`). `sessionsShowApps` stays and follows it (`false` is `hidden`), so saved layouts and existing callers keep working; a `tab` a preview saved reads as `section`. With `SessionShellSlots.appsPlacement` `section`, the Sessions list draws an Apps section below the list, with the same header style as Sessions, showing the first five apps and Show more for the rest; its view menu offers the choice when the surface passes `onAppsPlacementChange`. The agent page's Can use lists tools by readable name (the tool's own title, a curated GitHub name, or its code name in words); one GitHub action is one row covering Opengeni's built-in name and GitHub MCP's, so a choice there sets both.
+
+### Patch Changes
+
+- 2a4f625: Automation run history explains the `duplicate_agent_run` skip: one event delivery starts at most one run per agent, so when several automations of the same agent match it, the others record a skipped run with that reason.
+- 71fd8b6: Long chat messages in the native app render formatted again, like on the web: bold,
+  lists, links, math and inline `opengeni-html` / `opengeni-site` previews, instead of
+  raw text pages. A long message is cut where markdown-it starts a top-level block
+  (display math counted as one block), so each chunk parses to the same blocks as in the
+  whole message (apart from rare inputs where the math pass's simpler fence rule
+  disagrees with markdown-it). Each chunk is math-normalized and parsed on its own (at
+  most 8,192 characters per parse) and mounted one chunk-sized slice per frame. A visual
+  too long to share a chunk goes to the preview renderer whole; other code blocks longer
+  than one chunk show as pages. While a message streams, only its last blocks are parsed
+  again. Messages over 65,536 characters, and a single text block too long for one
+  chunk, still show as selectable plain-text pages.
+
+  Math in chat Markdown (web and native) finds display blocks in linear time: many
+  unclosed `$$` or `\[` openers no longer make the math pass quadratic. Output is
+  unchanged.
+
+- 2a4f625: A sub-session that waits only on a connection card no longer says "needs you" forever: completing a session's goal withdraws its open connection cards, and the parent's line for such a wait has Dismiss, which hides it until that sub-session waits again. Questions and approvals stay as they are.
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/connect@6.40.0
+
+## 6.39.0
+
+### Minor Changes
+
+- e4598af: Insights usage can group by agent (`groupBy=agent`) and filter by `agentId`; a worker's usage counts toward its root chat's agent, and responses add `facets.agents`. An agent's page shows what it cost in the last 30 days and per run to people who can see Usage.
+- e4598af: Agents are easier to set up. **Add agent ▾ → Create with chat** opens a chat that drafts the agent from a plain description and creates it once the person confirms, using the new bundled `agents` Skill (`builtin:agents`); `bot_template_save` also accepts `toolPermissions` and `skills`. New agents in the form start with short Instructions and ask before merging pull requests. The form and the agent's page offer common triggers as switches: when a pull request opens, when mentioned on a PR, and every weekday morning (`commonAgentTriggers()`).
+- d6f3b77: Paying for a plan through Stripe checkout now confirms it when you return, from Billing or from onboarding. A short message says your plan is activating, then names it once it's active, for example "Pro is active". A cancelled plan checkout shows nothing new. A checkout return is still confirmed when a redirect or an unfinished setup step changes the address first.
+
+### Patch Changes
+
+- 6b4d423: An organization's admins, not only its owner, can choose "Anyone in <organization>" for an agent, matching the API's organization administration rule.
+- 7b76136: A turn someone else started (such as meeting notes) that waits for Codex usage in your Personal workspace now says it can't use your own ChatGPT account, and offers "Continue on my account" when that account has room. The button takes over the wait as you, also after you paused the chat.
+
+  A ChatGPT account that Opengeni saw used no longer reads "No usage yet". When a live usage check returns no windows (for example a personal account the viewer can't read live), the Codex overview keeps the saved reading, and list rows show an older reading with its age ("Checked 16 hours ago"), or "No recent reading" when none is left.
+
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/connect@6.39.0
+
 ## 6.38.0
 
 ### Minor Changes

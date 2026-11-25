@@ -1472,6 +1472,7 @@ export * from "./session-share-links";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./signup-heedeo";
 export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
@@ -79559,38 +79560,64 @@ export async function setSessionGoalStatusWithEvent(
                 reason: "api",
               };
       const now = new Date();
-      const [event] = await tx
+      // A finished goal waits on nothing: withdraw the connection cards its
+      // chat still has open (a card the agent worked around mid-turn), so the
+      // chat and its parent stop showing it as needing the person.
+      const [open] =
+        input.event.type === "goal.completed"
+          ? await tx
+              .select({ keys: schema.sessions.awaitingConnectionKeys })
+              .from(schema.sessions)
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, workspaceId),
+                  eq(schema.sessions.id, sessionId),
+                ),
+              )
+          : [];
+      const rows: Array<{ type: SessionEventType; payload: Record<string, unknown> }> = [
+        { type: input.event.type, payload },
+        ...[...new Set(open?.keys ?? [])].map((key) => ({
+          type: "session.notification.withdrawn" as const,
+          payload: { key },
+        })),
+      ];
+      const appended = await tx
         .insert(schema.sessionEvents)
         .values(
-          withLosslessContentWriteVersion(
-            {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              sequence: session.lastSequence + 1,
-              type: input.event.type,
-              payload: payload,
-              ...(input.commandActor
-                ? {
-                    turnId: input.commandActor.turnId,
-                    turnGeneration: input.commandActor.executionGeneration,
-                    turnAttemptId: input.commandActor.attemptId,
-                    turnAssociation: "current",
-                  }
-                : {}),
-              occurredAt: now,
-            },
-            "payload",
-            "payloadCodecVersion",
+          rows.map((row, index) =>
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                sequence: session.lastSequence + 1 + index,
+                type: row.type,
+                payload: row.payload,
+                ...(input.commandActor
+                  ? {
+                      turnId: input.commandActor.turnId,
+                      turnGeneration: input.commandActor.executionGeneration,
+                      turnAttemptId: input.commandActor.attemptId,
+                      turnAssociation: "current" as const,
+                    }
+                  : {}),
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
           ),
         )
         .returning();
-      if (!event) throw new Error(`Failed to append ${input.event.type} event`);
+      if (appended.length !== rows.length)
+        throw new Error(`Failed to append ${input.event.type} event`);
+      appended.sort((left, right) => left.sequence - right.sequence);
       await tx
         .update(schema.sessions)
-        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .set({ lastSequence: session.lastSequence + rows.length, updatedAt: now })
         .where(eq(schema.sessions.id, sessionId));
-      return { ...result, events: [mapEvent(event)] };
+      return { ...result, events: appended.map(mapEvent) };
     }),
   );
 }

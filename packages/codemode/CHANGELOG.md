@@ -1,5 +1,40 @@
 # @opengeni/codemode
 
+## 6.41.0
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/sdk@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+- Updated dependencies [2a4f625]
+- Updated dependencies [2a4f625]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/tool-gateway@6.40.0
+
+## 6.39.0
+
+### Patch Changes
+
+- 9012657: A script that keeps calling `ogtool` or the native `codemode` client after its turn ended no longer hammers the API: a bearer refused with 401, or with 403 `agent_attempt_caller_stale`, is remembered across processes in a private per-user marker (a hash, never the bearer), and later calls with it fail locally with the same error. A refused API request now also logs who sent it: the worker's hashed attempt key (`callerCorrelationId`) for an agent-attempt bearer, a hashed credential key otherwise, and the User-Agent product.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/sdk@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+
 ## 6.38.0
 
 ### Patch Changes
