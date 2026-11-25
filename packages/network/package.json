@@ -46,9 +46,9 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@azure/msal-node": "7.1.2",
+    "@azure/msal-node": "7.2.3",
     "undici": "^6.29.1",
-    "ws": "8.21.1"
+    "ws": "8.23.0"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",
