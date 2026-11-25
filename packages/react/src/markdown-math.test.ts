@@ -1,6 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { mayContainMath, prepareMathMarkdown } from "./markdown-math";
 
+describe("display math scanning is linear", () => {
+  test.each(["$$ a\n", "$$\n", "\\[\n", "\\[ a\n"])(
+    "many unclosed %j openers stay fast and stay text",
+    (opener) => {
+      const text = opener.repeat(Math.floor(65_536 / opener.length));
+      const started = performance.now();
+      const prepared = prepareMathMarkdown(text);
+      // Quadratic rescanning took about a second here; linear is a few milliseconds.
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(prepared.hasMath).toBe(false);
+    },
+  );
+});
+
 const prepared = (text: string) => prepareMathMarkdown(text);
 
 describe("prepareMathMarkdown", () => {

@@ -1,4 +1,8 @@
-import { prepareMathMarkdown, type PreparedMathMarkdown } from "@opengeni/react/markdown-math";
+import {
+  displayMathBlockEnds,
+  prepareMathMarkdown,
+  type PreparedMathMarkdown,
+} from "@opengeni/react/markdown-math";
 
 /*
  * Bounds for drawing assistant Markdown in the native timeline.
@@ -6,16 +10,22 @@ import { prepareMathMarkdown, type PreparedMathMarkdown } from "@opengeni/react/
  * One Markdown parse never sees more than MAX_MARKDOWN_CHUNK_LENGTH UTF-16 code units
  * (about 1,300 words, after math normalization). A longer message is cut into chunks at
  * top-level block boundaries outside code fences and display math, and each chunk is
- * parsed on its own, so parsing work grows linearly with the message and crafted input
- * can never cost more than one bounded parse per chunk. While a message streams, only
- * its last chunk changes, so earlier chunks are not parsed again.
+ * prepared and parsed on its own, so the work grows linearly with the message and
+ * crafted input can never cost more than one bounded parse per chunk. While a message
+ * streams, chunks whose text did not change are not prepared or parsed again.
  *
- * In a long message, a code fence that starts at the beginning of a line is its own
- * unit and is drawn directly (code block, interactive preview or interactive answer),
- * without Markdown, so an `opengeni-html` visual of any length still renders.
+ * In a long message, a code fence at the beginning of a line that is too long to share
+ * a chunk is its own unit, drawn directly (code block, interactive preview or
+ * interactive answer) without Markdown, so an `opengeni-html` visual of any length
+ * still renders. Smaller fences stay in their chunk and render through Markdown's
+ * fence rule, which draws them the same way. A message therefore has at most about
+ * 2 × MAX_MARKDOWN_LENGTH / CHUNK_TARGET_LENGTH segments.
  *
- * A message longer than MAX_MARKDOWN_LENGTH, and a single block longer than one chunk
- * (one giant paragraph), are shown as selectable plain-text pages instead.
+ * A long message is mounted a bounded slice at a time (mountedSegmentCount), one slice
+ * per frame, so no single frame does more work than one bounded chunk.
+ *
+ * A message longer than MAX_MARKDOWN_LENGTH, and a single text block longer than one
+ * chunk (one giant paragraph), are shown as selectable plain-text pages instead.
  */
 
 /** The most text one Markdown parse sees. */
@@ -34,13 +44,14 @@ export function prepareBoundedMarkdown(text: string): PreparedMathMarkdown | nul
 }
 
 export type MarkdownSegment =
-  /** Bounded Markdown: one parse. */
-  | { kind: "markdown"; source: string; prepared: PreparedMathMarkdown }
+  /** At most one chunk of Markdown (a parse after math normalization, or plain pages). */
+  | { kind: "markdown"; source: string }
   /** A top-level code fence, drawn without Markdown. `closed` is false while it streams. */
   | { kind: "fence"; source: string; language: string; content: string; closed: boolean }
   /** A block too long for one parse, shown as plain-text pages. */
   | { kind: "plain"; source: string };
 
+/** A source line; `text` drops the line ending (CRLF too), as markdown-it reads it. */
 type Line = { start: number; end: number; text: string };
 
 function linesOf(text: string): Line[] {
@@ -49,7 +60,9 @@ function linesOf(text: string): Line[] {
   while (start < text.length) {
     const newline = text.indexOf("\n", start);
     const end = newline === -1 ? text.length : newline + 1;
-    lines.push({ start, end, text: text.slice(start, newline === -1 ? end : newline) });
+    let content = text.slice(start, newline === -1 ? end : newline);
+    if (content.endsWith("\r")) content = content.slice(0, -1);
+    lines.push({ start, end, text: content });
     start = end;
   }
   return lines;
@@ -75,18 +88,6 @@ function closesFence(line: string, fence: OpenFence): boolean {
   return !!match && match[1]![0] === fence.char && match[1]!.length >= fence.length;
 }
 
-/** The closer a multi-line display math opener waits for (as prepareMathMarkdown reads it). */
-function displayMathCloser(line: string): "$$" | "\\]" | null {
-  const trimmed = line.trim();
-  const opener = trimmed.startsWith("$$") ? "$$" : trimmed.startsWith("\\[") ? "\\[" : null;
-  if (!opener) return null;
-  const closer = opener === "$$" ? "$$" : "\\]";
-  const rest = trimmed.slice(2);
-  if (rest.trimEnd().endsWith(closer) && rest.trim().length > closer.length) return null;
-  if (opener === "$$" ? rest.includes("$") : rest.includes("\\]")) return null;
-  return closer;
-}
-
 type Block =
   | { kind: "text"; start: number; end: number }
   | {
@@ -102,39 +103,32 @@ type Block =
  * Top-level blocks: text runs that can be parsed apart, and fences at column 0.
  * Text is cut only before an unindented line that follows a blank line (so no list
  * item, quote, paragraph or indented code continues across the cut), and never inside
- * a fence or display math. Concatenating every block gives back the message.
+ * a fence or a display math block (found by the same rule the math pass uses).
+ * Concatenating every block gives back the message. Linear in the message length.
  */
 function blocksOf(text: string): Block[] {
   const lines = linesOf(text);
+  const mathEnd = displayMathBlockEnds(lines.map((line) => line.text));
   const blocks: Block[] = [];
   let textStart = 0;
   const cut = (at: number) => {
     if (at > textStart) blocks.push({ kind: "text", start: textStart, end: at });
     textStart = at;
   };
-  let nested: OpenFence | null = null;
-  let math: { closer: "$$" | "\\]"; start: number } | null = null;
+  let nested: (OpenFence & { start: number }) | null = null;
   let previousBlank = false;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     if (nested) {
-      if (closesFence(line.text, nested)) nested = null;
+      // An indented fence that has not closed within one chunk cannot be drawn
+      // formatted anyway: stop protecting it, so the rest of the message still is.
+      if (closesFence(line.text, nested) || line.start - nested.start > MAX_MARKDOWN_CHUNK_LENGTH) {
+        nested = null;
+      }
       previousBlank = false;
       continue;
     }
     const opener = fenceOpener(line.text);
-    if (math) {
-      const current = line.text.trim();
-      // An unclosed opener is text (prepareMathMarkdown) after the longest block one parse can hold.
-      if (opener || line.start - math.start > MAX_MARKDOWN_CHUNK_LENGTH) math = null;
-      else {
-        if (current.endsWith(math.closer) || (current === "" && math.closer === "\\]")) {
-          math = null;
-        }
-        previousBlank = current === "";
-        continue;
-      }
-    }
     if (opener && opener.indent === 0) {
       // A column-0 fence interrupts any paragraph, list or quote: it is its own block.
       cut(line.start);
@@ -164,41 +158,47 @@ function blocksOf(text: string): Block[] {
     }
     if (opener) {
       // An indented fence (in a list item): never cut inside it.
-      nested = opener;
+      nested = { ...opener, start: line.start };
       previousBlank = false;
       continue;
     }
     const blank = line.text.trim() === "";
     if (previousBlank && !blank && !/^[ \t]/.test(line.text)) cut(line.start);
-    const closer = displayMathCloser(line.text);
-    if (closer) math = { closer, start: line.start };
+    const math = mathEnd(index);
+    if (math !== null) {
+      // A closed display block stays whole; its last line ends with its closer.
+      index = math;
+      previousBlank = false;
+      continue;
+    }
     previousBlank = blank;
   }
   cut(text.length);
   return blocks;
 }
 
-function textSegment(source: string): MarkdownSegment {
-  const prepared = prepareBoundedMarkdown(source);
-  return prepared ? { kind: "markdown", source, prepared } : { kind: "plain", source };
-}
-
 /**
- * How to draw a message: one Markdown parse when it fits, bounded chunks when it is
- * long, or null when it is too long to format at all (plain-text pages).
+ * How to draw a message: one Markdown segment when it fits one parse, bounded segments
+ * when it is long, or null when it is too long to format at all (plain-text pages).
+ * Linear in the message length; math normalization happens per chunk when it is drawn.
  */
 export function markdownSegments(text: string): MarkdownSegment[] | null {
   if (text.length > MAX_MARKDOWN_LENGTH) return null;
-  const whole = prepareBoundedMarkdown(text);
-  if (whole) return [{ kind: "markdown", source: text, prepared: whole }];
+  if (text.length <= MAX_MARKDOWN_CHUNK_LENGTH) return [{ kind: "markdown", source: text }];
   const segments: MarkdownSegment[] = [];
   let chunk: { start: number; end: number } | null = null;
   const flush = () => {
-    if (chunk) segments.push(textSegment(text.slice(chunk.start, chunk.end)));
+    if (chunk) {
+      const source = text.slice(chunk.start, chunk.end);
+      segments.push({
+        kind: source.length <= MAX_MARKDOWN_CHUNK_LENGTH ? "markdown" : "plain",
+        source,
+      });
+    }
     chunk = null;
   };
   for (const block of blocksOf(text)) {
-    if (block.kind === "fence") {
+    if (block.kind === "fence" && block.end - block.start > CHUNK_TARGET_LENGTH) {
       flush();
       const { language, content, closed } = block;
       segments.push({
@@ -217,6 +217,28 @@ export function markdownSegments(text: string): MarkdownSegment[] | null {
   }
   flush();
   return segments;
+}
+
+/** Segments mounted per frame: about one chunk of text, and a few at most. */
+const MOUNT_LENGTH_PER_FRAME = CHUNK_TARGET_LENGTH;
+const MOUNT_SEGMENTS_PER_FRAME = 8;
+
+/**
+ * How many leading segments to have mounted after one more frame, starting from
+ * `mounted`: at least one more, then more while they fit one frame's budget. The first
+ * frame takes up to one full chunk, the bound a single message had before chunking.
+ */
+export function mountedSegmentCount(segments: readonly MarkdownSegment[], mounted: number) {
+  if (mounted >= segments.length) return segments.length;
+  const budget = mounted === 0 ? MAX_MARKDOWN_CHUNK_LENGTH : MOUNT_LENGTH_PER_FRAME;
+  let next = mounted;
+  let length = 0;
+  while (next < segments.length && next - mounted < MOUNT_SEGMENTS_PER_FRAME) {
+    length += segments[next]!.source.length;
+    if (next > mounted && length > budget) break;
+    next++;
+  }
+  return next;
 }
 
 // Leave one code unit of headroom to keep surrogate pairs together without

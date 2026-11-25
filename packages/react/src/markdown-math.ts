@@ -28,6 +28,7 @@ const FENCE = /^( {0,3})(`{3,}|~{3,})/;
 export function prepareMathMarkdown(text: string): PreparedMathMarkdown {
   if (!mayContainMath(text)) return { text, hasMath: false };
   const lines = text.split("\n");
+  const findBlock = displayMathBlocks(lines);
   const out: string[] = [];
   let hasMath = false;
   let fence: { char: string; length: number } | null = null;
@@ -52,7 +53,7 @@ export function prepareMathMarkdown(text: string): PreparedMathMarkdown {
       out.push(line);
       continue;
     }
-    const block = displayBlock(lines, index);
+    const block = findBlock(index);
     if (block) {
       if (block.body !== null) {
         hasMath = true;
@@ -83,12 +84,57 @@ type DisplayBlock = {
   end: number;
 };
 
+type Closer = "$$" | "\\]";
+
+/**
+ * Finds display blocks in `lines` in linear total time. The line that ends a block's
+ * scan (its closer, a fence, or for `\[` a blank line) is looked up in a table built
+ * once per closer, so an opener that never closes costs O(1) instead of a scan to the
+ * end of the message, and many unclosed openers cannot add up to quadratic work.
+ */
+function displayMathBlocks(lines: string[]): (start: number) => DisplayBlock | null {
+  const tables = new Map<Closer, Int32Array>();
+  const stops = (closer: Closer): Int32Array => {
+    let table = tables.get(closer);
+    if (!table) {
+      table = new Int32Array(lines.length + 1).fill(lines.length);
+      for (let index = lines.length - 1; index >= 0; index--) {
+        const current = lines[index]!.trim();
+        const stop =
+          FENCE.test(lines[index]!) ||
+          current.endsWith(closer) ||
+          (current === "" && closer === "\\]");
+        table[index] = stop ? index : table[index + 1]!;
+      }
+      tables.set(closer, table);
+    }
+    return table;
+  };
+  return (start) => displayBlock(lines, start, stops);
+}
+
+/**
+ * The last line of the closed display block that starts at `lines[start]`, or null.
+ * The same rules `prepareMathMarkdown` uses, so a caller can keep such blocks whole.
+ */
+export function displayMathBlockEnds(lines: string[]): (start: number) => number | null {
+  const findBlock = displayMathBlocks(lines);
+  return (start) => {
+    const block = findBlock(start);
+    return block && block.body !== null ? block.end : null;
+  };
+}
+
 /**
  * A display block starting at `lines[start]`: `$$` or `\[` on a line of its own (math on
  * the following lines up to a matching `$$` or `\]` line), or a whole line that is
  * `$$…$$` or `\[…\]`.
  */
-function displayBlock(lines: string[], start: number): DisplayBlock | null {
+function displayBlock(
+  lines: string[],
+  start: number,
+  stops: (closer: Closer) => Int32Array,
+): DisplayBlock | null {
   const line = lines[start]!;
   const indent = /^\s*/.exec(line)![0];
   const trimmed = line.trim();
@@ -108,18 +154,17 @@ function displayBlock(lines: string[], start: number): DisplayBlock | null {
   if (opener === "$$" && rest.includes("$")) return null;
   if (opener === "\\[" && rest.includes("\\]")) return null;
   const body: string[] = rest.trim() === "" ? [] : [rest.trim()];
-  for (let index = start + 1; index < lines.length; index++) {
-    const current = lines[index]!.trim();
-    if (FENCE.test(lines[index]!)) break;
-    if (current.endsWith(closer)) {
-      const last = current.slice(0, -closer.length).trim();
-      if (last !== "") body.push(last);
-      if (body.length === 0) return null;
-      return { indent, opener, rest, body, end: index };
-    }
-    // A blank line ends a `\[` paragraph in Markdown; `$$` math may contain blank lines.
-    if (current === "" && opener === "\\[") break;
-    body.push(current);
+  // The first line that ends the scan: a fence (unclosed), the closer, or, since a blank
+  // line ends a `\[` paragraph in Markdown, a blank line for `\[` (unclosed). `$$` math
+  // may contain blank lines.
+  const stop = stops(closer)[start + 1]!;
+  const current = stop < lines.length ? lines[stop]!.trim() : "";
+  if (stop < lines.length && !FENCE.test(lines[stop]!) && current.endsWith(closer)) {
+    for (let index = start + 1; index < stop; index++) body.push(lines[index]!.trim());
+    const last = current.slice(0, -closer.length).trim();
+    if (last !== "") body.push(last);
+    if (body.length === 0) return null;
+    return { indent, opener, rest, body, end: stop };
   }
   return { indent, opener, rest, body: null, end: start };
 }

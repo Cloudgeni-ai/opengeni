@@ -4,6 +4,7 @@ import {
   Fragment,
   memo,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -32,7 +33,13 @@ import {
   interactivePreviewKind,
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
-import { MAX_MARKDOWN_LENGTH, markdownSegments, type MarkdownSegment } from "./markdown-limit";
+import {
+  MAX_MARKDOWN_LENGTH,
+  markdownSegments,
+  mountedSegmentCount,
+  prepareBoundedMarkdown,
+  type MarkdownSegment,
+} from "./markdown-limit";
 import { PlainTextMessage } from "./plain-text-message";
 import { Icon } from "./icon";
 import { isStandaloneLinkGroup, soleTextGroupOf } from "./markdown-standalone-links";
@@ -844,7 +851,8 @@ const MarkdownChunk = memo(
     rendering: ChunkRendering;
   }) {
     const { styles, rules, onLinkPress, interactive } = rendering;
-    const { source, prepared } = segment;
+    const { source } = segment;
+    const prepared = useMemo(() => prepareBoundedMarkdown(source), [source]);
     // Previews and interactive answers both need to know whether the last fence is still open.
     const openTail = useMemo(
       () =>
@@ -854,6 +862,14 @@ const MarkdownChunk = memo(
       [last, interactive, source],
     );
     const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);
+    // Math normalization can expand a chunk past one parse: show its source instead.
+    if (!prepared) {
+      return (
+        <View style={{ marginBottom: 10 }}>
+          <PlainTextMessage text={source} style={styles.body!} />
+        </View>
+      );
+    }
     return (
       <FenceStateContext.Provider value={fenceState}>
         <Markdown
@@ -875,27 +891,68 @@ const MarkdownChunk = memo(
     previous.rendering === next.rendering,
 );
 
-/** A top-level fence of a long message, drawn directly instead of through Markdown. */
-function DirectFence({
-  segment,
-  streaming,
-  onCopy,
-  media,
-}: {
-  segment: Extract<MarkdownSegment, { kind: "fence" }>;
-  streaming: boolean;
-  onCopy?: ((text: string) => void) | undefined;
-  media: MarkdownMediaOptions;
-}) {
-  const fenceState = useMemo(
-    () => ({ openTail: segment.closed ? null : segment.content, streaming }),
-    [segment.closed, segment.content, streaming],
-  );
-  return (
-    <FenceStateContext.Provider value={fenceState}>
-      {fenceElement("fence", segment.content, segment.language, onCopy, media)}
-    </FenceStateContext.Provider>
-  );
+/**
+ * A large top-level fence of a long message, drawn directly instead of through
+ * Markdown. Memoized, so mounting later chunks does not redraw a large code block.
+ */
+const DirectFence = memo(
+  function DirectFence({
+    segment,
+    streaming,
+    onCopy,
+    media,
+  }: {
+    segment: Extract<MarkdownSegment, { kind: "fence" }>;
+    streaming: boolean;
+    onCopy?: ((text: string) => void) | undefined;
+    media: MarkdownMediaOptions;
+  }) {
+    const fenceState = useMemo(
+      () => ({ openTail: segment.closed ? null : segment.content, streaming }),
+      [segment.closed, segment.content, streaming],
+    );
+    return (
+      <FenceStateContext.Provider value={fenceState}>
+        {fenceElement("fence", segment.content, segment.language, onCopy, media)}
+      </FenceStateContext.Provider>
+    );
+  },
+  // The segment object is rebuilt on every delta; its source determines it.
+  (previous, next) =>
+    previous.segment.source === next.segment.source &&
+    previous.streaming === next.streaming &&
+    previous.onCopy === next.onCopy &&
+    previous.media === next.media,
+);
+
+function nextFrame(run: () => void): () => void {
+  if (typeof requestAnimationFrame === "function") {
+    const handle = requestAnimationFrame(run);
+    return () => cancelAnimationFrame(handle);
+  }
+  const handle = setTimeout(run, 16);
+  return () => clearTimeout(handle);
+}
+
+/**
+ * How many leading segments are mounted: one bounded slice now and one more per frame,
+ * so a long message never blocks a frame for longer than one chunk would. The count
+ * survives streaming deltas, which only add segments at the end.
+ */
+function useMountedSegments(segments: readonly MarkdownSegment[] | null): number {
+  const [mounted, setMounted] = useState(0);
+  const latest = useRef(segments);
+  latest.current = segments;
+  const count = segments?.length ?? 0;
+  const shown = segments ? Math.max(mounted, mountedSegmentCount(segments, 0)) : 0;
+  useEffect(() => {
+    if (shown >= count) return undefined;
+    return nextFrame(() => {
+      const current = latest.current;
+      if (current) setMounted(mountedSegmentCount(current, Math.min(shown, current.length)));
+    });
+  }, [count, shown]);
+  return Math.min(shown, count);
 }
 
 /** Trim the trailing paragraph margin (web `last:mb-0`). */
@@ -918,6 +975,7 @@ function TrimmedMarkdown({
 }) {
   const theme = useNativeTimelineTheme();
   const segments = useMemo(() => markdownSegments(text), [text]);
+  const shown = useMountedSegments(segments);
   const styles = useMemo(() => {
     const base = webMarkdownStyles(theme, tone);
     return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
@@ -931,7 +989,7 @@ function TrimmedMarkdown({
   let offset = 0;
   return (
     <View style={{ marginBottom: -10 }}>
-      {segments.map((segment, index) => {
+      {segments.slice(0, shown).map((segment, index) => {
         const last = index === segments.length - 1;
         // Keyed by where the segment starts, which stays put while later text streams in.
         const key = `${segment.kind}:${offset}`;

@@ -1,5 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import { createElement, type ReactNode } from "react";
+import { act, createElement, type ReactNode } from "react";
 import { registerDom, renderComponent } from "../../react/test/render-hook";
 
 // The real react-native-markdown-display and markdown-it; only React Native's host
@@ -51,6 +51,17 @@ mock.module("../src/timeline/primitives", () => ({
 }));
 
 registerDom();
+// Frames run only when a test flushes them, so each frame's work can be observed.
+const frames = new Map<number, () => void>();
+let nextFrameId = 1;
+globalThis.requestAnimationFrame = ((run: () => void) => {
+  const id = nextFrameId++;
+  frames.set(id, run);
+  return id;
+}) as typeof requestAnimationFrame;
+globalThis.cancelAnimationFrame = ((id: number) => {
+  frames.delete(id);
+}) as typeof cancelAnimationFrame;
 const { createWebMarkdownRenderer } = await import("../src/timeline/markdown");
 const { MAX_MARKDOWN_CHUNK_LENGTH } = await import("../src/timeline/markdown-limit");
 
@@ -92,6 +103,26 @@ const message = [
   "Read more in the [docs](https://example.com/docs). The score is $x^2$.",
 ].join("\n");
 
+/** Runs one pending frame; false when none is pending. */
+async function frame(): Promise<boolean> {
+  const pending = [...frames.entries()];
+  if (pending.length === 0) return false;
+  frames.clear();
+  await act(async () => {
+    for (const [, run] of pending) run();
+  });
+  return true;
+}
+
+/** Runs frames until a long message is fully mounted; returns how many it took. */
+async function settle(): Promise<number> {
+  let count = 0;
+  while (await frame()) {
+    if (++count > 100) throw new Error("the message never finished mounting");
+  }
+  return count;
+}
+
 function strongTexts(container: Element): string[] {
   return Array.from(container.querySelectorAll("span"))
     .filter((span) => JSON.parse(span.getAttribute("data-style") ?? "{}").fontWeight === "600")
@@ -102,6 +133,7 @@ test("a long message renders its Markdown and its interactive preview", async ()
   expect(message.length).toBeGreaterThan(MAX_MARKDOWN_CHUNK_LENGTH);
   const { blocks, render } = renderer();
   const view = await renderComponent(render(message, { tone: "body" }));
+  await settle();
   const text = view.container.textContent ?? "";
   // Formatted, not source: no Markdown markers, no plain-text pager, no raw HTML or CSS.
   expect(text).not.toContain("**");
@@ -131,6 +163,7 @@ test("a long message streaming its visual shows the loading state, then the prev
   const { blocks, render } = renderer();
   const open = message.slice(0, message.indexOf("</div>\n```") + 6);
   const view = await renderComponent(render(open, { tone: "body", streaming: true }));
+  await settle();
   expect(blocks.at(-1)).toEqual({ kind: "html", content: "", state: "streaming" });
   expect(view.container.textContent).not.toContain("<style>");
   await view.rerender(render(open, { tone: "body", streaming: false }));
@@ -140,21 +173,34 @@ test("a long message streaming its visual shows the loading state, then the prev
   await view.unmount();
 });
 
-test("a very long report renders formatted, in bounded parses, without stalling", async () => {
+test("a very long report renders formatted, one bounded slice per frame", async () => {
   const section = (index: number) =>
     `## Section ${index}\n\nSome **bold** text and a [link](https://example.com/${index}).\n\n` +
     "- one\n- two\n\n```ts\nconst x = 1;\n\nconst y = 2;\n```\n\n";
   let report = "";
   for (let index = 0; report.length < 60_000; index++) report += section(index);
   const { render } = renderer();
-  const started = performance.now();
   const view = await renderComponent(render(report, { tone: "body" }));
-  const elapsed = performance.now() - started;
+  // The first commit draws about one chunk, not the whole report.
+  const first = view.container.textContent ?? "";
+  expect(first).toContain("Section 0");
+  expect(first).not.toContain("Section 100");
+  expect(first.length).toBeLessThan(MAX_MARKDOWN_CHUNK_LENGTH);
+  // Then one more slice per frame, each at most one chunk.
+  let previous = first.length;
+  let count = 0;
+  while (await frame()) {
+    const now = (view.container.textContent ?? "").length;
+    expect(now - previous).toBeLessThan(MAX_MARKDOWN_CHUNK_LENGTH);
+    previous = now;
+    count++;
+  }
+  expect(count).toBeGreaterThan(5);
   const text = view.container.textContent ?? "";
+  expect(text).toContain(`Section ${report.split("## Section ").length - 2}`);
   expect(text).not.toContain("**");
   expect(text).not.toContain("## ");
   expect(text).not.toContain("Plain text");
   expect(text).toContain("const y = 2;");
-  expect(elapsed).toBeLessThan(10_000);
   await view.unmount();
 });

@@ -3,6 +3,7 @@ import {
   MAX_MARKDOWN_CHUNK_LENGTH,
   MAX_MARKDOWN_LENGTH,
   markdownSegments,
+  mountedSegmentCount,
   type MarkdownSegment,
   plainTextPage,
   prepareBoundedMarkdown,
@@ -47,7 +48,6 @@ function expectBounded(text: string, segments: MarkdownSegment[] | null) {
   for (const segment of segments!) {
     if (segment.kind !== "markdown") continue;
     expect(segment.source.length).toBeLessThanOrEqual(MAX_MARKDOWN_CHUNK_LENGTH);
-    expect(segment.prepared.text.length).toBeLessThanOrEqual(MAX_MARKDOWN_CHUNK_LENGTH);
   }
 }
 
@@ -56,9 +56,7 @@ describe("long messages are drawn in bounded segments", () => {
 
   test("a message that fits one parse stays one Markdown segment", () => {
     const text = "A **short** reply.\n\n```opengeni-html\n<p>hi</p>\n```";
-    expect(markdownSegments(text)).toEqual([
-      { kind: "markdown", source: text, prepared: { text, hasMath: false } },
-    ]);
+    expect(markdownSegments(text)).toEqual([{ kind: "markdown", source: text }]);
   });
 
   test("a long message splits at block boundaries and its visual is its own unit", () => {
@@ -108,18 +106,21 @@ describe("long messages are drawn in bounded segments", () => {
       expect(segment.source.split("$$").length % 2).toBe(1);
     }
     expect(
-      segments!.some((segment) => segment.kind === "markdown" && segment.prepared.hasMath),
+      segments!.some(
+        (segment) => segment.kind === "markdown" && prepareBoundedMarkdown(segment.source)?.hasMath,
+      ),
     ).toBe(true);
   });
 
   test("an unclosed fence at the end is still streaming", () => {
-    const text = `${paragraph(1)}\n\n`.repeat(40) + "```opengeni-html\n<div>\n<p>half";
+    const half = "<div>\n" + "<p>half</p>\n".repeat(500) + "<p>ha";
+    const text = `${paragraph(1)}\n\n`.repeat(40) + "```opengeni-html\n" + half;
     const segments = markdownSegments(text);
     expectBounded(text, segments);
     expect(segments!.at(-1)).toMatchObject({
       kind: "fence",
       language: "opengeni-html",
-      content: "<div>\n<p>half",
+      content: half,
       closed: false,
     });
   });
@@ -147,6 +148,7 @@ describe("long messages are drawn in bounded segments", () => {
     "a://",
     "a@b.co\n",
     "\\[x\\] ",
+    "$$ a\n",
     "$$\n",
     "\\[\n",
     "```\n",
@@ -160,12 +162,90 @@ describe("long messages are drawn in bounded segments", () => {
     const text = pattern.repeat(Math.floor(MAX_MARKDOWN_LENGTH / pattern.length));
     const started = performance.now();
     const segments = markdownSegments(text);
+    // Drawing prepares every chunk's math too: that is bounded and linear as well.
+    for (const segment of segments ?? []) {
+      if (segment.kind === "markdown") prepareBoundedMarkdown(segment.source);
+    }
     const elapsed = performance.now() - started;
     expectBounded(text, segments);
-    // A linear scan of 64K: generous for slow CI machines, far below a quadratic blow-up.
+    // Linear work on 64K: generous for slow CI machines, far below a quadratic blow-up.
     expect(elapsed).toBeLessThan(500);
     // Over the limit costs nothing: the length check comes first.
     expect(markdownSegments(pattern.repeat(1_000_000))).toBeNull();
+  });
+});
+
+describe("segmentation edge cases", () => {
+  const handlers = (count: number) =>
+    Array.from(
+      { length: count },
+      (_, index) => `def handler_${index}(event):\n    return event\n`,
+    ).join("\n");
+
+  test("CRLF messages find their fences like LF ones", () => {
+    const lf = `Here is the module:\n\n\`\`\`python\n${handlers(200)}\n\`\`\`\n\nDone.\n`;
+    const crlf = lf.replaceAll("\n", "\r\n");
+    for (const text of [lf, crlf]) {
+      const segments = markdownSegments(text);
+      expectBounded(text, segments);
+      expect(kinds(segments)).toEqual(["markdown", "fence", "markdown"]);
+      expect(segments![1]).toMatchObject({ language: "python", closed: true });
+      expect((segments![1] as { content: string }).content).not.toContain("\r");
+    }
+  });
+
+  test("a stray $$ line does not stop the cuts that follow it", () => {
+    const body = Array.from({ length: 60 }, (_, index) => `Paragraph ${index}. `.repeat(12));
+    const text = ["$$5 per month, billed yearly", ...body].join("\n\n");
+    const segments = markdownSegments(text);
+    expectBounded(text, segments);
+    expect(kinds(segments)!.every((kind) => kind === "markdown")).toBe(true);
+  });
+
+  test("an unclosed indented fence stops protecting text after one chunk", () => {
+    const body = Array.from({ length: 200 }, (_, index) => `Paragraph ${index}. `.repeat(12));
+    const text = ["1. step", "   ```sh", "   echo", "", ...body].join("\n\n");
+    const segments = markdownSegments(text);
+    expectBounded(text, segments);
+    expect(segments!.filter((segment) => segment.kind === "markdown").length).toBeGreaterThan(2);
+  });
+
+  test("small fences pack into chunks, so the segment count stays small", () => {
+    for (const text of [
+      "a\n```\n```\n".repeat(6_500),
+      Array.from({ length: 600 }, (_, index) => `Step ${index}:\n\n\`\`\`sh\necho ${index}\n\`\`\``)
+        .join("\n\n")
+        .slice(0, MAX_MARKDOWN_LENGTH),
+    ]) {
+      const segments = markdownSegments(text);
+      expectBounded(text, segments);
+      expect(kinds(segments)!.every((kind) => kind === "markdown")).toBe(true);
+      expect(segments!.length).toBeLessThanOrEqual((2 * MAX_MARKDOWN_LENGTH) / 4_096 + 2);
+    }
+  });
+
+  test("mounting takes one bounded slice per frame until every segment is mounted", () => {
+    const report = Array.from(
+      { length: 400 },
+      (_, index) =>
+        `## Section ${index}\n\nText **${index}**.\n\n\`\`\`ts\nconst x = ${index};\n\`\`\``,
+    ).join("\n\n");
+    const segments = markdownSegments(report.slice(0, MAX_MARKDOWN_LENGTH))!;
+    let mounted = 0;
+    let frames = 0;
+    while (mounted < segments.length) {
+      const next = mountedSegmentCount(segments, mounted);
+      expect(next).toBeGreaterThan(mounted);
+      expect(next - mounted).toBeLessThanOrEqual(8);
+      const length = segments.slice(mounted, next).reduce((sum, s) => sum + s.source.length, 0);
+      // A slice is one chunk's worth of text, or a single (possibly larger) segment.
+      if (next - mounted > 1) expect(length).toBeLessThanOrEqual(MAX_MARKDOWN_CHUNK_LENGTH);
+      mounted = next;
+      frames++;
+    }
+    expect(mounted).toBe(segments.length);
+    expect(frames).toBeGreaterThan(1);
+    expect(mountedSegmentCount(segments, segments.length)).toBe(segments.length);
   });
 });
 
