@@ -6,6 +6,8 @@
   "package": {
     "format": "opengeni.app-package",
     "version": 1,
+    "packageId": "2b7e4f10-6c3d-8a52-b1e9-0d4f8a6c2e31",
+    "packageVersion": "1.0.0",
     "exportedAt": "2026-11-22T00:00:00.000Z",
     "app": {
       "title": "Issue tracker",

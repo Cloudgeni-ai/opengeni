@@ -71,6 +71,10 @@ const workspaceRouteContracts = {
     kind: "page",
     source: "../../../packages/react/src/app/routes/artifacts.tsx",
   },
+  workspaceAppsRoute: {
+    kind: "page",
+    source: "../../../packages/react/src/app/routes/apps.tsx",
+  },
   workspaceArtifactDetailRoute: {
     kind: "page",
     source: "../../../packages/react/src/app/routes/artifacts.tsx",

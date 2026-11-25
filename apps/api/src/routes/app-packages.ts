@@ -6,6 +6,7 @@ import {
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
@@ -17,8 +18,15 @@ import {
   exportAppPackage,
   installAppPackage,
 } from "../app-packages/service";
-import { appUpgradeOperationKey, upgradeAppFromPackage } from "../app-packages/upgrade";
+import {
+  appUpgradeOperationKey,
+  resolveAppUpgradeSource,
+  upgradeAppFromPackage,
+} from "../app-packages/upgrade";
+import { listAppPackageStatus } from "../app-packages/status";
+import type { PackageSkillWriter } from "../app-packages/skills";
 import { parseRequestBody } from "../http/request-body";
+import { authorizeSkillScopeMutation } from "./skill-content";
 
 const AppId = z.string().uuid();
 
@@ -35,6 +43,29 @@ async function run<T>(fn: () => Promise<T>): Promise<T> {
   } catch (error) {
     throw appPackageHttpError(error) ?? error;
   }
+}
+
+/**
+ * A person saves a package's Skills as workspace Skills when they may change
+ * the workspace's Skills (the same check as the Skills page); otherwise the
+ * app installs without them and says why.
+ */
+function personSkillWriter(authorization: AccessGrantAuthorization): PackageSkillWriter {
+  try {
+    authorizeSkillScopeMutation(authorization, "workspace");
+  } catch {
+    return {
+      refused:
+        "Adding Skills to this workspace needs permission to change its Skills; ask someone who can to upgrade the app",
+    };
+  }
+  return {
+    actor: {
+      kind: "human",
+      principalKind: "human_session",
+      subjectId: authorization.grant.subjectId,
+    },
+  };
 }
 
 /**
@@ -75,6 +106,7 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
         title: request.title,
         visibility: request.visibility,
         demoData: request.demoData,
+        skillWriter: personSkillWriter(authorization),
         provenance: {
           // Its own namespace: the key cannot replay a create or a copy, and
           // a different package with the same key installs a different app.
@@ -96,9 +128,21 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
     return context.json(result, result.replayed ? 200 : 201);
   });
 
+  // Installed apps the person sees, with their version, local changes,
+  // Skills, automations, saved earlier state and any ready-made update.
+  app.get("/v1/workspaces/:workspaceId/app-packages/status", async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    return context.json(await run(() => listAppPackageStatus(deps, grant)), 200, {
+      "Cache-Control": "private, no-store",
+    });
+  });
+
   // Upgrade an app from a package: a plan (dryRun), or the package's version
-  // as a new version of the same app plus only its new data definitions.
-  // Managers of the app who can publish (artifacts:publish).
+  // as a new version of the same app plus only its new data definitions,
+  // Skills and automations. `previous` goes back to the app's state before
+  // its last upgrade the same way. Managers of the app who can publish
+  // (artifacts:publish).
   app.post(
     "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/package/upgrade",
     async (context) => {
@@ -113,9 +157,12 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
       const parsedId = AppId.safeParse(context.req.param("artifactId"));
       if (!parsedId.success) throw new HTTPException(422, { message: "Invalid app id" });
       const request = await body(context, AppPackageUpgradeRequest);
-      const result = await run(() =>
-        upgradeAppFromPackage(deps, grant, parsedId.data, {
-          package: request.package,
+      const result = await run(async () => {
+        const source = await resolveAppUpgradeSource(deps, grant, parsedId.data, request);
+        return await upgradeAppFromPackage(deps, grant, parsedId.data, {
+          package: source.package,
+          snapshotId: source.snapshotId,
+          skillWriter: personSkillWriter(authorization),
           dryRun: request.dryRun,
           allowDestructive: request.allowDestructive,
           provenance: request.idempotencyKey
@@ -125,7 +172,7 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
                   grant.subjectId,
                   parsedId.data,
                   request.idempotencyKey,
-                  request.package,
+                  source.package,
                 ),
                 actorSubjectId: grant.subjectId,
                 sourceSessionId: null,
@@ -135,8 +182,8 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
                 sourceToolName: null,
               }
             : null,
-        }),
-      );
+        });
+      });
       return context.json(result, 200, {
         "Cache-Control": "private, no-store",
       });

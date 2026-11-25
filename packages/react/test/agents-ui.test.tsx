@@ -54,7 +54,8 @@ const kit = await import("./agents-test-kit");
 const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText } =
   await import("../src/app/components/agents/agents-page");
 const { AgentPage } = await import("../src/app/components/agents/agent-page");
-const { ReadyMadeApps } = await import("../src/app/components/artifacts/ready-made-apps");
+const { AvailableApps, availableTemplates } =
+  await import("../src/app/components/artifacts/available-apps");
 const { installReadyMadeApp } = await import("../src/app/lib/ready-made-apps");
 const {
   NewAgentPage,
@@ -2196,12 +2197,31 @@ test("Ready-made agents aren't offered to someone who can't add agents", async (
   expect(container.querySelector("[data-ready-made-agent]")).toBeNull();
 });
 
+const APP_PACKAGE_ID = "6f1d4c2a-8b3e-8d71-9a05-3c2e7b4f1a90";
 const APP_TEMPLATE = {
   key: "issue-tracker",
   name: "Issue tracker",
   description: "Track bugs and tasks.",
   team: "Engineering",
-  package: { tools: [] },
+  package: {
+    format: "opengeni.app-package",
+    version: 1,
+    packageId: APP_PACKAGE_ID,
+    packageVersion: "1.0.0",
+    app: { title: "Issue tracker", html: "<h1>Issues</h1>" },
+    skills: [
+      {
+        files: [
+          {
+            path: "SKILL.md",
+            content:
+              "---\nname: issue-tracker\ndescription: File and update issues in the tracker\n---\n\nUse it.\n",
+          },
+        ],
+      },
+    ],
+    automations: [{ name: "Triage new issues", prompt: "Triage {{appId}}", schedule: {} }],
+  },
 };
 
 function appInstaller(responses: { id: string; status: string; replayed: boolean }[]) {
@@ -2233,7 +2253,15 @@ test("a ready-made app is added once; an archived copy is added fresh after it",
   ]);
 });
 
-test("Ready-made apps add in one click and open the app, which asks for its tools", async () => {
+test("Available lists ready-made apps not added here, archived ones count as not added", () => {
+  const status = (archived: boolean) =>
+    ({ appId: "a", packageId: APP_PACKAGE_ID, archived }) as never;
+  expect(availableTemplates([APP_TEMPLATE as never], []).length).toBe(1);
+  expect(availableTemplates([APP_TEMPLATE as never], [status(false)])).toEqual([]);
+  expect(availableTemplates([APP_TEMPLATE as never], [status(true)]).length).toBe(1);
+});
+
+test("Installing a ready-made app names its Skills and automations, then opens it", async () => {
   const installer = appInstaller([{ id: "app-9", status: "active", replayed: false }]);
   const client = Object.assign(fakeAgentsClient([]), installer, {
     async listAppTemplates() {
@@ -2243,15 +2271,25 @@ test("Ready-made apps add in one click and open the app, which asks for its tool
   let path = "";
   const container = await render(
     <AgentsTestHost context={canCreate(client)} onLocation={(location) => (path = location.href)}>
-      <ReadyMadeApps workspaceId={WORKSPACE_ID} />
+      <AvailableApps workspaceId={WORKSPACE_ID} installed={[]} />
     </AgentsTestHost>,
   );
   const row = container.querySelector<HTMLButtonElement>("[data-ready-made-app='issue-tracker']")!;
   expect(row.textContent).toContain("Issue tracker");
   await act(async () => row.click());
   await flush();
+  // Nothing installs until the dialog's one Install button.
+  expect(installer.requests).toEqual([]);
+  const dialog = document.querySelector<HTMLElement>("[role='dialog']")!;
+  expect(dialog.textContent).toContain("turns on its Skills");
+  expect(dialog.textContent).toContain("issue-tracker");
+  expect(dialog.textContent).toContain("File and update issues in the tracker");
+  expect(dialog.textContent).toContain("Triage new issues");
+  const install = button(dialog, "Install");
+  await act(async () => install.click());
+  await flush();
   expect(installer.requests.map((request) => request.idempotencyKey)).toEqual([
     "ready-made:issue-tracker",
   ]);
-  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/artifacts/app-9`);
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/sites/app-9`);
 });

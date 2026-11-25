@@ -24,8 +24,6 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react
 import { toast } from "../lib/toast";
 
 import { ArtifactLibrary } from "../components/artifacts/artifact-library";
-import { InstallAppButton } from "../components/artifacts/app-package";
-import { ReadyMadeApps } from "../components/artifacts/ready-made-apps";
 import { useCopyArtifactLink } from "../components/artifacts/copy-artifact-link";
 import {
   ARTIFACT_DETAIL_FRAME,
@@ -139,11 +137,34 @@ export function ArtifactsRoute({
         fromSession={fromSession}
       />
     </ArtifactSessionPage>
+  ) : search.kind === "site" ? (
+    // Apps have their own page now; links to the old Apps tab land there.
+    <RedirectToApps workspaceId={workspaceId} search={search} />
   ) : (
     <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
       <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} fromSession={fromSession} />
     </ArtifactSessionPage>
   );
+}
+
+function RedirectToApps({
+  workspaceId,
+  search,
+}: {
+  workspaceId: string;
+  search: ArtifactReturnSearch;
+}) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const { kind: _kind, browse: _browse, view: _view, tab: _tab, ...rest } = search;
+    void navigate({
+      to: "/workspaces/$workspaceId/apps",
+      params: { workspaceId },
+      search: Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined)),
+      replace: true,
+    });
+  }, [navigate, search, workspaceId]);
+  return null;
 }
 
 function ArtifactListRoute({
@@ -238,15 +259,6 @@ function ArtifactListRoute({
       New artifact
     </Button>
   ) : null;
-  // Ready-made apps under the Apps tab, and under the first empty page,
-  // for people who can add apps; not while searching or showing archived.
-  const readyMadeApps =
-    canPin &&
-    filters.q.trim() === "" &&
-    filters.status === "active" &&
-    // Below the list's last page, so it doesn't move as more pages load.
-    !catalog.nextCursor &&
-    (filters.kind === "site" || (filters.kind === "all" && empty));
   return (
     <ContentPage width="standard" className="pt-6" {...position}>
       <LineTabs
@@ -257,24 +269,17 @@ function ArtifactListRoute({
         <PageHeader
           icon={<PanelsTopLeftIcon />}
           title="Artifacts"
-          description={`Apps, images, documents and files made with ${productName}`}
-          actions={
-            filters.kind === "site" && canPin ? (
-              <>
-                <InstallAppButton workspaceId={workspaceId} />
-                {newArtifact}
-              </>
-            ) : empty && filters.kind === "all" ? null : (
-              newArtifact
-            )
-          }
+          description={`Images, documents and files made with ${productName}`}
+          actions={empty && filters.kind === "all" ? null : newArtifact}
           tabs={
             <LineTabsList aria-label="Artifact types">
-              {artifactKinds.map(([kind, label]) => (
-                <LineTabsTrigger key={kind} value={kind}>
-                  {label}
-                </LineTabsTrigger>
-              ))}
+              {artifactKinds
+                .filter(([kind]) => kind !== "site")
+                .map(([kind, label]) => (
+                  <LineTabsTrigger key={kind} value={kind}>
+                    {label}
+                  </LineTabsTrigger>
+                ))}
             </LineTabsList>
           }
         />
@@ -292,6 +297,10 @@ function ArtifactListRoute({
             nextCursor={catalog.nextCursor}
             onLoadMore={catalog.loadMore}
             emptyAction={newArtifact}
+            empty={{
+              title: "No artifacts yet",
+              description: `Images, documents, spreadsheets and presentations ${productName} makes show up here.`,
+            }}
             onEmptyChange={setEmpty}
             artifactKindsHidden={artifactKindsHidden}
             onPin={
@@ -314,7 +323,6 @@ function ArtifactListRoute({
                 : undefined
             }
           />
-          {readyMadeApps ? <ReadyMadeApps workspaceId={workspaceId} /> : null}
         </LineTabsContent>
       </LineTabs>
     </ContentPage>
@@ -513,7 +521,12 @@ function ArtifactDetailPage({
     "artifacts:publish",
   );
   const navigate = useNavigate();
-  const artifactsBack = useArtifactsBackLink(workspaceId, fromSession);
+  // An app's details go back to Apps, with the list's search and sort.
+  const listSearch = useSearch({ strict: false }) as ArtifactReturnSearch;
+  const artifactsBack = useArtifactsBackLink(workspaceId, fromSession, {
+    ...listSearch,
+    kind: "site",
+  });
   // Opened from the app's own view (its "…" Settings): Back returns to the
   // app as it was, through the browser's history, which the tabs replace.
   const fromSite = useRouterState({

@@ -7,6 +7,7 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   CircleArrowUpIcon,
+  UndoIcon,
   CopyIcon,
   DownloadIcon,
   LockKeyholeIcon,
@@ -24,7 +25,8 @@ import { ConfirmDialog } from "../../../ui/confirm-dialog";
 import { SettingRow } from "../../../ui/setting-row";
 import { useAppApi } from "../../lib/app-api";
 import { notifySiteToolReadinessChanged } from "../../lib/console-site";
-import { useExportApp, useUpgradeApp } from "./app-package";
+import { useAppPackageActions, useExportApp, useUpgradeApp } from "./app-package";
+import { useAppPackageStatus } from "../../lib/use-app-package-status";
 import { useAppContext } from "../../app-context";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
@@ -198,6 +200,12 @@ export function SiteSettings({
   const copies = useDuplicateSite(workspaceId);
   const exportApp = useExportApp(workspaceId);
   const upgradeApp = useUpgradeApp(workspaceId, artifact.id);
+  const packageActions = useAppPackageActions(workspaceId);
+  const packageStatus = useAppPackageStatus(
+    client,
+    workspaceId,
+    management.canPublish && Boolean(artifact.currentVersion) && artifact.status !== "archived",
+  ).apps.get(artifact.id);
   const resetAllowed = useResetSiteToolAllowances(
     workspaceId,
     artifact.id,
@@ -230,11 +238,14 @@ export function SiteSettings({
   const canExport = canDuplicate && exportApp !== null;
   const canUpgrade = canDuplicate && upgradeApp !== null && !archived;
   const canReset = resetAllowed !== null && !archived;
+  const canGoBack =
+    canDuplicate && packageActions !== null && !archived && Boolean(packageStatus?.previous);
   // Rarely used, so collapsed under More; a lone row shows as it is.
   const moreCount = [
     canDuplicate,
     canExport,
     canUpgrade,
+    canGoBack,
     canReset,
     management.canPublish && !archived,
   ].filter(Boolean).length;
@@ -284,6 +295,27 @@ export function SiteSettings({
             <Button type="button" size="sm" variant="outline" onClick={upgradeApp.open}>
               <CircleArrowUpIcon aria-hidden="true" />
               Upgrade
+            </Button>
+          }
+        />
+      ) : null}
+      {canGoBack && packageActions && packageStatus?.previous ? (
+        <SettingRow
+          label="Previous version"
+          description={
+            packageStatus.previous.packageVersion
+              ? `Go back to version ${packageStatus.previous.packageVersion}, as it was before the last update.`
+              : "Go back to how it was before the last update."
+          }
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => packageActions.restore(packageStatus)}
+            >
+              <UndoIcon aria-hidden="true" />
+              Restore
             </Button>
           }
         />
@@ -383,6 +415,7 @@ export function SiteSettings({
       {workspaceAccess}
       {moreCount > 1 ? <PublishMore>{moreRows}</PublishMore> : moreRows}
       {upgradeApp?.element}
+      {packageActions?.element}
       <ConfirmDialog
         open={archiveOpen}
         onOpenChange={setArchiveOpen}

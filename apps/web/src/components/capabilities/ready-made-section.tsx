@@ -1,9 +1,9 @@
-import { AppWindowIcon, GraduationCapIcon } from "lucide-react";
+import { GraduationCapIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { agentInitialsAvatar, type AgentTemplate, type AppTemplate } from "@opengeni/contracts";
+import { agentInitialsAvatar, type AgentTemplate } from "@opengeni/contracts";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { CapabilityCatalogRow, type CapabilityCatalogStatus } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
@@ -14,7 +14,6 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
-import { installReadyMadeApp } from "@opengeni/react/app/lib/ready-made-apps";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import type { ReadyMadeKind } from "./capabilities-section";
 
@@ -40,7 +39,6 @@ export type ReadyMadeEntry = {
 
 const KIND_LABEL: Record<ReadyMadeEntry["kind"], string> = {
   agent: "Agent",
-  app: "App",
   skill: "Skill",
 };
 
@@ -76,8 +74,9 @@ function metadataString(value: unknown): string | null {
 }
 
 /**
- * The Ready-made tab: ready-made agents, apps and skills, each added with one
- * click. An added agent or app opens; an added skill opens in Skills.
+ * The Ready-made tab: ready-made agents and skills, each added with one
+ * click. An added agent opens; an added skill opens in Skills. Ready-made
+ * apps are on the Apps page.
  */
 export function ReadyMadeSection({
   workspaceId,
@@ -96,20 +95,15 @@ export function ReadyMadeSection({
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
   const canAddAgents = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
-  const canAddApps = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
   const [partlyLoaded, setPartlyLoaded] = useState(false);
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[] | null>(null);
-  const [appTemplates, setAppTemplates] = useState<AppTemplate[] | null>(null);
   const [librarySkills, setLibrarySkills] = useState<CapabilityCatalogItem[] | null>(null);
   // Whether the workspace's agents loaded, so an added agent isn't offered again.
   const [agentsKnown, setAgentsKnown] = useState(true);
   // Ready-made agents already added here, to the agent they became.
   const [addedAgents, setAddedAgents] = useState<ReadonlyMap<string, string>>(new Map());
-  // Apps added from here, to the app they became. Adding again replays the
-  // same install, so an app added before a reload opens instead of doubling.
-  const [addedApps, setAddedApps] = useState<ReadonlyMap<string, string>>(new Map());
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -121,11 +115,10 @@ export function ReadyMadeSection({
     void Promise.allSettled([
       client.listAgentTemplates(workspaceId),
       client.listAgents(workspaceId),
-      client.listAppTemplates(workspaceId),
       client.listLibrarySkills(workspaceId),
-    ]).then(([templates, agents, apps, skills]) => {
+    ]).then(([templates, agents, skills]) => {
       if (!live) return;
-      const kinds = [templates, apps, skills];
+      const kinds = [templates, skills];
       // A kind this person may not read (403) isn't offered; it hasn't failed.
       const failed = kinds.filter(
         (result) => result.status === "rejected" && !isForbidden(result.reason),
@@ -146,7 +139,6 @@ export function ReadyMadeSection({
           ),
         ),
       );
-      setAppTemplates(apps.status === "fulfilled" ? apps.value : []);
       setLibrarySkills(skills.status === "fulfilled" ? skills.value : []);
     });
     return () => {
@@ -178,16 +170,6 @@ export function ReadyMadeSection({
             ? undefined
             : "Couldn't check your agents. Retry to add.",
       })),
-      ...(appTemplates ?? []).map((template) => ({
-        key: `app:${template.key}`,
-        kind: "app" as const,
-        name: template.name,
-        description: template.description,
-        team: template.team,
-        icon: <LogoTile name={template.name} icon={<AppWindowIcon />} />,
-        added: addedApps.has(template.key),
-        unavailable: canAddApps ? undefined : "Ask an admin to add apps",
-      })),
       ...(librarySkills ?? []).map((item) => ({
         key: `skill:${item.id}`,
         kind: "skill" as const,
@@ -201,13 +183,10 @@ export function ReadyMadeSection({
     ],
     [
       agentTemplates,
-      appTemplates,
       librarySkills,
       addedAgents,
-      addedApps,
       canInstallSkills,
       canAddAgents,
-      canAddApps,
       agentsKnown,
       workspaceId,
     ],
@@ -221,14 +200,6 @@ export function ReadyMadeSection({
         void navigate({
           to: "/workspaces/$workspaceId/agents/$agentId",
           params: { workspaceId, agentId },
-        });
-      }
-    } else if (entry.kind === "app") {
-      const appId = addedApps.get(key);
-      if (appId) {
-        void navigate({
-          to: "/workspaces/$workspaceId/artifacts/$artifactId",
-          params: { workspaceId, artifactId: appId },
         });
       }
     } else {
@@ -250,25 +221,6 @@ export function ReadyMadeSection({
           editAccess: "everyone",
         });
         setAddedAgents((current) => new Map(current).set(key, agent.id));
-      } else if (entry.kind === "app") {
-        const template = appTemplates?.find((each) => each.key === key);
-        if (!template) return;
-        // Adding it again returns the same app (the Artifacts page adds the same way).
-        const installed = await installReadyMadeApp(client, workspaceId, template);
-        setAddedApps((current) => new Map(current).set(key, installed.app.id));
-        if (installed.notInstalled.length > 0) {
-          toast.warning(`${entry.name} was added without some parts`, {
-            description: installed.notInstalled.map((problem) => problem.reason).join(" "),
-          });
-        } else if (!installed.replayed) {
-          toast.success(`Added ${entry.name}`);
-        }
-        // Open it: the app asks for any tool it uses that isn't connected yet.
-        void navigate({
-          to: "/workspaces/$workspaceId/artifacts/$artifactId",
-          params: { workspaceId, artifactId: installed.app.id },
-        });
-        return;
       } else {
         const item = librarySkills?.find((each) => each.id === key);
         const libraryId = metadataString(item?.metadata.libraryId);
@@ -308,7 +260,7 @@ export function ReadyMadeSection({
       />
     );
   }
-  if (agentTemplates === null || appTemplates === null || librarySkills === null) {
+  if (agentTemplates === null || librarySkills === null) {
     return (
       <p role="status" className="text-sm text-fg-muted">
         Loading…

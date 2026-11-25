@@ -5461,7 +5461,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "AppPackageInstallRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "artifacts:publish"
   },
   {
     "id": "installFikenConnection",
@@ -5680,6 +5681,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAppPackageStatus",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/app-packages/status",
+    "request": [],
+    "response": [],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "listAppServerRuns",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/runs",
@@ -5729,6 +5738,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "query": [
       "cursor",
+      "excludeKind",
       "includeSubSessions",
       "kind",
       "limit",
@@ -11802,7 +11812,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "AppPackageUpgradeRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "artifacts:publish"
   },
   {
     "id": "upgradeBillingSubscription",

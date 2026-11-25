@@ -13,6 +13,7 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/meetings"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
+  | "/workspaces/$workspaceId/apps"
   | "/workspaces/$workspaceId/settings";
 
 export type WorkspaceConfigIcon =
@@ -85,17 +86,16 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
     label: "Artifacts",
-    description: "Apps, images, documents, and files built with {product}",
+    description: "Images, documents, and files built with {product}",
   },
 ];
 
-/** Apps: the Artifacts page at its Apps tab, up front in the full console. */
+/** Apps: installed apps and ready-made ones to add, up front in the rail. */
 export const APPS_WORKSPACE_ITEM: WorkspaceConfigItem = {
-  to: "/workspaces/$workspaceId/artifacts",
-  search: { kind: "site" },
+  to: "/workspaces/$workspaceId/apps",
   icon: "app-window",
   label: "Apps",
-  description: "Apps your team made with {product}",
+  description: "Your team's apps, and ready-made ones to add",
 };
 
 /** The guided setups, first under Setup in the full console. */
@@ -106,7 +106,7 @@ export const GET_STARTED_WORKSPACE_ITEM: WorkspaceConfigItem = {
   description: "Guided setups that end with an agent at work",
 };
 
-/** A rail entry's identity: Apps and Artifacts share a page. */
+/** A rail entry's identity. */
 export function navItemKey(item: Pick<WorkspaceConfigItem, "to" | "search">): string {
   return item.search ? `${item.to}?kind=${item.search.kind}` : item.to;
 }
@@ -270,6 +270,8 @@ export function primaryWorkspaceItems(simplified: boolean): WorkspaceConfigItem[
     (item) =>
       interfaceListsDestination(simplified, item.to) &&
       !SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to),
+  ).flatMap((item) =>
+    item.to === "/workspaces/$workspaceId/artifacts" ? [APPS_WORKSPACE_ITEM, item] : [item],
   );
 }
 
@@ -328,31 +330,30 @@ export function isConfigItemActive(
 }
 
 /**
- * Whether a rail entry is the page you are on. Apps and Artifacts share the
- * Artifacts page: Apps is its Apps tab, an app opened from it (`?kind=site`
- * stays on the address) and an app's own view (`/sites/…`), Artifacts the
- * rest of it.
+ * Whether a rail entry is the page you are on. Apps is its page, an app's own
+ * view (`/sites/…`) and an app's details (`/artifacts/<id>?kind=site`);
+ * Artifacts is the rest of the Artifacts page.
  */
 export function isNavItemActive(
   location: { pathname: string; kind?: string | undefined },
   workspaceId: string,
   item: Pick<WorkspaceConfigItem, "to" | "search">,
 ): boolean {
-  if (item.to !== "/workspaces/$workspaceId/artifacts")
-    return isConfigItemActive(location.pathname, workspaceId, item.to);
   const artifacts = `/workspaces/${workspaceId}/artifacts`;
   const onApps =
+    location.pathname === `/workspaces/${workspaceId}/apps` ||
     location.pathname.startsWith(`/workspaces/${workspaceId}/sites/`) ||
     ((location.pathname === artifacts || location.pathname.startsWith(`${artifacts}/`)) &&
       location.kind === "site");
-  return item.search
-    ? onApps
-    : !onApps && isConfigItemActive(location.pathname, workspaceId, item.to);
+  if (item.to === "/workspaces/$workspaceId/apps") return onApps;
+  if (item.to === "/workspaces/$workspaceId/artifacts")
+    return !onApps && isConfigItemActive(location.pathname, workspaceId, item.to);
+  return isConfigItemActive(location.pathname, workspaceId, item.to);
 }
 
 /** Routes that belong to a section under another path. */
 const SECTION_ALIASES: Readonly<Record<string, WorkspaceConfigTarget>> = {
-  sites: "/workspaces/$workspaceId/artifacts",
+  sites: "/workspaces/$workspaceId/apps",
   schedules: "/workspaces/$workspaceId/automations",
   memory: "/workspaces/$workspaceId/state",
   documents: "/workspaces/$workspaceId/state",
@@ -371,7 +372,12 @@ export function workspaceSectionForPath(
   const prefix = `/workspaces/${workspaceId}/`;
   if (!pathname.startsWith(prefix)) return null;
   const first = pathname.slice(prefix.length).split("/")[0] ?? "";
-  const items = [...PRIMARY_WORKSPACE_ITEMS, GET_STARTED_WORKSPACE_ITEM, ...WORKSPACE_BROWSE_ITEMS];
+  const items = [
+    ...PRIMARY_WORKSPACE_ITEMS,
+    APPS_WORKSPACE_ITEM,
+    GET_STARTED_WORKSPACE_ITEM,
+    ...WORKSPACE_BROWSE_ITEMS,
+  ];
   const target = SECTION_ALIASES[first];
   const item = items.find((each) =>
     target ? each.to === target : configPathSuffix(each.to) === first,

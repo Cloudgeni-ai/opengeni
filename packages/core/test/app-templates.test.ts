@@ -5,6 +5,7 @@ import { agentTemplates, appTemplates } from "../src/index";
 describe("ready-made apps", () => {
   test("every content file is a valid, complete app package", () => {
     expect(appTemplates().map((template) => template.key)).toEqual([
+      "work-summary",
       "issue-tracker",
       "incident-log",
       "feedback-board",
@@ -13,12 +14,27 @@ describe("ready-made apps", () => {
     for (const template of appTemplates()) {
       const parsed = parseAppPackage(template.package);
       expect(parsed.problems).toEqual([]);
+      // A newer version is what offers installed copies an update.
+      expect(parsed.package.packageId).toBeString();
+      expect(parsed.package.packageVersion).toMatch(/^\d+\.\d+\.\d+$/);
       expect(parsed.package.data.collections.length).toBeGreaterThan(0);
       // The app's own HTML loads the host client for its data.
       expect(parsed.package.app.html).toContain("/__opengeni/site-tools/client.js");
       // Stored records are untrusted: rendered as text, never as HTML.
       expect(parsed.package.app.html).not.toContain("innerHTML");
     }
+  });
+
+  test("Work summary carries its Skill and a switched-off automation", () => {
+    const template = appTemplates().find((entry) => entry.key === "work-summary");
+    const parsed = parseAppPackage(template?.package);
+    expect(parsed.problems).toEqual([]);
+    expect(parsed.package.skills?.map((skill) => skill.name)).toEqual(["work-summary"]);
+    expect(parsed.package.skills?.[0]?.description).toBeString();
+    expect(parsed.package.automations?.map((automation) => automation.name)).toEqual([
+      "Update the work summary",
+    ]);
+    expect(parsed.package.automations?.[0]?.prompt).toContain("{{appId}}");
   });
 
   test("gallery content names the team it is for", () => {

@@ -32,8 +32,10 @@ import {
   artifactRequestedToolsMissingFromAttemptCatalog,
   createWorkspaceArtifact,
   getAppPackageId,
+  getAppPackageInstall,
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
+  putAppPackageInstall,
   setAppPackageId,
   SiteDataError,
   WorkspaceArtifactConflictError,
@@ -75,6 +77,9 @@ import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
 import { exportAppSidebar, installAppSidebar } from "./sidebar";
 import { appSyncHooks, syncName } from "./syncs";
+import { exportPackageExtras } from "./installed";
+import { applyPackageSkills, planPackageSkills, type PackageSkillWriter } from "./skills";
+import { addPackageAutomations } from "./automations";
 
 /**
  * App packages: export an app (a Site) with its definitions as one file, and
@@ -189,11 +194,13 @@ export async function exportAppPackage(
     notExported.push({ part: "sync", reason: reason(error, "listing syncs") });
   }
   const sidebar = await exportAppSidebar(deps, grant, appId, notExported);
+  const extras = await exportPackageExtras(deps, grant, appId, notExported);
 
   const pkg: AppPackage = {
     format: APP_PACKAGE_FORMAT,
     version: APP_PACKAGE_VERSION,
     packageId: (await getAppPackageId(deps.db, grant.workspaceId, appId)) ?? ownPackageId(appId),
+    ...(extras.packageVersion ? { packageVersion: extras.packageVersion } : {}),
     exportedAt: new Date().toISOString(),
     app: {
       title: artifact.title,
@@ -226,6 +233,8 @@ export async function exportAppPackage(
     },
     syncs,
     ...(sidebar.length > 0 ? { sidebar } : {}),
+    ...(extras.skills ? { skills: extras.skills } : {}),
+    ...(extras.automations ? { automations: extras.automations } : {}),
   };
   // A multi-file build's files, measured from the manifest before any is read.
   if (ref.assetManifest) {
@@ -603,6 +612,8 @@ export async function installAppPackage(
     visibility?: WorkspaceArtifactVisibility | undefined;
     demoData?: boolean | undefined;
     provenance: AppInstallProvenance;
+    /** Who saves the package's Skills (the person, or the agent's live turn), or why no one can. */
+    skillWriter: PackageSkillWriter;
   },
 ): Promise<AppPackageInstallResponse> {
   if (!deps.objectStorage)
@@ -624,6 +635,8 @@ export async function installAppPackage(
     demoRecords: 0,
     demoRows: 0,
     demoFiles: 0,
+    skills: [],
+    automations: [],
   };
 
   // 1. The app itself, from the package's version.
@@ -816,7 +829,61 @@ export async function installAppPackage(
   if (pkg.sidebar?.length)
     installed.sidebar = await installAppSidebar(deps, grant, app, pkg.sidebar, notInstalled);
 
-  // 6. Demo data, only into collections, tables and file lists that are
+  // 6. Its Skills (workspace Skills linked to the app) and automations
+  // (switched off), then what came with it, so its later upgrades know.
+  // A replay finds them linked already and adds nothing twice.
+  const before = await getAppPackageInstall(deps.db, grant.workspaceId, app.id);
+  let skillLinks = before?.skills ?? [];
+  if (pkg.skills?.length) {
+    const plan = await planPackageSkills(deps, grant, {
+      skills: pkg.skills,
+      links: skillLinks,
+      packageId: pkg.packageId ?? null,
+    });
+    notInstalled.push(...plan.problems);
+    const applied = await applyPackageSkills(
+      deps,
+      grant,
+      {
+        plan,
+        links: skillLinks,
+        writer: input.skillWriter,
+        operationKey: input.provenance.operationKey,
+        appTitle: app.title,
+      },
+      notInstalled,
+    );
+    skillLinks = applied.links;
+    installed.skills = skillLinks.map((link) => link.name);
+  }
+  let automations = before?.automations ?? [];
+  if (pkg.automations?.length) {
+    automations = (
+      await addPackageAutomations(
+        deps,
+        grant,
+        {
+          appId: app.id,
+          automations: pkg.automations,
+          existing: automations,
+          surface: input.provenance.sourceAttemptId === null ? "http" : "first_party_mcp",
+        },
+        notInstalled,
+      )
+    ).automations;
+    installed.automations = automations.map((entry) => entry.name);
+  }
+  await putAppPackageInstall(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    appId: app.id,
+    packageVersion: pkg.packageVersion ?? null,
+    versionId: before?.versionId ?? app.currentVersion?.id ?? null,
+    skills: skillLinks,
+    automations,
+  });
+
+  // 7. Demo data, only into collections, tables and file lists that are
   // still empty. Files go first: demo values that are a packaged file's id
   // then name its installed copy.
   if (wantsDemo && pkg.demoData) {

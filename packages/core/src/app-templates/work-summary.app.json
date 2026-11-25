@@ -1,0 +1,60 @@
+{
+  "key": "work-summary",
+  "name": "Work summary",
+  "description": "What got done, kept current by your agents. Comes with a Skill that tells agents what to add.",
+  "team": "Everyone",
+  "package": {
+    "format": "opengeni.app-package",
+    "version": 1,
+    "packageId": "6f1d4c2a-8b3e-8d71-9a05-3c2e7b4f1a90",
+    "packageVersion": "1.0.0",
+    "exportedAt": "2026-11-25T00:00:00.000Z",
+    "app": {
+      "title": "Work summary",
+      "description": "What got done, kept current by your agents.",
+      "html": "<!doctype html>\n<html lang='en'>\n<head>\n<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width, initial-scale=1'>\n<title>Work summary</title>\n<style>\n:root { color-scheme: light dark; --line: color-mix(in srgb, currentColor 14%, transparent); --muted: color-mix(in srgb, currentColor 62%, transparent); }\n* { box-sizing: border-box; }\nbody { margin: 0; font: 15px/1.5 system-ui, sans-serif; }\nmain { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }\nh1 { font-size: 22px; margin: 0 0 4px; }\np.lead { margin: 0 0 24px; color: var(--muted); }\nh2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 28px 0 10px; }\nul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }\nli { padding: 12px 16px; border: 1px solid var(--line); border-radius: 12px; }\nli h3 { font-size: 15px; margin: 0; }\nli p { margin: 4px 0 0; white-space: pre-wrap; }\nli .meta { font-size: 13px; color: var(--muted); margin-top: 6px; }\nli .meta a { color: inherit; }\n.kind { display: inline-block; font-size: 12px; padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); margin-right: 6px; }\ndetails { margin-bottom: 8px; }\nsummary { cursor: pointer; color: var(--muted); }\nform { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; margin-top: 10px; }\ninput, textarea, select, button { font: inherit; color: inherit; }\ninput, textarea, select { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: transparent; }\ntextarea { min-height: 64px; resize: vertical; }\nbutton { justify-self: start; padding: 8px 14px; border: 0; border-radius: 8px; background: #3b5bdb; color: #fff; cursor: pointer; }\n.note { color: var(--muted); }\n</style>\n</head>\n<body>\n<main>\n<h1>Work summary</h1>\n<p class='lead'>What got done, kept current by your agents.</p>\n<details>\n<summary>Add an entry</summary>\n<form id='add'>\n<input name='title' required maxlength='200' placeholder='What was done'>\n<textarea name='summary' maxlength='2000' placeholder='A line or two on what changed and why'></textarea>\n<select name='kind'><option value='shipped'>Shipped</option><option value='fixed'>Fixed</option><option value='decided'>Decided</option><option value='other'>Other</option></select>\n<input name='link' maxlength='500' placeholder='Link (optional)'>\n<button type='submit'>Add</button>\n</form>\n</details>\n<p id='status' class='note' role='status'></p>\n<div id='days'></div>\n</main>\n<script src='/__opengeni/site-tools/client.js'></script>\n<script>\nconst statusLine = document.getElementById('status');\nconst days = document.getElementById('days');\nlet entries = null;\ntry { entries = createOpenGeniSiteClient().data.collection('entries'); } catch { statusLine.textContent = 'Open the saved app to see the work summary.'; }\nconst KINDS = { shipped: 'Shipped', fixed: 'Fixed', decided: 'Decided', other: 'Other' };\nfunction safeLink(value) {\n  try { const url = new URL(String(value)); return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null; } catch { return null; }\n}\nfunction dayLabel(date) {\n  const today = new Date().toISOString().slice(0, 10);\n  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);\n  return date === today ? 'Today' : date === yesterday ? 'Yesterday' : date;\n}\nfunction render(records) {\n  days.replaceChildren();\n  if (records.length === 0) { statusLine.textContent = 'Nothing yet. Agents add entries here as they finish work.'; return; }\n  const byDay = new Map();\n  for (const record of records) {\n    const date = String(record.data.date || record.createdAt || '').slice(0, 10) || 'Undated';\n    if (!byDay.has(date)) byDay.set(date, []);\n    byDay.get(date).push(record);\n  }\n  for (const [date, list] of [...byDay].sort((a, b) => (a[0] < b[0] ? 1 : -1))) {\n    const heading = document.createElement('h2');\n    heading.textContent = dayLabel(date);\n    const items = document.createElement('ul');\n    for (const record of list) {\n      const item = document.createElement('li');\n      const title = document.createElement('h3');\n      const kind = document.createElement('span');\n      kind.className = 'kind';\n      kind.textContent = KINDS[record.data.kind] || KINDS.other;\n      title.append(kind, String(record.data.title || ''));\n      item.append(title);\n      if (record.data.summary) {\n        const summary = document.createElement('p');\n        summary.textContent = String(record.data.summary);\n        item.append(summary);\n      }\n      const meta = document.createElement('div');\n      meta.className = 'meta';\n      if (record.data.by) meta.append(String(record.data.by));\n      const href = safeLink(record.data.link);\n      if (href) {\n        if (record.data.by) meta.append(' · ');\n        const link = document.createElement('a');\n        link.href = href;\n        link.target = '_blank';\n        link.rel = 'noopener noreferrer';\n        link.textContent = 'Link';\n        meta.append(link);\n      }\n      if (meta.childNodes.length > 0) item.append(meta);\n      items.append(item);\n    }\n    days.append(heading, items);\n  }\n}\nasync function load() {\n  if (!entries) return;\n  try {\n    const { records } = await entries.list({ sort: [{ field: 'date', direction: 'desc' }, { field: '$createdAt', direction: 'desc' }], limit: 200 });\n    statusLine.textContent = '';\n    render(records);\n  } catch { statusLine.textContent = 'Couldn’t load the work summary. Try again in a moment.'; }\n}\ndocument.getElementById('add').addEventListener('submit', async (event) => {\n  event.preventDefault();\n  if (!entries) return;\n  const formEl = event.currentTarget;\n  const button = formEl.querySelector('button');\n  if (button.disabled) return;\n  const form = new FormData(formEl);\n  const entry = { title: String(form.get('title')).trim(), summary: String(form.get('summary')).trim(), kind: String(form.get('kind')), link: String(form.get('link')).trim(), date: new Date().toISOString().slice(0, 10) };\n  if (!entry.title) return;\n  button.disabled = true;\n  try { await entries.insert(entry); formEl.reset(); await load(); }\n  catch { statusLine.textContent = 'Couldn’t save that entry. Try again.'; }\n  finally { button.disabled = false; }\n});\nvoid load();\n</script>\n</body>\n</html>\n"
+    },
+    "tools": [],
+    "data": {
+      "collections": [
+        {
+          "name": "entries",
+          "accessMode": "shared"
+        }
+      ]
+    },
+    "sql": {
+      "migrations": [],
+      "queries": []
+    },
+    "syncs": [],
+    "sidebar": [
+      {
+        "label": "Work summary"
+      }
+    ],
+    "skills": [
+      {
+        "files": [
+          {
+            "path": "SKILL.md",
+            "content": "---\nname: work-summary\ndescription: Adds what got done to the Work summary app. Use after finishing real work (shipped a change, fixed a problem, made a decision, delivered something) in a workspace with that app.\n---\n\n# Work summary\n\nThe Work summary app (collection `entries`) lists what got done. Add an entry when you finish a piece of work; skip questions, research and work still in progress.\n\n1. Find the app: the app titled \"Work summary\" in this workspace.\n2. Check today's entries first (`app_data_query`, `date` equal to today) and don't add the same work twice; update an entry instead.\n3. Add one entry with `app_data_write` (`insert`):\n   - `title`: what was done, in a few plain words.\n   - `summary`: one or two sentences on what changed and why it matters.\n   - `kind`: `shipped`, `fixed`, `decided` or `other`.\n   - `link`: the PR, document or chat URL, when there is one.\n   - `by`: who did it (the person, or the agent and who it worked for).\n   - `date`: today, as YYYY-MM-DD.\n"
+          }
+        ]
+      }
+    ],
+    "automations": [
+      {
+        "name": "Update the work summary",
+        "prompt": "Add the work finished in this workspace over the last day to the Work summary app (id {{appId}}), following the work-summary Skill. Look at recent chats and their results. Add nothing when there is nothing new.",
+        "schedule": {
+          "type": "calendar",
+          "timeZone": "UTC",
+          "hour": 17,
+          "minute": 0,
+          "daysOfWeek": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"]
+        }
+      }
+    ]
+  }
+}

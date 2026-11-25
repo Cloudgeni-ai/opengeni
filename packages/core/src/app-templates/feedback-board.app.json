@@ -6,6 +6,8 @@
   "package": {
     "format": "opengeni.app-package",
     "version": 1,
+    "packageId": "4e8b2d6f-3a1c-8b97-8c45-7f0e1d3a9b62",
+    "packageVersion": "1.0.0",
     "exportedAt": "2026-11-22T00:00:00.000Z",
     "app": {
       "title": "Feedback board",

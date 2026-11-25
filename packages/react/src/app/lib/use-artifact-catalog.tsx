@@ -95,7 +95,8 @@ export function useArtifactCatalog(
       const fetchPage = (cursor?: string) =>
         client.listArtifactCatalog(workspaceId, {
           ...(q ? { q } : {}),
-          ...(kind === "all" ? {} : { kind }),
+          // Apps have their own page: everything else is "all" here.
+          ...(kind === "all" ? { excludeKind: "site" as const } : { kind }),
           sort,
           status,
           limit: 60,

@@ -5,10 +5,12 @@ export type {
   AppPackageInstallRequest,
   AppPackageInstallResponse,
   AppPackageProblem,
+  AppPackageStatus,
   AppPackageUpgradePlan,
   AppPackageUpgradeRequest,
   AppPackageUpgradeResponse,
   AppTemplate,
+  ListAppPackageStatusResponse,
   ListAppTemplatesResponse,
 } from "@opengeni/contracts";
 export type {

@@ -62,6 +62,8 @@ export const ArtifactCatalogListQuery = /* @__PURE__ */ defineSchema(() =>
         .refine((value) => !value.includes("\0"))
         .optional(),
       kind: ArtifactCatalogKind.optional(),
+      /** Leaves one kind out (Artifacts lists everything but apps, which have their own page). */
+      excludeKind: ArtifactCatalogKind.optional(),
       sort: z.enum(["updated", "newest", "title"]).default("updated"),
       status: z.enum(["active", "archived"]).default("active"),
       limit: z.coerce.number().int().min(1).max(100).default(50),

@@ -16,7 +16,8 @@ describe("the rail section a page is in", () => {
     expect(label("/workspaces/w1/sites/s1")).not.toBeNull();
     expect(label("/workspaces/w1/schedules")).not.toBeNull();
     expect(label("/workspaces/w1/memory")).not.toBeNull();
-    expect(label("/workspaces/w1/sites/s1")).toBe(label("/workspaces/w1/artifacts"));
+    expect(label("/workspaces/w1/sites/s1")).toBe(label("/workspaces/w1/apps"));
+    expect(label("/workspaces/w1/apps")).toBe("Apps");
     expect(label("/workspaces/w1/schedules")).toBe(label("/workspaces/w1/automations"));
     expect(label("/workspaces/w1/memory")).toBe(label("/workspaces/w1/state"));
   });

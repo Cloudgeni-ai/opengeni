@@ -94,11 +94,16 @@ export function useArtifactsBackLink(
 ): DetailBackLink {
   const navigate = useNavigate();
   const current: ArtifactReturnSearch = useSearch({ strict: false });
-  const search = artifactLibrarySearch(artifactLibraryFilters(from ?? current), fromSession);
+  const filters = artifactLibraryFilters(from ?? current);
+  // Apps have their own page; the rest of the artifacts are on Artifacts.
+  const apps = filters.kind === "site";
+  const { kind: _kind, ...appsSearch } = artifactLibrarySearch(filters, fromSession);
+  const search = apps ? appsSearch : artifactLibrarySearch(filters, fromSession);
   const query = useStringifySearch()(search);
+  const to = apps ? "/workspaces/$workspaceId/apps" : "/workspaces/$workspaceId/artifacts";
   return {
-    label: "Artifacts",
-    href: `/workspaces/${encodeURIComponent(workspaceId)}/artifacts${query}`,
+    label: apps ? "Apps" : "Artifacts",
+    href: `/workspaces/${encodeURIComponent(workspaceId)}/${apps ? "apps" : "artifacts"}${query}`,
     // The link keeps a real href (new tab, copy); a plain click stays in the router.
     onClick: (event?: MouseEvent) => {
       if (
@@ -107,11 +112,7 @@ export function useArtifactsBackLink(
       )
         return;
       event?.preventDefault();
-      void navigate({
-        to: "/workspaces/$workspaceId/artifacts",
-        params: { workspaceId },
-        search,
-      });
+      void navigate({ to, params: { workspaceId }, search });
     },
   };
 }

@@ -854,17 +854,15 @@ Rows you have show a status line in place of the description, with whose it
 is where that is known ("Installed · Workspace", "Installed · Yours"), and no
 glyph unless they need attention (`ConnectionInstalled`).
 
-**Ready-made** lists ready-made agents (`packages/core/src/agent-templates`),
-apps (`packages/core/src/app-templates`, [app packages](app-packages.md#ready-made-apps))
+**Ready-made** lists ready-made agents (`packages/core/src/agent-templates`)
 and reviewed library skills (`GET /v1/workspaces/:workspaceId/skills/library`,
 SDK `listLibrarySkills`, every installable library skill with `enabled` once
-added; the capability catalog lists only added ones), grouped by each item's own `team` (agent and app
-templates' `team`, a library skill's `metadata.team`), alphabetically, with
+added; the capability catalog lists only added ones), grouped by each item's own `team` (an agent
+template's `team`, a library skill's `metadata.team`), alphabetically, with
 items without one under **More**. One click adds an item through the same
-paths as elsewhere: `createAgentFromTemplate`, `installAppPackage` with the
-template's package (one idempotency key per ready-made app, so adding it
-again opens the same app), and `installLibrarySkill`. An added item opens
-instead.
+paths as elsewhere: `createAgentFromTemplate` and `installLibrarySkill`. An
+added item opens instead. Ready-made apps are on the Apps page
+([app packages](app-packages.md#ready-made-apps)).
 
 The **Connections** tab has two top-level sections: **Integrations** and
 **Connectors**, both connections - something that holds an identity in another

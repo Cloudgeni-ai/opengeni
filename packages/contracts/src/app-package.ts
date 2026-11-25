@@ -19,6 +19,9 @@ import {
   SiteSqlValueSchema,
 } from "./site-sql";
 import { SIDEBAR_LABEL_MAX_CHARS, SidebarAppPath } from "./sidebar-layout";
+import { SkillFile } from "./skills";
+import { readSkillMetadata } from "./skill-metadata";
+import { SKILL_MAX_FILES, validateSkillTextFiles } from "./skill-files";
 import { ToolGatewayIdentity } from "./tool-catalog";
 
 /**
@@ -40,10 +43,61 @@ export const APP_PACKAGE_DEMO_MAX_BYTES = 8 * 1024 * 1024;
 export const APP_PACKAGE_DEMO_FILES_MAX = 200;
 export const APP_PACKAGE_SYNCS_MAX = 50;
 export const APP_PACKAGE_SIDEBAR_MAX = 10;
+/** Skills a package can carry, and automations (scheduled agent runs). */
+export const APP_PACKAGE_SKILLS_MAX = 10;
+export const APP_PACKAGE_AUTOMATIONS_MAX = 5;
+/** An automation's instructions for each run, at most this many characters. */
+export const APP_PACKAGE_AUTOMATION_PROMPT_MAX_CHARS = 8_000;
+/** Earlier states of an installed app kept to go back to (see docs/app-packages.md#rollback). */
+export const APP_PACKAGE_SNAPSHOTS_KEPT = 3;
 /** How long a package file `app_export` stores for download is kept. */
 export const APP_PACKAGE_EXPORT_TTL_SECONDS = 24 * 60 * 60;
 
 const Name = primitives.string.regex(SITE_SQL_NAME);
+
+/** A package's own version label, such as "1.2.0": up to three dot-separated numbers. */
+export const AppPackageVersionLabel = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.regex(/^\d{1,6}(?:\.\d{1,6}){0,2}$/u),
+);
+
+/**
+ * Compares two package version labels by their numbers ("1.10" is after
+ * "1.9"; "1" equals "1.0.0"). Negative when `a` is older.
+ */
+export function compareAppPackageVersions(a: string, b: string): number {
+  const left = a.split(".").map(Number);
+  const right = b.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+/**
+ * A Skill the package carries: its SKILL.md folder. Install adds it as a
+ * workspace Skill linked to the app; its name and description come from
+ * SKILL.md.
+ */
+export const AppPackageSkillFiles = /* @__PURE__ */ defineSchema(() =>
+  z.object({ files: z.array(SkillFile).min(1).max(SKILL_MAX_FILES) }),
+);
+export type AppPackageSkill = { name: string; description: string; files: SkillFile[] };
+
+/**
+ * An automation the package carries: a scheduled agent run, added switched
+ * off. `{{appId}}` in its prompt becomes the installed app's id. The
+ * schedule is an automation schedule (`ScheduledTaskScheduleSpec`), checked
+ * when it is added.
+ */
+export const AppPackageAutomation = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: primitives.string.trim().min(1).max(200),
+    prompt: primitives.string.trim().min(1).max(APP_PACKAGE_AUTOMATION_PROMPT_MAX_CHARS),
+    schedule: z.record(primitives.string, z.unknown()),
+  }),
+);
+export type AppPackageAutomation = z.infer<typeof AppPackageAutomation>;
 
 export const AppPackageCollection = /* @__PURE__ */ defineSchema(() =>
   SiteDataCollectionDefinitionRequest.extend({ name: Name }),
@@ -141,6 +195,12 @@ export type AppPackage = {
    * version of the same app from a different app. Absent in older packages.
    */
   packageId?: string | undefined;
+  /**
+   * The package's own version label ("1.2.0"). A ready-made app with a later
+   * version than the one an app was installed from offers an update. Absent
+   * in older packages.
+   */
+  packageVersion?: string | undefined;
   exportedAt: string;
   app: {
     title: string;
@@ -158,6 +218,10 @@ export type AppPackage = {
   syncs: AppPackageSync[];
   /** The app's links in the exporting workspace's default sidebar. */
   sidebar?: AppPackageSidebarItem[] | undefined;
+  /** Skills that come with the app (SKILL.md folders). Absent in older packages. */
+  skills?: AppPackageSkill[] | undefined;
+  /** Automations (scheduled agent runs) that come with the app, added switched off. */
+  automations?: AppPackageAutomation[] | undefined;
   /** Present only when the author chose to include demo data. */
   demoData?:
     | {
@@ -182,6 +246,8 @@ export type AppPackageProblem = {
     | "query"
     | "sync"
     | "sidebar"
+    | "skill"
+    | "automation"
     | "demo_data";
   name?: string | undefined;
   reason: string;
@@ -249,6 +315,10 @@ export type AppPackageInstallResponse = {
     demoRows: number;
     /** Shared Site files loaded from the demo data. */
     demoFiles?: number;
+    /** The package's Skills, by name, added (or already linked) as workspace Skills. */
+    skills?: string[];
+    /** The package's automations, by name, added switched off. */
+    automations?: string[];
   };
   /** What couldn't be installed; the rest was. */
   notInstalled: AppPackageProblem[];
@@ -258,21 +328,34 @@ export type ParsedAppPackage = { package: AppPackage; problems: AppPackageProble
 
 /** POST .../published-artifacts/:id/package/upgrade */
 export const AppPackageUpgradeRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    package: z.record(primitives.string, z.unknown()).describe("The package file's JSON."),
-    dryRun: primitives.boolean.optional().describe("Only return the plan; nothing changes."),
-    allowDestructive: primitives.boolean
-      .optional()
-      .describe(
-        "Apply changes the plan marks destructive (they could hide, reassign or delete existing data).",
-      ),
-    idempotencyKey: primitives.string
-      .trim()
-      .min(1)
-      .max(200)
-      .optional()
-      .describe("Required to apply; the same key and package apply once."),
-  }),
+  z
+    .object({
+      package: z
+        .record(primitives.string, z.unknown())
+        .optional()
+        .describe("The package file's JSON. Give it, or `previous`."),
+      previous: primitives.boolean
+        .optional()
+        .describe(
+          "Go back to the app as it was before its last upgrade (its saved earlier state), instead of a package.",
+        ),
+      dryRun: primitives.boolean.optional().describe("Only return the plan; nothing changes."),
+      allowDestructive: primitives.boolean
+        .optional()
+        .describe(
+          "Apply changes the plan marks destructive (they could hide, reassign or delete existing data).",
+        ),
+      idempotencyKey: primitives.string
+        .trim()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Required to apply; the same key and package apply once."),
+    })
+    .refine((value) => (value.package === undefined) !== (value.previous !== true), {
+      message: "Give exactly one of package or previous: true",
+      path: ["package"],
+    }),
 );
 export type AppPackageUpgradeRequest = z.infer<typeof AppPackageUpgradeRequest>;
 
@@ -318,6 +401,22 @@ export type AppPackageUpgradePlan = {
   };
   /** Changes that could hide, reassign or delete existing data: applying needs `allowDestructive`. */
   destructive: AppPackageProblem[];
+  /** The app's version label now and the package's (null when unknown). Absent from older servers. */
+  packageVersion?: { current: string | null; next: string | null };
+  /**
+   * The package's Skills, by name: `added` (new workspace Skills), `changed`
+   * (their files differ and are replaced), `unchanged`, and `kept`: Skills
+   * that came with the app that the package no longer has (they stay).
+   */
+  skills?: { added: string[]; changed: string[]; unchanged: string[]; kept: string[] };
+  /** Automations, by name: `added` switched off; the app's existing ones are `kept` as they are. */
+  automations?: { added: string[]; kept: string[] };
+  /**
+   * Local changes the upgrade replaces: the app's own edits since it was
+   * installed or upgraded (`app`), and the names of its Skills edited here.
+   * The app's state before the upgrade is saved, so it can go back.
+   */
+  localChanges?: { app: boolean; skills: string[] };
   /** What stops the upgrade; nothing is applied while there is any. */
   conflicts: AppPackageProblem[];
   /** Parts of the package that are ignored or won't apply, and why. */
@@ -342,6 +441,10 @@ export type AppPackageUpgradeResponse = {
     migrations: string[];
     queries: string[];
     syncs: string[];
+    /** Skills added or updated. */
+    skills?: string[];
+    /** Automations added (switched off). */
+    automations?: string[];
   };
   /** What couldn't be upgraded; the rest was. */
   notUpgraded: AppPackageProblem[];
@@ -350,6 +453,36 @@ export type AppPackageUpgradeResponse = {
 export class AppPackageFormatError extends Error {
   readonly name = "AppPackageFormatError";
 }
+
+/**
+ * An installed app's package state (GET .../app-packages/status): where it
+ * came from, whether it was edited here since, its Skills and automations,
+ * whether it can go back to its state before the last upgrade, and whether
+ * a ready-made app offers a later version.
+ */
+export type AppPackageStatus = {
+  appId: string;
+  title: string;
+  packageId: string | null;
+  packageVersion: string | null;
+  /** Archived apps are listed too: their Skills stay, labelled with the app. */
+  archived: boolean;
+  /** The app's version was changed here since its install or last upgrade. */
+  modified: boolean;
+  skills: Array<{
+    id: string;
+    name: string;
+    /** Its files were changed here since the package wrote them. */
+    modified: boolean;
+  }>;
+  automations: Array<{ id: string; name: string }>;
+  /** Its saved state before the last upgrade, to go back to; null when there is none. */
+  previous: { packageVersion: string | null; savedAt: string } | null;
+  /** A ready-made app with the same package and a later version; null when there is none. */
+  update: { templateKey: string; packageVersion: string } | null;
+};
+
+export type ListAppPackageStatusResponse = { apps: AppPackageStatus[] };
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -416,6 +549,13 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
     assets = parsed.data;
   }
   const packageId = primitives.uuid.safeParse(root.packageId);
+  const packageVersion = AppPackageVersionLabel.safeParse(root.packageVersion);
+  if (root.packageVersion !== undefined && root.packageVersion !== null && !packageVersion.success)
+    problems.push({
+      part: "package",
+      name: "packageVersion",
+      reason: 'Its version label isn\'t numbers like "1.2.0" and was ignored',
+    });
   let source: AppPackage["app"]["source"];
   if (app.source !== undefined && app.source !== null) {
     const parsed = WorkspaceArtifactSourceBundle.safeParse(app.source);
@@ -499,6 +639,50 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
     sidebar.length = APP_PACKAGE_SIDEBAR_MAX;
   }
 
+  // Skills: each a SKILL.md folder whose name and description are read from it.
+  const skills: AppPackageSkill[] = [];
+  for (const [index, entry] of list(
+    root.skills,
+    AppPackageSkillFiles,
+    "skill",
+    "skills",
+  ).entries()) {
+    if (skills.length >= APP_PACKAGE_SKILLS_MAX) {
+      problems.push({
+        part: "skill",
+        reason: `Only the first ${APP_PACKAGE_SKILLS_MAX} Skills were read`,
+      });
+      break;
+    }
+    try {
+      validateSkillTextFiles(entry.files);
+      const main = entry.files.find((file) => file.path === "SKILL.md");
+      if (!main) throw new Error("It has no SKILL.md");
+      const metadata = readSkillMetadata(main.content);
+      if (skills.some((skill) => skill.name === metadata.name))
+        throw new Error(`Another Skill in the package is named ${metadata.name}`);
+      skills.push({
+        ...metadata,
+        files: entry.files.map(({ path, content }) => ({ path, content })),
+      });
+    } catch (error) {
+      problems.push({
+        part: "skill",
+        name: `Skill ${index + 1}`,
+        reason: `Invalid and left out (${error instanceof Error ? error.message : String(error)})`,
+      });
+    }
+  }
+
+  const automations = list(root.automations, AppPackageAutomation, "automation", "automations");
+  if (automations.length > APP_PACKAGE_AUTOMATIONS_MAX) {
+    problems.push({
+      part: "automation",
+      reason: `Only the first ${APP_PACKAGE_AUTOMATIONS_MAX} automations were read`,
+    });
+    automations.length = APP_PACKAGE_AUTOMATIONS_MAX;
+  }
+
   let demoData: AppPackage["demoData"];
   const demo = record(root.demoData);
   if (demo) {
@@ -562,6 +746,7 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
       format: APP_PACKAGE_FORMAT,
       version,
       ...(packageId.success ? { packageId: packageId.data } : {}),
+      ...(packageVersion.success ? { packageVersion: packageVersion.data } : {}),
       exportedAt: typeof root.exportedAt === "string" ? root.exportedAt : "",
       app: {
         title,
@@ -575,6 +760,8 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
       sql: { migrations, queries },
       syncs,
       ...(sidebar.length > 0 ? { sidebar } : {}),
+      ...(skills.length > 0 ? { skills } : {}),
+      ...(automations.length > 0 ? { automations } : {}),
       ...(demoData ? { demoData } : {}),
     },
     problems,

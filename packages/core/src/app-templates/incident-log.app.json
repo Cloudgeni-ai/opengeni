@@ -6,6 +6,8 @@
   "package": {
     "format": "opengeni.app-package",
     "version": 1,
+    "packageId": "9c0a5e3b-1f7d-8e24-a6b8-5d2c9e0f4b17",
+    "packageVersion": "1.0.0",
     "exportedAt": "2026-11-22T00:00:00.000Z",
     "app": {
       "title": "Incident log",

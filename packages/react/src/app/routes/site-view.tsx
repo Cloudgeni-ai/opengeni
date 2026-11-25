@@ -297,17 +297,18 @@ export function SiteViewRoute({
   // back, so the toolbar drops its own back link while the bar shows it.
   const artifactsBack = useArtifactsBackLink(workspaceId, back?.fromSession, back ?? undefined);
   const artifactsBackHref = artifactsBack.href;
+  const artifactsBackLabel = artifactsBack.label === "Apps" ? "Apps" : "Artifacts";
   const artifactsBackClick = useRef(artifactsBack.onClick);
   artifactsBackClick.current = artifactsBack.onClick;
   const backPlace = useMemo(() => {
     if (!back) return null;
     const crumb = {
-      label: "Artifacts",
+      label: artifactsBackLabel,
       href: artifactsBackHref,
       onClick: () => artifactsBackClick.current?.(),
     };
     return { section: crumb, parent: crumb };
-  }, [back, artifactsBackHref]);
+  }, [back, artifactsBackHref, artifactsBackLabel]);
   const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing, {
     copyable: true,
     place: backPlace,
@@ -976,8 +977,8 @@ function ArtifactsBackLink({
       <a
         href={back.href}
         onClick={back.onClick}
-        aria-label="Back to Artifacts"
-        title="Back to Artifacts"
+        aria-label={`Back to ${back.label}`}
+        title={`Back to ${back.label}`}
       >
         <ArrowLeftIcon aria-hidden="true" className="size-4" />
         {back.label}

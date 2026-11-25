@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   APP_PACKAGE_FORMAT,
   AppPackageFormatError,
+  AppPackageUpgradeRequest,
+  compareAppPackageVersions,
   parseAppPackage,
   siteSqlDestructiveChanges,
 } from "../src";
@@ -104,5 +106,58 @@ describe("app package asset files and package id", () => {
     expect(() => parseAppPackage({ ...base, app: { ...base.app, assets: { files: [] } } })).toThrow(
       AppPackageFormatError,
     );
+  });
+});
+
+describe("package versions, Skills and automations", () => {
+  const base = {
+    format: APP_PACKAGE_FORMAT,
+    version: 1,
+    app: { title: "Board", html: "<h1>Board</h1>" },
+  };
+  const skill = (name: string, description = "Do the thing") => ({
+    files: [
+      {
+        path: "SKILL.md",
+        content: `---\nname: ${name}\ndescription: ${description}\n---\n\nBody\n`,
+      },
+    ],
+  });
+
+  test("compares versions by their numbers", () => {
+    expect(compareAppPackageVersions("1.10.0", "1.9.0")).toBeGreaterThan(0);
+    expect(compareAppPackageVersions("1.0", "1.0.0")).toBe(0);
+    expect(compareAppPackageVersions("0.9.1", "1.0.0")).toBeLessThan(0);
+  });
+
+  test("reads a version, Skills named by their SKILL.md, and automations", () => {
+    const { package: pkg, problems } = parseAppPackage({
+      ...base,
+      packageVersion: "1.2.0",
+      skills: [skill("notes", "Add notes to the board"), skill("notes"), { files: [] }],
+      automations: [{ name: "Daily", prompt: "Update {{appId}}", schedule: { type: "calendar" } }],
+    });
+    expect(pkg.packageVersion).toBe("1.2.0");
+    expect(pkg.skills?.map((entry) => [entry.name, entry.description])).toEqual([
+      ["notes", "Add notes to the board"],
+    ]);
+    expect(pkg.automations?.map((entry) => entry.name)).toEqual(["Daily"]);
+    // A second Skill with the same name and an empty one are reported, not read.
+    expect(problems.filter((problem) => problem.part === "skill").length).toBe(2);
+  });
+
+  test("an invalid version is reported and left out", () => {
+    const { package: pkg, problems } = parseAppPackage({ ...base, packageVersion: "v1" });
+    expect(pkg.packageVersion).toBeUndefined();
+    expect(problems).toContainEqual(expect.objectContaining({ name: "packageVersion" }));
+  });
+
+  test("an upgrade names exactly one of a package or the previous version", () => {
+    expect(AppPackageUpgradeRequest.safeParse({ package: base }).success).toBe(true);
+    expect(AppPackageUpgradeRequest.safeParse({ previous: true }).success).toBe(true);
+    expect(AppPackageUpgradeRequest.safeParse({ package: base, previous: true }).success).toBe(
+      false,
+    );
+    expect(AppPackageUpgradeRequest.safeParse({}).success).toBe(false);
   });
 });

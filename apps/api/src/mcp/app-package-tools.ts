@@ -15,7 +15,12 @@ import {
   exportAppPackage,
   installAppPackage,
 } from "../app-packages/service";
-import { appUpgradeOperationKey, upgradeAppFromPackage } from "../app-packages/upgrade";
+import {
+  appUpgradeOperationKey,
+  resolveAppUpgradeSource,
+  upgradeAppFromPackage,
+} from "../app-packages/upgrade";
+import type { PackageSkillWriter } from "../app-packages/skills";
 import { recordAppPackageExport } from "../app-packages/exports";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { exactAgentAttemptClaims } from "../sandbox/agent-fleet-context";
@@ -24,6 +29,21 @@ import {
   type SiteAgentDataResolution,
 } from "../site-publishing/agent-data-tools";
 import { contractToolInput } from "./contract-input";
+
+/** An agent saves a package's Skills as itself, under the workspace's Agent learning. */
+function agentSkillWriter(
+  claims: NonNullable<ReturnType<typeof exactAgentAttemptClaims>>,
+): PackageSkillWriter {
+  return {
+    actor: {
+      kind: "agent",
+      sessionId: claims.sessionId,
+      turnId: claims.turnId,
+      attemptId: claims.attemptId,
+      executionGeneration: claims.executionGeneration,
+    },
+  };
+}
 
 type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
@@ -37,6 +57,7 @@ function contents(exported: AppPackageExportResponse) {
   return {
     title: pkg.app.title,
     packageId: pkg.packageId ?? null,
+    packageVersion: pkg.packageVersion ?? null,
     assetFiles: pkg.app.assets?.files.length ?? 0,
     tools: pkg.tools.length,
     collections: pkg.data.collections.map((collection) => collection.name),
@@ -44,6 +65,8 @@ function contents(exported: AppPackageExportResponse) {
     queries: pkg.sql.queries.map((query) => query.name),
     syncs: pkg.syncs.length,
     sidebar: pkg.sidebar?.length ?? 0,
+    skills: (pkg.skills ?? []).map((skill) => skill.name),
+    automations: (pkg.automations ?? []).map((automation) => automation.name),
     demoData: pkg.demoData
       ? {
           records: Object.fromEntries(
@@ -145,7 +168,7 @@ export function registerAppPackageTools(
     "app_install",
     {
       description:
-        "Install an app package (a file made by app_export or the app's Export) into this workspace as a new app. The app starts with empty data (or the package's demo data unless demoData is false), its collections and database are set up, and its syncs are added paused until the person confirms the account they use. Give fileId (a file in this workspace, such as an attachment or a file you published with sandbox_file_publish) or the package JSON. Returns the new app and anything that couldn't be installed. Retrying with the same idempotencyKey returns the same app.",
+        "Install an app package (a file made by app_export or the app's Export) into this workspace as a new app. The app starts with empty data (or the package's demo data unless demoData is false), its collections and database are set up, and its syncs are added paused until the person confirms the account they use. Skills that come with it become workspace Skills (under Agent learning) and its automations are added switched off. Give fileId (a file in this workspace, such as an attachment or a file you published with sandbox_file_publish) or the package JSON. Returns the new app and anything that couldn't be installed. Retrying with the same idempotencyKey returns the same app.",
       inputSchema: {
         fileId: z4.string().uuid().optional().describe("The package file's id in this workspace."),
         package: z4
@@ -183,6 +206,7 @@ export function registerAppPackageTools(
           title: args.title,
           visibility: args.visibility,
           demoData: args.demoData,
+          skillWriter: agentSkillWriter(claims),
           provenance: {
             operationKey: appInstallOperationKey(
               "attempt",
@@ -216,7 +240,7 @@ export function registerAppPackageTools(
     "app_upgrade",
     {
       description:
-        "Upgrade an existing app from a newer package of it (made by app_export): its version becomes the app's new version, and only what is new runs (new collections, new migrations, query and sync changes). The app's data stays; nothing is deleted. Call with dryRun: true first and tell the person the plan. Changes marked destructive need allowDestructive: true and the person's explicit agreement; conflicts stop the upgrade. Give fileId or the package JSON. Retrying with the same idempotencyKey applies it once.",
+        "Upgrade an existing app from a newer package of it (made by app_export, or a ready-made app's): its version becomes the app's new version, and only what is new runs (new collections, new migrations, query and sync changes, its Skills, new automations). The app's data stays; nothing is deleted. previous: true goes back to the app as it was before its last upgrade instead. Call with dryRun: true first and tell the person the plan. Changes marked destructive need allowDestructive: true and the person's explicit agreement; conflicts stop the upgrade. Give fileId or the package JSON. Retrying with the same idempotencyKey applies it once.",
       inputSchema: {
         appId: z4.string().uuid().describe("The app (Site) to upgrade."),
         fileId: z4.string().uuid().optional().describe("The package file's id in this workspace."),
@@ -224,6 +248,10 @@ export function registerAppPackageTools(
           .record(z4.string(), z4.unknown())
           .optional()
           .describe("The package JSON itself, instead of fileId."),
+        previous: z4
+          .boolean()
+          .optional()
+          .describe("Go back to the app as it was before its last upgrade, instead of a package."),
         dryRun: z4.boolean().optional().describe("Only return the plan; nothing changes."),
         allowDestructive: z4
           .boolean()
@@ -237,17 +265,33 @@ export function registerAppPackageTools(
         appId: string;
         fileId?: string | undefined;
         package?: Record<string, unknown> | undefined;
+        previous?: boolean | undefined;
         dryRun?: boolean | undefined;
         allowDestructive?: boolean | undefined;
         idempotencyKey: string;
       }) => {
-        if ((args.fileId === undefined) === (args.package === undefined))
-          throw new AppPackageError("validation", "Give exactly one of fileId or package");
+        const sources = [args.fileId, args.package, args.previous || undefined].filter(
+          (source) => source !== undefined,
+        );
+        if (sources.length !== 1)
+          throw new AppPackageError(
+            "validation",
+            "Give exactly one of fileId, package or previous: true",
+          );
         const claims = exactAgentAttemptClaims(grant);
         if (!claims) throw new AppPackageError("validation", "Upgrading needs a live agent turn");
-        const pkg = args.package ?? (await readPackageFile(deps, grant, args.fileId!));
+        const source = await resolveAppUpgradeSource(deps, grant, args.appId, {
+          package: args.previous
+            ? undefined
+            : (args.package ??
+              ((await readPackageFile(deps, grant, args.fileId!)) as Record<string, unknown>)),
+          previous: args.previous,
+        });
+        const pkg = source.package;
         const result = await upgradeAppFromPackage(deps, grant, args.appId, {
           package: pkg,
+          snapshotId: source.snapshotId,
+          skillWriter: agentSkillWriter(claims),
           dryRun: args.dryRun,
           allowDestructive: args.allowDestructive,
           provenance: {

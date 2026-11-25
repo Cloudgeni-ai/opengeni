@@ -4,7 +4,7 @@
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { APPS_WORKSPACE_ITEM, navItemKey, type WorkspaceConfigTarget } from "./workspace-nav-data";
 
-/** Each entry's rail key (`navItemKey`): Apps and Artifacts share a page. */
+/** Each entry's rail key (`navItemKey`). */
 const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = {
   capabilities: "/workspaces/$workspaceId/plugins",
   knowledge: "/workspaces/$workspaceId/state",
@@ -18,17 +18,15 @@ const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = 
 
 /**
  * The entries this person hides: the inbox, and the rail destinations by
- * `navItemKey`. Hiding Artifacts hides Apps too, its tab, so a rail trimmed
- * before Apps existed stays as it was.
+ * `navItemKey`. Apps and Artifacts are separate pages, hidden separately.
  */
 export function hiddenNavEntries(hidden: readonly string[]): {
   inbox: boolean;
   targets: ReadonlySet<string>;
 } {
-  const entries = hidden.includes("artifacts") ? [...hidden, "apps"] : hidden;
   return {
     inbox: hidden.includes("inbox"),
-    targets: new Set(entries.flatMap((entry) => ENTRY_TARGETS[entry] ?? [])),
+    targets: new Set(hidden.flatMap((entry) => ENTRY_TARGETS[entry] ?? [])),
   };
 }
 

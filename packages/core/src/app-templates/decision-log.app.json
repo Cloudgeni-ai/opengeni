@@ -6,6 +6,8 @@
   "package": {
     "format": "opengeni.app-package",
     "version": 1,
+    "packageId": "a1d3f5b7-9c2e-8f40-b8d6-2e4a6c8e0f13",
+    "packageVersion": "1.0.0",
     "exportedAt": "2026-11-21T00:00:00.000Z",
     "app": {
       "title": "Decision log",
