@@ -1185,12 +1185,17 @@ test("the Apps section lists an app once when its chats are in several projects"
   await selectView("Group by", "Project");
   await appsSection()
     .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
-    .waitFor();
+    .click();
   expect(
     await appsSection()
       .getByRole("link", { name: /^Open Opengeni usage\. App/ })
       .count(),
   ).toBe(1);
+  // Its chats from both projects open under the one row.
+  for (const title of usageConversations)
+    await appsSection()
+      .getByRole("link", { name: new RegExp(`^Open ${title}\\.`) })
+      .waitFor();
 }, 90_000);
 
 test("a Site row keeps its conversations nested whichever session is selected", async () => {

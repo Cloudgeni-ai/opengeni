@@ -1735,7 +1735,8 @@ export function SessionList() {
         groupSites: appRows && hierarchyMode,
         siteGroups,
         archivedSiteIds,
-        siteRowsByProject: channelMode,
+        // An Apps section lists each app once, whichever projects its chats are in.
+        siteRowsByProject: channelMode && !appsSection,
         workspaceId: rail.workspaceId,
         creator: { kind: "subject", subjectId: context.accessContext.subjectId },
       }),
@@ -1746,6 +1747,7 @@ export function SessionList() {
       siteGroups,
       archivedSiteIds,
       channelMode,
+      appsSection,
       rail.workspaceId,
       context.accessContext.subjectId,
     ],
@@ -1796,21 +1798,7 @@ export function SessionList() {
   // Archived lists no apps.
   const appNodes = useMemo(() => {
     if (!appsSection || browseStatus === "archived") return null;
-    // One row per app, whichever projects its chats are in.
-    const apps = railSectionsFor(
-      channelMode
-        ? buildPinnedRailSections(projectedSessions, new Date(), {
-            groupSites: appRows && hierarchyMode,
-            siteGroups,
-            archivedSiteIds,
-            siteRowsByProject: false,
-            workspaceId: rail.workspaceId,
-            creator: { kind: "subject", subjectId: context.accessContext.subjectId },
-          })
-        : railSections,
-      "apps",
-      needsYouOnly ? appNeedsYou : null,
-    );
+    const apps = railSectionsFor(railSections, "apps", needsYouOnly ? appNeedsYou : null);
     return {
       pinned: apps.pinned.map((node) => ({
         ...node,
@@ -1827,21 +1815,7 @@ export function SessionList() {
         browseSortBy,
       ).running,
     };
-  }, [
-    appsSection,
-    browseStatus,
-    browseSortBy,
-    needsYouOnly,
-    railSections,
-    channelMode,
-    projectedSessions,
-    appRows,
-    hierarchyMode,
-    siteGroups,
-    archivedSiteIds,
-    rail.workspaceId,
-    context.accessContext.subjectId,
-  ]);
+  }, [appsSection, browseStatus, browseSortBy, needsYouOnly, railSections]);
   // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
   const pinnedChatNodes = useMemo(
     () => pinnedNodes.filter((node) => !node.siteGroup),
