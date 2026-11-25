@@ -13,13 +13,7 @@ import { rawRows } from "./database";
 export const HEEDEO_SIGNUP_MODES = ["off", "shadow", "enforce"] as const;
 export type HeedeoSignupMode = (typeof HEEDEO_SIGNUP_MODES)[number];
 
-export const HEEDEO_SIGNUP_METHODS = [
-  "email",
-  "google",
-  "github",
-  "passkey",
-  "other",
-] as const;
+export const HEEDEO_SIGNUP_METHODS = ["email", "google", "github", "passkey", "other"] as const;
 export type HeedeoSignupMethod = (typeof HEEDEO_SIGNUP_METHODS)[number];
 
 export type HeedeoSignupOutcome = "evaluated" | "error" | "skipped" | "refused";
@@ -40,14 +34,9 @@ export function resetHeedeoSignupModeCache(): void {
  * The deployment's Heedeo signup mode, for a runtime connection. Fails off: a
  * failed read (including a database that predates migration 1565) is "off".
  */
-export async function readHeedeoSignupMode(
-  db: Database,
-): Promise<HeedeoSignupMode> {
+export async function readHeedeoSignupMode(db: Database): Promise<HeedeoSignupMode> {
   const now = Date.now();
-  if (
-    heedeoSignupModeCache &&
-    now - heedeoSignupModeCache.at < HEEDEO_SIGNUP_MODE_TTL_MS
-  ) {
+  if (heedeoSignupModeCache && now - heedeoSignupModeCache.at < HEEDEO_SIGNUP_MODE_TTL_MS) {
     return await heedeoSignupModeCache.value;
   }
   const value = rawRows<{ mode: string }>(
@@ -91,9 +80,7 @@ export type SignupHeedeoEvaluationRecord = {
 };
 
 const boundedText = (value: string | null | undefined, max: number) =>
-  typeof value === "string" && value.length > 0 && value.length <= max
-    ? value
-    : null;
+  typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
 const code = (value: string | null | undefined, pattern: RegExp) =>
   typeof value === "string" && pattern.test(value) ? value : null;
 const integer = (value: number | null | undefined, min: number, max: number) =>
@@ -112,11 +99,7 @@ export async function recordSignupHeedeoEvaluation(
   record: SignupHeedeoEvaluationRecord,
 ): Promise<void> {
   const reasonCodes = [
-    ...new Set(
-      (record.reasonCodes ?? []).filter((value) =>
-        /^[a-z0-9_:.-]{1,64}$/u.test(value),
-      ),
-    ),
+    ...new Set((record.reasonCodes ?? []).filter((value) => /^[a-z0-9_:.-]{1,64}$/u.test(value))),
   ].slice(0, 64);
   const httpStatus = integer(record.httpStatus, 0, 999);
   await rawRows(
@@ -133,10 +116,7 @@ export async function recordSignupHeedeoEvaluation(
       ${`{${reasonCodes.map((value) => `"${value}"`).join(",")}}`}::text[],
       ${boundedText(record.visitorId, 200)})`,
   );
-  await rawRows(
-    db,
-    sql`delete from opengeni_private.signup_heedeo_evaluations`,
-  );
+  await rawRows(db, sql`delete from opengeni_private.signup_heedeo_evaluations`);
 }
 
 export type SignupHeedeoVerdictOrganization = {
@@ -176,10 +156,8 @@ class RolledBackRead<T> extends Error {
   }
 }
 
-const iso = (value: unknown) =>
-  value ? new Date(value as string).toISOString() : null;
-const num = (value: unknown) =>
-  value === null || value === undefined ? null : Number(value);
+const iso = (value: unknown) => (value ? new Date(value as string).toISOString() : null);
+const num = (value: unknown) => (value === null || value === undefined ? null : Number(value));
 
 /**
  * Recent Heedeo verdicts, newest first, each joined to the organization the
@@ -252,9 +230,7 @@ export async function listSignupHeedeoVerdicts(
           score: num(row.score),
           band: (row.band as string | null) ?? null,
           flagged: (row.flagged as boolean | null) ?? null,
-          reasonCodes: Array.isArray(row.reason_codes)
-            ? (row.reason_codes as string[])
-            : [],
+          reasonCodes: Array.isArray(row.reason_codes) ? (row.reason_codes as string[]) : [],
           visitorId: (row.visitor_id as string | null) ?? null,
           organizations: (
             (typeof row.organizations === "string"
@@ -265,15 +241,13 @@ export async function listSignupHeedeoVerdicts(
             decision: (organization.decision as string | null) ?? null,
             decisionRevision: num(organization.decisionRevision),
             ruleId: (organization.ruleId as string | null) ?? null,
-            policyVersion:
-              (organization.policyVersion as string | null) ?? null,
+            policyVersion: (organization.policyVersion as string | null) ?? null,
           })),
         })),
       );
     });
   } catch (error) {
-    if (error instanceof RolledBackRead)
-      return error.value as SignupHeedeoVerdict[];
+    if (error instanceof RolledBackRead) return error.value as SignupHeedeoVerdict[];
     throw error;
   }
   throw new Error("Heedeo verdict read did not complete");
