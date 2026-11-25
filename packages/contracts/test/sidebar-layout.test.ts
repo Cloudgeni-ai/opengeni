@@ -1176,3 +1176,74 @@ describe("rolling deploy: this version writing what a newer one stored", () => {
     ).not.toThrow();
   });
 });
+
+describe("reading a layout answer", () => {
+  // Bendik's staging layout (25 Nov 2026), with an agent link added: every
+  // item must survive, so Settings → Sidebar and the rail can draw it.
+  const answer = {
+    items: [
+      {
+        id: "app-71c4e4913b",
+        origin: "workspace",
+        type: "app",
+        appId: "90cb351f-9bf3-4b31-969f-d053ae421b34",
+        path: null,
+        label: "Deployments",
+        icon: "rocket",
+      },
+      {
+        id: "my-app-79b6e87b34",
+        origin: "personal",
+        type: "app",
+        appId: "3c039779-f434-48d3-8134-3300e88f897a",
+        path: null,
+        label: "Benchmarks",
+        icon: "chart-line",
+      },
+      {
+        id: "my-agent-1",
+        origin: "personal",
+        type: "agent",
+        agentId: APP_A,
+        label: "Reviewer",
+        avatar: { kind: "letters", letters: "RV", hue: 200 },
+      },
+      {
+        id: "pinned-apps",
+        origin: "workspace",
+        type: "live_list",
+        list: "pinned_apps",
+        label: "Pinned apps",
+        limit: 5,
+        apps: [],
+      },
+    ],
+    hidden: [],
+    personal: {
+      available: true,
+      revision: 26,
+      customized: true,
+      options: { sessionsShowApps: false, settingsMore: ["account:security"] },
+    },
+    workspace: { revision: 11, canEdit: false },
+    options: { sessionsShowApps: false, hiddenNavEntries: [], settingsMore: ["account:security"] },
+  };
+
+  test("keeps every item, including an agent link and its avatar", () => {
+    const read = readResolvedSidebarItems(answer.items);
+    expect(read.map((item) => item.id)).toEqual(answer.items.map((item) => item.id));
+    expect(read.find((item) => item.type === "agent")).toMatchObject({
+      avatar: { kind: "letters", letters: "RV" },
+    });
+    expect(readResolvedSidebarOptions(answer.options)).toMatchObject({
+      sessionsShowApps: false,
+      settingsMore: ["account:security"],
+    });
+  });
+
+  test("an agent link with a malformed avatar is left out, not an error", () => {
+    expect(
+      readResolvedSidebarItems([{ ...answer.items[2], avatar: { kind: "letters", letters: "" } }]),
+    ).toEqual([]);
+  });
+});

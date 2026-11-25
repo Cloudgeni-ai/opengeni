@@ -1519,7 +1519,11 @@ export const ResolvedSidebarAgentLink = /* @__PURE__ */ defineSchema(() =>
     /** Its own label, else the agent's name. */
     label: z.string(),
     /** The agent's avatar, or its initials when it has none. */
-    avatar: SessionAvatar,
+    // A getter, read when parsing: in the web bundle this module's chunk and
+    // the avatar's can import each other, so it may not exist yet while loading.
+    get avatar() {
+      return SessionAvatar;
+    },
   }),
 );
 export const ResolvedSidebarChild = /* @__PURE__ */ defineSchema(() =>
