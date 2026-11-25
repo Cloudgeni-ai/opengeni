@@ -427,6 +427,41 @@ describe("organization MCP server", () => {
     },
   );
 
+  test("organization Insights forwards the inventory page and opaque next cursor unchanged", async () => {
+    const automationCursor = `${workspaceId}.${organizationId}`;
+    const body = {
+      automations: [
+        {
+          id: organizationId,
+          name: "Zero-run task",
+          workspaceId,
+          workspaceName: "Example",
+          fires: 0,
+        },
+      ],
+      automationNextCursor: automationCursor,
+      facets: { sources: ["schedule"] },
+    };
+    const { client, call, seen } = await connect(person(readOnly), () => Response.json(body));
+    try {
+      const result = await call("opengeni_action_call", {
+        id: "getOrganizationInsightsUsage",
+        pathParameters: { accountId: organizationId },
+        query: { automationCursor, limit: 50 },
+      });
+      expect(result).toEqual({ isError: false, value: { status: 200, body } });
+      expect(new URL(seen[0]!.url).searchParams.get("automationCursor")).toBe(automationCursor);
+      expect(verifiedDelegatedHumanAuthorizationForRequest(seen[0]!)).toEqual({
+        organizationId,
+        subjectId,
+        permissions: readOnly.permissions,
+        workspaceScope: readOnly.workspaceScope,
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   test.each(insightsRoutes)(
     "%s forwards route denial without substituting the requested scope for caller authority",
     async (path) => {
