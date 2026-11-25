@@ -37,6 +37,7 @@ import {
   MAX_MARKDOWN_CHUNK_LENGTH,
   MAX_MARKDOWN_LENGTH,
   createMarkdownSegmenter,
+  markdownItMathRanges,
   mountedSegmentCount,
   prepareBoundedMarkdown,
   type MarkdownSegment,
@@ -80,6 +81,16 @@ const MATH_PARSER = (() => {
   const parser = MarkdownIt({ typographer: false, linkify: true });
   parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
   parser.use(markdownItMath);
+  return parser;
+})();
+
+/**
+ * The block parser that decides where a long message is cut: the same rules as PARSER,
+ * plus display math as the one block MATH_PARSER sees after math normalization.
+ */
+const SEGMENT_PARSER = (() => {
+  const parser = MarkdownIt({ typographer: false, linkify: true });
+  parser.use(markdownItMathRanges);
   return parser;
 })();
 
@@ -992,7 +1003,7 @@ function TrimmedMarkdown({
 }) {
   const theme = useNativeTimelineTheme();
   // One segmenter per message, so streaming deltas re-parse only the blocks at its end.
-  const [segmenter] = useState(() => createMarkdownSegmenter(PARSER));
+  const [segmenter] = useState(() => createMarkdownSegmenter(SEGMENT_PARSER));
   const segments = useMemo(() => segmenter(text), [segmenter, text]);
   const shown = useMountedSegments(segments);
   const styles = useMemo(() => {

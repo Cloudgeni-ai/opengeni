@@ -155,12 +155,15 @@ profile, so a release build installed from Xcode registers for the sandbox.
 The shared native timeline never gives one Markdown parse more than 8,192 UTF-16
 code units (roughly 1,300 words), including math delimiter normalization. A longer
 message is cut into chunks of about 4,096 where markdown-it's own block parser starts
-a top-level block (or, in a list longer than one chunk, an item), never inside display
-math, so each chunk parses to the same blocks a single parse would give: a fence is
-code or a preview exactly as on a single parse. Each chunk is math-normalized and
-parsed on its own, so the inline work grows linearly; the block pass over the whole
-message is linear, and while a message streams only its last blocks are block-parsed
-again and unchanged chunks are not prepared or parsed again. A top-level code fence
+a top-level block (or, in a list longer than one chunk, an item). The parser that
+cuts sees display math as the one block the math parser draws, so each chunk parses
+to the same blocks a single parse would give, and a fence is code or a preview
+exactly as on a single parse. (The math pass tracks code fences by a simpler rule
+than markdown-it; when they disagree, inside a fence's text, math normalization of
+that text can differ.) Each chunk is math-normalized and parsed on its own, so the
+inline work grows linearly. The block pass over the whole message is linear and runs
+when the text changes; while a message streams, only its last blocks are block-parsed
+again, and unchanged chunks are not prepared or parsed again. A top-level code fence
 too long to share a chunk is drawn directly: an `opengeni-html` / `opengeni-site`
 preview of any size loads in its web view, and any other code block over one chunk
 uses plain-text pages. A long message mounts one chunk-sized slice per frame. Link

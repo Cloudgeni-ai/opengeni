@@ -3,12 +3,15 @@ import {
   MAX_MARKDOWN_CHUNK_LENGTH,
   MAX_MARKDOWN_LENGTH,
   createMarkdownSegmenter,
+  markdownItMathRanges,
   markdownSegments as segmentWith,
   mountedSegmentCount,
   type MarkdownSegment,
   plainTextPage,
   prepareBoundedMarkdown,
 } from "../src/timeline/markdown-limit";
+import { markdownItMath } from "../src/timeline/markdown-math-parser";
+import { prepareMathMarkdown } from "@opengeni/react/markdown-math";
 
 const rendererPath = Bun.resolveSync(
   "react-native-markdown-display/src/lib/parser.js",
@@ -16,7 +19,10 @@ const rendererPath = Bun.resolveSync(
 );
 const { default: MarkdownIt } = await import(Bun.resolveSync("markdown-it", rendererPath));
 const parser = MarkdownIt();
-const markdownSegments = (text: string) => segmentWith(text, parser);
+// As in the renderer: one parser cuts, a math parser draws normalized math.
+const segmentParser = MarkdownIt().use(markdownItMathRanges);
+const mathParser = MarkdownIt().use(markdownItMath);
+const markdownSegments = (text: string) => segmentWith(text, segmentParser);
 
 describe("bounded native Markdown", () => {
   test("ordinary replies and the exact limit retain Markdown", () => {
@@ -52,11 +58,13 @@ const joined = (segments: MarkdownSegment[] | null) =>
   segments?.map((segment) => segment.source).join("");
 
 type Token = { type: string; info: string; content: string };
-/** The leaf blocks markdown-it draws for a text, in order. */
-const leaves = (text: string): string[] =>
-  (parser.parse(text, {}) as Token[])
-    .filter((token) => ["fence", "code_block", "inline", "hr"].includes(token.type))
+/** The leaf blocks the renderer draws for a text, in order (math normalized first). */
+const leaves = (text: string): string[] => {
+  const prepared = prepareMathMarkdown(text);
+  return ((prepared.hasMath ? mathParser : parser).parse(prepared.text, {}) as Token[])
+    .filter((token) => ["fence", "code_block", "inline", "hr", "math_block"].includes(token.type))
     .map((token) => `${token.type}:${token.info}:${token.content}`);
+};
 
 /** Parsing every segment on its own draws the same blocks as parsing the whole message. */
 function expectParity(text: string, segments: MarkdownSegment[] | null) {
@@ -236,12 +244,7 @@ describe("segmentation edge cases", () => {
       (segment) =>
         (segment.kind === "fence" && segment.language === "opengeni-html") ||
         (segment.kind === "markdown" &&
-          parser
-            .parse(segment.source, {})
-            .some(
-              (token: { type: string; info: string }) =>
-                token.type === "fence" && token.info.trim().startsWith("opengeni-html"),
-            )),
+          leaves(segment.source).some((leaf) => leaf.startsWith("fence:opengeni-html"))),
     );
 
   test.each([
@@ -313,6 +316,50 @@ describe("segmentation edge cases", () => {
     });
   });
 
+  test("display math that ends a list keeps the following fence where one parse has it", () => {
+    const links = Array.from(
+      { length: 200 },
+      (_, index) => `Paragraph ${index} has a [link](https://example.com/${index}).`,
+    ).join("\n\n");
+    const text = `1. The relation we use:\n\\[ E = mc^2 \\]\n   \`\`\`bash\n   echo hi\n\`\`\`\n\n${links}\n\n\`\`\`opengeni-html\n<div>chart</div>\n\`\`\`\n\nDone.`;
+    expect(text.length).toBeGreaterThan(MAX_MARKDOWN_CHUNK_LENGTH);
+    const segments = markdownSegments(text);
+    expectBounded(text, segments);
+    expectParity(text, segments);
+    expect(kinds(segments)!.every((kind) => kind === "markdown")).toBe(true);
+    expect(hasPreview(segments)).toBe(true);
+  });
+
+  test("a reference title that closes later re-cuts like a fresh parse while streaming", () => {
+    // Until its closing quote streams in, a multi-line title is a paragraph of its own, a
+    // place to cut; then the whole title belongs to the definition before it.
+    const title = Array.from({ length: 24 }, (_, index) => `title line ${index} `.repeat(5));
+    const tail = Array.from({ length: 90 }, (_, index) => `Tail ${index}. `.repeat(8));
+    for (let pad = 110; pad < 170; pad++) {
+      const before = Array.from({ length: pad }, (_, index) => `Lead ${index}. `.repeat(8));
+      const open = `${before.join("\n\n")}\n\n[docs]: https://example.com/docs\n'${title.join("\n")}`;
+      const text = `${open}'\n\nSee [the docs][docs].\n\n${tail.join("\n\n")}`;
+      const segment = createMarkdownSegmenter(segmentParser);
+      segment(open);
+      expect(segment(text)).toEqual(markdownSegments(text));
+    }
+  });
+
+  test("display math that closes later re-cuts like a fresh parse while streaming", () => {
+    // `$$` math may hold blank lines: until its closer streams in, its lines are paragraphs.
+    const inside = Array.from({ length: 30 }, (_, index) => `Inside ${index}. `.repeat(8));
+    const tail = Array.from({ length: 60 }, (_, index) => `Tail ${index}. `.repeat(8));
+    for (let pad = 110; pad < 170; pad++) {
+      const before = Array.from({ length: pad }, (_, index) => `Lead ${index}. `.repeat(8));
+      const open = `${before.join("\n\n")}\n\n$$\na = b\n\n${inside.join("\n\n")}`;
+      const code = Array.from({ length: 40 }, (_, index) => `    code line ${index}`).join("\n");
+      const text = `${open}\n$$\n${code}\n\n${tail.join("\n\n")}`;
+      const segment = createMarkdownSegmenter(segmentParser);
+      segment(open);
+      expect(segment(text)).toEqual(markdownSegments(text));
+    }
+  });
+
   // Blocks whose extent depends on what follows them: containers, lazy lines, setext
   // underlines, tables, reference definitions and fences of every indentation.
   const pool = [
@@ -332,24 +379,37 @@ describe("segmentation edge cases", () => {
     "$$\na = b\n\nc\n$$",
     "- item\n\n      code in item\n- next",
     "> ```\n> quoted fence\n\nafter quote",
+    "1. The relation:\n\\[ E = mc^2 \\]\n   ```bash\n   echo hi\n```",
+    "- a list\n$$\nx\n$$\nlazy after math",
+    "Text with $x$ and \\(y\\) inline.\n\\[\nz\n\\]",
+    "[docs]: https://example.com/docs\n'A title\nover lines'\n\nSee [the docs][docs].",
+    "[open]: https://example.com\n'unterminated title\nstill going",
   ];
   const random = (seed: number) => () => {
     seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
     return seed / 2_147_483_648;
   };
-  const document = (next: () => number, length: number) => {
+  const hasMath = (item: string) => /\$|\\[([]/.test(item);
+  // The math pass tracks fences by its own simpler rule; where that disagrees with
+  // markdown-it (a fence opened inside another fence's text), it may normalize math in
+  // code differently. Mix math only with blocks where both agree.
+  const fenceTricks = (item: string) => /^ {1,3}(```|~~~)|^> ```|unclosed/m.test(item);
+  const document = (next: () => number, length: number, items = pool) => {
     let text = "";
     while (text.length < length) {
-      text += pool[Math.floor(next() * pool.length)]!;
+      text += items[Math.floor(next() * items.length)]!;
       text += ["\n", "\n\n", "\n\n\n"][Math.floor(next() * 3)]!;
     }
     return text;
   };
 
-  test("crafted block mixes always parse to the same blocks", () => {
+  test.each([
+    ["without math", pool.filter((item) => !hasMath(item))],
+    ["with math", pool.filter((item) => !fenceTricks(item))],
+  ])("crafted block mixes %s always parse to the same blocks", (_name, items) => {
     const next = random(7);
-    for (let round = 0; round < 60; round++) {
-      const text = document(next, 9_000 + Math.floor(next() * 40_000));
+    for (let round = 0; round < 40; round++) {
+      const text = document(next, 9_000 + Math.floor(next() * 40_000), items);
       const segments = markdownSegments(text);
       expectBounded(text, segments);
       expectParity(text, segments);
@@ -360,7 +420,7 @@ describe("segmentation edge cases", () => {
     const next = random(11);
     for (let round = 0; round < 4; round++) {
       const text = document(next, 30_000);
-      const segment = createMarkdownSegmenter(parser);
+      const segment = createMarkdownSegmenter(segmentParser);
       for (let end = 0; end < text.length; end += 1 + Math.floor(next() * 400)) {
         const prefix = text.slice(0, end);
         expect(segment(prefix)).toEqual(markdownSegments(prefix));
@@ -372,12 +432,17 @@ describe("segmentation edge cases", () => {
       block: {
         parse: (src: string, _md: never, env: object, tokens: never[]) => {
           parsed += src.length;
-          parser.block.parse(src, parser, env, tokens);
+          segmentParser.block.parse(src, segmentParser, env, tokens);
         },
       },
     };
     const segment = createMarkdownSegmenter(counting);
-    const text = document(random(3), 60_000);
+    // (Without unclosed fences, which run to the end and so are always parsed again.)
+    const text = document(
+      random(3),
+      60_000,
+      pool.filter((item) => !fenceTricks(item)),
+    );
     segment(text.slice(0, 50_000));
     parsed = 0;
     segment(text.slice(0, 50_100));

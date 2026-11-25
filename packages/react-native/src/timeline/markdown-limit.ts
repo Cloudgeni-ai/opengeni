@@ -9,9 +9,9 @@ import {
  *
  * One Markdown parse never sees more than MAX_MARKDOWN_CHUNK_LENGTH UTF-16 code units
  * (about 1,300 words, after math normalization). A longer message is cut into chunks
- * where markdown-it's own block parser starts a top-level block, never inside display
- * math, and each chunk is prepared and parsed on its own: every chunk parses to the
- * blocks a single parse would give, the inline work grows linearly with the message, and
+ * where markdown-it's own block parser starts a top-level block (display math counted
+ * as one block, as the math parser draws it), and each chunk is prepared and parsed on
+ * its own: every chunk parses to the blocks a single parse would give, the inline work grows linearly with the message, and
  * crafted input can never cost more than one bounded parse per chunk. The block pass over
  * the whole message is linear; while a message streams, only its last blocks are
  * block-parsed again, and chunks whose text did not change are not prepared or parsed.
@@ -23,7 +23,8 @@ import {
  * same way.
  *
  * A long message is mounted a bounded slice at a time (mountedSegmentCount), one slice
- * per frame, so no frame parses or mounts more than about one chunk of Markdown. A code
+ * per frame, so no frame parses or mounts more than about one chunk of Markdown (the
+ * linear block pass aside). A code
  * block longer than one chunk is shown as plain-text pages; a large preview loads in its
  * own web view.
  *
@@ -99,13 +100,21 @@ type Unit = {
 };
 
 /** Top-level blocks of `lines[from…]`, by markdown-it's own block parser. */
-function unitsOf(parser: MarkdownBlockParser, lines: Line[], from: number): Unit[] {
+function unitsOf(
+  parser: MarkdownBlockParser,
+  lines: Line[],
+  mathEnds: Int32Array,
+  from: number,
+): Unit[] {
   const tokens: BlockToken[] = [];
+  // As markdown-it's normalization reads it (line endings are already split).
   const src = lines
     .slice(from)
     .map((line) => line.text)
-    .join("\n");
-  parser.block.parse(src, parser as never, {}, tokens);
+    .join("\n")
+    .replaceAll("\0", "\uFFFD");
+  const env: MathRangeEnv = { mathRangeEnds: mathEnds, mathRangeOffset: from };
+  parser.block.parse(src, parser as never, env, tokens);
   const units: Unit[] = [];
   let list: Unit | null = null;
   for (const token of tokens) {
@@ -135,6 +144,52 @@ function unitsOf(parser: MarkdownBlockParser, lines: Line[], from: number): Unit
 
 type Piece = { start: number; end: number; fence: Unit["fence"] };
 
+type MathRangeEnv = { mathRangeEnds: Int32Array; mathRangeOffset: number };
+type MathRangeState = {
+  src: string;
+  env: Partial<MathRangeEnv>;
+  bMarks: number[];
+  eMarks: number[];
+  tShift: number[];
+  line: number;
+  push: (type: string, tag: string, nesting: number) => { map: [number, number] | null };
+};
+type RulableParser = {
+  block: {
+    ruler: {
+      before: (name: string, rule: string, fn: never, options: { alt: string[] }) => void;
+    };
+  };
+};
+
+/**
+ * The segmenting parser's view of display math. A chunk with math is drawn from its
+ * math-normalized text, where each display block (the math pass's `displayMathRanges`)
+ * is a `$$` block that interrupts paragraphs and ends lazy lines (`markdownItMath`). This
+ * rule makes the same lines one block in the original text, so the cuts follow the block
+ * structure the renderer sees. Without `env.mathRangeEnds` it never matches.
+ */
+export function markdownItMathRanges(md: RulableParser): void {
+  const rule = (state: MathRangeState, startLine: number, endLine: number, silent: boolean) => {
+    // The ends are by line of the whole message; this parse starts at line `offset`.
+    const offset = state.env.mathRangeOffset ?? 0;
+    const end = (state.env.mathRangeEnds?.[startLine + offset] ?? -1) - offset;
+    // Like `markdownItMath`, the block must close inside its container.
+    if (end < startLine || end >= endLine) return false;
+    const first = state.src
+      .slice(state.bMarks[startLine]! + state.tShift[startLine]!, state.eMarks[startLine]!)
+      .trim();
+    if (!first.startsWith("$$") && !first.startsWith("\\[")) return false;
+    if (silent) return true;
+    state.push("math_range", "math", 0).map = [startLine, end + 1];
+    state.line = end + 1;
+    return true;
+  };
+  md.block.ruler.before("fence", "math_range", rule as never, {
+    alt: ["paragraph", "reference", "blockquote", "list"],
+  });
+}
+
 /**
  * How to draw a message: one Markdown segment when it fits one parse, bounded segments
  * when it is long, or null when it is too long to format at all (plain-text pages).
@@ -154,28 +209,40 @@ export function createMarkdownSegmenter(parser: MarkdownBlockParser) {
     if (text.length > MAX_MARKDOWN_LENGTH) return null;
     if (text.length <= MAX_MARKDOWN_CHUNK_LENGTH) return [{ kind: "markdown", source: text }];
     const lines = linesOf(text);
-    let units: Unit[];
-    // A block boundary is decided by the line that starts the next block and the line after
-    // it, so every boundary at least two whole lines before the old text's last (possibly
-    // partial) line is unchanged, and markdown-it starts afresh at a top-level block.
+    const ranges = displayMathRanges(lines.map((line) => line.text));
+    // For each line, the last line of the display math block it starts, or -1.
+    const mathEnds = new Int32Array(lines.length).fill(-1);
+    const inMath = new Uint8Array(lines.length);
+    for (const { start, end } of ranges) {
+      mathEnds[start] = end;
+      inMath.fill(1, start + 1, end + 1);
+    }
+    // Reuse the blocks before a restart line B when text was only appended: markdown-it
+    // decides where a block ends from the lines up to the next block's first two lines,
+    // and no lookahead (a paragraph, a setext underline, a reference definition's title)
+    // runs across a blank line. So a top-level block start B with a blank line before it,
+    // B and B + 1 whole lines of the old text, and B outside display math (which may close
+    // later) starts afresh with the same blocks before it.
     let keep = -1;
     if (cached && text.startsWith(cached.text)) {
       const last = cached.lineCount - 1;
-      for (let index = cached.units.length - 1; index >= 0; index--) {
-        if (cached.units[index]!.line + 2 <= last) {
+      for (let index = cached.units.length - 1; index > 0; index--) {
+        const line = cached.units[index]!.line;
+        if (line + 2 <= last && lines[line - 1]!.text.trim() === "" && !inMath[line]) {
           keep = index;
           break;
         }
       }
     }
-    if (cached && keep > 0) {
-      const from = cached.units[keep]!.line;
-      units = [...cached.units.slice(0, keep), ...unitsOf(parser, lines, from)];
-    } else {
-      units = unitsOf(parser, lines, 0);
-    }
+    const units =
+      cached && keep > 0
+        ? [
+            ...cached.units.slice(0, keep),
+            ...unitsOf(parser, lines, mathEnds, cached.units[keep]!.line),
+          ]
+        : unitsOf(parser, lines, mathEnds, 0);
     cached = { text, lineCount: lines.length, units };
-    return segmentsOf(text, lines, units);
+    return segmentsOf(text, lines, units, inMath);
   };
 }
 
@@ -187,13 +254,14 @@ export function markdownSegments(
   return createMarkdownSegmenter(parser)(text);
 }
 
-function segmentsOf(text: string, lines: Line[], units: Unit[]): MarkdownSegment[] {
+function segmentsOf(
+  text: string,
+  lines: Line[],
+  units: Unit[],
+  /** Lines inside a display math block: no cut before them. */
+  inMath: Uint8Array,
+): MarkdownSegment[] {
   const offset = (line: number) => (line < lines.length ? lines[line]!.start : text.length);
-  // Lines inside a display math block: no cut before them.
-  const inMath = new Uint8Array(lines.length);
-  for (const { start, end } of displayMathRanges(lines.map((line) => line.text))) {
-    inMath.fill(1, start + 1, end + 1);
-  }
   const pieces: Piece[] = [];
   const add = (start: number, end: number, fence: Unit["fence"]) => {
     const previous = pieces[pieces.length - 1];
