@@ -22,6 +22,7 @@ const AUTOMATION_TRIGGERS = [
   "repair",
 ] as const;
 const AUTOMATION_OUTCOMES = ["ok", "failed", "skipped"] as const;
+type AutomationRunCounterRow = { trigger_kind: string; outcome: string; runs: string };
 
 /** Each API replica reads the same durable deployment-wide counter. */
 export async function automationRunMetrics(
@@ -29,11 +30,13 @@ export async function automationRunMetrics(
   settings: MetricsSettings,
 ): Promise<string> {
   if (!settings.observabilityMetricsEnabled) return "";
-  const rows = await withDatabaseStatementTimeout(db, 1_000, (bounded) =>
-    bounded.execute<{ trigger_kind: string; outcome: string; runs: string }>(sql`
-      select trigger_kind, outcome, sum(runs)::text as runs
-      from automation_run_counters group by trigger_kind, outcome`),
-  );
+  const result: AutomationRunCounterRow[] | { rows: AutomationRunCounterRow[] } =
+    await withDatabaseStatementTimeout(db, 1_000, (bounded) =>
+      bounded.execute<AutomationRunCounterRow>(sql`
+        select trigger_kind, outcome, sum(runs)::text as runs
+        from automation_run_counters group by trigger_kind, outcome`),
+    );
+  const rows = Array.isArray(result) ? result : result.rows;
   const values = new Map(rows.map((row) => [`${row.trigger_kind}:${row.outcome}`, row.runs]));
   const name = "opengeni_automation_runs_total";
   const quote = (label: string) =>
