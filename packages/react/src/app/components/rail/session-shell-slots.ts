@@ -43,13 +43,13 @@ export type SessionShellSlots = Readonly<{
   sessionsShowApps?: boolean | null | undefined;
   /**
    * Where apps show (docs/sidebar-layout.md, `appsPlacement`): rows in the
-   * Sessions list, an Apps tab beside Sessions, or hidden (as
+   * Sessions list, an Apps section of their own below Sessions, or hidden (as
    * `sessionsShowApps: false`). Null: not known yet, so the list waits.
    * Unset: `sessionsShowApps` decides.
    */
-  appsPlacement?: "sessions" | "tab" | "hidden" | null | undefined;
+  appsPlacement?: "sessions" | "section" | "hidden" | null | undefined;
   /** Changes the person's apps placement; the list's view menu offers it only with this. */
-  onAppsPlacementChange?: ((placement: "sessions" | "tab" | "hidden") => void) | undefined;
+  onAppsPlacementChange?: ((placement: "sessions" | "section" | "hidden") => void) | undefined;
   /**
    * "Add to sidebar" in an app row's menu: `has` says whether the app is
    * already in the person's sidebar (the item is left out then).

@@ -13,6 +13,7 @@ import { siteViewSearch } from "@opengeni/react/app/lib/routes";
 import { Toaster } from "sonner";
 import { SessionList } from "@opengeni/react/app/components/rail/session-list";
 import { SessionShellSlotsContext } from "../../../packages/react/src/app/components/rail/session-shell-slots";
+import { RailAppsSectionSlotContext } from "../../../packages/react/src/app/components/rail/rail-apps-section-slot";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   sessionBrowsePreferenceStorageId,
@@ -33,11 +34,11 @@ const pendingAppRows = new URLSearchParams(window.location.search).get("appRows"
 let settleAppRows: (value: boolean) => void = () => {};
 Object.assign(window, { sessionSidebarAppRows: (value: boolean) => settleAppRows(value) });
 
-// `?apps=sessions|tab|hidden`: the person's apps placement, which the list's
-// view menu changes here as the web app's sidebar options do.
+// `?apps=sessions|section|hidden`: the person's apps placement, which the
+// list's view menu changes here as the web app's sidebar options do.
 const appsParam = new URLSearchParams(window.location.search).get("apps");
 const initialAppsPlacement =
-  appsParam === "sessions" || appsParam === "tab" || appsParam === "hidden" ? appsParam : null;
+  appsParam === "sessions" || appsParam === "section" || appsParam === "hidden" ? appsParam : null;
 
 function RailSessionList() {
   const [sessionsShowApps, setSessionsShowApps] = useState<boolean | null>(
@@ -128,21 +129,7 @@ const root = createRootRoute({
               className="h-dvh w-[56px] shrink-0 border-r border-border bg-surface"
             />
           ) : (
-            <aside
-              aria-label="Workspace sidebar"
-              className="flex h-dvh w-full shrink-0 flex-col border-r border-border bg-surface md:w-[288px]"
-            >
-              <header className="shrink-0 px-6 pb-5 pt-6">
-                <p className="text-sm font-medium">Product engineering</p>
-                <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
-              </header>
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
-                <RailSessionList />
-              </div>
-              <footer className="shrink-0 border-t border-border px-6 py-4 text-xs text-fg-muted">
-                Alex Morgan
-              </footer>
-            </aside>
+            <FixtureSidebar />
           )}
           <MainArea />
         </main>
@@ -151,6 +138,35 @@ const root = createRootRoute({
     </OpenGeniProvider>
   ),
 });
+
+/** The sidebar, with the rail's place for the Apps section below the list. */
+function FixtureSidebar() {
+  const [appsSectionSlot, setAppsSectionSlot] = useState<HTMLElement | null>(null);
+  return (
+    <aside
+      aria-label="Workspace sidebar"
+      className="flex h-dvh w-full shrink-0 flex-col border-r border-border bg-surface md:w-[288px]"
+    >
+      <header className="shrink-0 px-6 pb-5 pt-6">
+        <p className="text-sm font-medium">Product engineering</p>
+        <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
+      </header>
+      <RailAppsSectionSlotContext.Provider value={appsSectionSlot}>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
+          <RailSessionList />
+        </div>
+      </RailAppsSectionSlotContext.Provider>
+      <div
+        ref={setAppsSectionSlot}
+        data-rail-apps-section
+        className="flex max-h-[40%] min-h-0 shrink-0 flex-col empty:hidden"
+      />
+      <footer className="shrink-0 border-t border-border px-6 py-4 text-xs text-fg-muted">
+        Alex Morgan
+      </footer>
+    </aside>
+  );
+}
 
 /** The Site view where the app shows it; otherwise the empty chat page. */
 function MainArea() {

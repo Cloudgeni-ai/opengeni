@@ -4,7 +4,7 @@ import {
   buildPinnedRailSections,
   channelRailSections,
   parseSiteRowKey,
-  railSectionsForTab,
+  railSectionsFor,
   siteRowConversationCount,
   siteRowKey,
   summarizeRailNodes,
@@ -361,7 +361,7 @@ test("a Site archived from the sidebar leaves with its loaded conversations", ()
   expect(result.pinned).toEqual([]);
 });
 
-test("with apps in their own tab, each tab lists only its rows; without one nothing changes", () => {
+test("with apps in their own section, each part lists only its rows; without one nothing changes", () => {
   const chat = session("chat", { metadata: {} });
   const pinnedChat = session("pinned-chat", {
     metadata: {},
@@ -380,23 +380,23 @@ test("with apps in their own tab, each tab lists only its rows; without one noth
       }),
     ],
   });
-  expect(railSectionsForTab(result, null)).toBe(result);
-  const sessions = railSectionsForTab(result, "sessions");
+  expect(railSectionsFor(result, null)).toBe(result);
+  const sessions = railSectionsFor(result, "sessions");
   expect(sessions.pinned.map((node) => node.session.id)).toEqual(["pinned-chat"]);
   expect(railRoots(sessions).map((node) => node.session.id)).toEqual(["chat"]);
-  const apps = railSectionsForTab(result, "apps");
+  const apps = railSectionsFor(result, "apps");
   expect(apps.pinned.map((node) => node.session.id)).toEqual([`site:${otherSiteId}`]);
   // An app keeps its chats under it.
   expect(
     railRoots(apps).map((node) => [node.session.id, node.children.map((c) => c.session.id)]),
   ).toEqual([[`site:${siteId}`, ["app-chat"]]]);
   // Groups left empty are left out; lookups still see everything.
-  for (const tab of [sessions, apps]) {
-    expect(tab.ordinary.grouped.every((bucket) => bucket.sessions.length > 0)).toBe(true);
-    expect(tab.complete).toBe(result.complete);
+  for (const part of [sessions, apps]) {
+    expect(part.ordinary.grouped.every((bucket) => bucket.sessions.length > 0)).toBe(true);
+    expect(part.complete).toBe(result.complete);
   }
-  // A tab can leave out more rows (the Apps tab's Needs you).
-  const none = railSectionsForTab(result, "apps", () => false);
+  // A part can leave out more rows (the Apps section's Needs you).
+  const none = railSectionsFor(result, "apps", () => false);
   expect([...none.pinned, ...railRoots(none)]).toEqual([]);
-  expect(railSectionsForTab(result, "apps", () => true)).toEqual(apps);
+  expect(railSectionsFor(result, "apps", () => true)).toEqual(apps);
 });

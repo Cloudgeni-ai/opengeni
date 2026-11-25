@@ -32362,11 +32362,18 @@
     },
     "SidebarAppsPlacement": {
       "io": [
-        "input",
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"hidden\\\"\",\"\\\"sessions\\\"\",\"\\\"tab\\\"\"]"
+        "$": "enum=[\"\\\"hidden\\\"\",\"\\\"section\\\"\",\"\\\"sessions\\\"\"]"
+      }
+    },
+    "SidebarAppsPlacementInput": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"hidden\\\"\",\"\\\"section\\\"\",\"\\\"sessions\\\"\",\"\\\"tab\\\"\"]"
       }
     },
     "SidebarItemIcon": {
@@ -32425,7 +32432,7 @@
         "$|op=reset": "object",
         "$|op=reset.op": "const!=[\"\\\"reset\\\"\"]",
         "$|op=options": "object",
-        "$|op=options.appsPlacement": "ref(SidebarAppsPlacement)? null",
+        "$|op=options.appsPlacement": "ref(SidebarAppsPlacementInput)? null",
         "$|op=options.hiddenNavEntries": "array? null",
         "$|op=options.hiddenNavEntries[]": "ref(SidebarNavEntry)",
         "$|op=options.op": "const!=[\"\\\"options\\\"\"]",

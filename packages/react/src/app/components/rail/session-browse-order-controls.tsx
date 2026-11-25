@@ -31,14 +31,14 @@ const STATUSES: Record<SessionBrowseStatus, string> = {
 };
 
 /** Where apps show in the sidebar (docs/sidebar-layout.md, `appsPlacement`). */
-export type AppsPlacement = "sessions" | "tab" | "hidden";
+export type AppsPlacement = "sessions" | "section" | "hidden";
 const APPS_PLACEMENTS: Record<AppsPlacement, string> = {
   sessions: "In Sessions",
-  tab: "Own tab",
+  section: "Own section",
   hidden: "Hidden",
 };
 
-/** The Apps choice: in the Sessions list, in a tab of their own, or hidden. */
+/** The Apps choice: in the Sessions list, in a section of their own, or hidden. */
 export function AppsPlacementSubmenu({
   value,
   onChange,

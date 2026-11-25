@@ -30,18 +30,18 @@ async function connect() {
 }
 
 describe("sidebar layout tools", () => {
-  test("the agent can put apps in the Sessions list, in their own tab, or hide them", async () => {
+  test("the agent can put apps in the Sessions list, in their own section, or hide them", async () => {
     const client = await connect();
     const { tools } = await client.listTools();
     const update = tools.find((tool) => tool.name === "sidebar_layout_update")!;
     const get = tools.find((tool) => tool.name === "sidebar_layout_get")!;
     expect(update.description).toContain("appsPlacement");
-    expect(update.description).toContain("give apps their own tab");
+    expect(update.description).toContain("give apps their own section");
     expect(update.description).toContain("I don't want apps in the sidebar");
     expect(get.description).toContain("appsPlacement");
     const schema = JSON.stringify(update.inputSchema);
     expect(schema).toContain('"appsPlacement"');
-    for (const placement of ["sessions", "tab", "hidden"])
+    for (const placement of ["sessions", "section", "hidden"])
       expect(schema).toContain(`"${placement}"`);
     // A placement this version doesn't know is refused before anything runs.
     const refused = await client.callTool({

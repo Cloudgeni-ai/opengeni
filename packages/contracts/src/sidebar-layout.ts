@@ -139,17 +139,30 @@ const SettingsEntryId = /* @__PURE__ */ defineSchema(() =>
 
 /**
  * Where apps show in the sidebar: as rows in the Sessions list (`sessions`,
- * today's behaviour), in an Apps tab beside Sessions (`tab`), or not as rows
- * at all, their chats listed as ordinary chats (`hidden`).
+ * today's behaviour), in an Apps section of their own below Sessions
+ * (`section`), or not as rows at all, their chats listed as ordinary chats
+ * (`hidden`).
  */
-export const SIDEBAR_APPS_PLACEMENTS = ["sessions", "tab", "hidden"] as const;
+export const SIDEBAR_APPS_PLACEMENTS = ["sessions", "section", "hidden"] as const;
 export const SidebarAppsPlacement = /* @__PURE__ */ defineSchema(() =>
   z.enum(SIDEBAR_APPS_PLACEMENTS),
 );
 export type SidebarAppsPlacement = (typeof SIDEBAR_APPS_PLACEMENTS)[number];
 
-function isSidebarAppsPlacement(value: unknown): value is SidebarAppsPlacement {
-  return (SIDEBAR_APPS_PLACEMENTS as readonly unknown[]).includes(value);
+/**
+ * What a change accepts: the placements and `tab`, the older name of
+ * `section` (apps briefly had a tab beside Sessions), stored as `section`.
+ */
+export const SidebarAppsPlacementInput = /* @__PURE__ */ defineSchema(() =>
+  z.enum([...SIDEBAR_APPS_PLACEMENTS, "tab"]),
+);
+
+/** A stored or given placement as this version reads it: `tab` is `section`; anything else unknown is unset. */
+export function readSidebarAppsPlacement(value: unknown): SidebarAppsPlacement | undefined {
+  if (value === "tab") return "section";
+  return (SIDEBAR_APPS_PLACEMENTS as readonly unknown[]).includes(value)
+    ? (value as SidebarAppsPlacement)
+    : undefined;
 }
 
 /**
@@ -163,10 +176,10 @@ export const SidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
       /**
        * Apps show as rows of their own in the Sessions list, their chats under
        * them (default true). Kept beside appsPlacement, which it follows:
-       * false is `hidden`, true is `sessions` (or `tab` when that is set).
+       * false is `hidden`, true is `sessions` (or `section` when that is set).
        */
       sessionsShowApps: z.boolean().optional(),
-      /** Where apps show: in the Sessions list, in their own tab, or hidden (default `sessions`). */
+      /** Where apps show: in the Sessions list, in their own section, or hidden (default `sessions`). */
       appsPlacement: SidebarAppsPlacement.optional(),
       /** Built-in rail entries left out (default none). */
       hiddenNavEntries: z.array(SidebarNavEntry).max(SIDEBAR_NAV_ENTRIES.length).optional(),
@@ -180,7 +193,7 @@ export type SidebarLayoutOptions = z.infer<typeof SidebarLayoutOptions>;
 /** The options in effect for a person, after their own choices and the default's. */
 export const ResolvedSidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    /** False only when apps are hidden; older clients show apps in their own tab as Sessions rows. */
+    /** False only when apps are hidden; older clients show apps in their own section as Sessions rows. */
     sessionsShowApps: z.boolean(),
     appsPlacement: SidebarAppsPlacement,
     hiddenNavEntries: z.array(z.string()),
@@ -227,6 +240,8 @@ export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
     ...value,
     ...(hidden ? { hiddenNavEntries: hidden as SidebarNavEntry[] } : {}),
     ...(more ? { settingsMore: more } : {}),
+    // Apps' tab became their own section: a saved tab is kept as a section.
+    ...(value.appsPlacement === "tab" ? { appsPlacement: "section" } : {}),
   } as SidebarLayoutOptions;
 }
 
@@ -286,7 +301,8 @@ export function knownSidebarOptions(
     unknown
   >;
   if (typeof sessionsShowApps === "boolean") known.sessionsShowApps = sessionsShowApps;
-  if (isSidebarAppsPlacement(appsPlacement)) known.appsPlacement = appsPlacement;
+  const placement = readSidebarAppsPlacement(appsPlacement);
+  if (placement) known.appsPlacement = placement;
   if (Array.isArray(hiddenNavEntries))
     known.hiddenNavEntries = hiddenNavEntries.filter((entry): entry is SidebarNavEntry =>
       (SIDEBAR_NAV_ENTRIES as readonly unknown[]).includes(entry),
@@ -881,8 +897,12 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
         op: z.literal("options"),
         /** Sets appsPlacement too: false is `hidden`, true is `sessions`. */
         sessionsShowApps: z.boolean().nullable().optional(),
-        /** Sets sessionsShowApps too, for older clients; wins over sessionsShowApps in the same change. */
-        appsPlacement: SidebarAppsPlacement.nullable().optional(),
+        /**
+         * Sets sessionsShowApps too, for older clients; wins over
+         * sessionsShowApps in the same change. `tab` is the older name of
+         * `section` and is stored as `section`.
+         */
+        appsPlacement: SidebarAppsPlacementInput.nullable().optional(),
         hiddenNavEntries: z
           .array(SidebarNavEntry)
           .max(SIDEBAR_NAV_ENTRIES.length)
@@ -1162,11 +1182,13 @@ function applyOptions(
         : value;
   }
   // The two apps options move together, so every version reads the same choice.
-  const placement = (change as Record<string, unknown>).appsPlacement;
-  if (placement === null) {
+  const given = (change as Record<string, unknown>).appsPlacement;
+  const placement = readSidebarAppsPlacement(given);
+  if (given === null) {
     delete next.appsPlacement;
     delete next.sessionsShowApps;
-  } else if (isSidebarAppsPlacement(placement)) {
+  } else if (placement) {
+    next.appsPlacement = placement;
     next.sessionsShowApps = placement !== "hidden";
   } else if (change.sessionsShowApps === null) {
     delete next.appsPlacement;

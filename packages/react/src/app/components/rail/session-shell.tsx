@@ -37,6 +37,7 @@ import {
 import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "./rail-context";
 import { RailSurface, ShellRail } from "./rail-surface";
 import { CollapsedSessionsButton, SessionList } from "./session-list";
+import { RailAppsSectionSlotContext } from "./rail-apps-section-slot";
 import {
   PrimaryNav,
   RailHeader,
@@ -87,6 +88,8 @@ export function RailBody() {
   const { switcher, mobileWorkspacePanel, railFooter, layout } =
     useContext(SessionShellSlotsContext);
   const [mobileSection, setMobileSection] = useState<"sessions" | "workspace">("sessions");
+  // The Apps section's place when apps have a section of their own.
+  const [appsSectionSlot, setAppsSectionSlot] = useState<HTMLElement | null>(null);
   const sessionsTabRef = useRef<HTMLButtonElement>(null);
   const workspaceTabRef = useRef<HTMLButtonElement>(null);
   // Unique per app, so two apps on one page never share these ids.
@@ -102,105 +105,114 @@ export function RailBody() {
   };
   return (
     <RailSurface data-rail>
-      <div
-        data-rail-scroll-viewport
-        className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
-      >
-        <div className="flex min-h-full flex-col">
-          <RailHeader />
+      <RailAppsSectionSlotContext.Provider value={appsSectionSlot}>
+        <div
+          data-rail-scroll-viewport
+          className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
+        >
+          <div className="flex min-h-full flex-col">
+            <RailHeader />
 
-          {rail.collapsed ? switcher : null}
+            {rail.collapsed ? switcher : null}
 
-          {rail.isMobile && mobileWorkspacePanel ? (
-            <>
-              <div
-                role="tablist"
-                aria-label="Navigation section"
-                onKeyDown={(event) => {
-                  if (event.key === "ArrowLeft" || event.key === "Home") {
-                    event.preventDefault();
-                    moveMobileTab("sessions");
-                  } else if (event.key === "ArrowRight" || event.key === "End") {
-                    event.preventDefault();
-                    moveMobileTab("workspace");
-                  }
-                }}
-                className="mx-3 mt-3 grid shrink-0 grid-cols-2 rounded-lg bg-surface-2/70 p-1"
-              >
-                <button
-                  ref={sessionsTabRef}
-                  id={`${mobileNavId}-tab-sessions`}
-                  type="button"
-                  role="tab"
-                  aria-selected={mobileSection === "sessions"}
-                  aria-controls={`${mobileNavId}-panel-sessions`}
-                  tabIndex={mobileSection === "sessions" ? 0 : -1}
-                  onClick={() => setMobileSection("sessions")}
-                  className={cn(
-                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
-                    mobileSection === "sessions"
-                      ? "bg-surface-3 text-fg shadow-sm"
-                      : "text-fg-label hover:text-fg",
-                  )}
-                >
-                  <MessagesSquareIcon className="size-4" />
-                  Sessions
-                </button>
-                <button
-                  ref={workspaceTabRef}
-                  id={`${mobileNavId}-tab-workspace`}
-                  type="button"
-                  role="tab"
-                  aria-selected={mobileSection === "workspace"}
-                  aria-controls={`${mobileNavId}-panel-workspace`}
-                  tabIndex={mobileSection === "workspace" ? 0 : -1}
-                  onClick={() => setMobileSection("workspace")}
-                  className={cn(
-                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
-                    mobileSection === "workspace"
-                      ? "bg-surface-3 text-fg shadow-sm"
-                      : "text-fg-label hover:text-fg",
-                  )}
-                >
-                  <Settings2Icon className="size-4" />
-                  Workspace
-                </button>
-              </div>
-              {mobileSection === "sessions" ? (
+            {rail.isMobile && mobileWorkspacePanel ? (
+              <>
                 <div
-                  id={`${mobileNavId}-panel-sessions`}
-                  role="tabpanel"
-                  aria-labelledby={`${mobileNavId}-tab-sessions`}
-                  className="mt-2 flex shrink-0 flex-col"
+                  role="tablist"
+                  aria-label="Navigation section"
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowLeft" || event.key === "Home") {
+                      event.preventDefault();
+                      moveMobileTab("sessions");
+                    } else if (event.key === "ArrowRight" || event.key === "End") {
+                      event.preventDefault();
+                      moveMobileTab("workspace");
+                    }
+                  }}
+                  className="mx-3 mt-3 grid shrink-0 grid-cols-2 rounded-lg bg-surface-2/70 p-1"
                 >
-                  <PrimaryNav />
-                  {layout}
-                  <SessionList />
+                  <button
+                    ref={sessionsTabRef}
+                    id={`${mobileNavId}-tab-sessions`}
+                    type="button"
+                    role="tab"
+                    aria-selected={mobileSection === "sessions"}
+                    aria-controls={`${mobileNavId}-panel-sessions`}
+                    tabIndex={mobileSection === "sessions" ? 0 : -1}
+                    onClick={() => setMobileSection("sessions")}
+                    className={cn(
+                      "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
+                      mobileSection === "sessions"
+                        ? "bg-surface-3 text-fg shadow-sm"
+                        : "text-fg-label hover:text-fg",
+                    )}
+                  >
+                    <MessagesSquareIcon className="size-4" />
+                    Sessions
+                  </button>
+                  <button
+                    ref={workspaceTabRef}
+                    id={`${mobileNavId}-tab-workspace`}
+                    type="button"
+                    role="tab"
+                    aria-selected={mobileSection === "workspace"}
+                    aria-controls={`${mobileNavId}-panel-workspace`}
+                    tabIndex={mobileSection === "workspace" ? 0 : -1}
+                    onClick={() => setMobileSection("workspace")}
+                    className={cn(
+                      "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
+                      mobileSection === "workspace"
+                        ? "bg-surface-3 text-fg shadow-sm"
+                        : "text-fg-label hover:text-fg",
+                    )}
+                  >
+                    <Settings2Icon className="size-4" />
+                    Workspace
+                  </button>
                 </div>
-              ) : (
-                <div
-                  id={`${mobileNavId}-panel-workspace`}
-                  role="tabpanel"
-                  aria-labelledby={`${mobileNavId}-tab-workspace`}
-                  className="mt-2 flex shrink-0 flex-col border-t border-border pt-2"
-                >
-                  {mobileWorkspacePanel}
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              {/* Sessions are the primary object. Workspace administration remains
+                {mobileSection === "sessions" ? (
+                  <div
+                    id={`${mobileNavId}-panel-sessions`}
+                    role="tabpanel"
+                    aria-labelledby={`${mobileNavId}-tab-sessions`}
+                    className="mt-2 flex shrink-0 flex-col"
+                  >
+                    <PrimaryNav />
+                    {layout}
+                    <SessionList />
+                  </div>
+                ) : (
+                  <div
+                    id={`${mobileNavId}-panel-workspace`}
+                    role="tabpanel"
+                    aria-labelledby={`${mobileNavId}-tab-workspace`}
+                    className="mt-2 flex shrink-0 flex-col border-t border-border pt-2"
+                  >
+                    {mobileWorkspacePanel}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {/* Sessions are the primary object. Workspace administration remains
               secondary on desktop and becomes its own screen on phones. */}
-              <PrimaryNav />
-              {rail.collapsed ? null : layout}
-              <div className="mt-2 flex shrink-0 flex-col">
-                {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
-              </div>
-            </>
-          )}
+                <PrimaryNav />
+                {rail.collapsed ? null : layout}
+                <div className="mt-2 flex shrink-0 flex-col">
+                  {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
+                </div>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      </RailAppsSectionSlotContext.Provider>
+      {/* The Apps section, when apps have one: a bounded share of the rail's
+          height that scrolls on its own; empty, it takes no room. */}
+      <div
+        ref={setAppsSectionSlot}
+        data-rail-apps-section
+        className="flex max-h-[40%] min-h-0 shrink-0 flex-col empty:hidden"
+      />
       {/* Keep the persistent controls above the scroll viewport, including
           session-row actions with their own stacking levels. The footer is a
           sibling of the clipped viewport, so it can stay transparent and let

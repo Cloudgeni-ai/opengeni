@@ -1489,19 +1489,20 @@ export function buildPinnedRailSections(
 }
 
 /**
- * The rail sections one tab shows when apps have a tab of their own: the
- * Apps tab keeps only app rows, the Sessions tab everything else. Without a
- * tab (null) the sections are unchanged. `complete` stays whole for lookups.
+ * The rail sections one part of the list shows when apps have a section of
+ * their own: the Apps section keeps only app rows, Sessions everything else.
+ * Without a part (null) the sections are unchanged. `complete` stays whole
+ * for lookups.
  */
-export function railSectionsForTab(
+export function railSectionsFor(
   sections: PinnedRailSections,
-  tab: "sessions" | "apps" | null,
-  /** Rows the tab also leaves out (the Apps tab's Needs you). */
+  part: "sessions" | "apps" | null,
+  /** Rows the part also leaves out (the Apps section's Needs you). */
   also: ((node: SessionTreeNode) => boolean) | null = null,
 ): PinnedRailSections {
-  if (tab === null) return sections;
+  if (part === null) return sections;
   const keep = (node: SessionTreeNode) =>
-    Boolean(node.siteGroup) === (tab === "apps") && (also === null || also(node));
+    Boolean(node.siteGroup) === (part === "apps") && (also === null || also(node));
   return {
     complete: sections.complete,
     pinned: sections.pinned.filter(keep),
@@ -1512,30 +1513,6 @@ export function railSectionsForTab(
         .filter((bucket) => bucket.sessions.length > 0),
     },
   };
-}
-
-/**
- * The tab that lists a session, or a Site's own row: apps when it sits under
- * an app row. Null when the rail doesn't list it.
- */
-export function railTabOfSession(
-  sections: PinnedRailSections,
-  target: { sessionId: string | null; siteId: string | null },
-): "sessions" | "apps" | null {
-  const contains = (node: SessionTreeNode): boolean =>
-    (target.sessionId !== null && node.session.id === target.sessionId) ||
-    node.children.some(contains);
-  const roots = [
-    ...sections.pinned,
-    ...sections.ordinary.running,
-    ...sections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
-  ];
-  for (const root of roots) {
-    if (contains(root) || (target.siteId !== null && root.siteGroup?.siteId === target.siteId)) {
-      return root.siteGroup ? "apps" : "sessions";
-    }
-  }
-  return null;
 }
 
 /** The selected descendant under a collapsed node, projected one level deeper. */

@@ -19,11 +19,11 @@ export type SidebarLiveListKind = "pinned_apps" | "recent_apps";
 export type SidebarItemIcon = string;
 
 /**
- * Where apps show: as rows in the Sessions list (`sessions`), in an Apps tab
- * beside Sessions (`tab`), or not as rows, their chats listed as ordinary
- * chats (`hidden`).
+ * Where apps show: as rows in the Sessions list (`sessions`), in an Apps
+ * section of their own below Sessions (`section`), or not as rows, their chats
+ * listed as ordinary chats (`hidden`).
  */
-export type SidebarAppsPlacement = "sessions" | "tab" | "hidden";
+export type SidebarAppsPlacement = "sessions" | "section" | "hidden";
 
 /** The primary rail's built-in entries a person (or the default) can hide. */
 export type SidebarNavEntry =
@@ -221,8 +221,8 @@ export type SidebarLayoutChange =
       op: "options";
       /** Also sets appsPlacement: false is `hidden`, true is `sessions`. */
       sessionsShowApps?: boolean | null;
-      /** Also sets sessionsShowApps; wins over it in the same change. */
-      appsPlacement?: SidebarAppsPlacement | null;
+      /** Also sets sessionsShowApps; wins over it in the same change. `tab` is the older name of `section`. */
+      appsPlacement?: SidebarAppsPlacement | "tab" | null;
       hiddenNavEntries?: SidebarNavEntry[] | null;
       settingsMore?: string[] | null;
     };

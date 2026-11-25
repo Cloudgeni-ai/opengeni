@@ -58,7 +58,11 @@ const context = {
     listCapabilities: async () => ({ items: catalog }),
     getConnectorToolPermissions: async (_workspace: string, id: string) => {
       toolReads.push(id);
-      return { tools: (tools[id] ?? []).map((name) => ({ name })) };
+      return {
+        tools: (tools[id] ?? []).map((name) =>
+          name === "archive" ? { name, title: "Archive a message" } : { name },
+        ),
+      };
     },
     updateAgent: async (_workspace: string, _id: string, patch: { toolPermissions: unknown }) => {
       updates.push(patch.toolPermissions);
@@ -72,6 +76,8 @@ const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { AgentCanUse, canUseConnections, ruledConnections, withAgentRule } =
   await import("./agent-can-use");
+const { canUseToolPermission, canUseTools, humanizeToolName, withAgentToolRules } =
+  await import("./agent-tool-names");
 
 afterAll(() => GlobalRegistrator.unregister());
 
@@ -175,8 +181,9 @@ describe("AgentCanUse", () => {
     );
     expect(rows).toEqual(["mail.example", "tickets.example"]);
     expect(container.textContent).not.toContain("Chat");
-    // Its tool rule shows without opening the tool list.
-    expect(container.textContent).toContain("send");
+    // Its tool rule shows without opening the tool list, by a readable name.
+    expect(container.textContent).toContain("Send");
+    expect(container.querySelector("code")).toBeNull();
     expect(
       container.querySelector('[data-agent-can-use="mail.example"] img')?.getAttribute("src"),
     ).toBe("/assets/mail.svg");
@@ -191,7 +198,7 @@ describe("AgentCanUse", () => {
     await act(async () => add.click());
     await pick("Connection", "Chat");
     expect(toolReads).toEqual(["chat"]);
-    await pick("Tool", "post");
+    await pick("Tool", "Post");
     await pick("Choice", "Block");
     expect(updates).toEqual([
       [...agent.toolPermissions, { connector: "chat.example", tool: "post", permission: "block" }],
@@ -213,5 +220,127 @@ describe("AgentCanUse", () => {
     await settle();
     await pick("tickets.example: all tools", "Remove");
     expect(updates).toEqual([[agent.toolPermissions[0]]]);
+  });
+
+  test("GitHub tools show one readable row per action, and a choice there sets every name", async () => {
+    const ruledAgent = {
+      ...agent,
+      toolPermissions: [
+        { connector: "github.com", tool: "merge_pull_request", permission: "block" },
+        { connector: "github.com", tool: "pull_request_merge", permission: "block" },
+      ],
+    } as unknown as Agent;
+    await act(async () =>
+      root.render(
+        <AgentCanUse
+          agent={ruledAgent}
+          workspaceId="ws"
+          onSaved={() => undefined}
+          onError={() => undefined}
+        />,
+      ),
+    );
+    await settle();
+    const rows = [...container.querySelectorAll("[data-agent-can-use-tool]")];
+    expect(rows.map((row) => row.textContent?.includes("Merge pull request"))).toEqual([true]);
+    expect(container.textContent).not.toContain("merge_pull_request");
+    await pick("GitHub: Merge pull request", "Ask first");
+    expect(updates).toEqual([
+      [
+        { connector: "github.com", tool: "pull_request_merge", permission: "ask" },
+        { connector: "github.com", tool: "merge_pull_request", permission: "ask" },
+      ],
+    ]);
+  });
+
+  test("Add rule names tools readably and sets every name of a GitHub action", async () => {
+    await act(async () =>
+      root.render(
+        <AgentCanUse
+          agent={agent}
+          workspaceId="ws"
+          onSaved={() => undefined}
+          onError={() => undefined}
+        />,
+      ),
+    );
+    await settle();
+    const add = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Add rule",
+    )!;
+    await act(async () => add.click());
+    await pick("Connection", "GitHub");
+    await pick("Tool", "Merge pull request");
+    await pick("Choice", "Block");
+    expect(updates).toEqual([
+      [
+        ...agent.toolPermissions,
+        { connector: "github.com", tool: "pull_request_merge", permission: "block" },
+        { connector: "github.com", tool: "merge_pull_request", permission: "block" },
+      ],
+    ]);
+  });
+});
+
+describe("Can use tool names", () => {
+  test("a tool's own title, else a curated GitHub name, else its code name in words", () => {
+    expect(humanizeToolName("merge_pull_request")).toBe("Merge pull request");
+    expect(humanizeToolName("sendMessage")).toBe("Send message");
+    expect(humanizeToolName("files.upload-v2")).toBe("Files upload v2");
+    expect(
+      canUseTools("mail.example", [
+        { name: "send" },
+        { name: "archive", title: "Archive a message" },
+        { name: "send" },
+      ]),
+    ).toEqual([
+      { key: "send", label: "Send", names: ["send"] },
+      { key: "archive", label: "Archive a message", names: ["archive"] },
+    ]);
+    // GitHub: both servers' names of one action share a row; a title still wins.
+    expect(
+      canUseTools("github.com", [
+        { name: "merge_pull_request" },
+        { name: "pull_request_merge" },
+        { name: "push_files" },
+        { name: "create_pull_request", title: "Open a pull request" },
+        { name: "brand_new_tool" },
+      ]),
+    ).toEqual([
+      {
+        key: "pull_request_merge",
+        label: "Merge pull request",
+        names: ["pull_request_merge", "merge_pull_request"],
+      },
+      { key: "push_files", label: "Push files", names: ["push_files"] },
+      {
+        key: "pull_request_create",
+        label: "Open a pull request",
+        names: ["pull_request_create", "create_pull_request"],
+      },
+      { key: "brand_new_tool", label: "Brand new tool", names: ["brand_new_tool"] },
+    ]);
+    // Elsewhere the same names are separate tools.
+    expect(canUseTools("other.example", [{ name: "merge_pull_request" }])).toEqual([
+      { key: "merge_pull_request", label: "Merge pull request", names: ["merge_pull_request"] },
+    ]);
+  });
+
+  test("a row shows its rules, the strictest when they differ, and sets or clears every name", () => {
+    const [merge] = canUseTools("github.com", [{ name: "merge_pull_request" }]);
+    const rules = [
+      { connector: "github.com", tool: "merge_pull_request", permission: "allow" },
+      { connector: "github.com", tool: "pull_request_merge", permission: "ask" },
+      { connector: "other.example", tool: "pull_request_merge", permission: "block" },
+    ] as const;
+    expect(canUseToolPermission(rules, "github.com", merge!)).toBe("ask");
+    expect(canUseToolPermission(rules.slice(0, 1), "github.com", merge!)).toBe("allow");
+    expect(canUseToolPermission([], "github.com", merge!)).toBeUndefined();
+    expect(withAgentToolRules(rules, "github.com", merge!.names, "block")).toEqual([
+      rules[2],
+      { connector: "github.com", tool: "pull_request_merge", permission: "block" },
+      { connector: "github.com", tool: "merge_pull_request", permission: "block" },
+    ]);
+    expect(withAgentToolRules(rules, "github.com", merge!.names, null)).toEqual([rules[2]]);
   });
 });

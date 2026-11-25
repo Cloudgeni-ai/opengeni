@@ -532,10 +532,10 @@ test("apps placement: the default and a person's own choice, as the agent tool s
   });
   await updateSidebarLayoutForGrant(deps, ws.admin, {
     scope: "workspace",
-    changes: [{ op: "options", appsPlacement: "tab" }],
+    changes: [{ op: "options", appsPlacement: "section" }],
   });
   expect((await readSidebarLayoutForGrant(deps, ws.ada)).options).toMatchObject({
-    appsPlacement: "tab",
+    appsPlacement: "section",
     sessionsShowApps: true,
   });
   // "I don't want apps in the sidebar", through the older option a saved layout may hold.
@@ -545,12 +545,19 @@ test("apps placement: the default and a person's own choice, as the agent tool s
   });
   expect(hidden.options).toMatchObject({ appsPlacement: "hidden", sessionsShowApps: false });
   expect(hidden.personal.options).toEqual({ appsPlacement: "hidden", sessionsShowApps: false });
-  // "Give apps their own tab."
+  // "Give apps their own section."
+  const section = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [{ op: "options", appsPlacement: "section" }],
+  });
+  expect(section.options).toMatchObject({ appsPlacement: "section", sessionsShowApps: true });
+  // An older client's "tab" is stored and answered as a section.
   const tab = await updateSidebarLayoutForGrant(deps, ws.ada, {
     scope: "personal",
     changes: [{ op: "options", appsPlacement: "tab" }],
   });
-  expect(tab.options).toMatchObject({ appsPlacement: "tab", sessionsShowApps: true });
+  expect(tab.options).toMatchObject({ appsPlacement: "section", sessionsShowApps: true });
+  expect(tab.personal.options).toEqual({ appsPlacement: "section", sessionsShowApps: true });
   // A member can't change the default.
   await expect(
     updateSidebarLayoutForGrant(deps, ws.ada, {

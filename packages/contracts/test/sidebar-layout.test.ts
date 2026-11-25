@@ -863,20 +863,20 @@ describe("apps placement", () => {
   });
 
   test("setting it sets sessionsShowApps for older readers, and the other way round", () => {
-    const tab = applyPersonalSidebarChanges(
+    const section = applyPersonalSidebarChanges(
       EMPTY_SIDEBAR_LAYOUT,
       EMPTY_SIDEBAR_PERSONAL_CHANGES,
-      parseChanges([{ op: "options", appsPlacement: "tab" }]),
+      parseChanges([{ op: "options", appsPlacement: "section" }]),
       ids(),
     );
-    expect(tab.options).toEqual({ appsPlacement: "tab", sessionsShowApps: true });
-    expect(mergeSidebarOptions(undefined, tab.options)).toMatchObject({
-      appsPlacement: "tab",
+    expect(section.options).toEqual({ appsPlacement: "section", sessionsShowApps: true });
+    expect(mergeSidebarOptions(undefined, section.options)).toMatchObject({
+      appsPlacement: "section",
       sessionsShowApps: true,
     });
     const hidden = applyPersonalSidebarChanges(
       EMPTY_SIDEBAR_LAYOUT,
-      tab,
+      section,
       parseChanges([{ op: "options", appsPlacement: "hidden" }]),
       ids(),
     );
@@ -884,7 +884,7 @@ describe("apps placement", () => {
     // An API caller using the older option moves the placement with it.
     const legacy = applyPersonalSidebarChanges(
       EMPTY_SIDEBAR_LAYOUT,
-      tab,
+      section,
       parseChanges([{ op: "options", sessionsShowApps: false }]),
       ids(),
     );
@@ -893,16 +893,16 @@ describe("apps placement", () => {
     const both = applyPersonalSidebarChanges(
       EMPTY_SIDEBAR_LAYOUT,
       EMPTY_SIDEBAR_PERSONAL_CHANGES,
-      parseChanges([{ op: "options", sessionsShowApps: false, appsPlacement: "tab" }]),
+      parseChanges([{ op: "options", sessionsShowApps: false, appsPlacement: "section" }]),
       ids(),
     );
-    expect(both.options).toEqual({ appsPlacement: "tab", sessionsShowApps: true });
+    expect(both.options).toEqual({ appsPlacement: "section", sessionsShowApps: true });
     // Null on either clears both, back to the default's.
     for (const clear of [{ appsPlacement: null }, { sessionsShowApps: null }])
       expect(
         applyPersonalSidebarChanges(
           EMPTY_SIDEBAR_LAYOUT,
-          tab,
+          section,
           parseChanges([{ op: "options", ...clear }]),
           ids(),
         ).options,
@@ -912,10 +912,10 @@ describe("apps placement", () => {
   test("a person's own placement wins over the default's; unset follows it", () => {
     const workspace = applyWorkspaceSidebarChanges(
       EMPTY_SIDEBAR_LAYOUT,
-      parseChanges([{ op: "options", appsPlacement: "tab" }]),
+      parseChanges([{ op: "options", appsPlacement: "section" }]),
       ids(),
     );
-    expect(mergeSidebarOptions(workspace.options, undefined).appsPlacement).toBe("tab");
+    expect(mergeSidebarOptions(workspace.options, undefined).appsPlacement).toBe("section");
     expect(
       mergeSidebarOptions(workspace.options, personal({ sessionsShowApps: false })).appsPlacement,
     ).toBe("hidden");
@@ -930,8 +930,10 @@ describe("apps placement", () => {
   test("an older version's later sessionsShowApps change wins over a stale placement", () => {
     // An older replica sets only sessionsShowApps and keeps appsPlacement as stored.
     expect(
-      mergeSidebarOptions(undefined, personal({ appsPlacement: "tab", sessionsShowApps: false }))
-        .appsPlacement,
+      mergeSidebarOptions(
+        undefined,
+        personal({ appsPlacement: "section", sessionsShowApps: false }),
+      ).appsPlacement,
     ).toBe("hidden");
     expect(
       mergeSidebarOptions(undefined, personal({ appsPlacement: "hidden", sessionsShowApps: true }))
@@ -941,7 +943,7 @@ describe("apps placement", () => {
     expect(
       mergeSidebarOptions(
         personal({ appsPlacement: "hidden", sessionsShowApps: false }),
-        personal({ appsPlacement: "tab" }),
+        personal({ appsPlacement: "section" }),
       ).appsPlacement,
     ).toBe("hidden");
     // A value a newer version added is read as unset and kept in storage.
@@ -952,7 +954,7 @@ describe("apps placement", () => {
   });
 
   test("the request schema takes it, and refuses values it doesn't know", () => {
-    const request = { scope: "personal", changes: [{ op: "options", appsPlacement: "tab" }] };
+    const request = { scope: "personal", changes: [{ op: "options", appsPlacement: "section" }] };
     expect(UpdateSidebarLayoutRequest.parse(request)).toEqual(request as never);
     expect(
       UpdateSidebarLayoutRequest.safeParse({
@@ -960,6 +962,33 @@ describe("apps placement", () => {
         changes: [{ op: "options", appsPlacement: "drawer" }],
       }).success,
     ).toBe(false);
+  });
+
+  test("a saved or given tab, the older name of section, is a section", () => {
+    // Saved by the version that gave apps a tab beside Sessions.
+    const saved = personal({ appsPlacement: "tab", sessionsShowApps: true });
+    expect(saved).toEqual({ appsPlacement: "section", sessionsShowApps: true });
+    expect(knownSidebarOptions({ appsPlacement: "tab", sessionsShowApps: true } as never)).toEqual({
+      appsPlacement: "section",
+      sessionsShowApps: true,
+    });
+    expect(mergeSidebarOptions(undefined, saved).appsPlacement).toBe("section");
+    expect(
+      readResolvedSidebarOptions({ appsPlacement: "tab", sessionsShowApps: true }).appsPlacement,
+    ).toBe("section");
+    // An older client's change still parses, and is stored as a section.
+    const given = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "options", appsPlacement: "tab" }]),
+      ids(),
+    );
+    expect(given.options).toEqual({ appsPlacement: "section", sessionsShowApps: true });
+    // A saved tab beside a later Hidden from an older version reads as hidden.
+    expect(
+      mergeSidebarOptions(undefined, personal({ appsPlacement: "tab", sessionsShowApps: false }))
+        .appsPlacement,
+    ).toBe("hidden");
   });
 });
 
