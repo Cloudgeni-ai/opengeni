@@ -25,6 +25,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     teamsWorkspaceRoutingEnabled: false,
     teamsAppName: "Opengeni",
     signupChallengeEnabled: false,
+    signInChallengeEnabled: false,
     signupChallengeHostnames: "",
     signupDisposableMailDomains: "",
     signupMailMxLookupTimeoutMs: 0,

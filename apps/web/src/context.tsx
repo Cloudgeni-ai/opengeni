@@ -421,6 +421,10 @@ export function RootRouteComponent() {
                       ? clientConfig.auth.signupChallengeSiteKey
                       : undefined
                   }
+                  signInChallengeRequired={
+                    clientConfig?.auth.mode === "managedSession" &&
+                    clientConfig.auth.signInChallengeRequired === true
+                  }
                   socialProviders={socialProvidersForHost(
                     window.location.hostname,
                     managedSocialProviders,
@@ -448,6 +452,10 @@ export function RootRouteComponent() {
                 clientConfig?.auth.mode === "managedSession"
                   ? clientConfig.auth.signupChallengeSiteKey
                   : undefined
+              }
+              signInChallengeRequired={
+                clientConfig?.auth.mode === "managedSession" &&
+                clientConfig.auth.signInChallengeRequired === true
               }
               socialProviders={socialProvidersForHost(
                 window.location.hostname,

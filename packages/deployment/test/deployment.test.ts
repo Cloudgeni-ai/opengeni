@@ -49,6 +49,7 @@ describe("deployment contract", () => {
     ];
     const disabled = generateRuntimeArtifacts(contract, {}, {});
     expect(disabled.runtimeEnv).toContain("OPENGENI_SIGNUP_CHALLENGE_ENABLED=false");
+    expect(disabled.runtimeEnv).toContain("OPENGENI_SIGN_IN_CHALLENGE_ENABLED=false");
     expect(disabled.requiredEnvVars).not.toContain(keys[1]);
     const enabled = { OPENGENI_SIGNUP_CHALLENGE_ENABLED: "true" };
     const missing = generateRuntimeArtifacts(contract, {}, enabled);

@@ -1078,6 +1078,7 @@ export async function signInEmail(input: {
   email: string;
   password: string;
   rememberMe?: boolean;
+  signupChallengeToken?: string;
 }): Promise<unknown> {
   return await authRequest<unknown>("/sign-in/email", {
     method: "POST",

@@ -2593,6 +2593,11 @@ const SettingsSchema = z.object({
    */
   skillImportGithubToken: z.string().min(1).optional(),
   signupChallengeEnabled: EnvBoolean.default(false),
+  /**
+   * Email sign-in also requires the signup challenge (credential stuffing).
+   * Takes effect only while `signupChallengeEnabled` is on.
+   */
+  signInChallengeEnabled: EnvBoolean.default(false),
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
   signupChallengeHostnames: z.string().default(""),
@@ -7155,6 +7160,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
     skillImportGithubToken: optional("OPENGENI_SKILL_IMPORT_GITHUB_TOKEN"),
     signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
+    signInChallengeEnabled: optional("OPENGENI_SIGN_IN_CHALLENGE_ENABLED"),
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),
     signupChallengeHostnames: optional("OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES"),

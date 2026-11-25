@@ -2683,6 +2683,10 @@ function runtimeEnvValues(
             "OPENGENI_SIGNUP_CHALLENGE_ENABLED",
             env.OPENGENI_SIGNUP_CHALLENGE_ENABLED ?? "false",
           ),
+          valueEnv(
+            "OPENGENI_SIGN_IN_CHALLENGE_ENABLED",
+            env.OPENGENI_SIGN_IN_CHALLENGE_ENABLED ?? "false",
+          ),
           ...[
             "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
             "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",

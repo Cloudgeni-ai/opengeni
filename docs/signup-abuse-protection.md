@@ -32,8 +32,28 @@ verification, or a click whose challenge fails, still starts the login without
 proof: an existing user signs in, and a new user is refused at the callback with
 `signup_challenge_required`. Consuming a token on an existing-user sign-in is
 harmless: it was minted for that click, and the proof only matters when the
-callback creates a user. Email sign-up keeps its visible widget; email sign-in
-needs none. This is distinct from organization invitations.
+callback creates a user. Email sign-up keeps its visible widget. This is
+distinct from organization invitations.
+
+With `OPENGENI_SIGN_IN_CHALLENGE_ENABLED=true` (default `false`; takes effect
+only while the signup challenge is on), email sign-in
+(`POST /v1/auth/sign-in/email`) requires the same challenge, against credential
+stuffing. The client config then reports `signInChallengeRequired: true` and the
+Sign in tab shows the same
+visible widget and sends its token as `signupChallengeToken`, verified by the
+same Siteverify path (same `signup` action, hostnames and freshness) before
+Better Auth checks the password. Refusals use sign-up's error shape and codes
+(`SIGNUP_CHALLENGE_REQUIRED`, `SIGNUP_CHALLENGE_FAILED`, retryable
+`SIGNUP_CHALLENGE_UNAVAILABLE`), so a nonexistent email and a wrong password
+look the same to a script. Passkey, Google and GitHub sign-in, and the
+session-set login window (`/v1/auth/session-set/transactions/email-password`),
+are separate routes and unaffected. There is no exemption: scripts that sign in
+with an email and password (`scripts/integration-eval` with
+`OPENGENI_EVAL_LOGIN_EMAIL`, the dev seed scripts, the launch-burst probe's
+legacy path, and opengeni-ops' release acceptance canary and email-mode
+synthetic probe) work only where this setting is off; move them to an API key
+or another session source before turning it on. Mobile, desktop and the CLI
+sign in through the web page and get the widget there.
 
 The browser must reach `https://challenges.cloudflare.com` for the widget and the
 API must reach its Siteverify endpoint. A deployment CSP must allow the provider's
