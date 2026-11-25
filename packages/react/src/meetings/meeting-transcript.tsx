@@ -600,6 +600,7 @@ function MeetingTranscriptContent({
   activeSegment,
   actions,
   onSeek,
+  readOnly = false,
 }: {
   segments: readonly RecordingTranscriptSegment[];
   speakers: readonly RecordingSpeaker[];
@@ -615,6 +616,8 @@ function MeetingTranscriptContent({
   actions: TranscriptActions;
   /** Null when there is no audio to play. */
   onSeek: ((milliseconds: number) => void) | null;
+  /** Shared from someone's Personal workspace: names and words can't be changed. */
+  readOnly?: boolean;
 }) {
   const msg = useOpenGeniText();
   const length =
@@ -692,7 +695,18 @@ function MeetingTranscriptContent({
               className="group/turn grid max-w-[72ch] min-w-0 gap-1.5"
             >
               <div className="flex min-w-0 items-center gap-2 pl-1">
-                {turn.speakerLabel ? (
+                {turn.speakerLabel && readOnly ? (
+                  <span
+                    data-speaker-name=""
+                    className={cn(
+                      "truncate text-sm leading-5 font-semibold",
+                      speakerTextClass(slot),
+                    )}
+                    style={speakerHueStyle(slot)}
+                  >
+                    {name}
+                  </span>
+                ) : turn.speakerLabel ? (
                   <SpeakerNameMenu
                     label={turn.speakerLabel}
                     displayName={name}
@@ -755,71 +769,75 @@ function MeetingTranscriptContent({
                 ) : (
                   <span className="text-xs leading-4 text-fg-muted tabular-nums">{at}</span>
                 )}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={msg("meetings.transcript.correctTheWordsOfNameAt", {
-                    name: name,
-                    formatClock: at,
-                  })}
-                  onClick={() => setEditing(turn)}
-                  className={cn("ml-auto", TURN_ACTION)}
-                >
-                  <PencilIcon />
-                </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
+                {readOnly ? null : (
+                  <>
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon-sm"
-                      aria-label={msg("meetings.transcript.moreActionsForNameAt", {
+                      aria-label={msg("meetings.transcript.correctTheWordsOfNameAt", {
                         name: name,
                         formatClock: at,
                       })}
-                      className={TURN_ACTION}
+                      onClick={() => setEditing(turn)}
+                      className={cn("ml-auto", TURN_ACTION)}
                     >
-                      <MoreHorizontalIcon />
+                      <PencilIcon />
                     </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="min-w-52">
-                    {labels.length > 1 ? (
-                      <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>
-                          <UsersIcon aria-hidden="true" />
-                          {msg("meetings.transcript.changeSpeaker")}
-                        </DropdownMenuSubTrigger>
-                        <DropdownMenuSubContent className="min-w-48">
-                          {labels
-                            .filter((label) => label !== turn.speakerLabel)
-                            .map((label) => (
-                              <DropdownMenuItem
-                                key={label}
-                                onSelect={() =>
-                                  void withToast(
-                                    msg("meetings.transcript.couldnTChangeTheSpeaker"),
-                                    async () => {
-                                      for (const segment of turn.segments) {
-                                        await actions.moveSegment(segment.index, label);
-                                      }
-                                    },
-                                  )
-                                }
-                              >
-                                <SpeakerDot slot={slots.get(label)} />
-                                <span className="min-w-0 flex-1 truncate">{nameOf(label)}</span>
-                              </DropdownMenuItem>
-                            ))}
-                        </DropdownMenuSubContent>
-                      </DropdownMenuSub>
-                    ) : null}
-                    <DropdownMenuItem onSelect={() => setEditing(turn)}>
-                      <PencilIcon aria-hidden="true" />
-                      {msg("meetings.transcript.correctTheWords")}
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={msg("meetings.transcript.moreActionsForNameAt", {
+                            name: name,
+                            formatClock: at,
+                          })}
+                          className={TURN_ACTION}
+                        >
+                          <MoreHorizontalIcon />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="min-w-52">
+                        {labels.length > 1 ? (
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger>
+                              <UsersIcon aria-hidden="true" />
+                              {msg("meetings.transcript.changeSpeaker")}
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent className="min-w-48">
+                              {labels
+                                .filter((label) => label !== turn.speakerLabel)
+                                .map((label) => (
+                                  <DropdownMenuItem
+                                    key={label}
+                                    onSelect={() =>
+                                      void withToast(
+                                        msg("meetings.transcript.couldnTChangeTheSpeaker"),
+                                        async () => {
+                                          for (const segment of turn.segments) {
+                                            await actions.moveSegment(segment.index, label);
+                                          }
+                                        },
+                                      )
+                                    }
+                                  >
+                                    <SpeakerDot slot={slots.get(label)} />
+                                    <span className="min-w-0 flex-1 truncate">{nameOf(label)}</span>
+                                  </DropdownMenuItem>
+                                ))}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                        ) : null}
+                        <DropdownMenuItem onSelect={() => setEditing(turn)}>
+                          <PencilIcon aria-hidden="true" />
+                          {msg("meetings.transcript.correctTheWords")}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </>
+                )}
               </div>
               {/* A soft bubble, left-aligned for everyone, like a chat. */}
               <p

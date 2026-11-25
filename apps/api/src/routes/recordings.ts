@@ -63,6 +63,7 @@ import {
   ownMeetingsReaching,
   ownRecordingWorkspaces,
   recordingVisible,
+  sharedRecordingHome,
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
@@ -248,6 +249,11 @@ export function registerRecordingRoutes(
    * they belong to, so it is read and changed where it is stored, as them, and
    * only with the access this request has there (the same permission, for the
    * same person). Without it the meeting is not found.
+   *
+   * A meeting shared with this workspace from its owner's Personal workspace
+   * is read there too, as the person, with this workspace's access: it is
+   * read only for them, so only its owner may change it, with their own
+   * access there.
    */
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
     const workspaceId = c.req.param("workspaceId") ?? "";
@@ -269,20 +275,39 @@ export function registerRecordingRoutes(
     ) {
       return actor;
     }
+    const shared = await sharedRecordingHome(db, { ...actor, recordingId });
+    if (shared && shared.ownerSubjectId !== actor.subjectId) {
+      if (permission !== "sessions:read") {
+        throw new ApiHttpError(403, {
+          code: "forbidden",
+          message: "Only the person who recorded this meeting can change it.",
+          retryable: false,
+        });
+      }
+      return { ...actor, workspaceId: shared.workspaceId };
+    }
     const home = await ownRecordingHome(db, {
       subjectId: actor.subjectId,
       recordingId,
       workspaces: await ownRecordingWorkspaces(db, actor),
       reachingWorkspaceId: await ownMeetingsReaching(db, actor),
     });
-    const there = home ? await sameGrantIn(c, home.id, permission, actor) : null;
-    if (!home || !there) return actor;
+    // Their own meeting they shared with this workspace opens as their own.
+    const own =
+      home ??
+      (shared
+        ? ((await ownRecordingWorkspaces(db, actor)).find(
+            (workspace) => workspace.id === shared.workspaceId,
+          ) ?? null)
+        : null);
+    const there = own ? await sameGrantIn(c, own.id, permission, actor) : null;
+    if (!own || !there) return actor;
     return {
       ...actor,
-      workspaceId: home.id,
+      workspaceId: own.id,
       accountId: there.accountId,
       creditAttribution: creditDebitAttributionForGrant(there),
-      sourceWorkspace: { id: home.id, name: home.name },
+      sourceWorkspace: { id: own.id, name: own.name },
     };
   }
 
@@ -1091,14 +1116,48 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, UpdateRecordingRequest);
-    // Sharing shares with the workspace that stores the meeting, so it is
-    // done there, where everyone it is shared with sees it.
-    if (actor.sourceWorkspace && body.visibility !== undefined && body.visibility !== "private") {
+    // A team workspace to share it with implies sharing it.
+    const sharedWorkspaceId =
+      body.sharedWorkspaceId === actor.workspaceId ? null : body.sharedWorkspaceId;
+    if (sharedWorkspaceId && body.visibility === "private") {
+      throw invalid("sharedWorkspaceId needs visibility workspace");
+    }
+    const visibility = sharedWorkspaceId ? "workspace" : body.visibility;
+    // Sharing without naming a workspace shares with the one that stores the
+    // meeting, so it is done there, where everyone it is shared with sees it.
+    if (
+      actor.sourceWorkspace &&
+      visibility === "workspace" &&
+      body.sharedWorkspaceId === undefined
+    ) {
       throw new ApiHttpError(409, {
         code: "conflict",
         message: "Share this meeting from the workspace it was recorded in.",
         retryable: false,
       });
+    }
+    // Another workspace to share it with: one of the owner's team workspaces
+    // of the organization where they may start work, for a meeting stored in
+    // their Personal workspace. A meeting a team workspace stores is shared
+    // only there, where it always shows once shared.
+    if (sharedWorkspaceId) {
+      if ((await ownMeetingsReaching(db, actor)) !== null) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: actor.sourceWorkspace
+            ? `This meeting belongs to ${actor.sourceWorkspace.name}, so it can be shared only there.`
+            : "This meeting belongs to this workspace, so it can be shared only here.",
+          retryable: false,
+        });
+      }
+      const target = (await ownRecordingWorkspaces(db, actor)).find(
+        (workspace) => workspace.id === sharedWorkspaceId && workspace.personal !== true,
+      );
+      if (!target || !(await sameGrantIn(c, target.id, "sessions:create", actor))) {
+        throw invalid(
+          "sharedWorkspaceId must be a team workspace of this organization you belong to",
+        );
+      }
     }
     // Where an Only me meeting works: the owner's own other workspaces of the
     // organization. Its own workspace and their Personal workspace always
@@ -1120,6 +1179,8 @@ export function registerRecordingRoutes(
             ...actor,
             recordingId,
             ...body,
+            visibility,
+            ...(body.sharedWorkspaceId === undefined ? {} : { sharedWorkspaceId }),
             ...(reachWorkspaceIds === undefined ? {} : { reachWorkspaceIds }),
           }),
         ),

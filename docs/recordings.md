@@ -14,9 +14,26 @@ A recording is either `private` (Only me) or `workspace` (everyone in the
 workspace), with the same rules as private and shared chats. New recordings
 are `private` unless the workspace sets `settings.recordings.defaultVisibility`,
 and a product may always pass `visibility` explicitly. Anyone who can see a
-recording may rename it, edit speakers and text, re-run its transcript and
-switch the shown version. Only the person who recorded it may upload, finish,
-share, unshare or delete it.
+recording in the workspace that stores it may rename it, edit speakers and
+text, re-run its transcript and switch the shown version. Only the person who
+recorded it may upload, finish, share, unshare or delete it.
+
+A person's own meeting stored in their Personal workspace can be shared with
+one of their team workspaces of the same organization:
+`PATCH …/recordings/:recordingId` with
+`{ visibility: "workspace", sharedWorkspaceId }`, from any workspace where the
+meeting works for them. The target must be a non-personal workspace where they
+can start chats (400 otherwise); a meeting stored in a team workspace can be
+shared only with that workspace (409 for another). The meeting stays stored,
+billed and retained in the Personal workspace; `sharedWorkspaceId` on the
+recording names the workspace it is shared with. Everyone in that workspace
+lists and opens it (transcript, notes, speakers, Ask about it) and agents
+there find it with `meetings_search`, read only: changes return 403 for anyone
+but the owner. `{ visibility: "private" }` unshares it. Deleting the meeting
+removes the share, and the share stops working when the owner leaves the
+workspace it is shared with. Chats that wrote its notes stay the owner's. In
+the React Meetings page this is the **Share** menu ("Only me" or one of the
+owner's team workspaces), when the host passes `reachWorkspaces`.
 
 A recording is stored in the workspace it was recorded in, and a shared one
 stays there. A signed-in person's (`user:`) own Only me meetings are theirs
@@ -47,12 +64,14 @@ they were recorded. The request must hold the same access in the storing
 workspace that the route needs (the person's role there, and an API key's or
 delegated token's workspace scope); without it the meeting is not found.
 Re-runs are billed and checked against the allowance of the storing workspace.
-Sharing one (`visibility: "workspace"`) is done in the storing workspace and
-returns 409 elsewhere. An app's own users (external users) keep their meetings
+Sharing one in its storing workspace (`visibility: "workspace"` without
+`sharedWorkspaceId`) is done in the storing workspace and returns 409
+elsewhere. An app's own users (external users) keep their meetings
 in the workspace that stores them, and `externalRef` lists only this
 workspace. Nobody else's Only me meetings and no shared ones cross
-workspaces, nothing crosses organizations, and a person who leaves the
-storing workspace or the organization no longer sees them elsewhere.
+workspaces except a meeting shared with a team workspace as above, nothing
+crosses organizations, and a person who leaves the storing workspace or the
+organization no longer sees them elsewhere.
 
 ## Language
 

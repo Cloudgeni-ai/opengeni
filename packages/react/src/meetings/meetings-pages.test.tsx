@@ -32,7 +32,7 @@ const {
   useMeetingRecorder,
   useMeetingRecorderControls,
 } = await import("./recorder-context");
-const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID } =
+const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID, TEAMMATE_SUBJECT_ID } =
   await import("../testing/meetings-fixture");
 
 async function render(node: React.ReactNode, host?: (container: HTMLElement) => void) {
@@ -1270,6 +1270,7 @@ describe("Meeting page", () => {
         viewerSubjectId={fixture.viewerSubjectId}
         recordings={fixture.client}
         onBack={() => {}}
+        onOpenChat={() => {}}
       />,
     );
     try {
@@ -1374,6 +1375,112 @@ describe("Meeting page", () => {
       expect(view.container.textContent).toContain("Shared with the workspace");
     } finally {
       await view.unmount();
+    }
+  });
+
+  test("the owner shares a Personal workspace meeting with one of their team workspaces, and back to Only me", async () => {
+    const fixture = createMeetingsFixture();
+    const sales = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
+    await fixture.client.updateRecording(fixture.workspaceId, fixture.readyId, {
+      visibility: "private",
+    });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        reachWorkspaces={[
+          { id: fixture.workspaceId, name: "Ingrid", personal: true },
+          { id: sales, name: "Sales" },
+          { id: "e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7a8b", name: "Design" },
+        ]}
+        onBack={() => {}}
+      />,
+    );
+    const trigger = () =>
+      view.container.querySelector<HTMLElement>('[aria-label^="Who can see this"]')!;
+    const choose = async (name: string) => {
+      await act(async () => {
+        trigger().dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+        );
+      });
+      await settle(50);
+      const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+      // Only me, then each of their team workspaces, never their Personal one.
+      expect(items.map((item) => item.textContent?.trim())).toEqual(["Only me", "Sales", "Design"]);
+      await act(async () => items.find((item) => item.textContent?.trim() === name)!.click());
+      await settle(300);
+    };
+    try {
+      await waitForText(view.container, "4 speakers");
+      expect(trigger().getAttribute("aria-label")).toBe("Who can see this: Only me");
+      await choose("Sales");
+      expect(await fixture.client.getRecording(fixture.workspaceId, fixture.readyId)).toMatchObject(
+        { visibility: "workspace", sharedWorkspaceId: sales },
+      );
+      expect(trigger().getAttribute("aria-label")).toBe("Who can see this: Sales");
+      await choose("Only me");
+      expect(await fixture.client.getRecording(fixture.workspaceId, fixture.readyId)).toMatchObject(
+        { visibility: "private", sharedWorkspaceId: null },
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a meeting a teammate shared from their Personal workspace is read only here", async () => {
+    const fixture = createMeetingsFixture({ sharedFromPersonal: true });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "mocks both pricing tables");
+      await waitForText(view.container, "4 speakers");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Shared with the workspace");
+      expect(view.container.querySelector('[aria-label^="Who can see this"]')).toBeNull();
+      expect(view.container.querySelector('[aria-label^="More actions for"]')).toBeNull();
+      const buttons = () =>
+        [...view.container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+      expect(buttons()).not.toContain("Edit");
+      expect(buttons()).not.toContain("Transcribe again");
+      // The chat that wrote the notes stays its owner's.
+      expect(buttons()).not.toContain("Open the chat");
+      await openTab(view.container, "Transcript");
+      await waitFor(() => view.container.querySelector('ol[aria-label="Transcript"]') !== null);
+      expect(view.container.textContent).toContain("Tomas Eriksen");
+      expect(view.container.querySelector('[aria-label^="Correct the words"]')).toBeNull();
+      expect(view.container.querySelector('[aria-label$="name this speaker"]')).toBeNull();
+      expect(view.container.querySelector('[aria-label="Speakers to review"]')).toBeNull();
+      await openTab(view.container, "Notepad");
+      expect(view.container.querySelector("textarea")).toBeNull();
+      expect(view.container.textContent).toContain("Tomas: schema review");
+    } finally {
+      await view.unmount();
+    }
+    // Its owner still changes it, and shares it.
+    const owner = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={TEAMMATE_SUBJECT_ID}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(owner.container, "mocks both pricing tables");
+      expect(owner.container.querySelector('[aria-label^="More actions for"]')).not.toBeNull();
+    } finally {
+      await owner.unmount();
     }
   });
 

@@ -634,6 +634,50 @@ describe("meeting tools", () => {
     expect(await tools("meeting_read", { meetingId: quarterly })).toMatchObject({ found: false });
   });
 
+  test("a Personal workspace meeting shared with a team workspace is read there, never changed", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const colleague = `user:colleague-${crypto.randomUUID()}`;
+    const team = await scope.workspace("Team", {
+      accountId: scope.accountId,
+      members: [colleague],
+    });
+    const customer = await scope.meeting({
+      title: "Customer call",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Acme renews in March." }],
+    });
+    const inTeam = toolsFor({ ...scope.grantFor(colleague), workspaceId: team.workspaceId });
+    expect(await inTeam("meeting_read", { meetingId: customer })).toMatchObject({ found: false });
+
+    await updateRecording(client.db, {
+      ...scope.actor,
+      recordingId: customer,
+      visibility: "workspace",
+      sharedWorkspaceId: team.workspaceId,
+    });
+    const found = await inTeam("meetings_search", { query: "renews" });
+    expect(found.meetings).toMatchObject([
+      { id: customer, title: "Customer call", visibility: "workspace" },
+    ]);
+    expect(found.meetings[0].recordedIn).toBeUndefined();
+    expect((await inTeam("meeting_read", { meetingId: customer })).lines).toContain(
+      "Acme renews in March.",
+    );
+    expect(
+      await inTeam("meeting_notes_save", { meetingId: customer, notes: "x", expectedRevision: 0 }),
+    ).toMatchObject({ found: false });
+
+    // Unshared, it is gone from Team.
+    await updateRecording(client.db, {
+      ...scope.actor,
+      recordingId: customer,
+      visibility: "private",
+    });
+    expect(await inTeam("meeting_read", { meetingId: customer })).toMatchObject({ found: false });
+    expect((await inTeam("meetings_search", {})).meetings).toEqual([]);
+  });
+
   test("a meeting-summary chat reaches only its own meeting", async () => {
     if (!client) return;
     const scope = await fixture();
