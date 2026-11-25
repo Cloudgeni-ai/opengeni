@@ -1286,6 +1286,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
     );
   }
   const tone = noticeTone(item);
+  const answered = noticeApprovalAnswered(item);
   const accent =
     tone === "failed"
       ? c["status-failed"]
@@ -1311,13 +1312,10 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
         style={{
           marginTop: 2,
           opacity:
-            item.tone === "cancelled" ||
-            (noticeIsResolvedApproval(item) && !noticeApprovalAnswered(item))
-              ? 0.6
-              : 1,
+            item.tone === "cancelled" || (noticeIsResolvedApproval(item) && !answered) ? 0.6 : 1,
         }}
       >
-        {noticeApprovalAnswered(item) ? (
+        {answered ? (
           <Icon name="check" size={16} color={accent} />
         ) : (
           <Icon name="triangle-alert" size={16} color={accent} />

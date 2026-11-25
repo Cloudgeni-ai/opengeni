@@ -14,7 +14,7 @@ export function noticeIsResolvedApproval(
 
 /**
  * A resolved approval wait with a recorded answer. One that ended without
- * any (a new message replaced it, the turn stopped) is resolved but not
+ * any (the turn moved on before it was answered) is resolved but not
  * answered, and never reads as the person's response.
  */
 export function noticeApprovalAnswered(

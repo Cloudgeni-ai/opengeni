@@ -313,9 +313,15 @@ export function buildTimeline(
   };
   // Open approval waits by the approval ids they ask about, so the person's
   // answer is on the wait the moment it is recorded, before work resumes.
-  const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
-  // Each turn's latest approval wait, for a decision that names none of its actions.
-  const latestApprovalWaitByTurn = new Map<string | null, NoticeItem>();
+  // A restarted worker can ask the same approvals again before they are
+  // answered, so an id can name several waits, oldest first.
+  const approvalWaitsById = new Map<string, Array<{ notice: NoticeItem; turnId: string | null }>>();
+  // Each turn's latest approval wait, for a decision that names none of its
+  // actions, with the one approval id an older request may carry instead.
+  const latestApprovalWaitByTurn = new Map<
+    string | null,
+    { notice: NoticeItem; approvalId: string }
+  >();
   // How each approval was first worded: a later wait that asks again about
   // the ones still open may carry no display of its own, or other words, and
   // history keeps the question the person first saw.
@@ -1588,8 +1594,15 @@ export function buildTimeline(
           ...(approvalActions.length > 0 ? { approvalActions } : {}),
           occurredAt: event.occurredAt,
         };
-        for (const action of approvalActions) approvalWaitsById.set(action.id, { notice, turnId });
-        latestApprovalWaitByTurn.set(turnId ?? presentationTurnId, notice);
+        for (const action of approvalActions) {
+          const waits = approvalWaitsById.get(action.id) ?? [];
+          waits.push({ notice, turnId });
+          approvalWaitsById.set(action.id, waits);
+        }
+        latestApprovalWaitByTurn.set(turnId ?? presentationTurnId, {
+          notice,
+          approvalId: stringValue(payload.approvalId),
+        });
         rememberPresentationWait(notice, turnId);
         break;
       }
@@ -1614,21 +1627,34 @@ export function buildTimeline(
           if (decision === "approve") call.status = "running";
           else call.approvalRejected = automatic ? "automatic" : "person";
         }
-        const open = approvalWaitsById.get(approvalId);
-        if (!open) {
-          // A decision for this turn that names none of the wait's actions still
-          // proves the wait was answered. Another turn's decision never does.
-          const wait = latestApprovalWaitByTurn.get(turnId ?? presentationTurnId);
-          if (wait && !wait.resolvedAt && !wait.approvalActions?.length) {
-            wait.unmatchedDecision = automatic ? "automatic" : "person";
+        const waits = approvalWaitsById.get(approvalId);
+        if (!waits) {
+          // An older request lists no actions: a decision for its turn answers
+          // it, unless the request named another approval. Another turn's
+          // decision never does.
+          const latest = latestApprovalWaitByTurn.get(turnId ?? presentationTurnId);
+          if (
+            latest &&
+            !latest.notice.approvalActions?.length &&
+            (!latest.approvalId || latest.approvalId === approvalId)
+          ) {
+            latest.notice.unmatchedDecision = automatic ? "automatic" : "person";
           }
           break;
         }
         approvalWaitsById.delete(approvalId);
-        const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
-        if (action) action.decision = decision;
-        if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
-          resolvePresentationWait(event, turnId ?? open.turnId);
+        // The latest wait that asked it gets the answer, and so does every
+        // earlier one asking it again that is still open (a re-ask). A wait that
+        // already ended without an answer keeps saying so.
+        const answered = waits.filter(
+          (wait, index) => index === waits.length - 1 || !wait.notice.resolvedAt,
+        );
+        for (const open of answered) {
+          const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
+          if (action) action.decision = decision;
+          if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
+            resolvePresentationWait(event, turnId ?? open.turnId);
+          }
         }
         break;
       }

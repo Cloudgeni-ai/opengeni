@@ -219,6 +219,30 @@ describe("an answered approval", () => {
       ]),
     );
     expect(noticeDisplayText(englishText, elsewhere)).toBe("Ended without an answer.");
+    // Nor is a decision for a different approval than the one the request named.
+    const other = notice(
+      buildTimeline(englishText, [...bare, decide(4, "approval-2", "approve"), running]),
+    );
+    expect(noticeDisplayText(englishText, other)).toBe("Ended without an answer.");
+  });
+
+  test("an approval asked again before it is answered reads as answered on every notice", () => {
+    // A restarted worker asks the same approval again with no resume between.
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "turn.preempted"),
+      event(5, "session.requiresAction", { approvals: [sendEmail] }),
+      decide(6, "call-1", "approve"),
+      event(7, "session.status.changed", { status: "running" }),
+    ]);
+    const asked = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(asked).toHaveLength(2);
+    for (const each of asked) {
+      expect(noticeDisplayText(englishText, each)).toBe("You approved “Send email”.");
+      expect(noticeApprovalAnswered(each)).toBe(true);
+    }
   });
 
   test("parallel app-action approvals say what was decided, one line each, told apart", () => {
