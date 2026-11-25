@@ -1796,7 +1796,21 @@ export function SessionList() {
   // Archived lists no apps.
   const appNodes = useMemo(() => {
     if (!appsSection || browseStatus === "archived") return null;
-    const apps = railSectionsFor(railSections, "apps", needsYouOnly ? appNeedsYou : null);
+    // One row per app, whichever projects its chats are in.
+    const apps = railSectionsFor(
+      channelMode
+        ? buildPinnedRailSections(projectedSessions, new Date(), {
+            groupSites: appRows && hierarchyMode,
+            siteGroups,
+            archivedSiteIds,
+            siteRowsByProject: false,
+            workspaceId: rail.workspaceId,
+            creator: { kind: "subject", subjectId: context.accessContext.subjectId },
+          })
+        : railSections,
+      "apps",
+      needsYouOnly ? appNeedsYou : null,
+    );
     return {
       pinned: apps.pinned.map((node) => ({
         ...node,
@@ -1813,7 +1827,21 @@ export function SessionList() {
         browseSortBy,
       ).running,
     };
-  }, [appsSection, browseStatus, browseSortBy, needsYouOnly, railSections]);
+  }, [
+    appsSection,
+    browseStatus,
+    browseSortBy,
+    needsYouOnly,
+    railSections,
+    channelMode,
+    projectedSessions,
+    appRows,
+    hierarchyMode,
+    siteGroups,
+    archivedSiteIds,
+    rail.workspaceId,
+    context.accessContext.subjectId,
+  ]);
   // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
   const pinnedChatNodes = useMemo(
     () => pinnedNodes.filter((node) => !node.siteGroup),

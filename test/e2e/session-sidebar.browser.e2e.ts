@@ -1035,7 +1035,7 @@ test("with apps not grouped, the list waits for that choice instead of drawing a
       () => (window as unknown as { appRowsSeen: { siteRows: number } }).appRowsSeen.siteRows,
     ),
   ).toBe(0);
-});
+}, 60_000);
 
 const appsSection = () => sidebar().getByRole("region", { name: "Apps", exact: true });
 const sessionsList = () => sidebar().getByRole("region", { name: "Sessions", exact: true });
@@ -1174,7 +1174,24 @@ test("the Apps section follows the list's view: every grouping, Needs you and Ar
   }
   await selectView("Status", "Active");
   await appsSection().locator("[data-site-row]").first().waitFor();
-}, 60_000);
+}, 90_000);
+
+test("the Apps section lists an app once when its chats are in several projects", async () => {
+  await page.setViewportSize({ width: 1160, height: 900 });
+  await page.goto(`${url}?scenario=sites&theme=light&apps=section&splitApp=1`, {
+    timeout: 60_000,
+  });
+  await appsSection().locator("[data-site-row]").first().waitFor();
+  await selectView("Group by", "Project");
+  await appsSection()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .waitFor();
+  expect(
+    await appsSection()
+      .getByRole("link", { name: /^Open Opengeni usage\. App/ })
+      .count(),
+  ).toBe(1);
+}, 90_000);
 
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);

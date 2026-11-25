@@ -242,7 +242,14 @@ if (sitesScenario) {
     session(7, "Pricing page copy", redesignId, 400),
     session(8, "Flaky checkout test", bugfixesId, 200),
     siteConversation(901, "Time filters across all graphs", usage, null, 2),
-    siteConversation(902, "Weekly active users by plan", usage, null, 180),
+    // `?splitApp=1`: one of the app's chats sits in another project.
+    siteConversation(
+      902,
+      "Weekly active users by plan",
+      usage,
+      previewParameters.get("splitApp") === "1" ? redesignId : null,
+      180,
+    ),
     siteConversation(903, "Export usage to CSV", usage, null, 2600),
     siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
   );
