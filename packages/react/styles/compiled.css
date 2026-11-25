@@ -1766,6 +1766,9 @@
 :where(.og-root).h-\[clamp\(30rem\,62vh\,48rem\)\],:where(.og-root) .h-\[clamp\(30rem\,62vh\,48rem\)\] {
     height: clamp(30rem, 62vh, 48rem);
   }
+:where(.og-root).h-\[min\(14rem\,40\%\)\],:where(.og-root) .h-\[min\(14rem\,40\%\)\] {
+    height: min(14rem, 40%);
+  }
 :where(.og-root).h-\[min\(760px\,85dvh\)\],:where(.og-root) .h-\[min\(760px\,85dvh\)\] {
     height: min(760px, 85dvh);
   }
@@ -2585,6 +2588,9 @@
 :where(.og-root).shrink-\[9999\],:where(.og-root) .shrink-\[9999\] {
     flex-shrink: 9999;
   }
+:where(.og-root).shrink-\[10000\],:where(.og-root) .shrink-\[10000\] {
+    flex-shrink: 10000;
+  }
 :where(.og-root).shrink-\[100000\],:where(.og-root) .shrink-\[100000\] {
     flex-shrink: 100000;
   }
@@ -2599,6 +2605,9 @@
   }
 :where(.og-root).basis-72,:where(.og-root) .basis-72 {
     flex-basis: calc(var(--spacing) * 72);
+  }
+:where(.og-root).basis-\[content\],:where(.og-root) .basis-\[content\] {
+    flex-basis: content;
   }
 :where(.og-root).basis-\[min\(100\%\,14rem\)\],:where(.og-root) .basis-\[min\(100\%\,14rem\)\] {
     flex-basis: min(100%, 14rem);
@@ -13206,6 +13215,11 @@
 :where(.og-root).\[\@media\(pointer\:coarse\)\]\:py-2\.5,:where(.og-root) .\[\@media\(pointer\:coarse\)\]\:py-2\.5 {
     @media (pointer:coarse) {
       padding-block: calc(var(--spacing) * 2.5);
+    }
+  }
+:where(.og-root).\[\[data-rail\]\:has\(\>\[data-rail-apps-section\]\:not\(\:empty\)\)\>\&\]\:flex-initial,:where(.og-root) .\[\[data-rail\]\:has\(\>\[data-rail-apps-section\]\:not\(\:empty\)\)\>\&\]\:flex-initial {
+    [data-rail]:has(>[data-rail-apps-section]:not(:empty))>& {
+      flex: 0 auto;
     }
   }
 /*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */
