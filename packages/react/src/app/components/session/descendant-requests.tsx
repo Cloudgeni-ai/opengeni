@@ -174,8 +174,10 @@ export function DescendantRequests(props: DescendantRequestsProps) {
     rerender((value) => value + 1);
   };
   const dismissed = readDismissedWaits();
+  // Only a card-only wait can be dismissed: a sub-session that needs action stays.
   const waiting = props.waiting.filter(
     (session) =>
+      session.status === "requires_action" ||
       dismissed.get(`${props.workspaceId}\u0000${session.id}`) !== subSessionWaitKey(session),
   );
   const dismiss = (session: SessionSummary) => {

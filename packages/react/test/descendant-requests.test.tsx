@@ -657,6 +657,28 @@ describe("DescendantRequests", () => {
     expect(container().textContent).toContain("Agents worker needs you");
   });
 
+  test("a dismissed card wait never hides the sub-session once it needs action", async () => {
+    const child = (status: "idle" | "requires_action") =>
+      summary("child", {
+        title: "Agents worker",
+        status,
+        requiresActionSince: null,
+        awaitingConnectionSince: "2026-11-24T21:49:15.000Z",
+      });
+    const { client } = fakeClient({});
+    await render({ client, waiting: [child("idle")] });
+    await click(
+      container().querySelector<HTMLButtonElement>('button[aria-label="Dismiss: Agents worker"]')!,
+    );
+    expect(container().querySelector("[data-descendant-requests]")).toBeNull();
+    await mounted!.unmount();
+    mounted = null;
+    // Same wait key, but now it needs action: it shows, with no dismiss.
+    await render({ client, waiting: [child("requires_action")] });
+    expect(container().textContent).toContain("Agents worker needs you");
+    expect(container().querySelector('button[aria-label^="Dismiss:"]')).toBeNull();
+  });
+
   test("a question or an approval offers no dismiss", async () => {
     const child = summary("child", { title: "Asking worker" });
     const { client } = fakeClient({ requests: { child: [request("child")] } });
