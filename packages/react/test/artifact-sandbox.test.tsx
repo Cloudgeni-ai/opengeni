@@ -415,8 +415,9 @@ describe("published HTML artifacts", () => {
       expect(preview.loading() !== null).toBe(true);
     } finally {
       jest.useRealTimers();
-      configureContentHosting({});
+      // Unmount before resetting hosting, so the reset never re-renders a mounted frame.
       await preview.cleanup();
+      configureContentHosting({});
     }
   });
 
@@ -437,8 +438,9 @@ describe("published HTML artifacts", () => {
       expect(preview.failure() !== null).toBe(true);
     } finally {
       jest.useRealTimers();
-      configureContentHosting({});
+      // Unmount before resetting hosting, so the reset never re-renders a mounted frame.
       await preview.cleanup();
+      configureContentHosting({});
     }
   });
 
