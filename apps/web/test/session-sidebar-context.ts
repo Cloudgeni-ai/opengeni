@@ -273,6 +273,19 @@ if (sitesScenario) {
       updatedAt: timeBefore(2880),
     },
   );
+  // `?manyApps=1`: three more apps, seven in all.
+  if (previewParameters.get("manyApps") === "1")
+    for (const [index, title] of [
+      "Churn dashboard",
+      "Roadmap tracker",
+      "Hiring pipeline",
+    ].entries())
+      createdSites.push({
+        siteId: `00000000-0000-4000-a000-00000000001${index}`,
+        title,
+        channelId: null,
+        updatedAt: timeBefore(3000 + index * 60),
+      });
   if (rowActionsScenario) {
     // A workstream whose agent spawned a chat, nested under it in the rail.
     const parent = rows.find((row) => row.title === "Slack community connection test")!;

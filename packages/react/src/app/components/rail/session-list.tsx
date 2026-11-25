@@ -33,7 +33,6 @@ import {
   RailRowQuickAction,
 } from "./rail-row-quick-actions";
 import { SessionBrowseOrderControls, type AppsPlacement } from "./session-browse-order-controls";
-import { RailAppsSectionSlotContext } from "./rail-apps-section-slot";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -85,7 +84,6 @@ import {
   type DragEvent,
   type ReactNode,
 } from "react";
-import { createPortal } from "react-dom";
 
 import { useRail } from "./rail-context";
 import {
@@ -1816,6 +1814,26 @@ export function SessionList() {
       ).running,
     };
   }, [appsSection, browseStatus, browseSortBy, needsYouOnly, railSections]);
+  // The Apps section shows its first rows and a Show more for the rest; an
+  // open app or app chat beyond them shows too.
+  const [appsShowAll, setAppsShowAll] = useState(false);
+  const appsSectionNodes = useMemo(() => {
+    if (!appNodes) return null;
+    const all = [...appNodes.pinned, ...appNodes.rest];
+    if (appsShowAll || all.length <= APPS_SECTION_ROWS) return { shown: all, hidden: 0 };
+    const shown = all.slice(0, APPS_SECTION_ROWS);
+    const open = all
+      .slice(APPS_SECTION_ROWS)
+      .find(
+        (node) =>
+          (activeSiteId !== null && node.siteGroup?.siteId === activeSiteId) ||
+          findSessionTreeNode([node], activeSessionId) !== null,
+      );
+    return {
+      shown: open ? [...shown, open] : shown,
+      hidden: all.length - shown.length - (open ? 1 : 0),
+    };
+  }, [appNodes, appsShowAll, activeSessionId, activeSiteId]);
   // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
   const pinnedChatNodes = useMemo(
     () => pinnedNodes.filter((node) => !node.siteGroup),
@@ -2847,16 +2865,15 @@ export function SessionList() {
               const selected = findSessionTreeNode(archivedNodes, activeSessionId);
               return selected ? [{ node: selected, depth: 0 }] : [];
             })();
-    // The Apps section comes after the list, when it shows its rows.
-    const appSectionRows =
-      appNodes && !collapsedChannelSections.has(APPS_SECTION_KEY)
-        ? visibleTreeRows([...appNodes.pinned, ...appNodes.rest], expanded, activeSessionId)
-        : [];
+    // The Apps section comes before the list.
+    const appSectionRows = appsSectionNodes
+      ? visibleTreeRows(appsSectionNodes.shown, expanded, activeSessionId)
+      : [];
     return [
+      ...appSectionRows,
       ...visibleTreeRows(pinnedNodes, expanded, activeSessionId),
       ...ordinaryRows,
       ...archiveRows,
-      ...appSectionRows,
     ].filter(({ node }) => {
       if (seen.has(node.session.id)) return false;
       seen.add(node.session.id);
@@ -2864,7 +2881,7 @@ export function SessionList() {
     });
   }, [
     activeSessionId,
-    appNodes,
+    appsSectionNodes,
     archiveExpanded,
     archivedNodes,
     browseStatus,
@@ -3757,9 +3774,7 @@ export function SessionList() {
     if (!first || first.height <= 0) return;
     const gap = rows[1] ? rows[1].top - first.top : 0;
     const rowHeight = gap > first.height && gap < first.height * 2 ? gap : first.height;
-    // With an Apps section the viewport is only as tall as the list, so the
-    // rail's spare height below Apps is room too.
-    const viewportHeight = viewport.clientHeight + railSpareBelowApps(viewport);
+    const viewportHeight = viewport.clientHeight;
     const frozen = archiveFillFreeze.current;
     if (frozen?.generation === fillGenerationRef.current && frozen.height === viewportHeight)
       return;
@@ -3801,12 +3816,6 @@ export function SessionList() {
     const observer = new ResizeObserver(schedule);
     observer.observe(viewport);
     observer.observe(list);
-    const railColumn = viewport.parentElement;
-    const appsSlot = railAppsSlot(viewport);
-    if (railColumn && appsSlot) {
-      observer.observe(railColumn);
-      observer.observe(appsSlot);
-    }
     return () => {
       observer.disconnect();
       if (frame) cancelAnimationFrame(frame);
@@ -4021,12 +4030,9 @@ export function SessionList() {
         .
       </p>
     ) : null;
-  // Apps in a section of their own: below the list, in the rail's slot when
-  // it has one, so both stay in view. It shows only when it lists apps.
-  const appsSectionSlot = useContext(RailAppsSectionSlotContext);
+  // Apps in a section of their own: a peer of Sessions, above it, with the
+  // same header. It shows only when it lists apps.
   const appsSectionId = useId();
-  const appsSectionCollapsed = collapsedChannelSections.has(APPS_SECTION_KEY);
-  const appsSectionRows = appNodes ? appNodes.pinned.length + appNodes.rest.length : 0;
   const appsGroupProps = {
     localDeliveryAttention,
     flat,
@@ -4046,54 +4052,42 @@ export function SessionList() {
     onRequestDelete: setSessionPendingDelete,
   };
   const appsSectionView =
-    appNodes && appsSectionRows > 0 && !appRowsPending ? (
+    appsSectionNodes && appsSectionNodes.shown.length > 0 && !appRowsPending ? (
       <section
         aria-labelledby={`${appsSectionId}-title`}
         data-sessions-apps-section
-        className="flex min-h-0 min-w-0 flex-1 flex-col"
+        className="mb-2 min-w-0 shrink-0"
       >
-        <div className="flex min-w-0 shrink-0 items-center pl-2 pr-3">
-          <button
+        <div className="mb-1 flex min-w-0 items-center gap-1 pl-[18px] pr-3 pt-1">
+          <span
             id={`${appsSectionId}-title`}
-            type="button"
-            aria-expanded={!appsSectionCollapsed}
-            aria-controls={appsSectionCollapsed ? undefined : `${appsSectionId}-list`}
-            onClick={() => toggleChannelSection(APPS_SECTION_KEY)}
-            className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-md py-1 pl-1.5 text-left text-sm font-normal text-fg outline-hidden hover:bg-hover focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11"
+            className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label"
           >
-            <span className="flex w-4 shrink-0 items-center">
-              <ProjectGlyph project={null} open={!appsSectionCollapsed} />
-            </span>
-            <span className="min-w-0 flex-1 truncate">Apps</span>
-          </button>
+            Apps
+          </span>
         </div>
-        {appsSectionCollapsed ? null : (
-          <div
-            ref={appsListRef}
-            id={`${appsSectionId}-list`}
-            onKeyDown={onKeyDown}
-            className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain pb-2 pl-2 pr-3"
-          >
-            {appNodes.pinned.length > 0 ? (
-              <SessionGroup
-                label="Pinned"
-                sectionId="apps-pinned"
-                nodes={appNodes.pinned}
-                {...appsGroupProps}
-              />
-            ) : null}
-            {appNodes.rest.length > 0 ? (
-              <SessionGroup
-                label="Apps"
-                hideHeading
-                sectionId="apps"
-                nodes={appNodes.rest}
-                {...appsGroupProps}
-              />
-            ) : null}
-            {siteGroupsTruncatedNote}
-          </div>
-        )}
+        <div ref={appsListRef} onKeyDown={onKeyDown} className="min-w-0 pl-2 pr-3">
+          <SessionGroup
+            label="Apps"
+            hideHeading
+            sectionId="apps"
+            nodes={appsSectionNodes.shown}
+            {...appsGroupProps}
+          />
+          {appsSectionNodes.hidden > 0 || appsShowAll ? (
+            <div className="px-2 text-center">
+              <button
+                type="button"
+                aria-expanded={appsShowAll}
+                onClick={() => setAppsShowAll((current) => !current)}
+                className="min-h-8 rounded-md px-2 text-xs font-normal text-fg-muted hover:bg-hover hover:text-fg pointer-coarse:min-h-11"
+              >
+                {appsShowAll ? "Show less" : `Show ${appsSectionNodes.hidden} more`}
+              </button>
+            </div>
+          ) : null}
+          {siteGroupsTruncatedNote}
+        </div>
       </section>
     ) : null;
 
@@ -4101,6 +4095,7 @@ export function SessionList() {
     <SiteRowActionsContext.Provider value={siteRowActions}>
       <WorkstreamRootsContext.Provider value={workstreamRoots}>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {appsSectionView}
           <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
             <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
               {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
@@ -4528,9 +4523,6 @@ export function SessionList() {
               </>
             )}
           </div>
-          {appsSectionView && appsSectionSlot
-            ? createPortal(appsSectionView, appsSectionSlot)
-            : appsSectionView}
           {projectPendingEdit ? (
             <ProjectProfileDialog
               key={projectPendingEdit.id}
@@ -6072,30 +6064,13 @@ function RowActionsMenu({
   );
 }
 
-/** Where the list's rows are: the list, then the Apps section when it shows. */
+/** Where the list's rows are: the Apps section when it shows, then the list. */
 function sessionRowRoots(list: HTMLElement | null, apps: HTMLElement | null): HTMLElement[] {
-  return [list, apps].filter((root): root is HTMLElement => root !== null);
-}
-
-/** The rail's Apps section slot beside this scroll viewport, if any. */
-function railAppsSlot(viewport: HTMLElement): HTMLElement | null {
-  return (
-    viewport.parentElement?.querySelector<HTMLElement>(":scope > [data-rail-apps-section]") ?? null
-  );
-}
-
-/** The rail's empty height below a showing Apps section, above the footer. */
-function railSpareBelowApps(viewport: HTMLElement): number {
-  const slot = railAppsSlot(viewport);
-  if (!slot || slot.childElementCount === 0) return 0;
-  const floor =
-    slot.nextElementSibling?.getBoundingClientRect().top ??
-    slot.parentElement!.getBoundingClientRect().bottom;
-  return Math.max(0, Math.floor(floor - slot.getBoundingClientRect().bottom));
+  return [apps, list].filter((root): root is HTMLElement => root !== null);
 }
 
 /** The Apps section's key among the list's collapsed sections (projects use their ids). */
-const APPS_SECTION_KEY = "apps-section";
+const APPS_SECTION_ROWS = 5;
 
 /** An app row with a chat that needs the person, for the Apps section's Needs you. */
 function appNeedsYou(node: SessionTreeNode): boolean {
