@@ -815,6 +815,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       operation === "session.model.write" ? "sessions:control" : undefined,
     );
+    if (operation === "session.model.write" && grant.principalKind === "agent_attempt") {
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: "This route does not accept agent attempt credentials.",
+        retryable: false,
+      });
+    }
     try {
       const authorization = await requireSessionAuthorization(deps, grant, {
         sessionId,

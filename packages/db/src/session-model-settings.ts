@@ -43,6 +43,8 @@ export async function setSessionModelInTransaction(
     actor: SessionCommandActor;
     operationKey: string;
     model: string;
+    /** The REST request identity stays stable even if a catalog alias moves. */
+    requestedModel?: string;
     reasoningEffort: ReasoningEffort;
     latencyMode?: LatencyMode;
     expected?: SetSessionModelSettingsRequest["expected"];
@@ -79,7 +81,7 @@ export async function setSessionModelInTransaction(
     });
   }
   const canonicalRequestHash = canonicalSessionCommandHash({
-    model: input.model,
+    model: input.requestedModel ?? input.model,
     reasoningEffort: input.reasoningEffort,
     // Omitted fields keep receipt hashes from existing MCP calls identical.
     ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),

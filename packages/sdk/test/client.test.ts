@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import sdkPackage from "../package.json";
 import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
+import { OpenGeniClient as PublicClient } from "../src/index";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import type { BrowserObservation, BrowserTargetListResponse } from "../src/interaction";
 import {
@@ -89,7 +90,7 @@ test("sets session model defaults with a keyed PUT and exposes the comparison co
     releasedCapacityWaitTurnId: null,
   };
   const current = { model: "other-model", reasoningEffort: "low", latencyMode: "standard" };
-  const { client, requests } = makeClient((sent) =>
+  const { fetch, requests } = recordingFetch((sent) =>
     JSON.parse(sent.body!).expected.model === expected.model
       ? jsonResponse(response)
       : jsonResponse(
@@ -107,6 +108,11 @@ test("sets session model defaults with a keyed PUT and exposes the comparison co
           409,
         ),
   );
+  const client = new PublicClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "fixture",
+    fetch,
+  });
   expect(await client.setSessionModelSettings(WORKSPACE_ID, SESSION_ID, request)).toEqual(response);
   expect(requests[0]).toMatchObject({
     method: "PUT",

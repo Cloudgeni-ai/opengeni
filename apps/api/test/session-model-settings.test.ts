@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { AccessGrant, Permission, SessionAuthorizationPort } from "@opengeni/contracts";
+import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
@@ -28,6 +29,7 @@ import { createApp } from "../src/app";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
+const delegationSecret = "model-settings-test-delegation-secret";
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("session-model-settings");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
@@ -124,7 +126,7 @@ async function workspaceKey(grant: AccessGrant, permissions: Permission[]) {
 function http(value: Awaited<ReturnType<typeof fixture>>, port?: SessionAuthorizationPort) {
   const app = createApp({
     ...deps(port),
-    settings: testSettings({ productAccessMode: "managed" }),
+    settings: testSettings({ productAccessMode: "managed", delegationSecret }),
   });
   return (token: string | null, body: unknown, sessionId = value.session.id) =>
     app.request(`/v1/workspaces/${value.grant.workspaceId}/sessions/${sessionId}/model-settings`, {
@@ -289,6 +291,16 @@ test("HTTP model settings compare atomically and replay the original result with
 test("HTTP model settings leave an already running turn and its execution policy alone", async () => {
   const value = await fixture();
   const active = await agent(value);
+  const agentToken = await signDelegatedAccessToken(delegationSecret, {
+    accountId: active.accountId,
+    workspaceId: active.workspaceId,
+    subjectId: active.subjectId,
+    permissions: active.permissions,
+    principalKind: "agent_attempt",
+    ...active.metadata,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  expect((await http(value)(agentToken, modelDefaults())).status).toBe(403);
   const token = await workspaceKey(value.grant, ["sessions:control"]);
   const before =
     await shared.admin`select * from session_turns where id = ${active.metadata.turnId}`;
@@ -301,6 +313,47 @@ test("HTTP model settings leave an already running turn and its execution policy
     model: "gpt-5.6-sol",
     latencyMode: "fast",
   });
+});
+
+test("HTTP compares before validating a capacity-wait model switch and can release it with explicit latency", async () => {
+  const value = await fixture();
+  const attempt = await agent(value);
+  const { turnId, attemptId } = attempt.metadata;
+  const armed = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.session.id,
+    turnId,
+    attemptId,
+    waitReason: "no_eligible_capacity",
+    earliestResetAt: new Date(Date.now() + 24 * 60 * 60_000),
+    failurePayload: { error: "No subscription capacity" },
+  });
+  expect(armed.action).toBe("waiting");
+  const put = http(value);
+  const token = await workspaceKey(value.grant, ["sessions:control"]);
+  const input = modelDefaults();
+  expect((await put(token, { ...input, model: "not-configured" })).status).toBe(400);
+  expect((await put(token, { ...input, latencyMode: "ultrafast" })).status).toBe(400);
+  expect(
+    (await put(token, { ...input, model: "not-configured", expected: { latencyMode: "fast" } }))
+      .status,
+  ).toBe(409);
+  expect(await getSessionTurn(client.db, value.grant.workspaceId, turnId)).toMatchObject({
+    model: "scripted-model",
+    status: "waiting_capacity",
+  });
+
+  const applied = await put(token, input);
+  expect(applied.status).toBe(200);
+  const body = await applied.json();
+  expect(body).toMatchObject({ releasedCapacityWaitTurnId: turnId, latencyMode: "fast" });
+  expect(await getSessionTurn(client.db, value.grant.workspaceId, turnId)).toMatchObject({
+    model: input.model,
+    latencyMode: "fast",
+    status: "recovering",
+  });
+  expect(await (await put(token, input)).json()).toEqual(body);
 });
 async function footprint(sessionId: string) {
   const [result] = await shared.admin`select status, active_turn_id, direct_control_state,

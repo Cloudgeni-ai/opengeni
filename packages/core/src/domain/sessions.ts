@@ -107,6 +107,8 @@ import {
   policyChargesCreditsForModel,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
+  TurnExecutionPolicyModelUnavailableError,
+  UnsupportedLatencyModeError,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
@@ -5774,6 +5776,7 @@ export async function setSessionModel(
     model,
     requestedModel: input.model,
     reasoningEffort: input.reasoningEffort,
+    deferValidation: extended,
     ...(latencyMode !== undefined ? { latencyMode } : {}),
   });
   const result = await runIdempotentPersistenceTransaction(
@@ -5795,6 +5798,7 @@ export async function setSessionModel(
           actor,
           operationKey: input.idempotencyKey,
           model,
+          ...(extended ? { requestedModel: input.model } : {}),
           reasoningEffort: input.reasoningEffort,
           ...(latencyMode !== undefined ? { latencyMode } : {}),
           ...(expected !== undefined ? { expected } : {}),
@@ -5882,10 +5886,13 @@ async function capacityWaitReleaseForModelSwitch(
     requestedModel: string;
     reasoningEffort: SetSessionModelRequest["reasoningEffort"];
     latencyMode?: Session["latencyMode"];
+    deferValidation: boolean;
   },
 ): Promise<{ turnId: string; executionPolicy: TurnExecutionPolicyV1 } | null> {
-  const session = await requireSession(deps.db, grant.workspaceId, input.sessionId);
-  if (!session.activeTurnId) return null;
+  const session = input.deferValidation
+    ? await getSession(deps.db, grant.workspaceId, input.sessionId)
+    : await requireSession(deps.db, grant.workspaceId, input.sessionId);
+  if (!session?.activeTurnId) return null;
   const turn = await getSessionTurn(deps.db, grant.workspaceId, session.activeTurnId);
   if (
     !turn ||
@@ -5937,6 +5944,15 @@ async function capacityWaitReleaseForModelSwitch(
     return { turnId: turn.id, executionPolicy };
   } catch (error) {
     if (error instanceof HTTPException) return null;
+    // REST compares and checks replay under the lock before validating the
+    // replacement. An optional capacity release must not preempt that result.
+    if (
+      input.deferValidation &&
+      (error instanceof TurnExecutionPolicyModelUnavailableError ||
+        error instanceof UnsupportedLatencyModeError)
+    ) {
+      return null;
+    }
     throw error;
   }
 }

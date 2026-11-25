@@ -97,6 +97,8 @@ instead of copying events.
 `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/model-settings` requires
 `sessions:control` and ordinary access to the target session. A workspace API
 key with that permission can update sessions it can access in its own workspace.
+Agent attempts keep using the existing `session_set_model` tool; their attempt
+credentials are not accepted on this endpoint.
 Pass all three desired settings and a UUID `idempotencyKey`. For example:
 
 ```json
