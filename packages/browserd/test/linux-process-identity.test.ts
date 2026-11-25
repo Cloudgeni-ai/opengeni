@@ -148,7 +148,6 @@ describe("Linux managed browser argument identity", () => {
   test("checks all protected NUL arguments and never treats argv[0] as a switch", () => {
     for (const argv of [
       [profileArgument, "--no-first-run"],
-      [executablePath, profileArgument, profileArgument],
       [executablePath, profileArgument, "--type="],
       [executablePath, profileArgument, "-user-data-dir=/tmp/other"],
       [executablePath, "--", profileArgument],
@@ -165,6 +164,22 @@ describe("Linux managed browser argument identity", () => {
         executablePath,
       }),
     ).toBeNull();
+  });
+
+  test("accepts the exact profile switch repeated, never a second profile", () => {
+    // An older desktop browser wrapper repeats the controller's own switch.
+    expect(
+      matchLinuxBrowserArguments({
+        argv: [executablePath, profileArgument, "--no-first-run", profileArgument],
+        profileDirectory,
+        executablePath,
+      }),
+    ).toBe("arguments");
+    for (const argv of [
+      [executablePath, "--user-data-dir=/tmp/opengeni-browser-profile", profileArgument],
+      [executablePath, profileArgument, profileArgument, "--user-data-dir=/tmp/other"],
+    ])
+      expect(matchLinuxBrowserArguments({ argv, profileDirectory, executablePath })).toBeNull();
   });
 });
 
