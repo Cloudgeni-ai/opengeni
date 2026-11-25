@@ -152,11 +152,32 @@ profile, so a release build installed from Xcode registers for the sandbox.
 
 ## Message rendering limits
 
-The shared native timeline renders Markdown only up to 8,192 UTF-16 code units
-(roughly 1,300 words), including math delimiter normalization. Longer messages
-use selectable plain-text pages; Previous/Next expose the complete source without
-mounting it all or running Markdown, math or interactive-preview parsers over it.
-The original message and copy action are unchanged.
+The shared native timeline never gives one Markdown parse more than 8,192 UTF-16
+code units (roughly 1,300 words), including math delimiter normalization. A longer
+message is cut into chunks of about 4,096 where markdown-it's own block parser
+starts a top-level block (or, in a list longer than one chunk, an item). The parser
+that cuts sees display math as the one block the math parser draws, so each chunk
+parses to the same blocks a single parse would give, and a fence is code or a
+preview as on a single parse. The exceptions come from the math pass, which tracks
+code fences by a simpler rule than markdown-it and splits lines only at LF: in a
+message with math where the two disagree (a list-item fence closer it reads as an
+opener, lone-CR line endings), a chunk can be math-normalized differently from a
+single parse, which changes that math and, rarely, the block around it. Each chunk
+is math-normalized and parsed on its own, so the inline work grows linearly. The
+block pass over the whole message is linear and runs when the text changes; while a
+message streams, only its last blocks are block-parsed again, and unchanged chunks
+are not prepared or parsed again. A top-level code fence too long to share a chunk
+is drawn directly: an `opengeni-html` / `opengeni-site` preview of any size loads in
+its web view, and any other code block over one chunk uses plain-text pages. A long
+message mounts one chunk-sized slice per frame. Link reference definitions only
+resolve within their own chunk, and an ordered list whose items are all numbered
+`1.` restarts at 1 after a cut.
+
+Messages over 65,536 code units (roughly 10,000 words), and a single text block
+longer than one chunk, use selectable plain-text pages; Previous/Next expose the
+complete source without mounting it all or running Markdown, math or
+interactive-preview parsers over it. The original message and copy action are
+unchanged.
 
 This app has a separate lockfile: its overrides pin `markdown-it` 14.3.1,
 `linkify-it` 5.0.2 and `decode-uri-component` 0.5.1. The root install pins the

@@ -44138,6 +44138,7 @@
       "WINDOW_LABEL": "value"
     },
     "@opengeni/react/markdown-math": {
+      "displayMathRanges": "value",
       "mayContainMath": "value",
       "PreparedMathMarkdown": "type",
       "prepareMathMarkdown": "value"
