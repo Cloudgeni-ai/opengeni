@@ -664,6 +664,14 @@ describe("DescendantRequests", () => {
     expect(container().querySelector('button[aria-label^="Dismiss:"]')).toBeNull();
   });
 
+  test("a wait only the sub-session's page can take offers no dismiss", async () => {
+    const child = summary("child", { title: "Sign-in worker" });
+    const { client } = fakeClient({});
+    await render({ client, waiting: [child] });
+    expect(container().textContent).toContain("Sign-in worker needs you");
+    expect(container().querySelector('button[aria-label^="Dismiss:"]')).toBeNull();
+  });
+
   test("stacks several waiting sub-sessions under one line that collapses", async () => {
     const first = summary("first", { title: "First worker" });
     const second = summary("second", { title: "Second worker" });

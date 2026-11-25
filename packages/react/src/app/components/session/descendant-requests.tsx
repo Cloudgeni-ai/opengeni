@@ -468,6 +468,7 @@ function DescendantRequestItem({
     (session.status !== "requires_action" && !awaitsConnection(session))
   )
     return null;
+  const cardOnlyWait = session.status !== "requires_action" && awaitsConnection(session);
   return (
     <div
       data-descendant-request={sessionId}
@@ -485,17 +486,20 @@ function DescendantRequestItem({
         at={null}
         className={cn(buttonVariants({ variant: "outline", size: "sm" }), "shrink-0")}
       />
-      {/* Nothing here to answer: the person can put it away until it waits again. */}
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label={`Dismiss: ${title}`}
-        onClick={onDismiss}
-        className="-mr-1 shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
-      >
-        <XIcon aria-hidden="true" className="size-4" />
-      </Button>
+      {/* Only a card-only wait can be put away: a question, an approval or a
+          sign-in the parent can't load stays until it is answered. */}
+      {cardOnlyWait ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`Dismiss: ${title}`}
+          onClick={onDismiss}
+          className="-mr-1 shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+        >
+          <XIcon aria-hidden="true" className="size-4" />
+        </Button>
+      ) : null}
     </div>
   );
 }
