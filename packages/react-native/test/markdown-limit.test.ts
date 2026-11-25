@@ -9,6 +9,13 @@ import {
   prepareBoundedMarkdown,
 } from "../src/timeline/markdown-limit";
 
+const rendererPath = Bun.resolveSync(
+  "react-native-markdown-display/src/lib/parser.js",
+  import.meta.dir,
+);
+const { default: MarkdownIt } = await import(Bun.resolveSync("markdown-it", rendererPath));
+const parser = MarkdownIt();
+
 describe("bounded native Markdown", () => {
   test("ordinary replies and the exact limit retain Markdown", () => {
     for (const text of ["", "A **short** reply.", "x".repeat(MAX_MARKDOWN_CHUNK_LENGTH)]) {
@@ -149,6 +156,7 @@ describe("long messages are drawn in bounded segments", () => {
     "a@b.co\n",
     "\\[x\\] ",
     "$$ a\n",
+    "$a ",
     "$$\n",
     "\\[\n",
     "```\n",
@@ -200,6 +208,49 @@ describe("segmentation edge cases", () => {
     const segments = markdownSegments(text);
     expectBounded(text, segments);
     expect(kinds(segments)!.every((kind) => kind === "markdown")).toBe(true);
+  });
+
+  // Text a single parse shows as code must never become a live preview after a cut.
+  const filler = Array.from({ length: 400 }, (_, index) => `Line ${index} of the sample.`).join(
+    "\n\n",
+  );
+  const hidden = "```opengeni-html\n<script>alert(1)</script>\n```";
+  // What the renderer would draw as a preview: a direct fence, or a fence token in a chunk.
+  const hasPreview = (segments: MarkdownSegment[] | null) =>
+    segments!.some(
+      (segment) =>
+        (segment.kind === "fence" && segment.language === "opengeni-html") ||
+        (segment.kind === "markdown" &&
+          parser
+            .parse(segment.source, {})
+            .some(
+              (token: { type: string; info: string }) =>
+                token.type === "fence" && token.info.trim().startsWith("opengeni-html"),
+            )),
+    );
+
+  test.each([
+    ["U+2028 in the info string", "````text\u2028x\n", "\n````"],
+    ["U+2029 in the info string", "````text\u2029x\n", "\n````"],
+    ["a lone CR in the info string", "````text\rx\n", "\n````"],
+    ["lone CR line endings", "````text\r", "\r````"],
+    ["a lone CR before the opener", "intro\r````text\n", "\n````"],
+  ])("a fence opened with %s keeps its content code", (_name, open, close) => {
+    const text = `intro\n\n${open}${filler}\n\n${hidden}\n\nmore${close}\n\nafter`;
+    const segments = markdownSegments(text);
+    expectBounded(text, segments);
+    expect(hasPreview(segments)).toBe(false);
+  });
+
+  test("a long indented fence that closes stays whole", () => {
+    const text = `intro\n\n \`\`\`\`text\n${filler}\n\n${hidden}\n\n\`\`\`\`\n\nafter\n\n${filler}`;
+    expect(text.indexOf("\n\nafter")).toBeGreaterThan(MAX_MARKDOWN_CHUNK_LENGTH);
+    const segments = markdownSegments(text);
+    expectBounded(text, segments);
+    expect(hasPreview(segments)).toBe(false);
+    // Too long for one parse, so it is shown as source, and "after" formats again.
+    expect(segments!.find((segment) => segment.source.includes(hidden))!.kind).toBe("plain");
+    expect(segments!.some((s) => s.kind === "markdown" && s.source.startsWith("after"))).toBe(true);
   });
 
   test("an unclosed indented fence stops protecting text after one chunk", () => {

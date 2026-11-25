@@ -34,6 +34,7 @@ import {
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
 import {
+  MAX_MARKDOWN_CHUNK_LENGTH,
   MAX_MARKDOWN_LENGTH,
   markdownSegments,
   mountedSegmentCount,
@@ -901,16 +902,27 @@ const DirectFence = memo(
     streaming,
     onCopy,
     media,
+    bodyStyle,
   }: {
     segment: Extract<MarkdownSegment, { kind: "fence" }>;
     streaming: boolean;
     onCopy?: ((text: string) => void) | undefined;
     media: MarkdownMediaOptions;
+    bodyStyle: TextStyle;
   }) {
     const fenceState = useMemo(
       () => ({ openTail: segment.closed ? null : segment.content, streaming }),
       [segment.closed, segment.content, streaming],
     );
+    const preview = !!interactivePreviewKind(segment.language) && !!media.renderInteractiveBlock;
+    // A code block longer than one parse would be one huge text view: page it instead.
+    if (!preview && segment.content.length > MAX_MARKDOWN_CHUNK_LENGTH) {
+      return (
+        <View style={{ marginBottom: 10 }}>
+          <PlainTextMessage text={segment.source} style={bodyStyle} />
+        </View>
+      );
+    }
     return (
       <FenceStateContext.Provider value={fenceState}>
         {fenceElement("fence", segment.content, segment.language, onCopy, media)}
@@ -922,7 +934,8 @@ const DirectFence = memo(
     previous.segment.source === next.segment.source &&
     previous.streaming === next.streaming &&
     previous.onCopy === next.onCopy &&
-    previous.media === next.media,
+    previous.media === next.media &&
+    previous.bodyStyle === next.bodyStyle,
 );
 
 function nextFrame(run: () => void): () => void {
@@ -942,8 +955,12 @@ function nextFrame(run: () => void): () => void {
 function useMountedSegments(segments: readonly MarkdownSegment[] | null): number {
   const [mounted, setMounted] = useState(0);
   const latest = useRef(segments);
-  latest.current = segments;
+  useEffect(() => {
+    latest.current = segments;
+  });
   const count = segments?.length ?? 0;
+  // A replaced, shorter message mounts its regrowth a slice per frame again.
+  if (mounted > count) setMounted(count);
   const shown = segments ? Math.max(mounted, mountedSegmentCount(segments, 0)) : 0;
   useEffect(() => {
     if (shown >= count) return undefined;
@@ -1013,6 +1030,7 @@ function TrimmedMarkdown({
               streaming={streaming && last}
               onCopy={onCopy}
               media={media}
+              bodyStyle={styles.body!}
             />
           );
         }

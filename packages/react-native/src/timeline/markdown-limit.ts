@@ -22,7 +22,9 @@ import {
  * 2 × MAX_MARKDOWN_LENGTH / CHUNK_TARGET_LENGTH segments.
  *
  * A long message is mounted a bounded slice at a time (mountedSegmentCount), one slice
- * per frame, so no single frame does more work than one bounded chunk.
+ * per frame, so no frame parses or mounts more than one chunk of Markdown. A code block
+ * longer than one chunk is shown as plain-text pages; a large preview loads in its own
+ * web view.
  *
  * A message longer than MAX_MARKDOWN_LENGTH, and a single text block longer than one
  * chunk (one giant paragraph), are shown as selectable plain-text pages instead.
@@ -51,24 +53,26 @@ export type MarkdownSegment =
   /** A block too long for one parse, shown as plain-text pages. */
   | { kind: "plain"; source: string };
 
-/** A source line; `text` drops the line ending (CRLF too), as markdown-it reads it. */
+/** A source line without its ending. Lines end as markdown-it reads them: LF, CRLF or CR. */
 type Line = { start: number; end: number; text: string };
 
 function linesOf(text: string): Line[] {
   const lines: Line[] = [];
+  const ending = /\r\n?|\n/g;
   let start = 0;
   while (start < text.length) {
-    const newline = text.indexOf("\n", start);
-    const end = newline === -1 ? text.length : newline + 1;
-    let content = text.slice(start, newline === -1 ? end : newline);
-    if (content.endsWith("\r")) content = content.slice(0, -1);
-    lines.push({ start, end, text: content });
+    ending.lastIndex = start;
+    const match = ending.exec(text);
+    const stop = match ? match.index : text.length;
+    const end = match ? stop + match[0].length : text.length;
+    lines.push({ start, end, text: text.slice(start, stop) });
     start = end;
   }
   return lines;
 }
 
-const FENCE_OPEN = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+// The info string may hold any character but a line ending (U+2028 included).
+const FENCE_OPEN = /^( {0,3})(`{3,}|~{3,})([\s\S]*)$/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
 type OpenFence = { char: string; length: number };
@@ -86,6 +90,24 @@ function fenceOpener(line: string): (OpenFence & { indent: number; info: string 
 function closesFence(line: string, fence: OpenFence): boolean {
   const match = FENCE_CLOSE.exec(line);
   return !!match && match[1]![0] === fence.char && match[1]!.length >= fence.length;
+}
+
+/**
+ * Whether a fence opened at line `index` has a closer anywhere after it: for each fence
+ * character, the longest closer at or after each line, built once (linear).
+ */
+function fenceClosers(lines: Line[]): (index: number, fence: OpenFence) => boolean {
+  const longest = { "`": new Int32Array(lines.length + 1), "~": new Int32Array(lines.length + 1) };
+  for (let index = lines.length - 1; index >= 0; index--) {
+    longest["`"][index] = longest["`"][index + 1]!;
+    longest["~"][index] = longest["~"][index + 1]!;
+    const match = FENCE_CLOSE.exec(lines[index]!.text);
+    if (match) {
+      const char = match[1]![0] as "`" | "~";
+      longest[char][index] = Math.max(longest[char][index]!, match[1]!.length);
+    }
+  }
+  return (index, fence) => longest[fence.char as "`" | "~"][index + 1]! >= fence.length;
 }
 
 type Block =
@@ -109,20 +131,25 @@ type Block =
 function blocksOf(text: string): Block[] {
   const lines = linesOf(text);
   const mathEnd = displayMathBlockEnds(lines.map((line) => line.text));
+  const closable = fenceClosers(lines);
   const blocks: Block[] = [];
   let textStart = 0;
   const cut = (at: number) => {
     if (at > textStart) blocks.push({ kind: "text", start: textStart, end: at });
     textStart = at;
   };
-  let nested: (OpenFence & { start: number }) | null = null;
+  let nested: (OpenFence & { start: number; closable: boolean }) | null = null;
   let previousBlank = false;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     if (nested) {
-      // An indented fence that has not closed within one chunk cannot be drawn
-      // formatted anyway: stop protecting it, so the rest of the message still is.
-      if (closesFence(line.text, nested) || line.start - nested.start > MAX_MARKDOWN_CHUNK_LENGTH) {
+      // An indented fence that never closes runs to the end of its list item; past one
+      // chunk it cannot be drawn formatted anyway, so stop protecting it and let the rest
+      // of the message still be. A fence that does close stays whole, however long.
+      if (
+        closesFence(line.text, nested) ||
+        (!nested.closable && line.start - nested.start > MAX_MARKDOWN_CHUNK_LENGTH)
+      ) {
         nested = null;
       }
       previousBlank = false;
@@ -158,7 +185,7 @@ function blocksOf(text: string): Block[] {
     }
     if (opener) {
       // An indented fence (in a list item): never cut inside it.
-      nested = { ...opener, start: line.start };
+      nested = { ...opener, start: line.start, closable: closable(index, opener) };
       previousBlank = false;
       continue;
     }

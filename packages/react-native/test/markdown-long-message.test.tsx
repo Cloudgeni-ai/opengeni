@@ -159,6 +159,21 @@ test("a long message renders its Markdown and its interactive preview", async ()
   await view.unmount();
 });
 
+test("a code block longer than one chunk is paged, while a large visual still previews", async () => {
+  const code = Array.from({ length: 600 }, (_, index) => `const value${index} = ${index};`);
+  const text = `Intro **text**.\n\n\`\`\`ts\n${code.join("\n")}\n\`\`\`\n\n${message}`;
+  const { blocks, render } = renderer();
+  const view = await renderComponent(render(text, { tone: "body" }));
+  await settle();
+  const content = view.container.textContent ?? "";
+  expect(content).toContain("Plain text");
+  expect(content).toContain("const value0 = 0;");
+  expect(content).not.toContain("const value599 = 599;");
+  expect(strongTexts(view.container)).toEqual(expect.arrayContaining(["text", "Headline:"]));
+  expect(blocks).toEqual([{ kind: "html", content: visual, state: "complete" }]);
+  await view.unmount();
+});
+
 test("a long message streaming its visual shows the loading state, then the preview", async () => {
   const { blocks, render } = renderer();
   const open = message.slice(0, message.indexOf("</div>\n```") + 6);

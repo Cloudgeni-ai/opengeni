@@ -105,3 +105,27 @@ test("math-expanded input falls back to the original, fully readable source", as
   expect(view.container.textContent).toContain(plainTextPage(text, 0).text);
   await view.unmount();
 });
+
+test("while a long message streams, only the chunk that changed is parsed again", async () => {
+  const paragraphs = Array.from({ length: 900 }, (_, index) => `Paragraph **${index}**.`);
+  const text = paragraphs.join("\n\n");
+  expect(text.length).toBeGreaterThan(MAX_MARKDOWN_CHUNK_LENGTH);
+  const view = await renderComponent(render(text, { tone: "body", streaming: true }));
+  // Let every frame mount its slice.
+  for (let frame = 0; frame < 20; frame++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+  }
+  const chunks = [...markdownInputs];
+  expect(chunks.length).toBeGreaterThan(2);
+  expect(chunks.every((chunk) => chunk.length <= MAX_MARKDOWN_CHUNK_LENGTH)).toBe(true);
+  expect(view.container.textContent).toContain("Paragraph **899**.");
+  markdownInputs.length = 0;
+  await view.rerender(render(`${text} More`, { tone: "body", streaming: true }));
+  await view.rerender(render(`${text} More words`, { tone: "body", streaming: true }));
+  // Each delta re-parses the last chunk only.
+  expect(markdownInputs).toHaveLength(2);
+  expect(markdownInputs.every((chunk) => chunk.startsWith(chunks.at(-1)!))).toBe(true);
+  await view.unmount();
+});

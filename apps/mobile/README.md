@@ -158,12 +158,13 @@ message is cut into chunks of about 4,096 between top-level blocks (an unindente
 line after a blank line, never inside a code fence or display math), and each chunk
 is math-normalized and parsed on its own, so the work grows linearly and, while a
 message streams, unchanged chunks are not prepared or parsed again. A code fence at
-the start of a line that is too long to share a chunk is drawn directly as a code
-block, interactive answer or `opengeni-html` / `opengeni-site` preview, without
-Markdown. A long message mounts one chunk-sized slice per frame, so no frame does
-more work than one chunk. Link reference definitions only resolve within their own
-chunk, and an ordered list whose items are all numbered `1.` restarts at 1 after a
-cut.
+the start of a line that is too long to share a chunk is drawn directly: an
+`opengeni-html` / `opengeni-site` preview of any size loads in its web view, and any
+other code block over one chunk uses plain-text pages. A long message mounts one
+chunk-sized slice per frame, so no frame parses or mounts more than one chunk of
+Markdown. Lines end at LF, CRLF or a lone CR, as markdown-it reads them. Link
+reference definitions only resolve within their own chunk, and an ordered list whose
+items are all numbered `1.` restarts at 1 after a cut.
 
 Messages over 65,536 code units (roughly 10,000 words), and a single text block
 longer than one chunk, use selectable plain-text pages; Previous/Next expose the
