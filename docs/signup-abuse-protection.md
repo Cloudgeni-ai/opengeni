@@ -103,14 +103,14 @@ appends a row with the operator, reason and database role to
 `opengeni_private.signup_network_velocity_revisions`. Runtime roles can neither
 read the settings, sources or evidence nor write them.
 
-| Setting | Default | Why |
-| --- | --- | --- |
-| `mode` | `off` | `observe` records evidence, `enforce` also holds. Migrations stay inert. |
-| `windowHours` | 24 | Farms create 21 accounts per day from one address. |
-| `exactHoldThreshold` | 3 | Hold from the 3rd new organization from one address (IPv6: one /64) within the window. Catches farms early; the largest real groups were 3-4, so release must be quick. |
-| `prefixHoldThreshold` | none | /24 and /48 groups are a weaker signal (shared ISPs, offices, mobile carriers): recorded and shown in evidence, but they hold only if an operator sets a threshold. |
-| `rateLimitEnabled` | off | Refuse extreme bursts at the organization step. |
-| `rateLimitMax` | 5 | Per exact address per rolling hour; the 6th is refused. Far above any real pattern, well below the 12/h farms. |
+| Setting               | Default | Why                                                                                                                                                                     |
+| --------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mode`                | `off`   | `observe` records evidence, `enforce` also holds. Migrations stay inert.                                                                                                |
+| `windowHours`         | 24      | Farms create 21 accounts per day from one address.                                                                                                                      |
+| `exactHoldThreshold`  | 3       | Hold from the 3rd new organization from one address (IPv6: one /64) within the window. Catches farms early; the largest real groups were 3-4, so release must be quick. |
+| `prefixHoldThreshold` | none    | /24 and /48 groups are a weaker signal (shared ISPs, offices, mobile carriers): recorded and shown in evidence, but they hold only if an operator sets a threshold.     |
+| `rateLimitEnabled`    | off     | Refuse extreme bursts at the organization step.                                                                                                                         |
+| `rateLimitMax`        | 5       | Per exact address per rolling hour; the 6th is refused. Far above any real pattern, well below the 12/h farms.                                                          |
 
 **Detect and hold.** `free_plan_credit_eligible` (before Free issuance and in
 spendable-balance admission) evaluates the current account only, under its own
@@ -620,9 +620,11 @@ deletes older rows as it writes). Columns: `data_schema`, `id`, `created_at`,
 (Heedeo's `visitor.id`, Heedeo's own opaque id, kept as returned so it can be
 looked up in Heedeo). No email, address or reason text is stored. The runtime
 may only insert rows and delete expired ones; operators and analytics read
-them as owner. To join a verdict to an organization: its owner membership
-(`organization_memberships.subject_id = 'user:' || user_id`, role `owner`;
-`account_id` is the organization), then `promotion_decisions` and
+them as owner. To join a verdict to the organization the signup created:
+`managed_accounts` with `external_source = 'better-auth:user'` and
+`external_id = user_id` (its `id` is the organization; for every organization
+the user owns, use `organization_memberships.subject_id = 'user:' || user_id`
+with role `owner`), then `promotion_decisions` and
 `opengeni_private.promotion_decision_history` on `(data_schema, account_id,
 revision)` for our own decision, rule and policy version.
 

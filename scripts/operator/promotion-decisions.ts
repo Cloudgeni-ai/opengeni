@@ -99,12 +99,21 @@ if (
   (!values.account || !/^[0-9a-f-]{36}$/i.test(values.account))
 )
   throw new Error("Provide --account <uuid>");
-if (values["heedeo-verdicts"] && values.account && !/^[0-9a-f-]{36}$/i.test(values.account))
+if (
+  values["heedeo-verdicts"] &&
+  values.account &&
+  !/^[0-9a-f-]{36}$/i.test(values.account)
+)
   throw new Error("--account must be a uuid");
 if (values.enforcement && !["on", "off"].includes(values.enforcement))
   throw new Error("--enforcement must be on or off");
-const url = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_ADMIN_URL;
-if (!url) throw new Error("Set an owner database URL (OPENGENI_MIGRATIONS_DATABASE_URL)");
+const url =
+  process.env.OPENGENI_MIGRATIONS_DATABASE_URL ??
+  process.env.OPENGENI_DATABASE_ADMIN_URL;
+if (!url)
+  throw new Error(
+    "Set an owner database URL (OPENGENI_MIGRATIONS_DATABASE_URL)",
+  );
 const searchPath = dbSearchPath(getSettings());
 const client = createDb(url, { max: 1, ...(searchPath ? { searchPath } : {}) });
 /** Changes for --network-velocity-set; only the flags given are changed. */
@@ -112,7 +121,8 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
   const changes: SignupNetworkVelocityChanges = {};
   const integer = (flag: string, value: string | undefined) => {
     if (value === undefined) return undefined;
-    if (!/^\d+$/.test(value)) throw new Error(`--${flag} must be a whole number`);
+    if (!/^\d+$/.test(value))
+      throw new Error(`--${flag} must be a whole number`);
     return Number(value);
   };
   if (values.mode !== undefined) {
@@ -139,12 +149,14 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
   if (values["denied-network-mode"] !== undefined) {
     if (!["off", "observe", "enforce"].includes(values["denied-network-mode"]))
       throw new Error("--denied-network-mode must be off, observe or enforce");
-    changes.deniedNetworkMode = values["denied-network-mode"] as "off" | "observe" | "enforce";
+    changes.deniedNetworkMode = values["denied-network-mode"] as
+      "off" | "observe" | "enforce";
   }
   if (values["sign-in-network-mode"] !== undefined) {
     if (!["off", "observe", "enforce"].includes(values["sign-in-network-mode"]))
       throw new Error("--sign-in-network-mode must be off, observe or enforce");
-    changes.signInNetworkMode = values["sign-in-network-mode"] as "off" | "observe" | "enforce";
+    changes.signInNetworkMode = values["sign-in-network-mode"] as
+      "off" | "observe" | "enforce";
   }
   const legModes = [
     ["email-domain-mode", "emailDomainMode"],
@@ -172,16 +184,24 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
       throw new Error("--heedeo-signup-mode must be off, shadow or enforce");
     changes.heedeoSignupMode = mode as (typeof HEEDEO_SIGNUP_MODES)[number];
   }
-  const emailDomainThreshold = integer("email-domain-threshold", values["email-domain-threshold"]);
-  if (emailDomainThreshold !== undefined) changes.emailDomainHoldThreshold = emailDomainThreshold;
+  const emailDomainThreshold = integer(
+    "email-domain-threshold",
+    values["email-domain-threshold"],
+  );
+  if (emailDomainThreshold !== undefined)
+    changes.emailDomainHoldThreshold = emailDomainThreshold;
   const emailDomainWindow = integer(
     "email-domain-window-minutes",
     values["email-domain-window-minutes"],
   );
-  if (emailDomainWindow !== undefined) changes.emailDomainWindowMinutes = emailDomainWindow;
+  if (emailDomainWindow !== undefined)
+    changes.emailDomainWindowMinutes = emailDomainWindow;
   const burstThreshold = integer("burst-threshold", values["burst-threshold"]);
   if (burstThreshold !== undefined) changes.burstHoldThreshold = burstThreshold;
-  const burstWindow = integer("burst-window-seconds", values["burst-window-seconds"]);
+  const burstWindow = integer(
+    "burst-window-seconds",
+    values["burst-window-seconds"],
+  );
   if (burstWindow !== undefined) changes.burstWindowSeconds = burstWindow;
   const deniedDomainThreshold = integer(
     "denied-domain-threshold",
@@ -193,11 +213,20 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
     "denied-domain-lookback-days",
     values["denied-domain-lookback-days"],
   );
-  if (deniedDomainLookback !== undefined) changes.deniedDomainLookbackDays = deniedDomainLookback;
-  const slowDomainThreshold = integer("slow-domain-threshold", values["slow-domain-threshold"]);
-  if (slowDomainThreshold !== undefined) changes.slowDomainHoldThreshold = slowDomainThreshold;
-  const slowDomainWindow = integer("slow-domain-window-hours", values["slow-domain-window-hours"]);
-  if (slowDomainWindow !== undefined) changes.slowDomainWindowHours = slowDomainWindow;
+  if (deniedDomainLookback !== undefined)
+    changes.deniedDomainLookbackDays = deniedDomainLookback;
+  const slowDomainThreshold = integer(
+    "slow-domain-threshold",
+    values["slow-domain-threshold"],
+  );
+  if (slowDomainThreshold !== undefined)
+    changes.slowDomainHoldThreshold = slowDomainThreshold;
+  const slowDomainWindow = integer(
+    "slow-domain-window-hours",
+    values["slow-domain-window-hours"],
+  );
+  if (slowDomainWindow !== undefined)
+    changes.slowDomainWindowHours = slowDomainWindow;
   if (Object.keys(changes).length === 0)
     throw new Error(
       "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days, --disposable-mail-mode, --slow-domain-mode, --slow-domain-threshold, --slow-domain-window-hours, --card-verification-mode, --heedeo-signup-mode",
@@ -208,7 +237,9 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
 try {
   if (values["network-velocity"]) {
     const db = client.db;
-    console.log(JSON.stringify(await readSignupNetworkVelocitySettings(db), null, 2));
+    console.log(
+      JSON.stringify(await readSignupNetworkVelocitySettings(db), null, 2),
+    );
   } else if (values["network-velocity-set"]) {
     // Owner-only, revision-fenced (0 before the first write). The database
     // validates the values, the reason (6-1000 bytes) and the operator.
@@ -231,16 +262,22 @@ try {
   } else if (values["network-holds"]) {
     // Read-only, rolled back. Email domains, 16-hex network groups and
     // account UUIDs only; never full emails or addresses.
-    const limit = values.limit && /^\d+$/.test(values.limit) ? Number(values.limit) : undefined;
+    const limit =
+      values.limit && /^\d+$/.test(values.limit)
+        ? Number(values.limit)
+        : undefined;
     const result = await listSignupNetworkHolds(client.db, {
       ...(limit ? { limit } : {}),
     });
     console.log(JSON.stringify(result, null, 2));
   } else if (values["heedeo-verdicts"]) {
     // Read-only, rolled back. Recent Heedeo signup verdicts with the
-    // organizations the user owns and our own promotion decision on each.
+    // organization the signup created and our own promotion decision on it.
     // UUIDs, codes and numbers only; never emails or addresses.
-    const limit = values.limit && /^\d+$/.test(values.limit) ? Number(values.limit) : undefined;
+    const limit =
+      values.limit && /^\d+$/.test(values.limit)
+        ? Number(values.limit)
+        : undefined;
     const result = await listSignupHeedeoVerdicts(client.db, {
       ...(limit ? { limit } : {}),
       ...(values.account ? { accountId: values.account } : {}),
@@ -249,16 +286,34 @@ try {
   } else if (values["network-capture-flagged"]) {
     // Re-runs the 1368 backfill: captures the owners' sign-in networks of
     // every denied or held account (keyed hashes only). Safe to repeat.
-    console.log(JSON.stringify(await captureFlaggedSignupNetworkOwners(client.db), null, 2));
+    console.log(
+      JSON.stringify(
+        await captureFlaggedSignupNetworkOwners(client.db),
+        null,
+        2,
+      ),
+    );
   } else if (values["network-release-holds"]) {
     // Rollback: releases current detector holds of the network rules (both,
     // or one with --rule ip-velocity-v1|denied-network-v1|email-cluster-v1|additional-organization-v1).
-    if (!values.operator?.trim() || !values.reason || values.reason.trim().length < 6)
+    if (
+      !values.operator?.trim() ||
+      !values.reason ||
+      values.reason.trim().length < 6
+    )
       throw new Error("Provide --operator and --reason (six characters)");
-    const limit = values.limit && /^\d+$/.test(values.limit) ? Number(values.limit) : undefined;
+    const limit =
+      values.limit && /^\d+$/.test(values.limit)
+        ? Number(values.limit)
+        : undefined;
     const rule = values.rule as SignupNetworkHoldPolicyVersion | undefined;
-    if (rule !== undefined && !SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.includes(rule))
-      throw new Error(`--rule must be one of ${SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.join(", ")}`);
+    if (
+      rule !== undefined &&
+      !SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.includes(rule)
+    )
+      throw new Error(
+        `--rule must be one of ${SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.join(", ")}`,
+      );
     const result = await releaseSignupNetworkHolds(client.db, {
       operator: `operator:${values.operator.trim()}`,
       reason: values.reason.trim(),
@@ -269,7 +324,8 @@ try {
     console.log(JSON.stringify(result, null, 2));
   } else if (values["detector-mode"]) {
     if (!values.operator?.trim()) throw new Error("Provide --operator");
-    const result = await client.db.execute(sql`select opengeni_private.set_promotion_detector_mode(
+    const result = await client.db
+      .execute(sql`select opengeni_private.set_promotion_detector_mode(
       ${values["detector-mode"]}, ${`operator:${values.operator.trim()}`}) as mode`);
     console.log(JSON.stringify(result, null, 2));
   } else if (values["free-credit-cutoff"]) {
@@ -288,7 +344,9 @@ try {
     // A zoneless timestamp would be read in the session time zone.
     if (
       cutoff !== "none" &&
-      !/\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(cutoff)
+      !/\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(
+        cutoff,
+      )
     )
       throw new Error(
         "--free-credit-cutoff needs an explicit zone, for example 2026-10-29T15:08:00Z",
@@ -313,7 +371,8 @@ try {
     console.log(JSON.stringify(result, null, 2));
   } else if (values.list) {
     // Operator-only evidence inventory; never exposed through a public route.
-    const rows = await client.db.execute(sql`select d.*, h.rule_id, h.policy_version, h.evidence
+    const rows = await client.db
+      .execute(sql`select d.*, h.rule_id, h.policy_version, h.evidence
       from promotion_decisions d join opengeni_private.promotion_decision_history h
       on h.data_schema=session_tenancy_fence_target_schema()::regnamespace::text and h.account_id=d.account_id and h.revision=d.revision
       order by d.updated_at desc,d.account_id limit 100`);
@@ -336,9 +395,14 @@ try {
     }
     console.log(JSON.stringify(result, null, 2));
   } else if (values.enforcement) {
-    if (!values.operator?.trim() || !values.reason || values.reason.trim().length < 6)
+    if (
+      !values.operator?.trim() ||
+      !values.reason ||
+      values.reason.trim().length < 6
+    )
       throw new Error("Provide --operator and --reason (six characters)");
-    const result = await client.db.execute(sql`select opengeni_private.set_promotion_enforcement(
+    const result = await client.db
+      .execute(sql`select opengeni_private.set_promotion_enforcement(
       ${values.enforcement === "on"},${values.operator.trim()},${values.reason.trim()},
       ${values["all-readers-upgraded"] === true}) as revision`);
     console.log(JSON.stringify(result, null, 2));
@@ -366,7 +430,8 @@ try {
       throw new Error(
         "Provide --operator, --reason (six characters), and --revision <current revision, 0 for new>",
       );
-    const result = await client.db.execute(sql`select opengeni_private.set_promotion_decision(
+    const result = await client.db
+      .execute(sql`select opengeni_private.set_promotion_decision(
       ${values.account}::uuid, ${values.decision!}, 'operator-v1', 'manual-review',
       ${JSON.stringify({ reason: values.reason.trim() })}::jsonb,
       ${`operator:${values.operator.trim()}`}, ${values.revision}::bigint) as decision`);

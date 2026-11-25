@@ -13,14 +13,23 @@ import { rawRows } from "./database";
 export const HEEDEO_SIGNUP_MODES = ["off", "shadow", "enforce"] as const;
 export type HeedeoSignupMode = (typeof HEEDEO_SIGNUP_MODES)[number];
 
-export const HEEDEO_SIGNUP_METHODS = ["email", "google", "github", "passkey", "other"] as const;
+export const HEEDEO_SIGNUP_METHODS = [
+  "email",
+  "google",
+  "github",
+  "passkey",
+  "other",
+] as const;
 export type HeedeoSignupMethod = (typeof HEEDEO_SIGNUP_METHODS)[number];
 
 export type HeedeoSignupOutcome = "evaluated" | "error" | "skipped" | "refused";
 
 /** The mode is read on every signup and client config; reuse it briefly per process. */
 const HEEDEO_SIGNUP_MODE_TTL_MS = 15_000;
-let heedeoSignupModeCache: { at: number; value: Promise<HeedeoSignupMode> } | null = null;
+let heedeoSignupModeCache: {
+  at: number;
+  value: Promise<HeedeoSignupMode>;
+} | null = null;
 
 /** Forget the cached mode (tests, and right after an operator change). */
 export function resetHeedeoSignupModeCache(): void {
@@ -31,9 +40,14 @@ export function resetHeedeoSignupModeCache(): void {
  * The deployment's Heedeo signup mode, for a runtime connection. Fails off: a
  * failed read (including a database that predates migration 1565) is "off".
  */
-export async function readHeedeoSignupMode(db: Database): Promise<HeedeoSignupMode> {
+export async function readHeedeoSignupMode(
+  db: Database,
+): Promise<HeedeoSignupMode> {
   const now = Date.now();
-  if (heedeoSignupModeCache && now - heedeoSignupModeCache.at < HEEDEO_SIGNUP_MODE_TTL_MS) {
+  if (
+    heedeoSignupModeCache &&
+    now - heedeoSignupModeCache.at < HEEDEO_SIGNUP_MODE_TTL_MS
+  ) {
     return await heedeoSignupModeCache.value;
   }
   const value = rawRows<{ mode: string }>(
@@ -77,7 +91,9 @@ export type SignupHeedeoEvaluationRecord = {
 };
 
 const boundedText = (value: string | null | undefined, max: number) =>
-  typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
+  typeof value === "string" && value.length > 0 && value.length <= max
+    ? value
+    : null;
 const code = (value: string | null | undefined, pattern: RegExp) =>
   typeof value === "string" && pattern.test(value) ? value : null;
 const integer = (value: number | null | undefined, min: number, max: number) =>
@@ -96,7 +112,11 @@ export async function recordSignupHeedeoEvaluation(
   record: SignupHeedeoEvaluationRecord,
 ): Promise<void> {
   const reasonCodes = [
-    ...new Set((record.reasonCodes ?? []).filter((value) => /^[a-z0-9_:.-]{1,64}$/u.test(value))),
+    ...new Set(
+      (record.reasonCodes ?? []).filter((value) =>
+        /^[a-z0-9_:.-]{1,64}$/u.test(value),
+      ),
+    ),
   ].slice(0, 64);
   const httpStatus = integer(record.httpStatus, 0, 999);
   await rawRows(
@@ -113,12 +133,14 @@ export async function recordSignupHeedeoEvaluation(
       ${`{${reasonCodes.map((value) => `"${value}"`).join(",")}}`}::text[],
       ${boundedText(record.visitorId, 200)})`,
   );
-  await rawRows(db, sql`delete from opengeni_private.signup_heedeo_evaluations`);
+  await rawRows(
+    db,
+    sql`delete from opengeni_private.signup_heedeo_evaluations`,
+  );
 }
 
 export type SignupHeedeoVerdictOrganization = {
   accountId: string;
-  membershipStatus: string;
   /** The organization's current promotion decision; null without one. */
   decision: string | null;
   decisionRevision: number | null;
@@ -154,14 +176,16 @@ class RolledBackRead<T> extends Error {
   }
 }
 
-const iso = (value: unknown) => (value ? new Date(value as string).toISOString() : null);
-const num = (value: unknown) => (value === null || value === undefined ? null : Number(value));
+const iso = (value: unknown) =>
+  value ? new Date(value as string).toISOString() : null;
+const num = (value: unknown) =>
+  value === null || value === undefined ? null : Number(value);
 
 /**
- * Recent Heedeo verdicts, newest first, each joined to the organizations its
- * user owns (membership subject `user:<id>`, role owner) and our current
- * promotion decision on them. With `accountId`, only verdicts of that
- * organization's owners. Owner connection only, in one read-only transaction
+ * Recent Heedeo verdicts, newest first, each joined to the organization the
+ * signup created (`managed_accounts` with `external_source = 'better-auth:user'`
+ * and `external_id = user_id`) and our current promotion decision on it. With
+ * `accountId`, only verdicts of that organization's signup. Owner connection only, in one read-only transaction
  * that is rolled back. UUIDs, codes and numbers only.
  */
 export async function listSignupHeedeoVerdicts(
@@ -183,10 +207,10 @@ export async function listSignupHeedeoVerdicts(
         sql`select opengeni_private.open_session_tenancy_fence_inventory(session_tenancy_fence_target_schema())`,
       );
       const accountFilter = options.accountId
-        ? sql`and exists (select 1 from organization_memberships owner_membership
-            where owner_membership.account_id = ${options.accountId}::uuid
-              and owner_membership.role = 'owner'
-              and owner_membership.subject_id = 'user:' || e.user_id)`
+        ? sql`and exists (select 1 from managed_accounts owner_account
+            where owner_account.id = ${options.accountId}::uuid
+              and owner_account.external_source = 'better-auth:user'
+              and owner_account.external_id = e.user_id)`
         : sql``;
       const rows = await rawRows<Record<string, unknown>>(
         txDb,
@@ -194,17 +218,17 @@ export async function listSignupHeedeoVerdicts(
             e.error_code, e.http_status, e.latency_ms, e.token_present, e.no_token, e.evaluation_id,
             e.score, e.band, e.flagged, e.reason_codes, e.visitor_id,
             coalesce((select jsonb_agg(jsonb_build_object(
-                'accountId', m.account_id, 'membershipStatus', m.status,
+                'accountId', a.id,
                 'decision', d.decision, 'decisionRevision', d.revision,
                 'ruleId', h.rule_id, 'policyVersion', h.policy_version)
-                order by m.created_at, m.account_id)
-              from organization_memberships m
-              left join promotion_decisions d on d.account_id = m.account_id
+                order by a.created_at, a.id)
+              from managed_accounts a
+              left join promotion_decisions d on d.account_id = a.id
               left join opengeni_private.promotion_decision_history h
                 on h.data_schema = e.data_schema and h.account_id = d.account_id
                 and h.revision = d.revision
-              where e.user_id is not null and m.role = 'owner'
-                and m.subject_id = 'user:' || e.user_id), '[]'::jsonb) as organizations
+              where e.user_id is not null and a.external_source = 'better-auth:user'
+                and a.external_id = e.user_id), '[]'::jsonb) as organizations
           from opengeni_private.signup_heedeo_evaluations e
           where e.data_schema = session_tenancy_fence_target_schema()::regnamespace::text
             ${accountFilter}
@@ -228,7 +252,9 @@ export async function listSignupHeedeoVerdicts(
           score: num(row.score),
           band: (row.band as string | null) ?? null,
           flagged: (row.flagged as boolean | null) ?? null,
-          reasonCodes: Array.isArray(row.reason_codes) ? (row.reason_codes as string[]) : [],
+          reasonCodes: Array.isArray(row.reason_codes)
+            ? (row.reason_codes as string[])
+            : [],
           visitorId: (row.visitor_id as string | null) ?? null,
           organizations: (
             (typeof row.organizations === "string"
@@ -236,17 +262,18 @@ export async function listSignupHeedeoVerdicts(
               : row.organizations) as Record<string, unknown>[]
           ).map((organization) => ({
             accountId: String(organization.accountId),
-            membershipStatus: String(organization.membershipStatus),
             decision: (organization.decision as string | null) ?? null,
             decisionRevision: num(organization.decisionRevision),
             ruleId: (organization.ruleId as string | null) ?? null,
-            policyVersion: (organization.policyVersion as string | null) ?? null,
+            policyVersion:
+              (organization.policyVersion as string | null) ?? null,
           })),
         })),
       );
     });
   } catch (error) {
-    if (error instanceof RolledBackRead) return error.value as SignupHeedeoVerdict[];
+    if (error instanceof RolledBackRead)
+      return error.value as SignupHeedeoVerdict[];
     throw error;
   }
   throw new Error("Heedeo verdict read did not complete");
