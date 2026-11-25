@@ -134,6 +134,13 @@ async function connect(
 }
 
 describe("organization MCP action catalog", () => {
+  test("the session model settings REST route adds no agent action", () => {
+    const path = "/v1/workspaces/:workspaceId/sessions/:sessionId/model-settings";
+    expect(registeredApiRoutes()).toContainEqual(expect.objectContaining({ method: "PUT", path }));
+    expect(isActionCatalogExempt(path)).toBe(true);
+    expect(ACTION_CATALOG.some((entry) => entry.path === path)).toBe(false);
+  });
+
   test("compact UI configuration reads do not add a redundant agent action", () => {
     const path = "/v1/workspaces/:workspaceId/sessions/:sessionId";
     expect(isActionCatalogExempt(`${path}/configuration`)).toBe(true);

@@ -1886,6 +1886,12 @@ export type SessionTenancyPublicProjection = {
   } | null;
 };
 
+export type {
+  SessionModelSettings,
+  SetSessionModelSettingsRequest,
+  SetSessionModelSettingsResponse,
+} from "@opengeni/contracts";
+
 export type UpdateSessionVisibilityRequest = {
   visibility: SessionVisibility;
   expectedAuthorityEpoch: number;

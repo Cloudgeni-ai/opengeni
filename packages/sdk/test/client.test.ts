@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import sdkPackage from "../package.json";
 import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
+import { OpenGeniClient as PublicClient } from "../src/index";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import type { BrowserObservation, BrowserTargetListResponse } from "../src/interaction";
 import {
@@ -69,6 +70,67 @@ test("HTTP and SSE requests identify the installed SDK without enabling strict c
   expect(
     requests.every((request) => request.headers["x-opengeni-sdk-version"] === sdkPackage.version),
   ).toBe(true);
+});
+
+test("sets session model defaults with a keyed PUT and exposes the comparison conflict", async () => {
+  const expected = { model: "old-model", latencyMode: "standard" } as const;
+  const request = {
+    model: "new-model",
+    reasoningEffort: "high",
+    latencyMode: "fast",
+    expected,
+    idempotencyKey: "11111111-1111-4111-8111-111111111111",
+  } as const;
+  const response = {
+    sessionId: SESSION_ID,
+    model: request.model,
+    reasoningEffort: request.reasoningEffort,
+    latencyMode: request.latencyMode,
+    effectiveFrom: "future_turns" as const,
+    releasedCapacityWaitTurnId: null,
+  };
+  const current = { model: "other-model", reasoningEffort: "low", latencyMode: "standard" };
+  const { fetch, requests } = recordingFetch((sent) =>
+    JSON.parse(sent.body!).expected.model === expected.model
+      ? jsonResponse(response)
+      : jsonResponse(
+          {
+            error: {
+              code: "conflict",
+              message: "Settings changed",
+              retryable: false,
+              details: {
+                reason: "model_settings_mismatch",
+                current: { ...current, privateField: "ignored" },
+              },
+            },
+          },
+          409,
+        ),
+  );
+  const client = new PublicClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "fixture",
+    fetch,
+  });
+  expect(await client.setSessionModelSettings(WORKSPACE_ID, SESSION_ID, request)).toEqual(response);
+  expect(requests[0]).toMatchObject({
+    method: "PUT",
+    url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/model-settings`,
+    body: JSON.stringify(request),
+  });
+  const error = await client
+    .setSessionModelSettings(WORKSPACE_ID, SESSION_ID, {
+      ...request,
+      expected: { model: "stale-model" },
+    })
+    .catch((failure: unknown) => failure);
+  expect(error).toBeInstanceOf(OpenGeniApiError);
+  expect(error).toMatchObject({ status: 409, retryable: false });
+  expect((error as OpenGeniApiError).details).toEqual({
+    reason: "model_settings_mismatch",
+    current,
+  });
 });
 
 function makeClient(
