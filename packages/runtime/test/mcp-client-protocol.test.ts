@@ -12,6 +12,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { McpServer as ModernMcpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
+import { PrefixedMcpServer, configureRuntimeMetricsHooks } from "../src/index";
 import { mcpStreamableHttpClientOptions } from "../src/mcp-client";
 
 // Tool definitions with deliberately unusual key order, nested schemas,
@@ -61,6 +62,7 @@ const started: Started[] = [];
 
 afterEach(() => {
   for (const server of started.splice(0)) server.stop();
+  configureRuntimeMetricsHooks(null);
 });
 
 function startLegacyServer(
@@ -110,6 +112,7 @@ function startLegacyServer(
         if (call.params.name === "fail") {
           throw new McpError(ErrorCode.InvalidParams, "the filters are not valid", {
             field: "filters",
+            status: 422,
           });
         }
         if (call.params.name === "slow") {
@@ -322,6 +325,27 @@ test("server errors and timeouts keep their v1 shapes and model-visible text", a
   } finally {
     await server.close();
   }
+});
+
+test("an external JSON-RPC Invalid params error keeps its shape and records rejected", async () => {
+  const fixture = startLegacyServer();
+  const expected = await withLegacyClient(fixture.url, async (client) =>
+    client.callTool({ name: "fail", arguments: {} }).catch((error: unknown) => error),
+  );
+  fixture.methods.length = 0;
+  const server = new PrefixedMcpServer(connectV2(fixture.url), "fixture");
+  const outcomes: string[] = [];
+  configureRuntimeMetricsHooks({ onMcpToolCall: ({ outcome }) => outcomes.push(outcome) });
+  await server.connect();
+  try {
+    const failure = await server.executeCatalogTool("fail", {}).catch((error: unknown) => error);
+    expect(errorShape(failure)).toEqual(errorShape(expected));
+    expect(errorShape(failure).code).toBe(ErrorCode.InvalidParams);
+  } finally {
+    await server.close();
+  }
+  expect(fixture.methods.filter((method) => method === "tools/call")).toHaveLength(1);
+  expect(outcomes).toEqual(["rejected"]);
 });
 
 test("a 2026-07-28 server negotiates the modern era", async () => {

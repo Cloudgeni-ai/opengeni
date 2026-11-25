@@ -962,6 +962,31 @@ branch's requirements as cumulative. Additional native contract refinements
 retain their preflight messages so cross-field failures explain the required
 relationship. Downstream provider and storage exceptions are separate failures.
 
+#### Reporting rejected arguments from an MCP server
+
+If a `tools/call` reaches your server but it refuses the caller's arguments
+before doing any work, return an MCP tool result with `isError: true` and
+the boolean `true` at `_meta["opengeni/argumentRejected"]`. This works for any
+MCP server; it needs no deployment configuration. Keep the explanation in
+the normal `content` field so the caller knows what to correct:
+
+```json
+{
+  "isError": true,
+  "content": [{ "type": "text", "text": "Pass exactly one of `start` or `cursor`." }],
+  "_meta": { "opengeni/argumentRejected": true }
+}
+```
+
+An external server's JSON-RPC error `-32602` (Invalid params) in response to
+`tools/call` also counts as `outcome="rejected"`. Either signal only changes
+metrics: it does not change the result, protocol error, or retry behavior.
+The failure-ratio alert excludes rejections from both the failure count and
+the total. An unmarked `isError` result remains `provider_declared_error`.
+Do not use the mark for downstream failures or when the outcome is unknown.
+
+#### Failure diagnostics and Codemode receipts
+
 Unexpected failures in `session_create`, `session_queue_message`, and
 `session_steer` retain a bounded `error.diagnostic` in the ordinary failed-tool
 receipt. It contains cause classes, reviewed source locations or location
