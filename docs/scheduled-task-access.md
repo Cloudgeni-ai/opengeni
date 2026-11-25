@@ -145,6 +145,12 @@ Already-admitted occurrences retain their frozen execution settings. Text in a
 launcher prompt naming a child model is also unchanged; editing that instruction
 is a separate content change, not an effect of changing these defaults.
 
+Both scheduled and event-driven occurrences targeting a chat use that chat's
+effective model settings at admission. A saved settings change takes effect
+without waiting for another turn; an older queued turn starting later does not
+undo it. If the effective settings change while a fresh occurrence is being
+admitted, the database rejects the stale snapshot so the worker can read again.
+
 ## Who owns a schedule
 
 A schedule's owner is the person who saved it: a managed human (or a verified
