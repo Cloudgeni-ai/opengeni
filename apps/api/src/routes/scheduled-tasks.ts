@@ -49,6 +49,8 @@ import {
   scheduledTaskTriggerToken,
   pauseScheduledTaskAsAdmin,
   pausePrivateScheduledTaskAsAdmin,
+  resumeScheduledTaskAsAdmin,
+  scheduledTaskTogglesAsAdmin,
   requirePausableScheduledTask,
   requireVisibleScheduledTask,
   scheduledTaskAccess,
@@ -469,11 +471,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
+    if (existing.status === "paused") {
+      const [unchanged] = await withEventsAndBlockers([existing]);
+      return c.json(scheduledTaskForGrant(unchanged ?? existing, grant));
+    }
     const previous: ScheduledTaskRestoreState = { task: existing };
-    const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
-    const adminPause = viewer.admin && !ownerPause;
-    const task = adminPause
-      ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
+    const task = scheduledTaskTogglesAsAdmin(viewer, existing)
+      ? await pauseScheduledTaskAsAdmin(db, grant, existing)
       : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     const [paused] = await withEventsAndBlockers([task]);
@@ -489,8 +493,17 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
+    const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
+    const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
     const previous: ScheduledTaskRestoreState = { task: existing };
+    // An admin turns someone else's schedule back on with the permission
+    // that turned it off; editing and running it stay with its owner.
+    if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
+      const task = await resumeScheduledTaskAsAdmin(db, grant, existing);
+      await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
+      const [resumed] = await withEventsAndBlockers([task]);
+      return c.json(scheduledTaskForGrant(resumed ?? task, grant));
+    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,

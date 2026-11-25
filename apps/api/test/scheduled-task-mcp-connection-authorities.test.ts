@@ -1367,6 +1367,55 @@ test.each([
   }
 });
 
+test("an admin turns another participant's shared schedule off and on through the tools", async () => {
+  if (!available) return;
+  const workspace = await workspaceFixture();
+  const task = await createScheduledTask(client.db, {
+    ...workspace,
+    name: "Owned schedule",
+    status: "active",
+    schedule: { type: "manual" },
+    temporalScheduleId: crypto.randomUUID(),
+    runMode: "new_session_per_run",
+    overlapPolicy: "allow_concurrent",
+    agentConfig: {
+      prompt: "Use my connections",
+      resources: [],
+      tools: [],
+      metadata: {},
+    },
+    createdBy: { kind: "subject", subjectId: workspace.subjectId },
+    metadata: {},
+  });
+  const adminGrant: AccessGrant = {
+    ...grantFor(workspace),
+    subjectId: "user:workspace-admin",
+    permissions: ["scheduled_tasks:manage", "scheduled_tasks:run", "workspace:admin"],
+  };
+  const server = buildOpenGeniMcpServer(deps(client.db), adminGrant);
+  const connected = await connectedClient(server);
+  try {
+    for (const [name, status] of [
+      ["scheduled_tasks_pause", "paused"],
+      ["scheduled_tasks_resume", "active"],
+    ] as const) {
+      const result = await connected.client.callTool({ name, arguments: { id: task.id } });
+      expect(result).not.toMatchObject({ isError: true });
+      expect((await getScheduledTask(client.db, workspace.workspaceId, task.id))?.status).toBe(
+        status,
+      );
+    }
+    // Editing stays with the owner.
+    const renamed = await connected.client.callTool({
+      name: "scheduled_tasks_update",
+      arguments: { id: task.id, name: "Taken over" },
+    });
+    expect(renamed).toMatchObject({ isError: true });
+  } finally {
+    await connected.close();
+  }
+});
+
 test.each(["update", "pause", "resume", "trigger", "delete"] as const)(
   "HTTP %s refuses service credentials acting on a personal schedule",
   async (operation) => {
