@@ -1336,7 +1336,7 @@ import {
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
-import { pauseResponseTrigger } from "./pause-response-trigger";
+import { isPauseResponseEventType, pauseResponseTrigger } from "./pause-response-trigger";
 export { pauseResponseTrigger } from "./pause-response-trigger";
 import {
   boundedChildProgressNote,
@@ -84804,12 +84804,7 @@ export async function claimSessionWorkForAttempt(
                     ),
                   )
                   .limit(1);
-                if (
-                  !legacyResumeTrigger ||
-                  !["user.approvalDecision", "user.humanInputResponse"].includes(
-                    legacyResumeTrigger.type,
-                  )
-                ) {
+                if (!legacyResumeTrigger || !isPauseResponseEventType(legacyResumeTrigger.type)) {
                   throw new SessionControlInvariantError(
                     `Running turn ${activeTurn.id} has no pending-update attempt boundary`,
                   );

@@ -76,7 +76,7 @@ export const AWAITING_APPROVAL_NOT_STARTED_TOOL_CALL_EVENT_TEXT =
 
 /** Model-visible result for a call that still waited for approval when its turn ended. */
 export const AWAITING_APPROVAL_NOT_STARTED_TOOL_CALL_RESULT_TEXT =
-  "This tool call was still waiting for approval when the turn ended, so it never ran. Nothing changed; propose it again if it is still needed.";
+  "This tool call was still waiting for approval when the turn ended, so it never ran. Nothing changed; only repeat it if the person still wants it.";
 
 /** The person-facing and model-visible not-started copy for a recovery reason. */
 export function notStartedToolCallTexts(reason: string | undefined): {
@@ -463,6 +463,8 @@ export async function closePendingSessionToolCallsInTransaction(
         )
       : undefined;
     const interrupted = !existingResult && !call.resultItem;
+    // Only a function call becomes "not started"; other awaiting call types
+    // keep the conservative interrupted result below.
     const awaitingApproval = interrupted && awaitingApprovalCallIds.has(call.callId);
     const notStarted =
       interrupted &&

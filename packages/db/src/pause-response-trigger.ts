@@ -3,7 +3,14 @@ import type { Database } from "./database";
 import * as schema from "./schema";
 
 /** The answers a person (or the system for them) gives to a paused turn. */
-export const PAUSE_RESPONSE_EVENT_TYPES = ["user.approvalDecision", "user.humanInputResponse"];
+export const PAUSE_RESPONSE_EVENT_TYPES = [
+  "user.approvalDecision",
+  "user.humanInputResponse",
+] as const;
+
+export function isPauseResponseEventType(type: string): boolean {
+  return (PAUSE_RESPONSE_EVENT_TYPES as readonly string[]).includes(type);
+}
 
 /**
  * The one rule for which recorded answer resumes a paused turn, shared by the
@@ -55,7 +62,7 @@ export async function pauseResponseTrigger(
         eq(schema.sessionEvents.workspaceId, input.workspaceId),
         eq(schema.sessionEvents.sessionId, input.sessionId),
         eq(schema.sessionEvents.turnId, input.turnId),
-        inArray(schema.sessionEvents.type, PAUSE_RESPONSE_EVENT_TYPES),
+        inArray(schema.sessionEvents.type, [...PAUSE_RESPONSE_EVENT_TYPES]),
         gt(schema.sessionEvents.sequence, current.sequence),
         input.candidateEventId === undefined
           ? undefined

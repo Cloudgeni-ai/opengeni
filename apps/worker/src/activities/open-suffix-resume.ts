@@ -186,7 +186,21 @@ export function resolveOpenSuffixTriggerTarget(
 /** The trigger of a resume: the decision or answer that claimed it, with its log position. */
 export type OpenSuffixResumeTrigger = Pick<SessionEvent, "type" | "payload"> & {
   sequence?: number;
+  /** The turn the answer was recorded for; omitted only by callers without one. */
+  turnId?: string | null | undefined;
 };
+
+/**
+ * True when the trigger was recorded for this turn. Call ids can repeat across
+ * turns, so another turn's answer (or a turnless one) never settles or
+ * pre-approves this turn's call, even when its call id matches.
+ */
+export function openSuffixTriggerAnswersTurn(
+  trigger: Pick<OpenSuffixResumeTrigger, "turnId">,
+  turnId: string,
+): boolean {
+  return trigger.turnId === undefined || trigger.turnId === turnId;
+}
 
 /** The question round a still-open call asks, if its MCP server asked one. */
 function openSuffixRowRound(row: OpenSuffixPendingToolCall): number | undefined {
@@ -220,7 +234,8 @@ export async function openSuffixSiblingDecisions(input: {
     input.rows ??
     (await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId));
   const triggerCallId =
-    input.trigger.type === "user.approvalDecision"
+    input.trigger.type === "user.approvalDecision" &&
+    openSuffixTriggerAnswersTurn(input.trigger, input.turnId)
       ? (input.trigger.payload as { approvalId?: unknown }).approvalId
       : undefined;
   const open = rows.filter(
@@ -262,6 +277,7 @@ export async function openSuffixApprovedCallIds(input: {
   const payload = input.trigger.payload as { approvalId?: unknown; decision?: unknown };
   if (
     input.trigger.type === "user.approvalDecision" &&
+    openSuffixTriggerAnswersTurn(input.trigger, input.turnId) &&
     payload.decision === "approve" &&
     typeof payload.approvalId === "string"
   ) {
@@ -497,7 +513,9 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   // the dispatcher already took) settles nothing itself. Its pause's other
   // recorded decisions still apply below, and whatever stays open is asked
   // again, so a stale answer can never end the turn.
-  const target = resolveOpenSuffixTriggerTarget(rows, input.trigger, callId);
+  const target = openSuffixTriggerAnswersTurn(input.trigger, input.turnId)
+    ? resolveOpenSuffixTriggerTarget(rows, input.trigger, callId)
+    : null;
   // The pause's other decisions, recorded up to this resume's trigger, run
   // now too, all in the model's call order. Decisions recorded after the
   // trigger wait for the next resume, which applies them without asking.

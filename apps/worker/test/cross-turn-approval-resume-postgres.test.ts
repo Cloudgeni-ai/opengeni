@@ -19,7 +19,10 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { settleOpenSuffixResumeIfNeeded } from "../src/activities/open-suffix-resume";
+import {
+  openSuffixApprovedCallIds,
+  settleOpenSuffixResumeIfNeeded,
+} from "../src/activities/open-suffix-resume";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -44,7 +47,7 @@ afterAll(async () => {
  * approves A's call, A finishes, and B pauses for its own approval. A's
  * decision is newer than B's trigger message, but it belongs to A.
  */
-async function queuedTurnPausedAfterEarlierApproval() {
+async function queuedTurnPausedAfterEarlierApproval(options: { reuseCallId?: boolean } = {}) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -198,7 +201,8 @@ async function queuedTurnPausedAfterEarlierApproval() {
   });
   const turnB = await claimed({ kind: "next" });
   expect(turnB.id).not.toBe(turnA.id);
-  const callB = `call-b-${suffix}`;
+  // Models can repeat a call id in a later turn.
+  const callB = options.reuseCallId ? callA : `call-b-${suffix}`;
   await pauseForApproval(turnB, callB);
   return {
     workspaceId,
@@ -275,6 +279,48 @@ test("a resume whose answer matches no open call keeps waiting instead of failin
   expect(settles).toHaveLength(1);
   expect(settles[0]).toMatchObject({
     turnStatus: "requires_action",
+    events: [
+      { type: "session.requiresAction", payload: { approvals: [{ id: world.callB }] } },
+      { type: "session.status.changed", payload: { status: "requires_action" } },
+    ],
+  });
+  const rows = await listTurnOpenSuffixToolCalls(
+    client.db,
+    world.workspaceId,
+    world.session.id,
+    world.turnB.id,
+  );
+  expect(rows.map((row) => [row.callId, row.resultItem])).toEqual([[world.callB, null]]);
+});
+
+test("another turn's approval never runs this turn's call with the same id", async () => {
+  const world = await queuedTurnPausedAfterEarlierApproval({ reuseCallId: true });
+  const trigger = await getSessionEvent(client.db, world.workspaceId, world.decisionA.id);
+  expect(trigger!.turnId).not.toBe(world.turnB.id);
+  expect((trigger!.payload as { approvalId: string }).approvalId).toBe(world.callB);
+  // The agent is never built with the call pre-approved.
+  expect(
+    await openSuffixApprovedCallIds({
+      db: client.db,
+      ...world.identity(world.turnB),
+      trigger: trigger!,
+    }),
+  ).toEqual([]);
+  const settles: unknown[] = [];
+  const outcome = await settleOpenSuffixResumeIfNeeded({
+    db: client.db,
+    agent: undefined as never,
+    ...world.identity(world.turnB),
+    trigger: trigger!,
+    humanInputResume: null,
+    settle: async (input) => {
+      settles.push(input);
+      return true;
+    },
+  });
+  // The call is asked again, never run on the earlier turn's approval.
+  expect(outcome).toEqual({ action: "requires_action" });
+  expect(settles[0]).toMatchObject({
     events: [
       { type: "session.requiresAction", payload: { approvals: [{ id: world.callB }] } },
       { type: "session.status.changed", payload: { status: "requires_action" } },
