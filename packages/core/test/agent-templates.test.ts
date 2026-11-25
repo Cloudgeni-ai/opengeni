@@ -93,6 +93,7 @@ describe("ready-made agents", () => {
       const next = instructions.indexOf(`\n${n + 1}. `, start + 1);
       const end = next === -1 ? instructions.indexOf("\n\n", start + 1) : next;
       expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
       return instructions.slice(start, end);
     };
     const post = step(6);
@@ -102,9 +103,10 @@ describe("ready-made agents", () => {
     expect(post).toContain("at most three lines");
     expect(post).toContain("No praise");
     // Critical and Bug findings sit on the exact line, labelled, with a concrete fix.
-    expect(post).toContain("inline comment on the exact line");
+    expect(post).toContain("inline comment on the exact lines");
     expect(post).toContain("**Bug: retries never stop**");
-    expect(post).toContain("```suggestion");
+    // A suggestion replaces the lines its comment covers, so it must match them.
+    expect(post).toContain("```suggestion block that replaces exactly the commented lines");
     // Nits never get inline comments: left out or folded away.
     expect(post).toContain("<details><summary>Nits</summary>");
     expect(post).toContain("Give each finding once.");
@@ -112,6 +114,12 @@ describe("ready-made agents", () => {
     const rereview = step(7);
     expect(rereview).toContain("On a re-review");
     expect(rereview).toContain("post only new findings");
+    // Earlier open findings still count, so a re-review never reads cleaner than the PR is.
+    expect(rereview).toContain("Base the verdict and counts on every finding still open.");
+    // A question gets an answer in its thread, not another review.
+    expect(instructions).toContain(
+      "in the same thread for an inline comment, instead of posting a new review",
+    );
   });
 
   test("they stay general: no Opengeni-internal skills or names", () => {
