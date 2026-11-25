@@ -26,6 +26,25 @@ export type SessionInterventions = {
 const NONE: readonly InteractionIntervention[] = [];
 // Live hints drive refreshes; this is only the fallback while they are down.
 const FALLBACK_POLL_MS = 10_000;
+const INTERVENTION_CLIENT_METHODS = [
+  "streamWorkspaceInteractionRevisions",
+  "listInteractionInterventions",
+  "getInteractionIntervention",
+  "createInteractionIntervention",
+  "resolveInteractionIntervention",
+] as const;
+const unsupported = () => Promise.reject(new Error("Hand-offs aren't available here."));
+// A client without hand-off methods (an older or trimmed embed) shows none
+// rather than breaking the chat; the hook is disabled, so these never run.
+const NO_INTERVENTIONS_CLIENT = Object.fromEntries(
+  INTERVENTION_CLIENT_METHODS.map((method) => [method, unsupported]),
+) as unknown as NonNullable<EmbeddedInterventionClientOverride<ChatClient>["client"]>;
+
+export function supportsInterventions(client: unknown): boolean {
+  if (!client || typeof client !== "object") return false;
+  const methods = client as Record<string, unknown>;
+  return INTERVENTION_CLIENT_METHODS.every((method) => typeof methods[method] === "function");
+}
 
 /** Open hand-offs of these sessions; reads nothing while the list is empty. */
 export function useSessionInterventions(options: {
@@ -35,10 +54,11 @@ export function useSessionInterventions(options: {
 }): SessionInterventions {
   const t = useOpenGeniText();
   const key = [...options.sessionIds].sort().join(",");
+  const supported = supportsInterventions(options.client);
   const interventions = useInteractionInterventions({
-    client: options.client,
+    client: supported ? options.client : NO_INTERVENTIONS_CLIENT,
     workspaceId: options.workspaceId,
-    enabled: key.length > 0,
+    enabled: supported && key.length > 0,
     pollIntervalMs: FALLBACK_POLL_MS,
   });
   const bySession = useMemo(

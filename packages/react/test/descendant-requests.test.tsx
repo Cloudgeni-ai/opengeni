@@ -53,7 +53,7 @@ const {
 } = await import("../src/app/lib/descendant-requests");
 const { DescendantRequests, resetDescendantRequestsStateForTests } =
   await import("../src/app/components/session/descendant-requests");
-const { groupOpenInterventions } =
+const { groupOpenInterventions, supportsInterventions, useSessionInterventions } =
   await import("../src/app/components/session/session-interventions");
 
 type Intervention = Parameters<typeof groupOpenInterventions>[0][number];
@@ -769,6 +769,23 @@ describe("DescendantRequests", () => {
     const grouped = groupOpenInterventions([later, settled, other, earlier], ["child"]);
     expect([...grouped.keys()]).toEqual(["child"]);
     expect(grouped.get("child")!.map((item) => item.id)).toEqual(["earlier", "later"]);
+  });
+
+  test("a client without hand-off methods shows none instead of breaking the chat", async () => {
+    expect(supportsInterventions({})).toBe(false);
+    let seen = -1 as number;
+    function Probe() {
+      const result = useSessionInterventions({
+        client: {} as never,
+        workspaceId: "workspace",
+        sessionIds: ["child"],
+      });
+      seen = result.bySession.size;
+      return null;
+    }
+    const rendered = await renderComponent(createElement(Probe));
+    expect(seen).toBe(0);
+    await rendered.unmount();
   });
 
   test("stacks several waiting sub-sessions under one line that collapses", async () => {
