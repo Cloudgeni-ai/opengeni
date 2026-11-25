@@ -433,7 +433,7 @@ describe("organization billing StrictMode ownership", () => {
 
   // Regression: the plan block and the receipts list once shared a React key,
   // so every re-render of a long-open Billing page left one more copy of
-  // "Your plan" and "Plans" in the DOM (and remounted the receipts).
+  // "Your plan" and "Plans" in the DOM.
   test("shows the plan once while balance changes and a plan switch re-render Billing", async () => {
     const billingWith = (key: string) => ({
       mode: "stripe" as const,
@@ -491,7 +491,7 @@ describe("organization billing StrictMode ownership", () => {
       expect(count("Plans")).toBe(1);
       expect(count("Manage billing")).toBe(1);
       expect(container.textContent).toContain("Enterprise");
-      // The receipts list kept its state rather than remounting on each render.
+      // The receipts list keeps its state across these renders.
       expect(listBillingReceipts.mock.calls.length).toBe(receiptReads);
       expect(
         consoleError.mock.calls.filter((call) => String(call[0]).includes("same key")),
