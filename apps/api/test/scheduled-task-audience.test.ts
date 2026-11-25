@@ -542,6 +542,18 @@ test("an admin turns someone else's shared schedule off and on again with the sa
   expect((await toggle(f.admin.headers, "resume")).status).toBe(200);
   expect((await toggle(f.admin.headers, "resume")).status).toBe(200);
   expect(await status()).toBe("active");
+  // Each admin toggle is audited with who did it and whose schedule it is.
+  const audited = await shared.admin<{ action: string; subject_id: string; owner: string }[]>`
+    select action, subject_id, metadata->>'ownerSubjectId' as owner from audit_events
+    where target_type = 'scheduled_task' and target_id = ${task.id} order by occurred_at`;
+  expect(audited.map((row) => row.action)).toEqual([
+    "scheduled_task.admin_paused",
+    "scheduled_task.admin_resumed",
+    "scheduled_task.admin_paused",
+    "scheduled_task.admin_resumed",
+  ]);
+  expect(new Set(audited.map((row) => row.subject_id))).toEqual(new Set([f.admin.subjectId]));
+  expect(new Set(audited.map((row) => row.owner))).toEqual(new Set([f.owner.subjectId]));
 
   // Editing it still belongs to its owner.
   const renamed = await f.app.request(`${f.base}/${task.id}`, {

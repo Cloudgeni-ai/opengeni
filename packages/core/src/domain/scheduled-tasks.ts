@@ -1082,42 +1082,85 @@ async function assertSiteMayReachScheduledTask(
     throw new HTTPException(404, { message: "scheduled task not found" });
 }
 
+/** Audit actions for an admin turning a schedule they may not edit off or on. */
+export const SCHEDULED_TASK_ADMIN_PAUSED_AUDIT_ACTION = "scheduled_task.admin_paused";
+export const SCHEDULED_TASK_ADMIN_RESUMED_AUDIT_ACTION = "scheduled_task.admin_resumed";
+
+type AdminToggledTask = Pick<ScheduledTask, "workspaceId" | "id" | "status" | "ownerSubjectId">;
+
+async function recordScheduledTaskAdminToggle(
+  tx: Database,
+  grant: AccessGrant,
+  task: AdminToggledTask,
+  action: string,
+): Promise<void> {
+  await recordAuditEvent(tx, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    action,
+    targetType: "scheduled_task",
+    targetId: task.id,
+    metadata: {
+      principalKind: grant.principalKind ?? null,
+      ownerSubjectId: task.ownerSubjectId,
+      previousStatus: task.status,
+    },
+  });
+}
+
 /**
- * An admin's pause of a schedule they do not own. Pausing is reversible and
+ * An admin's pause of a schedule they may not edit. Pausing is reversible and
  * changes nothing else; `resumeScheduledTaskAsAdmin` undoes it. Only the
- * owner can change or run it.
+ * owner can change or run it. Audited, so the owner can see who paused it.
  */
 export async function pauseScheduledTaskAsAdmin(
   db: Database,
-  workspaceId: string,
-  taskId: string,
+  grant: AccessGrant,
+  existing: AdminToggledTask,
 ): Promise<ScheduledTask> {
   return await withScheduledTaskAuthorityWriteErrors(() =>
-    updateScheduledTask(db, workspaceId, taskId, { status: "paused" }),
+    updateScheduledTask(db, existing.workspaceId, existing.id, {
+      status: "paused",
+      beforeUpdateCommit: async (tx: Database) => {
+        await recordScheduledTaskAdminToggle(
+          tx,
+          grant,
+          existing,
+          SCHEDULED_TASK_ADMIN_PAUSED_AUDIT_ACTION,
+        );
+      },
+    }),
   );
 }
 
 /**
- * An admin's resume of a schedule they do not own: the undo of
+ * An admin's resume of a schedule they may not edit: the undo of
  * `pauseScheduledTaskAsAdmin`, so turning it off and on needs the same
  * permission. It changes nothing else, so it runs as its owner again, exactly
- * as before the pause, and its event triggers are re-armed.
+ * as before the pause, and its event triggers are re-armed. This also turns
+ * on one its owner paused; the audit event records who did.
  */
 export async function resumeScheduledTaskAsAdmin(
   db: Database,
-  existing: Pick<ScheduledTask, "workspaceId" | "id" | "status">,
+  grant: AccessGrant,
+  existing: ScheduledTask,
 ): Promise<ScheduledTask> {
-  const rearm = existing.status !== "active" || (await scheduledTaskFinishedOnce(db, existing));
+  // An active one is already on, unless it ran once and needs re-arming.
+  if (existing.status === "active" && !(await scheduledTaskFinishedOnce(db, existing)))
+    return existing;
   return await withScheduledTaskAuthorityWriteErrors(() =>
     updateScheduledTask(db, existing.workspaceId, existing.id, {
       status: "active",
-      ...(rearm
-        ? {
-            beforeUpdateCommit: async (tx: Database) => {
-              await rearmScheduledTaskEventsOnResume(tx, existing);
-            },
-          }
-        : {}),
+      beforeUpdateCommit: async (tx: Database) => {
+        await rearmScheduledTaskEventsOnResume(tx, existing);
+        await recordScheduledTaskAdminToggle(
+          tx,
+          grant,
+          existing,
+          SCHEDULED_TASK_ADMIN_RESUMED_AUDIT_ACTION,
+        );
+      },
     }),
   );
 }

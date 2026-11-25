@@ -217,7 +217,10 @@ organization allows Only me chats.
   `scheduled_tasks_pause` and `scheduled_tasks_resume` tools), so turning it
   off and on needs the same permission. Resuming changes nothing else: the
   schedule runs as its owner again, exactly as before the pause, and its event
-  triggers are re-armed. Changing or running it stays with its owner.
+  triggers are re-armed. This also turns on one its owner paused. Each admin
+  pause and resume is audited (`scheduled_task.admin_paused` and
+  `scheduled_task.admin_resumed`, with the owner). Changing or running it stays
+  with its owner.
 
 The audience is not execution configuration: like the name and status it is
 left out of the execution digest, so changing it never invalidates accepted

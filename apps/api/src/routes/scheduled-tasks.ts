@@ -473,7 +473,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
     const previous: ScheduledTaskRestoreState = { task: existing };
     const task = scheduledTaskTogglesAsAdmin(viewer, existing)
-      ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
+      ? await pauseScheduledTaskAsAdmin(db, grant, existing)
       : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     const [paused] = await withEventsAndBlockers([task]);
@@ -495,7 +495,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // An admin turns someone else's schedule back on with the permission
     // that turned it off; editing and running it stay with its owner.
     if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
-      const task = await resumeScheduledTaskAsAdmin(db, existing);
+      const task = await resumeScheduledTaskAsAdmin(db, grant, existing);
       await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
       const [resumed] = await withEventsAndBlockers([task]);
       return c.json(scheduledTaskForGrant(resumed ?? task, grant));
