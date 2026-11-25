@@ -244,7 +244,7 @@ Skills (`saveSkill`), not a separate store.
   (`skillId`, `name`, and the `revisionId` the package wrote, or
   `pendingRevisionId` while it waits for review). Copies of one package share
   their Skills: installing another copy links the shared Skill as it is here
-  (reported when its files differ) and only an upgrade, after its plan,
+  and only an upgrade, after its plan,
   replaces it. A different Skill with the same name already here stays as it
   is and is reported. Writing workspace Skills needs the same permission as
   the Skills page (`documents:manage`); without it the app installs and each
@@ -365,5 +365,7 @@ later, with app server code.
 - Not packaged anywhere: private files, records and files past the demo
   limits, publication settings, sharing and tool allowances. Upgrades never
   change these.
-- An app installed or upgraded before migration 1566 has no install record,
-  so it shows no version, Modified or update until its next upgrade.
+- An app installed before migration 1571 has no install record: it is
+  listed with no version or Modified, and a ready-made one offers its update.
+- A shared Skill's update saved for review (Review first) relinks only the
+  app that upgraded; other copies show it as Modified once it is approved.

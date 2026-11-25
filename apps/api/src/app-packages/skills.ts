@@ -135,13 +135,8 @@ export async function planPackageSkills(
           continue;
         }
         if (input.mode === "install" && filesKey(named.files) !== filesKey(skill.files)) {
-          // Another copy of the app shares it, maybe edited or newer: keep it.
-          plan.problems.push({
-            part: "skill",
-            name: skill.name,
-            reason:
-              "This workspace's version of the Skill is kept; upgrade the app to replace it with the package's",
-          });
+          // Another copy of the app shares it, maybe edited or newer: link it
+          // as it is; an upgrade's plan shows replacing it.
           plan.unchanged.push(skill.name);
           plan.steps.push({ skill, current: named, write: false });
           continue;

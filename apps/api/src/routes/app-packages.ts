@@ -56,12 +56,16 @@ async function run<T>(fn: () => Promise<T>): Promise<T> {
 function personSkillWriter(authorization: AccessGrantAuthorization): PackageSkillWriter {
   try {
     authorizeSkillScopeMutation(authorization, "workspace");
-    return { actor: skillInstallerActor(authorization) };
   } catch {
     return {
       refused:
         "Adding Skills to this workspace needs permission to change its Skills; ask someone who can to upgrade the app",
     };
+  }
+  try {
+    return { actor: skillInstallerActor(authorization) };
+  } catch (error) {
+    return { refused: error instanceof Error ? error.message : "Skills can't be saved here" };
   }
 }
 

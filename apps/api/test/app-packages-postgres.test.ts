@@ -1721,9 +1721,8 @@ test("packages carry Skills and automations; updates show them, and go back", as
   // Installing another copy from an older file links the shared Skill as it is.
   const copy = await f.install({ package: skilledPackage("0.9.0", "Version zero.") }, manager);
   expect(copy.status, copy.text).toBe(201);
-  expect(copy.json.notInstalled).toContainEqual(
-    expect.objectContaining({ part: "skill", name: "board-notes" }),
-  );
+  expect(copy.json.notInstalled).toEqual([]);
+  expect(copy.json.installed.skills).toEqual(["board-notes"]);
   const kept = await f.call(
     manager,
     "GET",

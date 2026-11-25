@@ -250,9 +250,11 @@ export function registerAppPackageTools(
           .optional()
           .describe("The package JSON itself, instead of fileId."),
         previous: z4
-          .boolean()
+          .union([z4.boolean(), z4.string().uuid()])
           .optional()
-          .describe("Go back to the app as it was before its last upgrade, instead of a package."),
+          .describe(
+            "Go back to the app as it was before an upgrade, instead of a package: true for the latest saved state, or a saved state's id.",
+          ),
         dryRun: z4.boolean().optional().describe("Only return the plan; nothing changes."),
         allowDestructive: z4
           .boolean()
@@ -266,7 +268,7 @@ export function registerAppPackageTools(
         appId: string;
         fileId?: string | undefined;
         package?: Record<string, unknown> | undefined;
-        previous?: boolean | undefined;
+        previous?: boolean | string | undefined;
         dryRun?: boolean | undefined;
         allowDestructive?: boolean | undefined;
         idempotencyKey: string;
