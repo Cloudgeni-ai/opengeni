@@ -1442,7 +1442,8 @@ function MeetingDetailPageForRecording({
     (reachWorkspaces === undefined
       ? !recording.sourceWorkspace
       : (recording.sharedWorkspaceId !== undefined || !recording.sourceWorkspace) &&
-        (share.targets.length > 0 || share.current !== null));
+        // Kept while it is shared anywhere, so Only me stays one choice away.
+        (share.targets.length > 0 || recording.visibility !== "private"));
   const changeSharing = async (target: MeetingShareTarget | null) => {
     const failure = msg("meetings.detailPage.couldnTChangeWhoCan");
     const storing = recording.workspaceId;

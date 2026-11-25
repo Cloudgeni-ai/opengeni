@@ -1430,6 +1430,45 @@ describe("Meeting page", () => {
     }
   });
 
+  test("an owner who left the workspace it is shared with can still make it Only me", async () => {
+    const fixture = createMeetingsFixture();
+    await fixture.client.updateRecording(fixture.workspaceId, fixture.readyId, {
+      visibility: "workspace",
+      sharedWorkspaceId: "e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7a8b",
+    });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        reachWorkspaces={[{ id: fixture.workspaceId, name: "Ingrid", personal: true }]}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "4 speakers");
+      const trigger = view.container.querySelector<HTMLElement>('[aria-label^="Who can see this"]');
+      expect(trigger?.getAttribute("aria-label")).toBe("Who can see this: Only me");
+      await act(async () => {
+        trigger!.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+        );
+      });
+      await settle(50);
+      const onlyMe = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+        (item) => item.textContent?.trim() === "Only me",
+      );
+      await act(async () => onlyMe!.click());
+      await settle(300);
+      expect(await fixture.client.getRecording(fixture.workspaceId, fixture.readyId)).toMatchObject(
+        { visibility: "private", sharedWorkspaceId: null },
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a meeting a teammate shared from their Personal workspace is read only here", async () => {
     const fixture = createMeetingsFixture({ sharedFromPersonal: true });
     const view = await render(
