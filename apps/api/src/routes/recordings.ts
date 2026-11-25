@@ -301,7 +301,13 @@ export function registerRecordingRoutes(
           ) ?? null)
         : null);
     const there = own ? await sameGrantIn(c, own.id, permission, actor) : null;
-    if (!own || !there) return actor;
+    if (!own || !there) {
+      // Their own meeting shared here, on access that reaches only here: they
+      // read it here as everyone it is shared with does.
+      return shared && permission === "sessions:read"
+        ? { ...actor, workspaceId: shared.workspaceId }
+        : actor;
+    }
     return {
       ...actor,
       workspaceId: own.id,

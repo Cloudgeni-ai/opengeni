@@ -275,6 +275,30 @@ test("a Personal workspace meeting shared with a team workspace opens there, rea
     await at(owner, team, "PATCH", `/recordings/${customer}`, { title: "Customer call, Acme" }),
   ).toMatchObject({ status: 200, body: { title: "Customer call, Acme" } });
   expect(ids(await at(owner, team, "GET", "/recordings"))).toEqual([customer, teamOwn]);
+  // On a key the owner scoped to Team, they read it there like everyone in
+  // Team, and change it only with access to their Personal workspace.
+  const key = await call(as(owner), "POST", `/v1/organizations/${accountId}/personal-api-keys`, {
+    name: "Team only",
+    access: {
+      preset: "full",
+      permissions: ["workspace:read", "sessions:read", "sessions:create"],
+      workspaceScope: { kind: "selected", workspaceIds: [team] },
+    },
+  });
+  expect(key.status).toBe(201);
+  const bearer = { authorization: `Bearer ${key.body.token}` };
+  expect(ids(await call(bearer, "GET", `/v1/workspaces/${team}/recordings`))).toContain(customer);
+  expect(await call(bearer, "GET", `/v1/workspaces/${team}/recordings/${customer}`)).toMatchObject({
+    status: 200,
+    body: { id: customer, workspaceId: personal },
+  });
+  expect(
+    (
+      await call(bearer, "PATCH", `/v1/workspaces/${team}/recordings/${customer}`, {
+        title: "Renamed",
+      })
+    ).status,
+  ).toBe(404);
 
   // Only the owner's team workspaces they belong to, and only from Personal.
   expect((await share(personal, customer, { sharedWorkspaceId: theirs })).status).toBe(400);
