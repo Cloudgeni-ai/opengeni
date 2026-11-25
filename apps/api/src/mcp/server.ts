@@ -521,6 +521,9 @@ import {
   scheduledTaskForGrant,
   pauseScheduledTaskAsAdmin,
   pausePrivateScheduledTaskAsAdmin,
+  resumeScheduledTaskAsAdmin,
+  scheduledTaskTogglesAsAdmin,
+  scheduledTaskFinishedOnce,
   requirePausableScheduledTask,
   requireVisibleScheduledTask,
   scheduledTaskAccess,
@@ -3004,11 +3007,8 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
-        const adminPause =
-          viewer.admin &&
-          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
-        const task = adminPause
-          ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
+        const task = scheduledTaskTogglesAsAdmin(viewer, existing)
+          ? await pauseScheduledTaskAsAdmin(deps.db, grant, existing)
           : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
           db: deps.db,
@@ -3028,10 +3028,23 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireVisibleTask(id);
-        if (existing.status === "active") {
+        // An active one is already on, unless it ran once and needs re-arming.
+        if (existing.status === "active" && !(await scheduledTaskFinishedOnce(deps.db, existing))) {
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
+        // Admins resume what they may pause; editing and running stay with the owner.
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+        if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
+          const task = await resumeScheduledTaskAsAdmin(deps.db, grant, existing);
+          await syncUpdatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            previous,
+            task,
+          });
+          return json(scheduledTaskReceipt("scheduled_tasks_resume", task, "updated", true));
+        }
         const update = await validatedScheduledTaskUpdate({
           githubPersonalFetch: deps.githubPersonalFetch,
           settings: deps.settings,

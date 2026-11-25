@@ -6469,6 +6469,8 @@ export type ClientAuthConfig =
        */
       newSignupsEnabled?: boolean;
       signupChallengeSiteKey?: string | undefined;
+      /** Heedeo signup scoring's browser script; present only while scoring is on. */
+      heedeo?: { publishableKey: string; scriptUrl: string } | undefined;
       /** Sign in with a passkey, and add passkeys in Security; omitted (false) by older deployments. */
       passkeySignIn?: boolean;
       /** Create an account with only a name and a passkey; omitted (false) by older deployments. */

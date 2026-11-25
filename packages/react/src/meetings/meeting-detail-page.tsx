@@ -21,13 +21,13 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CreditCardIcon,
-  GlobeIcon,
   LayersIcon,
   LoaderCircleIcon,
   LockIcon,
   PencilIcon,
   RefreshCwIcon,
   Trash2Icon,
+  UsersIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { userErrorText } from "../ui/api-error";
@@ -37,7 +37,6 @@ import type {
   RecordingPerson,
   RecordingTranscriptVersion,
   RecordingTranscriptionModel,
-  RecordingVisibility,
 } from "@opengeni/contracts";
 import {
   activeSegmentIndex,
@@ -83,6 +82,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
@@ -531,26 +531,69 @@ function TranscribeAgainDialog({
   );
 }
 
-function VisibilityMenu({
-  visibility,
+/** A workspace a meeting can be shared with: everyone in it can open it. */
+export type MeetingShareTarget = { id: string; name: string };
+
+/**
+ * Who can open a meeting: Only me, or one workspace. A meeting recorded in
+ * the owner's Personal workspace can be shared with any of their team
+ * workspaces; one a team workspace stores, only with that workspace.
+ */
+export function meetingShareTargets(
+  recording: Pick<
+    Recording,
+    "workspaceId" | "visibility" | "sharedWorkspaceId" | "sourceWorkspace"
+  >,
+  workspaces: readonly ReachWorkspace[] | undefined,
+  fallbackName: string,
+): { targets: MeetingShareTarget[]; current: string | null } {
+  const storing = recording.workspaceId;
+  const stored = workspaces?.find((workspace) => workspace.id === storing);
+  const personal = stored?.personal === true;
+  const targets = personal
+    ? (workspaces ?? [])
+        .filter(
+          (workspace) =>
+            workspace.personal !== true &&
+            // Where it is shared stays listed, so the menu says so.
+            (workspace.shareable !== false || workspace.id === recording.sharedWorkspaceId),
+        )
+        .map(({ id, name }) => ({ id, name }))
+    : [
+        {
+          id: storing,
+          name:
+            workspaces === undefined
+              ? fallbackName
+              : (stored?.name ?? recording.sourceWorkspace?.name ?? fallbackName),
+        },
+      ];
+  // Shared in the Personal workspace that stores it, or with a workspace its
+  // owner has left, nobody else sees it.
+  const sharedWith = recording.sharedWorkspaceId ?? (personal ? null : storing);
+  const current =
+    recording.visibility !== "private" && targets.some((target) => target.id === sharedWith)
+      ? sharedWith
+      : null;
+  return { targets, current };
+}
+
+function ShareMenu({
+  targets,
+  current,
+  stored,
   onChange,
 }: {
-  visibility: RecordingVisibility;
-  onChange: (visibility: RecordingVisibility) => void;
+  targets: readonly MeetingShareTarget[];
+  /** The workspace it is shared with; null for Only me. */
+  current: string | null;
+  /** Only me in name only: shared where nobody else sees it, so Only me still applies. */
+  stored: boolean;
+  onChange: (target: MeetingShareTarget | null) => void;
 }) {
   const msg = useOpenGeniText();
-  const options: Array<{ value: RecordingVisibility; label: string; description: string }> = [
-    {
-      value: "private",
-      label: msg("meetings.detailPage.onlyMe"),
-      description: msg("meetings.detailPage.onlyYouCanOpenIt"),
-    },
-    {
-      value: "workspace",
-      label: msg("meetings.detailPage.workspace"),
-      description: msg("meetings.detailPage.everyoneInThisWorkspaceCan"),
-    },
-  ];
+  const shared = targets.find((target) => target.id === current) ?? null;
+  const value = shared?.name ?? msg("meetings.detailPage.onlyMe");
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -558,41 +601,36 @@ function VisibilityMenu({
           type="button"
           size="sm"
           variant="outline"
-          className="rounded-[10px] pointer-coarse:h-11"
-          aria-label={msg("meetings.detailPage.whoCanSeeThisValue", {
-            value:
-              visibility === "private"
-                ? msg("meetings.detailPage.onlyMe")
-                : msg("meetings.detailPage.workspace"),
-          })}
+          className="max-w-56 rounded-[10px] pointer-coarse:h-11"
+          aria-label={msg("meetings.detailPage.whoCanSeeThisValue", { value })}
         >
-          {visibility === "private" ? (
-            <LockIcon aria-hidden="true" />
-          ) : (
-            <GlobeIcon aria-hidden="true" />
-          )}
-          {visibility === "private"
-            ? msg("meetings.detailPage.onlyMe")
-            : msg("meetings.detailPage.workspace")}
+          {shared ? <UsersIcon aria-hidden="true" /> : <LockIcon aria-hidden="true" />}
+          <span className="min-w-0 truncate">{value}</span>
           <ChevronDownIcon aria-hidden="true" className="text-fg-subtle" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
-        {options.map((option) => (
+        <DropdownMenuItem
+          onSelect={() => {
+            if (current !== null || stored) onChange(null);
+          }}
+        >
+          <LockIcon aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate">{msg("meetings.detailPage.onlyMe")}</span>
+          {current === null ? <CheckIcon aria-hidden="true" className="text-brand" /> : null}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>{msg("meetings.detailPage.shareWith")}</DropdownMenuLabel>
+        {targets.map((target) => (
           <DropdownMenuItem
-            key={option.value}
+            key={target.id}
             onSelect={() => {
-              if (option.value !== visibility) onChange(option.value);
+              if (target.id !== current) onChange(target);
             }}
-            className="items-start"
           >
-            <span className="grid min-w-0 flex-1 gap-0.5">
-              <span className="text-sm leading-5 text-fg">{option.label}</span>
-              <span className="text-xs leading-4.5 text-fg-muted">{option.description}</span>
-            </span>
-            {option.value === visibility ? (
-              <CheckIcon aria-hidden="true" className="mt-0.5 text-brand" />
-            ) : null}
+            <UsersIcon aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate">{target.name}</span>
+            {target.id === current ? <CheckIcon aria-hidden="true" className="text-brand" /> : null}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -725,7 +763,7 @@ function PhaseNotice({
   /** The version's model and its provider, when the workspace's list has it. */
   modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   fixes: TranscriptFixes;
-  onRetry: () => void;
+  onRetry: (() => void) | undefined;
 }) {
   const msg = useOpenGeniText();
   const phase = meetingPhase(recording);
@@ -808,12 +846,15 @@ function PhaseNotice({
         title={msg("meetings.detailPage.theTranscriptFailed")}
         actionLayout="responsive"
         action={
-          <FailedTranscriptActions
-            version={phase.version}
-            about={about}
-            fixes={fixes}
-            onRetry={onRetry}
-          />
+          // Only its owner can fix it.
+          onRetry ? (
+            <FailedTranscriptActions
+              version={phase.version}
+              about={about}
+              fixes={fixes}
+              onRetry={onRetry}
+            />
+          ) : undefined
         }
       >
         {transcriptErrorText(phase.version?.errorCode ?? null, msg, about)}
@@ -858,7 +899,7 @@ function RerunNotice({
   modelName: (version: RecordingTranscriptVersion) => string;
   modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   fixes: TranscriptFixes;
-  onRetry: () => void;
+  onRetry: (() => void) | undefined;
 }) {
   const msg = useOpenGeniText();
   const newest = versions.reduce<RecordingTranscriptVersion | null>(
@@ -882,12 +923,14 @@ function RerunNotice({
         title={msg("meetings.detailPage.transcribingAgainFailed")}
         actionLayout="responsive"
         action={
-          <FailedTranscriptActions
-            version={newest}
-            about={modelOf(newest)}
-            fixes={fixes}
-            onRetry={onRetry}
-          />
+          onRetry ? (
+            <FailedTranscriptActions
+              version={newest}
+              about={modelOf(newest)}
+              fixes={fixes}
+              onRetry={onRetry}
+            />
+          ) : undefined
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
@@ -1006,8 +1049,12 @@ function MeetingDetailPageForRecording({
     enabled: Boolean(transcriptVersionId),
   });
   // A person's own Only me meeting from another workspace of the organization
-  // keeps its people and transcribers in the workspace that stores it.
-  const home = { ...override, workspaceId: recording?.workspaceId ?? workspaceId };
+  // keeps its people and transcribers in the workspace that stores it; one
+  // shared with this workspace is read with this workspace's people.
+  const home = {
+    ...override,
+    workspaceId: recording?.sourceWorkspace ? recording.workspaceId : workspaceId,
+  };
   const people = useRecordingPeople(home);
   const models = useRecordingModels(home);
   const { client } = useRecordingsClient(override);
@@ -1382,6 +1429,59 @@ function MeetingDetailPageForRecording({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // Shared with this workspace from its owner's Personal workspace: read only.
+  const readOnly = !owner && recording.workspaceId !== workspaceId;
+  const share =
+    owner && recording.purpose === "meeting"
+      ? meetingShareTargets(recording, reachWorkspaces, msg("meetings.detailPage.workspace"))
+      : null;
+  // Opened from another workspace, its own Only me meeting can be shared only
+  // by naming where, on a server that knows sharing with a team.
+  const shareable =
+    share !== null &&
+    (reachWorkspaces === undefined
+      ? !recording.sourceWorkspace
+      : (recording.sharedWorkspaceId !== undefined || !recording.sourceWorkspace) &&
+        // Kept while it is shared anywhere, so Only me stays one choice away.
+        (share.targets.length > 0 || recording.visibility !== "private"));
+  const changeSharing = async (target: MeetingShareTarget | null) => {
+    const failure = msg("meetings.detailPage.couldnTChangeWhoCan");
+    const storing = recording.workspaceId;
+    try {
+      if (target === null) {
+        // Only me again: it keeps working where the owner is looking from.
+        const keepHere =
+          workspaceId !== storing &&
+          recording.reachWorkspaceIds !== undefined &&
+          recording.reachWorkspaceIds !== null &&
+          !recording.reachWorkspaceIds.includes(workspaceId) &&
+          reachWorkspaces?.find((workspace) => workspace.id === workspaceId)?.personal !== true;
+        await meeting.update({
+          visibility: "private",
+          ...(keepHere
+            ? { reachWorkspaceIds: [...(recording.reachWorkspaceIds ?? []), workspaceId] }
+            : {}),
+        });
+        toast.success(msg("meetings.detailPage.onlyYouCanSeeThis"));
+        return;
+      }
+      const request =
+        target.id === storing && !recording.sourceWorkspace
+          ? { visibility: "workspace" as const }
+          : { visibility: "workspace" as const, sharedWorkspaceId: target.id };
+      // Shared with another workspace, it shows there, and no longer here.
+      if (workspaceId !== storing && target.id !== workspaceId) {
+        await client.updateRecording(workspaceId, recording.id, request);
+        toast.success(msg("meetings.detailPage.sharedWithWorkspace", { workspace: target.name }));
+        onBack();
+        return;
+      }
+      await meeting.update(request);
+      toast.success(msg("meetings.detailPage.sharedWithWorkspace", { workspace: target.name }));
+    } catch (error) {
+      toast.error(failure, { description: errorText(error) });
+    }
+  };
   // The owner's own Only me meeting, on a server that keeps where it works.
   const reachable =
     owner &&
@@ -1420,7 +1520,7 @@ function MeetingDetailPageForRecording({
     recording.audioDeletedAt !== null ||
     (recording.state !== "capturing" &&
       !recording.tracks.some((track) => track.playable || track.chunkCount > 0));
-  const canRerun = recording.state !== "capturing" && !audioGone && !rerunPending;
+  const canRerun = !readOnly && recording.state !== "capturing" && !audioGone && !rerunPending;
   // Pending before any transcript is done, it is the first one, not "again".
   const firstPending = rerunPending && shownVersionNumber === 0;
   const unnamedCount = speakerLabels.filter(
@@ -1447,6 +1547,20 @@ function MeetingDetailPageForRecording({
         : unnamed
           ? msg("meetings.detailPage.nameNameThisSpeaker", { name: name })
           : msg("meetings.detailPage.nameChangeWhoThisIs", { name: name });
+      if (readOnly) {
+        return (
+          <li
+            key={label}
+            className={cn(
+              "flex min-w-0 items-center gap-2 text-sm leading-5 text-fg",
+              variant === "list" ? "py-1" : "rounded-full border border-border px-3 py-1",
+            )}
+          >
+            <SpeakerDot slot={slots.get(label)} />
+            <span className="min-w-0 truncate">{name}</span>
+          </li>
+        );
+      }
       return (
         <li key={label} className="min-w-0">
           <SpeakerNameMenu
@@ -1596,7 +1710,7 @@ function MeetingDetailPageForRecording({
           {!owner && recording.visibility === "workspace"
             ? msg("meetings.detailPage.sharedWithTheWorkspace")
             : null}
-          {recording.sourceWorkspace
+          {recording.sourceWorkspace && recording.visibility === "private"
             ? msg("meetings.detailPage.onlyMeRecordedIn", {
                 workspace: recording.sourceWorkspace.name,
               })
@@ -1605,51 +1719,45 @@ function MeetingDetailPageForRecording({
       }
       actions={
         <>
-          {owner && !recording.sourceWorkspace ? (
-            <VisibilityMenu
-              visibility={recording.visibility}
-              onChange={(visibility) =>
-                void update({ visibility }, msg("meetings.detailPage.couldnTChangeWhoCan")).then(
-                  () =>
-                    toast.success(
-                      visibility === "workspace"
-                        ? msg("meetings.detailPage.sharedWithTheWorkspace")
-                        : msg("meetings.detailPage.onlyYouCanSeeThis"),
-                    ),
-                  () => undefined,
-                )
-              }
+          {shareable && share ? (
+            <ShareMenu
+              targets={share.targets}
+              current={share.current}
+              stored={recording.visibility !== "private"}
+              onChange={(target) => void changeSharing(target)}
             />
           ) : null}
-          <MoreMenu label={msg("meetings.detailPage.moreActionsForTitle", { title: shownTitle })}>
-            <DropdownMenuItem onSelect={() => setRenaming(true)}>
-              <PencilIcon aria-hidden="true" />
-              {msg("meetings.detailPage.rename")}
-            </DropdownMenuItem>
-            {reachable ? (
-              <DropdownMenuItem onSelect={() => setChoosingReach(true)}>
-                <LayersIcon aria-hidden="true" />
-                {msg("meetings.detailPage.availableInMenu")}
+          {readOnly ? null : (
+            <MoreMenu label={msg("meetings.detailPage.moreActionsForTitle", { title: shownTitle })}>
+              <DropdownMenuItem onSelect={() => setRenaming(true)}>
+                <PencilIcon aria-hidden="true" />
+                {msg("meetings.detailPage.rename")}
               </DropdownMenuItem>
-            ) : null}
-            {recording.state !== "capturing" ? (
-              <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
-                <RefreshCwIcon aria-hidden="true" />
-                {rerunPending && !firstPending
-                  ? msg("meetings.detailPage.transcribingAgain")
-                  : msg("meetings.detailPage.transcribeAgain")}
-              </DropdownMenuItem>
-            ) : null}
-            {owner ? (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onSelect={() => setDeleting(true)}>
-                  <Trash2Icon aria-hidden="true" />
-                  {msg("meetings.detailPage.deleteMeeting")}
+              {reachable ? (
+                <DropdownMenuItem onSelect={() => setChoosingReach(true)}>
+                  <LayersIcon aria-hidden="true" />
+                  {msg("meetings.detailPage.availableInMenu")}
                 </DropdownMenuItem>
-              </>
-            ) : null}
-          </MoreMenu>
+              ) : null}
+              {recording.state !== "capturing" ? (
+                <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
+                  <RefreshCwIcon aria-hidden="true" />
+                  {rerunPending && !firstPending
+                    ? msg("meetings.detailPage.transcribingAgain")
+                    : msg("meetings.detailPage.transcribeAgain")}
+                </DropdownMenuItem>
+              ) : null}
+              {owner ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onSelect={() => setDeleting(true)}>
+                    <Trash2Icon aria-hidden="true" />
+                    {msg("meetings.detailPage.deleteMeeting")}
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+            </MoreMenu>
+          )}
         </>
       }
     />
@@ -1685,7 +1793,7 @@ function MeetingDetailPageForRecording({
         {meeting.versions.length > 0 ? (
           <DetailAsideItem label={msg("meetings.detailPage.transcript")}>
             <div className="grid w-full min-w-0 gap-2">
-              {meeting.versions.length > 1 ? (
+              {meeting.versions.length > 1 && !readOnly ? (
                 <NativeSelect
                   options={meeting.versions.map((entry) => ({
                     value: entry.id,
@@ -1704,10 +1812,15 @@ function MeetingDetailPageForRecording({
                 />
               ) : (
                 <span className="text-sm leading-5 text-fg">
-                  {versionLine(meeting.versions[0]!, modelName, msg)}
+                  {versionLine(
+                    meeting.versions.find((entry) => entry.id === transcriptVersionId) ??
+                      meeting.versions[0]!,
+                    modelName,
+                    msg,
+                  )}
                 </span>
               )}
-              {phase.kind === "failed" || firstPending ? null : (
+              {phase.kind === "failed" || firstPending || readOnly ? null : (
                 <Button
                   type="button"
                   size="sm"
@@ -1732,7 +1845,7 @@ function MeetingDetailPageForRecording({
   // or why there isn't one yet.
   const transcriptBody = (
     <>
-      {showTranscript && reviewLabels.length > 0 ? (
+      {showTranscript && reviewLabels.length > 0 && !readOnly ? (
         // Beside the speakers card, the speakers still to review sit at
         // the top of the transcript, where the reader starts. Only the outer
         // wrapper hides, so no display class competes with the container query.
@@ -1756,7 +1869,7 @@ function MeetingDetailPageForRecording({
             <ul aria-label={msg("meetings.detailPage.speakers")} className="flex flex-wrap gap-2">
               {speakerButtons("chips")}
             </ul>
-            {reviewLine ? (
+            {reviewLine && !readOnly ? (
               <p className="text-xs leading-4.5 text-fg-muted">
                 {msg("meetings.detailPage.reviewlineTapADashedName", {
                   reviewLine: reviewLine,
@@ -1858,6 +1971,7 @@ function MeetingDetailPageForRecording({
           people={people.people}
           activeSegment={activeSegment}
           actions={actions}
+          readOnly={readOnly}
           onSeek={sources.length > 0 ? (ms) => player.current?.playFrom(ms) : null}
         />
       )}
@@ -1875,7 +1989,7 @@ function MeetingDetailPageForRecording({
           recordingElsewhere={previewing && !recordingHere}
           modelOf={modelOf}
           fixes={fixes}
-          onRetry={() => setRerunning(true)}
+          onRetry={readOnly ? undefined : () => setRerunning(true)}
         />
         {phase.kind === "ready" ? (
           <RerunNotice
@@ -1884,7 +1998,7 @@ function MeetingDetailPageForRecording({
             modelName={modelName}
             modelOf={modelOf}
             fixes={fixes}
-            onRetry={() => setRerunning(true)}
+            onRetry={readOnly ? undefined : () => setRerunning(true)}
           />
         ) : null}
         {audioGone ? (
@@ -1928,7 +2042,13 @@ function MeetingDetailPageForRecording({
               <>
                 <div hidden={tab !== "summary"} data-meeting-tab="summary">
                   <DetailSection className={askable ? "pb-2" : undefined}>
-                    <MeetingSummary notes={notes} onOpenChat={onOpenChat} mentions={mentions} />
+                    <MeetingSummary
+                      notes={notes}
+                      // The chat that wrote the notes stays its owner's.
+                      onOpenChat={readOnly ? undefined : onOpenChat}
+                      mentions={mentions}
+                      readOnly={readOnly}
+                    />
                   </DetailSection>
                 </div>
                 {tab === "transcript" ? (
@@ -1937,7 +2057,7 @@ function MeetingDetailPageForRecording({
                   </DetailSection>
                 ) : tab === "notepad" ? (
                   <DetailSection key="notepad">
-                    <MeetingNotepad notes={notes} />
+                    <MeetingNotepad notes={notes} readOnly={readOnly} />
                   </DetailSection>
                 ) : null}
               </>
