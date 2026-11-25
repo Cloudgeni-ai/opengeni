@@ -185,6 +185,7 @@ export type UsageResponse = {
   series: UsageSeriesPoint[];
   facets: UsageFacets;
   automations?: InsightsUsageResponse["automations"];
+  automationNextCursor?: InsightsUsageResponse["automationNextCursor"];
   /** What this source can answer; the adapter is narrower than the real endpoint. */
   capabilities: {
     groupBy: UsageGroupBy[];

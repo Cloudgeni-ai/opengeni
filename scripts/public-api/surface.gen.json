@@ -22542,6 +22542,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.automationNextCursor": "string? null",
         "$.automations": "array?",
         "$.automations[]": "object",
         "$.automations[].fires": "integer!",

@@ -5,6 +5,7 @@ import { InsightsCallsResponse, InsightsUsageResponse } from "@opengeni/contract
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   applyCreditLedgerEntry,
+  compactAutomationRunCounters,
   createApiKey,
   createDb,
   createOrganizationApiKey,
@@ -27,7 +28,10 @@ import {
   withDatabaseStatementTimeout,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
@@ -39,13 +43,13 @@ import { createApp } from "../src/app";
 import { automationRunMetrics, registerPrometheusMetricsRoute } from "../src/http/metrics-listener";
 
 const secret = "insights-unified-http-postgres-fixture";
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: DbClient;
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("insights-unified-http");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("insights-unified-http");
   if (!acquired) throw new Error("Unified Insights HTTP verification requires PostgreSQL");
   shared = acquired;
-  client = createDb(shared.appUrl);
+  client = createDb(shared.appUrl, { searchPath: shared.schema });
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -860,11 +864,85 @@ test("inventory includes zero-use and terminal runs; the shared metric increment
   expect(response.status, await response.clone().text()).toBe(200);
   const snapshot = InsightsUsageResponse.parse(await response.json());
   expect(snapshot.totals.calls).toBe(0);
-  expect(snapshot.automations?.map((row) => [row.id, row.fires])).toEqual([
-    [privateTask.id, 0],
-    [ran.id, 2],
-    [unused.id, 0],
+  expect(new Map(snapshot.automations?.map((row) => [row.id, row.fires]))).toEqual(
+    new Map([
+      [privateTask.id, 0],
+      [ran.id, 2],
+      [unused.id, 0],
+    ]),
+  );
+  const page = async (cursor?: string) => {
+    const params = new URLSearchParams({ range: "24h", limit: "2" });
+    if (cursor) params.set("automationCursor", cursor);
+    const result = await app.request(path(scope, true, "usage", params.toString()), {
+      headers: { authorization },
+    });
+    expect(result.status, await result.clone().text()).toBe(200);
+    return InsightsUsageResponse.parse(await result.json());
+  };
+  const first = await page();
+  expect(first.automations).toHaveLength(2);
+  expect(first.automationNextCursor).toBeString();
+  const second = await page(first.automationNextCursor!);
+  expect(second.automations).toHaveLength(1);
+  expect(second.automationNextCursor).toBeNull();
+  expect([...first.automations!, ...second.automations!]).toEqual(snapshot.automations!);
+  expect(second.totals).toEqual(snapshot.totals);
+
+  const refusal = (task: typeof ran) => ({
+    workspaceId: scope.workspaceId,
+    taskId: task.id,
+    taskAuthorityRevision: task.authorityRevision,
+    taskExecutionDigest: task.executionDigest,
+    triggerType: "scheduled" as const,
+    producerKey: crypto.randomUUID(),
+    reason: "scheduled_authority_unavailable" as const,
+    retryable: false,
+  });
+  const inserted = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const firstWriter = client.db.transaction(async (db) => {
+    try {
+      await recordScheduledTaskAdmissionRefusal(db, refusal(ran));
+      inserted.resolve();
+      await finish.promise;
+    } catch (error) {
+      inserted.reject(error);
+      throw error;
+    }
+  });
+  try {
+    await inserted.promise;
+    await withDatabaseStatementTimeout(client.db, 1_000, (db) =>
+      recordScheduledTaskAdmissionRefusal(db, refusal(unused)),
+    );
+  } finally {
+    finish.resolve();
+    await firstWriter;
+  }
+  const rolledBack = new Error("roll back terminal settlement");
+  await expect(
+    client.db.transaction(async (db) => {
+      await recordScheduledTaskAdmissionRefusal(db, { ...refusal(ran), triggerType: "manual" });
+      throw rolledBack;
+    }),
+  ).rejects.toThrow(rolledBack.message);
+  const beforeCompaction = await metrics();
+  expect(count(beforeCompaction, "manual", "failed")).toBe(count(before, "manual", "failed"));
+  expect(count(beforeCompaction, "once", "failed")).toBe(count(after, "once", "failed") + 2);
+  await Promise.all([
+    compactAutomationRunCounters(client.db),
+    compactAutomationRunCounters(client.db),
   ]);
+  const [folded] = await client.db.execute<{ pending: boolean; runs: string }>(sql`
+    select exists(select 1 from automation_run_outcome_events) as pending,
+      (select runs::text from automation_run_counters
+        where trigger_kind = 'once' and outcome = 'failed') as runs`);
+  expect(folded).toEqual({
+    pending: false,
+    runs: String(count(beforeCompaction, "once", "failed")),
+  });
+  expect(await metrics()).toBe(beforeCompaction);
   const withoutScheduleRead = await bearer(scope, ["billing:read", "sessions:read"]);
   const noAccess = await app.request(path(scope, true, "usage", "range=24h"), {
     headers: { authorization: withoutScheduleRead },

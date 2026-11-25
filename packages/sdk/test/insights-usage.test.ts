@@ -131,8 +131,14 @@ describe("expanded shared Insights SDK requests", () => {
   });
 
   test("organization usage encodes custom calendar days and recorded source/plan selectors", async () => {
-    const { client, requests } = fixture();
-    await client.getOrganizationInsightsUsage(id, {
+    const cursor = `${id}.${secondId}`;
+    const { client, requests, result } = fixture({
+      automations: [
+        { id: secondId, name: "Periodic task", workspaceId: id, workspaceName: "Team", fires: 0 },
+      ],
+      automationNextCursor: cursor,
+    });
+    const received = await client.getOrganizationInsightsUsage(id, {
       range: "custom",
       from: "2026-10-01",
       to: "2026-10-02",
@@ -141,14 +147,16 @@ describe("expanded shared Insights SDK requests", () => {
       source: ["api", "other"],
       plan: ["historical", "unknown"],
       seriesGroups: true,
+      automationCursor: cursor,
     });
+    expect(received).toEqual(result);
     const url = new URL(requests[0]!.url);
     expect(url.pathname).toBe(`/v1/organizations/${id}/insights/usage`);
     const query = OrganizationInsightsUsageQuery.parse(
       Object.fromEntries(
         [...new Set(url.searchParams.keys())].map((key) => [
           key,
-          ["range", "from", "to", "groupBy", "seriesGroups"].includes(key)
+          ["range", "from", "to", "groupBy", "seriesGroups", "automationCursor"].includes(key)
             ? url.searchParams.get(key)
             : url.searchParams.getAll(key),
         ]),
@@ -163,6 +171,7 @@ describe("expanded shared Insights SDK requests", () => {
       plan: ["historical", "unknown"],
       workspaceId: [id, secondId],
       seriesGroups: true,
+      automationCursor: cursor,
     });
   });
 

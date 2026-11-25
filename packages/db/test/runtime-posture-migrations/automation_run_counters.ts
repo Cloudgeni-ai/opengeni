@@ -1,7 +1,7 @@
 import type { RuntimePostureMigration } from "../runtime-posture-migrations";
 
-/** Deployment-wide outcome counters: FORCE RLS, read/insert/update. */
+/** Deployment-wide metrics: pending outcomes and compacted totals. */
 export default {
   migration: "1566_automation_run_counters",
-  forceRls: { readInsertUpdate: 1 },
+  forceRls: { fullDml: 1, readInsertUpdate: 1 },
 } satisfies RuntimePostureMigration;

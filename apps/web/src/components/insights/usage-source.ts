@@ -231,3 +231,21 @@ export async function loadUsageCalls(
     { signal },
   );
 }
+
+export async function loadAutomationInventoryPage(
+  client: ChatClient<OpenGeniClient>,
+  scope: Extract<UsageScope, { kind: "organization" }>,
+  query: UsageQuery,
+  cursor: string,
+  signal: AbortSignal,
+): Promise<{ automations: NonNullable<UsageResponse["automations"]>; next: string | null }> {
+  const response = await client.requestJson<InsightsUsageResponse>(
+    "GET",
+    `${basePath(scope)}/usage`,
+    undefined,
+    { ...queryParams(query), automationCursor: cursor },
+    { signal },
+  );
+  if (!response.automations) throw new Error("Automation inventory unavailable");
+  return { automations: response.automations, next: response.automationNextCursor ?? null };
+}

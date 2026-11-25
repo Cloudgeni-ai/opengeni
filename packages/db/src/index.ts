@@ -1513,6 +1513,7 @@ export * from "./insights";
 export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
+export * from "./automation-run-metrics";
 export * from "./sandbox-viewer-only-drain";
 export * from "./sandbox-fleet-limits";
 import {

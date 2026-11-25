@@ -66,7 +66,7 @@ export function insightsRawQuerySupported(
     "scheduleId",
     "source",
     "limit",
-    ...(organization ? ["workspaceId"] : []),
+    ...(organization ? (calls ? ["workspaceId"] : ["workspaceId", "automationCursor"]) : []),
     ...(calls ? ["cursor"] : ["groupBy", "seriesGroups", "agentId"]),
   ]);
   if (Object.keys(query).some((key) => !keys.has(key))) return false;
@@ -113,8 +113,8 @@ function organizationCacheAuthority(context: AccessContext, accountId: string) {
 
 function rawUsageResponse(response: Awaited<ReturnType<typeof getInsightsUsage>>) {
   const parsed = InsightsUsageResponse.parse(response);
-  // A newer contract can supply an additive default. Absence is a capability
-  // signal, so this raw implementation must not manufacture source support.
+  // Preserve an older reader's missing capability marker when validation
+  // supplies an additive default.
   if (!Object.hasOwn(response.facets, "sources")) Reflect.deleteProperty(parsed.facets, "sources");
   return parsed;
 }

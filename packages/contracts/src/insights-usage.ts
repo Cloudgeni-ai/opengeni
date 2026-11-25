@@ -402,6 +402,12 @@ export const WorkspaceInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceInsightsUsageQuery = z.infer<typeof WorkspaceInsightsUsageQuery>;
 export type WorkspaceInsightsUsageQueryInput = z.input<typeof WorkspaceInsightsUsageQuery>;
 
+const AutomationInventoryCursor = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.regex(
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+  ),
+);
+
 export const OrganizationInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -411,6 +417,8 @@ export const OrganizationInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
       groupBy: InsightsUsageGroupBy.default("model"),
       seriesGroups: QueryBoolean.optional(),
       limit: queryLimit(200),
+      /** Continue only the automation inventory; totals and groups are unchanged. */
+      automationCursor: AutomationInventoryCursor.optional(),
     })
     .strict()
     .superRefine(validateWindowQuery),
@@ -731,6 +739,7 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
             .strict(),
         )
         .optional(),
+      automationNextCursor: AutomationInventoryCursor.nullable().optional(),
       /**
        * The ranges this server answers. Servers older than the rolling hour
        * ranges omit it; they answer only the six calendar presets.

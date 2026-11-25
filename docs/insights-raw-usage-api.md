@@ -45,7 +45,8 @@ The calls endpoint does not accept `agentId`.
 
 Usage can group by `source`; both usage and calls can filter by `source`.
 The values are `web`, `api` (including SDK/embed and MCP entry), `slack`,
-`schedule`, `agent`, and `other` (including unknown legacy provenance).
+`schedule`, `agent`, and `other`. `other` also covers system, site, and voice
+turn surfaces and records without usable provenance.
 An attributed automation run takes priority over the accepted turn's entry
 surface. Source filters only match visible usage. Hidden amounts remain in
 their usual aggregate rows and never reveal a source. `facets.sources` declares
@@ -54,13 +55,17 @@ accepted turns in the requested window; ordinary reads retain hourly rollups.
 
 Organization Insights also returns `automations` on the same usage endpoint
 (`getOrganizationInsightsUsage` in the SDK). Each row contains the automation
-and workspace IDs and names and `fires`: all persisted runs created in the
+and workspace IDs and names and `fires`: visible persisted runs created in the
 selected window, regardless of outcome or whether they used a model. An existing
 automation without runs is included with zero. The inventory respects the
 workspace filter and the existing `scheduled_tasks:run` grant and visibility
 rules; other usage filters don't change the inventory or its counts. An
 all-workspaces organization key includes only Shared workspaces, never another
-person's Personal workspace or Only me automations. Older servers omit the field.
+person's Personal workspace or Only me automations. Pages are ordered by
+workspace and automation ID and use the existing `limit` (at most 50 inventory
+rows per response). Pass `automationNextCursor` as `automationCursor` with the
+same range and workspace filter to continue; `null` means the last page. The
+cursor does not change usage totals or groups. Older servers omit the inventory.
 
 Charged amounts come only from negative `model_usage_debit` / `model_response`
 credit-ledger entries, matched by `turnId:sourceKey`. Requested fact prices are

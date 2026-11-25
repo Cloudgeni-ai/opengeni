@@ -446,14 +446,7 @@ export async function readInsightsUsage(
         ...rows<{ payload: Record<string, unknown> }>(result)[0]!.payload,
         prior: prior!.prior,
         ...(input.workspaceId === null
-          ? {
-              automations: await readOrganizationAutomationInventory(
-                scoped,
-                input,
-                window,
-                personal,
-              ),
-            }
+          ? await readOrganizationAutomationInventory(scoped, input, window, personal)
           : {}),
       };
     },
@@ -486,19 +479,22 @@ async function readOrganizationAutomationInventory(
   input: Scope & { query: InsightsUsageQuery },
   window: { since: Date; until: Date },
   personal: string | null,
-): Promise<NonNullable<InsightsUsageResponse["automations"]>> {
+): Promise<Pick<InsightsUsageResponse, "automations" | "automationNextCursor">> {
   const subject = currentSessionRlsActorContext()?.subjectId;
-  if (!subject) return [];
+  const inventory: NonNullable<InsightsUsageResponse["automations"]> = [];
   const allowed = new Set(input.automationWorkspaceIds ?? []);
-  if (allowed.size === 0 && !input.automationSharedWorkspaces) return [];
+  if (!subject || (allowed.size === 0 && !input.automationSharedWorkspaces))
+    return { automations: inventory, automationNextCursor: null };
+  const [afterWorkspace, afterTask] = input.query.automationCursor?.split(".") ?? [];
+  const pageSize = Math.min(50, input.query.limit);
   const selected = input.query.workspaceId && new Set(input.query.workspaceId);
   const workspaces = rows<{ id: string; name: string }>(
     await db.execute(sql`
     select w.id::text,w.name from workspaces w where w.account_id=${input.accountId}::uuid
+      ${afterWorkspace ? sql`and w.id>=${afterWorkspace}::uuid` : sql``}
       and (w.id in(select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid))
-        or w.id=${personal}::uuid) order by w.name,w.id`),
+        or w.id=${personal}::uuid) order by w.id`),
   );
-  const inventory: NonNullable<InsightsUsageResponse["automations"]> = [];
   for (const workspace of workspaces) {
     if (
       (!input.automationSharedWorkspaces && !allowed.has(workspace.id)) ||
@@ -511,20 +507,31 @@ async function readOrganizationAutomationInventory(
       async (scoped) =>
         rows<{ id: string; name: string; fires: number }>(
           await scoped.execute(sql`
+        with page as materialized (
+          select id,name,workspace_id from scheduled_tasks t where t.account_id=${input.accountId}::uuid
+            and t.workspace_id=${workspace.id}::uuid and t.deleted_at is null
+            and (t.visibility='workspace_shared' or t.owner_subject_id=${subject})
+            ${afterTask && workspace.id === afterWorkspace ? sql`and t.id>${afterTask}::uuid` : sql``}
+          order by t.id limit ${pageSize + 1 - inventory.length}
+        )
         select t.id::text,t.name,(select count(*)::int from scheduled_task_runs r
           where r.workspace_id=t.workspace_id and r.task_id=t.id
             and r.created_at>=${window.since.toISOString()}::timestamptz
             and r.created_at<${window.until.toISOString()}::timestamptz) as fires
-        from scheduled_tasks t where t.account_id=${input.accountId}::uuid
-          and t.workspace_id=${workspace.id}::uuid and t.deleted_at is null
-          and (t.visibility='workspace_shared' or t.owner_subject_id=${subject})
-        order by t.name,t.id`),
+        from page t order by t.id`),
         ),
     );
     for (const task of tasks)
       inventory.push({ ...task, workspaceId: workspace.id, workspaceName: workspace.name });
+    if (inventory.length > pageSize) break;
   }
-  return inventory;
+  const hasMore = inventory.length > pageSize;
+  if (hasMore) inventory.pop();
+  const last = inventory.at(-1);
+  return {
+    automations: inventory,
+    automationNextCursor: hasMore && last ? `${last.workspaceId}.${last.id}` : null,
+  };
 }
 
 function cursorScope(input: Scope & { query: InsightsCallsQuery }): string {
