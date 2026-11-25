@@ -2399,7 +2399,7 @@ export const FORCE_RLS_TABLES = [
   "recording_notes",
   "recording_people",
   "recording_segment_edits",
-  // 1565_recording_shares: the team workspace a Personal workspace meeting is shared with.
+  // 1566_recording_shares: the team workspace a Personal workspace meeting is shared with.
   "recording_shares",
   "recording_speaker_assignments",
   "recording_speaker_voices",
@@ -2846,7 +2846,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "recording_notes",
   "recording_people",
   "recording_segment_edits",
-  // 1565_recording_shares: a meeting shared with a team workspace (owner adds, changes, removes).
+  // 1566_recording_shares: a meeting shared with a team workspace (owner adds, changes, removes).
   "recording_shares",
   "recording_speaker_assignments",
   "recording_speaker_voices",

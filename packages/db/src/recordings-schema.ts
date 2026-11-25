@@ -484,7 +484,7 @@ export const recordingEvents = pgTable(
   (table) => [index("recording_events_workspace_idx").on(table.workspaceId, table.occurredAt)],
 );
 
-// Migration 1565. The team workspace a meeting stored in its owner's Personal
+// Migration 1566. The team workspace a meeting stored in its owner's Personal
 // workspace is shared with: its members open it there, read only.
 export const recordingShares = pgTable(
   "recording_shares",
