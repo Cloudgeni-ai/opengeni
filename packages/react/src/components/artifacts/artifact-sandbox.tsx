@@ -183,8 +183,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
   }
   const frame = (gate?: FrameGate) => (
     <PublishedHtmlArtifactFrame
-      // The loading slot keys itself; without it the frame keys on frameKey.
-      key={gate ? undefined : frameKey}
+      {...(gate ? {} : { key: frameKey })}
       title={props.title}
       html={props.html}
       autoHeight={Boolean(props.autoHeight && !focused)}

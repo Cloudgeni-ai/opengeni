@@ -23,13 +23,28 @@ import {
   HTML_FRAME_HOST_VERSION,
 } from "@opengeni/contracts/html-frame-host";
 
+// React warns about a spread key only once per component, so watch the whole file.
+const keySpreadWarnings: unknown[][] = [];
+const originalConsoleError = console.error;
+
 beforeAll(() => {
+  console.error = (...args: unknown[]) => {
+    if (String(args[0]).includes('containing a "key" prop is being spread')) {
+      keySpreadWarnings.push(args);
+    }
+    originalConsoleError(...args);
+  };
   GlobalRegistrator.register();
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
 });
-afterAll(() => GlobalRegistrator.unregister());
+afterAll(() => {
+  GlobalRegistrator.unregister();
+  console.error = originalConsoleError;
+  // The frame key is passed directly, never through a props spread.
+  expect(keySpreadWarnings).toEqual([]);
+});
 
 describe("published HTML artifacts", () => {
   it("runs exact source without parent-origin or top-navigation authority", () => {
@@ -63,19 +78,6 @@ describe("published HTML artifacts", () => {
         <ArtifactSandbox html="<h1>App</h1>" title="Preview" showTitle={false} />,
       ),
     ).toContain('aria-label="Preview"');
-  });
-
-  it("passes the frame key directly, never through a props spread", () => {
-    const consoleError = spyOn(console, "error").mockImplementation(() => {});
-    try {
-      renderToStaticMarkup(<ArtifactSandbox html="<h1>App</h1>" title="Status" />);
-      const keySpread = consoleError.mock.calls.filter((call) =>
-        String(call[0]).includes('containing a "key" prop is being spread'),
-      );
-      expect(keySpread).toEqual([]);
-    } finally {
-      consoleError.mockRestore();
-    }
   });
 
   it("lets the host replace or hide the Live indicator", () => {
