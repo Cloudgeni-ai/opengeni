@@ -1,13 +1,21 @@
 import { VISUALIZATION_CSS, VISUALIZATION_HELPERS } from "./visualization-assets.gen";
 
-/** Conversation styling/helpers only. Rendering and tool transport remain in the Site frame. */
+/**
+ * Conversation styling/helpers only. Rendering and tool transport remain in the Site frame.
+ *
+ * The height reporter sits right after the fragment, before the helpers: a
+ * parser-inserted script runs only after the stylesheets above it (a
+ * fragment's Google Fonts `<link>`) and the fragment's own blocking scripts,
+ * so its first report means the content can paint, and it never waits on the
+ * helpers' CDN scripts. The host shows its loading surface until that report
+ * (bounded, see `ArtifactSandbox`).
+ */
 export function inlineHtmlDocument(fragment: string): string {
   return (
     '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>' +
     VISUALIZATION_CSS +
     "</style><style>html,body{margin:0;min-height:0}body{padding:16px;box-sizing:border-box}</style></head><body>" +
     fragment +
-    VISUALIZATION_HELPERS +
     `<script>
 (()=>{
   window.addEventListener('message',event=>{
@@ -19,6 +27,8 @@ export function inlineHtmlDocument(fragment: string): string {
   const resize=()=>{const height=Math.ceil(document.body.getBoundingClientRect().height);if(height!==previous){previous=height;parent.postMessage({type:'opengeni.preview.height',height},'*')}};
   new ResizeObserver(resize).observe(document.body);resize();
 })();
-</script></body></html>`
+</script>` +
+    VISUALIZATION_HELPERS +
+    "</body></html>"
   );
 }
