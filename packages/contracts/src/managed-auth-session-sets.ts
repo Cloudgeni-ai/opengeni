@@ -180,6 +180,8 @@ export const StartManagedAuthSocialTransactionRequest = /* @__PURE__ */ defineSc
     transactionId: primitives.uuid,
     provider: ManagedAuthSocialProvider,
     signupChallengeToken: z.string().max(2048).optional(),
+    /** Heedeo signup scoring token; ignored when not a string within bounds. */
+    heedeoToken: z.string().max(4096).optional().catch(undefined),
     /**
      * Optional untrusted first-touch campaign tokens, used only by the
      * content-free sign-up acquisition counter when this start creates a new

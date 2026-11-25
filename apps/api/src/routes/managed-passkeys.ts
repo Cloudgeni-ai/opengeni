@@ -37,6 +37,7 @@ import {
   verifyManagedPasskeySignIn,
 } from "../auth/managed-passkeys";
 import type { ManagedAuthNewSignupsGate } from "../auth/new-signups-gate";
+import { heedeoSignupRequestFrom, runWithHeedeoSignup } from "../auth/heedeo-signup";
 import { runWithSignupChallenge, verifySignupChallenge } from "../auth/signup-challenge";
 import { parseRequestBody } from "../http/request-body";
 import {
@@ -537,15 +538,17 @@ export function registerManagedPasskeyRoutes(
       let user: { id: string } | null;
       try {
         user = await runManagedAuthProvider("passkey", () =>
-          runWithSignupChallenge(ceremony.signupChallengeVerified === true, () =>
-            internal.createUser(
-              {
-                id: userId,
-                email: passkeyOnlyAccountEmail(userId),
-                name: ceremony.name ?? "Passkey user",
-                emailVerified: true,
-              },
-              { method: "passkey" },
+          runWithHeedeoSignup(heedeoSignupRequestFrom(context.req.raw, request.heedeoToken), () =>
+            runWithSignupChallenge(ceremony.signupChallengeVerified === true, () =>
+              internal.createUser(
+                {
+                  id: userId,
+                  email: passkeyOnlyAccountEmail(userId),
+                  name: ceremony.name ?? "Passkey user",
+                  emailVerified: true,
+                },
+                { method: "passkey" },
+              ),
             ),
           ),
         );
