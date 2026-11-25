@@ -1719,6 +1719,13 @@ function launchEnvironment(
   }
   Object.assign(environment, options.environment);
   if (options.timezone) environment.TZ = supportedTimezone(options.timezone);
+  // The desktop image's browser wrapper adds a default profile of its own
+  // unless this names one. A wrapper from an image older than its fix adds it
+  // even next to the controller's own --user-data-dir, and a sandbox keeps the
+  // image it was created from, so name the controller's profile: every
+  // profile switch then names the same directory and the browser stays
+  // provably this controller's.
+  environment.OPENGENI_BROWSER_PROFILE = resolve(options.profileDirectory);
   if (browserLaunch?.backgroundBrowserExecutable) {
     environment.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE = browserLaunch.backgroundBrowserExecutable;
     environment.OPENGENI_BACKGROUND_BROWSER_PID_FILE = browserPidFile;

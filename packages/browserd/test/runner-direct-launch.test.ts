@@ -12,14 +12,15 @@ const native = process.platform === "linux" || process.platform === "darwin";
 
 /** A stand-in for Chrome: a single executable that accepts Chrome's command
  * line, records it, takes the profile lock and writes DevToolsActivePort as
- * Chrome does for `--remote-debugging-port=0`. A `crash` file next to the
- * profile makes it fail on stderr before it writes the port file. */
+ * Chrome does for `--remote-debugging-port=0`. Like Chrome, the last profile
+ * switch wins. A `crash` file next to the profile makes it fail on stderr
+ * before it writes the port file. */
 const SYNTHETIC_BROWSER = `
 import { existsSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
 if (args.includes("--version")) { console.log("Synthetic Browser"); process.exit(0); }
-const profile = args.find((a) => a.startsWith("--user-data-dir="))?.slice("--user-data-dir=".length);
+const profile = args.findLast((a) => a.startsWith("--user-data-dir="))?.slice("--user-data-dir=".length);
 if (!profile) process.exit(2);
 writeFileSync(join(dirname(profile), "argv.json"), JSON.stringify(args));
 if (existsSync(join(dirname(profile), "crash"))) {
@@ -116,6 +117,43 @@ test.skipIf(!native)(
         expect(argv).not.toContain(tell);
 
       await expect(runner.run(["click", "@e1"])).rejects.toThrow("only its CDP transport");
+      await runner.terminate();
+      await waitUntilGone(pid);
+    } finally {
+      await runner.terminate().catch(() => undefined);
+    }
+  },
+  30_000,
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a launch through an older desktop browser wrapper still records the browser it started",
+  async () => {
+    const { directory, options } = await session("older-wrapper");
+    // The desktop image's wrapper before it kept a caller's own profile: it
+    // always adds its default profile, which a caller may name.
+    const wrapper = join(directory, "opengeni-browser");
+    await writeFile(
+      wrapper,
+      `#!/bin/sh\nexec ${JSON.stringify(browserExecutable)} --no-sandbox --user-data-dir="\${OPENGENI_BROWSER_PROFILE:-${join(directory, "wrapper-default-profile")}}" "$@"\n`,
+      { mode: 0o700 },
+    );
+    const runner = await ManagedBrowserRunner.create({
+      ...options,
+      browserExecutablePath: wrapper,
+    });
+    try {
+      const { cdpUrl } = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      const pid = Number((await readFile(join(directory, "browser.pid"), "utf8")).trim());
+      const argv = JSON.parse(await readFile(join(directory, "argv.json"), "utf8")) as string[];
+      expect(argv.filter((argument) => argument.startsWith("--user-data-dir"))).toEqual([
+        `--user-data-dir=${options.profileDirectory}`,
+        `--user-data-dir=${options.profileDirectory}`,
+      ]);
+      // Without a recorded process, the browser could never be continued
+      // after it stops.
+      const receipt = await runner.ownedProcessIdentity(cdpUrl, pid);
+      expect(receipt?.pid).toBe(pid);
       await runner.terminate();
       await waitUntilGone(pid);
     } finally {
