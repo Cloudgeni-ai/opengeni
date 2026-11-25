@@ -552,10 +552,12 @@ whole.
   run mode, chat and visibility after the edit. Any trigger type in the catalog works,
   including types added later, because the trigger is the automation's own.
   Event runs keep the automation limits: the chain limit, the storm guard
-  (`maxRunsPerHour`) and usage limits. One event delivery starts at most one
-  run per agent: when several of an agent's automations match it, the oldest
-  one runs and the others record a skipped run with reason
-  `duplicate_agent_run`. The page lists the automations with
+  (`maxRunsPerHour`) and usage limits. Each event starts at most one run per
+  agent and owner: when several of a person's (or the workspace's)
+  automations of one agent match it, one takes it (not one held back by the
+  storm guard or a known blocker, then the oldest), and one left with none of
+  the delivery's events records a skipped run with reason
+  `duplicate_agent_run`, once per streak. The page lists the automations with
   an on/off switch (pause/resume) and remove. **Add trigger** opens a small
   dialog on the page (`agent-trigger-dialog.tsx`, the picker in
   `agent-trigger-picker.tsx`, pure parts in `agent-trigger-model.ts`). Its

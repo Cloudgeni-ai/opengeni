@@ -934,9 +934,10 @@ async function deliveryEvents(
  *
  * One event starts at most one run per agent and owner: when several
  * automations of the same agent (`agentConfig.agentId`) and owner match an
- * event, only one queues it: one that isn't held back by the storm guard,
- * then the oldest. An automation left with none of the delivery's events
- * records a skipped run (reason `duplicate_agent_run`) in its run history.
+ * event, only one queues it: one that isn't held back by the storm guard or
+ * a blocker its owner was told about, then the oldest. An automation left
+ * with none of the delivery's events records a skipped run (reason
+ * `duplicate_agent_run`) in its run history, once per streak of them.
  * Automations of different agents or owners, and ones without an agent,
  * each run.
  */
@@ -961,7 +962,7 @@ async function queueMatchingEvents(
     authority_revision: number;
     execution_digest: string | null;
     owner_subject_id: string | null;
-    throttled: boolean;
+    held: boolean;
   }>(
     tx,
     sql`select trigger.id, trigger.task_id, trigger.event_types, trigger.conditions,
@@ -969,7 +970,10 @@ async function queueMatchingEvents(
         nullif(task.agent_config ->> 'agentId', '') as agent_id,
         task.created_at as task_created_at, task.account_id as task_account_id,
         task.authority_revision, task.execution_digest, task.owner_subject_id,
-        settings.throttled_since is not null as throttled
+        (settings.throttled_since is not null or exists (
+          select 1 from scheduled_task_blocker_reviews review
+          where review.workspace_id = task.workspace_id and review.task_id = task.id
+            and review.state = 'notified')) as held
       from event_triggers trigger
       join scheduled_tasks task
         on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
@@ -1019,7 +1023,7 @@ async function queueMatchingEvents(
     if (agentTasks.length < 2) continue;
     const ranked = [...agentTasks].sort(
       (a, b) =>
-        Number(a.throttled) - Number(b.throttled) ||
+        Number(a.held) - Number(b.held) ||
         asDate(a.task_created_at).getTime() - asDate(b.task_created_at).getTime() ||
         (a.task_id < b.task_id ? -1 : a.task_id > b.task_id ? 1 : 0),
     );
@@ -1042,6 +1046,7 @@ async function queueMatchingEvents(
         executionDigest: duplicate.execution_digest,
         producerKey: eventDuplicateAgentRunProducerKey(deliveryId, duplicate.task_id),
         reason: EVENT_DUPLICATE_AGENT_RUN_REASON,
+        oncePerStreak: true,
       });
     }
   }
@@ -2091,9 +2096,20 @@ async function recordSkippedEventRun(
     executionDigest: string | null;
     producerKey: string;
     reason: string;
+    /** Not when the automation's latest run is already this skip. */
+    oncePerStreak?: boolean;
   },
 ): Promise<boolean> {
   const refusal = JSON.stringify({ version: 1, reason: input.reason, retryable: true });
+  if (input.oncePerStreak) {
+    const [latest] = await rawRows<{ error: string | null }>(
+      tx,
+      sql`select error from scheduled_task_runs
+        where workspace_id = ${input.workspaceId} and task_id = ${input.taskId}
+        order by created_at desc, id desc limit 1`,
+    );
+    if (latest?.error === input.reason) return false;
+  }
   try {
     return await tx.transaction(async (savepoint) => {
       const rows = await rawRows<{ id: string }>(

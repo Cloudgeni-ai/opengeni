@@ -742,6 +742,10 @@ describe("deliveries and matching", () => {
     const second = await deliver(space, source.id, [event("comment.created")]);
     expect(second.matchedTaskIds).toContain(oldest.id);
     expect(second.matchedTaskIds).not.toContain(newer.id);
+    // One skipped run per streak, not one per delivery.
+    const [{ count } = { count: 0 }] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from scheduled_task_runs where task_id = ${newer.id}`;
+    expect(count).toBe(1);
     let reviewed: string[] | null = null;
     await reviewScheduledTaskBlockers(client.db, space.workspaceId, newer.id, (review) => {
       reviewed = review.runs.map((entry) => entry.id);

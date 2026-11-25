@@ -684,11 +684,13 @@ the thread delivery from the wake; recurring ones don't. See [../session-status-
   Meetings, and the "Also run for what Opengeni does" switch is offered for
   "This workspace" as well as GitHub and Slack. A run the chain limit left
   out shows as skipped with reason "chain limit".
-  One delivery starts at most one run per agent (`agentConfig.agentId`):
-  when several automations of the same agent match it, the oldest one queues
-  the events and each other one records a skipped run with reason
-  `duplicate_agent_run` (migration 1565). Automations of different agents,
-  and ones without an agent, each run.
+  Each event starts at most one run per agent (`agentConfig.agentId`) and
+  owner: when several such automations match it, one queues it (not one held
+  back by the storm guard or a blocker its owner was told about, then the
+  oldest). An automation left with none of the delivery's events records a
+  skipped run with reason `duplicate_agent_run` (migration 1565), once per
+  streak. Automations of different agents or owners, and ones without an
+  agent, each run.
   Event sources have a page with their endpoint, status and delivery log. Chats
   show what they are waiting for: the chat row's mark and hover card, the
   command menu and the chat header name the event and its source ("Waiting
