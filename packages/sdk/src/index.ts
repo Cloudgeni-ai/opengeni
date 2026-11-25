@@ -282,6 +282,7 @@ export type {
   ResolvedSidebarLayoutOptions,
   ResolvedSidebarLiveList,
   SidebarItemIcon,
+  SidebarAppsPlacement,
   SidebarItemOrigin,
   SidebarLayoutChange,
   SidebarLayoutOptions,

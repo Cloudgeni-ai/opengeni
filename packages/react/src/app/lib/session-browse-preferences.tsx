@@ -132,6 +132,47 @@ function groupByStorageKey(preferenceStorageId: string): string {
 /** Far above any real number of projects; only bounds what a bad value can cost. */
 const MAX_REMEMBERED_COLLAPSED_SECTIONS = 1000;
 
+/** The Sessions list's tab when apps have a tab of their own. */
+export type SessionRailTab = "sessions" | "apps";
+
+/** The tab this person last opened in this workspace on this device; Sessions by default. */
+export function readSessionRailTab(
+  id: string,
+  storage: BrowsePreferenceStorage | null = browserStorage(),
+): SessionRailTab {
+  try {
+    return storage?.getItem(`${id}:tab`) === "apps" ? "apps" : "sessions";
+  } catch {
+    return "sessions";
+  }
+}
+
+export function writeSessionRailTab(
+  id: string,
+  tab: SessionRailTab,
+  storage: BrowsePreferenceStorage | null = browserStorage(),
+): void {
+  try {
+    storage?.setItem(`${id}:tab`, tab);
+  } catch {
+    /* Storage may be unavailable; the tab still switches for this visit. */
+  }
+}
+
+/** The open tab for one person and workspace, remembered on this device. */
+export function useSessionRailTab(id: string): [SessionRailTab, (tab: SessionRailTab) => void] {
+  const [state, setState] = useState(() => ({ id, tab: readSessionRailTab(id) }));
+  const tab = state.id === id ? state.tab : readSessionRailTab(id);
+  const setTab = useCallback(
+    (next: SessionRailTab) => {
+      writeSessionRailTab(id, next);
+      setState({ id, tab: next });
+    },
+    [id],
+  );
+  return [tab, setTab];
+}
+
 /**
  * The list sections (projects and other groups) this person collapsed in this
  * workspace on this device. Only collapses are remembered, so a new project

@@ -761,6 +761,7 @@ describe("options", () => {
     expect(readResolvedSidebarOptions(undefined)).toEqual(DEFAULT_SIDEBAR_LAYOUT_OPTIONS);
     expect(DEFAULT_SIDEBAR_LAYOUT_OPTIONS).toEqual({
       sessionsShowApps: true,
+      appsPlacement: "sessions",
       hiddenNavEntries: [],
       settingsMore: null,
     });
@@ -772,7 +773,11 @@ describe("options", () => {
       parseChanges([{ op: "options", sessionsShowApps: false, hiddenNavEntries: ["meetings"] }]),
       ids(),
     );
-    expect(workspace.options).toEqual({ sessionsShowApps: false, hiddenNavEntries: ["meetings"] });
+    expect(workspace.options).toEqual({
+      sessionsShowApps: false,
+      appsPlacement: "hidden",
+      hiddenNavEntries: ["meetings"],
+    });
     const member = applyPersonalSidebarChanges(
       workspace,
       EMPTY_SIDEBAR_PERSONAL_CHANGES,
@@ -782,6 +787,7 @@ describe("options", () => {
     expect(sidebarPersonalChangesCustomized(member)).toBe(true);
     expect(mergeSidebarOptions(workspace.options, member.options)).toEqual({
       sessionsShowApps: false,
+      appsPlacement: "hidden",
       hiddenNavEntries: [],
       settingsMore: ["workspace:general"],
     });
@@ -833,6 +839,120 @@ describe("options", () => {
   });
 });
 
+describe("apps placement", () => {
+  const personal = (options: Record<string, unknown>) =>
+    readStoredSidebarPersonalChanges({ ...EMPTY_SIDEBAR_PERSONAL_CHANGES, options }).options;
+
+  test("saved layouts from before it keep their meaning", () => {
+    expect(mergeSidebarOptions(undefined, personal({ sessionsShowApps: false }))).toMatchObject({
+      sessionsShowApps: false,
+      appsPlacement: "hidden",
+    });
+    expect(mergeSidebarOptions(undefined, personal({ sessionsShowApps: true }))).toMatchObject({
+      sessionsShowApps: true,
+      appsPlacement: "sessions",
+    });
+    // An older server's answer has no appsPlacement.
+    expect(
+      readResolvedSidebarOptions({
+        sessionsShowApps: false,
+        hiddenNavEntries: [],
+        settingsMore: null,
+      }).appsPlacement,
+    ).toBe("hidden");
+  });
+
+  test("setting it sets sessionsShowApps for older readers, and the other way round", () => {
+    const tab = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "options", appsPlacement: "tab" }]),
+      ids(),
+    );
+    expect(tab.options).toEqual({ appsPlacement: "tab", sessionsShowApps: true });
+    expect(mergeSidebarOptions(undefined, tab.options)).toMatchObject({
+      appsPlacement: "tab",
+      sessionsShowApps: true,
+    });
+    const hidden = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      tab,
+      parseChanges([{ op: "options", appsPlacement: "hidden" }]),
+      ids(),
+    );
+    expect(hidden.options).toEqual({ appsPlacement: "hidden", sessionsShowApps: false });
+    // An API caller using the older option moves the placement with it.
+    const legacy = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      tab,
+      parseChanges([{ op: "options", sessionsShowApps: false }]),
+      ids(),
+    );
+    expect(legacy.options).toEqual({ appsPlacement: "hidden", sessionsShowApps: false });
+    // In one change, appsPlacement wins.
+    const both = applyPersonalSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "options", sessionsShowApps: false, appsPlacement: "tab" }]),
+      ids(),
+    );
+    expect(both.options).toEqual({ appsPlacement: "tab", sessionsShowApps: true });
+    // Null on either clears both, back to the default's.
+    for (const clear of [{ appsPlacement: null }, { sessionsShowApps: null }])
+      expect(
+        applyPersonalSidebarChanges(
+          EMPTY_SIDEBAR_LAYOUT,
+          tab,
+          parseChanges([{ op: "options", ...clear }]),
+          ids(),
+        ).options,
+      ).toBeUndefined();
+  });
+
+  test("a person's own placement wins over the default's; unset follows it", () => {
+    const workspace = applyWorkspaceSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      parseChanges([{ op: "options", appsPlacement: "tab" }]),
+      ids(),
+    );
+    expect(mergeSidebarOptions(workspace.options, undefined).appsPlacement).toBe("tab");
+    expect(
+      mergeSidebarOptions(workspace.options, personal({ sessionsShowApps: false })).appsPlacement,
+    ).toBe("hidden");
+    expect(
+      mergeSidebarOptions(workspace.options, personal({ appsPlacement: "sessions" })).appsPlacement,
+    ).toBe("sessions");
+  });
+
+  test("an older version's later sessionsShowApps change wins over a stale placement", () => {
+    // An older replica sets only sessionsShowApps and keeps appsPlacement as stored.
+    expect(
+      mergeSidebarOptions(undefined, personal({ appsPlacement: "tab", sessionsShowApps: false }))
+        .appsPlacement,
+    ).toBe("hidden");
+    expect(
+      mergeSidebarOptions(undefined, personal({ appsPlacement: "hidden", sessionsShowApps: true }))
+        .appsPlacement,
+    ).toBe("sessions");
+    // A value a newer version added is read as unset and kept in storage.
+    const stored = personal({ appsPlacement: "drawer", sessionsShowApps: true });
+    expect(stored).toEqual({ appsPlacement: "drawer", sessionsShowApps: true } as never);
+    expect(knownSidebarOptions(stored)).toEqual({ sessionsShowApps: true });
+    expect(mergeSidebarOptions(undefined, stored).appsPlacement).toBe("sessions");
+  });
+
+  test("the request schema takes it, and refuses values it doesn't know", () => {
+    const request = { scope: "personal", changes: [{ op: "options", appsPlacement: "tab" }] };
+    expect(UpdateSidebarLayoutRequest.parse(request)).toEqual(request as never);
+    expect(
+      UpdateSidebarLayoutRequest.safeParse({
+        scope: "personal",
+        changes: [{ op: "options", appsPlacement: "drawer" }],
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe("rolling deploy: this version writing what a newer one stored", () => {
   // What a newer API replica stored: an option, a top-level field and a
   // version this one doesn't know, beside ones it does.
@@ -874,7 +994,7 @@ describe("rolling deploy: this version writing what a newer one stored", () => {
         { id: "a", type: "app", appId: APP_A },
         { id: "b", type: "app", appId: APP_B },
       ],
-      options: { ...NEWER_OPTIONS, sessionsShowApps: true },
+      options: { ...NEWER_OPTIONS, sessionsShowApps: true, appsPlacement: "sessions" },
       sections: [{ id: "s1" }],
     });
     // Reset is the one change that clears them.
@@ -943,6 +1063,7 @@ describe("rolling deploy: this version writing what a newer one stored", () => {
       ids(),
     );
     expect(set.options?.sessionsShowApps).toBe(false);
+    expect(set.options?.appsPlacement).toBe("hidden");
   });
 
   test("rail entries a newer version hid stay hidden when this one saves the list", () => {
@@ -976,6 +1097,7 @@ describe("rolling deploy: this version writing what a newer one stored", () => {
   test("every option the schema has is read for answers and applied by changes", () => {
     const every = {
       sessionsShowApps: false,
+      appsPlacement: "hidden",
       hiddenNavEntries: ["meetings"],
       settingsMore: ["workspace:usage"],
     } satisfies Required<SidebarLayoutOptions>;

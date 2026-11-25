@@ -14,6 +14,7 @@ import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { toast } from "sonner";
+import type { SidebarAppsPlacement } from "@opengeni/sdk";
 import { AppPages } from "@opengeni/react/app/routes/app-page";
 import { PromotionReviewBanner } from "@/components/rail/promotion-review-banner";
 import { workspaceSectionForPath } from "@/components/rail/workspace-nav-data";
@@ -35,6 +36,21 @@ import {
 function useSessionsSidebarOptions(workspaceId: string) {
   const { layout, options, update } = useSidebarLayout(workspaceId);
   const sessionsShowApps = options ? options.sessionsShowApps : null;
+  const appsPlacement = options ? options.appsPlacement : null;
+  const personalAvailable = layout?.personal.available === true;
+  const onAppsPlacementChange = useMemo(
+    () =>
+      personalAvailable
+        ? (placement: SidebarAppsPlacement) =>
+            void update({
+              scope: "personal",
+              changes: [{ op: "options", appsPlacement: placement }],
+            }).catch((error: unknown) =>
+              toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
+            )
+        : undefined,
+    [personalAvailable, update],
+  );
   const sidebarApps = useMemo(() => {
     if (!layout?.personal.available) return undefined;
     const linked = new Set<string>();
@@ -55,13 +71,14 @@ function useSessionsSidebarOptions(workspaceId: string) {
         ),
     };
   }, [layout, update]);
-  return { sessionsShowApps, sidebarApps };
+  return { sessionsShowApps, appsPlacement, onAppsPlacementChange, sidebarApps };
 }
 
 function useWebShellSlots(): SessionShellSlots {
   const { collapsed, workspaceId } = useRail();
   const navigate = useNavigate();
-  const { sessionsShowApps, sidebarApps } = useSessionsSidebarOptions(workspaceId);
+  const { sessionsShowApps, appsPlacement, onAppsPlacementChange, sidebarApps } =
+    useSessionsSidebarOptions(workspaceId);
   return useMemo(
     () => ({
       switcher: <SwitcherBlock />,
@@ -94,9 +111,19 @@ function useWebShellSlots(): SessionShellSlots {
           : null;
       },
       sessionsShowApps,
+      appsPlacement,
+      onAppsPlacementChange,
       sidebarApps,
     }),
-    [collapsed, navigate, workspaceId, sessionsShowApps, sidebarApps],
+    [
+      collapsed,
+      navigate,
+      workspaceId,
+      sessionsShowApps,
+      appsPlacement,
+      onAppsPlacementChange,
+      sidebarApps,
+    ],
   );
 }
 

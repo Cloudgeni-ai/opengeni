@@ -32,7 +32,7 @@ import {
   RAIL_ROW_QUICK_ACTIONS_CLASS,
   RailRowQuickAction,
 } from "./rail-row-quick-actions";
-import { SessionBrowseOrderControls } from "./session-browse-order-controls";
+import { SessionBrowseOrderControls, type AppsPlacement } from "./session-browse-order-controls";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -217,6 +217,7 @@ import {
   sortSessionForest,
   compareSessionBrowse,
   projectRailSessions,
+  railSectionsForTab,
   groupSessionsForRail,
   mergeSessionForRail,
   parseSiteRowKey,
@@ -248,7 +249,9 @@ import {
   type SessionBrowsePreferences,
   sessionBrowsePreferenceStorageId,
   useCollapsedSessionSections,
+  useSessionRailTab,
   writeSessionBrowsePreferences,
+  type SessionRailTab,
 } from "../../lib/session-browse-preferences";
 import { creatorPageIdentity, railRowCreator } from "../../lib/creator-initials";
 import {
@@ -491,8 +494,25 @@ export function SessionList() {
   // sidebar options list apps' chats as ordinary chats. Until that's known
   // the list waits, so it never draws app rows only to redraw without them.
   const shellSlots = useContext(SessionShellSlotsContext);
-  const appRowsPending = shellSlots.sessionsShowApps === null;
-  const appRows = shellSlots.sessionsShowApps !== false;
+  // Where apps show: rows here, a tab of their own beside Sessions, or hidden
+  // (their chats listed as ordinary chats). A surface without the newer
+  // choice still says whether apps are rows.
+  const appsPlacement: AppsPlacement | null =
+    shellSlots.appsPlacement !== undefined
+      ? shellSlots.appsPlacement
+      : shellSlots.sessionsShowApps === null
+        ? null
+        : shellSlots.sessionsShowApps === false
+          ? "hidden"
+          : "sessions";
+  const appRowsPending = appsPlacement === null;
+  const appRows = appsPlacement !== "hidden";
+  const [railTab, setRailTab] = useSessionRailTab(browsePreferenceStorageId);
+  // The open tab when apps have one; null lists everything together.
+  const listTab: SessionRailTab | null = appsPlacement === "tab" ? railTab : null;
+  const appsTab = listTab === "apps";
+  const appsTabRef = useRef(appsTab);
+  appsTabRef.current = appsTab;
   const sidebarApps = shellSlots.sidebarApps;
   const channelMode = browseGroupBy === "project";
   const clearBrowseControls = useCallback(() => {
@@ -723,7 +743,8 @@ export function SessionList() {
   );
   const visibleNodesForGroup = useCallback(
     (key: string, nodes: SessionTreeNode[]) =>
-      search
+      // App rows arrive complete, so the Apps tab never windows them.
+      search || appsTab
         ? nodes
         : sessionGroupWindowNodes(
             nodes,
@@ -731,7 +752,7 @@ export function SessionList() {
             activeSessionId,
             archiveReduction(key) > 0 ? 0 : SESSION_GROUP_VISIBLE_STEP,
           ),
-    [activeSessionId, search, visibleCountForGroup, archiveReduction],
+    [activeSessionId, appsTab, search, visibleCountForGroup, archiveReduction],
   );
   const [archiveFolder, setArchiveFolder] = useState({
     generation: pageGeneration,
@@ -978,6 +999,38 @@ export function SessionList() {
   const focusRestoreOperation = useRef(0);
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
+  const tabsId = useId();
+  // Each tab keeps its own scroll position. A tab opened for the first time
+  // keeps the tabs in view.
+  const tabScrollTops = useRef<Partial<Record<SessionRailTab, number>>>({});
+  const pendingTabScroll = useRef<number | null>(null);
+  const switchListTab = useCallback(
+    (next: SessionRailTab) => {
+      if (next === railTab) return;
+      const viewport = tabScrollViewport(listRef.current);
+      if (viewport) {
+        tabScrollTops.current[railTab] = viewport.scrollTop;
+        const header = headerRef.current;
+        const headerTop = header
+          ? header.getBoundingClientRect().top -
+            viewport.getBoundingClientRect().top +
+            viewport.scrollTop
+          : 0;
+        pendingTabScroll.current =
+          tabScrollTops.current[next] ?? Math.min(viewport.scrollTop, Math.max(0, headerTop));
+      }
+      setRailTab(next);
+    },
+    [railTab, setRailTab],
+  );
+  useLayoutEffect(() => {
+    const target = pendingTabScroll.current;
+    pendingTabScroll.current = null;
+    if (target === null) return;
+    const viewport = tabScrollViewport(listRef.current);
+    if (viewport) viewport.scrollTop = target;
+  }, [railTab]);
   useEffect(() => {
     const viewport = listRef.current?.closest("[data-rail-scroll-viewport]");
     if (!viewport) return;
@@ -1732,15 +1785,20 @@ export function SessionList() {
       context.accessContext.subjectId,
     ],
   );
+  // With apps in a tab of their own, each tab lists only its rows.
+  const tabSections = useMemo(
+    () => railSectionsForTab(railSections, listTab),
+    [railSections, listTab],
+  );
   const forest = useMemo(
     () =>
       sortSessionForest(
         browseGroupBy === "activity"
-          ? railSections.ordinary
-          : groupSessionForestForBrowse(railSections.ordinary, browseGroupBy, { creatorLabels }),
+          ? tabSections.ordinary
+          : groupSessionForestForBrowse(tabSections.ordinary, browseGroupBy, { creatorLabels }),
         browseSortBy,
       ),
-    [browseGroupBy, browseSortBy, creatorLabels, railSections.ordinary],
+    [browseGroupBy, browseSortBy, creatorLabels, tabSections.ordinary],
   );
   const visibleForest = useMemo(
     () => ({
@@ -1762,16 +1820,17 @@ export function SessionList() {
   // Keep personal pin order while applying the selected sort to shortcut descendants.
   const pinnedNodes = useMemo(
     () =>
-      railSections.pinned.map((node) => ({
+      tabSections.pinned.map((node) => ({
         ...node,
         children: sortSessionForest({ running: node.children, grouped: [] }, browseSortBy).running,
       })),
-    [railSections.pinned, browseSortBy],
+    [tabSections.pinned, browseSortBy],
   );
   // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
+  // They stay the same in either tab.
   const pinnedChatNodes = useMemo(
-    () => pinnedNodes.filter((node) => !node.siteGroup),
-    [pinnedNodes],
+    () => railSections.pinned.filter((node) => !node.siteGroup),
+    [railSections.pinned],
   );
   // The hierarchy rail always has the same shape: unfiled Recents first, then
   // workstreams. A workspace with no created workstreams should not fall back
@@ -1795,6 +1854,8 @@ export function SessionList() {
             }))
             .filter((section) => {
               if (browseStatus === "archived") return false;
+              // The Apps tab shows projects that have apps.
+              if (appsTab) return section.sessions.length > 0;
               if (showEmptyGroups || section.sessions.length > 0) return true;
               const key = sessionPaginationProjectGroup(section.channelId, section.name).key;
               const continuation = activeSessionContinuation(
@@ -1808,6 +1869,7 @@ export function SessionList() {
         : [],
     [
       channelMode,
+      appsTab,
       forest,
       channels,
       browseSortBy,
@@ -2787,7 +2849,7 @@ export function SessionList() {
         )
       : visibleForestRows(visibleForest, expanded, activeSessionId);
     const archiveRows =
-      browseStatus === "active"
+      browseStatus === "active" || appsTab
         ? []
         : archiveExpanded
           ? visibleTreeRows(
@@ -2810,6 +2872,7 @@ export function SessionList() {
     });
   }, [
     activeSessionId,
+    appsTab,
     archiveExpanded,
     archivedNodes,
     browseStatus,
@@ -3588,6 +3651,7 @@ export function SessionList() {
   // leaves, even if there is no next page of unfiled sessions.
   const renderedChannelSections =
     browseStatus === "archived" ||
+    appsTab ||
     !showEmptyGroups ||
     channelSections.some((section) => section.channelId === null)
       ? channelSections
@@ -3613,7 +3677,7 @@ export function SessionList() {
                 : SESSION_GROUP_LABELS(t)[group],
             sessions: [],
           };
-          return showEmptyGroups ? [bucket] : [];
+          return showEmptyGroups && !appsTab ? [bucket] : [];
         });
 
   // Expanded, windowed groups in rendered (top-down) order. Spare rail height
@@ -3652,7 +3716,8 @@ export function SessionList() {
       loading: state?.loading ?? false,
     });
   };
-  if (!search) {
+  // The Apps tab's rows are complete: nothing there loads more.
+  if (!search && !appsTab) {
     if (browseStatus !== "archived" && channelMode) {
       for (const section of renderedChannelSections) {
         if (collapsedChannelSections.has(section.key)) continue;
@@ -3690,6 +3755,8 @@ export function SessionList() {
   fillGenerationRef.current = pageGeneration;
   const lastFillViewportHeight = useRef<number | null>(null);
   const measureFill = useCallback(() => {
+    // The Apps tab's rows are complete; Sessions keeps its fill for its return.
+    if (appsTabRef.current) return;
     const list = listRef.current;
     const viewport = list?.closest<HTMLElement>("[data-rail-scroll-viewport]");
     if (!list || !viewport) return;
@@ -3947,10 +4014,17 @@ export function SessionList() {
     <SiteRowActionsContext.Provider value={siteRowActions}>
       <WorkstreamRootsContext.Provider value={workstreamRoots}>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
-            <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
-              {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
-            </span>
+          <div
+            ref={headerRef}
+            className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1"
+          >
+            {listTab ? (
+              <SessionListTabs tab={listTab} onChange={switchListTab} idPrefix={tabsId} />
+            ) : (
+              <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
+                {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
+              </span>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -4030,6 +4104,8 @@ export function SessionList() {
                   onShowEmptyGroupsChange={(show) =>
                     updateBrowsePreferences({ showEmptyGroups: show })
                   }
+                  appsPlacement={appsPlacement ?? undefined}
+                  onAppsPlacementChange={shellSlots.onAppsPlacementChange}
                 />
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -4048,9 +4124,11 @@ export function SessionList() {
 
           <div
             ref={listRef}
-            role="region"
+            role={listTab ? "tabpanel" : "region"}
+            id={listTab ? `${tabsId}-panel` : undefined}
+            aria-labelledby={listTab ? `${tabsId}-${listTab}` : undefined}
             tabIndex={-1}
-            aria-label={search ? "Session search results" : "Sessions"}
+            aria-label={listTab ? undefined : search ? "Session search results" : "Sessions"}
             data-sessionpin-session-list
             onKeyDown={onKeyDown}
             onPointerDown={() => {
@@ -4078,6 +4156,11 @@ export function SessionList() {
               // instead of flashing the old recency layout first. The third
               // holds it until the person's choice of app rows is known.
               <SessionListSkeleton />
+            ) : appsTab &&
+              pinnedNodes.length === 0 &&
+              forest.running.length === 0 &&
+              forest.grouped.length === 0 ? (
+              <div className="px-2 py-4 text-center text-xs text-fg-subtle">No apps yet.</div>
             ) : error && allSessions.length === 0 ? (
               <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
                 Session history is unavailable.{" "}
@@ -4154,7 +4237,10 @@ export function SessionList() {
                     ) : null}
                   </>
                 ) : null}
-                {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
+                {hierarchyMode &&
+                browseStatus !== "archived" &&
+                listTab !== "sessions" &&
+                rootPage.siteGroupsTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
                     Some older apps aren&apos;t shown. Find them in{" "}
                     <Link
@@ -4206,7 +4292,7 @@ export function SessionList() {
                         section.sessions,
                       )}
                       pagination={
-                        search
+                        search || appsTab
                           ? undefined
                           : paginationForGroup(
                               sessionPaginationProjectGroup(section.channelId, section.name),
@@ -4241,17 +4327,21 @@ export function SessionList() {
                         label="Active"
                         nodes={forest.running}
                         visibleNodes={visibleForest.running}
-                        pagination={paginationForGroup(
-                          {
-                            key: "activity:active",
-                            label: "Active",
-                            kind: "activity",
-                            group: "active",
-                          },
-                          nextCursor,
-                          false,
-                          forest.running,
-                        )}
+                        pagination={
+                          appsTab
+                            ? undefined
+                            : paginationForGroup(
+                                {
+                                  key: "activity:active",
+                                  label: "Active",
+                                  kind: "activity",
+                                  group: "active",
+                                },
+                                nextCursor,
+                                false,
+                                forest.running,
+                              )
+                        }
                         localDeliveryAttention={localDeliveryAttention}
                         flat={flat}
                         activeSessionId={activeSessionId}
@@ -4283,7 +4373,7 @@ export function SessionList() {
                             bucket.sessions,
                           )}
                           pagination={
-                            paginationGroup
+                            paginationGroup && !appsTab
                               ? paginationForGroup(
                                   paginationGroup,
                                   nextCursor,
@@ -4311,7 +4401,7 @@ export function SessionList() {
                         />
                       );
                     })}
-                    {creatorDiscoveryPagination ? (
+                    {creatorDiscoveryPagination && !appsTab ? (
                       <SessionGroup
                         label="More creators"
                         nodes={[]}
@@ -4340,10 +4430,11 @@ export function SessionList() {
                 browseGroupBy !== "none" &&
                 browseGroupBy !== "creator" &&
                 (!channelMode || search) &&
+                !appsTab &&
                 workspacePagination ? (
                   <SessionGroupPaginationControl {...workspacePagination} />
                 ) : null}
-                {browseStatus !== "active" ? (
+                {browseStatus !== "active" && !appsTab ? (
                   <SessionGroup
                     label="Archived"
                     sectionId="archived"
@@ -5922,6 +6013,75 @@ function RowActionsMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** What scrolls the list: the rail's viewport, else the nearest scrolling ancestor. */
+function tabScrollViewport(list: HTMLElement | null): HTMLElement | null {
+  const rail = list?.closest<HTMLElement>("[data-rail-scroll-viewport]");
+  if (rail) return rail;
+  for (let node = list?.parentElement ?? null; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if (overflow === "auto" || overflow === "scroll") return node;
+  }
+  return null;
+}
+
+const SESSION_LIST_TABS: readonly { value: SessionRailTab; label: string }[] = [
+  { value: "sessions", label: "Sessions" },
+  { value: "apps", label: "Apps" },
+];
+
+/** Sessions and Apps, in place of the list's title when apps have a tab of their own. */
+function SessionListTabs({
+  tab,
+  onChange,
+  idPrefix,
+}: {
+  tab: SessionRailTab;
+  onChange: (tab: SessionRailTab) => void;
+  idPrefix: string;
+}) {
+  const refs = useRef(new Map<SessionRailTab, HTMLButtonElement>());
+  return (
+    <div
+      role="tablist"
+      aria-label="Sidebar list"
+      className="flex min-w-0 flex-1 items-center gap-3"
+      onKeyDown={(event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const next = tab === "sessions" ? "apps" : "sessions";
+        onChange(next);
+        refs.current.get(next)?.focus();
+      }}
+    >
+      {SESSION_LIST_TABS.map((option) => {
+        const selected = option.value === tab;
+        return (
+          <button
+            key={option.value}
+            ref={(node) => {
+              if (node) refs.current.set(option.value, node);
+              else refs.current.delete(option.value);
+            }}
+            type="button"
+            role="tab"
+            id={`${idPrefix}-${option.value}`}
+            aria-selected={selected}
+            aria-controls={`${idPrefix}-panel`}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "truncate rounded-sm text-sm font-normal outline-hidden focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:min-h-11",
+              selected ? "text-fg" : "text-fg-subtle hover:text-fg",
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

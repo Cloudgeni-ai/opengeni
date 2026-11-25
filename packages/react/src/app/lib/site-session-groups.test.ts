@@ -4,6 +4,7 @@ import {
   buildPinnedRailSections,
   channelRailSections,
   parseSiteRowKey,
+  railSectionsForTab,
   siteRowConversationCount,
   siteRowKey,
   summarizeRailNodes,
@@ -33,7 +34,10 @@ function session(id: string, patch: Partial<Session> = {}): Session {
   } as Session;
 }
 test("Site group has stable identity, real children, aggregate activity and no duplicate count", () => {
-  const running = session("older", { status: "running", activelyWorking: true });
+  const running = session("older", {
+    status: "running",
+    activelyWorking: true,
+  });
   const latest = session("newer", { updatedAt: "2026-09-08T11:00:00Z" });
   const result = buildPinnedRailSections([running, latest]);
   const group = result.ordinary.running[0]!;
@@ -41,7 +45,10 @@ test("Site group has stable identity, real children, aggregate activity and no d
   expect(group.session.id).toBe(`site:${siteId}`);
   expect(group.children.map((n) => n.session.id)).toEqual(["newer", "older"]);
   expect(summarizeRailNodes([group]).total).toBe(2);
-  expect(summarizeRailNodes([group])).toMatchObject({ kind: "active", count: 1 });
+  expect(summarizeRailNodes([group])).toMatchObject({
+    kind: "active",
+    count: 1,
+  });
   expect(
     visibleTreeRows([group], new Set([`site:${siteId}`])).map((r) => r.node.session.id),
   ).toEqual(["newer", "older"]);
@@ -74,14 +81,19 @@ function railRoots(result: ReturnType<typeof buildPinnedRailSections>): SessionT
 
 test("pins win; projects split Site rows only when the rail shows projects", () => {
   const placed = session("project", { channelId: "project-id" });
-  const pinned = session("pin", { pinned: true, pinnedAt: "2026-09-08T10:00:00Z" });
+  const pinned = session("pin", {
+    pinned: true,
+    pinnedAt: "2026-09-08T10:00:00Z",
+  });
   const sessions = [placed, pinned, session("unfiled")];
   const result = buildPinnedRailSections(sessions);
   expect(result.pinned.map((n) => n.session.id)).toEqual(["pin"]);
   expect(
     railRoots(result).map((n) => [n.session.id, n.children.map((c) => c.session.id).sort()]),
   ).toEqual([[`site:${siteId}`, ["project", "unfiled"]]]);
-  const byProject = buildPinnedRailSections(sessions, new Date(), { siteRowsByProject: true });
+  const byProject = buildPinnedRailSections(sessions, new Date(), {
+    siteRowsByProject: true,
+  });
   const sections = channelRailSections(byProject.ordinary, [
     { id: "project-id", name: "Project" } as never,
   ]);
@@ -145,14 +157,24 @@ test("Site rows are complete from the server and never depend on the open sessio
 });
 
 test("Site rows sort by activity among ordinary rows and summarize complete counts", () => {
-  const recent = session("recent", { metadata: {}, updatedAt: "2026-09-08T12:00:00Z" });
-  const old = session("old", { metadata: {}, updatedAt: "2026-09-08T06:00:00Z" });
+  const recent = session("recent", {
+    metadata: {},
+    updatedAt: "2026-09-08T12:00:00Z",
+  });
+  const old = session("old", {
+    metadata: {},
+    updatedAt: "2026-09-08T06:00:00Z",
+  });
   const result = buildPinnedRailSections([recent, old], new Date("2026-09-08T13:00:00Z"), {
     siteGroups: [siteGroup({ total: 4, unread: 2 })],
   });
   expect(railRoots(result).map((n) => n.session.id)).toEqual(["recent", `site:${siteId}`, "old"]);
   const site = railRoots(result)[1]!;
-  expect(summarizeRailNodes([site])).toMatchObject({ kind: "unread", count: 2, total: 4 });
+  expect(summarizeRailNodes([site])).toMatchObject({
+    kind: "unread",
+    count: 2,
+    total: 4,
+  });
   // Live or waiting conversations float their Site row with the running rows.
   for (const live of [{ active: 1 }, { attention: 1, attentionSince: "2026-09-08T08:30:00Z" }]) {
     const running = buildPinnedRailSections([recent], new Date(), {
@@ -168,7 +190,10 @@ test("a Site without conversations is a plain row in its creating chat's project
     channelId: "project-id",
     updatedAt: "2026-09-08T11:00:00Z",
   });
-  const older = session("older", { metadata: {}, updatedAt: "2026-09-08T06:00:00Z" });
+  const older = session("older", {
+    metadata: {},
+    updatedAt: "2026-09-08T06:00:00Z",
+  });
   const created = siteGroup({
     channelId: "project-id",
     conversations: 0,
@@ -205,7 +230,10 @@ test("a Site without conversations is a plain row in its creating chat's project
 });
 
 test("a loaded conversation's newer messages never move its Site row", () => {
-  const chat = session("chat", { metadata: {}, updatedAt: "2026-09-08T11:00:00Z" });
+  const chat = session("chat", {
+    metadata: {},
+    updatedAt: "2026-09-08T11:00:00Z",
+  });
   // The Site was last published at 09:00; one of its conversations is open and
   // had a message at 12:00, after the chat beside it.
   const busy = session("busy", { updatedAt: "2026-09-08T12:00:00Z" });
@@ -221,7 +249,10 @@ test("a loaded conversation's newer messages never move its Site row", () => {
 });
 
 test("a Site's first conversation in another project never lifts its merged row", () => {
-  const chat = session("chat", { metadata: {}, updatedAt: "2026-09-08T11:00:00Z" });
+  const chat = session("chat", {
+    metadata: {},
+    updatedAt: "2026-09-08T11:00:00Z",
+  });
   // A Site this viewer cannot read keeps each project's first conversation
   // start; a rail without projects shows one row, at the earliest.
   const roots = railRoots(
@@ -244,7 +275,10 @@ test("a Site's first conversation in another project never lifts its merged row"
 
 test("Site row keys round-trip their Site and project", () => {
   expect(parseSiteRowKey(siteRowKey(siteId))).toEqual({ siteId });
-  expect(parseSiteRowKey(siteRowKey(siteId, null))).toEqual({ siteId, channelId: null });
+  expect(parseSiteRowKey(siteRowKey(siteId, null))).toEqual({
+    siteId,
+    channelId: null,
+  });
   expect(parseSiteRowKey(siteRowKey(siteId, "project-id"))).toEqual({
     siteId,
     channelId: "project-id",
@@ -275,7 +309,9 @@ test("collapsed Site exposes only the selected descendant, matching keyboard ord
 test("a pinned Site is one Pinned row across projects, ordered with pinned chats", () => {
   const conversation = session("conversation", { channelId: "project-id" });
   const otherConversation = session("other", {
-    metadata: { _opengeniSiteOrigin: { siteId: otherSiteId, title: "Roadmap" } },
+    metadata: {
+      _opengeniSiteOrigin: { siteId: otherSiteId, title: "Roadmap" },
+    },
   });
   const pinnedChat = session("chat", {
     pinned: true,
@@ -287,10 +323,19 @@ test("a pinned Site is one Pinned row across projects, ordered with pinned chats
     siteGroups: [
       siteGroup({ channelId: "project-id", conversations: 1, total: 1 }),
       siteGroup({ channelId: null, conversations: 2, total: 2 }),
-      siteGroup({ siteId: otherSiteId, title: "Roadmap", conversations: 1, total: 1 }),
+      siteGroup({
+        siteId: otherSiteId,
+        title: "Roadmap",
+        conversations: 1,
+        total: 1,
+      }),
     ].map((group) =>
       group.siteId === siteId
-        ? { ...group, pinned: true as const, pinnedAt: "2026-09-08T13:00:00.000Z" }
+        ? {
+            ...group,
+            pinned: true as const,
+            pinnedAt: "2026-09-08T13:00:00.000Z",
+          }
         : group,
     ),
   });
@@ -314,4 +359,40 @@ test("a Site archived from the sidebar leaves with its loaded conversations", ()
   });
   expect(railRoots(result).map((node) => node.session.id)).toEqual(["chat"]);
   expect(result.pinned).toEqual([]);
+});
+
+test("with apps in their own tab, each tab lists only its rows; without one nothing changes", () => {
+  const chat = session("chat", { metadata: {} });
+  const pinnedChat = session("pinned-chat", {
+    metadata: {},
+    pinned: true,
+    pinnedAt: "2026-09-08T10:00:00Z",
+  });
+  const appChat = session("app-chat");
+  const result = buildPinnedRailSections([chat, pinnedChat, appChat], new Date(), {
+    siteGroups: [
+      siteGroup(),
+      siteGroup({
+        siteId: otherSiteId,
+        title: "Pinned app",
+        pinned: true,
+        pinnedAt: null,
+      }),
+    ],
+  });
+  expect(railSectionsForTab(result, null)).toBe(result);
+  const sessions = railSectionsForTab(result, "sessions");
+  expect(sessions.pinned.map((node) => node.session.id)).toEqual(["pinned-chat"]);
+  expect(railRoots(sessions).map((node) => node.session.id)).toEqual(["chat"]);
+  const apps = railSectionsForTab(result, "apps");
+  expect(apps.pinned.map((node) => node.session.id)).toEqual([`site:${otherSiteId}`]);
+  // An app keeps its chats under it.
+  expect(
+    railRoots(apps).map((node) => [node.session.id, node.children.map((c) => c.session.id)]),
+  ).toEqual([[`site:${siteId}`, ["app-chat"]]]);
+  // Groups left empty are left out; lookups still see everything.
+  for (const tab of [sessions, apps]) {
+    expect(tab.ordinary.grouped.every((bucket) => bucket.sessions.length > 0)).toBe(true);
+    expect(tab.complete).toBe(result.complete);
+  }
 });

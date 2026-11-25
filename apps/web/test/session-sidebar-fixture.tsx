@@ -33,13 +33,26 @@ const pendingAppRows = new URLSearchParams(window.location.search).get("appRows"
 let settleAppRows: (value: boolean) => void = () => {};
 Object.assign(window, { sessionSidebarAppRows: (value: boolean) => settleAppRows(value) });
 
+// `?apps=sessions|tab|hidden`: the person's apps placement, which the list's
+// view menu changes here as the web app's sidebar options do.
+const appsParam = new URLSearchParams(window.location.search).get("apps");
+const initialAppsPlacement =
+  appsParam === "sessions" || appsParam === "tab" || appsParam === "hidden" ? appsParam : null;
+
 function RailSessionList() {
   const [sessionsShowApps, setSessionsShowApps] = useState<boolean | null>(
     pendingAppRows ? null : true,
   );
   settleAppRows = setSessionsShowApps;
-  const slots = useMemo(() => ({ sessionsShowApps }), [sessionsShowApps]);
-  if (!pendingAppRows) return <SessionList />;
+  const [appsPlacement, setAppsPlacement] = useState(initialAppsPlacement);
+  const slots = useMemo(
+    () =>
+      appsPlacement
+        ? { appsPlacement, onAppsPlacementChange: setAppsPlacement }
+        : { sessionsShowApps },
+    [appsPlacement, sessionsShowApps],
+  );
+  if (!pendingAppRows && !appsPlacement) return <SessionList />;
   return (
     <SessionShellSlotsContext.Provider value={slots}>
       <SessionList />

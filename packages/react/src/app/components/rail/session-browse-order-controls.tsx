@@ -30,6 +30,25 @@ const STATUSES: Record<SessionBrowseStatus, string> = {
   all: "All",
 };
 
+/** Where apps show in the sidebar (docs/sidebar-layout.md, `appsPlacement`). */
+export type AppsPlacement = "sessions" | "tab" | "hidden";
+const APPS_PLACEMENTS: Record<AppsPlacement, string> = {
+  sessions: "In Sessions",
+  tab: "Own tab",
+  hidden: "Hidden",
+};
+
+/** The Apps choice: in the Sessions list, in a tab of their own, or hidden. */
+export function AppsPlacementSubmenu({
+  value,
+  onChange,
+}: {
+  value: AppsPlacement;
+  onChange: (value: AppsPlacement) => void;
+}) {
+  return <ViewSubmenu label="Apps" value={value} choices={APPS_PLACEMENTS} onChange={onChange} />;
+}
+
 function ViewSubmenu<T extends string>({
   label,
   value,
@@ -84,6 +103,8 @@ export function SessionBrowseOrderControls({
   onMineOnlyChange,
   showEmptyGroups,
   onShowEmptyGroupsChange,
+  appsPlacement,
+  onAppsPlacementChange,
 }: {
   groupBy: SessionBrowseGroupBy;
   onGroupByChange: (value: SessionBrowseGroupBy) => void;
@@ -98,6 +119,9 @@ export function SessionBrowseOrderControls({
   onMineOnlyChange: (value: boolean) => void;
   showEmptyGroups: boolean;
   onShowEmptyGroupsChange: (value: boolean) => void;
+  /** The person's apps placement; the Apps choice shows only with a handler. */
+  appsPlacement?: AppsPlacement | undefined;
+  onAppsPlacementChange?: ((value: AppsPlacement) => void) | undefined;
 }) {
   return (
     <>
@@ -117,6 +141,9 @@ export function SessionBrowseOrderControls({
       <DropdownMenuSeparator />
       <ViewSubmenu label="Group by" value={groupBy} choices={GROUPS} onChange={onGroupByChange} />
       <ViewSubmenu label="Sort by" value={sortBy} choices={SORTS} onChange={onSortByChange} />
+      {appsPlacement && onAppsPlacementChange ? (
+        <AppsPlacementSubmenu value={appsPlacement} onChange={onAppsPlacementChange} />
+      ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuCheckboxItem
         checked={showEmptyGroups}

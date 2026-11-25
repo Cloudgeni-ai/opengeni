@@ -1488,6 +1488,29 @@ export function buildPinnedRailSections(
   };
 }
 
+/**
+ * The rail sections one tab shows when apps have a tab of their own: the
+ * Apps tab keeps only app rows, the Sessions tab everything else. Without a
+ * tab (null) the sections are unchanged. `complete` stays whole for lookups.
+ */
+export function railSectionsForTab(
+  sections: PinnedRailSections,
+  tab: "sessions" | "apps" | null,
+): PinnedRailSections {
+  if (tab === null) return sections;
+  const keep = (node: SessionTreeNode) => Boolean(node.siteGroup) === (tab === "apps");
+  return {
+    complete: sections.complete,
+    pinned: sections.pinned.filter(keep),
+    ordinary: {
+      running: sections.ordinary.running.filter(keep),
+      grouped: sections.ordinary.grouped
+        .map((bucket) => ({ ...bucket, sessions: bucket.sessions.filter(keep) }))
+        .filter((bucket) => bucket.sessions.length > 0),
+    },
+  };
+}
+
 /** The selected descendant under a collapsed node, projected one level deeper. */
 export function selectedDescendantNode(
   node: SessionTreeNode,

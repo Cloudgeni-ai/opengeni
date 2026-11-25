@@ -29044,6 +29044,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appsPlacement": "ref(SidebarAppsPlacement)!",
         "$.hiddenNavEntries": "array!",
         "$.hiddenNavEntries[]": "string",
         "$.sessionsShowApps": "boolean!",
@@ -32359,6 +32360,15 @@
         "$.text": "string!"
       }
     },
+    "SidebarAppsPlacement": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"hidden\\\"\",\"\\\"sessions\\\"\",\"\\\"tab\\\"\"]"
+      }
+    },
     "SidebarItemIcon": {
       "io": [
         "input"
@@ -32415,6 +32425,7 @@
         "$|op=reset": "object",
         "$|op=reset.op": "const!=[\"\\\"reset\\\"\"]",
         "$|op=options": "object",
+        "$|op=options.appsPlacement": "ref(SidebarAppsPlacement)? null",
         "$|op=options.hiddenNavEntries": "array? null",
         "$|op=options.hiddenNavEntries[]": "ref(SidebarNavEntry)",
         "$|op=options.op": "const!=[\"\\\"options\\\"\"]",
@@ -32429,6 +32440,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appsPlacement": "ref(SidebarAppsPlacement)?",
         "$.hiddenNavEntries": "array?",
         "$.hiddenNavEntries[]": "ref(SidebarNavEntry)",
         "$.sessionsShowApps": "boolean?",
@@ -40315,6 +40327,7 @@
       "SetWorkspaceModelKeyListPriceRequest": "type",
       "SharedSession": "type",
       "SharedSessionMessage": "type",
+      "SidebarAppsPlacement": "type",
       "SidebarItemIcon": "type",
       "SidebarItemOrigin": "type",
       "SidebarLayoutChange": "type",

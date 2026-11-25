@@ -7,7 +7,9 @@ import {
   sessionBrowsePreferenceStorageId,
   writeSessionBrowseGroupBy,
   readSessionBrowsePreferences,
+  readSessionRailTab,
   writeSessionBrowsePreferences,
+  writeSessionRailTab,
 } from "./session-browse-preferences";
 
 function memoryStorage(): Pick<Storage, "getItem" | "setItem"> {
@@ -167,5 +169,30 @@ describe("session browse preferences", () => {
       storage.setItem(`${id}:view`, value);
       expect(readSessionBrowsePreferences(id, storage).groupBy).toBe("project");
     }
+  });
+});
+
+describe("the Sessions or Apps tab", () => {
+  test("Sessions by default; the open tab is remembered per person and workspace", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:ada", "workspace:a");
+    const other = sessionBrowsePreferenceStorageId("user:ada", "workspace:b");
+    expect(readSessionRailTab(id, storage)).toBe("sessions");
+    writeSessionRailTab(id, "apps", storage);
+    expect(readSessionRailTab(id, storage)).toBe("apps");
+    expect(readSessionRailTab(other, storage)).toBe("sessions");
+    // Anything else stored reads as Sessions; blocked storage too.
+    storage.setItem(`${id}:tab`, "drawer");
+    expect(readSessionRailTab(id, storage)).toBe("sessions");
+    const blocked = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {
+        throw new Error("blocked");
+      },
+    };
+    expect(readSessionRailTab(id, blocked)).toBe("sessions");
+    expect(() => writeSessionRailTab(id, "apps", blocked)).not.toThrow();
   });
 });

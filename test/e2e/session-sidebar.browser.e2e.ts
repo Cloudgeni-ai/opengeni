@@ -1037,6 +1037,98 @@ test("with apps not grouped, the list waits for that choice instead of drawing a
   ).toBe(0);
 });
 
+test("with apps in their own tab, Sessions and Apps share the list's place and keep their scroll", async () => {
+  await page.setViewportSize({ width: 1160, height: 420 });
+  await page.goto(`${url}?scenario=sites&theme=light&apps=tab`, { timeout: 60_000 });
+  const tabs = sidebar().getByRole("tablist", { name: "Sidebar list" });
+  const sessionsTab = tabs.getByRole("tab", { name: "Sessions", exact: true });
+  const appsTab = tabs.getByRole("tab", { name: "Apps", exact: true });
+  await railConversation("Slack community connection test").waitFor();
+  expect(await sessionsTab.getAttribute("aria-selected")).toBe("true");
+  // Sessions leaves the apps out; their chats go with them.
+  expect(await sidebar().locator("[data-site-row]").count()).toBe(0);
+  for (const title of usageConversations) expect(await railConversation(title).count()).toBe(0);
+  const viewport = sidebar().locator(".overflow-y-auto").first();
+  const scrollTop = () => viewport.evaluate((node) => node.scrollTop);
+  // Scrolled a little, with the tabs still in view.
+  await viewport.evaluate((node) => {
+    node.scrollTop = 50;
+  });
+  const sessionsScroll = await scrollTop();
+  expect(sessionsScroll).toBeGreaterThan(0);
+  // Here the tabs sit at the very top of what scrolls, so click them where
+  // they are, as in the app, where the sidebar's links sit above them.
+  await appsTab.dispatchEvent("click");
+  expect(await appsTab.getAttribute("aria-selected")).toBe("true");
+  await siteRow("Opengeni usage").waitFor();
+  // Only apps, in their projects, with their chats under them.
+  expect(await railConversation("Slack community connection test").count()).toBe(0);
+  await group("Website redesign")
+    .getByRole("link", { name: "Open Pricing calculator. App", exact: true })
+    .waitFor();
+  expect(await sidebar().locator("a[data-session-row]:not([data-site-row] a)").count()).toBe(0);
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations) await railConversation(title).waitFor();
+  await viewport.evaluate((node) => {
+    node.scrollTop = 25;
+  });
+  const appsScroll = await scrollTop();
+  expect(appsScroll).toBe(25);
+
+  // Each tab comes back where it was left, and the keyboard switches them too.
+  await sessionsTab.dispatchEvent("click");
+  await railConversation("Slack community connection test").waitFor();
+  expect(await scrollTop()).toBe(sessionsScroll);
+  await sessionsTab.evaluate((node: HTMLElement) => node.focus({ preventScroll: true }));
+  await page.keyboard.press("ArrowRight");
+  expect(await appsTab.getAttribute("aria-selected")).toBe("true");
+  await siteRow("Opengeni usage").waitFor();
+  expect(await scrollTop()).toBe(appsScroll);
+
+  // The open tab is remembered across a reload.
+  await page.reload();
+  await siteRow("Opengeni usage").waitFor();
+  expect(
+    await sidebar().getByRole("tab", { name: "Apps", exact: true }).getAttribute("aria-selected"),
+  ).toBe("true");
+
+  // The view menu moves apps back into Sessions: no tabs, app rows in the list.
+  await page.getByRole("button", { name: /^Session view/ }).click();
+  await page.getByRole("menuitem", { name: /^Apps/ }).click();
+  await page.getByRole("menuitemradio", { name: "In Sessions", exact: true }).click();
+  await railConversation("Slack community connection test").waitFor();
+  await siteRow("Opengeni usage").waitFor();
+  expect(await sidebar().getByRole("tablist").count()).toBe(0);
+}, 60_000);
+
+test("the Sessions and Apps tabs at desktop and phone widths", async () => {
+  for (const [name, size] of [
+    ["desktop", { width: 1160, height: 900 }],
+    ["narrow", { width: 390, height: 844 }],
+  ] as const) {
+    await page.setViewportSize(size);
+    await page.goto(`${url}?scenario=sites&theme=light&apps=tab`, { timeout: 60_000 });
+    const tabs = sidebar().getByRole("tablist", { name: "Sidebar list" });
+    await tabs.getByRole("tab", { name: "Sessions", exact: true }).click();
+    await railConversation("Slack community connection test").waitFor();
+    // Both tabs and the list's actions fit the header.
+    const header = await tabs.evaluate((node) => {
+      const row = node.parentElement!.getBoundingClientRect();
+      return [...node.parentElement!.children].every((child) => {
+        const box = child.getBoundingClientRect();
+        return box.left >= row.left - 1 && box.right <= row.right + 1;
+      });
+    });
+    expect(header).toBe(true);
+    await capture(`apps-tab-${name}-sessions`);
+    await tabs.getByRole("tab", { name: "Apps", exact: true }).click();
+    await siteRow("Opengeni usage").waitFor();
+    await capture(`apps-tab-${name}-apps`);
+  }
+}, 60_000);
+
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteRow("Opengeni usage").waitFor();
