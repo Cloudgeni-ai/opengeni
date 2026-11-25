@@ -1702,11 +1702,17 @@ export function buildTimeline(
         const round =
           typeof payload.elicitationRound === "number" ? payload.elicitationRound : undefined;
         let key = approvalKey(turnId ?? presentationTurnId, approvalId, round);
-        if (turnId === null && !approvalWaitsByKey.has(key)) {
-          // A decision recorded without its turn answers the latest question
-          // with its id and round, in whichever turn asked it.
-          const question = `\u0000${approvalId}\u0000${round ?? ""}`;
-          for (const asked of approvalWaitsByKey.keys()) if (asked.endsWith(question)) key = asked;
+        if (!approvalWaitsByKey.has(key) && (turnId === null || round === undefined)) {
+          // An older decision can lack its turn or its MCP question round: it
+          // answers the latest open question with its id that matches what it
+          // does carry.
+          for (const asked of approvalWaitsByKey.keys()) {
+            const [askedTurn, askedId, askedRound] = asked.split("\u0000");
+            if (askedId !== approvalId) continue;
+            if (turnId !== null && askedTurn !== turnId) continue;
+            if (round !== undefined && askedRound !== String(round)) continue;
+            key = asked;
+          }
         }
         approvalDecisions.set(key, decision);
         // The call it names stops waiting too: an approved call runs now, a
@@ -2175,7 +2181,9 @@ export function buildTimeline(
         if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
-        if (event.type === "turn.cancelled") endApprovalWaits(event, turnId);
+        // Cancelled or replaced (a Steer while it waited): its approvals were
+        // never answered for it.
+        endApprovalWaits(event, turnId);
         // The turn handed over to a Steer at a safe boundary: its next model
         // step, right after a context compaction, or while it only waited (an
         // approval, a question or capacity; those supersessions name their

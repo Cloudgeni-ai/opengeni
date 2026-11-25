@@ -434,6 +434,27 @@ describe("an answered approval", () => {
     expect(item.resolvedAt).toBeDefined();
     expect(noticeDisplayText(englishText, item)).toBe("Not answered.");
     expect(noticeApprovalAnswered(item)).toBe(false);
+    const steered = notice(
+      buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        event(4, "turn.superseded", { reason: "steer", targetTurnId: "turn-2" }),
+        event(5, "turn.started", {}, "turn-2"),
+        event(6, "turn.completed", {}, "turn-2"),
+      ]),
+    );
+    expect(steered.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, steered)).toBe("Not answered.");
+  });
+
+  test("an older decline saved without its MCP question round still answers it", () => {
+    const item = notice(
+      buildTimeline(englishText, [
+        ...asking([{ ...sendEmail, elicitation: { server: "linear", round: 1, requests: [] } }]),
+        event(4, "user.approvalDecision", { approvalId: "call-1", decision: "reject" }),
+        event(5, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(noticeDisplayText(englishText, item)).toBe("You declined “Send email”.");
   });
 
   test("parallel app-action approvals say what was decided, one line each, told apart", () => {

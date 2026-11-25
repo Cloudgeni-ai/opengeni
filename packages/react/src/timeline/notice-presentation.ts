@@ -5,7 +5,7 @@ import { durationBetween } from "./work-presentation";
 import { type OpenGeniText } from "../messages/runtime";
 import { toolActionTitle } from "../tool-action-wording";
 
-/** An approval notice the person has since answered. */
+/** An approval notice that no longer waits, answered or not. */
 export function noticeIsResolvedApproval(
   item: Pick<NoticeItem, "approval" | "resolvedAt">,
 ): boolean {
