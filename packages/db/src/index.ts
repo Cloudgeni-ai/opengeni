@@ -47,6 +47,7 @@ export * from "./session-target";
 export * from "./session-resource-removal";
 export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
+import { projectPersonalGitHubDelegationsOntoResources } from "./personal-github-delegation-projection";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
@@ -85647,11 +85648,19 @@ export async function claimSessionWorkForAttempt(
           const receiverContext = delivered.receiverContext;
           const authorityUpdate = delivered.updates[0];
           if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
-          const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+          const frozenPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
             receiverContext?.personalConnectionDelegations ??
               authorityUpdate.personalConnectionDelegations,
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
+          // The receiving context's own authority already fits this session;
+          // a sender's (an agent message or steer) is fitted to its repositories.
+          const internalPersonalConnectionDelegations = receiverContext
+            ? frozenPersonalConnectionDelegations
+            : projectPersonalGitHubDelegationsOntoResources(
+                frozenPersonalConnectionDelegations,
+                session.resources,
+              );
           const internalXaiAuthority = receiverContext
             ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
             : frozenXaiExecutionAuthority(authorityUpdate);
