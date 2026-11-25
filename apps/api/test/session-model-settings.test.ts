@@ -3,27 +3,42 @@ import { createHash } from "node:crypto";
 import type { AccessGrant, Permission, SessionAuthorizationPort } from "@opengeni/contracts";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
+  appendSessionEvents,
+  applySessionTurnSettlement,
   armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
+  claimEventTriggerDispatch,
   claimSessionWorkForAttempt,
   createApiKey,
   createDb,
+  createEventSource,
+  createScheduledTask,
+  createScheduledTaskRun,
   createSession,
   ensureManagedAccessForUser,
+  eventOccurrenceProducerKey,
+  getLatestStartedSessionTurn,
   getOrganizationPrivateSessionSettings,
+  getScheduledTaskRunAcceptedExecution,
   getSession,
   getSessionTurn,
   initializeSessionStartAtomically,
+  listScheduledTaskRuns,
+  markEventOccurrenceStarted,
   mutateSessionControlInTransaction,
+  recordEventDelivery,
+  setScheduledTaskEvents,
   updateOrganizationPrivateSessionSettings,
   upsertWorkspaceModelPolicy,
   withWorkspaceSessionActivityRls,
   type SessionCreateInput,
 } from "@opengeni/db";
-import { setSessionModel, type ApiRouteDeps } from "@opengeni/core";
+import { eventMatchesTrigger, setSessionModel, type ApiRouteDeps } from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
+import { createScheduledTaskActivities } from "../../worker/src/activities/scheduled-tasks";
+import type { ControlActivityServices } from "../../worker/src/activities/types";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { createApp } from "../src/app";
 
@@ -394,6 +409,208 @@ async function agent(value: Awaited<ReturnType<typeof fixture>>) {
     },
   };
 }
+
+async function eventProducerKey(grant: AccessGrant, taskId: string) {
+  const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  const { source } = await createEventSource(client.db, {
+    ...scope,
+    createdBySubjectId: grant.subjectId,
+    ownerSubjectId: grant.subjectId,
+    kind: "webhook",
+    adapter: "standard",
+    name: "Notifications",
+    visibility: "workspace",
+    secretEncrypted: "fixture-secret",
+  });
+  await setScheduledTaskEvents(client.db, {
+    ...scope,
+    taskId,
+    triggers: [
+      {
+        sourceId: source.id,
+        eventTypes: ["fixture.ready"],
+        conditions: [],
+        includeOwnEvents: false,
+      },
+    ],
+  });
+  const body = new TextEncoder().encode("{}");
+  await recordEventDelivery(client.db, {
+    ...scope,
+    sourceId: source.id,
+    status: "accepted",
+    reason: null,
+    dedupeKey: crypto.randomUUID(),
+    body,
+    bodyBytes: body.byteLength,
+    bodySha256: createHash("sha256").update(body).digest("hex"),
+    headers: {},
+    events: [
+      {
+        externalId: "test-event",
+        streamKey: "",
+        type: "fixture.ready",
+        occurredAt: new Date(),
+        subject: "test-event",
+        summary: "Fixture ready",
+        url: null,
+        actor: { kind: "person", name: "Test sender" },
+        data: {},
+        dataTruncated: false,
+        gapBefore: false,
+      },
+    ],
+    match: eventMatchesTrigger,
+    settleMs: 0,
+  });
+  const dispatch = await claimEventTriggerDispatch(client.db, grant.workspaceId, taskId);
+  expect(dispatch.start).toHaveLength(1);
+  const occurrence = dispatch.start[0]!;
+  await markEventOccurrenceStarted(client.db, grant.workspaceId, occurrence.id);
+  return eventOccurrenceProducerKey(occurrence.id);
+}
+
+test.each([
+  ["scheduled", "HTTP", "already started"],
+  ["event", "session_set_model", "already started"],
+  ["scheduled", "HTTP", "queued before the write and started after"],
+] as const)(
+  "%s fire uses settings written by %s when the old turn was %s",
+  async (triggerType, writer, oldTurn) => {
+    const value = await fixture();
+    const { grant, session } = value;
+    const { accountId, workspaceId, subjectId } = grant;
+    const [personal] = await shared.admin`insert into workspaces (account_id, name)
+    values (${accountId}, 'Personal schedule fixture') returning id`;
+    await shared.admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+    values (${accountId}, ${subjectId}, 'active', ${personal!.id})`;
+    const task = await createScheduledTask(client.db, {
+      accountId,
+      workspaceId,
+      name: "Message this chat",
+      status: "active",
+      schedule:
+        triggerType === "scheduled"
+          ? { type: "once", runAt: new Date().toISOString(), timeZone: "UTC" }
+          : { type: "manual" },
+      temporalScheduleId: `fixture-${crypto.randomUUID()}`,
+      runMode: "existing_session",
+      targetSessionId: session.id,
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Check for updates", resources: [], tools: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId },
+      metadata: {},
+    });
+    const caller = await agent(value);
+    const { turnId, attemptId } = caller.metadata;
+    const turn = await getSessionTurn(client.db, workspaceId, turnId);
+    const recordTurnStart = () =>
+      appendSessionEvents(client.db, workspaceId, session.id, [
+        { type: "turn.started", turnId, payload: {} },
+      ]);
+    if (oldTurn === "already started") await recordTurnStart();
+    const desired =
+      writer === "HTTP"
+        ? { model: "gpt-5.6-sol", reasoningEffort: "high", latencyMode: "fast" }
+        : { model: "scripted-model", reasoningEffort: "high", latencyMode: "standard" };
+    const token = writer === "HTTP" ? await workspaceKey(grant, ["sessions:control"]) : null;
+    if (writer === "HTTP") {
+      const response = await http(value)(token, {
+        ...desired,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject(desired);
+    } else {
+      expect(await call(caller, request(session.id))).toMatchObject({
+        committed: true,
+        facts: desired,
+      });
+    }
+    if (oldTurn !== "already started") await recordTurnStart();
+    expect(
+      await applySessionTurnSettlement(client.db, workspaceId, {
+        sessionId: session.id,
+        turnId,
+        triggerEventId: turn!.triggerEventId,
+        attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { output: "Done" } }],
+      }),
+    ).toMatchObject({ action: "settled" });
+    expect(await getLatestStartedSessionTurn(client.db, workspaceId, session.id)).toMatchObject({
+      id: turnId,
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+    });
+
+    const producerKey =
+      triggerType === "event"
+        ? await eventProducerKey(grant, task.id)
+        : `fixture-once:${crypto.randomUUID()}`;
+    const activities = createScheduledTaskActivities(
+      async () =>
+        ({
+          settings: testSettings({
+            databaseUrl: shared.appUrl,
+            sandboxBackend: "none",
+            eventTriggersEnabled: true,
+          }),
+          db: client.db,
+          bus: new MemoryEventBus(),
+          wakeSessionWorkflow: async () => undefined,
+        }) as unknown as ControlActivityServices,
+    );
+    const fire = { workspaceId, taskId: task.id, triggerType, producerKey };
+    const dispatched = await activities.dispatchScheduledTaskRun(fire);
+    if (dispatched.action !== "signal")
+      throw new Error(`Expected dispatch: ${JSON.stringify(dispatched)}`);
+    expect(dispatched.sessionId).toBe(session.id);
+    const runs = await listScheduledTaskRuns(client.db, workspaceId, task.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "dispatched", sessionId: session.id, triggerType });
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId,
+      runId: runs[0]!.id,
+    });
+    expect(accepted?.targetSessionExecution).toMatchObject(desired);
+
+    if (writer === "HTTP" && oldTurn === "already started") {
+      // The read of a fresh snapshot and admission are separate transactions.
+      // A settings write between them must still invalidate that snapshot.
+      const newer = await http(value)(token, { ...modelDefaults(), reasoningEffort: "medium" });
+      expect(newer.status).toBe(200);
+      await expect(
+        createScheduledTaskRun(client.db, {
+          ...fire,
+          producerKey: crypto.randomUUID(),
+          taskAuthorityRevision: accepted!.task.authorityRevision,
+          taskExecutionDigest: accepted!.task.executionDigest,
+          acceptedExecutionSnapshot: accepted,
+        }),
+      ).rejects.toMatchObject({
+        cause: {
+          code: "40001",
+          message: "scheduled target-session execution policy changed during admission",
+        },
+      });
+      expect(await listScheduledTaskRuns(client.db, workspaceId, task.id)).toHaveLength(1);
+      // The accepted occurrence is still frozen and claimable on the previous choice.
+      const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: session.id,
+        workflowId: dispatched.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(claimed).toMatchObject({ action: "claimed", turn: desired });
+    }
+  },
+);
 
 test("model settings tool uses existing permission and exact signed tool selection", async () => {
   const { grant } = await fixture();
