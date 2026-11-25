@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import { toolRowPresentation } from "../src/timeline/tool-presentation";
-import { approvalHistoryTitle, noticeDisplayText } from "../src/timeline/notice-presentation";
+import {
+  approvalHistoryTitle,
+  noticeApprovalAnswered,
+  noticeDisplayText,
+} from "../src/timeline/notice-presentation";
 import type {
   NoticeItem,
   SessionStatusItem,
@@ -149,14 +153,72 @@ describe("an answered approval", () => {
     expect(noticeDisplayText(englishText, notice(answered))).toBe("You approved 1 and declined 1.");
   });
 
-  test("without a recorded decision, says only that it was answered", () => {
+  test("without a recorded decision, never says the person answered", () => {
     const item = notice(
       buildTimeline(englishText, [
         ...asking([sendEmail]),
         event(4, "session.status.changed", { status: "running" }),
       ]),
     );
-    expect(noticeDisplayText(englishText, item)).toBe("You responded to this approval.");
+    expect(noticeDisplayText(englishText, item)).toBe("Ended without an answer.");
+    expect(noticeApprovalAnswered(item)).toBe(false);
+  });
+
+  test("an earlier turn's decision never reads as a later turn's answer", () => {
+    // The staging incident: a message queued while turn 1 waited became turn 2;
+    // turn 1's decision was recorded, then turn 2 paused for its own approval
+    // and resumed without one.
+    const deploy = { id: "call-2", name: "deploy", rawItem: { callId: "call-2" } };
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "user.approvalDecision", { approvalId: "call-1", decision: "approve" }),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "turn.completed"),
+      event(7, "turn.started", {}, "turn-2"),
+      event(8, "session.requiresAction", { approvals: [deploy] }, "turn-2"),
+      event(9, "session.status.changed", { status: "requires_action" }, "turn-2"),
+      event(10, "session.status.changed", { status: "running" }, "turn-2"),
+    ]);
+    const [first, second] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, first!)).toBe("You approved “Send email”.");
+    expect(second!.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, second!)).toBe("Ended without an answer.");
+    expect(noticeApprovalAnswered(second!)).toBe(false);
+  });
+
+  test("a request without its approvals list reads as answered only once a decision is recorded", () => {
+    const bare = [
+      event(1, "turn.started"),
+      event(2, "session.requiresAction", { approvalId: "approval-1" }),
+      event(3, "session.status.changed", { status: "requires_action" }),
+    ];
+    const running = event(5, "session.status.changed", { status: "running" });
+    const answered = notice(
+      buildTimeline(englishText, [...bare, decide(4, "approval-1", "approve"), running]),
+    );
+    expect(noticeDisplayText(englishText, answered)).toBe("You responded to this approval.");
+    expect(noticeApprovalAnswered(answered)).toBe(true);
+    const refused = notice(
+      buildTimeline(englishText, [
+        ...bare,
+        { ...decide(4, "approval-1", "reject"), clientEventId: "system:approval-expired:1" },
+        running,
+      ]),
+    );
+    expect(noticeDisplayText(englishText, refused)).toBe("Declined automatically.");
+    const unanswered = notice(buildTimeline(englishText, [...bare, running]));
+    expect(noticeDisplayText(englishText, unanswered)).toBe("Ended without an answer.");
+    // Another turn's decision is not this request's answer.
+    const elsewhere = notice(
+      buildTimeline(englishText, [
+        ...bare,
+        event(4, "user.approvalDecision", { approvalId: "x", decision: "approve" }, "turn-0"),
+        running,
+      ]),
+    );
+    expect(noticeDisplayText(englishText, elsewhere)).toBe("Ended without an answer.");
   });
 
   test("parallel app-action approvals say what was decided, one line each, told apart", () => {

@@ -207,6 +207,7 @@ import {
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { sessionStatusItemDisplayStatus } from "../session-status-model";
 import {
+  noticeApprovalAnswered,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -5442,6 +5443,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   }
   const presentedTone = noticeTone(item);
   const resolvedApproval = noticeIsResolvedApproval(item);
+  const answeredApproval = noticeApprovalAnswered(item);
   const tone =
     presentedTone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
@@ -5457,11 +5459,14 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       )}
       role="status"
     >
-      {resolvedApproval ? (
+      {answeredApproval ? (
         <CheckIcon className="mt-0.5 size-4 shrink-0 opacity-70" aria-hidden="true" />
       ) : (
         <TriangleAlertIcon
-          className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
+          className={cn(
+            "mt-0.5 size-4 shrink-0",
+            (item.tone === "cancelled" || resolvedApproval) && "opacity-60",
+          )}
         />
       )}
       <div className="min-w-0 flex-1">

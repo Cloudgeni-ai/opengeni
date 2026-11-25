@@ -358,6 +358,7 @@ describe("readable per-turn rows", () => {
         <MessageTimeline
           events={[
             ...waiting,
+            event("user.approvalDecision", { approvalId: "same", decision: "approve" }),
             event("session.status.changed", { status: "running" }, null),
             event("agent.toolCall.output", { id: "same", output: "approved result" }),
             event("agent.message.delta", {
@@ -379,6 +380,40 @@ describe("readable per-turn rows", () => {
     } finally {
       await r.unmount();
     }
+  });
+
+  test("an approval wait that ended without an answer never reads as answered", async () => {
+    const render = async (decided: boolean) => {
+      sequence = 0;
+      const events = [
+        event("turn.started", {}),
+        event("agent.toolCall.created", { id: "draft", name: "update_draft", arguments: {} }),
+        event("session.requiresAction", {
+          approvals: [{ id: "draft", name: "update_draft", rawItem: { callId: "draft" } }],
+        }),
+        event("session.status.changed", { status: "requires_action" }, null),
+        ...(decided
+          ? [event("user.approvalDecision", { approvalId: "draft", decision: "approve" })]
+          : []),
+        event("session.status.changed", { status: "running" }, null),
+        event("agent.message.delta", { text: "Carrying on.", phase: "commentary" }),
+      ];
+      const r = await renderComponent(
+        <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
+      );
+      await flush();
+      const text = r.container.textContent ?? "";
+      const checked = r.container.querySelector("svg.lucide-check") !== null;
+      await r.unmount();
+      return { text, checked };
+    };
+    const unanswered = await render(false);
+    expect(unanswered.text).toContain("Ended without an answer.");
+    expect(unanswered.text).not.toContain("You responded");
+    expect(unanswered.checked).toBe(false);
+    const answered = await render(true);
+    expect(answered.text).not.toContain("Ended without an answer.");
+    expect(answered.checked).toBe(true);
   });
 
   test("completed standalone compaction remains visible without an eternal Working header", async () => {

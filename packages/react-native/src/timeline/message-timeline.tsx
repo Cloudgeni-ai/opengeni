@@ -33,6 +33,7 @@ import {
   timelineTurnsWithUnloadedSteps,
   activityHasUnloadedSteps,
   turnGroupHasUnloadedSteps,
+  noticeApprovalAnswered,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -1306,8 +1307,17 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
         backgroundColor: tone === "neutral" ? c["surface-1"] : withAlpha(accent, 0.1),
       }}
     >
-      <View style={{ marginTop: 2, opacity: item.tone === "cancelled" ? 0.6 : 1 }}>
-        {noticeIsResolvedApproval(item) ? (
+      <View
+        style={{
+          marginTop: 2,
+          opacity:
+            item.tone === "cancelled" ||
+            (noticeIsResolvedApproval(item) && !noticeApprovalAnswered(item))
+              ? 0.6
+              : 1,
+        }}
+      >
+        {noticeApprovalAnswered(item) ? (
           <Icon name="check" size={16} color={accent} />
         ) : (
           <Icon name="triangle-alert" size={16} color={accent} />

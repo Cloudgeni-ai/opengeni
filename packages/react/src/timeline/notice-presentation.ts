@@ -13,6 +13,21 @@ export function noticeIsResolvedApproval(
 }
 
 /**
+ * A resolved approval wait with a recorded answer. One that ended without
+ * any (a new message replaced it, the turn stopped) is resolved but not
+ * answered, and never reads as the person's response.
+ */
+export function noticeApprovalAnswered(
+  item: Pick<NoticeItem, "approval" | "resolvedAt" | "approvalActions" | "unmatchedDecision">,
+): boolean {
+  return (
+    noticeIsResolvedApproval(item) &&
+    (item.unmatchedDecision !== undefined ||
+      (item.approvalActions ?? []).some((action) => action.decision !== undefined))
+  );
+}
+
+/**
  * What an approval asked, as history: its question without the question mark
  * or anything after it ("Remove the Gmail connection for anna@example.com?
  * …" → "Remove the Gmail connection for anna@example.com"). A quoted name
@@ -60,13 +75,24 @@ function tellingFact(action: ApprovalAction, alike: ApprovalAction[]): string | 
  */
 export function noticeDisplayText(
   t: OpenGeniText,
-  item: Pick<NoticeItem, "text" | "approval" | "resolvedAt" | "approvalActions">,
+  item: Pick<
+    NoticeItem,
+    "text" | "approval" | "resolvedAt" | "approvalActions" | "unmatchedDecision"
+  >,
 ): string {
   if (!noticeIsResolvedApproval(item)) return item.text;
   const actions = item.approvalActions ?? [];
   const decided = actions.filter((action) => action.decision !== undefined);
-  // Without any answer (an older replay), say only that it was answered.
-  if (decided.length === 0) return t("timeline.noticePresentation.youRespondedToThisApproval");
+  if (decided.length === 0) {
+    // Answered by a decision that named none of its actions (an older
+    // request): say only that it was answered, and by whom.
+    if (item.unmatchedDecision === "automatic")
+      return t("timeline.noticePresentation.declinedAutomatically");
+    if (item.unmatchedDecision === "person")
+      return t("timeline.noticePresentation.youRespondedToThisApproval");
+    // No answer was recorded: the wait ended some other way.
+    return t("timeline.noticePresentation.endedWithoutAnswer");
+  }
   // Each answered action, by what it asked, in the host's words when it named the action.
   const titleOf = (action: ApprovalAction) =>
     toolActionTitle(t, action.toolName) ?? action.title ?? undefined;

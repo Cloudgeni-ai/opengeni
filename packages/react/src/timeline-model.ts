@@ -157,6 +157,7 @@ export {
 export type { SessionDisplayStatus, SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";
 export {
+  noticeApprovalAnswered,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
