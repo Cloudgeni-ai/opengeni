@@ -64,7 +64,6 @@ export function insightsRawQuerySupported(
     "person",
     "rootSessionId",
     "scheduleId",
-    "source",
     "limit",
     ...(organization ? (calls ? ["workspaceId"] : ["workspaceId", "automationCursor"]) : []),
     ...(calls ? ["cursor"] : ["groupBy", "seriesGroups", "agentId"]),
@@ -88,7 +87,6 @@ export function insightsRawQuerySupported(
       "person",
       "schedule",
       "agent",
-      "source",
       ...(organization ? ["workspace"] : []),
     ]).has(String(query.groupBy))
   );

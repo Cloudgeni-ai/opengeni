@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  INSIGHTS_USAGE_SOURCE_SURFACES,
-  InsightsUsageSource,
   resolveInsightsUsageWindow,
   type InsightsCall,
   type InsightsCallsQuery,
@@ -243,8 +241,6 @@ function mini(): SQL {
     'chargedMicros',${sum("chargedMicros")},'listMicros',${sum("listMicros")},'byPayer',${payers()})`;
 }
 
-const usageSourceLabel = sql`coalesce(${JSON.stringify(INSIGHTS_USAGE_SOURCE_SURFACES)}::jsonb ->> (payload->>'usageSurface'), 'other')`;
-
 function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
   const keys = {
     model: sql`payload->>'provider'||'/'||(payload->>'model')`,
@@ -255,7 +251,6 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootSessionId','deleted')`,
     person: sql`coalesce(payload->>'person','service')`,
     schedule: sql`coalesce(payload->>'scheduleId','service')`,
-    source: usageSourceLabel,
     // Agents the caller may not see share one row, so their ids stay hidden.
     agent: sql`case when payload->>'agentId' is null then 'none' when payload->>'agentName' is null then 'unavailable' else payload->>'agentId' end`,
   };
@@ -268,7 +263,6 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootTitle','Untitled chat')`,
     person: sql`coalesce(payload->>'personName','Service')`,
     schedule: sql`coalesce(payload->>'scheduleName',case when payload->>'scheduleId' is null then 'Interactive' else 'Unavailable schedule' end)`,
-    source: usageSourceLabel,
     // agentName is set only for agents the caller may see (migration 1564).
     agent: sql`coalesce(payload->>'agentName',case when payload->>'agentId' is null then 'No agent' else 'Unavailable agent' end)`,
   };
@@ -288,8 +282,7 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
           : sql`'item'::text`;
   return {
     key: sql`case when payload->>'kind' in ('private','personal') then payload->>'kind'||':'||(payload->>'person')
-      when payload->>'kind'<>'item' then payload->>'kind'||case when ${groupBy}='workspace' and payload->>'workspaceId' is not null then ':'||(payload->>'workspaceId') else '' end
-      else ${groupBy === "source" ? key : sql`(${normalKind})||':'||(${key})`} end`,
+      when payload->>'kind'<>'item' then payload->>'kind'||case when ${groupBy}='workspace' and payload->>'workspaceId' is not null then ':'||(payload->>'workspaceId') else '' end else (${normalKind})||':'||(${key}) end`,
     kind: sql`case when payload->>'kind'<>'item' then payload->>'kind' else ${normalKind} end`,
     label: sql`case payload->>'kind' when 'private' then coalesce(payload->>'personName','Private chats')
       when 'personal' then coalesce(payload->>'personName','Personal usage') when 'deleted' then 'Deleted chats'
@@ -313,8 +306,6 @@ export async function readInsightsUsage(
   const personal =
     input.workspaceId === null ? await personalAutomationWorkspaceId(db, input) : null;
   const group = grouping(query.groupBy);
-  const sourceAware = query.groupBy === "source" || query.source !== undefined;
-  const remainder = query.groupBy === "source" ? "other:folded" : "other";
   const queryJson = JSON.stringify(query);
   // The capability already masks hidden identities. Do not call a SQL function
   // once per fact when the request has no identity/dimension predicates.
@@ -339,15 +330,9 @@ export async function readInsightsUsage(
           query.agentId.map((id) => sql`${id}`),
           sql`, `,
         )}))`;
-  const baseFilter = filteredQuery
+  const filter = filteredQuery
     ? sql`opengeni_private.insights_usage_filter(payload,${queryJson}::jsonb) and ${agentFilter}`
     : agentFilter;
-  const filter = query.source
-    ? sql`${baseFilter} and payload->>'kind'='item' and ${usageSourceLabel} in (${sql.join(
-        query.source.map((value) => sql`${value}`),
-        sql`, `,
-      )})`
-    : baseFilter;
   const details = sql`array[${sql.join(
     (input.detailsWorkspaceIds ?? []).map((id) => sql`${id}::uuid`),
     sql`, `,
@@ -358,7 +343,7 @@ export async function readInsightsUsage(
     bucket: InsightsUsageBucket,
   ) => sql`opengeni_private.insights_scoped_usage_rows(
     ${input.accountId}::uuid,${input.workspaceId}::uuid,${since.toISOString()}::timestamptz,
-    ${until.toISOString()}::timestamptz,${sourceAware ? `${bucket}:source` : bucket}::text,${details},${input.detailsSharedWorkspaces === true}::boolean)`;
+    ${until.toISOString()}::timestamptz,${bucket}::text,${details},${input.detailsSharedWorkspaces === true}::boolean)`;
   const payload: Record<string, unknown> = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -396,11 +381,11 @@ export async function readInsightsUsage(
         where r.kind not in ('private','personal','deleted','restricted') and r.rank>${query.limit}),
       selected_groups as (select key,kind,label,measures,provider,model,workspace_id,you from ranked
         where kind in ('private','personal','deleted','restricted') or rank<=${query.limit}
-        union all select ${remainder},'other','Other',${measures()},null,null,null,false from tail having count(*)>0),
+        union all select 'other','other','Other',${measures()},null,null,null,false from tail having count(*)>0),
       top_series as materialized(select key from group_rows order by
         (measures->>'chargedMicros')::bigint+(measures->>'listMicros')::bigint desc,(measures->>'calls')::bigint desc,key limit 6),
-      mini_rows as (select bucket,case when key in(select key from top_series) then key else ${remainder} end as key,
-        ${mini()} as measures from categorized group by bucket,2),
+      mini_rows as (select bucket,case when key in(select key from top_series) then key else 'other' end as key,
+        ${mini()} as measures from categorized group by bucket,case when key in(select key from top_series) then key else 'other' end),
       buckets as (select bucket,${measures()} as measures from categorized group by bucket),
       points as (select generate_series(${bucketStart(window.bucket, sql`${window.since.toISOString()}::timestamptz`)},
         ${window.until.toISOString()}::timestamptz-interval '1 microsecond',
@@ -425,7 +410,6 @@ export async function readInsightsUsage(
             from mini_rows where mini_rows.bucket=points.start),'{}'::jsonb)) else '{}'::jsonb end order by points.start)
           from points left join buckets on buckets.bucket=points.start cross join zero),'[]'::jsonb),
         'facets',jsonb_build_object(
-          'sources',${JSON.stringify(InsightsUsageSource.options)}::jsonb,
           'workspaces',coalesce((select jsonb_agg(jsonb_build_object('id',id,'name',name,'personal',personal) order by name,id)
             from(select payload->>'workspaceId' as id,max(payload->>'workspaceName') as name,bool_or(coalesce((payload->>'personal')::boolean,false)) as personal from visible group by payload->>'workspaceId') v),'[]'::jsonb),
           'providers',coalesce((select jsonb_agg(provider order by provider) from(select distinct payload->>'provider' as provider from visible) v),'[]'::jsonb),
@@ -621,7 +605,7 @@ export async function readInsightsCalls(
       const result =
         await scoped.execute(sql`select payload from opengeni_private.insights_scoped_calls_rows(
       ${input.accountId}::uuid,${input.workspaceId}::uuid,${window.since.toISOString()}::timestamptz,${window.until.toISOString()}::timestamptz,
-      ${JSON.stringify({ ...input.query, ...CALLS_READER_FIELDS, ...(input.query.source ? { usageSourceSurfaces: INSIGHTS_USAGE_SOURCE_SURFACES } : {}) })}::jsonb,${cursorAt}::timestamptz,${cursorId}::uuid,${input.query.limit + 1}::int,
+      ${JSON.stringify({ ...input.query, ...CALLS_READER_FIELDS })}::jsonb,${cursorAt}::timestamptz,${cursorId}::uuid,${input.query.limit + 1}::int,
       ${details},${input.detailsSharedWorkspaces === true}::boolean)
       order by (payload->>'occurredAt')::timestamptz desc,payload->>'id' desc limit ${input.query.limit + 1}`);
       return rows<{ payload: InsightsCall }>(result).map((row) => row.payload);

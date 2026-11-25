@@ -675,9 +675,8 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
   }
 }, 120_000);
 
-test("source grouping conserves list prices and debits; source filters run before calls pagination", async () => {
+test("recorded model facts report the accepted turn surface to metrics writers", async () => {
   const scope = await fixture();
-  const authorization = await bearer(scope, ["billing:read", "workspace:admin"]);
   const actors = { subjectId: scope.subjectId };
   const session = await withSessionRlsActorContext(actors, () =>
     createSession(client.db, {
@@ -693,12 +692,7 @@ test("source grouping conserves list prices and debits; source filters run befor
       createdByContext: {},
     }),
   );
-  for (const [surface, listMicros, chargedMicros] of [
-    ["web", 91, 18],
-    ["slack", 63, 12],
-    ["scheduled", 17, 4],
-    [null, 5, 1],
-  ] as const) {
+  for (const surface of ["web", "slack", "scheduled", null] as const) {
     const turn = await withSessionRlsActorContext(actors, () =>
       enqueueSessionTurn(client.db, {
         ...scope,
@@ -717,80 +711,23 @@ test("source grouping conserves list prices and debits; source filters run befor
         initiator: { kind: "subject", subjectId: scope.subjectId },
       }),
     );
-    const sourceKey = crypto.randomUUID();
     const fact = await withSessionRlsActorContext(actors, () =>
       recordModelCallFact(client.db, {
         ...scope,
         sessionId: session.id,
         turnId: turn.id,
-        sourceKey,
+        sourceKey: crypto.randomUUID(),
         provider: "openai",
         providerApi: "responses",
         model: "fixture-model",
         billingPath: "opengeni_credits",
-        pricedCostMicros: chargedMicros,
-        estimatedProviderCostMicros: listMicros,
+        pricedCostMicros: 5,
+        estimatedProviderCostMicros: 10,
         pricingSource: "configured_list_price",
       }),
     );
     expect(fact.turnSurface).toBe(surface);
-    await applyCreditLedgerEntry(client.db, {
-      ...scope,
-      type: "model_usage_debit",
-      amountMicros: -chargedMicros,
-      sourceType: "model_response",
-      sourceId: `${turn.id}:${sourceKey}`,
-      idempotencyKey: sourceKey,
-      metadata: { sessionId: session.id },
-    });
   }
-  const app = api();
-  for (const organization of [false, true]) {
-    const request = (leaf: "usage" | "calls", query: string) =>
-      app.request(path(scope, organization, leaf, query), { headers: { authorization } });
-    const response = await request("usage", "range=24h&groupBy=source&seriesGroups=true");
-    expect(response.status, await response.clone().text()).toBe(200);
-    const result = InsightsUsageResponse.parse(await response.json());
-    expect(result.facets.sources).toEqual(["web", "api", "slack", "schedule", "agent", "other"]);
-    expect(
-      result.groups.map((group) => [
-        group.key,
-        group.measures.listMicros,
-        group.measures.chargedMicros,
-      ]),
-    ).toEqual([
-      ["web", 91, 18],
-      ["slack", 63, 12],
-      ["schedule", 17, 4],
-      ["other", 5, 1],
-    ]);
-    expect(result.totals).toMatchObject({ calls: 4, listMicros: 176, chargedMicros: 35 });
-    const filtered = await request("usage", "range=1h&groupBy=source&source=schedule");
-    expect(filtered.status, await filtered.clone().text()).toBe(200);
-    expect(InsightsUsageResponse.parse(await filtered.json()).totals).toMatchObject({
-      calls: 1,
-      listMicros: 17,
-      chargedMicros: 4,
-    });
-    const folded = await request("usage", "range=24h&groupBy=source&limit=1&seriesGroups=true");
-    expect(InsightsUsageResponse.parse(await folded.json()).groups.map((g) => g.key)).toContain(
-      "other:folded",
-    );
-    const calls = await request("calls", "range=24h&source=slack&limit=1");
-    expect(calls.status, await calls.clone().text()).toBe(200);
-    expect(InsightsCallsResponse.parse(await calls.json())).toMatchObject({
-      calls: [{ listMicros: 63 }],
-      nextCursor: null,
-    });
-  }
-  const billingOnly = await bearer(scope, ["billing:read"]);
-  const hidden = await app.request(path(scope, true, "usage", "range=24h&groupBy=source"), {
-    headers: { authorization: billingOnly },
-  });
-  expect(hidden.status, await hidden.clone().text()).toBe(200);
-  expect(
-    InsightsUsageResponse.parse(await hidden.json()).groups.map((group) => group.kind),
-  ).toEqual(["restricted"]);
 }, 120_000);
 
 test("inventory includes zero-use and terminal runs; the shared metric increments once and excludes private and tenant labels", async () => {

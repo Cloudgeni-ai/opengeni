@@ -11,8 +11,9 @@ workspaceId: string | null, query, now, detailsWorkspaceIds?: readonly string[],
 detailsSharedWorkspaces?: boolean })`. A null workspace selects organization
 scope. The result is the existing `@opengeni/contracts/insights-usage` response.
 The response advertises its supported ranges, including custom UTC dates or
-instants. Unsupported dimensions such as plan return HTTP 400 rather than
-silently using a different dimension.
+instants. Unsupported dimensions such as source and plan return HTTP 400
+rather than silently using a different dimension. The response omits
+`facets.sources`.
 
 Core must supply authenticated detail authority, not wire fields: workspace
 routes pass their sessions:read-authorized workspace; organization routes pass
@@ -42,16 +43,6 @@ Like the other identity filters, `agentId` matches visible usage only; hidden
 rows never reveal which agent a hidden chat used. `facets.agents` lists the
 visible agents with usage and marks servers that answer the agent dimension.
 The calls endpoint does not accept `agentId`.
-
-Usage can group by `source`; both usage and calls can filter by `source`.
-The values are `web`, `api` (including SDK/embed and MCP entry), `slack`,
-`schedule`, `agent`, and `other`. `other` also covers system, site, and voice
-turn surfaces and records without usable provenance.
-An attributed automation run takes priority over the accepted turn's entry
-surface. Source filters only match visible usage. Hidden amounts remain in
-their usual aggregate rows and never reveal a source. `facets.sources` declares
-the fixed supported values. Exact source breakdowns read raw facts and their
-accepted turns in the requested window; ordinary reads retain hourly rollups.
 
 Organization Insights also returns `automations` on the same usage endpoint
 (`getOrganizationInsightsUsage` in the SDK). Each row contains the automation

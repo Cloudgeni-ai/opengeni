@@ -440,7 +440,6 @@ describe("organization MCP server", () => {
         },
       ],
       automationNextCursor: automationCursor,
-      facets: { sources: ["schedule"] },
     };
     const { client, call, seen } = await connect(person(readOnly), () => Response.json(body));
     try {

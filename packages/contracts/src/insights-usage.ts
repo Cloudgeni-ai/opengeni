@@ -101,9 +101,8 @@ export const InsightsUsageSource = /* @__PURE__ */ defineSchema(() =>
 );
 export type InsightsUsageSource = z.infer<typeof InsightsUsageSource>;
 
-/** Map stored turn provenance, never a request's claimed origin. The DB
- * query builder uses the same mapping for aggregation inside PostgreSQL. */
-export const INSIGHTS_USAGE_SOURCE_SURFACES = {
+/** Map stored turn provenance into the Insights vocabulary. */
+const INSIGHTS_USAGE_SOURCE_SURFACES = {
   web: "web",
   api_key: "api",
   embedded: "api",
