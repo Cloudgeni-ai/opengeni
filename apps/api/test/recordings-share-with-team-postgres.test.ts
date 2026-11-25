@@ -293,6 +293,21 @@ test("a Personal workspace meeting shared with a team workspace opens there, rea
   expect(ids(await at(colleague, team, "GET", "/recordings"))).toEqual([]);
   expect((await at(colleague, team, "GET", `/recordings/${customer}`)).status).toBe(404);
   expect(ids(await at(seller, sales, "GET", "/recordings"))).toEqual([customer]);
+  // Naming its visibility again, without the workspace, keeps it shared there.
+  expect(
+    await share(personal, customer, { visibility: "workspace", title: "Acme call" }),
+  ).toMatchObject({ status: 200, body: { sharedWorkspaceId: sales, title: "Acme call" } });
+  expect(ids(await at(seller, sales, "GET", "/recordings"))).toEqual([customer]);
+  // A meeting that isn't there is not found, not refused.
+  expect((await share(team, crypto.randomUUID(), { sharedWorkspaceId: sales })).status).toBe(404);
+  // Anyone in Team still renames a meeting shared there, naming its visibility unchanged.
+  expect((await share(team, teamOwn, { visibility: "workspace" })).status).toBe(200);
+  expect(
+    await at(colleague, team, "PATCH", `/recordings/${teamOwn}`, {
+      title: "Standup, Tuesday",
+      visibility: "workspace",
+    }),
+  ).toMatchObject({ status: 200, body: { title: "Standup, Tuesday", sharedWorkspaceId: null } });
 
   // Unshared: Only me again, for its owner alone.
   expect(await share(sales, customer, { visibility: "private" })).toMatchObject({
@@ -325,7 +340,7 @@ test("a Personal workspace meeting shared with a team workspace opens there, rea
   await shared.admin`delete from workspace_memberships
     where workspace_id = ${team} and subject_id = ${owner.subjectId}`;
   expect((await at(colleague, team, "GET", `/recordings/${customer}`)).status).toBe(404);
-  expect(ids(await at(colleague, team, "GET", "/recordings"))).toEqual([]);
+  expect(ids(await at(colleague, team, "GET", "/recordings"))).toEqual([teamOwn]);
 
   // Deleting the meeting removes the share.
   await shared.admin`delete from recordings where id = ${customer}`;

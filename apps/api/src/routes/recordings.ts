@@ -1122,7 +1122,8 @@ export function registerRecordingRoutes(
     if (sharedWorkspaceId && body.visibility === "private") {
       throw invalid("sharedWorkspaceId needs visibility workspace");
     }
-    const visibility = sharedWorkspaceId ? "workspace" : body.visibility;
+    const visibility =
+      body.sharedWorkspaceId !== undefined ? (body.visibility ?? "workspace") : body.visibility;
     // Sharing without naming a workspace shares with the one that stores the
     // meeting, so it is done there, where everyone it is shared with sees it.
     if (
@@ -1141,6 +1142,8 @@ export function registerRecordingRoutes(
     // their Personal workspace. A meeting a team workspace stores is shared
     // only there, where it always shows once shared.
     if (sharedWorkspaceId) {
+      // A meeting this person can't change here is not found, as elsewhere.
+      await guard(() => getRecording(db, { ...actor, recordingId }));
       if ((await ownMeetingsReaching(db, actor)) !== null) {
         throw new ApiHttpError(409, {
           code: "conflict",

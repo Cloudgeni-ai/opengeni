@@ -552,7 +552,7 @@ export function meetingShareTargets(
   const personal = stored?.personal === true;
   const targets = personal
     ? (workspaces ?? [])
-        .filter((workspace) => workspace.personal !== true)
+        .filter((workspace) => workspace.personal !== true && workspace.shareable !== false)
         .map(({ id, name }) => ({ id, name }))
     : [
         {
@@ -563,22 +563,27 @@ export function meetingShareTargets(
               : (stored?.name ?? recording.sourceWorkspace?.name ?? fallbackName),
         },
       ];
-  // Shared in the Personal workspace that stores it, nobody else sees it.
+  // Shared in the Personal workspace that stores it, or with a workspace its
+  // owner has left, nobody else sees it.
+  const sharedWith = recording.sharedWorkspaceId ?? (personal ? null : storing);
   const current =
-    recording.visibility === "private"
-      ? null
-      : (recording.sharedWorkspaceId ?? (personal ? null : storing));
+    recording.visibility !== "private" && targets.some((target) => target.id === sharedWith)
+      ? sharedWith
+      : null;
   return { targets, current };
 }
 
 function ShareMenu({
   targets,
   current,
+  stored,
   onChange,
 }: {
   targets: readonly MeetingShareTarget[];
   /** The workspace it is shared with; null for Only me. */
   current: string | null;
+  /** Only me in name only: shared where nobody else sees it, so Only me still applies. */
+  stored: boolean;
   onChange: (target: MeetingShareTarget | null) => void;
 }) {
   const msg = useOpenGeniText();
@@ -602,7 +607,7 @@ function ShareMenu({
       <DropdownMenuContent align="end" className="w-64">
         <DropdownMenuItem
           onSelect={() => {
-            if (current !== null) onChange(null);
+            if (current !== null || stored) onChange(null);
           }}
         >
           <LockIcon aria-hidden="true" />
@@ -1712,6 +1717,7 @@ function MeetingDetailPageForRecording({
             <ShareMenu
               targets={share.targets}
               current={share.current}
+              stored={recording.visibility !== "private"}
               onChange={(target) => void changeSharing(target)}
             />
           ) : null}

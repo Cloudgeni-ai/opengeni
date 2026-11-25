@@ -242,7 +242,12 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
   async function actorForMeeting(
     meetingId: string,
     permission: "sessions:read" | "sessions:create",
-  ): Promise<{ who: RecordingActor & { only: string | null }; recordedIn: string | null }> {
+  ): Promise<{
+    who: RecordingActor & { only: string | null };
+    recordedIn: string | null;
+    /** Shared with this workspace to read: only its owner changes it. */
+    readOnly?: boolean;
+  }> {
     const who = await actor();
     // A meeting-summary chat reaches its one meeting, here, and nothing else.
     if (who.only) return { who, recordedIn: null };
@@ -255,7 +260,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     if (shared && shared.ownerSubjectId !== who.subjectId) {
       return permission === "sessions:read"
         ? { who: { ...who, workspaceId: shared.workspaceId }, recordedIn: null }
-        : { who, recordedIn: null };
+        : { who, recordedIn: null, readOnly: true };
     }
     const workspaces = await ownElsewhere(who, permission);
     const home = await ownRecordingHome(deps.db, {
@@ -569,7 +574,14 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (new TextEncoder().encode(request.notes).length > RECORDING_NOTE_MAX_BYTES) {
         return failure(json, "notes_too_long", "Notes can be at most 256 KiB; shorten them.");
       }
-      const { who } = await actorForMeeting(request.meetingId, "sessions:create");
+      const { who, readOnly } = await actorForMeeting(request.meetingId, "sessions:create");
+      if (readOnly) {
+        return failure(
+          json,
+          "read_only",
+          "This meeting is shared with the workspace to read; only the person who recorded it can change it.",
+        );
+      }
       if (who.only && who.only !== request.meetingId) return notVisible();
       // A summary chat writes the first notes and may revise only its own,
       // whatever revision it passes; the revision check below then refuses

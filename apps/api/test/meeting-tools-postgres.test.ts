@@ -666,7 +666,7 @@ describe("meeting tools", () => {
     );
     expect(
       await inTeam("meeting_notes_save", { meetingId: customer, notes: "x", expectedRevision: 0 }),
-    ).toMatchObject({ found: false });
+    ).toMatchObject({ error: { code: "read_only" } });
 
     // Unshared, it is gone from Team.
     await updateRecording(client.db, {

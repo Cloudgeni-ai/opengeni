@@ -24,7 +24,7 @@ afterAll(() => {
 });
 
 const { MeetingsListPage } = await import("./meetings-list-page");
-const { MeetingDetailPage } = await import("./meeting-detail-page");
+const { MeetingDetailPage, meetingShareTargets } = await import("./meeting-detail-page");
 const {
   createMeetingRecorderStore,
   MeetingRecorderProvider,
@@ -1894,6 +1894,34 @@ describe("Meeting page", () => {
     } finally {
       await view.unmount();
     }
+  });
+});
+
+describe("Share targets", () => {
+  const personal = { id: "p", name: "Personal", personal: true };
+  const sales = { id: "s", name: "Sales" };
+  const design = { id: "d", name: "Design", shareable: false };
+  const meeting = (visibility: "private" | "workspace", sharedWorkspaceId: string | null) => ({
+    workspaceId: "p",
+    visibility,
+    sharedWorkspaceId,
+    sourceWorkspace: null,
+  });
+
+  test("only team workspaces where the person can start work are offered", () => {
+    expect(
+      meetingShareTargets(meeting("private", null), [personal, sales, design], "Workspace"),
+    ).toEqual({ targets: [{ id: "s", name: "Sales" }], current: null });
+    expect(
+      meetingShareTargets(meeting("workspace", "s"), [personal, sales, design], "Workspace")
+        .current,
+    ).toBe("s");
+  });
+
+  test("shared with a workspace its owner has left reads Only me", () => {
+    expect(
+      meetingShareTargets(meeting("workspace", "gone"), [personal, sales], "Workspace").current,
+    ).toBeNull();
   });
 });
 

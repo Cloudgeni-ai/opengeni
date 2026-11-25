@@ -29,11 +29,16 @@ billed and retained in the Personal workspace; `sharedWorkspaceId` on the
 recording names the workspace it is shared with. Everyone in that workspace
 lists and opens it (transcript, notes, speakers, Ask about it) and agents
 there find it with `meetings_search`, read only: changes return 403 for anyone
-but the owner. `{ visibility: "private" }` unshares it. Deleting the meeting
-removes the share, and the share stops working when the owner leaves the
-workspace it is shared with. Chats that wrote its notes stay the owner's. In
+but the owner. Like any meeting shared with that workspace, whoever may read
+its shared meetings (an API key, a delegated token or an app's own users)
+reads it too. `sharedWorkspaceId` alone implies `visibility: "workspace"`, and
+`{ visibility: "private" }` unshares it. Deleting the meeting removes the
+share. While the owner is not a member of the workspace it is shared with, it
+isn't shared there (their Share menu shows Only me); it is again if they
+rejoin, unless they chose Only me. Chats that wrote its notes stay the owner's. In
 the React Meetings page this is the **Share** menu ("Only me" or one of the
-owner's team workspaces), when the host passes `reachWorkspaces`.
+owner's team workspaces where they can start chats), when the host passes
+`reachWorkspaces`.
 
 A recording is stored in the workspace it was recorded in, and a shared one
 stays there. A signed-in person's (`user:`) own Only me meetings are theirs

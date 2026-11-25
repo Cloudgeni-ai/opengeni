@@ -1136,15 +1136,27 @@ export async function updateRecording(
     if (reach !== undefined && row.ownerSubjectId !== input.subjectId) {
       throw new RecordingForbiddenError();
     }
-    // Who it is shared with changes with its visibility, by its owner only.
-    const sharing = input.visibility !== undefined || input.sharedWorkspaceId !== undefined;
+    // The team workspace it is shared with: kept unless it is named again or
+    // the meeting turns Only me; changed by its owner only.
+    const [current] = await tx
+      .select({ workspaceId: schema.recordingShares.workspaceId })
+      .from(schema.recordingShares)
+      .where(
+        and(
+          eq(schema.recordingShares.recordingWorkspaceId, input.workspaceId),
+          eq(schema.recordingShares.recordingId, input.recordingId),
+        ),
+      );
+    const currentShare = current?.workspaceId ?? null;
     const sharedWorkspaceId =
-      (visibility ?? row.visibility) === "workspace_shared" &&
-      input.sharedWorkspaceId &&
-      input.sharedWorkspaceId !== row.workspaceId
-        ? input.sharedWorkspaceId
-        : null;
-    if (sharing) {
+      (visibility ?? row.visibility) !== "workspace_shared"
+        ? null
+        : input.sharedWorkspaceId === undefined
+          ? currentShare
+          : input.sharedWorkspaceId && input.sharedWorkspaceId !== row.workspaceId
+            ? input.sharedWorkspaceId
+            : null;
+    if (sharedWorkspaceId !== currentShare) {
       if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
       if (sharedWorkspaceId && row.purpose !== "meeting") {
         throw new RecordingConflictError("Only a meeting can be shared", "dictation_private");
@@ -1155,22 +1167,16 @@ export async function updateRecording(
           and(
             eq(schema.recordingShares.recordingId, input.recordingId),
             eq(schema.recordingShares.recordingWorkspaceId, input.workspaceId),
-            ...(sharedWorkspaceId
-              ? [ne(schema.recordingShares.workspaceId, sharedWorkspaceId)]
-              : []),
           ),
         );
       if (sharedWorkspaceId) {
-        await tx
-          .insert(schema.recordingShares)
-          .values({
-            accountId: row.accountId,
-            recordingWorkspaceId: row.workspaceId,
-            recordingId: row.id,
-            workspaceId: sharedWorkspaceId,
-            sharedBySubjectId: input.subjectId,
-          })
-          .onConflictDoNothing();
+        await tx.insert(schema.recordingShares).values({
+          accountId: row.accountId,
+          recordingWorkspaceId: row.workspaceId,
+          recordingId: row.id,
+          workspaceId: sharedWorkspaceId,
+          sharedBySubjectId: input.subjectId,
+        });
       }
     }
     const [updated] = await tx
