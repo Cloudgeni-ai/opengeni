@@ -1,5 +1,5 @@
 import {
-  displayMathBlockEnds,
+  displayMathRanges,
   prepareMathMarkdown,
   type PreparedMathMarkdown,
 } from "@opengeni/react/markdown-math";
@@ -8,23 +8,24 @@ import {
  * Bounds for drawing assistant Markdown in the native timeline.
  *
  * One Markdown parse never sees more than MAX_MARKDOWN_CHUNK_LENGTH UTF-16 code units
- * (about 1,300 words, after math normalization). A longer message is cut into chunks at
- * top-level block boundaries outside code fences and display math, and each chunk is
- * prepared and parsed on its own, so the work grows linearly with the message and
- * crafted input can never cost more than one bounded parse per chunk. While a message
- * streams, chunks whose text did not change are not prepared or parsed again.
+ * (about 1,300 words, after math normalization). A longer message is cut into chunks
+ * where markdown-it's own block parser starts a top-level block, never inside display
+ * math, and each chunk is prepared and parsed on its own: every chunk parses to the
+ * blocks a single parse would give, the inline work grows linearly with the message, and
+ * crafted input can never cost more than one bounded parse per chunk. The block pass over
+ * the whole message is linear; while a message streams, only its last blocks are
+ * block-parsed again, and chunks whose text did not change are not prepared or parsed.
  *
- * In a long message, a code fence at the beginning of a line that is too long to share
- * a chunk is its own unit, drawn directly (code block, interactive preview or
- * interactive answer) without Markdown, so an `opengeni-html` visual of any length
- * still renders. Smaller fences stay in their chunk and render through Markdown's
- * fence rule, which draws them the same way. A message therefore has at most about
- * 2 × MAX_MARKDOWN_LENGTH / CHUNK_TARGET_LENGTH segments.
+ * In a long message, a top-level code fence too long to share a chunk is its own unit,
+ * drawn directly (code block, interactive preview or interactive answer) without
+ * Markdown, so an `opengeni-html` visual of any length still renders. Smaller fences
+ * stay in their chunk and render through Markdown's fence rule, which draws them the
+ * same way.
  *
  * A long message is mounted a bounded slice at a time (mountedSegmentCount), one slice
- * per frame, so no frame parses or mounts more than one chunk of Markdown. A code block
- * longer than one chunk is shown as plain-text pages; a large preview loads in its own
- * web view.
+ * per frame, so no frame parses or mounts more than about one chunk of Markdown. A code
+ * block longer than one chunk is shown as plain-text pages; a large preview loads in its
+ * own web view.
  *
  * A message longer than MAX_MARKDOWN_LENGTH, and a single text block longer than one
  * chunk (one giant paragraph), are shown as selectable plain-text pages instead.
@@ -71,147 +72,151 @@ function linesOf(text: string): Line[] {
   return lines;
 }
 
-// The info string may hold any character but a line ending (U+2028 included).
-const FENCE_OPEN = /^( {0,3})(`{3,}|~{3,})([\s\S]*)$/;
+/** The fields of a markdown-it block token the segmenter reads. */
+type BlockToken = {
+  type: string;
+  level: number;
+  nesting: number;
+  map: [number, number] | null;
+  info: string;
+  content: string;
+  markup: string;
+};
+
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
-type OpenFence = { char: string; length: number };
+/** A markdown-it instance: the parser whose block structure the cuts follow. */
+export type MarkdownBlockParser = {
+  block: { parse(src: string, md: never, env: object, tokens: BlockToken[]): void };
+};
 
-/** A CommonMark fence opener on this line (backtick info strings cannot contain backticks). */
-function fenceOpener(line: string): (OpenFence & { indent: number; info: string }) | null {
-  const match = FENCE_OPEN.exec(line);
-  if (!match) return null;
-  const marker = match[2]!;
-  const info = match[3]!;
-  if (marker[0] === "`" && info.includes("`")) return null;
-  return { char: marker[0]!, length: marker.length, indent: match[1]!.length, info };
-}
+/** A top-level block as markdown-it parsed it, by line. */
+type Unit = {
+  line: number;
+  fence: { language: string; content: string; closed: boolean } | null;
+  /** The lines where the items of a top-level list start. */
+  items: number[] | null;
+};
 
-function closesFence(line: string, fence: OpenFence): boolean {
-  const match = FENCE_CLOSE.exec(line);
-  return !!match && match[1]![0] === fence.char && match[1]!.length >= fence.length;
-}
-
-/**
- * Whether a fence opened at line `index` has a closer anywhere after it: for each fence
- * character, the longest closer at or after each line, built once (linear).
- */
-function fenceClosers(lines: Line[]): (index: number, fence: OpenFence) => boolean {
-  const longest = { "`": new Int32Array(lines.length + 1), "~": new Int32Array(lines.length + 1) };
-  for (let index = lines.length - 1; index >= 0; index--) {
-    longest["`"][index] = longest["`"][index + 1]!;
-    longest["~"][index] = longest["~"][index + 1]!;
-    const match = FENCE_CLOSE.exec(lines[index]!.text);
-    if (match) {
-      const char = match[1]![0] as "`" | "~";
-      longest[char][index] = Math.max(longest[char][index]!, match[1]!.length);
+/** Top-level blocks of `lines[from…]`, by markdown-it's own block parser. */
+function unitsOf(parser: MarkdownBlockParser, lines: Line[], from: number): Unit[] {
+  const tokens: BlockToken[] = [];
+  const src = lines
+    .slice(from)
+    .map((line) => line.text)
+    .join("\n");
+  parser.block.parse(src, parser as never, {}, tokens);
+  const units: Unit[] = [];
+  let list: Unit | null = null;
+  for (const token of tokens) {
+    if (!token.map) continue;
+    const line = from + token.map[0];
+    if (token.level === 0 && token.nesting !== -1) {
+      const isList = token.type === "bullet_list_open" || token.type === "ordered_list_open";
+      const unit: Unit = { line, fence: null, items: isList ? [] : null };
+      if (token.type === "fence") {
+        // At the top level, a last line that can close the fence did close it.
+        const last = token.map[1] - token.map[0] >= 2 ? lines[from + token.map[1] - 1] : null;
+        const closer = last ? FENCE_CLOSE.exec(last.text)?.[1] : undefined;
+        unit.fence = {
+          language: token.info.trim().split(/\s+/)[0] ?? "",
+          content: token.content.endsWith("\n") ? token.content.slice(0, -1) : token.content,
+          closed: !!closer && closer[0] === token.markup[0] && closer.length >= token.markup.length,
+        };
+      }
+      units.push(unit);
+      list = isList ? unit : null;
+    } else if (list && token.level === 1 && token.type === "list_item_open") {
+      list.items!.push(line);
     }
   }
-  return (index, fence) => longest[fence.char as "`" | "~"][index + 1]! >= fence.length;
+  return units;
 }
 
-type Block =
-  | { kind: "text"; start: number; end: number }
-  | {
-      kind: "fence";
-      start: number;
-      end: number;
-      language: string;
-      content: string;
-      closed: boolean;
-    };
-
-/**
- * Top-level blocks: text runs that can be parsed apart, and fences at column 0.
- * Text is cut only before an unindented line that follows a blank line (so no list
- * item, quote, paragraph or indented code continues across the cut), and never inside
- * a fence or a display math block (found by the same rule the math pass uses).
- * Concatenating every block gives back the message. Linear in the message length.
- */
-function blocksOf(text: string): Block[] {
-  const lines = linesOf(text);
-  const mathEnd = displayMathBlockEnds(lines.map((line) => line.text));
-  const closable = fenceClosers(lines);
-  const blocks: Block[] = [];
-  let textStart = 0;
-  const cut = (at: number) => {
-    if (at > textStart) blocks.push({ kind: "text", start: textStart, end: at });
-    textStart = at;
-  };
-  let nested: (OpenFence & { start: number; closable: boolean }) | null = null;
-  let previousBlank = false;
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
-    if (nested) {
-      // An indented fence that never closes runs to the end of its list item; past one
-      // chunk it cannot be drawn formatted anyway, so stop protecting it and let the rest
-      // of the message still be. A fence that does close stays whole, however long.
-      if (
-        closesFence(line.text, nested) ||
-        (!nested.closable && line.start - nested.start > MAX_MARKDOWN_CHUNK_LENGTH)
-      ) {
-        nested = null;
-      }
-      previousBlank = false;
-      continue;
-    }
-    const opener = fenceOpener(line.text);
-    if (opener && opener.indent === 0) {
-      // A column-0 fence interrupts any paragraph, list or quote: it is its own block.
-      cut(line.start);
-      const body: string[] = [];
-      let end = text.length;
-      let closed = false;
-      for (index++; index < lines.length; index++) {
-        const inner = lines[index]!;
-        if (closesFence(inner.text, opener)) {
-          end = inner.end;
-          closed = true;
-          break;
-        }
-        body.push(inner.text);
-      }
-      blocks.push({
-        kind: "fence",
-        start: line.start,
-        end,
-        language: opener.info.trim().split(/\s+/)[0] ?? "",
-        content: body.join("\n"),
-        closed,
-      });
-      textStart = end;
-      previousBlank = false;
-      continue;
-    }
-    if (opener) {
-      // An indented fence (in a list item): never cut inside it.
-      nested = { ...opener, start: line.start, closable: closable(index, opener) };
-      previousBlank = false;
-      continue;
-    }
-    const blank = line.text.trim() === "";
-    if (previousBlank && !blank && !/^[ \t]/.test(line.text)) cut(line.start);
-    const math = mathEnd(index);
-    if (math !== null) {
-      // A closed display block stays whole; its last line ends with its closer.
-      index = math;
-      previousBlank = false;
-      continue;
-    }
-    previousBlank = blank;
-  }
-  cut(text.length);
-  return blocks;
-}
+type Piece = { start: number; end: number; fence: Unit["fence"] };
 
 /**
  * How to draw a message: one Markdown segment when it fits one parse, bounded segments
  * when it is long, or null when it is too long to format at all (plain-text pages).
- * Linear in the message length; math normalization happens per chunk when it is drawn.
+ *
+ * Cuts follow markdown-it's own block structure: a long message is cut only where one of
+ * its top-level blocks starts (or, inside a list longer than one chunk, where one of its
+ * items starts), so every chunk parses to the same blocks a single parse would give, and
+ * a fence is a fence exactly when a single parse says so. Display math blocks, as the
+ * math pass finds them, are never cut. Linear in the message length.
+ *
+ * The segmenter keeps the block structure of the last message it saw: when the new text
+ * extends it (streaming), only the blocks from the end of the stable part are parsed again.
  */
-export function markdownSegments(text: string): MarkdownSegment[] | null {
-  if (text.length > MAX_MARKDOWN_LENGTH) return null;
-  if (text.length <= MAX_MARKDOWN_CHUNK_LENGTH) return [{ kind: "markdown", source: text }];
+export function createMarkdownSegmenter(parser: MarkdownBlockParser) {
+  let cached: { text: string; lineCount: number; units: Unit[] } | null = null;
+  return (text: string): MarkdownSegment[] | null => {
+    if (text.length > MAX_MARKDOWN_LENGTH) return null;
+    if (text.length <= MAX_MARKDOWN_CHUNK_LENGTH) return [{ kind: "markdown", source: text }];
+    const lines = linesOf(text);
+    let units: Unit[];
+    // A block boundary is decided by the line that starts the next block and the line after
+    // it, so every boundary at least two whole lines before the old text's last (possibly
+    // partial) line is unchanged, and markdown-it starts afresh at a top-level block.
+    let keep = -1;
+    if (cached && text.startsWith(cached.text)) {
+      const last = cached.lineCount - 1;
+      for (let index = cached.units.length - 1; index >= 0; index--) {
+        if (cached.units[index]!.line + 2 <= last) {
+          keep = index;
+          break;
+        }
+      }
+    }
+    if (cached && keep > 0) {
+      const from = cached.units[keep]!.line;
+      units = [...cached.units.slice(0, keep), ...unitsOf(parser, lines, from)];
+    } else {
+      units = unitsOf(parser, lines, 0);
+    }
+    cached = { text, lineCount: lines.length, units };
+    return segmentsOf(text, lines, units);
+  };
+}
+
+/** `createMarkdownSegmenter` for a single message. */
+export function markdownSegments(
+  text: string,
+  parser: MarkdownBlockParser,
+): MarkdownSegment[] | null {
+  return createMarkdownSegmenter(parser)(text);
+}
+
+function segmentsOf(text: string, lines: Line[], units: Unit[]): MarkdownSegment[] {
+  const offset = (line: number) => (line < lines.length ? lines[line]!.start : text.length);
+  // Lines inside a display math block: no cut before them.
+  const inMath = new Uint8Array(lines.length);
+  for (const { start, end } of displayMathRanges(lines.map((line) => line.text))) {
+    inMath.fill(1, start + 1, end + 1);
+  }
+  const pieces: Piece[] = [];
+  const add = (start: number, end: number, fence: Unit["fence"]) => {
+    const previous = pieces[pieces.length - 1];
+    if (previous && inMath[start]) {
+      previous.end = end;
+      previous.fence = null;
+    } else {
+      pieces.push({ start, end, fence });
+    }
+  };
+  units.forEach((unit, index) => {
+    const start = index === 0 ? 0 : unit.line;
+    const end = units[index + 1]?.line ?? lines.length;
+    if (!unit.items || offset(end) - offset(start) <= CHUNK_TARGET_LENGTH) {
+      add(start, end, unit.fence);
+      return;
+    }
+    // A list longer than one chunk may be cut between its items.
+    const starts = [start, ...unit.items.filter((line) => line > start)];
+    starts.forEach((item, at) => add(item, starts[at + 1] ?? end, null));
+  });
+  if (pieces.length === 0) pieces.push({ start: 0, end: lines.length, fence: null });
+
   const segments: MarkdownSegment[] = [];
   let chunk: { start: number; end: number } | null = null;
   const flush = () => {
@@ -224,22 +229,17 @@ export function markdownSegments(text: string): MarkdownSegment[] | null {
     }
     chunk = null;
   };
-  for (const block of blocksOf(text)) {
-    if (block.kind === "fence" && block.end - block.start > CHUNK_TARGET_LENGTH) {
+  for (const piece of pieces) {
+    const start = offset(piece.start);
+    const end = offset(piece.end);
+    if (piece.fence && end - start > CHUNK_TARGET_LENGTH) {
       flush();
-      const { language, content, closed } = block;
-      segments.push({
-        kind: "fence",
-        source: text.slice(block.start, block.end),
-        language,
-        content,
-        closed,
-      });
-    } else if (chunk && block.end - chunk.start <= CHUNK_TARGET_LENGTH) {
-      chunk.end = block.end;
+      segments.push({ kind: "fence", source: text.slice(start, end), ...piece.fence });
+    } else if (chunk && end - chunk.start <= CHUNK_TARGET_LENGTH) {
+      chunk.end = end;
     } else {
       flush();
-      chunk = { start: block.start, end: block.end };
+      chunk = { start, end };
     }
   }
   flush();

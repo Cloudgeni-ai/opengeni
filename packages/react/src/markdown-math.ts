@@ -31,25 +31,11 @@ export function prepareMathMarkdown(text: string): PreparedMathMarkdown {
   const findBlock = displayMathBlocks(lines);
   const out: string[] = [];
   let hasMath = false;
-  let fence: { char: string; length: number } | null = null;
+  let fence: OpenFence | null = null;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    if (fence) {
-      out.push(line);
-      const close = FENCE.exec(line);
-      if (
-        close &&
-        close[2]![0] === fence.char &&
-        close[2]!.length >= fence.length &&
-        line.slice(close[0].length).trim() === ""
-      ) {
-        fence = null;
-      }
-      continue;
-    }
-    const open = FENCE.exec(line);
-    if (open) {
-      fence = { char: open[2]![0]!, length: open[2]!.length };
+    if (fence || FENCE.test(line)) {
+      fence = nextFence(line, fence);
       out.push(line);
       continue;
     }
@@ -113,16 +99,42 @@ function displayMathBlocks(lines: string[]): (start: number) => DisplayBlock | n
   return (start) => displayBlock(lines, start, stops);
 }
 
+type OpenFence = { char: string; length: number };
+
+/** The code fence open after `line`, given the one open before it (`prepareMathMarkdown`'s rule). */
+function nextFence(line: string, fence: OpenFence | null): OpenFence | null {
+  const match = FENCE.exec(line);
+  if (!fence) return match ? { char: match[2]![0]!, length: match[2]!.length } : null;
+  const closes =
+    !!match &&
+    match[2]![0] === fence.char &&
+    match[2]!.length >= fence.length &&
+    line.slice(match[0].length).trim() === "";
+  return closes ? null : fence;
+}
+
 /**
- * The last line of the closed display block that starts at `lines[start]`, or null.
- * The same rules `prepareMathMarkdown` uses, so a caller can keep such blocks whole.
+ * The closed display blocks `prepareMathMarkdown` would find in `lines`, as first and last
+ * line indexes, by the same walk (code fences skipped). Linear. A caller that cuts the text
+ * into pieces keeps these blocks whole.
  */
-export function displayMathBlockEnds(lines: string[]): (start: number) => number | null {
+export function displayMathRanges(lines: string[]): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  if (!lines.some(mayContainMath)) return ranges;
   const findBlock = displayMathBlocks(lines);
-  return (start) => {
-    const block = findBlock(start);
-    return block && block.body !== null ? block.end : null;
-  };
+  let fence: OpenFence | null = null;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (fence || FENCE.test(line)) {
+      fence = nextFence(line, fence);
+      continue;
+    }
+    const block = findBlock(index);
+    if (!block) continue;
+    if (block.body !== null) ranges.push({ start: index, end: block.end });
+    index = block.end;
+  }
+  return ranges;
 }
 
 /**

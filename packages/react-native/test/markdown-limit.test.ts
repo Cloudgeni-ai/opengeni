@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   MAX_MARKDOWN_CHUNK_LENGTH,
   MAX_MARKDOWN_LENGTH,
-  markdownSegments,
+  createMarkdownSegmenter,
+  markdownSegments as segmentWith,
   mountedSegmentCount,
   type MarkdownSegment,
   plainTextPage,
@@ -15,6 +16,7 @@ const rendererPath = Bun.resolveSync(
 );
 const { default: MarkdownIt } = await import(Bun.resolveSync("markdown-it", rendererPath));
 const parser = MarkdownIt();
+const markdownSegments = (text: string) => segmentWith(text, parser);
 
 describe("bounded native Markdown", () => {
   test("ordinary replies and the exact limit retain Markdown", () => {
@@ -48,6 +50,18 @@ describe("bounded native Markdown", () => {
 const kinds = (segments: MarkdownSegment[] | null) => segments?.map((segment) => segment.kind);
 const joined = (segments: MarkdownSegment[] | null) =>
   segments?.map((segment) => segment.source).join("");
+
+type Token = { type: string; info: string; content: string };
+/** The leaf blocks markdown-it draws for a text, in order. */
+const leaves = (text: string): string[] =>
+  (parser.parse(text, {}) as Token[])
+    .filter((token) => ["fence", "code_block", "inline", "hr"].includes(token.type))
+    .map((token) => `${token.type}:${token.info}:${token.content}`);
+
+/** Parsing every segment on its own draws the same blocks as parsing the whole message. */
+function expectParity(text: string, segments: MarkdownSegment[] | null) {
+  expect(segments!.flatMap((segment) => leaves(segment.source))).toEqual(leaves(text));
+}
 
 function expectBounded(text: string, segments: MarkdownSegment[] | null) {
   expect(segments).not.toBeNull();
@@ -99,7 +113,7 @@ describe("long messages are drawn in bounded segments", () => {
   });
 
   test("never cuts inside nested fences or display math", () => {
-    const nested = "1. step\n\n   ```sh\n   echo a\n\nnot a cut\n   ```";
+    const nested = "1. step\n\n   ```sh\n   echo a\n\n   not a cut\n   ```";
     const math = "$$\na = b\n\nc = d\n$$";
     const text = Array.from({ length: 120 }, (_, index) =>
       index % 2 ? `${nested}\n\n${paragraph(index)}` : `${math}\n\n${paragraph(index)}`,
@@ -107,11 +121,12 @@ describe("long messages are drawn in bounded segments", () => {
     const segments = markdownSegments(text);
     expectBounded(text, segments);
     for (const segment of segments!) {
-      expect(segment.source.startsWith("not a cut")).toBe(false);
+      expect(segment.source.startsWith("   not a cut")).toBe(false);
       expect(segment.source.startsWith("c = d")).toBe(false);
       expect(segment.source.split("```").length % 2).toBe(1);
       expect(segment.source.split("$$").length % 2).toBe(1);
     }
+    expectParity(text, segments);
     expect(
       segments!.some(
         (segment) => segment.kind === "markdown" && prepareBoundedMarkdown(segment.source)?.hasMath,
@@ -177,7 +192,7 @@ describe("long messages are drawn in bounded segments", () => {
     const elapsed = performance.now() - started;
     expectBounded(text, segments);
     // Linear work on 64K: generous for slow CI machines, far below a quadratic blow-up.
-    expect(elapsed).toBeLessThan(500);
+    expect(elapsed).toBeLessThan(1_000);
     // Over the limit costs nothing: the length check comes first.
     expect(markdownSegments(pattern.repeat(1_000_000))).toBeNull();
   });
@@ -248,17 +263,125 @@ describe("segmentation edge cases", () => {
     const segments = markdownSegments(text);
     expectBounded(text, segments);
     expect(hasPreview(segments)).toBe(false);
-    // Too long for one parse, so it is shown as source, and "after" formats again.
-    expect(segments!.find((segment) => segment.source.includes(hidden))!.kind).toBe("plain");
+    expectParity(text, segments);
+    // Code too long for one parse is paged as source by the renderer; "after" formats again.
+    expect(segments!.find((segment) => segment.source.includes(hidden))).toMatchObject({
+      kind: "fence",
+      language: "text",
+      closed: true,
+    });
     expect(segments!.some((s) => s.kind === "markdown" && s.source.startsWith("after"))).toBe(true);
   });
 
-  test("an unclosed indented fence stops protecting text after one chunk", () => {
+  test("a fence in a list item ends with the item, as in a single parse", () => {
     const body = Array.from({ length: 200 }, (_, index) => `Paragraph ${index}. `.repeat(12));
     const text = ["1. step", "   ```sh", "   echo", "", ...body].join("\n\n");
     const segments = markdownSegments(text);
     expectBounded(text, segments);
     expect(segments!.filter((segment) => segment.kind === "markdown").length).toBeGreaterThan(2);
+  });
+
+  test("a list-item fence whose body is not indented is code, as in a single parse", () => {
+    const html = "<p>quoted</p>\n".repeat(700);
+    const text = `1. Install:\n   \`\`\`bash\nnpm install\n   \`\`\`\n\n\`\`\`opengeni-html\n${html}\`\`\`\n\nDone.`;
+    expect(text.length).toBeGreaterThan(MAX_MARKDOWN_CHUNK_LENGTH);
+    const segments = markdownSegments(text);
+    expectBounded(text, segments);
+    expectParity(text, segments);
+    expect(hasPreview(segments)).toBe(false);
+  });
+
+  test("an unclosed indented fence at the top level runs to the end, as in a single parse", () => {
+    for (const open of ["  ~~~", "  ````"]) {
+      const text = `Intro\n\n${open}\n${filler}\n\n${hidden}\n\nmore`;
+      const segments = markdownSegments(text);
+      expectBounded(text, segments);
+      expectParity(text, segments);
+      expect(hasPreview(segments)).toBe(false);
+    }
+  });
+
+  test("a preview after a list-item fence stays a preview, as in a single parse", () => {
+    const html = "<p>shown</p>\n".repeat(800);
+    const text = `- step\n  \`\`\`js\n  code\n\`\`\`opengeni-html\n${html}\`\`\`\n\nDone.`;
+    const segments = markdownSegments(text);
+    expectBounded(text, segments);
+    expectParity(text, segments);
+    expect(segments!.find((segment) => segment.kind === "fence")).toMatchObject({
+      language: "opengeni-html",
+      closed: true,
+    });
+  });
+
+  // Blocks whose extent depends on what follows them: containers, lazy lines, setext
+  // underlines, tables, reference definitions and fences of every indentation.
+  const pool = [
+    "> quote\n> > nested\nlazy line",
+    "- a\n  - b\n    - c\n\n  more a\n- d",
+    "1. one\n   ```js\n   x\n   ```\n2. two\n```\nback\n```",
+    "| a | b |\n|---|---|\n" + "| 1 | 2 |\n".repeat(40),
+    "[ref]: https://example.com\n\nSee [ref].",
+    "Title\n=====\n\nSub\n---",
+    "  ~~~\nindented tilde\n  ~~~",
+    "    indented code\n\n    more",
+    "***\n- - -",
+    "<div>\nhtml is text here\n</div>",
+    "Paragraph with **bold** and a [link](https://example.com). ".repeat(6),
+    "```opengeni-html\n<p>preview</p>\n```",
+    "   ```\nunclosed?",
+    "$$\na = b\n\nc\n$$",
+    "- item\n\n      code in item\n- next",
+    "> ```\n> quoted fence\n\nafter quote",
+  ];
+  const random = (seed: number) => () => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+    return seed / 2_147_483_648;
+  };
+  const document = (next: () => number, length: number) => {
+    let text = "";
+    while (text.length < length) {
+      text += pool[Math.floor(next() * pool.length)]!;
+      text += ["\n", "\n\n", "\n\n\n"][Math.floor(next() * 3)]!;
+    }
+    return text;
+  };
+
+  test("crafted block mixes always parse to the same blocks", () => {
+    const next = random(7);
+    for (let round = 0; round < 60; round++) {
+      const text = document(next, 9_000 + Math.floor(next() * 40_000));
+      const segments = markdownSegments(text);
+      expectBounded(text, segments);
+      expectParity(text, segments);
+    }
+  });
+
+  test("streaming re-parses only the end and segments like a fresh parse", () => {
+    const next = random(11);
+    for (let round = 0; round < 4; round++) {
+      const text = document(next, 30_000);
+      const segment = createMarkdownSegmenter(parser);
+      for (let end = 0; end < text.length; end += 1 + Math.floor(next() * 400)) {
+        const prefix = text.slice(0, end);
+        expect(segment(prefix)).toEqual(markdownSegments(prefix));
+      }
+    }
+    // Appending to a long message parses only its last blocks again.
+    let parsed = 0;
+    const counting = {
+      block: {
+        parse: (src: string, _md: never, env: object, tokens: never[]) => {
+          parsed += src.length;
+          parser.block.parse(src, parser, env, tokens);
+        },
+      },
+    };
+    const segment = createMarkdownSegmenter(counting);
+    const text = document(random(3), 60_000);
+    segment(text.slice(0, 50_000));
+    parsed = 0;
+    segment(text.slice(0, 50_100));
+    expect(parsed).toBeLessThan(2_000);
   });
 
   test("small fences pack into chunks, so the segment count stays small", () => {

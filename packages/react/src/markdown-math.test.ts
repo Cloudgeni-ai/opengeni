@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mayContainMath, prepareMathMarkdown } from "./markdown-math";
+import { displayMathRanges, mayContainMath, prepareMathMarkdown } from "./markdown-math";
 
 describe("display math scanning is linear", () => {
   test.each(["$$ a\n", "$$\n", "\\[\n", "\\[ a\n"])(
@@ -13,6 +13,15 @@ describe("display math scanning is linear", () => {
       expect(prepared.hasMath).toBe(false);
     },
   );
+
+  test("displayMathRanges finds the blocks the math pass rewrites, skipping fences", () => {
+    const lines = ["a", "$$", "x", "", "y", "$$", "```", "$$", "z", "$$", "```", "\\[ w \\]", "$$"];
+    expect(displayMathRanges(lines)).toEqual([
+      { start: 1, end: 5 },
+      { start: 11, end: 11 },
+    ]);
+    expect(displayMathRanges(["no math", "here"])).toEqual([]);
+  });
 });
 
 const prepared = (text: string) => prepareMathMarkdown(text);

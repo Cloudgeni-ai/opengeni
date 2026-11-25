@@ -36,7 +36,7 @@ import {
 import {
   MAX_MARKDOWN_CHUNK_LENGTH,
   MAX_MARKDOWN_LENGTH,
-  markdownSegments,
+  createMarkdownSegmenter,
   mountedSegmentCount,
   prepareBoundedMarkdown,
   type MarkdownSegment,
@@ -991,7 +991,9 @@ function TrimmedMarkdown({
   media: MarkdownMediaOptions & MarkdownLinkOptions;
 }) {
   const theme = useNativeTimelineTheme();
-  const segments = useMemo(() => markdownSegments(text), [text]);
+  // One segmenter per message, so streaming deltas re-parse only the blocks at its end.
+  const [segmenter] = useState(() => createMarkdownSegmenter(PARSER));
+  const segments = useMemo(() => segmenter(text), [segmenter, text]);
   const shown = useMountedSegments(segments);
   const styles = useMemo(() => {
     const base = webMarkdownStyles(theme, tone);
