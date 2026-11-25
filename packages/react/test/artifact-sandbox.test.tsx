@@ -65,6 +65,19 @@ describe("published HTML artifacts", () => {
     ).toContain('aria-label="Preview"');
   });
 
+  it("passes the frame key directly, never through a props spread", () => {
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderToStaticMarkup(<ArtifactSandbox html="<h1>App</h1>" title="Status" />);
+      const keySpread = consoleError.mock.calls.filter((call) =>
+        String(call[0]).includes('containing a "key" prop is being spread'),
+      );
+      expect(keySpread).toEqual([]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("lets the host replace or hide the Live indicator", () => {
     const replaced = renderToStaticMarkup(
       <ArtifactSandbox
