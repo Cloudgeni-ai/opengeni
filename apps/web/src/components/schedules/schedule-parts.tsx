@@ -86,7 +86,11 @@ export function schedulePermissions(task: ScheduledTask, access: ScheduleAccess)
     // An admin turns someone else's Workspace schedule off and on (it keeps
     // running as its owner), but never edits, runs or deletes it.
     canToggle:
-      access.canManage && (own || (access.isAdmin === true && task.visibility !== "private")),
+      access.canManage &&
+      (own
+        ? // Locked to the app or key that made it: only an admin's status-only path.
+          task.creatorLocked !== true || access.isAdmin === true
+        : access.isAdmin === true && task.visibility !== "private"),
     canPauseOrDelete: own && access.canManage,
     canDuplicate: access.canManage,
   };

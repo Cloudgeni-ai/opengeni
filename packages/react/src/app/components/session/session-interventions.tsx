@@ -24,6 +24,8 @@ export type SessionInterventions = {
 };
 
 const NONE: readonly InteractionIntervention[] = [];
+// Live hints drive refreshes; this is only the fallback while they are down.
+const FALLBACK_POLL_MS = 10_000;
 
 /** Open hand-offs of these sessions; reads nothing while the list is empty. */
 export function useSessionInterventions(options: {
@@ -37,6 +39,7 @@ export function useSessionInterventions(options: {
     client: options.client,
     workspaceId: options.workspaceId,
     enabled: key.length > 0,
+    pollIntervalMs: FALLBACK_POLL_MS,
   });
   const bySession = useMemo(
     () => groupOpenInterventions(interventions.interventions, key ? key.split(",") : []),

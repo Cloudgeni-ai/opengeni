@@ -335,6 +335,10 @@ test("an admin can switch someone else's Workspace schedule, but not their Only 
   // Turning it off and on is all: no edit, run or delete.
   const perms = schedulePermissions(theirs, admin);
   expect([perms.canEdit, perms.canRun, perms.canPauseOrDelete]).toEqual([false, false, false]);
+  // An owner's own creator-locked schedule switches only through the admin path.
+  const locked = { ...schedule("b", "Locked", "active"), creatorLocked: true as const };
+  expect(canSwitchSchedule(locked, manager)).toBe(false);
+  expect(canSwitchSchedule(locked, admin)).toBe(true);
 });
 
 test("switched rows drop Pause from their menu", async () => {
