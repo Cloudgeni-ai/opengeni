@@ -491,6 +491,12 @@ export type NoticeItem = {
     /** automatic_reject: Opengeni declined it, not the person. */
     decision?: "approve" | "reject" | "automatic_reject";
   }>;
+  /**
+   * A decision recorded for this wait's turn while it waited that names none
+   * of its actions (an older request without its approvals list): proof it
+   * was answered, by the person or automatically. Presentation only.
+   */
+  unmatchedDecision?: "person" | "automatic";
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
   /**
