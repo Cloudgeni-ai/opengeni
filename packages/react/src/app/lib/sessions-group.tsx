@@ -1511,6 +1511,30 @@ export function railSectionsForTab(
   };
 }
 
+/**
+ * The tab that lists a session, or a Site's own row: apps when it sits under
+ * an app row. Null when the rail doesn't list it.
+ */
+export function railTabOfSession(
+  sections: PinnedRailSections,
+  target: { sessionId: string | null; siteId: string | null },
+): "sessions" | "apps" | null {
+  const contains = (node: SessionTreeNode): boolean =>
+    (target.sessionId !== null && node.session.id === target.sessionId) ||
+    node.children.some(contains);
+  const roots = [
+    ...sections.pinned,
+    ...sections.ordinary.running,
+    ...sections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+  ];
+  for (const root of roots) {
+    if (contains(root) || (target.siteId !== null && root.siteGroup?.siteId === target.siteId)) {
+      return root.siteGroup ? "apps" : "sessions";
+    }
+  }
+  return null;
+}
+
 /** The selected descendant under a collapsed node, projected one level deeper. */
 export function selectedDescendantNode(
   node: SessionTreeNode,

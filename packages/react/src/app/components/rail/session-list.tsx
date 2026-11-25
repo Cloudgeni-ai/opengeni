@@ -218,6 +218,7 @@ import {
   compareSessionBrowse,
   projectRailSessions,
   railSectionsForTab,
+  railTabOfSession,
   groupSessionsForRail,
   mergeSessionForRail,
   parseSiteRowKey,
@@ -1790,6 +1791,36 @@ export function SessionList() {
     () => railSectionsForTab(railSections, listTab),
     [railSections, listTab],
   );
+  // Opening a chat or an app shows the tab that lists it. A tab the person
+  // picks stays until they open something else.
+  const routeTarget = `${activeSessionId ?? ""}|${activeSiteId ?? ""}`;
+  const revealedRouteTarget = useRef<string | null>(null);
+  const pickListTab = useCallback(
+    (next: SessionRailTab) => {
+      revealedRouteTarget.current = routeTarget;
+      switchListTab(next);
+    },
+    [routeTarget, switchListTab],
+  );
+  useEffect(() => {
+    if (appsPlacement !== "tab" || revealedRouteTarget.current === routeTarget) return;
+    const tab = railTabOfSession(railSections, {
+      sessionId: activeSessionId,
+      siteId: activeSiteId,
+    });
+    // Not listed (yet): look again when the list loads.
+    if (tab === null && (activeSessionId !== null || activeSiteId !== null)) return;
+    revealedRouteTarget.current = routeTarget;
+    if (tab !== null && tab !== railTab) switchListTab(tab);
+  }, [
+    activeSessionId,
+    activeSiteId,
+    appsPlacement,
+    railSections,
+    railTab,
+    routeTarget,
+    switchListTab,
+  ]);
   const forest = useMemo(
     () =>
       sortSessionForest(
@@ -3656,6 +3687,18 @@ export function SessionList() {
     channelSections.some((section) => section.channelId === null)
       ? channelSections
       : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
+  // The Apps tab's own rows: app rows are not keyboard rows, so `flat` can't
+  // tell whether it shows anything. Archived lists no apps.
+  const appsTabRowCount = !appsTab
+    ? 0
+    : pinnedNodes.length +
+      (browseStatus === "archived"
+        ? 0
+        : channelMode
+          ? channelSections.reduce((count, section) => count + section.sessions.length, 0)
+          : forest.running.length +
+            forest.grouped.reduce((count, bucket) => count + bucket.sessions.length, 0));
+  const appsTabFiltered = Boolean(search) || browseStatusPreference !== "active" || mineOnly;
   const renderedGroupedBuckets =
     browseGroupBy === "creator" || browseGroupBy === "none" || browseGroupBy === "project"
       ? forest.grouped
@@ -4006,9 +4049,21 @@ export function SessionList() {
 
   useEffect(() => {
     if (loading || (!search && !browseControlsActive)) return;
+    if (appsTab) {
+      setAnnouncement(`${appsTabRowCount} matching app${appsTabRowCount === 1 ? "" : "s"}.`);
+      return;
+    }
     const count = sessionBrowseResultCount(browseSessions, hierarchyMode);
     setAnnouncement(`${count} matching session${count === 1 ? "" : "s"}.`);
-  }, [browseControlsActive, browseSessions, hierarchyMode, loading, search]);
+  }, [
+    appsTab,
+    appsTabRowCount,
+    browseControlsActive,
+    browseSessions,
+    hierarchyMode,
+    loading,
+    search,
+  ]);
 
   return (
     <SiteRowActionsContext.Provider value={siteRowActions}>
@@ -4019,7 +4074,7 @@ export function SessionList() {
             className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1"
           >
             {listTab ? (
-              <SessionListTabs tab={listTab} onChange={switchListTab} idPrefix={tabsId} />
+              <SessionListTabs tab={listTab} onChange={pickListTab} idPrefix={tabsId} />
             ) : (
               <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
                 {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
@@ -4156,11 +4211,6 @@ export function SessionList() {
               // instead of flashing the old recency layout first. The third
               // holds it until the person's choice of app rows is known.
               <SessionListSkeleton />
-            ) : appsTab &&
-              pinnedNodes.length === 0 &&
-              forest.running.length === 0 &&
-              forest.grouped.length === 0 ? (
-              <div className="px-2 py-4 text-center text-xs text-fg-subtle">No apps yet.</div>
             ) : error && allSessions.length === 0 ? (
               <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
                 Session history is unavailable.{" "}
@@ -4172,7 +4222,24 @@ export function SessionList() {
                   Retry
                 </button>
               </div>
-            ) : flat.length === 0 &&
+            ) : appsTab && appsTabRowCount === 0 ? (
+              <div className="px-2 py-4 text-center text-xs text-fg-subtle">
+                <p>{appsTabFiltered ? "No apps match this view." : "No apps yet."}</p>
+                {appsTabFiltered ? (
+                  <button
+                    type="button"
+                    className="mt-2 min-h-8 rounded px-2 underline hover:text-fg pointer-coarse:min-h-11"
+                    onClick={() => {
+                      updateSearchDraft("");
+                      clearBrowseControls();
+                    }}
+                  >
+                    Clear search and filters
+                  </button>
+                ) : null}
+              </div>
+            ) : !appsTab &&
+              flat.length === 0 &&
               !showEmptyGroups &&
               (search || browseControlsActive) &&
               (search || browseStatus === "active") ? (
@@ -4196,11 +4263,12 @@ export function SessionList() {
                   {needsYouOnly && !search ? "Show all sessions" : "Clear search and filters"}
                 </button>
               </div>
-            ) : (browseSessions.length === 0 && !hierarchyMode) ||
-              (!search &&
-                !browseControlsActive &&
-                allSessions.length === 0 &&
-                pinnedNodes.length === 0) ? (
+            ) : !appsTab &&
+              ((browseSessions.length === 0 && !hierarchyMode) ||
+                (!search &&
+                  !browseControlsActive &&
+                  allSessions.length === 0 &&
+                  pinnedNodes.length === 0)) ? (
               <EmptySessions />
             ) : (
               <>
@@ -6049,9 +6117,15 @@ function SessionListTabs({
       aria-label="Sidebar list"
       className="flex min-w-0 flex-1 items-center gap-3"
       onKeyDown={(event) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        const keys: Record<string, SessionRailTab | undefined> = {
+          ArrowLeft: tab === "sessions" ? "apps" : "sessions",
+          ArrowRight: tab === "sessions" ? "apps" : "sessions",
+          Home: "sessions",
+          End: "apps",
+        };
+        const next = keys[event.key];
+        if (!next) return;
         event.preventDefault();
-        const next = tab === "sessions" ? "apps" : "sessions";
         onChange(next);
         refs.current.get(next)?.focus();
       }}
@@ -6073,8 +6147,8 @@ function SessionListTabs({
             tabIndex={selected ? 0 : -1}
             onClick={() => onChange(option.value)}
             className={cn(
-              "truncate rounded-sm text-sm font-normal outline-hidden focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:min-h-11",
-              selected ? "text-fg" : "text-fg-subtle hover:text-fg",
+              "truncate rounded-sm text-sm outline-hidden focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:min-h-11",
+              selected ? "font-medium text-fg" : "font-normal text-fg-subtle hover:text-fg",
             )}
           >
             {option.label}

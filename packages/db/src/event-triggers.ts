@@ -809,7 +809,7 @@ export async function recordEventDeliveryInTransaction(
       .returning({ id: schema.inboundEvents.id });
     if (row) inserted.push({ id: row.id, event });
   }
-  const matched = await queueMatchingEvents(tx, input, inserted, settleMs);
+  const matched = await queueMatchingEvents(tx, input, deliveryRow.id, inserted, settleMs);
   if (input.billingOrigin === "api" && matched.length > 0) {
     // Rows lock in id order, so concurrent deliveries can't deadlock here.
     await tx.execute(
@@ -931,10 +931,17 @@ async function deliveryEvents(
  * like the owner's one its trigger names; see triggerHearsSource), and an
  * event only fires the triggers of the stream it arrived on (an MCP
  * subscription).
+ *
+ * One delivery starts at most one run per agent: when several automations
+ * of the same agent (`agentConfig.agentId`) match it, only the oldest one
+ * queues the events, and each other one records a skipped run (reason
+ * `duplicate_agent_run`) in its run history. Automations of different
+ * agents, and ones without an agent, each run.
  */
 async function queueMatchingEvents(
   tx: Database,
   input: RecordEventDeliveryInput,
+  deliveryId: string,
   events: Array<{ id: string; event: StoredEventInput }>,
   settleMs: number,
 ): Promise<string[]> {
@@ -946,10 +953,18 @@ async function queueMatchingEvents(
     conditions: unknown;
     include_own_events: boolean;
     stream_key: string;
+    agent_id: string | null;
+    task_created_at: Date | string;
+    task_account_id: string;
+    authority_revision: number;
+    execution_digest: string | null;
   }>(
     tx,
     sql`select trigger.id, trigger.task_id, trigger.event_types, trigger.conditions,
-        trigger.include_own_events, trigger.stream_key
+        trigger.include_own_events, trigger.stream_key,
+        nullif(task.agent_config ->> 'agentId', '') as agent_id,
+        task.created_at as task_created_at, task.account_id as task_account_id,
+        task.authority_revision, task.execution_digest
       from event_triggers trigger
       join scheduled_tasks task
         on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
@@ -983,6 +998,38 @@ async function queueMatchingEvents(
       entry.triggerIds.push(trigger.id);
       forTask.set(id, entry);
       queued.set(trigger.task_id, forTask);
+    }
+  }
+  if (queued.size === 0) return [];
+  // At most one run per agent: the oldest matching automation of each agent
+  // keeps the events; the others record that they were skipped.
+  const tasks = new Map(triggers.map((trigger) => [trigger.task_id, trigger]));
+  const byAgent = new Map<string, string[]>();
+  for (const taskId of queued.keys()) {
+    const agentId = tasks.get(taskId)?.agent_id;
+    if (!agentId) continue;
+    byAgent.set(agentId, [...(byAgent.get(agentId) ?? []), taskId]);
+  }
+  for (const taskIds of byAgent.values()) {
+    if (taskIds.length < 2) continue;
+    const [, ...duplicates] = taskIds
+      .map((taskId) => tasks.get(taskId)!)
+      .sort(
+        (a, b) =>
+          asDate(a.task_created_at).getTime() - asDate(b.task_created_at).getTime() ||
+          (a.task_id < b.task_id ? -1 : a.task_id > b.task_id ? 1 : 0),
+      );
+    for (const duplicate of duplicates) {
+      queued.delete(duplicate.task_id);
+      await recordSkippedEventRun(tx, {
+        accountId: duplicate.task_account_id,
+        workspaceId: input.workspaceId,
+        taskId: duplicate.task_id,
+        authorityRevision: Number(duplicate.authority_revision),
+        executionDigest: duplicate.execution_digest,
+        producerKey: eventDuplicateAgentRunProducerKey(deliveryId, duplicate.task_id),
+        reason: EVENT_DUPLICATE_AGENT_RUN_REASON,
+      });
     }
   }
   if (queued.size === 0) return [];
@@ -1671,6 +1718,14 @@ export function eventChainLimitProducerKey(firstInboxId: string): string {
   return `scheduled-task-event-chain-limit:${firstInboxId}`;
 }
 
+/** Why an automation's run was skipped: another automation of its agent took the same delivery. */
+export const EVENT_DUPLICATE_AGENT_RUN_REASON = "duplicate_agent_run";
+
+/** The producer key of the skipped run that records one delivery left to another automation of the agent. */
+export function eventDuplicateAgentRunProducerKey(deliveryId: string, taskId: string): string {
+  return `scheduled-task-event-duplicate:${deliveryId}:${taskId}`;
+}
+
 type DispatchFacts = {
   account_id: string;
   task_status: string;
@@ -1736,6 +1791,7 @@ export async function claimEventTriggerDispatch(
             coalesce((select run.error = 'chain_limit' and run.admission_refusal is not null
               from scheduled_task_runs run
               where run.workspace_id = task.workspace_id and run.task_id = task.id
+                and run.error is distinct from ${EVENT_DUPLICATE_AGENT_RUN_REASON}
               order by run.created_at desc, run.id desc limit 1), false) as chain_limit_engaged,
             coalesce(task.reusable_session_id, (
               select run.session_id from scheduled_task_runs run
@@ -1746,7 +1802,8 @@ export async function claimEventTriggerDispatch(
             settings.throttled_since, settings.throttle_notified,
             (exists (select 1 from scheduled_task_runs run
                 where run.workspace_id = task.workspace_id and run.task_id = task.id
-                  and run.created_at >= settings.armed_at)
+                  and run.created_at >= settings.armed_at
+                  and run.error is distinct from ${EVENT_DUPLICATE_AGENT_RUN_REASON})
               or exists (select 1 from scheduled_task_event_occurrences occurrence
                 where occurrence.workspace_id = task.workspace_id and occurrence.task_id = task.id
                   and occurrence.created_at >= settings.armed_at)) as consumed_since_armed,
@@ -1868,13 +1925,14 @@ export async function claimEventTriggerDispatch(
               limited.map((entry) => entry.inbox.id),
             ),
           );
-        const recorded = await recordChainLimitReceipt(tx, {
+        const recorded = await recordSkippedEventRun(tx, {
           accountId: facts.account_id,
           workspaceId,
           taskId,
           authorityRevision: facts.authority_revision,
           executionDigest: facts.execution_digest,
           producerKey: eventChainLimitProducerKey(limited[0]!.inbox.id),
+          reason: "chain_limit",
         });
         if (recorded && !facts.chain_limit_engaged && facts.session_id !== null) {
           chainLimitNotice = {
@@ -2003,12 +2061,14 @@ export async function claimEventTriggerDispatch(
 }
 
 /**
- * The run history's record that the chain limit left events out: a skipped
- * run with reason `chain_limit`, never started. Recorded in a savepoint, so
- * an automation the refusal guard won't take (one that changed meanwhile)
+ * A run history record of events an automation did not run on: a skipped
+ * run with a retryable admission refusal, never started. Reasons:
+ * `chain_limit` and `duplicate_agent_run` (another automation of the same
+ * agent took the delivery; migration 1565). Recorded in a savepoint, so an
+ * automation the refusal guard won't take (one that changed meanwhile)
  * still dispatches; returns whether it was recorded.
  */
-async function recordChainLimitReceipt(
+async function recordSkippedEventRun(
   tx: Database,
   input: {
     accountId: string;
@@ -2017,8 +2077,10 @@ async function recordChainLimitReceipt(
     authorityRevision: number;
     executionDigest: string | null;
     producerKey: string;
+    reason: string;
   },
 ): Promise<boolean> {
+  const refusal = JSON.stringify({ version: 1, reason: input.reason, retryable: true });
   try {
     return await tx.transaction(async (savepoint) => {
       const rows = await rawRows<{ id: string }>(
@@ -2028,8 +2090,7 @@ async function recordChainLimitReceipt(
             fired_at, completed_at, action_kind, status, error, admission_refusal)
           values (${input.accountId}, ${input.workspaceId}, ${input.taskId},
             ${input.authorityRevision}, ${input.executionDigest}, 'event', ${input.producerKey},
-            now(), now(), 'agent_turn', 'skipped', 'chain_limit',
-            '{"version":1,"reason":"chain_limit","retryable":true}'::jsonb)
+            now(), now(), 'agent_turn', 'skipped', ${input.reason}, ${refusal}::jsonb)
           on conflict do nothing
           returning id`,
       );

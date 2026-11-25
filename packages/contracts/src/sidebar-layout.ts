@@ -253,15 +253,16 @@ export function mergeSidebarOptions(
  * One scope's apps placement, or undefined when it sets none. appsPlacement
  * counts only while it agrees with sessionsShowApps: a version from before
  * appsPlacement changes only sessionsShowApps, and that later choice wins.
+ * This version always stores the two together, so appsPlacement alone is
+ * what an older version's clear of sessionsShowApps left: unset.
  */
 function scopeAppsPlacement(
   options: SidebarLayoutOptions | undefined,
 ): SidebarAppsPlacement | undefined {
   const showApps = options?.sessionsShowApps;
-  const placement = options?.appsPlacement;
-  if (placement && (showApps === undefined || showApps === (placement !== "hidden")))
-    return placement;
   if (showApps === undefined) return undefined;
+  const placement = options?.appsPlacement;
+  if (placement && showApps === (placement !== "hidden")) return placement;
   return showApps ? "sessions" : "hidden";
 }
 

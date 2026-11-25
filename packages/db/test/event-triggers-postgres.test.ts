@@ -104,7 +104,10 @@ async function workspace() {
 type Space = Awaited<ReturnType<typeof workspace>>;
 
 /** An automation; `owner` makes it a person's (runs then need that person's authority). */
-async function task(space: Space, options: { owner?: string; schedule?: unknown } = {}) {
+async function task(
+  space: Space,
+  options: { owner?: string; schedule?: unknown; agentId?: string } = {},
+) {
   return createScheduledTask(client.db, {
     accountId: space.accountId,
     workspaceId: space.workspaceId,
@@ -115,7 +118,13 @@ async function task(space: Space, options: { owner?: string; schedule?: unknown 
     temporalScheduleId: `schedule-${crypto.randomUUID()}`,
     runMode: "new_session_per_run",
     overlapPolicy: "buffer_one",
-    agentConfig: { prompt: "Look at what happened", resources: [], tools: [], metadata: {} },
+    agentConfig: {
+      prompt: "Look at what happened",
+      resources: [],
+      tools: [],
+      metadata: {},
+      ...(options.agentId ? { agentId: options.agentId } : {}),
+    },
     metadata: {},
     createdBy: options.owner
       ? { kind: "subject", subjectId: options.owner }
@@ -702,6 +711,47 @@ describe("deliveries and matching", () => {
     expect((await deliver(space, source.id, [event("deploy.finished")])).matchedTaskIds).toEqual(
       [],
     );
+  });
+
+  test("one delivery starts one run per agent; its other automations record a skipped duplicate", async () => {
+    const space = await workspace();
+    const source = await webhookSource(space);
+    const reviewer = crypto.randomUUID();
+    const helper = crypto.randomUUID();
+    const oldest = await task(space, { agentId: reviewer });
+    const newer = await task(space, { agentId: reviewer });
+    const otherAgent = await task(space, { agentId: helper });
+    const noAgent = await task(space);
+    for (const automation of [newer, oldest, otherAgent, noAgent]) {
+      await setScheduledTaskEvents(client.db, {
+        ...space,
+        taskId: automation.id,
+        triggers: [{ sourceId: source.id, ...everything }],
+      });
+    }
+    const first = await deliver(space, source.id, [event("comment.created")]);
+    expect([...first.matchedTaskIds].sort()).toEqual([oldest.id, otherAgent.id, noAgent.id].sort());
+    expect(await inboxStatuses(space, oldest.id)).toEqual(["pending"]);
+    expect(await inboxStatuses(space, newer.id)).toEqual([]);
+    const skipped = await shared!.admin<{ status: string; error: string; trigger_type: string }[]>`
+      select status, error, trigger_type from scheduled_task_runs where task_id = ${newer.id}`;
+    expect([...skipped]).toEqual([
+      { status: "skipped", error: "duplicate_agent_run", trigger_type: "event" },
+    ]);
+    // The same automation wins every time, and a skipped duplicate is not a blocker.
+    const second = await deliver(space, source.id, [event("comment.created")]);
+    expect(second.matchedTaskIds).toContain(oldest.id);
+    expect(second.matchedTaskIds).not.toContain(newer.id);
+    let reviewed: string[] | null = null;
+    await reviewScheduledTaskBlockers(client.db, space.workspaceId, newer.id, (review) => {
+      reviewed = review.runs.map((entry) => entry.id);
+      return { kind: "none", reviewedRunId: null };
+    });
+    expect(reviewed ?? []).toEqual([]);
+    // Pausing the winner lets the other automation of the agent run.
+    await updateScheduledTask(client.db, space.workspaceId, oldest.id, { status: "paused" });
+    const third = await deliver(space, source.id, [event("comment.created")]);
+    expect(third.matchedTaskIds).toContain(newer.id);
   });
 });
 

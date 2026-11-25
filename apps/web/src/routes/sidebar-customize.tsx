@@ -42,6 +42,7 @@ import {
   type SidebarNavEntry,
 } from "@opengeni/contracts/sidebar-layout";
 import { AppsPlacementSubmenu } from "@opengeni/react/app/components/rail/session-browse-order-controls";
+import { appsPlacementChange } from "@/components/sidebar-layout/apps-placement-change";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { Button } from "@opengeni/react/ui/button";
@@ -721,7 +722,7 @@ function PageMoreMenu({
     <MoreMenu label="More sidebar options">
       <AppsPlacementSubmenu
         value={options.appsPlacement}
-        onChange={(appsPlacement) => onChange([{ op: "options", appsPlacement }])}
+        onChange={(appsPlacement) => onChange([appsPlacementChange(appsPlacement)])}
       />
       <DropdownMenuSub>
         <DropdownMenuSubTrigger>Menu entries</DropdownMenuSubTrigger>

@@ -920,7 +920,10 @@ describe("apps placement", () => {
       mergeSidebarOptions(workspace.options, personal({ sessionsShowApps: false })).appsPlacement,
     ).toBe("hidden");
     expect(
-      mergeSidebarOptions(workspace.options, personal({ appsPlacement: "sessions" })).appsPlacement,
+      mergeSidebarOptions(
+        workspace.options,
+        personal({ appsPlacement: "sessions", sessionsShowApps: true }),
+      ).appsPlacement,
     ).toBe("sessions");
   });
 
@@ -934,6 +937,13 @@ describe("apps placement", () => {
       mergeSidebarOptions(undefined, personal({ appsPlacement: "hidden", sessionsShowApps: true }))
         .appsPlacement,
     ).toBe("sessions");
+    // An older version's clear of sessionsShowApps leaves appsPlacement alone: unset.
+    expect(
+      mergeSidebarOptions(
+        personal({ appsPlacement: "hidden", sessionsShowApps: false }),
+        personal({ appsPlacement: "tab" }),
+      ).appsPlacement,
+    ).toBe("hidden");
     // A value a newer version added is read as unset and kept in storage.
     const stored = personal({ appsPlacement: "drawer", sessionsShowApps: true });
     expect(stored).toEqual({ appsPlacement: "drawer", sessionsShowApps: true } as never);

@@ -1129,6 +1129,61 @@ test("the Sessions and Apps tabs at desktop and phone widths", async () => {
   }
 }, 60_000);
 
+test("the Apps tab lists its apps under every grouping, and says when a filter leaves none", async () => {
+  await page.setViewportSize({ width: 1160, height: 900 });
+  await page.goto(`${url}?scenario=sites&theme=light&apps=tab`, { timeout: 60_000 });
+  const tabs = sidebar().getByRole("tablist", { name: "Sidebar list" });
+  await tabs.getByRole("tab", { name: "Apps", exact: true }).click();
+  await siteRow("Opengeni usage").waitFor();
+  for (const grouping of ["Last activity", "Created date", "Creator", "None", "Project"]) {
+    await selectView("Group by", grouping);
+    await siteRow("Opengeni usage").waitFor();
+    expect(await sidebar().getByText("No sessions match this view.").count()).toBe(0);
+  }
+  // Archived lists no apps: the tab says so and offers the way back.
+  await selectView("Status", "Archived");
+  await sidebar().getByText("No apps match this view.").waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(0);
+  await sidebar().getByRole("button", { name: "Clear search and filters", exact: true }).click();
+  await siteRow("Opengeni usage").waitFor();
+  // Needs you never offers to load older sessions here.
+  await selectView("Status", "Needs you");
+  expect(
+    await sidebar()
+      .getByRole("button", { name: /Load older/ })
+      .count(),
+  ).toBe(0);
+  expect(await sidebar().getByText("Nothing needs you right now.").count()).toBe(0);
+  await selectView("Status", "Active");
+  await siteRow("Opengeni usage").waitFor();
+
+  // Opening a chat shows the tab that lists it; a tab the person picks stays.
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  let currentUrl = page.url();
+  await railConversation("Export usage to CSV").click();
+  await page.waitForURL((next) => next.toString() !== currentUrl);
+  await tabs.getByRole("tab", { name: "Sessions", exact: true }).click();
+  await railConversation("Slack community connection test").waitFor();
+  await page.waitForTimeout(200);
+  expect(
+    await tabs.getByRole("tab", { name: "Sessions", exact: true }).getAttribute("aria-selected"),
+  ).toBe("true");
+  currentUrl = page.url();
+  await railConversation("Slack community connection test").click();
+  await page.waitForURL((next) => next.toString() !== currentUrl);
+  expect(
+    await tabs.getByRole("tab", { name: "Sessions", exact: true }).getAttribute("aria-selected"),
+  ).toBe("true");
+  // Back to the app's chat: the Apps tab lists it.
+  await page.goBack();
+  await siteRow("Opengeni usage").waitFor();
+  expect(
+    await tabs.getByRole("tab", { name: "Apps", exact: true }).getAttribute("aria-selected"),
+  ).toBe("true");
+}, 60_000);
+
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteRow("Opengeni usage").waitFor();

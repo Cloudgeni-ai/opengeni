@@ -11,6 +11,7 @@ import { RailFooter } from "@/components/rail/rail-footer";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
+import { appsPlacementChange } from "@/components/sidebar-layout/apps-placement-change";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { toast } from "sonner";
@@ -44,7 +45,7 @@ function useSessionsSidebarOptions(workspaceId: string) {
         ? (placement: SidebarAppsPlacement) =>
             void update({
               scope: "personal",
-              changes: [{ op: "options", appsPlacement: placement }],
+              changes: [appsPlacementChange(placement)],
             }).catch((error: unknown) =>
               toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
             )
