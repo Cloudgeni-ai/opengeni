@@ -2,7 +2,7 @@
 // the page's navigation host; the router mock below backs it.
 import "@/navigation-host";
 import type { ChatClient } from "@opengeni/sdk";
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { OrganizationUsageSummary, OrganizationUsageWorkspacePage } from "@opengeni/contracts";
@@ -16,6 +16,8 @@ import * as ContextModule from "@opengeni/react/app/app-context";
 import * as FormDialogModule from "@opengeni/react/ui/form-dialog";
 import * as AnalyticsModule from "@/lib/analytics";
 import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
+import { notifyCreditBalanceChanged } from "@opengeni/react/app/lib/credit-balance-events";
+import { previewPlan, previewPlans } from "@/dev/subscription-plans-preview";
 
 const accountId = "account-strict";
 const workspaceId = "workspace-strict";
@@ -96,6 +98,10 @@ const listBillingReceipts = mock(async (_query: unknown) => ({
   ],
   nextCursor: null,
 }));
+// No plan catalog unless a test sets one (deployments without subscriptions 404).
+const getBillingSubscriptionPlans = mock(async (_query: unknown): Promise<unknown> => {
+  throw Object.assign(new Error("Not found"), { status: 404 });
+});
 const listOrganizationApiKeys = mock(async (_accountId: string) => []);
 const createOrganizationApiKey = mock(async () => {
   throw new Error("not used");
@@ -179,6 +185,7 @@ const context = {
     createBillingCheckout,
     createBillingPortalSession,
     listBillingReceipts,
+    getBillingSubscriptionPlans,
     listOrganizationApiKeys,
     createOrganizationApiKey,
     deleteOrganizationApiKey,
@@ -421,6 +428,85 @@ describe("organization billing StrictMode ownership", () => {
         mode: "stripe",
         balance: { accountId, balanceMicros: 25_000_000, currency: "usd", updatedAt: timestamp },
       }));
+    }
+  });
+
+  // Regression: the plan block and the receipts list once shared a React key,
+  // so every re-render of a long-open Billing page left one more copy of
+  // "Your plan" and "Plans" in the DOM.
+  test("shows the plan once while balance changes and a plan switch re-render Billing", async () => {
+    const billingWith = (key: string) => ({
+      mode: "stripe" as const,
+      balance: {
+        accountId,
+        balanceMicros: 25_000_000,
+        currency: "usd" as const,
+        updatedAt: timestamp,
+        plan: previewPlan(key),
+      },
+    });
+    getBilling.mockImplementation(async () => billingWith("free"));
+    getBillingSubscriptionPlans.mockImplementation(async () => ({
+      accountId,
+      revision: 1,
+      plans: previewPlans,
+      plan: previewPlan("free"),
+    }));
+    listBillingReceipts.mockClear();
+    const consoleError = spyOn(console, "error");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const count = (label: string) =>
+      [...container.querySelectorAll("h2, button")].filter(
+        (element) => element.textContent?.trim() === label,
+      ).length;
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="billing" />),
+      );
+      await flush();
+      await flush();
+      expect(count("Your plan")).toBe(1);
+      expect(count("Manage billing")).toBe(1);
+      const receiptReads = listBillingReceipts.mock.calls.length;
+      expect(receiptReads).toBeGreaterThanOrEqual(1);
+
+      // Ops switch the organization to Enterprise and grant credits while the
+      // page stays open; each balance change refreshes Billing in place.
+      getBilling.mockImplementation(async () => billingWith("enterprise"));
+      for (let change = 0; change < 3; change += 1) {
+        await act(async () => notifyCreditBalanceChanged(accountId));
+        await flush();
+      }
+      const amount = container.querySelector<HTMLInputElement>('input[name="credit-amount"]');
+      expect(amount).not.toBeNull();
+      await act(async () => {
+        amount!.value = "40.00";
+        amount!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await flush();
+
+      expect(count("Your plan")).toBe(1);
+      expect(count("Plans")).toBe(1);
+      expect(count("Manage billing")).toBe(1);
+      expect(container.textContent).toContain("Enterprise");
+      // The receipts list keeps its state across these renders.
+      expect(listBillingReceipts.mock.calls.length).toBe(receiptReads);
+      expect(
+        consoleError.mock.calls.filter((call) => String(call[0]).includes("same key")),
+      ).toEqual([]);
+    } finally {
+      consoleError.mockRestore();
+      await act(async () => root.unmount());
+      container.remove();
+      getBilling.mockImplementation(async () => ({
+        mode: "stripe",
+        balance: { accountId, balanceMicros: 25_000_000, currency: "usd", updatedAt: timestamp },
+      }));
+      getBillingSubscriptionPlans.mockImplementation(async () => {
+        throw Object.assign(new Error("Not found"), { status: 404 });
+      });
     }
   });
 
