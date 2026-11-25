@@ -95,7 +95,8 @@ mock.module("./create-with-opengeni", () => ({
   useCreateWithOpenGeni: () => ({ open: () => undefined, dialog: null }),
 }));
 const { SchedulesListPage, holdOrder } = await import("./schedules-list-page");
-const { ScheduleMenuItems, canSwitchSchedule } = await import("./schedule-parts");
+const { ScheduleMenuItems, canSwitchSchedule, schedulePermissions } =
+  await import("./schedule-parts");
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
   await import("@opengeni/react/ui/dropdown-menu");
 
@@ -324,6 +325,16 @@ test("the switch shows only where it pauses a schedule the viewer can change", (
   expect(canSwitchSchedule(schedule("a", "Mine", "active"), { ...manager, canManage: false })).toBe(
     false,
   );
+});
+
+test("an admin can switch someone else's Workspace schedule, but not their Only me one", () => {
+  const admin = { ...manager, isAdmin: true };
+  const theirs = { ...schedule("a", "Theirs", "paused"), ownerSubjectId: "other" };
+  expect(canSwitchSchedule(theirs, admin)).toBe(true);
+  expect(canSwitchSchedule({ ...theirs, visibility: "private" as const }, admin)).toBe(false);
+  // Turning it off and on is all: no edit, run or delete.
+  const perms = schedulePermissions(theirs, admin);
+  expect([perms.canEdit, perms.canRun, perms.canPauseOrDelete]).toEqual([false, false, false]);
 });
 
 test("switched rows drop Pause from their menu", async () => {

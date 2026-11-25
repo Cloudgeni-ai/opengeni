@@ -46,6 +46,11 @@ import { Link } from "../../lib/navigation";
 import { sessionDisplayTitle } from "../../lib/session-rename";
 import { toast } from "../../lib/toast";
 import { cn } from "../../lib/utils";
+import {
+  SessionInterventionNotice,
+  interventionsFor,
+  type SessionInterventions,
+} from "./session-interventions";
 
 /** The exact client surface the card reads and answers through. */
 export type DescendantRequestsClient = Pick<
@@ -89,6 +94,8 @@ export type DescendantRequestsProps = {
   pollIntervalMs?: number | undefined;
   /** Asks a provider for access an action's account lacks, before approving it. */
   onAllowAccess?: ApprovalSurfaceProps["onAllowAccess"];
+  /** Open browser or computer hand-offs of the waiting sub-sessions, read by the host. */
+  interventions?: SessionInterventions | undefined;
 };
 
 // The shared-feed mode with an empty feed: no live stream per sub-session.
@@ -255,6 +262,7 @@ function DescendantRequestItem({
   pollIntervalMs = DEFAULT_POLL_MS,
   onAllowAccess,
   onDismiss,
+  interventions,
 }: DescendantRequestsProps & {
   session: SessionSummary;
   compact: boolean;
@@ -457,6 +465,34 @@ function DescendantRequestItem({
             />
           </div>
         ) : null}
+      </div>
+    );
+  }
+  // A browser or computer hand-off (a passkey, a sign-in): its reason and its
+  // Done show here, so opening the sub-session isn't the only way to act.
+  const handoffs = interventionsFor(interventions, sessionId);
+  if (handoffs.length > 0 && interventions) {
+    return (
+      <div data-descendant-request={sessionId} data-descendant-request-kind="handoff">
+        <ItemSource
+          title={title}
+          verb="needs you"
+          link={
+            <SubSessionLink
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              title={title}
+              at={null}
+            />
+          }
+        />
+        <SessionInterventionNotice
+          interventions={handoffs}
+          mutating={interventions.mutating}
+          onResolve={(intervention, outcome) => {
+            void interventions.resolve(intervention, outcome).then(() => onResolved?.());
+          }}
+        />
       </div>
     );
   }

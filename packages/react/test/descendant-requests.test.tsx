@@ -53,6 +53,40 @@ const {
 } = await import("../src/app/lib/descendant-requests");
 const { DescendantRequests, resetDescendantRequestsStateForTests } =
   await import("../src/app/components/session/descendant-requests");
+const { groupOpenInterventions } =
+  await import("../src/app/components/session/session-interventions");
+
+type Intervention = Parameters<typeof groupOpenInterventions>[0][number];
+
+function intervention(sessionId: string, overrides: Partial<Intervention> = {}): Intervention {
+  return {
+    id: "intervention-1",
+    accountId: "00000000-0000-4000-8000-000000000001",
+    workspaceId: WORKSPACE,
+    resourceKind: "browser_session",
+    resourceId: "00000000-0000-4000-8000-000000000002",
+    targetId: "158214646",
+    controllerGeneration: "1",
+    targetGeneration: "1",
+    documentGeneration: null,
+    kind: "mfa",
+    reason: "Approve the sign-in.",
+    status: "open",
+    authRunId: null,
+    originatingSessionId: sessionId,
+    originatingTurnId: null,
+    originatingAttemptId: null,
+    originatingToolOperationId: null,
+    responseActorSubjectId: null,
+    version: 1,
+    operationId: "00000000-0000-4000-8000-000000000003",
+    expiresAt: "2026-11-25T17:39:00.000Z",
+    createdAt: "2026-11-25T15:39:00.000Z",
+    updatedAt: "2026-11-25T15:39:00.000Z",
+    settledAt: null,
+    ...overrides,
+  };
+}
 
 type DescendantRequestsProps = Parameters<typeof DescendantRequests>[0];
 
@@ -692,6 +726,49 @@ describe("DescendantRequests", () => {
     await render({ client, waiting: [child] });
     expect(container().textContent).toContain("Sign-in worker needs you");
     expect(container().querySelector('button[aria-label^="Dismiss:"]')).toBeNull();
+  });
+
+  test("a browser hand-off shows its reason and is answered in place", async () => {
+    // The a4ff9ccc case: paused on a passkey in the person's own Chrome, which
+    // the sub-session's page didn't show either.
+    const child = summary("child", { title: "Eval worker" });
+    const { client } = fakeClient({});
+    const resolved: Array<[string, string]> = [];
+    const passkey = intervention("child", {
+      reason: 'GitHub needs your passkey. Press "Use passkey" and approve it.',
+    });
+    await render({
+      client,
+      waiting: [child],
+      interventions: {
+        bySession: new Map([["child", [passkey]]]),
+        mutating: false,
+        resolve: async (item, outcome) => {
+          resolved.push([item.id, outcome]);
+        },
+      },
+    });
+    const item = container().querySelector('[data-descendant-request-kind="handoff"]');
+    expect(item?.textContent).toContain("Eval worker needs you");
+    expect(item?.textContent).toContain("Verification needed");
+    expect(item?.textContent).toContain("GitHub needs your passkey");
+    expect(link("Open sub-session: Eval worker")).not.toBeNull();
+    await click(button("Done")!);
+    await click(button("Cancel request")!);
+    expect(resolved).toEqual([
+      [passkey.id, "completed"],
+      [passkey.id, "dismissed"],
+    ]);
+  });
+
+  test("groups only open hand-offs by the session that asked, oldest first", () => {
+    const later = intervention("child", { id: "later", createdAt: "2026-11-25T15:40:00.000Z" });
+    const earlier = intervention("child", { id: "earlier", createdAt: "2026-11-25T15:30:00.000Z" });
+    const settled = intervention("child", { id: "settled", status: "completed" });
+    const other = intervention("someone-else", { id: "other" });
+    const grouped = groupOpenInterventions([later, settled, other, earlier], ["child"]);
+    expect([...grouped.keys()]).toEqual(["child"]);
+    expect(grouped.get("child")!.map((item) => item.id)).toEqual(["earlier", "later"]);
   });
 
   test("stacks several waiting sub-sessions under one line that collapses", async () => {
