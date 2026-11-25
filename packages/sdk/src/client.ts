@@ -807,6 +807,8 @@ import type {
   UpdateSessionUnattendedRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
+  SetSessionModelSettingsRequest,
+  SetSessionModelSettingsResponse,
   UpdateSessionVisibilityResponse,
   SessionVisibility,
   SessionShareLink,
@@ -1994,6 +1996,19 @@ export class OpenGeniClient {
     request: UpdateSessionRequest,
   ): Promise<Session> {
     return await this.requestJson<Session>("PATCH", sessionPath(workspaceId, sessionId), request);
+  }
+
+  /** Replace model defaults without sending a message. Reuse the key for an exact retry. */
+  async setSessionModelSettings(
+    workspaceId: string,
+    sessionId: string,
+    request: SetSessionModelSettingsRequest,
+  ): Promise<SetSessionModelSettingsResponse> {
+    return await this.requestJson<SetSessionModelSettingsResponse>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/model-settings`,
+      request,
+    );
   }
 
   /** Whether this exact authenticated principal may atomically create a private session. */

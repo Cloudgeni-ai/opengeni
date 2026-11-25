@@ -176,6 +176,8 @@ import {
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
   UpdateSessionVisibilityRequest,
+  SetSessionModelSettingsRequest,
+  type SetSessionModelSettingsResponse,
   SessionVisibility,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
@@ -291,6 +293,7 @@ import {
   failSessionRealtimeConnectionInTransaction,
   NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
+  SessionModelSettingsMismatchError,
   SessionControlConflictError,
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
@@ -442,6 +445,7 @@ import {
   removeSessionResources,
   updateSessionProfile,
   setSessionRetention,
+  setSessionModel,
   setSessionUnattended,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
@@ -805,7 +809,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       await next();
       return;
     }
-    const grant = await requireAccessGrant(c, deps, workspaceId);
+    const grant = await requireAccessGrant(
+      c,
+      deps,
+      workspaceId,
+      operation === "session.model.write" ? "sessions:control" : undefined,
+    );
     try {
       const authorization = await requireSessionAuthorization(deps, grant, {
         sessionId,
@@ -1737,6 +1746,56 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(body);
     },
   );
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/model-settings", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const parsed = SetSessionModelSettingsRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "Invalid session model settings request.",
+        retryable: false,
+        details: { fields: zodErrorFields(parsed.error) },
+      });
+    }
+    try {
+      const result = await setSessionModel(deps, grant, sessionId, parsed.data, "http");
+      return c.json<SetSessionModelSettingsResponse>({
+        sessionId,
+        model: result.model,
+        reasoningEffort: result.reasoningEffort,
+        latencyMode: result.latencyMode,
+        effectiveFrom: result.effectiveFrom,
+        releasedCapacityWaitTurnId: result.releasedCapacityWaitTurnId,
+      });
+    } catch (error) {
+      if (error instanceof SessionModelSettingsMismatchError) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: error.message,
+          retryable: false,
+          details: { reason: "model_settings_mismatch", current: error.current },
+        });
+      }
+      if (error instanceof SessionCommandIdempotencyError) {
+        throw new ApiHttpError(409, {
+          code: "idempotency_conflict",
+          message: error.message,
+          retryable: false,
+        });
+      }
+      if (error instanceof HTTPException && error.status === 422) {
+        throw new ApiHttpError(400, {
+          code: "validation_failed",
+          message: error.message,
+          retryable: false,
+        });
+      }
+      throw error;
+    }
+  });
 
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/visibility", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -6346,6 +6405,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
+  if (suffix === "/model-settings" && verb === "PUT") return "session.model.write";
   // Changes what the agent may ask and wait for, like its tools.
   if (suffix === "/unattended" && verb === "PUT") return "session.tool_policy.write";
   // Task usage limit: read with the session; change as a control write

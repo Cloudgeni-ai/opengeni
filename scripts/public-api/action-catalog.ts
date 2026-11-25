@@ -33,6 +33,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
       "configuration read for compact UI clients; the existing getSession agent action already returns the full configuration",
   },
   {
+    pattern: /^\/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/model-settings$/,
+    reason: "product API for session defaults; agents keep using session_set_model",
+  },
+  {
     pattern: /^\/v1\/workspaces\/:workspaceId\/decisions$/,
     reason: "stateless product inference API; agents use the internal configured decision model",
   },
