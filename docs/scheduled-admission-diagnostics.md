@@ -118,7 +118,7 @@ episode, resolved when the review clears, a chat notice takes over, or the
 automation is deleted. A trigger on `scheduled_task_blocker_reviews` opens it
 through `opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1`, whose
 runtime EXECUTE was withheld for one release (rolling safety) and is granted
-by `1566_scheduled_task_blocker_inbox_notices_grant.sql`.
+by `1571_scheduled_task_blocker_inbox_notices_grant.sql`.
 
 ### Refused pull request runs
 
