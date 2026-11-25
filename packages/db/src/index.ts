@@ -47,6 +47,12 @@ export * from "./session-target";
 export * from "./session-resource-removal";
 export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
+import {
+  droppedPersonalGitHubOwner,
+  lacksPersonalGitHubForResources,
+  ownPersonalGitHubDelegation,
+  projectPersonalGitHubDelegationsOntoResources,
+} from "./personal-github-delegation-projection";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
@@ -85645,11 +85651,25 @@ export async function claimSessionWorkForAttempt(
           const receiverContext = delivered.receiverContext;
           const authorityUpdate = delivered.updates[0];
           if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
-          const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+          const frozenPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
             receiverContext?.personalConnectionDelegations ??
               authorityUpdate.personalConnectionDelegations,
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
+          // The receiving context's own authority already fits this session;
+          // a sender's (an agent message or steer) is fitted to its repositories.
+          let internalPersonalConnectionDelegations = receiverContext
+            ? frozenPersonalConnectionDelegations
+            : projectPersonalGitHubDelegationsOntoResources(
+                frozenPersonalConnectionDelegations,
+                session.resources,
+              );
+          const droppedGitHubOwner = receiverContext
+            ? null
+            : droppedPersonalGitHubOwner(
+                frozenPersonalConnectionDelegations,
+                internalPersonalConnectionDelegations,
+              );
           const internalXaiAuthority = receiverContext
             ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
             : frozenXaiExecutionAuthority(authorityUpdate);
@@ -86045,6 +86065,62 @@ export async function claimSessionWorkForAttempt(
             // not an ambient request subject. The attempt snapshot below also
             // freezes the same visibility/owner-membership authority tuple.
             initiatingHumanSubjectId = privateOwnerSubjectId;
+          }
+          // A sender's Your GitHub that didn't fit, or a sender without one,
+          // would leave this chat's personal repositories without Git access:
+          // keep what the same person gave this chat in their latest message.
+          // Scheduled runs keep exactly what their schedule admitted.
+          const ownGitHubSubjectId =
+            receiverContext || scheduledTaskRunId
+              ? null
+              : (droppedGitHubOwner ??
+                (lacksPersonalGitHubForResources(
+                  internalPersonalConnectionDelegations,
+                  session.resources,
+                )
+                  ? initiatingHumanSubjectId
+                  : null));
+          if (ownGitHubSubjectId) {
+            // Only the person's latest own message counts: if they sent it
+            // without Your GitHub, nothing older is brought back.
+            const recent = await tx
+              .select({
+                id: schema.sessionTurns.id,
+                delegations: schema.sessionTurns.personalConnectionDelegations,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.initiatorKind, "subject"),
+                  eq(schema.sessionTurns.initiatingHumanSubjectId, ownGitHubSubjectId),
+                ),
+              )
+              .orderBy(desc(schema.sessionTurns.position))
+              .limit(1);
+            const history = recent.flatMap((row) => {
+              // One unreadable old snapshot must not stop this turn starting.
+              try {
+                return [
+                  parsedPersonalConnectionDelegations(
+                    row.delegations,
+                    `session_turns:${workspaceId}:${sessionId}:own-github`,
+                  ),
+                ];
+              } catch {
+                console.warn(
+                  `[session-claim] skipped unreadable Your GitHub snapshot on turn ${row.id}`,
+                );
+                return [];
+              }
+            });
+            const own = ownPersonalGitHubDelegation(history, ownGitHubSubjectId, session.resources);
+            if (own)
+              internalPersonalConnectionDelegations = [
+                ...internalPersonalConnectionDelegations,
+                own,
+              ];
           }
           let acceptedPersonalConnectionDelegations = internalPersonalConnectionDelegations;
           let acceptedMcpAccountBindings = parseAcceptedMcpAccountBindings(

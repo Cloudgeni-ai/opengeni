@@ -285,7 +285,7 @@ const COMPUTER_INTERACTION_METHODS = [
   "endComputerSession",
 ] as const;
 
-const INTERVENTION_METHODS = [
+export const INTERVENTION_METHODS = [
   "streamWorkspaceInteractionRevisions",
   "listInteractionInterventions",
   "getInteractionIntervention",

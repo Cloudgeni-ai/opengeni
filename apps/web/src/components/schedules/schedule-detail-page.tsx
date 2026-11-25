@@ -452,7 +452,7 @@ export function ScheduleDetailPage({
                     Edit
                   </Button>
                 ) : null}
-                {task.status === "paused" && perms.canPauseOrDelete ? (
+                {task.status === "paused" && perms.canToggle ? (
                   <Button
                     type="button"
                     size="sm"
@@ -758,7 +758,7 @@ function Overview({
               checked={scheduleSwitchedOn(task)}
               onCheckedChange={onActiveChange}
               pending={busy}
-              disabled={!perms.canPauseOrDelete}
+              disabled={!perms.canToggle}
               disabledReason={
                 perms.own
                   ? "You need permission to manage automations in this workspace."
@@ -769,8 +769,9 @@ function Overview({
         />
         {!perms.own ? (
           <InlineHelp icon className="mt-3">
-            It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
-            pause or delete it. Duplicate it to make your own.
+            {perms.canToggle
+              ? `It runs with ${firstName}'s connected accounts, so only ${firstName} can change, run or delete it. Duplicate it to make your own.`
+              : `It runs with ${firstName}'s connected accounts, so only ${firstName} can change, run, pause or delete it. Duplicate it to make your own.`}
           </InlineHelp>
         ) : null}
       </DetailSection>
