@@ -563,6 +563,95 @@ bun scripts/operator/promotion-decisions.ts --network-velocity-set --card-verifi
 Rollback: `--card-verification-mode off`. Recorded cards and claims stay; with
 the gate off nothing reads them.
 
+## Heedeo shadow scoring
+
+[Heedeo](https://docs.heedeo.com) scores each new account, mostly by matching
+the browser and device against earlier signups. Migration
+`1565_signup_heedeo_evaluations.sql` adds a deployment-wide mode, `off` by
+default:
+
+- `off`: nothing loads, nothing is sent, nothing is stored.
+- `shadow`: every signup is scored and the verdict stored. It never blocks
+  anyone; compare the verdicts with our own decisions before enforcing.
+- `enforce`: as shadow, and a signup Heedeo flags (`flagged: true`, its
+  review or block band; a person pressed Trust on is never flagged) is
+  refused with the existing generic refusal and no account is created.
+
+Heedeo runs only while the mode is not `off` and both keys are set on the API:
+`OPENGENI_HEEDEO_PUBLISHABLE_KEY` and `OPENGENI_HEEDEO_SECRET_KEY` (a private
+runtime secret, delivered like the signup challenge secret and never sent to
+the browser). Optional: `OPENGENI_HEEDEO_API_URL` (default
+`https://app.heedeo.com`), `OPENGENI_HEEDEO_SCRIPT_URL` (default
+`https://heedeo.dev/i.js`) and `OPENGENI_HEEDEO_TIMEOUT_MS` (default 1500,
+clamped to 100–5000). With the mode on and a key missing, signups go on and
+record `skipped` with `missing_keys`.
+
+How it works:
+
+- While the mode is on, `GET /v1/config/client` gives the browser
+  `auth.heedeo` (publishable key and script URL), and the sign-in and sign-up
+  pages and the add-account window load Heedeo's script. The console's
+  Content-Security-Policy lists the script's origin for `script-src` and
+  `connect-src` whenever both keys are set.
+- Each signup path asks the script for a single-use token (`identify()`), for
+  at most 1.8 seconds, and never waits longer or fails because of it: email
+  sign-up sends it in the request, every Google or GitHub click carries it in
+  the server-owned OAuth state (5 minutes, bound to the provider) to the
+  callback, and passkey sign-up sends it with the final request.
+- The API sends one `signup` event per new account from the user-create hook,
+  after our own refusals (allowed addresses, paused signups, signup
+  challenge), just before the account exists: the token (if any), the email
+  (never a passkey placeholder), the trusted client address, Heedeo's request
+  header subset (never cookies or authorization), a request id, and for
+  Google and GitHub the provider and whether it verified the email. The call
+  takes at most `OPENGENI_HEEDEO_TIMEOUT_MS`, retrying a 5xx once within it. A
+  timeout, network error, 4xx (including 401/403 and 429), 5xx or malformed
+  answer fails open in every mode and is stored as `error`.
+
+Stored: `opengeni_private.signup_heedeo_evaluations`, one row per evaluated,
+skipped or refused signup while the mode is on, kept 180 days (the runtime
+deletes older rows as it writes). Columns: `data_schema`, `id`, `created_at`,
+`user_id` (`auth_users.id`; null for an enforce refusal), `signup_method`
+(`email`, `google`, `github`, `passkey`, `other`), `mode` (`shadow`,
+`enforce`), `outcome` (`evaluated`, `error`, `skipped`, `refused`),
+`error_code`, `http_status`, `latency_ms`, `token_present`, `no_token`,
+`evaluation_id` (Heedeo's `event_id`), `score`, `band` (Heedeo's
+`suggested`), `flagged`, `reason_codes` (codes only) and `visitor_id`
+(Heedeo's `visitor.id`, Heedeo's own opaque id, kept as returned so it can be
+looked up in Heedeo). No email, address or reason text is stored. The runtime
+may only insert rows and delete expired ones; operators and analytics read
+them as owner. To join a verdict to an organization: its owner membership
+(`organization_memberships.subject_id = 'user:' || user_id`, role `owner`;
+`account_id` is the organization), then `promotion_decisions` and
+`opengeni_private.promotion_decision_history` on `(data_schema, account_id,
+revision)` for our own decision, rule and policy version.
+
+Switch it with the audited, revision-fenced network velocity setter (appends a
+`opengeni_private.signup_heedeo_mode_revisions` row; processes pick it up
+within 15 seconds), or the ops workflow's JSON changes
+`{"heedeoSignupMode":"shadow"}`:
+
+```sh
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --heedeo-signup-mode shadow \
+  --revision <current-revision> --operator <operator-id> --reason 'Heedeo shadow scoring'
+
+# Recent verdicts with each owner's organizations and our decision (codes and ids only)
+bun scripts/operator/promotion-decisions.ts --heedeo-verdicts --limit 100
+# One organization's owners: --show adds heedeoVerdicts beside its decision history
+bun scripts/operator/promotion-decisions.ts --show --account <organization-uuid>
+```
+
+Rollback: `--heedeo-signup-mode off` (or `{"heedeoSignupMode":"off"}`); the
+browser stops loading the script and nothing more is sent or stored. Stored
+rows stay until they age out; the database owner may delete them sooner.
+
+Enforce caveats: every path above is scored before the account is created, so
+enforce can refuse each of them. Turn it on only after the release has rolled
+out everywhere (older processes don't score), and after reviewing shadow
+verdicts. Privacy: the script reads the browser on Heedeo's full collection
+profile (its default), and Heedeo receives the email and address of each new
+signup; mention Heedeo in the privacy policy before turning it on.
+
 ## Funding and review
 
 `0981_promotion_funding_decisions.sql` adds account decisions: `eligible`,

@@ -6,6 +6,7 @@ import {
   managedAuthPasswordBreached,
   type PasswordBreachLookup,
 } from "./password-breach";
+import { heedeoSignupAdmission, recordHeedeoSignupAfterCreate } from "./heedeo-signup";
 import { requireSignupChallenge } from "./signup-challenge";
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
 import {
@@ -467,6 +468,8 @@ export function createManagedAuth(
     newSignupsGate?: ManagedAuthNewSignupsGate;
     /** Breached-password lookup; Have I Been Pwned unless a test replaces it. */
     passwordBreachLookup?: PasswordBreachLookup;
+    /** Heedeo signup scoring's HTTP client; fetch unless a test replaces it. */
+    heedeoFetcher?: typeof fetch;
   } = {},
 ): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
@@ -986,12 +989,30 @@ export function createManagedAuth(
               // After the refusals a retry can't fix, so a social click that
               // skipped the challenge while sign-ups are paused says so.
               requireSignupChallenge(settings);
+              // Heedeo scoring last, just before the account exists. Fails
+              // open; only enforce mode refuses, with the generic refusal.
+              const providerId = currentManagedAuthProviderId();
+              if (
+                (await heedeoSignupAdmission({
+                  settings,
+                  db,
+                  user,
+                  providerId,
+                  ...(options.heedeoFetcher ? { fetcher: options.heedeoFetcher } : {}),
+                  warn: (message, attributes) => options.observability?.warn(message, attributes),
+                })) === "refuse"
+              ) {
+                return false;
+              }
               return admission;
             } catch (error) {
               throw managedAuthOAuthCallbackRefusal(error, context?.path);
             }
           },
           after: async (user, context) => {
+            await recordHeedeoSignupAfterCreate(db, user.id, (message, attributes) =>
+              options.observability?.warn(message, attributes),
+            );
             await funnel?.recordSignUp(context);
             if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {

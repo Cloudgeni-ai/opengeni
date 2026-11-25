@@ -4,6 +4,8 @@ import {
   captureFlaggedSignupNetworkOwners,
   createDb,
   getBillingBalance,
+  HEEDEO_SIGNUP_MODES,
+  listSignupHeedeoVerdicts,
   listSignupNetworkHolds,
   readSignupNetworkVelocitySettings,
   releaseSignupNetworkHolds,
@@ -59,6 +61,9 @@ const { values } = parseArgs({
     "disposable-mail-mode": { type: "string" },
     "slow-domain-mode": { type: "string" },
     "card-verification-mode": { type: "string" },
+    // Heedeo signup scoring (migration 1565).
+    "heedeo-signup-mode": { type: "string" },
+    "heedeo-verdicts": { type: "boolean" },
     "slow-domain-threshold": { type: "string" },
     "slow-domain-window-hours": { type: "string" },
     rule: { type: "string" },
@@ -83,16 +88,19 @@ const modes = [
   values["network-holds"],
   values["network-capture-flagged"],
   values["network-release-holds"],
+  values["heedeo-verdicts"],
 ].filter(Boolean);
 if (modes.length !== 1)
   throw new Error(
-    "Choose --show, --list, --observations, --detector-mode off|observe|enforce, --enforcement on|off, --free-credit-cutoff <timestamp|none>, --free-credit-cutoff-history, --network-velocity, --network-velocity-set, --network-holds, --network-capture-flagged, --network-release-holds, or --decision eligible|verification_required|held|denied",
+    "Choose --show, --list, --observations, --detector-mode off|observe|enforce, --enforcement on|off, --free-credit-cutoff <timestamp|none>, --free-credit-cutoff-history, --network-velocity, --network-velocity-set, --network-holds, --network-capture-flagged, --network-release-holds, --heedeo-verdicts, or --decision eligible|verification_required|held|denied",
   );
 if (
   (values.show || values.decision) &&
   (!values.account || !/^[0-9a-f-]{36}$/i.test(values.account))
 )
   throw new Error("Provide --account <uuid>");
+if (values["heedeo-verdicts"] && values.account && !/^[0-9a-f-]{36}$/i.test(values.account))
+  throw new Error("--account must be a uuid");
 if (values.enforcement && !["on", "off"].includes(values.enforcement))
   throw new Error("--enforcement must be on or off");
 const url = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_ADMIN_URL;
@@ -158,6 +166,12 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
       throw new Error("--card-verification-mode must be off or enforce");
     changes.cardVerificationMode = mode;
   }
+  if (values["heedeo-signup-mode"] !== undefined) {
+    const mode = values["heedeo-signup-mode"];
+    if (!(HEEDEO_SIGNUP_MODES as readonly string[]).includes(mode))
+      throw new Error("--heedeo-signup-mode must be off, shadow or enforce");
+    changes.heedeoSignupMode = mode as (typeof HEEDEO_SIGNUP_MODES)[number];
+  }
   const emailDomainThreshold = integer("email-domain-threshold", values["email-domain-threshold"]);
   if (emailDomainThreshold !== undefined) changes.emailDomainHoldThreshold = emailDomainThreshold;
   const emailDomainWindow = integer(
@@ -186,7 +200,7 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
   if (slowDomainWindow !== undefined) changes.slowDomainWindowHours = slowDomainWindow;
   if (Object.keys(changes).length === 0)
     throw new Error(
-      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days, --disposable-mail-mode, --slow-domain-mode, --slow-domain-threshold, --slow-domain-window-hours, --card-verification-mode",
+      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days, --disposable-mail-mode, --slow-domain-mode, --slow-domain-threshold, --slow-domain-window-hours, --card-verification-mode, --heedeo-signup-mode",
     );
   return changes;
 }
@@ -220,6 +234,16 @@ try {
     const limit = values.limit && /^\d+$/.test(values.limit) ? Number(values.limit) : undefined;
     const result = await listSignupNetworkHolds(client.db, {
       ...(limit ? { limit } : {}),
+    });
+    console.log(JSON.stringify(result, null, 2));
+  } else if (values["heedeo-verdicts"]) {
+    // Read-only, rolled back. Recent Heedeo signup verdicts with the
+    // organizations the user owns and our own promotion decision on each.
+    // UUIDs, codes and numbers only; never emails or addresses.
+    const limit = values.limit && /^\d+$/.test(values.limit) ? Number(values.limit) : undefined;
+    const result = await listSignupHeedeoVerdicts(client.db, {
+      ...(limit ? { limit } : {}),
+      ...(values.account ? { accountId: values.account } : {}),
     });
     console.log(JSON.stringify(result, null, 2));
   } else if (values["network-capture-flagged"]) {
@@ -323,7 +347,14 @@ try {
       .execute(sql`select * from opengeni_private.promotion_decision_history
       where data_schema=session_tenancy_fence_target_schema()::regnamespace::text and account_id=${values.account}::uuid
       order by revision desc limit 100`);
-    console.log(JSON.stringify(result, null, 2));
+    // The owners' Heedeo signup verdicts beside our own decision history.
+    const heedeoVerdicts = await listSignupHeedeoVerdicts(client.db, {
+      accountId: values.account!,
+      limit: 20,
+    }).catch((error: unknown) => ({
+      unavailable: error instanceof Error ? error.message : String(error),
+    }));
+    console.log(JSON.stringify({ history: result, heedeoVerdicts }, null, 2));
   } else {
     if (
       !values.operator?.trim() ||

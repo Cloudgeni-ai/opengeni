@@ -114,6 +114,18 @@ export async function consoleContentSecuritySources(
     add(["script-src", "frame-src"], TURNSTILE_ORIGIN);
   }
 
+  // Heedeo signup scoring: its script and identify() call share the script's
+  // origin. Listed whenever both keys are configured; the operator mode
+  // (read from the database) decides whether pages load it.
+  if (
+    settings.productAccessMode === "managed" &&
+    settings.heedeoPublishableKey &&
+    settings.heedeoSecretKey
+  ) {
+    const heedeo = httpsOrHttpOrigin(settings.heedeoScriptUrl, ["https:"]);
+    add(["script-src", "connect-src"], heedeo);
+  }
+
   // Analytics, only when configured (and then only after consent).
   if (settings.analyticsEnabled) {
     const posthog = settings.analyticsPosthogProjectKey
