@@ -1122,6 +1122,23 @@ export async function resumeScheduledTaskAsAdmin(
   );
 }
 
+/**
+ * Whether an admin's pause or resume takes the status-only path: someone
+ * else's schedule, or one locked to the app or key that created it. An admin
+ * may turn either off and on, but never edit it.
+ */
+export function scheduledTaskTogglesAsAdmin(
+  viewer: { subjectId: string | null; admin: boolean },
+  task: Pick<ScheduledTask, "ownerSubjectId" | "creatorLocked">,
+): boolean {
+  return (
+    viewer.admin &&
+    (viewer.subjectId === null ||
+      task.ownerSubjectId !== viewer.subjectId ||
+      task.creatorLocked === true)
+  );
+}
+
 export const SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE =
   "This schedule is paused, so it cannot run now. Resume it first, then trigger it.";
 

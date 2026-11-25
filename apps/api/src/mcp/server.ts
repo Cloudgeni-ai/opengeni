@@ -522,6 +522,7 @@ import {
   pauseScheduledTaskAsAdmin,
   pausePrivateScheduledTaskAsAdmin,
   resumeScheduledTaskAsAdmin,
+  scheduledTaskTogglesAsAdmin,
   requirePausableScheduledTask,
   requireVisibleScheduledTask,
   scheduledTaskAccess,
@@ -3005,10 +3006,7 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
-        const adminPause =
-          viewer.admin &&
-          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
-        const task = adminPause
+        const task = scheduledTaskTogglesAsAdmin(viewer, existing)
           ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
           : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
@@ -3035,10 +3033,7 @@ export function buildOpenGeniMcpServer(
         const previous: ScheduledTaskRestoreState = { task: existing };
         // Admins resume what they may pause; editing and running stay with the owner.
         const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
-        if (
-          viewer.admin &&
-          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
-        ) {
+        if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
           const task = await resumeScheduledTaskAsAdmin(deps.db, existing);
           await syncUpdatedScheduledTask({
             db: deps.db,

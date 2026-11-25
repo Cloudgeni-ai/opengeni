@@ -559,4 +559,31 @@ test("an admin turns someone else's shared schedule off and on again with the sa
   // The owner turns their own off and on as before.
   expect((await toggle(f.owner.headers, "resume")).status).toBe(200);
   expect(await status()).toBe("active");
+
+  // An admin's own schedule locked to the app or key that created it: they can
+  // pause it, so they can resume it too, though editing stays with that creator.
+  const lockedCreated = await f.create(f.admin.headers, { name: "Made by an app" });
+  expect(lockedCreated.status).toBe(201);
+  const locked = (await lockedCreated.json()) as { id: string };
+  // Recorded directly: the creator columns are immutable once written.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update scheduled_tasks set creator_locked = true, created_by_subject_id = 'app:creator'
+      where id = ${locked.id}`;
+  });
+  const lockedToggle = async (action: "pause" | "resume") =>
+    await f.app.request(`${f.base}/${locked.id}/${action}`, {
+      method: "POST",
+      headers: f.admin.headers,
+    });
+  expect((await lockedToggle("pause")).status).toBe(200);
+  const lockedOn = await lockedToggle("resume");
+  expect(lockedOn.status).toBe(200);
+  expect(((await lockedOn.json()) as { status: string }).status).toBe("active");
+  const lockedRename = await f.app.request(`${f.base}/${locked.id}`, {
+    method: "PATCH",
+    headers: f.admin.headers,
+    body: JSON.stringify({ name: "Mine now" }),
+  });
+  expect(lockedRename.status).toBe(403);
 });

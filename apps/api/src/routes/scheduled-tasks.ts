@@ -50,6 +50,7 @@ import {
   pauseScheduledTaskAsAdmin,
   pausePrivateScheduledTaskAsAdmin,
   resumeScheduledTaskAsAdmin,
+  scheduledTaskTogglesAsAdmin,
   requirePausableScheduledTask,
   requireVisibleScheduledTask,
   scheduledTaskAccess,
@@ -471,9 +472,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
     const previous: ScheduledTaskRestoreState = { task: existing };
-    const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
-    const adminPause = viewer.admin && !ownerPause;
-    const task = adminPause
+    const task = scheduledTaskTogglesAsAdmin(viewer, existing)
       ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
       : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
@@ -495,10 +494,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const previous: ScheduledTaskRestoreState = { task: existing };
     // An admin turns someone else's schedule back on with the permission
     // that turned it off; editing and running it stay with its owner.
-    if (
-      viewer.admin &&
-      (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
-    ) {
+    if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
       const task = await resumeScheduledTaskAsAdmin(db, existing);
       await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
       const [resumed] = await withEventsAndBlockers([task]);
