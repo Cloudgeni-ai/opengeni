@@ -1161,6 +1161,25 @@ test("a short Sessions list leaves no gap: Apps follows it directly, with no div
     expect(await node.evaluate((element) => getComputedStyle(element).borderTopWidth)).toBe("0px");
 }, 90_000);
 
+test("with an Apps section, Sessions still fills the rail's spare height", async () => {
+  await page.setViewportSize({ width: 1160, height: 1400 });
+  for (const apps of ["hidden", "section"]) {
+    await page.goto(`${url}?scenario=sites&theme=light&apps=${apps}&fill=1`, { timeout: 60_000 });
+    await railConversation("Slack community connection test").waitFor();
+    // Every Default chat loads to use the spare height; none waits behind Show more.
+    await page.waitForFunction(
+      () =>
+        !document.querySelector(
+          '[role="group"][aria-label="Default"] button[aria-label^="Show "]',
+        ) &&
+        ![...document.querySelectorAll('[role="group"][aria-label="Default"] button')].some(
+          (button) => /^Show \d+ more/.test(button.textContent ?? ""),
+        ),
+    );
+  }
+  await appsSection().locator("[data-site-row]").first().waitFor();
+}, 90_000);
+
 test("the Apps section at desktop and phone widths", async () => {
   for (const [name, size] of [
     ["desktop", { width: 1160, height: 900 }],

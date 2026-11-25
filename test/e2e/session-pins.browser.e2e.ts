@@ -729,7 +729,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
             settingsRect.y + settingsRect.height / 2,
           );
           return {
-            siblings: element.nextElementSibling === footer,
+            // The Apps section's slot, when apps have one, sits between them.
+            siblings:
+              element.nextElementSibling === footer ||
+              (element.nextElementSibling?.matches("[data-rail-apps-section]") === true &&
+                element.nextElementSibling.nextElementSibling === footer),
             overflow: scrollStyle.overflowY,
             separated: scrollRect.bottom <= footerRect.top + 1,
             contained: footerRect.bottom <= window.innerHeight + 1,

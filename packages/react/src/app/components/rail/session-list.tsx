@@ -3757,7 +3757,9 @@ export function SessionList() {
     if (!first || first.height <= 0) return;
     const gap = rows[1] ? rows[1].top - first.top : 0;
     const rowHeight = gap > first.height && gap < first.height * 2 ? gap : first.height;
-    const viewportHeight = viewport.clientHeight;
+    // With an Apps section the viewport is only as tall as the list, so the
+    // rail's spare height below Apps is room too.
+    const viewportHeight = viewport.clientHeight + railSpareBelowApps(viewport);
     const frozen = archiveFillFreeze.current;
     if (frozen?.generation === fillGenerationRef.current && frozen.height === viewportHeight)
       return;
@@ -3799,6 +3801,12 @@ export function SessionList() {
     const observer = new ResizeObserver(schedule);
     observer.observe(viewport);
     observer.observe(list);
+    const rail = viewport.parentElement;
+    const appsSlot = railAppsSlot(viewport);
+    if (rail && appsSlot) {
+      observer.observe(rail);
+      observer.observe(appsSlot);
+    }
     return () => {
       observer.disconnect();
       if (frame) cancelAnimationFrame(frame);
@@ -6067,6 +6075,23 @@ function RowActionsMenu({
 /** Where the list's rows are: the list, then the Apps section when it shows. */
 function sessionRowRoots(list: HTMLElement | null, apps: HTMLElement | null): HTMLElement[] {
   return [list, apps].filter((root): root is HTMLElement => root !== null);
+}
+
+/** The rail's Apps section slot beside this scroll viewport, if any. */
+function railAppsSlot(viewport: HTMLElement): HTMLElement | null {
+  return (
+    viewport.parentElement?.querySelector<HTMLElement>(":scope > [data-rail-apps-section]") ?? null
+  );
+}
+
+/** The rail's empty height below a showing Apps section, above the footer. */
+function railSpareBelowApps(viewport: HTMLElement): number {
+  const slot = railAppsSlot(viewport);
+  if (!slot || slot.childElementCount === 0) return 0;
+  const floor =
+    slot.nextElementSibling?.getBoundingClientRect().top ??
+    slot.parentElement!.getBoundingClientRect().bottom;
+  return Math.max(0, Math.floor(floor - slot.getBoundingClientRect().bottom));
 }
 
 /** The Apps section's key among the list's collapsed sections (projects use their ids). */

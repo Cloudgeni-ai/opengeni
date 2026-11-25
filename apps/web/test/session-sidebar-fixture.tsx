@@ -43,6 +43,7 @@ Object.assign(window, { sessionSidebarAppRows: (value: boolean) => settleAppRows
 const appsParam = new URLSearchParams(window.location.search).get("apps");
 const initialAppsPlacement =
   appsParam === "sessions" || appsParam === "section" || appsParam === "hidden" ? appsParam : null;
+const fillRail = new URLSearchParams(window.location.search).get("fill") === "1";
 
 function RailSessionList() {
   const [sessionsShowApps, setSessionsShowApps] = useState<boolean | null>(
@@ -157,7 +158,11 @@ function FixtureSidebar() {
         <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
       </header>
       <RailAppsSectionSlotContext.Provider value={appsSectionSlot}>
-        <div className={railScrollViewportClassName}>
+        {/* `?fill=1`: the list fills spare height as in the real rail. */}
+        <div
+          data-rail-scroll-viewport={fillRail ? "" : undefined}
+          className={railScrollViewportClassName}
+        >
           <RailSessionList />
         </div>
       </RailAppsSectionSlotContext.Provider>
