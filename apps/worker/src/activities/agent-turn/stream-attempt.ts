@@ -3193,7 +3193,6 @@ export async function runTurnStreamAttempt(
   ];
   const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
     additionalApprovals: pendingProgrammaticApprovals,
-    programmaticApprovalAcknowledged,
     db,
     agent,
     accountId: input.accountId,
