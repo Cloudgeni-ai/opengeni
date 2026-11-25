@@ -49,6 +49,7 @@ export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
 import {
   droppedPersonalGitHubOwner,
+  lacksPersonalGitHubForResources,
   ownPersonalGitHubDelegation,
   projectPersonalGitHubDelegationsOntoResources,
 } from "./personal-github-delegation-projection";
@@ -85671,37 +85672,6 @@ export async function claimSessionWorkForAttempt(
                 frozenPersonalConnectionDelegations,
                 internalPersonalConnectionDelegations,
               );
-          if (droppedGitHubOwner) {
-            // Outside the sender's authority: keep what the same person
-            // already gave this chat, so its repositories keep working.
-            const recent = await tx
-              .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, workspaceId),
-                  eq(schema.sessionTurns.sessionId, sessionId),
-                  eq(schema.sessionTurns.initiatingHumanSubjectId, droppedGitHubOwner),
-                ),
-              )
-              .orderBy(desc(schema.sessionTurns.position))
-              .limit(20);
-            const own = ownPersonalGitHubDelegation(
-              recent.map((row) =>
-                parsedPersonalConnectionDelegations(
-                  row.delegations,
-                  `session_turns:${workspaceId}:${sessionId}:own-github`,
-                ),
-              ),
-              droppedGitHubOwner,
-              session.resources,
-            );
-            if (own)
-              internalPersonalConnectionDelegations = [
-                ...internalPersonalConnectionDelegations,
-                own,
-              ];
-          }
           const internalXaiAuthority = receiverContext
             ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
             : frozenXaiExecutionAuthority(authorityUpdate);
@@ -86097,6 +86067,51 @@ export async function claimSessionWorkForAttempt(
             // not an ambient request subject. The attempt snapshot below also
             // freezes the same visibility/owner-membership authority tuple.
             initiatingHumanSubjectId = privateOwnerSubjectId;
+          }
+          // A sender's Your GitHub that didn't fit, or a sender without one,
+          // would leave this chat's personal repositories without Git access:
+          // keep what the same person already gave this chat.
+          const ownGitHubSubjectId = receiverContext
+            ? null
+            : (droppedGitHubOwner ??
+              (lacksPersonalGitHubForResources(
+                internalPersonalConnectionDelegations,
+                session.resources,
+              )
+                ? initiatingHumanSubjectId
+                : null));
+          if (ownGitHubSubjectId) {
+            const recent = await tx
+              .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.initiatingHumanSubjectId, ownGitHubSubjectId),
+                ),
+              )
+              .orderBy(desc(schema.sessionTurns.position))
+              .limit(20);
+            const history = recent.flatMap((row) => {
+              // One unreadable old snapshot must not stop this turn starting.
+              try {
+                return [
+                  parsedPersonalConnectionDelegations(
+                    row.delegations,
+                    `session_turns:${workspaceId}:${sessionId}:own-github`,
+                  ),
+                ];
+              } catch {
+                return [];
+              }
+            });
+            const own = ownPersonalGitHubDelegation(history, ownGitHubSubjectId, session.resources);
+            if (own)
+              internalPersonalConnectionDelegations = [
+                ...internalPersonalConnectionDelegations,
+                own,
+              ];
           }
           let acceptedPersonalConnectionDelegations = internalPersonalConnectionDelegations;
           let acceptedMcpAccountBindings = parseAcceptedMcpAccountBindings(

@@ -89,6 +89,29 @@ export function droppedPersonalGitHubOwner(
   return dropped && !after.some(isPersonalGitHub) ? dropped.ownerSubjectId : null;
 }
 
+/** True when the session has Your GitHub repositories but no delegation for them. */
+export function lacksPersonalGitHubForResources(
+  delegations: readonly McpPersonalConnectionDelegation[],
+  resources: readonly unknown[],
+): boolean {
+  if (
+    delegations.some(
+      (delegation) =>
+        delegation.connectionType === "github_personal" &&
+        delegation.personalGitHubRepositorySelection !== undefined,
+    )
+  )
+    return false;
+  return resources.some((stored) => {
+    const parsed = ResourceRef.safeParse(stored);
+    return (
+      parsed.success &&
+      parsed.data.kind === "repository" &&
+      parsed.data.connectionType === "github_personal"
+    );
+  });
+}
+
 /**
  * The receiving session's own Your GitHub delegation for the same person,
  * newest first, fitted to its repositories: what that person already gave

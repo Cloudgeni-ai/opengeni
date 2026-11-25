@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { McpPersonalConnectionDelegation, ResourceRef } from "@opengeni/contracts";
 import {
   droppedPersonalGitHubOwner,
+  lacksPersonalGitHubForResources,
   ownPersonalGitHubDelegation,
   projectPersonalGitHubDelegationsOntoResources,
 } from "../src/personal-github-delegation-projection";
@@ -137,6 +138,15 @@ test("a dropped sender delegation falls back to the chat's own Your GitHub for t
     "Cloudgeni-ai/cloudgeni",
   ]);
   expect(ownPersonalGitHubDelegation([[other]], "user:bendik", resources)).toBeNull();
+});
+
+test("a sender without Your GitHub still needs the chat's own for personal repositories", () => {
+  const resources = [repository("opengeni", "1", "write")];
+  expect(lacksPersonalGitHubForResources([], resources)).toBe(true);
+  expect(lacksPersonalGitHubForResources([], [])).toBe(false);
+  expect(
+    lacksPersonalGitHubForResources([delegation({ allRepositoriesAccess: "write" })], resources),
+  ).toBe(false);
 });
 
 test("other delegations pass through; no personal repositories keeps only All my repositories", () => {
