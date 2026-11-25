@@ -979,7 +979,8 @@ the normal `content` field so the caller knows what to correct:
 ```
 
 An external server's JSON-RPC error `-32602` (Invalid params) in response to
-`tools/call` also counts as `outcome="rejected"`. Either signal only changes
+`tools/call` also counts as `outcome="rejected"`. A client-generated validation
+error is not the same as a server response. Either signal only changes
 metrics: it does not change the result, protocol error, or retry behavior.
 The failure-ratio alert excludes rejections from both the failure count and
 the total. An unmarked `isError` result remains `provider_declared_error`.

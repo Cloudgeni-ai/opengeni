@@ -139,7 +139,7 @@ describe("MCP argument rejection metrics", () => {
     expect(outcomes).toEqual(["thrown_protocol_error", "thrown_protocol_error"]);
   });
 
-  test("external Invalid params leaves best-effort error content and dispatch unchanged", async () => {
+  test("a local Invalid params error still counts as a protocol failure with unchanged best-effort content", async () => {
     const outcomes: string[] = [];
     configureRuntimeMetricsHooks({ onMcpToolCall: ({ outcome }) => outcomes.push(outcome) });
     const error = new McpError(ErrorCode.InvalidParams, "invalid params");
@@ -159,6 +159,6 @@ describe("MCP argument rejection metrics", () => {
     } finally {
       warn.mockRestore();
     }
-    expect(outcomes).toEqual(["rejected"]);
+    expect(outcomes).toEqual(["thrown_protocol_error"]);
   });
 });
