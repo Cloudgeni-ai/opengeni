@@ -118,7 +118,7 @@ export type SignupNetworkVelocitySettings = {
    */
   cardVerificationMode?: "off" | "enforce";
   /**
-   * Migration 1565: Heedeo signup scoring (docs/signup-abuse-protection.md,
+   * Migration 1566: Heedeo signup scoring (docs/signup-abuse-protection.md,
    * "Heedeo shadow scoring"); "off" until set. Older databases omit it.
    */
   heedeoSignupMode?: "off" | "shadow" | "enforce";

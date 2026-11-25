@@ -61,7 +61,7 @@ const { values } = parseArgs({
     "disposable-mail-mode": { type: "string" },
     "slow-domain-mode": { type: "string" },
     "card-verification-mode": { type: "string" },
-    // Heedeo signup scoring (migration 1565).
+    // Heedeo signup scoring (migration 1566).
     "heedeo-signup-mode": { type: "string" },
     "heedeo-verdicts": { type: "boolean" },
     "slow-domain-threshold": { type: "string" },

@@ -4,7 +4,7 @@ import type { Database } from "./database";
 import { rawRows } from "./database";
 
 /**
- * Heedeo signup scoring (migration 1565, docs/signup-abuse-protection.md,
+ * Heedeo signup scoring (migration 1566, docs/signup-abuse-protection.md,
  * "Heedeo shadow scoring"): the runtime mode read, the best-effort verdict
  * write and the owner-only operator listing. Rows hold codes, numbers and ids
  * only, never an email or an address.
@@ -32,7 +32,7 @@ export function resetHeedeoSignupModeCache(): void {
 
 /**
  * The deployment's Heedeo signup mode, for a runtime connection. Fails off: a
- * failed read (including a database that predates migration 1565) is "off".
+ * failed read (including a database that predates migration 1566) is "off".
  */
 export async function readHeedeoSignupMode(db: Database): Promise<HeedeoSignupMode> {
   const now = Date.now();

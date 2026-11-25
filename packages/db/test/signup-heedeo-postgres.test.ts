@@ -22,7 +22,7 @@ import {
   inspectRuntimeDatabasePosture,
 } from "../src/runtime-posture";
 
-// Migration 1565: Heedeo signup scoring's operator mode (through the 1494
+// Migration 1566: Heedeo signup scoring's operator mode (through the 1494
 // network velocity setter) and its verdict table. Synthetic ids only.
 let shared: RestrictedRuntimeTestDatabase | null = null;
 let client: DbClient | null = null;

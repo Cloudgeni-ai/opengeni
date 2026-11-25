@@ -837,7 +837,7 @@ BEGIN
               AND attnum>0 AND NOT attisdropped),runtime_table,${literal(role)});
       END LOOP;
     END IF;
-    -- Migration 1565's Heedeo signup scoring: the runtime reads the mode and
+    -- Migration 1566's Heedeo signup scoring: the runtime reads the mode and
     -- appends verdicts (deleting only expired ones under the table's policy).
     -- The migration grants this to roles that already exist; converge it for
     -- roles provisioned after it.

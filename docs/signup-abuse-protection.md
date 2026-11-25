@@ -567,7 +567,7 @@ the gate off nothing reads them.
 
 [Heedeo](https://docs.heedeo.com) scores each new account, mostly by matching
 the browser and device against earlier signups. Migration
-`1565_signup_heedeo_evaluations.sql` adds a deployment-wide mode, `off` by
+`1566_signup_heedeo_evaluations.sql` adds a deployment-wide mode, `off` by
 default:
 
 - `off`: nothing loads, nothing is sent, nothing is stored.
