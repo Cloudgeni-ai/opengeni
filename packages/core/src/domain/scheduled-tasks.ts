@@ -1139,7 +1139,9 @@ export async function pauseScheduledTaskAsAdmin(
  * `pauseScheduledTaskAsAdmin`, so turning it off and on needs the same
  * permission. It changes nothing else, so it runs as its owner again, exactly
  * as before the pause, and its event triggers are re-armed. This also turns
- * on one its owner paused; the audit event records who did.
+ * on one its owner paused; the audit event records who did. It deliberately
+ * skips the owner's edit checks (such as a target chat still existing): those
+ * run under the owner's grant, and every run re-checks them as the owner.
  */
 export async function resumeScheduledTaskAsAdmin(
   db: Database,

@@ -471,6 +471,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
+    if (existing.status === "paused") {
+      const [unchanged] = await withEventsAndBlockers([existing]);
+      return c.json(scheduledTaskForGrant(unchanged ?? existing, grant));
+    }
     const previous: ScheduledTaskRestoreState = { task: existing };
     const task = scheduledTaskTogglesAsAdmin(viewer, existing)
       ? await pauseScheduledTaskAsAdmin(db, grant, existing)

@@ -523,6 +523,7 @@ import {
   pausePrivateScheduledTaskAsAdmin,
   resumeScheduledTaskAsAdmin,
   scheduledTaskTogglesAsAdmin,
+  scheduledTaskFinishedOnce,
   requirePausableScheduledTask,
   requireVisibleScheduledTask,
   scheduledTaskAccess,
@@ -3027,7 +3028,8 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireVisibleTask(id);
-        if (existing.status === "active") {
+        // An active one is already on, unless it ran once and needs re-arming.
+        if (existing.status === "active" && !(await scheduledTaskFinishedOnce(deps.db, existing))) {
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
