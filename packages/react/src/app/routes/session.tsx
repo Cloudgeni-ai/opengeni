@@ -310,6 +310,8 @@ import {
 } from "../components/session/codex-usage-notice";
 import { PinnedAccountWaitNotice } from "../components/session/pinned-account-wait-notice";
 import { pinnedAccountWait } from "../lib/pinned-account-wait";
+import { OwnAccountWaitNotice } from "../components/session/own-account-wait-notice";
+import { waitingTurnStartedWithoutViewer } from "../lib/own-account-wait";
 import { isCodexProductModel } from "../lib/session-model";
 import { useCodexUsageModelSwitch } from "../lib/use-codex-usage-model-switch";
 import {
@@ -4004,10 +4006,11 @@ function SessionChatPane(props: {
       : null;
   // Run the blocked work on `policy`: the chat's own Codex model to continue
   // at the reset (its turn parks until then), or the model the person picked.
-  // A paused chat is resumed first, so the work isn't held back.
+  // A paused chat is resumed first, so the work isn't held back. `steer`
+  // replaces the active turn even when a pause released its wait.
   const continueAfterUsageLimit = async (
     policy: Parameters<typeof retryFailedSession>[1],
-    options: { resumeFirst?: boolean } = {},
+    options: { resumeFirst?: boolean; steer?: boolean } = {},
   ) => {
     if (usageContinuationInFlight.current) return;
     usageContinuationInFlight.current = true;
@@ -4043,7 +4046,7 @@ function SessionChatPane(props: {
             ...policy,
             clientEventId: crypto.randomUUID(),
           };
-          if (props.session.status === "waiting_capacity")
+          if (props.session.status === "waiting_capacity" || options.steer)
             await context.client.steerMessage(props.session.workspaceId, sessionId, message);
           else await context.client.sendMessage(props.session.workspaceId, sessionId, message);
         }
@@ -4134,6 +4137,51 @@ function SessionChatPane(props: {
       wait={pinnedWait}
       events={props.events}
       canChoose={workspacePermissions.includes("sessions:control")}
+    />
+  ) : null;
+  // A turn someone else started (meeting notes, another person) waits for
+  // Codex usage in the viewer's Personal workspace. Their own account serves
+  // only turns they send (D-53, D-56), so the notice offers continuing
+  // themselves; a Steer takes over the wait, also after a pause released it.
+  const ownAccountWaitApplies = useMemo(
+    () =>
+      !terminal &&
+      isCodexProductModel(props.session.model) &&
+      workspacePermissions.includes("sessions:control") &&
+      isPersonalWorkspace(workspace, context.managedSelfContext) &&
+      waitingTurnStartedWithoutViewer(props.session, props.events, {
+        viewerSubjectId: context.accessContext.subjectId,
+        paused: usagePaused,
+      }),
+    [
+      terminal,
+      props.session,
+      props.events,
+      workspacePermissions,
+      workspace,
+      context.managedSelfContext,
+      context.accessContext.subjectId,
+      usagePaused,
+    ],
+  );
+  const ownAccountWaitNotice = ownAccountWaitApplies ? (
+    <OwnAccountWaitNotice
+      workspaceId={props.session.workspaceId}
+      sessionId={props.session.id}
+      model={props.session.model}
+      events={props.events}
+      pending={usageContinuation?.pending}
+      error={usageContinuation?.error}
+      onContinue={() =>
+        void continueAfterUsageLimit(
+          {
+            model: props.session.model,
+            reasoningEffort: props.session.reasoningEffort,
+            latencyMode: props.session.latencyMode,
+          },
+          { steer: true },
+        )
+      }
     />
   ) : null;
   // The chosen model is about to rebuild a chat Codex compacted.
@@ -5055,6 +5103,7 @@ function SessionChatPane(props: {
                   ownLoginsHeadsUp ||
                   unavailableModelNotice ||
                   pinnedAccountWaitNotice ||
+                  ownAccountWaitNotice ||
                   codexUsageNotice ||
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
@@ -5083,6 +5132,7 @@ function SessionChatPane(props: {
                       ) : null}
                       {unavailableModelNotice}
                       {pinnedAccountWaitNotice}
+                      {ownAccountWaitNotice}
                       {codexUsageNotice}
                       {modelSwitchHeadsUp}
                       {usageLimitNotice}
