@@ -311,7 +311,7 @@ import {
 import { PinnedAccountWaitNotice } from "../components/session/pinned-account-wait-notice";
 import { pinnedAccountWait } from "../lib/pinned-account-wait";
 import { OwnAccountWaitNotice } from "../components/session/own-account-wait-notice";
-import { waitingTurnStartedWithoutViewer } from "../lib/own-account-wait";
+import { othersWaitingTurn } from "../lib/own-account-wait";
 import { isCodexProductModel } from "../lib/session-model";
 import { useCodexUsageModelSwitch } from "../lib/use-codex-usage-model-switch";
 import {
@@ -4143,16 +4143,17 @@ function SessionChatPane(props: {
   // Codex usage in the viewer's Personal workspace. Their own account serves
   // only turns they send (D-53, D-56), so the notice offers continuing
   // themselves; a Steer takes over the wait, also after a pause released it.
-  const ownAccountWaitApplies = useMemo(
+  const othersWait = useMemo(
     () =>
       !terminal &&
       isCodexProductModel(props.session.model) &&
       workspacePermissions.includes("sessions:control") &&
-      isPersonalWorkspace(workspace, context.managedSelfContext) &&
-      waitingTurnStartedWithoutViewer(props.session, props.events, {
-        viewerSubjectId: context.accessContext.subjectId,
-        paused: usagePaused,
-      }),
+      isPersonalWorkspace(workspace, context.managedSelfContext)
+        ? othersWaitingTurn(props.session, props.events, {
+            viewerSubjectId: context.accessContext.subjectId,
+            paused: usagePaused,
+          })
+        : null,
     [
       terminal,
       props.session,
@@ -4164,11 +4165,12 @@ function SessionChatPane(props: {
       usagePaused,
     ],
   );
-  const ownAccountWaitNotice = ownAccountWaitApplies ? (
+  const ownAccountWaitNotice = othersWait ? (
     <OwnAccountWaitNotice
       workspaceId={props.session.workspaceId}
       sessionId={props.session.id}
       model={props.session.model}
+      startedBy={othersWait.startedBy}
       events={props.events}
       pending={usageContinuation?.pending}
       error={usageContinuation?.error}
@@ -5132,8 +5134,8 @@ function SessionChatPane(props: {
                       ) : null}
                       {unavailableModelNotice}
                       {pinnedAccountWaitNotice}
-                      {ownAccountWaitNotice}
                       {codexUsageNotice}
+                      {ownAccountWaitNotice}
                       {modelSwitchHeadsUp}
                       {usageLimitNotice}
                       {creditRefusalNotice ? (

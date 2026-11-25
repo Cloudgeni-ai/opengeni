@@ -19,6 +19,7 @@ export function OwnAccountWaitNotice({
   workspaceId,
   sessionId,
   model,
+  startedBy,
   events,
   pending = false,
   error,
@@ -29,6 +30,8 @@ export function OwnAccountWaitNotice({
   sessionId: string;
   /** The chat's model, which the viewer's account must be allowed to serve. */
   model: string;
+  /** Who started the waiting turn: a service (meeting notes) or another person. */
+  startedBy: "service" | "person";
   events?: SessionEvent[] | undefined;
   pending?: boolean | undefined;
   error?: string | null | undefined;
@@ -53,7 +56,9 @@ export function OwnAccountWaitNotice({
       <CircleAlertIcon aria-hidden className="size-3.5 shrink-0 text-status-waiting" />
       <p className="min-w-0 flex-1 text-fg-muted">
         <span className="font-medium text-fg">
-          This chat started automatically, so it can’t use your own ChatGPT account.
+          {startedBy === "service"
+            ? "This message was sent automatically, so it can’t use your own ChatGPT account."
+            : "Someone else sent this message, so it can’t use your own ChatGPT account."}
         </span>
       </p>
       <Button

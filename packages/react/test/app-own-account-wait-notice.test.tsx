@@ -19,8 +19,7 @@ import { fakeClient, WORKSPACE_ID } from "./fake-client";
 const { OpenGeniProvider } = await import("../src");
 const { OwnAccountWaitNotice } =
   await import("../src/app/components/session/own-account-wait-notice");
-const { ownAccountWithRoom, waitingTurnStartedWithoutViewer } =
-  await import("../src/app/lib/own-account-wait");
+const { ownAccountWithRoom, othersWaitingTurn } = await import("../src/app/lib/own-account-wait");
 afterAll(() => GlobalRegistrator.unregister());
 
 const VIEWER = "user-1";
@@ -92,48 +91,87 @@ function choiceWith(...accounts: ModelAccountChoiceOption[]): SessionModelAccoun
 }
 
 test("a usage wait on a turn someone else started is one the viewer can take over", () => {
-  expect(waitingTurnStartedWithoutViewer(waiting, [serviceQueued, usageWait], viewer)).toBe(true);
+  expect(othersWaitingTurn(waiting, [serviceQueued, usageWait], viewer)).toEqual({
+    startedBy: "service",
+  });
   // Another person's turn, too.
   expect(
-    waitingTurnStartedWithoutViewer(
+    othersWaitingTurn(
       waiting,
       [queuedBy({ kind: "subject", subjectId: "user-2" }), usageWait],
       viewer,
     ),
-  ).toBe(true);
+  ).toEqual({ startedBy: "person" });
   // A pause releases the wait and leaves the chat idle on the same turn.
   expect(
-    waitingTurnStartedWithoutViewer(
-      { status: "idle", activeTurnId: TURN },
-      [serviceQueued, usageWait],
-      {
-        ...viewer,
-        paused: true,
-      },
+    othersWaitingTurn({ status: "idle", activeTurnId: TURN }, [serviceQueued, usageWait], {
+      ...viewer,
+      paused: true,
+    }),
+  ).toEqual({ startedBy: "service" });
+  // As production records it: started, waited, paused, resumed, started and waited again.
+  expect(
+    othersWaitingTurn(
+      waiting,
+      [
+        serviceQueued,
+        event(6, "turn.started", {}),
+        usageWait,
+        event(16, "turn.started", {}),
+        event(17, "codex.capacity.waiting", { waitReason: "no_eligible_capacity" }),
+      ],
+      viewer,
     ),
-  ).toBe(true);
+  ).toEqual({ startedBy: "service" });
+});
+
+test("a turn that ran after its wait, or waits on another provider, is not", () => {
+  // It got capacity and was paused while running: the chat is idle on it again.
+  for (const ran of ["turn.started", "codex.capacity.resumed"]) {
+    expect(
+      othersWaitingTurn(
+        { status: "idle", activeTurnId: TURN },
+        [serviceQueued, usageWait, event(9, ran, {})],
+        { ...viewer, paused: true },
+      ),
+    ).toBeNull();
+  }
+  // A Claude wait, in a chat since switched to a Codex model.
+  expect(
+    othersWaitingTurn(
+      waiting,
+      [
+        serviceQueued,
+        event(7, "turn.capacity_waiting", {
+          provider: "claude-subscription",
+          waitReason: "no_eligible_capacity",
+        }),
+      ],
+      viewer,
+    ),
+  ).toBeNull();
 });
 
 test("the viewer's own turn, other waits and missing evidence are not", () => {
   // Their own turn already may use their account.
   expect(
-    waitingTurnStartedWithoutViewer(
+    othersWaitingTurn(
       waiting,
       [queuedBy({ kind: "subject", subjectId: VIEWER }), usageWait],
       viewer,
     ),
-  ).toBe(false);
+  ).toBeNull();
   // No initiator in the loaded events, or no viewer.
-  expect(waitingTurnStartedWithoutViewer(waiting, [usageWait], viewer)).toBe(false);
+  expect(othersWaitingTurn(waiting, [usageWait], viewer)).toBeNull();
   expect(
-    waitingTurnStartedWithoutViewer(waiting, [serviceQueued, usageWait], {
+    othersWaitingTurn(waiting, [serviceQueued, usageWait], {
       viewerSubjectId: null,
       paused: false,
     }),
-  ).toBe(false);
+  ).toBeNull();
   // A wait that needs someone to act, or one for an earlier turn.
   expect(
-    waitingTurnStartedWithoutViewer(
+    othersWaitingTurn(
       waiting,
       [
         serviceQueued,
@@ -143,9 +181,9 @@ test("the viewer's own turn, other waits and missing evidence are not", () => {
       ],
       viewer,
     ),
-  ).toBe(false);
+  ).toBeNull();
   expect(
-    waitingTurnStartedWithoutViewer(
+    othersWaitingTurn(
       waiting,
       [
         serviceQueued,
@@ -153,22 +191,14 @@ test("the viewer's own turn, other waits and missing evidence are not", () => {
       ],
       viewer,
     ),
-  ).toBe(false);
+  ).toBeNull();
   // Running, or idle without a pause.
   expect(
-    waitingTurnStartedWithoutViewer(
-      { ...waiting, status: "running" },
-      [serviceQueued, usageWait],
-      viewer,
-    ),
-  ).toBe(false);
+    othersWaitingTurn({ ...waiting, status: "running" }, [serviceQueued, usageWait], viewer),
+  ).toBeNull();
   expect(
-    waitingTurnStartedWithoutViewer(
-      { ...waiting, status: "idle" },
-      [serviceQueued, usageWait],
-      viewer,
-    ),
-  ).toBe(false);
+    othersWaitingTurn({ ...waiting, status: "idle" }, [serviceQueued, usageWait], viewer),
+  ).toBeNull();
 });
 
 test("only the viewer's own active account with room for the model counts", () => {
@@ -225,6 +255,7 @@ async function renderNotice(
     onContinue?: () => void;
     pending?: boolean;
     error?: string | null;
+    startedBy?: "service" | "person";
   } = {},
 ) {
   const client = Object.assign(fakeClient({}), {
@@ -240,6 +271,7 @@ async function renderNotice(
           workspaceId={WORKSPACE_ID}
           sessionId="session-1"
           model={MODEL}
+          startedBy={props.startedBy ?? "service"}
           events={[serviceQueued, usageWait]}
           onContinue={props.onContinue ?? (() => undefined)}
           pending={props.pending}
@@ -266,7 +298,7 @@ test("the notice says why the viewer's account is not used and continues on it",
     const notice = view.container.querySelector('[data-testid="own-account-wait-notice"]')!;
     expect(notice.getAttribute("role")).toBe("status");
     expect(notice.textContent).toContain(
-      "This chat started automatically, so it can’t use your own ChatGPT account.",
+      "This message was sent automatically, so it can’t use your own ChatGPT account.",
     );
     const button = view.container.querySelector<HTMLButtonElement>(
       '[data-testid="own-account-wait-continue"]',
@@ -283,8 +315,12 @@ test("the notice shows progress and errors, and nothing without an own account w
   const busy = await renderNotice(choiceWith(account()), {
     pending: true,
     error: "Try again.",
+    startedBy: "person",
   });
   try {
+    expect(busy.container.textContent).toContain(
+      "Someone else sent this message, so it can’t use your own ChatGPT account.",
+    );
     const button = busy.container.querySelector<HTMLButtonElement>(
       '[data-testid="own-account-wait-continue"]',
     )!;
