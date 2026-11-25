@@ -1012,7 +1012,7 @@ describe("dispatch", () => {
   });
 });
 
-describe("a blocked automation with no chat tells its owner in the inbox (migrations 1562, 1563)", () => {
+describe("a blocked automation with no chat tells its owner in the inbox (migrations 1562, 1565)", () => {
   const sync = "opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1(uuid)";
 
   async function blockWith(
@@ -1062,7 +1062,7 @@ describe("a blocked automation with no chat tells its owner in the inbox (migrat
     return [...rows];
   }
 
-  test("the runtime may sync the notice (1563)", async () => {
+  test("the runtime may sync the notice (1565)", async () => {
     const [grant] = await shared!.admin<{ allowed: boolean }[]>`
       select has_function_privilege('opengeni_app', ${sync}, 'EXECUTE') as allowed`;
     expect(grant!.allowed).toBe(true);
