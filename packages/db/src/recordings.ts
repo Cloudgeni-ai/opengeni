@@ -150,6 +150,7 @@ function recordingView(
   row: RecordingRow,
   tracks: readonly TrackRow[],
   transcript: VersionRow | null,
+  sharedWorkspaceId: string | null,
 ): Recording {
   return {
     id: row.id,
@@ -157,6 +158,7 @@ function recordingView(
     ownerSubjectId: row.ownerSubjectId,
     visibility: fromVisibility(row.visibility),
     reachWorkspaceIds: row.reachWorkspaceIds ?? null,
+    sharedWorkspaceId: row.visibility === "workspace_shared" ? sharedWorkspaceId : null,
     title: row.title,
     titleSource: row.titleSource,
     purpose: row.purpose,
@@ -285,7 +287,7 @@ async function loadViews(
 ): Promise<Recording[]> {
   if (rows.length === 0) return [];
   const ids = rows.map((row) => row.id);
-  const [tracks, versions] = await Promise.all([
+  const [tracks, versions, shares] = await Promise.all([
     tx
       .select()
       .from(schema.recordingTracks)
@@ -309,9 +311,24 @@ async function loadViews(
         desc(schema.recordingTranscriptVersions.isCurrent),
         desc(schema.recordingTranscriptVersions.versionNumber),
       ),
+    tx
+      .select({
+        recordingId: schema.recordingShares.recordingId,
+        workspaceId: schema.recordingShares.workspaceId,
+      })
+      .from(schema.recordingShares)
+      .where(
+        and(
+          eq(schema.recordingShares.recordingWorkspaceId, workspaceId),
+          inArray(schema.recordingShares.recordingId, ids),
+        ),
+      ),
   ]);
   const transcriptFor = new Map(versions.map((version) => [version.recordingId, version]));
-  return rows.map((row) => recordingView(row, tracks, transcriptFor.get(row.id) ?? null));
+  const sharedWith = new Map(shares.map((share) => [share.recordingId, share.workspaceId]));
+  return rows.map((row) =>
+    recordingView(row, tracks, transcriptFor.get(row.id) ?? null, sharedWith.get(row.id) ?? null),
+  );
 }
 
 async function insertEvent(
@@ -491,6 +508,12 @@ export type ListRecordingsInput = RecordingActor & {
    * work.
    */
   reachingWorkspaceId?: string | null | undefined;
+  /**
+   * Only the meetings of this workspace shared with that other workspace
+   * (`workspaceId`) by one of `sharedBy`, the owners still in it: what that
+   * workspace lists of this one.
+   */
+  sharedWith?: { workspaceId: string; sharedBy: readonly string[] } | undefined;
   /** Only recordings started before this instant (the previous page's last `startedAt`). */
   before?: { startedAt: Date; id: string } | undefined;
   limit?: number | undefined;
@@ -515,6 +538,19 @@ export async function listRecordings(
         eq(schema.recordings.visibility, "user_private"),
       );
       if (input.reachingWorkspaceId) conditions.push(reaches(input.reachingWorkspaceId));
+    }
+    if (input.sharedWith) {
+      conditions.push(
+        eq(schema.recordings.visibility, "workspace_shared"),
+        inArray(schema.recordings.ownerSubjectId, [...input.sharedWith.sharedBy]),
+        sql`EXISTS (
+          SELECT 1 FROM recording_shares share
+          WHERE share.recording_workspace_id = ${schema.recordings.workspaceId}
+            AND share.recording_id = ${schema.recordings.id}
+            AND share.workspace_id = ${input.sharedWith.workspaceId}::uuid
+            AND share.shared_by_subject_id = ${schema.recordings.ownerSubjectId}
+        )`,
+      );
     }
     if (input.startedFrom) conditions.push(gte(schema.recordings.startedAt, input.startedFrom));
     if (input.startedTo) conditions.push(lt(schema.recordings.startedAt, input.startedTo));
@@ -764,13 +800,85 @@ export async function ownRecordingHome(
 /** How many other workspaces are read at once for one request. */
 const OWN_ELSEWHERE_CONCURRENCY = 8;
 
+/** At most this many owners' Personal workspaces are read for one workspace's shared meetings. */
+const SHARED_SOURCES_MAX = 200;
+
+/** The share is still good: whoever shared it is still a member of the workspace it is shared with. */
+function sharerStillMember() {
+  return sql`EXISTS (
+    SELECT 1 FROM workspace_memberships membership
+    WHERE membership.workspace_id = ${schema.recordingShares.workspaceId}
+      AND membership.account_id = ${schema.recordingShares.accountId}
+      AND membership.subject_id = ${schema.recordingShares.sharedBySubjectId}
+  )`;
+}
+
+/**
+ * Where the meetings shared with this workspace from other workspaces are
+ * stored, and by whom: each owner's Personal workspace, with the owners still
+ * members of this one. Read in this workspace, as the person.
+ */
+export async function meetingsSharedWith(
+  db: Database,
+  input: RecordingActor,
+): Promise<Array<{ workspaceId: string; sharedBy: string[] }>> {
+  const rows = await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) =>
+    tx
+      .selectDistinct({
+        workspaceId: schema.recordingShares.recordingWorkspaceId,
+        sharedBy: schema.recordingShares.sharedBySubjectId,
+      })
+      .from(schema.recordingShares)
+      .where(and(eq(schema.recordingShares.workspaceId, input.workspaceId), sharerStillMember()))
+      .orderBy(
+        asc(schema.recordingShares.recordingWorkspaceId),
+        asc(schema.recordingShares.sharedBySubjectId),
+      )
+      .limit(SHARED_SOURCES_MAX),
+  );
+  const sources = new Map<string, string[]>();
+  for (const row of rows) {
+    sources.set(row.workspaceId, [...(sources.get(row.workspaceId) ?? []), row.sharedBy]);
+  }
+  return [...sources].map(([workspaceId, sharedBy]) => ({ workspaceId, sharedBy }));
+}
+
+/**
+ * The workspace storing a meeting shared with this one, and its owner; null
+ * when it isn't shared here, or its owner has left this workspace. Whether
+ * it is still shared and still there is then read where it is stored.
+ */
+export async function sharedRecordingHome(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<{ workspaceId: string; ownerSubjectId: string } | null> {
+  const [row] = await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) =>
+    tx
+      .select({
+        workspaceId: schema.recordingShares.recordingWorkspaceId,
+        ownerSubjectId: schema.recordingShares.sharedBySubjectId,
+      })
+      .from(schema.recordingShares)
+      .where(
+        and(
+          eq(schema.recordingShares.recordingId, input.recordingId),
+          eq(schema.recordingShares.workspaceId, input.workspaceId),
+          sharerStillMember(),
+        ),
+      )
+      .limit(1),
+  );
+  return row ?? null;
+}
+
 /**
  * The meetings this workspace lists for the person: its own, plus the
  * person's own Only me meetings stored in `elsewhere`, the other workspaces of
  * the same organization the caller checked they may read now, that work in
  * this one (`reachingWorkspaceId`, from `ownMeetingsReaching`), newest first
- * across them. `sourceWorkspaces` names the other workspaces the page's
- * meetings come from.
+ * across them, and the meetings shared with this one from their owners'
+ * Personal workspaces. `sourceWorkspaces` names the other workspaces the
+ * page's own Only me meetings come from.
  */
 export async function listRecordingsWithOwnElsewhere(
   db: Database,
@@ -789,8 +897,18 @@ export async function listRecordingsWithOwnElsewhere(
   // A product's reference names something of this workspace's.
   const elsewhere =
     meetings && !request.externalRef && request.subjectId.startsWith("user:") ? candidates : [];
+  // Shared with this workspace: everyone who sees its shared meetings sees them.
+  const shared =
+    meetings && !request.externalRef
+      ? await meetingsSharedWith(db, {
+          workspaceId: request.workspaceId,
+          subjectId: request.subjectId,
+        })
+      : [];
   const here = await listRecordings(db, { ...request, limit });
-  if (elsewhere.length === 0) return { ...here, sourceWorkspaces: new Map() };
+  if (elsewhere.length === 0 && shared.length === 0) {
+    return { ...here, sourceWorkspaces: new Map() };
+  }
   const pages: Awaited<ReturnType<typeof listRecordings>>[] = [];
   for (let start = 0; start < elsewhere.length; start += OWN_ELSEWHERE_CONCURRENCY) {
     pages.push(
@@ -808,8 +926,25 @@ export async function listRecordingsWithOwnElsewhere(
       )),
     );
   }
+  for (let start = 0; start < shared.length; start += OWN_ELSEWHERE_CONCURRENCY) {
+    pages.push(
+      ...(await Promise.all(
+        shared.slice(start, start + OWN_ELSEWHERE_CONCURRENCY).map(
+          async (source) =>
+            await listRecordings(db, {
+              ...request,
+              workspaceId: source.workspaceId,
+              sharedWith: { workspaceId: request.workspaceId, sharedBy: source.sharedBy },
+              limit,
+            }),
+        ),
+      )),
+    );
+  }
+  const seen = new Set<string>();
   const merged = [here, ...pages]
     .flatMap((page) => page.recordings)
+    .filter((recording) => !seen.has(recording.id) && Boolean(seen.add(recording.id)))
     .sort((a, b) =>
       // The database's order: start time, then id, both newest first.
       a.startedAt === b.startedAt
@@ -966,6 +1101,13 @@ export type UpdateRecordingInput = RecordingActor & {
    * owner's own workspaces of this organization first.
    */
   reachWorkspaceIds?: readonly string[] | null | undefined;
+  /**
+   * With `visibility: "workspace"`, the owner's team workspace of the same
+   * organization to share the meeting with instead of the workspace that
+   * stores it (their Personal workspace); null shares it there. The caller
+   * checks the workspace first. Unsharing removes it.
+   */
+  sharedWorkspaceId?: string | null | undefined;
 };
 
 /**
@@ -993,6 +1135,52 @@ export async function updateRecording(
           : [...new Set(input.reachWorkspaceIds)].filter((id) => id !== row.workspaceId).sort();
     if (reach !== undefined && row.ownerSubjectId !== input.subjectId) {
       throw new RecordingForbiddenError();
+    }
+    // The team workspace it is shared with: kept unless it is named again or
+    // the meeting turns Only me; changed by its owner only.
+    const [current] = await tx
+      .select({ workspaceId: schema.recordingShares.workspaceId })
+      .from(schema.recordingShares)
+      .where(
+        and(
+          eq(schema.recordingShares.recordingWorkspaceId, input.workspaceId),
+          eq(schema.recordingShares.recordingId, input.recordingId),
+        ),
+      );
+    const currentShare = current?.workspaceId ?? null;
+    const sharedWorkspaceId =
+      (visibility ?? row.visibility) !== "workspace_shared"
+        ? null
+        : input.sharedWorkspaceId === undefined
+          ? // A share left behind while it was Only me never comes back by itself.
+            row.visibility === "workspace_shared"
+            ? currentShare
+            : null
+          : input.sharedWorkspaceId && input.sharedWorkspaceId !== row.workspaceId
+            ? input.sharedWorkspaceId
+            : null;
+    if (sharedWorkspaceId !== currentShare) {
+      if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+      if (sharedWorkspaceId && row.purpose !== "meeting") {
+        throw new RecordingConflictError("Only a meeting can be shared", "dictation_private");
+      }
+      await tx
+        .delete(schema.recordingShares)
+        .where(
+          and(
+            eq(schema.recordingShares.recordingId, input.recordingId),
+            eq(schema.recordingShares.recordingWorkspaceId, input.workspaceId),
+          ),
+        );
+      if (sharedWorkspaceId) {
+        await tx.insert(schema.recordingShares).values({
+          accountId: row.accountId,
+          recordingWorkspaceId: row.workspaceId,
+          recordingId: row.id,
+          workspaceId: sharedWorkspaceId,
+          sharedBySubjectId: input.subjectId,
+        });
+      }
     }
     const [updated] = await tx
       .update(schema.recordings)

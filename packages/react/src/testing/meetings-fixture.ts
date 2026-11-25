@@ -21,6 +21,9 @@ const ME = "user:ingrid";
 const SALES_WORKSPACE = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
 /** The viewer's own Only me meeting stored in the Sales workspace. */
 export const ELSEWHERE_RECORDING_ID = "3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b";
+/** With `sharedFromPersonal`: a teammate whose Personal workspace stores the ready meeting. */
+export const TEAMMATE_SUBJECT_ID = "user:lea";
+const TEAMMATE_PERSONAL_WORKSPACE = "d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f7a";
 const NOW = Date.now();
 const minutes = (count: number) => count * 60_000;
 const iso = (offset: number) => new Date(NOW - offset).toISOString();
@@ -80,6 +83,7 @@ function recording(
     workspaceId: WORKSPACE,
     ownerSubjectId: ME,
     visibility: "private",
+    sharedWorkspaceId: null,
     title,
     purpose: "meeting",
     state: "ready",
@@ -260,6 +264,12 @@ export function createMeetingsFixture(
     creditsOnly?: boolean;
     /** The organization's ChatGPT subscription also transcribes meetings, at no credit cost. */
     subscription?: boolean;
+    /**
+     * The ready meeting was recorded in a teammate's Personal workspace and
+     * shared with this one: open it as `TEAMMATE_SUBJECT_ID` sees it, or as
+     * anyone else in this workspace, read only.
+     */
+    sharedFromPersonal?: boolean;
   } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
@@ -574,6 +584,19 @@ export function createMeetingsFixture(
       ],
     ],
   ]);
+  if (options.sharedFromPersonal) {
+    recordings = recordings.map((entry) =>
+      entry.id === readyId
+        ? {
+            ...entry,
+            workspaceId: TEAMMATE_PERSONAL_WORKSPACE,
+            ownerSubjectId: TEAMMATE_SUBJECT_ID,
+            visibility: "workspace",
+            sharedWorkspaceId: WORKSPACE,
+          }
+        : entry,
+    );
+  }
   // The viewer's own Only me meetings stored in another workspace of the
   // organization appear in this workspace's list, labelled with where they live.
   if (options.otherWorkspaces && options.state !== "empty") {
@@ -614,7 +637,18 @@ export function createMeetingsFixture(
       }),
     getRecording: async (_workspaceId: string, id: string) => await delay(find(id)),
     updateRecording: async (_workspaceId: string, id: string, request: Partial<Recording>) => {
-      recordings = recordings.map((entry) => (entry.id === id ? { ...entry, ...request } : entry));
+      // Sharing names the workspace; Only me, or sharing where it is stored, names none.
+      const sharing =
+        request.visibility === undefined && request.sharedWorkspaceId === undefined
+          ? {}
+          : {
+              visibility: request.sharedWorkspaceId ? "workspace" : request.visibility,
+              sharedWorkspaceId:
+                request.visibility === "private" ? null : (request.sharedWorkspaceId ?? null),
+            };
+      recordings = recordings.map((entry) =>
+        entry.id === id ? ({ ...entry, ...request, ...sharing } as Recording) : entry,
+      );
       return await delay(find(id));
     },
     deleteRecording: async (_workspaceId: string, id: string) => {

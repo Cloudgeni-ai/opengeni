@@ -571,6 +571,14 @@ export const UpdateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
        * Each must be a workspace the owner belongs to.
        */
       reachWorkspaceIds: z.array(z.string().uuid()).max(200).nullable().optional(),
+      /**
+       * Only the owner, sharing a meeting stored in their Personal workspace:
+       * the team workspace of the organization to share it with (it implies
+       * `visibility: "workspace"`). Its members can then open it there, read
+       * only. With `visibility: "workspace"`, null or the storing workspace
+       * shares it where it is stored.
+       */
+      sharedWorkspaceId: z.string().uuid().nullable().optional(),
       externalRef: externalRef.nullable().optional(),
       metadata: recordingMetadata.optional(),
     })
@@ -775,6 +783,12 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
      * Shared meetings work only in their workspace and ignore it.
      */
     reachWorkspaceIds: z.array(z.string()).nullable().optional(),
+    /**
+     * A shared meeting stored in its owner's Personal workspace: the team
+     * workspace it is shared with. Null when it is shared where it is stored,
+     * or Only me. Absent from servers before sharing with a team existed.
+     */
+    sharedWorkspaceId: z.string().nullable().optional(),
     title: z.string(),
     /** Where the title came from. Absent from servers before it was added. */
     titleSource: RecordingTitleSource.optional(),
