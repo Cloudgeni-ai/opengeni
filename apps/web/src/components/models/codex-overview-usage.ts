@@ -1,4 +1,4 @@
-import type { CodexAccountOverview, CodexUsage } from "@opengeni/sdk";
+import type { CodexAccount, CodexAccountOverview, CodexUsage } from "@opengeni/sdk";
 
 /** One Codex account's usage as its list row and its page both show it. */
 export type CodexOverviewUsage = CodexUsage & {
@@ -27,4 +27,13 @@ export function codexOverviewUsage(usage: CodexAccountOverview["usage"]): CodexO
     checkError: usage.error,
     source: usage.source,
   };
+}
+
+/**
+ * The words for an account row with no usage to show. "No usage yet" only
+ * while Opengeni never saw the account used; a used account that has no
+ * reading now reads neutrally.
+ */
+export function codexNoReadingLabel(account: Pick<CodexAccount, "usageCheckedAt">): string {
+  return account.usageCheckedAt ? "No recent reading" : "No usage yet";
 }
