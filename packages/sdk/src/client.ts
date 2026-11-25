@@ -637,6 +637,8 @@ import type {
   CreateBillingCardVerificationSessionRequest,
   CreateBillingCardVerificationSessionResponse,
   ConfirmBillingCardVerificationRequest,
+  CreditOffer,
+  ListCreditOffersResponse,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -13626,6 +13628,23 @@ export class OpenGeniClient {
     request: ConfirmBillingCardVerificationRequest,
   ): Promise<BillingCardVerificationStatus> {
     return await this.requestJson("POST", "/v1/billing/card-verification/confirm", request);
+  }
+
+  /** Custom credit offers assigned to the organization (docs/custom-credit-offers.md). */
+  async listCreditOffers(options: { accountId?: string } = {}): Promise<ListCreditOffersResponse> {
+    return await this.requestJson("GET", "/v1/billing/credit-offers", undefined, options);
+  }
+
+  /** Billing managers only. Starts the offer's validity window; replays are no-ops. */
+  async activateCreditOffer(
+    offerId: string,
+    options: { accountId?: string } = {},
+  ): Promise<CreditOffer> {
+    return await this.requestJson(
+      "POST",
+      `/v1/billing/credit-offers/${encodeURIComponent(offerId)}/activate`,
+      options.accountId ? { accountId: options.accountId } : {},
+    );
   }
 
   async createSubscriptionCheckout(

@@ -3,6 +3,13 @@ import type { BillingSummary } from "@opengeni/react/app/types";
 import { CreditScopeDetails } from "@/components/credits/credit-scope-details";
 import { PromotionReviewNotice } from "@/components/promotion-review-notice";
 
+const expiryDate = (value: string) =>
+  new Date(value).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+
 /** The credit balance, large, with one line on what it means. */
 export function OrganizationCreditBalance({
   billing,
@@ -127,7 +134,9 @@ export function OrganizationCreditBalance({
                   ? "On hold · Not available to spend"
                   : grant.planCredit
                     ? "For app use · Resets monthly · View models"
-                    : undefined
+                    : grant.expiresAt
+                      ? `Expires ${expiryDate(grant.expiresAt)} · View models`
+                      : undefined
               }
             />
           ))}

@@ -176,6 +176,7 @@ export async function readBillingBalance(
       receipts: ReceiptTotals | null;
       latest: LatestReceipt | null;
       month: string;
+      offerPendingExpiry: string;
     }>(
       tx,
       sql`
@@ -263,24 +264,41 @@ export async function readBillingBalance(
         (select to_jsonb(receipts) from receipts) as receipts,
         (select jsonb_build_object('at', at, 'atMicros', "atMicros", 'chain', chain, 'unpaid', unpaid) from latest) as latest,
         (select to_char(utc, 'YYYY-MM') from fee_month) as month,
-        coalesce((select jsonb_agg(jsonb_build_object(
+        -- Custom credit offers past their end that settlement has not yet
+        -- expired (it does under the account lock before the next debit).
+        (select coalesce(sum(g.amount_micros - coalesce(used.amount, 0)), 0)::text
+          from credit_offers offer
+          join ${schema.creditLedgerEntries} g on g.id = offer.grant_entry_id and g.account_id = offer.account_id
+          left join (
+            select grant_entry_id, sum(amount_micros) as amount
+            from ${schema.creditDebitAllocations} where account_id = ${accountId}
+            group by grant_entry_id
+          ) used on used.grant_entry_id = g.id
+          where offer.account_id = ${accountId} and offer.expired_at is null
+            and offer.expires_at <= coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())
+        ) as "offerPendingExpiry",
+        coalesce((select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
           'grantId', g.id,
           'label', coalesce(g.metadata->>'creditOfferLabel', 'Promotional credits'),
           'eligibleModelIds', coalesce(
             (select coalesce(
-              case when g.source_type = 'verified_signup_trial' or g.type = 'plan_credit_grant' then policy->'signupModelIds'
+              -- A custom offer keeps the models it was assigned with.
+              case when offer.id is not null then to_jsonb(g.eligible_model_ids)
+                when g.source_type = 'verified_signup_trial' or g.type = 'plan_credit_grant' then policy->'signupModelIds'
                 else policy->'offers'->(g.metadata->>'creditOfferId')->'eligibleModelIds' end,
               policy->'defaultModelIds'
             ) from current_policy), to_jsonb(g.eligible_model_ids)),
           'remainingMicros', g.amount_micros - coalesce(used.amount, 0),
           'coversVoice', g.source_type = 'verified_signup_trial',
           'planCredit', g.type = 'plan_credit_grant',
+          'expiresAt', offer.expires_at,
           'held', coalesce((g.source_type = 'verified_signup_trial' OR (g.type='plan_credit_grant' AND period.plan_key='free'))
             AND EXISTS (SELECT 1 FROM promotion_enforcement WHERE enabled)
             AND EXISTS (SELECT 1 FROM promotion_decisions WHERE account_id=${accountId}::uuid AND decision <> 'eligible'), false)
-        ) order by g.created_at, g.id)
+        )) order by g.created_at, g.id)
           from ${schema.creditLedgerEntries} g
           left join plan_credit_periods period on period.grant_entry_id = g.id
+          left join credit_offers offer on offer.grant_entry_id = g.id and offer.account_id = g.account_id
           left join (
             select grant_entry_id, sum(amount_micros) as amount
             from ${schema.creditDebitAllocations} where account_id = ${accountId}
@@ -290,12 +308,17 @@ export async function readBillingBalance(
             and g.amount_micros > coalesce(used.amount, 0)
             and (g.type <> 'plan_credit_grant' or (period.expired_at is null
               and period.period_end > coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())))
+            and (offer.id is null or (offer.expired_at is null
+              and offer.expires_at > coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())))
         ), '[]'::jsonb) as grants
     `,
     );
     // Expiry cannot depend on a maintenance worker being awake. Keep this read
     // lock-free; writers settle the same expiry under the account lock first.
-    const balanceMicros = Number(row?.balance ?? 0) - (row?.plan?.creditPendingExpiryMicros ?? 0);
+    const balanceMicros =
+      Number(row?.balance ?? 0) -
+      (row?.plan?.creditPendingExpiryMicros ?? 0) -
+      Number(row?.offerPendingExpiry ?? 0);
     const promotionalCredits = (row?.grants ?? []).map((grant) => ({
       ...grant,
       held: includeHeldForSettlement ? false : grant.held,

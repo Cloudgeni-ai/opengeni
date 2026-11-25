@@ -15,6 +15,7 @@ import {
 export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./billing-card-verification";
+export * from "./billing-credit-offers";
 export * from "./secret-value";
 export * from "./citation-urls";
 export * from "./claude-cite-tags";
@@ -7295,6 +7296,8 @@ export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
     planCredit: primitives.optionalBoolean,
     /** Free funding excluded from new admission while an abuse hold is active. */
     held: primitives.optionalBoolean,
+    /** When the grant stops paying for anything (custom credit offers). */
+    expiresAt: primitives.string.optional(),
   }),
 );
 export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;

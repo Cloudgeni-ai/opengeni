@@ -21,6 +21,7 @@
   "type": "module",
   "scripts": {
     "credits:policy": "bun scripts/operator/credit-promotion-policy.ts",
+    "credits:offers": "bun scripts/operator/credit-offers.ts",
     "plans:catalog": "bun scripts/operator/subscription-plan-catalog.ts",
     "integrations:nango": "bun scripts/operator/nango.ts",
     "dev": "bun scripts/run-development-stack.ts",
