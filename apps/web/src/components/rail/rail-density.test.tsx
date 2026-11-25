@@ -86,6 +86,12 @@ const railSurface = await Bun.file(
   ),
 ).text();
 const webRailShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
+const railAppsSectionSlot = await Bun.file(
+  new URL(
+    "../../../../../packages/react/src/app/components/rail/rail-apps-section-slot.ts",
+    import.meta.url,
+  ),
+).text();
 
 describe("rail overflow boundaries", () => {
   test("contains scrolling session controls above a non-shrinking footer on the rail glow", () => {
@@ -94,13 +100,24 @@ describe("rail overflow boundaries", () => {
     expect(railSurface).toContain(
       "og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden",
     );
-    expect(railShell).toMatch(
-      /data-rail-scroll-viewport\s+className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"/,
+    expect(railShell).toContain(
+      "<div data-rail-scroll-viewport className={railScrollViewportClassName}>",
+    );
+    expect(railAppsSectionSlot).toContain(
+      '"relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain',
+    );
+    // With an Apps section, Sessions takes only the height it needs and Apps
+    // follows it; the footer stays at the bottom.
+    expect(railAppsSectionSlot).toContain(
+      "[[data-rail]:has(>[data-rail-apps-section]:not(:empty))>&]:flex-initial",
+    );
+    expect(railAppsSectionSlot).toContain(
+      '"flex h-[min(14rem,40%)] shrink-[10000] basis-[content] flex-col empty:hidden"',
     );
     // The footer sits outside the clipped scroll viewport, so it stays
     // transparent and the glow runs to the rail's bottom edge.
     expect(railShell).toMatch(
-      /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border"/,
+      /data-rail-footer\s+className="relative z-10 mt-auto shrink-0 border-t border-border"/,
     );
   });
 

@@ -4042,25 +4042,21 @@ export function SessionList() {
       <section
         aria-labelledby={`${appsSectionId}-title`}
         data-sessions-apps-section
-        className="flex min-h-0 min-w-0 flex-1 flex-col border-t border-border pt-1"
+        className="flex min-h-0 min-w-0 flex-1 flex-col"
       >
-        <div className="flex min-w-0 shrink-0 items-center pl-[18px] pr-3">
+        <div className="flex min-w-0 shrink-0 items-center pl-2 pr-3">
           <button
             id={`${appsSectionId}-title`}
             type="button"
             aria-expanded={!appsSectionCollapsed}
             aria-controls={appsSectionCollapsed ? undefined : `${appsSectionId}-list`}
             onClick={() => toggleChannelSection(APPS_SECTION_KEY)}
-            className="flex h-8 min-w-0 items-center gap-1 rounded-sm text-sm font-normal text-fg-label outline-hidden hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11"
+            className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-md py-1 pl-1.5 text-left text-sm font-normal text-fg outline-hidden hover:bg-hover focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11"
           >
-            <span className="truncate">Apps</span>
-            <ChevronRightIcon
-              aria-hidden="true"
-              className={cn(
-                "size-3.5 shrink-0 text-fg-subtle transition-transform",
-                !appsSectionCollapsed && "rotate-90",
-              )}
-            />
+            <span className="flex w-4 shrink-0 items-center">
+              <ProjectGlyph project={null} open={!appsSectionCollapsed} />
+            </span>
+            <span className="min-w-0 flex-1 truncate">Apps</span>
           </button>
         </div>
         {appsSectionCollapsed ? null : (

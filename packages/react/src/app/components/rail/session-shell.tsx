@@ -37,7 +37,11 @@ import {
 import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "./rail-context";
 import { RailSurface, ShellRail } from "./rail-surface";
 import { CollapsedSessionsButton, SessionList } from "./session-list";
-import { RailAppsSectionSlotContext } from "./rail-apps-section-slot";
+import {
+  RailAppsSectionSlotContext,
+  railAppsSectionSlotClassName,
+  railScrollViewportClassName,
+} from "./rail-apps-section-slot";
 import {
   PrimaryNav,
   RailHeader,
@@ -106,10 +110,7 @@ export function RailBody() {
   return (
     <RailSurface data-rail>
       <RailAppsSectionSlotContext.Provider value={appsSectionSlot}>
-        <div
-          data-rail-scroll-viewport
-          className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
-        >
+        <div data-rail-scroll-viewport className={railScrollViewportClassName}>
           <div className="flex min-h-full flex-col">
             <RailHeader />
 
@@ -206,19 +207,18 @@ export function RailBody() {
           </div>
         </div>
       </RailAppsSectionSlotContext.Provider>
-      {/* The Apps section, when apps have one: a bounded share of the rail's
-          height that scrolls on its own; empty, it takes no room. */}
+      {/* The Apps section, when apps have one. */}
       <div
         ref={setAppsSectionSlot}
         data-rail-apps-section
-        className="flex max-h-[40%] min-h-0 shrink-0 flex-col empty:hidden"
+        className={railAppsSectionSlotClassName}
       />
       {/* Keep the persistent controls above the scroll viewport, including
           session-row actions with their own stacking levels. The footer is a
           sibling of the clipped viewport, so it can stay transparent and let
           the rail glow run to the bottom edge. */}
       {railFooter ? (
-        <div data-rail-footer className="relative z-10 shrink-0 border-t border-border">
+        <div data-rail-footer className="relative z-10 mt-auto shrink-0 border-t border-border">
           {railFooter}
         </div>
       ) : null}
