@@ -19,6 +19,7 @@ import type { SiteViewer } from "@opengeni/sdk";
 import { cn } from "../../lib/cn";
 import { useWindowLayerOpen } from "../../lib/window-layer";
 import { PortalContainerProvider, usePortalContainer } from "../../ui/portal-container";
+import { PreviewLoading } from "../preview-loading";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
 import {
   PublishedHtmlArtifactFrame,
@@ -42,6 +43,12 @@ export type ArtifactSandboxProps = {
   autoHeight?: boolean | undefined;
   /** Upper bound for `autoHeight`, in CSS pixels; taller content scrolls inside. */
   maxAutoHeight?: number | undefined;
+  /**
+   * Cover the frame with the "Preparing preview…" surface until its document
+   * can paint, so slow page loads (render-blocking fonts, the frame host)
+   * never show as an empty box.
+   */
+  loadingUntilPainted?: boolean | undefined;
   theme?: "light" | "dark" | undefined;
   headerControls?: ReactNode | undefined;
   /**
@@ -166,6 +173,33 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const reload = () => {
     setReloadKey((value) => value + 1);
   };
+  const frameKey = `${reloadKey}:${props.reloadToken ?? 0}:${props.frameKey ?? ""}`;
+  // Which frame has painted; a reload or new page shows the loading surface again.
+  const [paintedFrameKey, setPaintedFrameKey] = useState<string | null>(null);
+  const loading = props.loadingUntilPainted === true && paintedFrameKey !== frameKey;
+  const frame = (
+    <PublishedHtmlArtifactFrame
+      key={frameKey}
+      title={props.title}
+      html={props.html}
+      autoHeight={Boolean(props.autoHeight && !focused)}
+      {...(props.maxAutoHeight ? { maxAutoHeight: props.maxAutoHeight } : {})}
+      {...(props.loadingUntilPainted ? { onPainted: () => setPaintedFrameKey(frameKey) } : {})}
+      {...(props.theme ? { theme: props.theme } : {})}
+      {...(!focused && props.height ? { style: { height: props.height } } : {})}
+      {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
+      {...(props.viewer ? { viewer: props.viewer } : {})}
+      location={siteLocation}
+      onLocationChange={onSiteLocationChange}
+      className={cn(
+        // Until the app paints, the frame is Opengeni's own canvas (no white flash in dark).
+        "block h-[clamp(30rem,62vh,48rem)] w-full border-0",
+        props.theme === "dark" ? "bg-canvas" : "bg-white",
+        props.fill && "h-0 min-h-0 flex-1",
+        focused && "min-h-0 flex-1",
+      )}
+    />
+  );
   return (
     <dialog
       ref={attachFrame}
@@ -306,26 +340,21 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
           ) : null}
         </div>
       </div>
-      <PublishedHtmlArtifactFrame
-        key={`${reloadKey}:${props.reloadToken ?? 0}:${props.frameKey ?? ""}`}
-        title={props.title}
-        html={props.html}
-        autoHeight={Boolean(props.autoHeight && !focused)}
-        {...(props.maxAutoHeight ? { maxAutoHeight: props.maxAutoHeight } : {})}
-        {...(props.theme ? { theme: props.theme } : {})}
-        {...(!focused && props.height ? { style: { height: props.height } } : {})}
-        {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
-        {...(props.viewer ? { viewer: props.viewer } : {})}
-        location={siteLocation}
-        onLocationChange={onSiteLocationChange}
-        className={cn(
-          // Until the app paints, the frame is Opengeni's own canvas (no white flash in dark).
-          "block h-[clamp(30rem,62vh,48rem)] w-full border-0",
-          props.theme === "dark" ? "bg-canvas" : "bg-white",
-          props.fill && "h-0 min-h-0 flex-1",
-          focused && "min-h-0 flex-1",
-        )}
-      />
+      {props.loadingUntilPainted ? (
+        <div
+          data-artifact-frame-slot=""
+          className={cn("relative", (props.fill || focused) && "flex min-h-0 flex-1 flex-col")}
+        >
+          {frame}
+          {loading ? (
+            <div role="status" aria-live="polite" className="absolute inset-0">
+              <PreviewLoading fill />
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        frame
+      )}
     </dialog>
   );
 }

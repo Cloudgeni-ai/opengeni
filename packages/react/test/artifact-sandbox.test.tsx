@@ -219,6 +219,79 @@ describe("published HTML artifacts", () => {
     }
   });
 
+  it("covers an inline chat visual with the loading surface until its frame can paint", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const client = {} as unknown as Parameters<typeof ChatInteractiveBlock>[0]["client"];
+    // Hold the frames' own load events, as a slow page (render-blocking fonts,
+    // the frame host) would, until the test lets one through.
+    let holdLoads = true;
+    const holdLoad = (event: Event) => {
+      if (holdLoads && (event.target as Element | null)?.tagName === "IFRAME")
+        event.stopImmediatePropagation();
+    };
+    container.addEventListener("load", holdLoad, true);
+    const loadingSurface = () =>
+      container.querySelector("[data-artifact-frame-slot] .og-preview-loading");
+    try {
+      await act(async () =>
+        root.render(
+          <ChatInteractiveBlock
+            workspaceId="ws-1"
+            kind="html"
+            content='<link rel="stylesheet" href="https://fonts.example/slow.css"><div>chart</div>'
+            client={client}
+          />,
+        ),
+      );
+      await act(async () => container.querySelector("button")!.click());
+      const iframe = container.querySelector("iframe")!;
+      // While the frame's document is still loading (render-blocking fonts, the
+      // frame host), the slot shows "Preparing preview…", never an empty box.
+      expect(loadingSurface()).not.toBeNull();
+      expect(container.querySelector('[role="status"]')?.textContent).toContain(
+        "Preparing preview",
+      );
+      // Another window's report does not reveal it.
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: { type: "opengeni.preview.height", height: 200 },
+            source: window,
+          }),
+        );
+      });
+      expect(loadingSurface()).not.toBeNull();
+      // The frame's first height report means its content can paint.
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: { type: "opengeni.preview.height", height: 200 },
+            source: iframe.contentWindow,
+          }),
+        );
+      });
+      expect(loadingSurface()).toBeNull();
+      expect(container.querySelector("iframe")).toBe(iframe);
+
+      // Reloading shows the loading surface again until the new frame loads,
+      // even when it never reports a height.
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-label="Reload app"]')!.click(),
+      );
+      expect(loadingSurface()).not.toBeNull();
+      const reloaded = container.querySelector("iframe")!;
+      holdLoads = false;
+      await act(async () => reloaded.dispatchEvent(new Event("load")));
+      expect(loadingSurface()).toBeNull();
+    } finally {
+      container.removeEventListener("load", holdLoad, true);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("accepts a tool port only through the parent-issued document bootstrap", () => {
     const port = {} as MessagePort;
     const connect = {

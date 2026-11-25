@@ -37,6 +37,12 @@ export type PublishedHtmlArtifactFrameProps = {
   autoHeight?: boolean;
   /** Upper bound for `autoHeight`, in CSS pixels. */
   maxAutoHeight?: number;
+  /**
+   * The document can show its content: its first height report (inline
+   * previews post one once their stylesheets have loaded) or, failing that,
+   * its load. Called at most once per frame.
+   */
+  onPainted?: () => void;
   theme?: "light" | "dark";
   title: string;
   className?: string;
@@ -99,12 +105,23 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
   const themeRef = useRef(props.theme);
   themeRef.current = props.theme;
   const [reportedHeight, setHeight] = useState<number>();
+  const onPaintedRef = useRef(props.onPainted);
+  onPaintedRef.current = props.onPainted;
+  const paintedRef = useRef(false);
+  const painted = () => {
+    if (paintedRef.current) return;
+    paintedRef.current = true;
+    onPaintedRef.current?.();
+  };
+  const paintedHandlerRef = useRef(painted);
+  paintedHandlerRef.current = painted;
+  const listensForHeight = props.autoHeight === true || props.onPainted !== undefined;
   const height =
     reportedHeight === undefined
       ? undefined
       : Math.min(props.maxAutoHeight ?? 1200, Math.max(80, Math.ceil(reportedHeight)));
   useEffect(() => {
-    if (!props.autoHeight) return;
+    if (!listensForHeight) return;
     const receive = (event: MessageEvent) => {
       if (
         event.source !== frameRef.current?.contentWindow ||
@@ -112,11 +129,13 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       )
         return;
       const value = event.data.height;
-      if (typeof value === "number" && Number.isFinite(value)) setHeight(value);
+      if (typeof value !== "number" || !Number.isFinite(value)) return;
+      setHeight(value);
+      paintedHandlerRef.current();
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [props.autoHeight]);
+  }, [listensForHeight]);
   useEffect(() => {
     frameRef.current?.contentWindow?.postMessage(
       { type: "opengeni.preview.theme", theme: props.theme },
@@ -140,6 +159,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       { type: "opengeni.preview.theme", theme: themeRef.current },
       "*",
     );
+    painted();
     frameLoadPendingRef.current = true;
     onFrameLoadRef.current();
   };
