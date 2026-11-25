@@ -9,7 +9,10 @@ import { useCallback, useMemo } from "react";
 import { InteractionInterventionBanner } from "../../../components/interaction-intervention-banner";
 import { useInteractionInterventions } from "../../../hooks/use-interaction-interventions";
 import { useOpenGeniText } from "../../../messages/runtime";
-import type { EmbeddedInterventionClientOverride } from "../../../session-context";
+import {
+  INTERVENTION_METHODS as INTERVENTION_CLIENT_METHODS,
+  type EmbeddedInterventionClientOverride,
+} from "../../../session-context";
 import { userErrorText } from "../../../ui/api-error";
 import { toast } from "../../lib/toast";
 import { cn } from "../../lib/utils";
@@ -26,13 +29,6 @@ export type SessionInterventions = {
 const NONE: readonly InteractionIntervention[] = [];
 // Live hints drive refreshes; this is only the fallback while they are down.
 const FALLBACK_POLL_MS = 10_000;
-const INTERVENTION_CLIENT_METHODS = [
-  "streamWorkspaceInteractionRevisions",
-  "listInteractionInterventions",
-  "getInteractionIntervention",
-  "createInteractionIntervention",
-  "resolveInteractionIntervention",
-] as const;
 const unsupported = () => Promise.reject(new Error("Hand-offs aren't available here."));
 // A client without hand-off methods (an older or trimmed embed) shows none
 // rather than breaking the chat; the hook is disabled, so these never run.
