@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/sdk@6.40.0
+  - @opengeni/connect@6.40.0
+
 ## 6.39.0
 
 ### Minor Changes

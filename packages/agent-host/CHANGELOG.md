@@ -1,5 +1,12 @@
 # @opengeni/agent-host
 
+## 6.40.0
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+  - @opengeni/sdk@6.40.0
+
 ## 6.39.0
 
 ### Patch Changes

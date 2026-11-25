@@ -1,5 +1,17 @@
 # @opengeni/sdk
 
+## 6.40.0
+
+### Minor Changes
+
+- 8a8579a: Add `setSessionModelSettings` and its HTTP endpoint so integration servers can change future session model defaults without sending a message. An optional comparison protects against overwriting a concurrent change, and retrying with the same key does not apply the update twice.
+
+### Patch Changes
+
+- Updated dependencies [8a8579a]
+  - @opengeni/contracts@6.40.0
+  - @opengeni/connect@6.40.0
+
 ## 6.39.0
 
 ### Minor Changes
