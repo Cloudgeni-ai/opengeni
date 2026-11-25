@@ -1,5 +1,27 @@
 # @opengeni/core
 
+## 6.41.0
+
+### Patch Changes
+
+- ca5b614: A workspace admin who can turn off someone else's Workspace schedule or agent trigger can now turn it back on. Before, pausing worked but resuming was refused as owner-only. Resuming changes nothing else, so it runs as its owner again; changing or running it still belongs to its owner.
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/db@6.41.0
+  - @opengeni/documents@6.41.0
+  - @opengeni/runtime@6.41.0
+  - @opengeni/storage@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/events@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
 ## 6.40.0
 
 ### Patch Changes

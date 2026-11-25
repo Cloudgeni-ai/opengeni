@@ -1,5 +1,43 @@
 # @opengeni/api-router
 
+## 6.41.0
+
+### Minor Changes
+
+- dd6dd0b: A meeting recorded in your Personal workspace can be shared with one of your team workspaces (`PATCH …/recordings/:recordingId` with `{ visibility: "workspace", sharedWorkspaceId }`), from any workspace where you see it. Everyone in that workspace can open it read only, and agents there find it with `meetings_search`; `Recording.sharedWorkspaceId` says where it is shared. The meeting page's Share menu lists "Only me" and your team workspaces.
+
+### Patch Changes
+
+- ca5b614: A workspace admin who can turn off someone else's Workspace schedule or agent trigger can now turn it back on. Before, pausing worked but resuming was refused as owner-only. Resuming changes nothing else, so it runs as its owner again; changing or running it still belongs to its owner.
+- Updated dependencies [ca5b614]
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/core@6.41.0
+  - @opengeni/config@6.41.0
+  - @opengeni/contracts@6.41.0
+  - @opengeni/db@6.41.0
+  - @opengeni/documents@6.41.0
+  - @opengeni/github@6.41.0
+  - @opengeni/runtime@6.41.0
+  - @opengeni/storage@6.41.0
+  - @opengeni/artifact-tool@6.41.0
+  - @opengeni/capabilities@6.41.0
+  - @opengeni/codemode@6.41.0
+  - @opengeni/codex@6.41.0
+  - @opengeni/decisions@6.41.0
+  - @opengeni/events@6.41.0
+  - @opengeni/interaction@6.41.0
+  - @opengeni/observability@6.41.0
+  - @opengeni/tool-gateway@6.41.0
+  - @opengeni/vaults@6.41.0
+  - @opengeni/vaults-bitwarden@6.41.0
+  - @opengeni/vaults-keeper@6.41.0
+  - @opengeni/vaults-onepassword@6.41.0
+  - @opengeni/vaults-protonpass@6.41.0
+  - @opengeni/agent-proto@6.41.0
+  - @opengeni/network@6.41.0
+  - @opengeni/xai-subscription@6.41.0
+
 ## 6.40.0
 
 ### Minor Changes

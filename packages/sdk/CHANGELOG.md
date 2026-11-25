@@ -1,5 +1,18 @@
 # @opengeni/sdk
 
+## 6.41.0
+
+### Minor Changes
+
+- bbbeecf: Add Heedeo signup scoring, off by default. An operator mode (`heedeoSignupMode`: `off`, `shadow` or `enforce`, through the signup network velocity setter) and the `OPENGENI_HEEDEO_*` keys turn it on. Shadow scores each new account once, just before it is created, and stores the verdict without acting on it; enforce refuses a signup in Heedeo's `block` band. Heedeo failures never block a signup. The client config gains an optional `auth.heedeo` (publishable key and script URL) while scoring is on.
+
+### Patch Changes
+
+- Updated dependencies [bbbeecf]
+- Updated dependencies [dd6dd0b]
+  - @opengeni/contracts@6.41.0
+  - @opengeni/connect@6.41.0
+
 ## 6.40.0
 
 ### Minor Changes

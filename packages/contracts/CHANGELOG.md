@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 6.41.0
+
+### Minor Changes
+
+- bbbeecf: Add Heedeo signup scoring, off by default. An operator mode (`heedeoSignupMode`: `off`, `shadow` or `enforce`, through the signup network velocity setter) and the `OPENGENI_HEEDEO_*` keys turn it on. Shadow scores each new account once, just before it is created, and stores the verdict without acting on it; enforce refuses a signup in Heedeo's `block` band. Heedeo failures never block a signup. The client config gains an optional `auth.heedeo` (publishable key and script URL) while scoring is on.
+- dd6dd0b: A meeting recorded in your Personal workspace can be shared with one of your team workspaces (`PATCH …/recordings/:recordingId` with `{ visibility: "workspace", sharedWorkspaceId }`), from any workspace where you see it. Everyone in that workspace can open it read only, and agents there find it with `meetings_search`; `Recording.sharedWorkspaceId` says where it is shared. The meeting page's Share menu lists "Only me" and your team workspaces.
+
 ## 6.40.0
 
 ### Minor Changes
