@@ -152,10 +152,12 @@ async function unpaidRunning(): Promise<number> {
   return counts!.runningBoxes;
 }
 
-/** Starting or warm boxes on a managed provider (fleet pressure's count). */
+/** Starting or warm boxes on a managed provider that are not asleep (fleet
+ * pressure's count). */
 async function warmBoxes(): Promise<number> {
   const [row] = await admin<{ n: number }[]>`select count(*)::int as n from sandbox_leases
-    where liveness in ('warming', 'warm') and backend <> 'selfhosted'`;
+    where liveness in ('warming', 'warm') and backend <> 'selfhosted'
+      and not (backend = 'compute' and compute_asleep_since is not null)`;
   return row!.n;
 }
 
@@ -412,6 +414,30 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
     for (const paid of await paidOrganizations()) {
       expect((await acquire(paid, "direct", fleet)).role).toBe("spawner");
     }
+  }, 120_000);
+
+  test("sleeping compute boxes count toward neither the unpaid cap nor fleet pressure", async () => {
+    const unpaid = await organization({ plan: "free" });
+    const group = crypto.randomUUID();
+    const runningBefore = await unpaidRunning();
+    const warmBefore = await warmBoxes();
+    expect((await acquire(unpaid, "direct", {}, { group, backend: "compute" })).role).toBe(
+      "spawner",
+    );
+    expect(await unpaidRunning()).toBe(runningBefore + 1);
+    const fleet = {
+      pressureEngageWarmBoxes: 1_000_000,
+      pressureReleaseWarmBoxes: 1_000_000,
+      pressureReleaseAfterMs: 0,
+      pressureUnpaidRunningBoxes: 0,
+    };
+    resetSandboxFleetState();
+    expect((await readSandboxFleetPressure(db, fleet)).warmBoxes).toBe(warmBefore + 1);
+    await admin`update sandbox_leases set compute_asleep_since = now()
+      where workspace_id = ${unpaid.workspaceId} and sandbox_group_id = ${group}`;
+    expect(await unpaidRunning()).toBe(runningBefore);
+    resetSandboxFleetState();
+    expect((await readSandboxFleetPressure(db, fleet)).warmBoxes).toBe(warmBefore);
   }, 120_000);
 
   test("self-hosted boxes never count toward fleet pressure", async () => {

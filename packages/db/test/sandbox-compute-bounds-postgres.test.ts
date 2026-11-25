@@ -290,6 +290,39 @@ describe("free compute bounds (real PostgreSQL)", () => {
     });
   }, 60_000);
 
+  test("a sleeping compute box is not a running box", async () => {
+    // Compute leases are never drained for being idle: the sandbox sleeps and
+    // its lease stays warm. Sleeping chats must not fill the running budget.
+    const org = await organization({ plan: "free" });
+    const sleeping = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const group of sleeping) {
+      expect((await acquire(org, "direct", { group, backend: "compute" })).role).toBe("spawner");
+      await warm(org, group);
+    }
+    expect(await acquire(org, "turn")).toMatchObject({
+      role: "fenced",
+      reason: "organization_sandbox_capacity",
+    });
+    await admin`update sandbox_leases set compute_asleep_since = now()
+      where workspace_id = ${org.workspaceId} and sandbox_group_id = any(${sleeping}::uuid[])`;
+    // Both asleep: a new chat gets its box.
+    expect((await acquire(org, "turn")).role).toBe("spawner");
+    // One wakes: it counts again, and the budget of two is full.
+    await admin`update sandbox_leases set compute_asleep_since = null
+      where workspace_id = ${org.workspaceId} and sandbox_group_id = ${sleeping[0]!}`;
+    const refused = await refusal(acquire(org, "direct"));
+    expect([refused.reason, refused.limit]).toEqual(["running", 2]);
+    // Only compute sandboxes sleep; the stamp means nothing on another backend.
+    const modal = await organization({ plan: "free" });
+    const modalGroups = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const group of modalGroups) {
+      expect((await acquire(modal, "direct", { group })).role).toBe("spawner");
+    }
+    await admin`update sandbox_leases set compute_asleep_since = now()
+      where workspace_id = ${modal.workspaceId} and sandbox_group_id = any(${modalGroups}::uuid[])`;
+    expect((await refusal(acquire(modal, "direct"))).reason).toBe("running");
+  }, 60_000);
+
   describe("a plan-less organization", () => {
     // With subscription plans on, a new self-serve organization has no plan
     // row until subscription maintenance enrolls it in Free, so it is bounded
