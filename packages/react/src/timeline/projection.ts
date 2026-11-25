@@ -311,12 +311,41 @@ export function buildTimeline(
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
   };
+  // An approval wait whose every action has an answer is over. The rest of
+  // the turn's waits end with it only once none of them still asks about an
+  // action without an answer: a newer wait can ask more than this one did.
+  const resolveAnsweredApprovalWait = (
+    event: SessionEvent,
+    notice: NoticeItem,
+    turnId: string | null,
+  ) => {
+    if (event.duplicateOfEventId || (event.turnAssociation && event.turnAssociation !== "current"))
+      return;
+    notice.resolvedAt = event.occurredAt;
+    const key = turnId ?? presentationTurnId;
+    const rest = (presentationWaits.get(key) ?? []).filter((wait) => wait !== notice);
+    const stillAsking = rest.some(
+      (wait) =>
+        wait.kind === "notice" &&
+        !wait.resolvedAt &&
+        wait.approvalActions?.some((action) => action.decision === undefined),
+    );
+    if (stillAsking) presentationWaits.set(key, rest);
+    else resolvePresentationWait(event, key);
+  };
   // Open approval waits by the approval ids they ask about, so the person's
   // answer is on the wait the moment it is recorded, before work resumes.
   // A restarted worker can ask the same approvals again before they are
   // answered: an id names every wait still open when it was asked again,
   // oldest first, and an answer is on all of them.
   const approvalWaitsById = new Map<string, Array<{ notice: NoticeItem; turnId: string | null }>>();
+  // Every answer recorded in each turn, by approval id. A worker can ask an
+  // approval again after it was answered but before the answer was applied;
+  // the answer is already known then, and no new decision will be recorded.
+  const approvalDecisionsByTurn = new Map<
+    string | null,
+    Map<string, NonNullable<NonNullable<NoticeItem["approvalActions"]>[number]["decision"]>>
+  >();
   // Each turn's latest approval wait, for a decision that names none of its
   // actions, with the one approval id an older request may carry instead.
   const latestApprovalWaitByTurn = new Map<
@@ -1595,7 +1624,13 @@ export function buildTimeline(
           ...(approvalActions.length > 0 ? { approvalActions } : {}),
           occurredAt: event.occurredAt,
         };
+        const answered = approvalDecisionsByTurn.get(turnId ?? presentationTurnId);
         for (const action of approvalActions) {
+          const known = answered?.get(action.id);
+          if (known) {
+            action.decision = known;
+            continue;
+          }
           // A wait that had already ended is a separate ask, not this one again.
           const waits = (approvalWaitsById.get(action.id) ?? []).filter(
             (wait) => !wait.notice.resolvedAt,
@@ -1607,7 +1642,16 @@ export function buildTimeline(
           notice,
           approvalId: stringValue(payload.approvalId),
         });
-        rememberPresentationWait(notice, turnId);
+        if (
+          approvalActions.length > 0 &&
+          approvalActions.every((action) => action.decision !== undefined)
+        ) {
+          // Everything it asks was already answered: it is history at once.
+          notice.resolvedAt = event.occurredAt;
+          items.push(notice);
+        } else {
+          rememberPresentationWait(notice, turnId);
+        }
         break;
       }
 
@@ -1623,6 +1667,10 @@ export function buildTimeline(
           payload.decision === "reject" &&
           (payload.refusal !== undefined || event.clientEventId?.startsWith("system:") === true);
         const decision = automatic ? "automatic_reject" : payload.decision;
+        const decisionTurn = turnId ?? presentationTurnId;
+        const answered = approvalDecisionsByTurn.get(decisionTurn) ?? new Map();
+        answered.set(approvalId, decision);
+        approvalDecisionsByTurn.set(decisionTurn, answered);
         // The call it names stops waiting too: an approved call runs now, a
         // rejected one never will.
         const call = callsById.get(approvalId);
@@ -1651,7 +1699,7 @@ export function buildTimeline(
           const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
           if (action) action.decision = decision;
           if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
-            resolvePresentationWait(event, turnId ?? open.turnId);
+            resolveAnsweredApprovalWait(event, open.notice, turnId ?? open.turnId);
           }
         }
         break;

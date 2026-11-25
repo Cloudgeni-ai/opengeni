@@ -69,9 +69,9 @@ function tellingFact(action: ApprovalAction, alike: ApprovalAction[]): string | 
  * A resolved approval notice reads as history, saying what the person
  * decided for each action whose answer is known, one line each: "You
  * approved “Remove the Gmail connection for anna@example.com”." Actions it
- * asked about but never got an answer for here (a later wait asked again)
- * are left out. Two that would read the same get the first fact that tells
- * them apart: "(Added: 2 Oct 2026, 10:12 UTC)".
+ * asked about without a recorded answer are left out; with none answered it
+ * reads "Not answered.". Two that would read the same get the first fact that
+ * tells them apart: "(Added: 2 Oct 2026, 10:12 UTC)".
  */
 export function noticeDisplayText(
   t: OpenGeniText,

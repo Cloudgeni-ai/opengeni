@@ -298,6 +298,78 @@ describe("an answered approval", () => {
     ).toEqual(["You approved “Send email”.", "You approved “Deploy”."]);
   });
 
+  test("an approval asked again after its answer was recorded keeps that answer", () => {
+    const deploy = {
+      id: "call-2",
+      name: "deploy",
+      display: { title: "Deploy" },
+      rawItem: { callId: "call-2" },
+    };
+    const asked = (items: ReturnType<typeof buildTimeline>) =>
+      items.filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true);
+    // Approved, then a restarted worker asks again before applying it.
+    const again = asked(
+      buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        decide(4, "call-1", "approve"),
+        event(5, "turn.preempted"),
+        event(6, "session.requiresAction", { approvals: [sendEmail] }),
+        event(7, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(again.map((item) => noticeDisplayText(englishText, item))).toEqual([
+      "You approved “Send email”.",
+      "You approved “Send email”.",
+    ]);
+    expect(again.every(noticeApprovalAnswered)).toBe(true);
+    // Both answered quickly; the resume asks again about the one answered
+    // after it started and then applies the recorded answer.
+    const quick = asked(
+      buildTimeline(englishText, [
+        ...asking([sendEmail, deploy]),
+        decide(4, "call-2", "approve"),
+        event(5, "session.status.changed", { status: "running" }),
+        decide(6, "call-1", "approve"),
+        event(7, "session.requiresAction", { approvals: [sendEmail] }),
+        event(8, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(quick.map((item) => noticeDisplayText(englishText, item))).toEqual([
+      "You approved “Send email”.\nYou approved “Deploy”.",
+      "You approved “Send email”.",
+    ]);
+  });
+
+  test("answering an older notice leaves a newer one that asks more still waiting", () => {
+    const deploy = {
+      id: "call-2",
+      name: "deploy",
+      display: { title: "Deploy" },
+      rawItem: { callId: "call-2" },
+    };
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "session.requiresAction", { approvals: [sendEmail, deploy] }),
+      decide(5, "call-1", "approve"),
+    ]);
+    const [older, newer] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(older!.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, older!)).toBe("You approved “Send email”.");
+    expect(newer!.resolvedAt).toBeUndefined();
+    const done = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "session.requiresAction", { approvals: [sendEmail, deploy] }),
+      decide(5, "call-1", "approve"),
+      decide(6, "call-2", "reject"),
+    ]).filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true);
+    expect(done.every((item) => item.resolvedAt !== undefined)).toBe(true);
+    expect(noticeDisplayText(englishText, done[1]!)).toBe(
+      "You approved “Send email”.\nYou declined “Deploy”.",
+    );
+  });
+
   test("parallel app-action approvals say what was decided, one line each, told apart", () => {
     const removal = (callId: string, title: string, added: string) => ({
       id: callId,
