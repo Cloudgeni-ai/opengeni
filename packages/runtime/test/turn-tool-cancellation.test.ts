@@ -19,7 +19,9 @@ import {
   cancellableShellCommand,
   cancellableSynchronousShellCommand,
   createTurnToolCancellationController,
-  parseRetainedProcessGroupControl,
+  isTurnShellMarkerPath,
+  processGroupStopCommand,
+  PROCESS_GROUP_STOP_EXIT,
   TURN_SCOPED_STEER_GRACE_MS,
 } from "../src/sandbox/turn-tool-cancellation";
 import {
@@ -311,16 +313,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(116, "ready\n"));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 116,
-      adoptRetainedProcessAsBackgroundCommand: async (
-        sessionId: number,
-        command?: string,
-        processGroupControl?: { markerPath: string; token: string },
-      ) => {
+      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number, command?: string) => {
         expect(sessionId).toBe(116);
         expect(command).toBe("long-task");
-        // Pause/Stop later end this command by its wrapper's group identity.
-        expect(processGroupControl).toBeDefined();
-        expect(parseRetainedProcessGroupControl(processGroupControl)).toEqual(processGroupControl!);
         adoptions += 1;
       },
     };
@@ -337,6 +332,156 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(1);
   });
 
+  // Production regression (release 6.35.0 live acceptance): Pause moved an
+  // adopted Modal command to `stopping`, but only the turn that wrapped it knew
+  // its process-group marker, so nothing could signal it and a command that
+  // ignores INT/TERM wrote after Pause. Adoption must hand the marker on, and
+  // the marker alone must be enough to stop the whole group later.
+  test("adoption hands on the process-group marker that later stops an INT/TERM-ignoring command", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-adopted-stop-"));
+    const zombie = join(root, "zombie.txt");
+    const children: Array<ReturnType<typeof Bun.spawn>> = [];
+    try {
+      const controller = createTurnToolCancellationController(undefined, {
+        sandboxTemporaryDirectory: root,
+      });
+      let adoptedMarker: string | undefined;
+      const exec = functionTool("exec_command", async (_context, rawInput) => {
+        const { cmd } = JSON.parse(rawInput) as { cmd: string };
+        const child = Bun.spawn(["/bin/sh", "-c", cmd], {
+          cwd: root,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        children.push(child);
+        const reader = child.stdout.getReader();
+        let printed = "";
+        while (!printed.includes("READY")) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error(`fixture exited early: ${printed}`);
+          printed += new TextDecoder().decode(value);
+        }
+        reader.releaseLock();
+        return running(121, printed);
+      });
+      const session = {
+        hasRetainedProcess: (sessionId: number) => sessionId === 121,
+        adoptRetainedProcessAsBackgroundCommand: async (
+          _sessionId: number,
+          _command?: string,
+          processGroupMarker?: string,
+        ) => {
+          adoptedMarker = processGroupMarker;
+        },
+      };
+      const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+        Extract<Tool<unknown>, { type: "function" }>
+      >;
+      const output = await wrappedExec!.invoke(
+        runContext,
+        JSON.stringify({
+          cmd: `trap '' INT TERM; printf 'READY\\n'; sleep 2; printf zombie > '${zombie}'`,
+          yield_time_ms: 0,
+          tty: false,
+        }),
+      );
+      expect(output).toContain("Process running with session ID 121");
+      // Adoption detached the turn: its own cancellation no longer stops it.
+      await controller.waitForQuiescence();
+      expect(adoptedMarker).toBeDefined();
+      expect(isTurnShellMarkerPath(adoptedMarker)).toBe(true);
+      expect(adoptedMarker!.startsWith(`${root}/opengeni-turn-shell/`)).toBe(true);
+
+      // Spawn asynchronously so this process keeps reaping its killed child,
+      // as the sandbox's own process tree does.
+      const stopGroup = async () =>
+        await Bun.spawn(
+          ["/bin/sh", "-c", processGroupStopCommand(adoptedMarker!, { termGraceMs: 300 })],
+          { stdout: "ignore", stderr: "ignore" },
+        ).exited;
+      expect(await stopGroup()).toBe(PROCESS_GROUP_STOP_EXIT.stopped);
+      expect(
+        await Promise.race([
+          children[0]!.exited.then(() => true),
+          Bun.sleep(2_000).then(() => false),
+        ]),
+      ).toBe(true);
+      await Bun.sleep(2_500);
+      expect(existsSync(zombie)).toBe(false);
+      // A later stop leaves no start tombstone behind, however often it runs.
+      expect(existsSync(`${adoptedMarker}.cancelled`)).toBe(false);
+      // A repeated stop is idempotent once the group is gone.
+      expect([PROCESS_GROUP_STOP_EXIT.stopped, PROCESS_GROUP_STOP_EXIT.markerAbsent]).toContain(
+        (await stopGroup()) as never,
+      );
+      expect(existsSync(`${adoptedMarker}.cancelled`)).toBe(false);
+    } finally {
+      for (const child of children) child.kill("SIGKILL");
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test("a process-group stop gives TERM its grace before KILL", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-stop-grace-"));
+    const marker = join(root, "opengeni-turn-shell", crypto.randomUUID());
+    const cleaned = join(root, "cleaned.txt");
+    const child = Bun.spawn(
+      [
+        "/bin/sh",
+        "-c",
+        cancellableShellCommand(
+          `trap 'sleep 0.5; printf cleaned > '"'${cleaned}'"'; exit 0' TERM; printf 'READY\\n'; while :; do sleep 0.1; done`,
+          marker,
+        ),
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    try {
+      const reader = child.stdout.getReader();
+      let printed = "";
+      while (!printed.includes("READY")) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`fixture exited early: ${printed}`);
+        printed += new TextDecoder().decode(value);
+      }
+      reader.releaseLock();
+      const stopped = await Bun.spawn(
+        ["/bin/sh", "-c", processGroupStopCommand(marker, { termGraceMs: 3_000 })],
+        { stdout: "ignore", stderr: "ignore" },
+      ).exited;
+      expect(stopped).toBe(PROCESS_GROUP_STOP_EXIT.stopped);
+      // The command's TERM handler ran to completion instead of being killed.
+      expect(existsSync(cleaned)).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test("a process-group stop accepts only an exact turn shell marker path", () => {
+    const marker = "/tmp/opengeni-turn-shell/0f8fad5b-d9cb-469f-a165-70867728950e";
+    expect(isTurnShellMarkerPath(marker)).toBe(true);
+    for (const invalid of [
+      "opengeni-turn-shell/0f8fad5b-d9cb-469f-a165-70867728950e",
+      "/tmp/../etc/opengeni-turn-shell/0f8fad5b-d9cb-469f-a165-70867728950e",
+      "/tmp/opengeni-turn-shell/not-a-token",
+      "/tmp/x'y/opengeni-turn-shell/0f8fad5b-d9cb-469f-a165-70867728950e",
+      `${marker}\n`,
+      null,
+    ]) {
+      expect(isTurnShellMarkerPath(invalid)).toBe(false);
+    }
+    expect(() =>
+      processGroupStopCommand("/tmp/opengeni-turn-shell/x", { termGraceMs: 5_000 }),
+    ).toThrow();
+    const stop = processGroupStopCommand(marker, { termGraceMs: 5_000 });
+    expect(stop).toContain("0f8fad5b-d9cb-469f-a165-70867728950e");
+    // 5 s of TERM grace in 100 ms polls, and no start tombstone.
+    expect(stop).toContain('[ "$__opengeni_poll" -lt 50 ]');
+    expect(stop).not.toContain(".cancelled");
+  });
+
   test("an adopted native handle exposes its UUID and a later read honors the foreground wait", async () => {
     const controller = createTurnToolCancellationController();
     let reads = 0;
@@ -351,10 +496,8 @@ describe("turn sandbox-tool physical cancellation fence", () => {
           writeStdin: async () => (++reads === 1 ? running(117, "middle\n") : exited(0, "done\n")),
         },
       }),
-      adoptProcessAsBackgroundCommand: async ({ command, processGroupControl }) => {
+      adoptProcessAsBackgroundCommand: async ({ command }) => {
         expect(command).toBe("work");
-        expect(processGroupControl).toBeDefined();
-        expect(parseRetainedProcessGroupControl(processGroupControl)).toEqual(processGroupControl!);
       },
       observeProcessTerminal: async () => {
         observations += 1;

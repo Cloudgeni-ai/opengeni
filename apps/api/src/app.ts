@@ -59,6 +59,7 @@ import {
   httpRejectionFactsFromEnvelope,
   httpRejectionFactsFromError,
   readRejectionEnvelope,
+  rejectedCallerLogAttributes,
   type HttpRejectionFacts,
 } from "./http/rejection-telemetry";
 import {
@@ -81,6 +82,7 @@ import {
   environmentsEncryptionKeyBytes,
   landingOriginEntries,
   orgAgentsEnabledForAccount,
+  resolveFirstPartyDelegationSecret,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -1212,6 +1214,12 @@ export function createAppComposition(
             correlationId,
             ...(sdkVersion ? { sdkVersion } : {}),
             ...(rejection ? rejectionLogAttributes(rejection) : {}),
+            ...(rejection
+              ? await rejectedCallerLogAttributes(
+                  c.req.raw.headers,
+                  resolveFirstPartyDelegationSecret(deps.settings),
+                )
+              : {}),
           });
         } catch (error) {
           const status = httpStatusForError(error);
@@ -1904,6 +1912,7 @@ export function createAppComposition(
           : {}),
         connectedMachines: deps.settings.sandboxSelfhostedEnabled,
         ...(orgAgentsEnabled ? { orgAgents: true } : {}),
+        artifactExport: deps.settings.artifactMaterializerDeployed,
         browserExtension: browserExtension(deps.settings),
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
@@ -3123,6 +3132,7 @@ function rejectionLogAttributes(rejection: HttpRejectionFacts) {
     rejectionCode: rejection.code,
     rejectionReason: rejection.reason,
     ...(rejection.fingerprint ? { rejectionFingerprint: rejection.fingerprint } : {}),
+    ...(rejection.detail ? { rejectionDetail: rejection.detail } : {}),
   };
 }
 

@@ -1,5 +1,56 @@
 # @opengeni/react
 
+## 6.38.0
+
+### Minor Changes
+
+- 4abb2b9: Add `@opengeni/react/skills`, a packaged Skills page for any host: list, view, a folder editor with save and remove, version history and restore when the client can read them, and upload of a SKILL.md, a skill folder or a .zip. Also exports `@opengeni/react/ui/capability-page`, and `ConnectionInstalled` takes `title={null}`, an `aria-label` and a per-item `statusTone`. `SkillsPanel` takes `refusalCodes` to show a host relay's own refusal sentences.
+
+### Patch Changes
+
+- de3d320: When another account signs in on the same browser, an open tab notices (on a refused request or when the tab comes back to the front), drops everything it held for the previous person and opens the new person's own workspace, with one short notice. A link to a workspace the person can't open also says why it opened theirs instead. `AppStateHost.subscribeSignInLost` listeners now receive a reason: `"signed_out"` for a lapsed sign-in (401) or `"forbidden"` for a 403.
+- f1289fa: Shared agents have a **Who can edit** setting: "Creator and admins" or "Everyone in workspace". Agents made in Opengeni's apps start as everyone in the workspace; existing agents, and API creates that leave it out, keep today's rule (creator and admins). Agents gain `editAccess` and `viewer.canManage`, and `createAgent`, `createAgentFromTemplate` and `updateAgent` accept `editAccess`. The ready-made PR reviewer can now be set to review a pull request in one click when someone on the team mentions it there. When a pull request event's automation run is refused before it starts, Opengeni says why in a comment on that pull request.
+- 2148132: An app opened as a page from the sidebar has one small chat button in its corner. It opens the same chat panel as the app view, with New, Copy link and Open as a full chat, and the chat can be hidden again. People who can't start chats see no button.
+- c498f66: A `FormPage` footer now rests on the bottom edge of what is visible, even when the page scrolls inside a container with bottom padding. On the agent sign-in page ("Connect … to Opengeni") the Cancel and Allow bar used to stop above the bottom, with the permission list showing beneath it.
+- bfe5398: A chat pinned to one subscription account now says so when it waits for that account. The chat keeps honouring the pin: its turn still waits for the chosen account and never moves to another one by itself. But the wait no longer tells people to switch the chat to another model, which did not help, because the pin holds whatever the model.
+
+  - The composer shows "This chat is pinned to the Claude account “Team”, which is out of capacity. Resets Sat 18:00." with one button, **Use automatic account choice**. It switches the chat back to automatic account choice through the existing session account choice (`connectionId: null`), which applies to the waiting turn, so it continues at once on another account. People who can't manage the chat are told who can. A turned-off or no-longer-eligible pinned account gets the same notice and button.
+  - The timeline keeps the wait's own explanation instead of the generic "switch to another model" line.
+  - The person's inbox notification is titled "Chat waiting for its pinned Claude account", names the account and when it has room again, and offers automatic account choice instead of a model switch. It is still sent once per waiting turn and updated in place when what it said changes.
+  - A worker's parent agent is told the same, with the `setSessionModelAccount` action (`connectionId: null`) as the way to let the worker continue, instead of `session_set_model`.
+
+  The account is named by its label only when the label is not an email address. The internal wait field that named an account needing a new sign-in is now `waitAccount` (type `SubscriptionWaitAccount`; `SubscriptionReconnectAccount` remains as a deprecated alias) and also names a pinned account.
+
+- fe66f1c: Keep modal content above its backdrop when an extension reorders body children.
+
+  If you customize a Dialog or Sheet content exit animation, set `--og-modal-exit-duration` on its overlay to at least the full exit time so the overlay stays mounted until the content animation finishes. Use the matching SDK `Dialog` or `Sheet` root for non-modal dialogs rather than a raw Radix root.
+
+- c05ba68: Automations that run an agent with Memory are no longer refused when they start. Microsoft Teams chats with an agent now get its Memory, as Slack and app chats do.
+  An automation whose agent was deleted or is no longer shared now stops with a clear reason instead of retrying.
+- b76dd79: A message is no longer refused when one of its connector accounts stopped working after the chat was opened (for example its sign-in expired). It is sent without that account: the connector keeps your other picks that still work, or runs without an account for that turn, and no other account is used in its place. The left-out account is recorded on the turn, logged, and an expired sign-in posts its reconnect notice in the chat, addressed to the person who sent the message (not the chat's owner in a shared chat) and posted once per break, so a dismissed notice stays dismissed while the account stays broken. The notice names the account only in a private chat or in its owner's own Personal workspace; anywhere else it names only the service. Work that continues the message narrows the same way, keeping your working picks rather than dropping the connector. An account id you can't see, or one that belongs to another connector, is still refused, and personal GitHub and social account picks stay strict because a repository or post can't be attached without that account. A chat left open re-reads its accounts when you return to it, and reconnect notices name the service (Atlassian, not "Mcp").
+
+  In the composer, a picked account that stopped working stays picked and shows "Reconnect required" on the connector and on the account, with a Reconnect action for that account. Send stays enabled.
+
+  If a server still refuses such a message, the chat re-reads its accounts and sends it again once on its own, leaving out a pick that stopped working only where the connector keeps another pick, with no failed message to resend. Only that resend is narrowed: your picks stay as you made them, so the account is used again once you reconnect it. It never adds, swaps or widens accounts: when no such resend exists, or the second send is refused too, the message shows as failed as before.
+
+  "Reconnect required" on a connector in + → Connectors now stays until you reconnect it, including after a reload and on other devices. In a Personal workspace, a connector carried from another workspace used to disappear from the connector list once its account stopped working; the list now keeps it as not runnable, marked as needing reconnecting, so it is never a default tool and chats never run it with that account. A new chat or tool selection that still names it is accepted instead of being refused, and keeps it chosen, with your account picks for it, so the chat gets it back once you reconnect and uses only the accounts you picked. The Open PR button no longer has a glow, matching the other primary buttons.
+
+- 4122dc5: The Skills page numbers a skill's versions within that skill (Version 1, 2, ...) instead of showing the shared revision counter, and the docs say to import `@opengeni/react/connect.css` for it.
+- b902e4e: Steer on the collapsed queue now steers every queued message, including ones still being sent, in one command: the agent gets them in the order sent, with one interruption. The button shows the count when more than one message waits. Steer on a row in the open queue still steers just that message.
+
+  `steerQueueItem` accepts an optional `together` list of other waiting prompts (`{ turnId, expectedTurnVersion }`) to steer in the same command, and `useTurnQueue` adds `steerTurns`.
+
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/sdk@6.38.0
+  - @opengeni/connect@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

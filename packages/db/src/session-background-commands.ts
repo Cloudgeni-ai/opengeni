@@ -719,9 +719,21 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
     turnId?: string;
     attemptId?: string;
     executionGeneration?: number;
-    processGroupControl?: { markerPath: string; token: string } | undefined;
+    /** Turn shell marker path of an unsupervised command; see migration 1560. */
+    processGroupMarker?: string | undefined;
   },
 ): Promise<SessionBackgroundCommand> {
+  // A malformed marker never fails adoption: the command is kept without one
+  // (observable, not signalable by the reconciler). The worker validates the
+  // exact turn shell form again before using it.
+  const candidateMarker = input.processGroupMarker ?? null;
+  const processGroupMarker =
+    candidateMarker !== null &&
+    candidateMarker.length <= 1024 &&
+    candidateMarker.startsWith("/") &&
+    !/[\0\n\r']/u.test(candidateMarker)
+      ? candidateMarker
+      : null;
   const [process] = await db
     .select({
       accountId: schema.sandboxRetainedProcesses.accountId,
@@ -759,20 +771,15 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
       retainedProcessId: input.retainedProcessId,
       commandPreview: commandPreview(input.command),
       commandText: input.command,
+      processGroupMarker,
       launchTurnId: input.turnId ?? null,
       launchAttemptId: input.attemptId ?? null,
       launchExecutionGeneration: input.executionGeneration ?? null,
-      processGroupControl: input.processGroupControl ?? null,
     })
     .onConflictDoUpdate({
       target: schema.sessionBackgroundCommands.retainedProcessId,
       targetWhere: sql`${schema.sessionBackgroundCommands.retainedProcessId} is not null`,
-      // A replayed adoption may carry the identity a recovered row lacked; a
-      // stored identity is never replaced.
-      set: {
-        updatedAt: new Date(),
-        processGroupControl: sql`coalesce(${schema.sessionBackgroundCommands.processGroupControl}, excluded.process_group_control)`,
-      },
+      set: { updatedAt: new Date() },
     })
     .returning();
   if (!row) throw new Error("Managed background command adoption returned no row");
@@ -803,35 +810,6 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
 
 /** Stop requester recorded for an operation abandoned on an unreachable machine. */
 export const UNREACHABLE_MACHINE_STOP_REQUESTER = "system:connected-machine-unreachable";
-
-/** The stored process-group identity of a managed background command that a
- * person or Pause asked to stop. Null unless the command is still stopping on
- * this exact retained process; the reaper validates the shape before use. */
-export async function stoppingManagedBackgroundCommandProcessGroupControl(
-  db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string; retainedProcessId: string },
-): Promise<unknown> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      const [row] = await tx
-        .select({ control: schema.sessionBackgroundCommands.processGroupControl })
-        .from(schema.sessionBackgroundCommands)
-        .where(
-          and(
-            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
-            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
-            eq(schema.sessionBackgroundCommands.retainedProcessId, input.retainedProcessId),
-            eq(schema.sessionBackgroundCommands.provider, "managed"),
-            eq(schema.sessionBackgroundCommands.state, "stopping"),
-          ),
-        )
-        .limit(1);
-      return row?.control ?? null;
-    },
-  );
-}
 
 /** @internal Caller must already hold the canonical exact-attempt fence, or for
  * an abandoned operation, proof that the exact attempt launched it. */
@@ -1626,6 +1604,35 @@ export type SessionCommandIdentity = {
   sessionId: string;
   commandId: string;
 };
+
+/** The persisted process-group marker of the stopping managed command that
+ * owns `retainedProcessId` (migration 1560), or null when it has none, is not
+ * stopping, or is not a managed command. */
+export async function getStoppingManagedCommandProcessGroupMarker(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; retainedProcessId: string },
+): Promise<string | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({ marker: schema.sessionBackgroundCommands.processGroupMarker })
+        .from(schema.sessionBackgroundCommands)
+        .where(
+          and(
+            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            eq(schema.sessionBackgroundCommands.retainedProcessId, input.retainedProcessId),
+            eq(schema.sessionBackgroundCommands.provider, "managed"),
+            eq(schema.sessionBackgroundCommands.state, "stopping"),
+          ),
+        )
+        .limit(1);
+      return row?.marker ?? null;
+    },
+  );
+}
 
 /** The immutable machine locator of one of this session's RUNNING connected
  * commands, copied at adoption: what any attempt of the session reads its

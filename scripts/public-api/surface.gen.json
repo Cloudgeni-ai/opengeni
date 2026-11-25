@@ -12308,6 +12308,7 @@
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string! null",
         "$.description": "string!",
+        "$.editAccess": "enum!=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]",
         "$.firstMessage": "string!",
         "$.hasFirstMessage": "boolean!",
         "$.id": "string!",
@@ -12457,6 +12458,14 @@
         "$.renderer": "ref(AgentRenderer)?",
         "$.titleInstructions": "string? null",
         "$.vaultPolicy": "ref(VaultPolicy)?"
+      }
+    },
+    "AgentEditAccess": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]"
       }
     },
     "AgentEffectiveTools": {
@@ -12780,6 +12789,7 @@
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string! null",
         "$.description": "string!",
+        "$.editAccess": "enum!=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]",
         "$.hasFirstMessage": "boolean!",
         "$.id": "string!",
         "$.memory": "ref(AgentMemory)!",
@@ -12831,6 +12841,7 @@
         "$": "object",
         "$.instructions": "string!",
         "$.name": "string!",
+        "$.oneClick": "boolean?",
         "$.schedule": "ref(AutomationTemplateSchedule)! null",
         "$.triggers": "array!",
         "$.triggers[]": "ref(AutomationTemplateTrigger)"
@@ -12922,6 +12933,7 @@
       "shape": {
         "$": "object",
         "$.canEdit": "boolean!",
+        "$.canManage": "boolean?",
         "$.canManageSlack": "boolean!",
         "$.canOpenInSlack": "boolean!"
       }
@@ -15458,7 +15470,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:event-triggers\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:agents\\\"\",\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:documents\\\"\",\"\\\"builtin:event-triggers\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-secrets\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\",\"\\\"builtin:presentations\\\"\",\"\\\"builtin:projects\\\"\",\"\\\"builtin:schedules\\\"\",\"\\\"builtin:secrets\\\"\",\"\\\"builtin:sites\\\"\",\"\\\"builtin:skill-management\\\"\",\"\\\"builtin:spreadsheets\\\"\",\"\\\"builtin:video-generation\\\"\",\"\\\"builtin:visualize\\\"\"]"
       }
     },
     "CancelBillingSubscriptionRequest": {
@@ -16201,6 +16213,7 @@
         "$.analytics.providers.reo": "object?",
         "$.analytics.providers.reo.clientId": "string!",
         "$.apiContractRevision": "const!=[\"\\\"2026-09-plugins-and-skills-v1\\\"\"]",
+        "$.artifactExport": "boolean?",
         "$.artifacts": "object?",
         "$.artifacts.cachePartition": "object!",
         "$.artifacts.cachePartition.accountId": "string!",
@@ -18102,6 +18115,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.editAccess": "ref(AgentEditAccess)?",
         "$.name": "string?",
         "$.visibility": "ref(AgentVisibility)?"
       }
@@ -18114,6 +18128,7 @@
         "$": "object",
         "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
+        "$.editAccess": "enum?=[\"\\\"creator_and_admins\\\"\",\"\\\"everyone\\\"\"]",
         "$.firstMessage": "string?",
         "$.instructions": "string?",
         "$.memoryEnabled": "boolean?",
@@ -22398,6 +22413,10 @@
       ],
       "shape": {
         "$": "object",
+        "$.agents": "array?",
+        "$.agents[]": "object",
+        "$.agents[].id": "string!",
+        "$.agents[].name": "string!",
         "$.models": "array!",
         "$.models[]": "ref(InsightsModelFacet)",
         "$.payers": "array!",
@@ -22450,7 +22469,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"model\\\"\",\"\\\"payer\\\"\",\"\\\"person\\\"\",\"\\\"plan\\\"\",\"\\\"project\\\"\",\"\\\"provider\\\"\",\"\\\"rootSession\\\"\",\"\\\"schedule\\\"\",\"\\\"session\\\"\",\"\\\"source\\\"\",\"\\\"workspace\\\"\"]"
+        "$": "enum=[\"\\\"agent\\\"\",\"\\\"model\\\"\",\"\\\"payer\\\"\",\"\\\"person\\\"\",\"\\\"plan\\\"\",\"\\\"project\\\"\",\"\\\"provider\\\"\",\"\\\"rootSession\\\"\",\"\\\"schedule\\\"\",\"\\\"session\\\"\",\"\\\"source\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "InsightsUsageMeasures": {
@@ -32457,7 +32476,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agents\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
+        "$": "enum=[\"\\\"agents\\\"\",\"\\\"apps\\\"\",\"\\\"artifacts\\\"\",\"\\\"automations\\\"\",\"\\\"capabilities\\\"\",\"\\\"get_started\\\"\",\"\\\"inbox\\\"\",\"\\\"knowledge\\\"\",\"\\\"meetings\\\"\"]"
       }
     },
     "SiteAuthAuthorizeRequest": {
@@ -33541,7 +33560,11 @@
         "$.clientEventId": "string!",
         "$.controlEtag": "string?",
         "$.expectedTurnVersion": "integer!",
-        "$.interrupt": "boolean?"
+        "$.interrupt": "boolean?",
+        "$.together": "array?",
+        "$.together[]": "object",
+        "$.together[].expectedTurnVersion": "integer!",
+        "$.together[].turnId": "string!"
       }
     },
     "StoredKnowledgeEntryContent": {
@@ -34936,6 +34959,7 @@
         "$": "object",
         "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
+        "$.editAccess": "ref(AgentEditAccess)?",
         "$.expectedVersion": "integer!",
         "$.firstMessage": "string?",
         "$.instructions": "string?",
@@ -36290,6 +36314,7 @@
         "$.aliases": "array!",
         "$.aliases[]": "string",
         "$.archivedAt": "string! null",
+        "$.canReveal": "boolean?",
         "$.category": "string! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string! null",
@@ -36307,6 +36332,7 @@
         "$.references": "ref(VaultItemReferences)!",
         "$.type": "ref(VaultItemType)!",
         "$.updatedAt": "string!",
+        "$.useOnly": "boolean?",
         "$.username": "string! null",
         "$.vaultId": "string!",
         "$.websites": "array!",
@@ -44839,6 +44865,34 @@
       "SiteList": "value",
       "SiteListProps": "type"
     },
+    "@opengeni/react/skills": {
+      "filesFromDrop": "value",
+      "humanizeName": "value",
+      "readSkillUpload": "value",
+      "readSkillUploadEntries": "value",
+      "scopeAudience": "value",
+      "scopeLabel": "value",
+      "SKILL_OWNER_FILTER_OPTIONS": "value",
+      "skillBody": "value",
+      "skillDisplayName": "value",
+      "skillFilesProblem": "value",
+      "SkillOwnerFilter": "type",
+      "skillOwnerListFilter": "value",
+      "SkillPage": "value",
+      "SkillsClient": "type",
+      "skillShortDescription": "value",
+      "SkillsPageSlot": "type",
+      "SkillsPanel": "value",
+      "SkillsPanelController": "type",
+      "SkillsPanelProps": "type",
+      "skillStatus": "value",
+      "skillSummary": "value",
+      "SkillUpload": "type",
+      "SkillUploadEntry": "type",
+      "SkillUploadError": "value",
+      "unzipSkillArchive": "value",
+      "UploadedFile": "type"
+    },
     "@opengeni/react/styles.css": {
       "default": "value"
     },
@@ -45216,6 +45270,17 @@
       "WEEKDAYS": "value",
       "zonedParts": "value",
       "zonedTimeToUtc": "value"
+    },
+    "@opengeni/react/ui/capability-page": {
+      "CapabilityAside": "value",
+      "CapabilityMark": "value",
+      "CapabilityPage": "value",
+      "CapabilityPageProps": "type",
+      "CapabilityStatus": "value",
+      "CapabilityStatusLabel": "type",
+      "OutcomeList": "value",
+      "TechnicalDetails": "value",
+      "TechnicalFact": "type"
     },
     "@opengeni/react/ui/card": {
       "Card": "value",

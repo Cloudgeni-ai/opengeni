@@ -1,5 +1,17 @@
 # @opengeni/desktop
 
+## 6.38.0
+
+### Patch Changes
+
+- Updated dependencies [f1289fa]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [47f4951]
+- Updated dependencies [b902e4e]
+  - @opengeni/sdk@6.38.0
+  - @opengeni/agent-host@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

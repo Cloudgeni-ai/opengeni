@@ -182,6 +182,18 @@ export const AgentVisibility = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentVisibility = z.infer<typeof AgentVisibility>;
 
+/**
+ * Who can edit a shared agent: `creator_and_admins` (whoever made it, or an
+ * admin of its workspace) or `everyone` in its workspace who can start chats
+ * there. Who can use or edit it, and deleting it, stay with its creator and
+ * admins either way. An Only me agent is only ever its owner's. Clients must
+ * tolerate values added later.
+ */
+export const AgentEditAccess = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["creator_and_admins", "everyone"]),
+);
+export type AgentEditAccess = z.infer<typeof AgentEditAccess>;
+
 /** Shared with its workspace, and maybe beyond: anything but Only me. */
 export function agentVisibilityIsShared(visibility: AgentVisibility): boolean {
   return visibility !== "private";
@@ -362,10 +374,17 @@ export const AGENT_BUILT_IN_GITHUB_CONNECTOR = "github.com";
 export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /**
-     * Rename it, change its Instructions, First message, Memory and who can
-     * use it, or delete it: whoever made it, or an admin of its workspace.
+     * Rename it, change its Instructions, Remember across chats, Can use and Skills:
+     * whoever made it, an admin of its workspace, or, when its
+     * `editAccess` is `everyone`, anyone in its workspace who can start chats.
      */
     canEdit: z.boolean(),
+    /**
+     * Change who can use or edit it, or delete it: whoever made it, or an
+     * admin of its workspace. Absent from older servers, where `canEdit`
+     * covered it.
+     */
+    canManage: z.boolean().optional(),
     /** Make it available in Slack, or not: an admin of its workspace. */
     canManageSlack: z.boolean(),
     /**
@@ -390,6 +409,8 @@ export const AgentSummary = /* @__PURE__ */ defineSchema(() =>
     visibility: AgentVisibility,
     /** Whose Only me agent it is; null for a shared one. */
     ownerSubjectId: z.string().nullable(),
+    /** Who can edit it when shared. Absent from older servers, whose rule was `creator_and_admins`. */
+    editAccess: AgentEditAccess.default("creator_and_admins"),
     origin: AgentOrigin,
     /** The chat it was made from, when it was made from one. */
     sourceSessionId: Uuid.nullable(),
@@ -450,6 +471,11 @@ export const CreateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       avatar: SessionAvatar.nullable().default(null),
       /** Only a person can keep an agent to themselves. */
       visibility: AgentVisibility.default("workspace"),
+      /**
+       * Who can edit it when shared. Omitted, its creator and admins, as
+       * before this field; Opengeni's own apps send `everyone`.
+       */
+      editAccess: AgentEditAccess.default("creator_and_admins"),
       instructions: AgentInstructions.default(""),
       /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.default(""),
@@ -474,6 +500,8 @@ export const UpdateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       description: AgentDescription.optional(),
       avatar: SessionAvatar.nullable().optional(),
       visibility: AgentVisibility.optional(),
+      /** Who can edit it when shared: its creator or an admin may change this. */
+      editAccess: AgentEditAccess.optional(),
       instructions: AgentInstructions.optional(),
       /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.optional(),
@@ -644,9 +672,131 @@ export const AgentTemplateTrigger = /* @__PURE__ */ defineSchema(() =>
     /** Null: it runs only on its events. */
     schedule: AutomationTemplateSchedule.nullable().default(null),
     triggers: z.array(AutomationTemplateTrigger).default([]),
+    /**
+     * Added in one click from the agent page, with no form: it needs no
+     * choices beyond the workspace's GitHub connection.
+     */
+    oneClick: z.boolean().optional(),
   }),
 );
 export type AgentTemplateTrigger = z.output<typeof AgentTemplateTrigger>;
+
+/** What a common trigger listens on: GitHub events, or a schedule that needs nothing. */
+export type CommonAgentTriggerNeed = "github" | null;
+
+/**
+ * A common trigger: an on/off choice offered for every agent (in the new
+ * agent form and on its page) when the agent can use what it listens on. It
+ * saves as an ordinary automation that starts a chat with the agent, so the
+ * full trigger form can change it later. The create-an-agent chat offers the
+ * same list (the bundled `agents` Skill names each by its event types).
+ */
+export const COMMON_AGENT_TRIGGER_KEYS = [
+  "pull_request_opened",
+  "mentioned_on_pull_request",
+  "weekday_morning",
+] as const;
+
+export interface CommonAgentTrigger {
+  key: (typeof COMMON_AGENT_TRIGGER_KEYS)[number];
+  needs: CommonAgentTriggerNeed;
+  trigger: AgentTemplateTrigger;
+}
+
+const MENTION_AUTHORS = { op: "in", value: ["OWNER", "MEMBER", "COLLABORATOR"] } as const;
+
+/**
+ * The common triggers, in the order they are offered. Given the agent's name,
+ * "When mentioned on a PR" also needs the comment to name it, so one mention
+ * of Opengeni's GitHub App starts only the agents it names.
+ */
+export function commonAgentTriggers(
+  options: { agentName?: string | undefined } = {},
+): readonly CommonAgentTrigger[] {
+  const agentName = options.agentName?.trim();
+  const named = agentName
+    ? [{ field: "data.comment.body", op: "contains" as const, value: agentName }]
+    : [];
+  return [
+    {
+      key: "pull_request_opened",
+      needs: "github",
+      trigger: AgentTemplateTrigger.parse({
+        name: "When a pull request opens",
+        instructions: "A pull request was opened or marked ready for review. Handle it.",
+        oneClick: true,
+        triggers: [
+          {
+            source: { kind: "github" },
+            eventTypes: ["pull_request.opened", "pull_request.ready_for_review"],
+            conditions: [{ field: "data.pull_request.draft", op: "equals", value: false }],
+          },
+        ],
+      }),
+    },
+    {
+      key: "mentioned_on_pull_request",
+      needs: "github",
+      trigger: AgentTemplateTrigger.parse({
+        name: "When mentioned on a PR",
+        instructions:
+          "Someone on the team mentioned you in a comment on this pull request. Read their comment, do what they ask, and answer them on it.",
+        oneClick: true,
+        triggers: [
+          {
+            source: { kind: "github" },
+            eventTypes: ["issue_comment.created"],
+            conditions: [
+              { field: "data.issue.pull_request", op: "equals", value: true },
+              { field: "data.comment.mentions_app", op: "equals", value: true },
+              { field: "data.comment.author_association", ...MENTION_AUTHORS },
+              ...named,
+            ],
+          },
+          {
+            source: { kind: "github" },
+            eventTypes: ["pull_request_review_comment.created"],
+            conditions: [
+              { field: "data.comment.mentions_app", op: "equals", value: true },
+              { field: "data.comment.author_association", ...MENTION_AUTHORS },
+              ...named,
+            ],
+          },
+        ],
+      }),
+    },
+    {
+      key: "weekday_morning",
+      needs: null,
+      trigger: AgentTemplateTrigger.parse({
+        name: "Every weekday morning",
+        instructions: "Do your scheduled work.",
+        oneClick: true,
+        schedule: {
+          type: "calendar",
+          hour: 9,
+          minute: 0,
+          daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+        },
+      }),
+    },
+  ];
+}
+
+/**
+ * Where a new agent starts in Opengeni's own form: short working rules
+ * people can keep or replace, and Can use that asks a person before merging.
+ */
+export const NEW_AGENT_DEFAULT_INSTRUCTIONS = [
+  "Work on your own until the job is done. Check Memory for how this team works before you start.",
+  "Ask a person before anything risky or hard to undo, such as deleting data, deploying, or messaging customers.",
+  "When you finish, say in a few lines what you did and what is left.",
+].join("\n");
+
+export const NEW_AGENT_DEFAULT_TOOL_PERMISSIONS: readonly AgentToolPermissionRule[] = [
+  { connector: "github.com", tool: "merge_pull_request", permission: "ask" },
+  { connector: "github.com", tool: "pull_request_merge", permission: "ask" },
+];
 
 /** The team a piece of ready-made content is for, as people say it: "Engineering", "Sales". */
 export const ReadyMadeTeam = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(60));
@@ -683,6 +833,8 @@ export const CreateAgentFromTemplateRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       name: AgentName.optional(),
       visibility: AgentVisibility.optional(),
+      /** Who can edit it when shared; omitted, its creator and admins. */
+      editAccess: AgentEditAccess.optional(),
     })
     .strict(),
 );

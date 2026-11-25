@@ -62,7 +62,7 @@ async function scope(): Promise<Scope> {
     .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${account!.id}, 'person-a', 'active', ${workspace!.id})`;
   await shared!
     .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
-    values (${account!.id}, ${workspace!.id}, 'person-a', 'person-a', 'member', ${shared!.admin.json(GRANTED)})`;
+    values (${account!.id}, ${workspace!.id}, 'person-a', 'person-a', 'member', ${shared!.admin.json([...GRANTED, "workspace:admin"])})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -74,6 +74,7 @@ const GRANTED: Permission[] = [
   "secrets:write",
   "secrets:use",
 ];
+const ADMIN: Permission[] = [...GRANTED, "workspace:admin"];
 
 /**
  * The app with a remote bridge factory over one fake provider that keeps its
@@ -216,6 +217,10 @@ function fixture() {
           `/vaults/${item.vaultId}/items/${item.id}/fields/${field.id}/reveal`,
           "POST",
           {},
+          // Values are checked as an admin: password-manager items and copies
+          // a member could only use are hidden from members (docs/secrets.md,
+          // "Who can see a value"); these tests are about the move itself.
+          ADMIN,
         ),
         200,
       )
@@ -255,6 +260,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       const { target, remote, team } = await f.world();
 
       // Copy: the hosted copy holds the provider's value; the original stays.
+      // A member can't see password-manager values, so their copy is use-only.
       const deploy = await f.itemNamed(target, remote.id, "Deploy key");
       const copied = await f.json<{ id: string; vaultId: string; name: string }>(
         await f.request(target, `/vaults/${remote.id}/items/${deploy.id}/move`, "POST", {
@@ -264,19 +270,45 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         200,
       );
       expect(copied).toMatchObject({ vaultId: team.id, name: "Deploy key" });
-      expect(await f.reveal(target, await f.itemNamed(target, team.id, "Deploy key"))).toBe(
+      const memberCopy = await f.itemNamed(target, team.id, "Deploy key");
+      expect(memberCopy).toMatchObject({ useOnly: true, canReveal: false });
+      const refused = await f.request(
+        target,
+        `/vaults/${team.id}/items/${memberCopy.id}/fields/${memberCopy.fields[0]!.id}/reveal`,
+        "POST",
+        {},
+        ADMIN,
+      );
+      expect(refused.status).toBe(403);
+      expect(await refused.text()).not.toContain("deploy-secret");
+      // An admin's copy can be seen, and holds the provider's value.
+      await f.json(
+        await f.request(
+          target,
+          `/vaults/${remote.id}/items/${deploy.id}/move`,
+          "POST",
+          { targetVaultId: team.id, mode: "copy", newName: "Deploy key (admin)" },
+          ADMIN,
+        ),
+        200,
+      );
+      expect(await f.reveal(target, await f.itemNamed(target, team.id, "Deploy key (admin)"))).toBe(
         "deploy-secret",
       );
       expect(f.archives()).toHaveLength(0);
       expect(await f.providerNames()).toContain("Deploy key");
 
-      // Move: saved in the hosted vault, then the original is archived upstream.
+      // Move (as an admin, so the value can be checked): saved in the hosted
+      // vault, then the original is archived upstream.
       const release = await f.itemNamed(target, remote.id, "Release token");
       const moved = await f.json<{ id: string; vaultId: string }>(
-        await f.request(target, `/vaults/${remote.id}/items/${release.id}/move`, "POST", {
-          targetVaultId: team.id,
-          mode: "move",
-        }),
+        await f.request(
+          target,
+          `/vaults/${remote.id}/items/${release.id}/move`,
+          "POST",
+          { targetVaultId: team.id, mode: "move" },
+          ADMIN,
+        ),
         200,
       );
       expect(moved.vaultId).toBe(team.id);
@@ -299,6 +331,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
           targetVaultId: team.id,
           mode: "move",
         },
+        ADMIN,
       );
       const body = (await response.json()) as {
         error: string;

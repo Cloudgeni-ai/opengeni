@@ -74,7 +74,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
  * (1487), and the managed warm box count fleet pressure reads (1492), and
  * the subscription needs-sign-in notice sync (1503), and the one-statement
- * lookup of the Slack event sources a shared Slack bot reaches (1552).
+ * lookup of the Slack event sources a shared Slack bot reaches (1552), and
+ * the inbox notice sync for a blocked automation with no chat (1562).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -120,6 +121,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+  "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
 ] as const;
 
 /**
@@ -173,6 +175,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * or resolves a notice, and the person dismisses one left after a reconnect.
  * 1552 withholds the shared Slack bot's one-statement source lookup; until it
  * is granted, a Slack callback keeps 1538's per-workspace probe.
+ * 1562 withholds the inbox notice sync for a blocked automation with no chat;
+ * until it is granted, such an owner is told only on the automation's page.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -188,6 +192,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+  "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -345,6 +350,11 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "opengeni_private.inbox_items",
     "opengeni_private.native_push_devices",
     "opengeni_private.native_push_deliveries",
+  ],
+  "sync_scheduled_task_blocker_inbox_notice_v1(uuid)": [
+    "scheduled_tasks",
+    "scheduled_task_blocker_reviews",
+    "opengeni_private.inbox_items",
   ],
   "deliver_app_notification_v1(uuid)": [
     "app_notifications",
@@ -591,6 +601,10 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // calls deliver_app_notification_v1 once the runtime may). Triggers fire
   // without the inserting role holding EXECUTE.
   "deliver_app_notification()",
+  // Migration 1562: the blocked automation inbox notice trigger (an invoker
+  // trigger that calls sync_scheduled_task_blocker_inbox_notice_v1 once the
+  // runtime may). Triggers fire without the writing role holding EXECUTE.
+  "scheduled_task_blocker_inbox_notice()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -2601,6 +2615,8 @@ export const FORCE_RLS_TABLES = [
   "vault_field_versions",
   "vault_item_fields",
   "vault_item_name_aliases",
+  // 1563_vault_item_use_only: marks that an item's values are never shown again.
+  "vault_item_use_only",
   "vault_items",
   "vault_name_aliases",
   "vault_passkey_leases",
@@ -3151,6 +3167,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
+  // 1563_vault_item_use_only: a use-only mark is added, never changed or removed.
+  "vault_item_use_only",
   // Written by the invoker-rights 1105 triggers; read by the "This workspace" feed.
   "workspace_activity_events",
   "workspace_artifact_events",

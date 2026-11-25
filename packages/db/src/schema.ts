@@ -11861,12 +11861,9 @@ export const sessionBackgroundCommands = pgTable(
     opId: text("op_id"),
     commandPreview: text("command_preview").notNull().default(""),
     commandText: text("command_text"),
-    // In-box process-group identity of a turn-wrapped managed command, kept so
-    // Pause/Stop can end it after its turn. Reaper-only; never mapped to API.
-    processGroupControl: jsonb("process_group_control").$type<{
-      markerPath: string;
-      token: string;
-    }>(),
+    // Turn shell marker path of an unsupervised managed command, written at
+    // adoption so a later stop can signal its process group (migration 1560).
+    processGroupMarker: text("process_group_marker"),
     cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     cancelRequestedBy: text("cancel_requested_by"),
     exitCode: integer("exit_code"),

@@ -2,6 +2,7 @@
 // `workspace-config-link.tsx`.
 
 export type WorkspaceConfigTarget =
+  | "/workspaces/$workspaceId/get-started"
   | "/workspaces/$workspaceId/insights"
   | "/workspaces/$workspaceId/secrets"
   | "/workspaces/$workspaceId/rigs"
@@ -26,10 +27,14 @@ export type WorkspaceConfigIcon =
   | "bot"
   | "audio-lines"
   | "panels-top-left"
+  | "app-window"
+  | "rocket"
   | "settings";
 
 export type WorkspaceConfigItem = {
   to: WorkspaceConfigTarget;
+  /** Search the link carries: Apps is the Artifacts page's Apps tab. */
+  search?: { kind: "site" };
   icon: WorkspaceConfigIcon;
   label: string;
   /** Its tooltip; `{product}` is the name people know the product by (`itemDescription`). */
@@ -83,6 +88,46 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     description: "Apps, images, documents, and files built with {product}",
   },
 ];
+
+/** Apps: the Artifacts page at its Apps tab, up front in the full console. */
+export const APPS_WORKSPACE_ITEM: WorkspaceConfigItem = {
+  to: "/workspaces/$workspaceId/artifacts",
+  search: { kind: "site" },
+  icon: "app-window",
+  label: "Apps",
+  description: "Apps your team made with {product}",
+};
+
+/** The guided setups, first under Setup in the full console. */
+export const GET_STARTED_WORKSPACE_ITEM: WorkspaceConfigItem = {
+  to: "/workspaces/$workspaceId/get-started",
+  icon: "rocket",
+  label: "Get started",
+  description: "Guided setups that end with an agent at work",
+};
+
+/** A rail entry's identity: Apps and Artifacts share a page. */
+export function navItemKey(item: Pick<WorkspaceConfigItem, "to" | "search">): string {
+  return item.search ? `${item.to}?kind=${item.search.kind}` : item.to;
+}
+
+/**
+ * The full console's rail: Agents and Apps up front (after Inbox), and
+ * everything that sets the workspace up under one Setup group. Nothing is
+ * left out; each page keeps its own address.
+ */
+const FULL_FRONT_TARGETS: readonly WorkspaceConfigTarget[] = ["/workspaces/$workspaceId/agents"];
+const FULL_SETUP_TARGETS: readonly WorkspaceConfigTarget[] = [
+  "/workspaces/$workspaceId/plugins",
+  "/workspaces/$workspaceId/automations",
+  "/workspaces/$workspaceId/state",
+  "/workspaces/$workspaceId/artifacts",
+  "/workspaces/$workspaceId/meetings",
+];
+
+function itemsFor(targets: readonly WorkspaceConfigTarget[]): WorkspaceConfigItem[] {
+  return targets.flatMap((to) => PRIMARY_WORKSPACE_ITEMS.filter((item) => item.to === to));
+}
 
 export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
   {
@@ -214,20 +259,37 @@ export function interfaceListsOrganizationSection(simplified: boolean, section: 
   return !simplified || !SIMPLIFIED_UNLISTED_ORGANIZATION_SECTIONS.has(section);
 }
 
-/** The rail destinations the interface lists at the top level, in catalog order. */
+/**
+ * The rail destinations the interface lists at the top level: Agents and
+ * Apps in the full console; in the simplified interface, the catalog order
+ * less what it leaves out or folds away.
+ */
 export function primaryWorkspaceItems(simplified: boolean): WorkspaceConfigItem[] {
+  if (!simplified) return [...itemsFor(FULL_FRONT_TARGETS), APPS_WORKSPACE_ITEM];
   return PRIMARY_WORKSPACE_ITEMS.filter(
     (item) =>
       interfaceListsDestination(simplified, item.to) &&
-      !(simplified && SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to)),
+      !SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to),
   );
 }
 
-/** The rail destinations the interface folds under "Advanced": none in the full console. */
-export function advancedWorkspaceItems(simplified: boolean): WorkspaceConfigItem[] {
+/**
+ * The rail's one folded group: "Setup" in the full console (Get started,
+ * Capabilities, Automations, Knowledge, Artifacts, Meetings), "Advanced"
+ * in the simplified interface (Knowledge, Automations).
+ */
+export function groupedWorkspaceItems(simplified: boolean): {
+  label: string;
+  items: WorkspaceConfigItem[];
+} {
   return simplified
-    ? PRIMARY_WORKSPACE_ITEMS.filter((item) => SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to))
-    : [];
+    ? {
+        label: "Advanced",
+        items: PRIMARY_WORKSPACE_ITEMS.filter((item) =>
+          SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to),
+        ),
+      }
+    : { label: "Setup", items: [GET_STARTED_WORKSPACE_ITEM, ...itemsFor(FULL_SETUP_TARGETS)] };
 }
 
 export function filterWorkspaceConfigGroups(
@@ -265,6 +327,29 @@ export function isConfigItemActive(
   return pathname === destination || pathname.startsWith(`${destination}/`);
 }
 
+/**
+ * Whether a rail entry is the page you are on. Apps and Artifacts share the
+ * Artifacts page: Apps is its Apps tab, an app opened from it (`?kind=site`
+ * stays on the address) and an app's own view (`/sites/…`), Artifacts the
+ * rest of it.
+ */
+export function isNavItemActive(
+  location: { pathname: string; kind?: string | undefined },
+  workspaceId: string,
+  item: Pick<WorkspaceConfigItem, "to" | "search">,
+): boolean {
+  if (item.to !== "/workspaces/$workspaceId/artifacts")
+    return isConfigItemActive(location.pathname, workspaceId, item.to);
+  const artifacts = `/workspaces/${workspaceId}/artifacts`;
+  const onApps =
+    location.pathname.startsWith(`/workspaces/${workspaceId}/sites/`) ||
+    ((location.pathname === artifacts || location.pathname.startsWith(`${artifacts}/`)) &&
+      location.kind === "site");
+  return item.search
+    ? onApps
+    : !onApps && isConfigItemActive(location.pathname, workspaceId, item.to);
+}
+
 /** Routes that belong to a section under another path. */
 const SECTION_ALIASES: Readonly<Record<string, WorkspaceConfigTarget>> = {
   sites: "/workspaces/$workspaceId/artifacts",
@@ -286,7 +371,7 @@ export function workspaceSectionForPath(
   const prefix = `/workspaces/${workspaceId}/`;
   if (!pathname.startsWith(prefix)) return null;
   const first = pathname.slice(prefix.length).split("/")[0] ?? "";
-  const items = [...PRIMARY_WORKSPACE_ITEMS, ...WORKSPACE_BROWSE_ITEMS];
+  const items = [...PRIMARY_WORKSPACE_ITEMS, GET_STARTED_WORKSPACE_ITEM, ...WORKSPACE_BROWSE_ITEMS];
   const target = SECTION_ALIASES[first];
   const item = items.find((each) =>
     target ? each.to === target : configPathSuffix(each.to) === first,

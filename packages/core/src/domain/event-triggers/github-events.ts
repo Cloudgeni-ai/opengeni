@@ -134,6 +134,8 @@ function comment(value: unknown): Json | null {
   return compact({
     id: int(found.id),
     user: login(found.user),
+    // OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE and so on.
+    author_association: text(found.author_association),
     path: text(found.path),
     line: int(found.line),
     html_url: text(found.html_url),
@@ -485,6 +487,13 @@ export function readGitHubDelivery(input: {
   const action = rawAction && /^[a-z_]{1,64}$/u.test(rawAction) ? rawAction : null;
   const type = action ? `${event}.${action}` : event;
   const shaped = shape(event, action, payload);
+  const mentioned = commentMentionsOwnApp(payload, input.ownLogins);
+  if (mentioned !== null) {
+    const shapedComment = object(shaped.data.comment);
+    if (shapedComment) {
+      shaped.data = { ...shaped.data, comment: { ...shapedComment, mentions_app: mentioned } };
+    }
+  }
   const sender = text(object(payload.sender)?.login);
   const normalized: NormalizedEventInput = {
     externalId: input.headers.get("x-github-delivery")?.trim() || null,
@@ -497,6 +506,30 @@ export function readGitHubDelivery(input: {
     data: shaped.data,
   };
   return { kind: "events", events: [normalized] };
+}
+
+/**
+ * Whether a comment @mentions Opengeni's own GitHub App (`@slug` or
+ * `@slug[bot]`), read from the whole body before it is shortened. A mention
+ * in code or a quoted reply doesn't count, so quoting a request doesn't ask
+ * again. Null when the delivery carries no comment.
+ */
+function commentMentionsOwnApp(payload: Json, ownLogins: ReadonlySet<string>): boolean | null {
+  const found = object(payload.comment);
+  if (!found) return null;
+  const said = (text(found.body) ?? "")
+    .replace(/^ {0,3}(```|~~~)[^\n]*\n[\s\S]*?(^ {0,3}\1[^\n]*$|(?![\s\S]))/gmu, "")
+    .replace(/`+[^`]*`+/gu, "")
+    .replace(/^ {0,3}>.*$/gmu, "");
+  for (const own of ownLogins) {
+    const slug = own.endsWith("[bot]") ? own.slice(0, -"[bot]".length) : own;
+    if (!slug) continue;
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    if (new RegExp(`(^|[^\\w@/.-])@${escaped}(\\[bot\\])?(?![\\w-])`, "iu").test(said)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** The installation a delivery is for, if any. */
@@ -630,6 +663,10 @@ const GITHUB_TYPES: CatalogEntry[] = [
       REPOSITORY_FIELD,
       ["data.comment.path", "The file the comment is on"],
       ["data.comment.user", "Who commented"],
+      ["data.comment.author_association", "OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR or NONE"],
+      ["data.comment.mentions_app", "true when the comment @mentions Opengeni's GitHub App"],
+      ["data.comment.body", "The comment text"],
+      ["data.pull_request.number", "The pull request number"],
     ],
   },
   { type: "issues.opened", description: "An issue was opened", fields: ISSUE_FIELDS },
@@ -653,6 +690,8 @@ const GITHUB_TYPES: CatalogEntry[] = [
       ["data.issue.number", "The issue or pull request number"],
       ["data.issue.pull_request", "true when the comment is on a pull request"],
       ["data.comment.user", "Who commented"],
+      ["data.comment.author_association", "OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR or NONE"],
+      ["data.comment.mentions_app", "true when the comment @mentions Opengeni's GitHub App"],
       ["data.comment.body", "The comment text"],
     ],
   },

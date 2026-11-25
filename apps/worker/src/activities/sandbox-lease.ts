@@ -25,7 +25,12 @@ import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
 import { createHash, randomUUID } from "node:crypto";
 import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
-import { isProviderCommandObservationUnavailableError } from "@opengeni/runtime";
+import {
+  isProviderCommandObservationUnavailableError,
+  isTurnShellMarkerPath,
+  processGroupStopCommand,
+  PROCESS_GROUP_STOP_EXIT,
+} from "@opengeni/runtime";
 import { ApplicationFailure, Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
@@ -116,10 +121,10 @@ import {
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
   connectedCommandReconciliationRetryMs,
+  getStoppingManagedCommandProcessGroupMarker,
   recordConnectedCommandOutputConsumption,
   settleConnectedCommandOutputReleaseClaim,
   settleConnectedCommandOutputRetry,
-  stoppingManagedBackgroundCommandProcessGroupControl,
   type ConnectedCommandOutputExpiry,
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
@@ -195,10 +200,6 @@ import {
   SelfhostedControlError,
   subjectFor,
   SUPERVISED_STOP_KILL_AFTER_SECONDS,
-  parseRetainedProcessGroupControl,
-  retainedProcessGroupStopCommand,
-  retainedProcessGroupStopOutcome,
-  type RetainedProcessGroupControl,
   modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   ComputeControlClient,
@@ -483,9 +484,8 @@ export type RetainedProcessProbeFn = (
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
   drainBudget?: RetainedProcessDrainBudget,
-  /** Present only when Pause/Stop asked an unsupervised Modal command to stop
-   * and its turn persisted the wrapper's process-group identity. */
-  processGroupControl?: RetainedProcessGroupControl,
+  /** Persisted turn shell marker of an unsupervised stopping command. */
+  processGroupMarker?: string | null,
 ) => Promise<RetainedProcessProbeResult>;
 
 /** Shared wall-clock bound on output draining within one reconciliation sweep. */
@@ -506,6 +506,12 @@ export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
  * escalation plus a margin. */
 export const RETAINED_PROCESS_STOP_SETTLE_WAIT_MS =
   SUPERVISED_STOP_KILL_AFTER_SECONDS * 1_000 + 2_000;
+/** TERM grace before KILL when the reconciler stops an unsupervised command's
+ * process group: the same as a supervised stop. The reconciler runs outside
+ * the in-turn control budget, which keeps its own grace short. */
+export const RETAINED_PROCESS_GROUP_TERM_GRACE_MS = SUPERVISED_STOP_KILL_AFTER_SECONDS * 1_000;
+/** Room for that grace, the KILL polls and the exec round trip. */
+const RETAINED_PROCESS_GROUP_STOP_YIELD_MS = RETAINED_PROCESS_GROUP_TERM_GRACE_MS + 3_000;
 /** Bounds on reading a command's output backlog: per claim, and across one
  * reconciliation sweep so the reaper activity stays well inside its timeout.
  * Each read returns up to one provider page per stream. */
@@ -3212,32 +3218,38 @@ async function reconcileTerminalRetainedProcesses(
               );
               supervisionMetric("cancellation_intent");
             }
+            // An unsupervised stopping command has no supervisor to cancel
+            // through. Its persisted wrapper marker lets the cancelling probe
+            // signal its process group, instead of only waiting for an exit
+            // that a command ignoring INT/TERM may never make.
+            const processGroupMarker =
+              !supervised && claim.ownerState === "background_stopping"
+                ? await getStoppingManagedCommandProcessGroupMarker(db, {
+                    accountId: process.accountId,
+                    workspaceId: process.workspaceId,
+                    sessionId: process.sessionId,
+                    retainedProcessId: process.id,
+                  }).catch((error: unknown) => {
+                    observability.warn(
+                      "sandbox reaper: stopping command process-group marker unavailable",
+                      { processId: process.id, error: errorMessage(error) },
+                    );
+                    return null;
+                  })
+                : null;
             const legacyDeadlineStop =
               lease!.rotationReason === "provider_deadline" &&
               !supervised &&
               !process.deadlineCancellationRequestedAt;
-            const explicitStop =
-              claim.ownerState === "background_stopping" &&
-              !process.deadlineCancellationRequestedAt;
-            // Pause/Stop of an unsupervised Modal command: the Modal SDK has no
-            // command signal, so end the command's own process group in-box
-            // with the identity its turn persisted at adoption.
-            const processGroupControl =
-              explicitStop && !supervised && process.providerBackend === "modal"
-                ? parseRetainedProcessGroupControl(
-                    await stoppingManagedBackgroundCommandProcessGroupControl(db, {
-                      accountId: process.accountId,
-                      workspaceId: process.workspaceId,
-                      sessionId: process.sessionId,
-                      retainedProcessId: process.id,
-                    }),
-                  )
-                : null;
             const probeOutcome = await probe(
               settings,
               lease!,
               process,
-              explicitStop || legacyDeadlineStop ? "cancel" : "observe",
+              (claim.ownerState === "background_stopping" &&
+                !process.deadlineCancellationRequestedAt) ||
+                legacyDeadlineStop
+                ? "cancel"
+                : "observe",
               async (result, chunkId, stream, streamFidelity) => {
                 if (
                   typeof result !== "string" ||
@@ -3261,7 +3273,7 @@ async function reconcileTerminalRetainedProcesses(
               },
               commandPersistence,
               drainBudget,
-              processGroupControl ?? undefined,
+              processGroupMarker,
             ).then(
               (value) => ({ ok: true as const, value }),
               (error: unknown) => ({ ok: false as const, error }),
@@ -3603,6 +3615,12 @@ type RetainedProcessProbeClient = {
 
 type RetainedProcessProbeSession = ProviderCommandSession & {
   acknowledgeCommandOutput?: (result: string) => Promise<void>;
+  execCommand?: (args: {
+    cmd: string;
+    tty?: boolean;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<unknown>;
   writeStdin?: (args: {
     sessionId: number;
     chars: string;
@@ -3612,62 +3630,6 @@ type RetainedProcessProbeSession = ProviderCommandSession & {
 };
 
 const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
-
-/** Pause/Stop give the process group this long to exit on TERM before KILL,
- * as the supervised path does (SUPERVISED_STOP_KILL_AFTER_SECONDS). */
-export const PROCESS_GROUP_STOP_TERM_GRACE_MS = 5_000;
-/** In-box yield for the helper: the TERM grace, the KILL loop, and margin. */
-const PROCESS_GROUP_STOP_YIELD_MS = PROCESS_GROUP_STOP_TERM_GRACE_MS + 3_000;
-/** The provider call may return a little after the in-box yield. */
-const PROCESS_GROUP_STOP_TIMEOUT_MS = PROCESS_GROUP_STOP_YIELD_MS + 3_000;
-
-/** Run the turn wrapper's TERM-then-KILL helper for one command's process
- * group on its exact resumed box. True only when the helper proves the group
- * is gone; any transport error or inconclusive answer leaves the caller's
- * ordinary observation path unchanged. Skipped (false) when the sweep's
- * remaining budget cannot cover it; the next sweep retries. */
-export async function stopRetainedProcessGroup(
-  session: RetainedProcessProbeSession,
-  control: RetainedProcessGroupControl,
-  budget?: RetainedProcessDrainBudget,
-): Promise<boolean> {
-  const runner = session as {
-    execCommand?: (args: {
-      cmd: string;
-      login?: boolean;
-      tty?: boolean;
-      yieldTimeMs?: number;
-      maxOutputTokens?: number;
-    }) => Promise<unknown>;
-    exec?: (args: {
-      cmd: string;
-      login?: boolean;
-      tty?: boolean;
-      yieldTimeMs?: number;
-      maxOutputTokens?: number;
-    }) => Promise<unknown>;
-  };
-  const run = runner.execCommand ?? runner.exec;
-  if (!run) return false;
-  if (budget && Date.now() + PROCESS_GROUP_STOP_TIMEOUT_MS > budget.until) return false;
-  try {
-    const result = await withRetainedProcessProbeTimeout(
-      run.call(session, {
-        cmd: retainedProcessGroupStopCommand(control, {
-          termGraceMs: PROCESS_GROUP_STOP_TERM_GRACE_MS,
-        }),
-        login: false,
-        tty: false,
-        yieldTimeMs: PROCESS_GROUP_STOP_YIELD_MS,
-        maxOutputTokens: 128,
-      }),
-      PROCESS_GROUP_STOP_TIMEOUT_MS,
-    );
-    return retainedProcessGroupStopOutcome(sandboxCommandExitCode(result)) === "stopped";
-  } catch {
-    return false;
-  }
-}
 
 /** A command's exit is reported only after both output streams reach EOF, so a
  * finished command with a large backlog looks running until it is read. While a
@@ -3789,7 +3751,7 @@ export async function probeRetainedProcessAtProvider(
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
   drainBudget?: RetainedProcessDrainBudget,
-  processGroupControl?: RetainedProcessGroupControl,
+  processGroupMarker?: string | null,
 ): Promise<RetainedProcessProbeResult> {
   if (
     lease.id !== process.leaseId ||
@@ -3974,28 +3936,13 @@ export async function probeRetainedProcessAtProvider(
 
   let result: unknown;
   try {
-    const supervisedCancelled =
-      mode === "cancel" || lease.rotationReason === "provider_deadline"
-        ? ((await session.cancelSupervisedCommand?.(
-            process.providerSessionId,
-            lease.rotationReason === "provider_deadline" ? "provider_deadline" : "explicit_stop",
-          )) ?? false)
-        : false;
-    // An unsupervised command has no provider signal. Run the turn's own
-    // TERM-then-KILL helper on the same box; it signals only the process group
-    // whose leader still carries this command's token.
-    const groupStopped =
-      mode === "cancel" && !supervisedCancelled && processGroupControl
-        ? await stopRetainedProcessGroup(session, processGroupControl, drainBudget)
-        : false;
-    // A stopped command takes up to the supervisor's KILL escalation to exit.
-    // Wait for it here, within the sweep's budget, so the stop settles now
-    // instead of after a backoff; the read returns as soon as it exits.
-    const readWaitMs =
-      (supervisedCancelled || groupStopped) &&
-      Date.now() + RETAINED_PROCESS_STOP_SETTLE_WAIT_MS < (drainBudget?.until ?? Infinity)
-        ? RETAINED_PROCESS_STOP_SETTLE_WAIT_MS
-        : 1_000;
+    const { supervisedCancelled, readWaitMs } = await stopRetainedProcessBeforeRead(session, {
+      mode,
+      providerSessionId: process.providerSessionId,
+      providerDeadline: lease.rotationReason === "provider_deadline",
+      processGroupMarker: processGroupMarker ?? null,
+      budgetUntil: drainBudget?.until ?? Infinity,
+    });
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
@@ -4004,7 +3951,6 @@ export async function probeRetainedProcessAtProvider(
         chars:
           mode === "cancel" &&
           !supervisedCancelled &&
-          !groupStopped &&
           (process.providerBackend !== "modal" || legacyPty)
             ? "\u0003"
             : "",
@@ -4101,6 +4047,85 @@ export async function probeRetainedProcessAtProvider(
     }
   }
   return observation;
+}
+
+/**
+ * The stop a probe makes before its provider read, and how long that read may
+ * wait for the stopped command to exit. A supervised command is cancelled
+ * through its supervisor. An unsupervised one has no supervisor, and a non-PTY
+ * command no provider signal, so in `cancel` mode its process group is stopped
+ * in the box through the wrapper's persisted marker. Either stop is best
+ * effort: the following read remains the only exit proof.
+ */
+export async function stopRetainedProcessBeforeRead(
+  session: Pick<RetainedProcessProbeSession, "cancelSupervisedCommand" | "execCommand">,
+  input: {
+    mode: "observe" | "cancel";
+    providerSessionId: number;
+    providerDeadline: boolean;
+    processGroupMarker: string | null;
+    budgetUntil: number;
+  },
+): Promise<{ supervisedCancelled: boolean; groupStopped: boolean; readWaitMs: number }> {
+  const supervisedCancelled =
+    input.mode === "cancel" || input.providerDeadline
+      ? ((await session.cancelSupervisedCommand?.(
+          input.providerSessionId,
+          input.providerDeadline ? "provider_deadline" : "explicit_stop",
+        )) ?? false)
+      : false;
+  // The group stop can take its whole yield; skip it when that would overrun
+  // the sweep's budget. The command stays stopping and the next sweep retries.
+  const groupStopped =
+    input.mode === "cancel" &&
+    !supervisedCancelled &&
+    input.processGroupMarker &&
+    Date.now() + RETAINED_PROCESS_GROUP_STOP_YIELD_MS < input.budgetUntil
+      ? await stopRetainedProcessGroup(session, input.processGroupMarker)
+      : false;
+  // A stopped command takes up to the supervisor's KILL escalation to exit.
+  // Wait for it here, within the sweep's budget, so the stop settles now
+  // instead of after a backoff; the read returns as soon as it exits.
+  const readWaitMs =
+    (supervisedCancelled || groupStopped) &&
+    Date.now() + RETAINED_PROCESS_STOP_SETTLE_WAIT_MS < input.budgetUntil
+      ? RETAINED_PROCESS_STOP_SETTLE_WAIT_MS
+      : 1_000;
+  return { supervisedCancelled, groupStopped, readWaitMs };
+}
+
+/**
+ * Run the turn shell's token/PGID-guarded TERM/KILL helper for an unsupervised
+ * command's process group, as a separate exec on the same box, with the same
+ * TERM grace as a supervised stop. True only when the helper proves the group
+ * absent (exit 0). A missing marker (the wrapper already exited, or never
+ * recorded its group) is not a stop. Never exit proof: a malformed marker, a
+ * missing exec surface, a timeout or any failure returns false, and the
+ * caller's provider read still decides settlement.
+ */
+export async function stopRetainedProcessGroup(
+  session: Pick<RetainedProcessProbeSession, "execCommand">,
+  processGroupMarker: string,
+): Promise<boolean> {
+  if (!isTurnShellMarkerPath(processGroupMarker) || typeof session.execCommand !== "function")
+    return false;
+  try {
+    const result = await withRetainedProcessProbeTimeout(
+      session.execCommand({
+        cmd: processGroupStopCommand(processGroupMarker, {
+          termGraceMs: RETAINED_PROCESS_GROUP_TERM_GRACE_MS,
+        }),
+        tty: false,
+        yieldTimeMs: RETAINED_PROCESS_GROUP_STOP_YIELD_MS,
+        maxOutputTokens: 128,
+      }),
+      RETAINED_PROCESS_GROUP_STOP_YIELD_MS,
+    );
+    const exitCode = typeof result === "string" ? parseExecBannerExitCode(result) : null;
+    return exitCode === PROCESS_GROUP_STOP_EXIT.stopped;
+  } catch {
+    return false;
+  }
 }
 
 /** Classify only exact SDK control banners. Arbitrary output, malformed text,

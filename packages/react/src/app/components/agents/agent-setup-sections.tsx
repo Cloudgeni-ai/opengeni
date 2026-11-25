@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from "react";
 import { PlusIcon, Trash2Icon } from "lucide-react";
+import { slackAgentCallText } from "@opengeni/contracts";
 import type { Agent, AgentTemplate, KnowledgeEntrySummary, ScheduledTask } from "@opengeni/sdk";
 
 import { automationWhenWords } from "../../../components/automations/automation-model";
@@ -24,7 +25,17 @@ import { toast } from "../../lib/toast";
 import { AgentCanUse as AgentCanUseSection } from "./agent-can-use";
 import { AgentSkills as AgentSkillsSection } from "./agent-skills";
 import { AgentTriggerDialog } from "./agent-trigger-dialog";
-import type { AgentTriggerChat } from "./agent-trigger-model";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
+import { githubConnectedOf } from "../../lib/github-connect";
+import {
+  addAgentSuggestedTrigger,
+  agentTriggerOffers,
+  agentTriggerSaveError,
+  agentUsesGitHub,
+  mentionHint,
+  type AgentTriggerOffer,
+  type AgentTriggerChat,
+} from "./agent-trigger-model";
 
 const VERSION_CONFLICT =
   "Someone else changed this agent. Reload to see their change, then try again.";
@@ -49,14 +60,16 @@ export function agentTriggers(tasks: readonly ScheduledTask[], agentId: string):
 }
 
 export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
-  const { client } = useAppContext();
+  const context = useAppContext();
+  const { productName } = useSimplifiedInterface();
+  const { client } = context;
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<ScheduledTask[] | null>(null);
   const [template, setTemplate] = useState<AgentTemplate | null>(null);
   const [sources, setSources] = useState<{ id: string; name: string }[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
-  // The light Add trigger dialog, blank or at one suggestion.
-  const [adding, setAdding] = useState<{ suggestion?: number } | null>(null);
+  // The light Add trigger dialog, blank or at one offer.
+  const [adding, setAdding] = useState<{ offer?: AgentTriggerOffer } | null>(null);
   useEffect(() => {
     let live = true;
     client.listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 }).then(
@@ -81,7 +94,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
   }, [agent.id, agent.templateKey, client, workspaceId]);
   // The full form starts at the suggestion, or at the source picked in the dialog.
   const openFullForm = (
-    agentTrigger?: number,
+    offer: AgentTriggerOffer | undefined,
     start: {
       sourceId?: string | undefined;
       note?: string | undefined;
@@ -93,13 +106,18 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
       params: { workspaceId },
       search: {
         agent: agent.id,
-        ...(agentTrigger !== undefined ? { agentTrigger } : {}),
+        ...(offer?.templateIndex !== undefined ? { agentTrigger: offer.templateIndex } : {}),
+        ...(offer?.common ? { agentCommonTrigger: offer.common } : {}),
         ...(start.sourceId ? { source: start.sourceId } : {}),
         returnTo: "agent",
       },
       // The note stays out of the address, so links and analytics never carry it.
       ...(start.note || start.chat
-        ? { state: { agentTriggerStart: { note: start.note, chat: start.chat } } }
+        ? {
+            state: {
+              agentTriggerStart: { note: start.note, chat: start.chat },
+            },
+          }
         : {}),
     });
   const addSource = (kind?: string) =>
@@ -116,7 +134,9 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
         : await client.pauseScheduledTask(workspaceId, task.id);
       setTasks((list) => list?.map((row) => (row.id === next.id ? next : row)) ?? null);
     } catch (error) {
-      toast.error("Couldn't change the trigger", { description: userErrorText(error) });
+      toast.error("Couldn't change the trigger", {
+        description: userErrorText(error),
+      });
     } finally {
       setBusy(null);
     }
@@ -127,15 +147,55 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
       await client.deleteScheduledTask(workspaceId, task.id);
       setTasks((list) => list?.filter((row) => row.id !== task.id) ?? null);
     } catch (error) {
-      toast.error("Couldn't remove the trigger", { description: userErrorText(error) });
+      toast.error("Couldn't remove the trigger", {
+        description: userErrorText(error),
+      });
     } finally {
       setBusy(null);
     }
   };
-  // A suggestion the person already set up is not offered again.
-  const suggestions = (template?.suggestedTriggers ?? [])
-    .map((suggestion, index) => ({ suggestion, index }))
-    .filter(({ suggestion }) => !tasks?.some((task) => task.name.endsWith(suggestion.name)));
+  // A one-click offer is added as it is; one that needs a choice opens the dialog.
+  const addNow = async (offer: AgentTriggerOffer) => {
+    setBusy(offer.key);
+    try {
+      const outcome = await addAgentSuggestedTrigger(t, {
+        client,
+        workspaceId,
+        agent,
+        suggestion: offer.suggestion,
+        githubConnected,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        now: new Date(),
+      });
+      if (outcome.kind === "needs_setup") {
+        setAdding({ offer });
+        return;
+      }
+      const task = outcome.task;
+      setTasks((list) => [...(list ?? []).filter((row) => row.id !== task.id), task]);
+      toast.success("Trigger added", { description: task.name });
+    } catch (error) {
+      toast.error("Couldn't add the trigger", {
+        description: agentTriggerSaveError(
+          error,
+          agent.visibility === "private" ? "private" : "workspace",
+        ),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const githubConnected = githubConnectedOf(context.githubStatus?.status);
+  // Its template's suggestions and the common triggers it can use, each
+  // offered until it is set up.
+  const offers = agentTriggerOffers({
+    templateSuggestions: template?.suggestedTriggers ?? [],
+    usesGitHub: agentUsesGitHub(agent.toolPermissions, githubConnected),
+    agentName: agent.name,
+    tasks,
+  });
+  // A shared agent already starts when someone asks it in Slack.
+  const inSlack = agent.visibility !== "private" && agent.slack.length > 0;
   return (
     <DetailSection
       title="Starts when"
@@ -150,8 +210,15 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
     >
       {tasks === null ? (
         <SettingRowSkeleton />
-      ) : tasks.length === 0 && suggestions.length === 0 ? (
+      ) : tasks.length === 0 && offers.length === 0 && !inSlack ? (
         <p className="m-0 text-sm text-fg-muted">Only when someone starts a chat with it.</p>
+      ) : null}
+      {inSlack ? (
+        <SettingRow
+          data-agent-slack-trigger=""
+          label="When mentioned in Slack"
+          description={`Always on: ${slackAgentCallText(agent.name)}`}
+        />
       ) : null}
       {tasks?.map((task) => (
         <SettingRow
@@ -182,14 +249,33 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
         />
       ))}
       {agent.viewer.canEdit
-        ? suggestions.map(({ suggestion, index }) => (
+        ? offers.map((offer) => (
             <SettingRow
-              key={`suggestion-${index}`}
+              key={offer.key}
               data-agent-suggested-trigger=""
-              label={suggestion.name}
-              description="Suggested. Off until you choose where it listens."
+              data-agent-common-trigger={offer.common}
+              label={offer.suggestion.name}
+              description={
+                offer.common === "mentioned_on_pull_request"
+                  ? mentionHint(agent.name, productName)
+                  : offer.suggestion.oneClick
+                    ? undefined
+                    : "Off until you choose where it listens."
+              }
               control={
-                <RowButton onClick={() => setAdding({ suggestion: index })}>Set up</RowButton>
+                offer.suggestion.oneClick ? (
+                  <Switch
+                    aria-label={`${offer.suggestion.name} on`}
+                    checked={false}
+                    pending={busy === offer.key}
+                    disabled={busy !== null && busy !== offer.key}
+                    onCheckedChange={(on) => {
+                      if (on) void addNow(offer);
+                    }}
+                  />
+                ) : (
+                  <RowButton onClick={() => setAdding({ offer })}>Set up</RowButton>
+                )
               }
             />
           ))
@@ -198,11 +284,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
         <AgentTriggerDialog
           agent={agent}
           workspaceId={workspaceId}
-          suggestion={
-            adding?.suggestion !== undefined
-              ? template?.suggestedTriggers[adding.suggestion]
-              : undefined
-          }
+          suggestion={adding?.offer?.suggestion}
           open={adding !== null}
           onOpenChange={(open) => {
             if (!open) setAdding(null);
@@ -212,7 +294,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
             setAdding(null);
             toast.success("Trigger added", { description: task.name });
           }}
-          onOpenFullForm={(start) => openFullForm(adding?.suggestion, start)}
+          onOpenFullForm={(start) => openFullForm(adding?.offer, start)}
           onAddSource={addSource}
         />
       ) : null}
@@ -266,7 +348,9 @@ function MemoryEntryRow({
       setVersion(full.version);
       setEditing(full.revision.entry.content);
     } catch (error) {
-      toast.error("Couldn't open this memory", { description: userErrorText(error) });
+      toast.error("Couldn't open this memory", {
+        description: userErrorText(error),
+      });
     } finally {
       setBusy(false);
     }
@@ -293,7 +377,9 @@ function MemoryEntryRow({
       setText(editing);
       setEditing(null);
     } catch (error) {
-      toast.error("Couldn't save this memory", { description: userErrorText(error) });
+      toast.error("Couldn't save this memory", {
+        description: userErrorText(error),
+      });
     } finally {
       setBusy(false);
     }
@@ -307,7 +393,9 @@ function MemoryEntryRow({
       });
       onRemoved(entry.id);
     } catch (error) {
-      toast.error("Couldn't remove this memory", { description: userErrorText(error) });
+      toast.error("Couldn't remove this memory", {
+        description: userErrorText(error),
+      });
       setBusy(false);
     }
   };

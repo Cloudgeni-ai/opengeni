@@ -15,4 +15,15 @@ describe("hiddenNavEntries", () => {
       "/workspaces/$workspaceId/state",
     ]);
   });
+
+  test("Apps hides alone; hiding Artifacts hides Apps too", () => {
+    expect([...hiddenNavEntries(["apps"]).targets]).toEqual([
+      "/workspaces/$workspaceId/artifacts?kind=site",
+    ]);
+    expect([...hiddenNavEntries(["artifacts", "get_started"]).targets]).toEqual([
+      "/workspaces/$workspaceId/artifacts",
+      "/workspaces/$workspaceId/get-started",
+      "/workspaces/$workspaceId/artifacts?kind=site",
+    ]);
+  });
 });

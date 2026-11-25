@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import { CapabilityPage, CapabilityStatus } from "@/components/capabilities/capability-page";
+import { CapabilityPage, CapabilityStatus } from "@opengeni/react/ui/capability-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 

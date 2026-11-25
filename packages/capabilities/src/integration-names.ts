@@ -81,14 +81,23 @@ export function integrationNameWords(text: string): string[] {
 /**
  * The vendor's own word in a provider domain: the label before its public
  * suffix ("jira" for jira.com, "synthflow" for docs.synthflow.ai), when it is
- * one word of four or more letters on a domain that is not shared hosting.
+ * one word of four or more letters on a domain that is not shared hosting or
+ * the platform's own.
  */
 export function integrationVendorWord(providerDomain: string | null | undefined): string | null {
   const registrable = providerDomain ? registrableHostDomain(providerDomain) : null;
-  if (!registrable || SHARED_HOSTING_DOMAINS.has(registrable)) return null;
+  if (!registrable || SHARED_HOSTING_DOMAINS.has(registrable) || PLATFORM_DOMAINS.has(registrable))
+    return null;
   const words = integrationNameWords(registrable.split(".")[0] ?? "");
   return words.length === 1 && words[0]!.length >= 4 ? words[0]! : null;
 }
+
+/**
+ * The platform's own domain, which its built-in integrations (Connected
+ * Machine) carry. Its word names the product the person is already in ("the
+ * Opengeni app"), never one of those integrations.
+ */
+const PLATFORM_DOMAINS = new Set(["opengeni.ai"]);
 
 /**
  * Short words that never join their neighbours into one name: "linked in" is

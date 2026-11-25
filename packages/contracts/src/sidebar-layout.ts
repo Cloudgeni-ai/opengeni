@@ -119,6 +119,8 @@ export const SIDEBAR_NAV_ENTRIES = [
   "agents",
   "meetings",
   "artifacts",
+  "apps",
+  "get_started",
 ] as const;
 export const SidebarNavEntry = /* @__PURE__ */ defineSchema(() => z.enum(SIDEBAR_NAV_ENTRIES));
 export type SidebarNavEntry = (typeof SIDEBAR_NAV_ENTRIES)[number];

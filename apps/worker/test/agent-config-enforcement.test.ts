@@ -2059,7 +2059,7 @@ const INVENTORY = {
     "## Writing style": 552,
     "# Working with the user": 128,
     "## Match effort to the request": 733,
-    "## Progress updates": 747,
+    "## Progress updates": 939,
     "## Final answer": 434,
     "### Formatting rules": 127,
     "# Rules for getting work done": 626,

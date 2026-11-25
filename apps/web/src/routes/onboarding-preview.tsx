@@ -7,7 +7,7 @@ import type { WorkspaceModelCatalogModel, ReasoningEffort, LatencyMode } from "@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { directModelConnectionSpec, type CreateConnectionRequest } from "@opengeni/contracts";
 import { ChevronsUpDownIcon } from "lucide-react";
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { CreditRequiredPromptView } from "@opengeni/react/app/components/credit-required-prompt";
@@ -31,9 +31,48 @@ const previewCreditScope = {
   eligibleModelIds: ["gpt-6-luna", "gpt-6-sol"],
 };
 const scopedCreditPreview = () => new URLSearchParams(window.location.search).get("scoped") === "1";
+/** The production plan terms; `?plans=0` previews a deployment without plans. */
+const previewPlan = (
+  key: string,
+  label: string,
+  priceUsd: number | null,
+  creditUsd: number,
+  seatLimit: number | null,
+) => ({
+  key,
+  label,
+  stripePriceId: priceUsd ? `price_preview_${key}` : null,
+  monthlyPriceMicros: priceUsd === null ? null : priceUsd * 1_000_000,
+  monthlyCreditMicros: creditUsd * 1_000_000,
+  seatLimit,
+  freeCredit: key === "free",
+  selfService: Boolean(priceUsd),
+});
 const previewMethods = {
   async getBilling() {
     return { mode: "stripe" as const, balance: { balanceMicros: 0 } };
+  },
+  async getBillingSubscriptionPlans() {
+    if (new URLSearchParams(window.location.search).get("plans") === "0") {
+      throw Object.assign(new Error("subscription plans are not enabled"), { status: 404 });
+    }
+    return {
+      accountId: "preview-organization",
+      revision: 1,
+      plans: [
+        previewPlan("free", "Free", 0, 10, 3),
+        previewPlan("pro", "Pro", 20, 100, 5),
+        previewPlan("max", "Max", 100, 500, 10),
+        previewPlan("enterprise", "Enterprise", null, 0, null),
+      ],
+      plan: null,
+    };
+  },
+  async createSubscriptionCheckout({ planKey }: { planKey: string }) {
+    return {
+      checkoutSessionId: "cs_preview_plan",
+      url: `${window.location.origin}/dev/onboarding?view=checkout&plan=${planKey}`,
+    };
   },
   async createBillingCheckout({
     amountUsd,
@@ -227,7 +266,7 @@ function PreviewResult({ view }: { view: string }) {
               : "Payment simulated. No money was charged."
             : authorization
               ? "This simulates the external sign-in step. In the real flow, you authorize on the provider’s website using code DEMO-2254."
-              : `You selected $${Number(params.get("amount") || 25).toFixed(2)} in Opengeni credits. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
+              : `You selected ${params.get("plan") ? `the ${params.get("plan")} plan` : `$${Number(params.get("amount") || 25).toFixed(2)} in Opengeni credits`}. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
         </p>
         {!finished ? (
           <Button
@@ -546,6 +585,17 @@ function AdditionalOrganizationPreview() {
 
 /** Public development-only harness rendering the production onboarding components. */
 export function OnboardingPreviewRoute() {
+  // `?theme=light|dark` renders the preview in that theme regardless of the saved appearance.
+  const theme = new URLSearchParams(window.location.search).get("theme");
+  useLayoutEffect(() => {
+    if (theme !== "light" && theme !== "dark") return;
+    document.documentElement.dataset.ogTheme = theme;
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
+  return <OnboardingPreviewView />;
+}
+
+function OnboardingPreviewView() {
   if (new URLSearchParams(window.location.search).get("view") === "security")
     return <SignInMethodsPreview />;
   const view = new URLSearchParams(window.location.search).get("view");

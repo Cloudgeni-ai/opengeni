@@ -332,6 +332,7 @@ export const CLIENT_PAGES = [
   "inbox",
   "sites",
   "meetings",
+  "get-started",
   "home",
   "session-link",
   "identity-link",

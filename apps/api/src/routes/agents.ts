@@ -4,7 +4,9 @@
  * The path workspace is the agent's home, where its chats run. Reading needs
  * what reading chats needs, and an Only me agent is visible only to its
  * owner. Making and changing agents needs what starting a chat needs; a
- * change also needs the agent's creator or a workspace admin. A shared agent
+ * change also needs the agent's creator or a workspace admin, or on a shared
+ * agent whose "Who can edit" is everyone, anyone in its workspace. Who can use
+ * or edit it, and deleting it, stay with its creator and admins. A shared agent
  * is available in every Slack workspace linked to its workspace, with no
  * separate step (see integrations/agent-slack-availability.ts), so the Slack
  * name rules apply when a shared agent is created, renamed or shared; open use
@@ -36,6 +38,7 @@ import {
   type AgentErrorCode,
 } from "@opengeni/contracts";
 import {
+  AgentEditRefusedError,
   AgentLimitError,
   AgentPrivateOwnerError,
   createAgent,
@@ -60,6 +63,7 @@ import {
   agentTemplates,
   agentChatView,
   agentEditableBy,
+  agentManageableBy,
   agentRevisionView,
   agentSlackAvailabilityView,
   agentSummaryView,
@@ -69,9 +73,10 @@ import {
   agentVisibilityRecord,
   agentVisibilityValue,
   agentVisibleTo,
+  authorizationHoldsOrganizationAdministration,
   knowledgeContextForAccess,
+  MissingPermissionRefusal,
   requireAccessGrantAuthorization,
-  requireAccountAdminAuthorizationStamp,
   type AccessGrantAuthorization,
   type AgentViewContext,
   type AgentViewer,
@@ -220,23 +225,31 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return agent;
   }
 
+  const EDIT_REFUSED = "Only whoever made this agent, or a workspace admin, can change it.";
+  const MANAGE_REFUSED =
+    "Only whoever made this agent, or a workspace admin, can change who can use or edit it, or delete it.";
+
+  function forbidden(message: string): ApiHttpError {
+    return new ApiHttpError(403, { code: "forbidden", message, retryable: false });
+  }
+
   function requireEditable(context: RequestContext, agent: AgentRecord): void {
-    if (!agentEditableBy(context.viewer, agent)) {
-      throw new ApiHttpError(403, {
-        code: "forbidden",
-        message: "Only whoever made this agent, or a workspace admin, can change it.",
-        retryable: false,
-      });
-    }
+    if (!agentEditableBy(context.viewer, agent)) throw forbidden(EDIT_REFUSED);
+  }
+
+  /** Who can use or edit it, and deleting it: its creator or an admin. */
+  function requireManageable(context: RequestContext, agent: AgentRecord): void {
+    if (!agentManageableBy(context.viewer, agent)) throw forbidden(MANAGE_REFUSED);
   }
 
   /**
    * Letting anyone in the organization use an agent opens it beyond its
-   * workspace, so it takes an organization admin (as Slack's open use did).
+   * workspace, so it takes the organization's owner or one of its admins
+   * (organization administration, not the owner-only `account:admin`).
    * Narrowing it back does not.
    */
   function requireOrganizationAccessAdmin(context: RequestContext): void {
-    requireAccountAdminAuthorizationStamp(context.access);
+    if (!isOrganizationAdmin(context)) throw new MissingPermissionRefusal("account:admin");
   }
 
   async function memoryReviewFirst(context: RequestContext): Promise<boolean> {
@@ -251,13 +264,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  /** The organization's owner or one of its admins, signed in as themselves. */
   function isOrganizationAdmin(context: RequestContext): boolean {
-    try {
-      requireAccountAdminAuthorizationStamp(context.access);
-      return true;
-    } catch {
-      return false;
-    }
+    return authorizationHoldsOrganizationAdministration(context.access);
   }
 
   /** Slack workspace names by installation, read from each installation's own workspace. */
@@ -356,6 +365,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       description: template.description,
       avatar: template.avatar,
       visibility: overrides.visibility ?? "workspace",
+      ...(overrides.editAccess ? { editAccess: overrides.editAccess } : {}),
       instructions: template.instructions,
       memoryEnabled: template.memoryEnabled,
       toolPermissions: template.toolPermissions,
@@ -410,6 +420,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           visibility: access.visibility,
           ownerSubjectId: access.visibility === "private" ? viewer.subjectId : null,
           organizationAccess: access.organizationAccess,
+          editAccess: request.editAccess,
           name: request.name,
           description: request.description,
           avatar: request.avatar,
@@ -450,6 +461,11 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const visibility = access.visibility;
     const changesVisibility = visibility !== current.visibility;
     const changesOrganizationAccess = access.organizationAccess !== current.organizationAccess;
+    const changesEditAccess =
+      request.editAccess !== undefined && request.editAccess !== current.editAccess;
+    // Who can use or edit it stays with its creator and admins.
+    const manages = changesVisibility || changesOrganizationAccess || changesEditAccess;
+    if (manages) requireManageable(context, current);
     if (access.organizationAccess && changesOrganizationAccess) {
       requireOrganizationAccessAdmin(context);
     }
@@ -492,6 +508,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       agentId: current.id,
       expectedVersion: request.expectedVersion,
       actorSubjectId: viewer.subjectId,
+      // Rechecked under the row lock: who can edit it may have just changed.
+      authorize: (locked) =>
+        manages ? agentManageableBy(viewer, locked) : agentEditableBy(viewer, locked),
       patch: {
         ...(request.name !== undefined ? { name: request.name } : {}),
         ...(request.description !== undefined ? { description: request.description } : {}),
@@ -504,6 +523,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
         ...(request.skills !== undefined ? { skills: request.skills } : {}),
         ...(changesOrganizationAccess ? { organizationAccess: access.organizationAccess } : {}),
+        ...(changesEditAccess && request.editAccess ? { editAccess: request.editAccess } : {}),
         ...(changesVisibility
           ? {
               visibility,
@@ -520,6 +540,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
       },
     }).catch((error: unknown) => {
+      if (error instanceof AgentEditRefusedError) {
+        throw forbidden(manages ? MANAGE_REFUSED : EDIT_REFUSED);
+      }
       throw privateOwnerError(error);
     });
     if (outcome.kind === "not_found") throw notFound();
@@ -550,8 +573,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete(`${base}/:agentId`, async (c) => {
     const context = await requestContext(c, "sessions:create");
     const agent = await requireVisibleAgent(c, context);
-    requireEditable(context, agent);
-    const deleted = await deleteAgent(db, context.home, agent.id);
+    requireManageable(context, agent);
+    const deleted = await deleteAgent(db, context.home, agent.id, (locked) =>
+      agentManageableBy(context.viewer, locked),
+    ).catch((error: unknown) => {
+      if (error instanceof AgentEditRefusedError) throw forbidden(MANAGE_REFUSED);
+      throw error;
+    });
     return c.json(DeleteAgentResponse.parse({ deleted }));
   });
 

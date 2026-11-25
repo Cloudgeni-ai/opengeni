@@ -7,6 +7,7 @@ import type {
   ChatSession as Session,
   SessionEvent,
   ChatSessionListResponse as SessionListResponse,
+  WorkspaceArtifact,
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
@@ -101,7 +102,11 @@ import {
 import { useRecordSiteOpened } from "../lib/site-opened";
 import { AppConnectCard } from "../lib/app-connect-card";
 import { AppSyncJoinCard, AppSyncOptInHost } from "../lib/app-sync-opt-in";
-import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
+import {
+  siteMayHaveChanged,
+  useSiteLiveVersion,
+  type SiteLiveVersion,
+} from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
 import { useWindowBarCarriesBack, useWindowBarTitle } from "../../ui/window-bar-title";
@@ -364,21 +369,7 @@ export function SiteViewRoute({
     wasFullScreen.current = fullScreen;
     if (left) document.querySelector<HTMLElement>("[data-site-actions-menu]")?.focus();
   }, [fullScreen]);
-  const site = useMemo<SiteState>(
-    () =>
-      artifact
-        ? {
-            status: "ready",
-            title: artifact.title,
-            versionId: artifact.currentVersion?.id ?? null,
-            revision: artifact.currentVersion?.revision ?? null,
-            archived: artifact.status === "archived",
-          }
-        : live.failed
-          ? { status: "error" }
-          : { status: "loading" },
-    [artifact, live.failed],
-  );
+  const site = useMemo(() => siteStateOf(artifact, live.failed), [artifact, live.failed]);
   const { check } = live;
   // Embedded (the phone app's viewer) there is no page URL to keep the Site's
   // address in, so it lives here, starting at `page`.
@@ -640,6 +631,86 @@ export function SiteViewRoute({
     </div>
   );
 }
+
+function siteStateOf(artifact: WorkspaceArtifact | undefined, failed: boolean): SiteState {
+  return artifact
+    ? {
+        status: "ready",
+        title: artifact.title,
+        versionId: artifact.currentVersion?.id ?? null,
+        revision: artifact.currentVersion?.revision ?? null,
+        archived: artifact.status === "archived",
+      }
+    : failed
+      ? { status: "error" }
+      : { status: "loading" };
+}
+
+/**
+ * The Site view's chat, for an app opened as a page from the sidebar
+ * (app-page-view.tsx), beside the app while it is open: the same panel, its
+ * conversations and New, Copy link and Open as a full chat. The page's
+ * address stays the app's own, so the conversation open here is this
+ * panel's, not the address's.
+ */
+export function AppPageChat({
+  workspaceId,
+  siteId,
+  live,
+  layout,
+  updateLayout,
+  open,
+  onOpen,
+  onHide,
+}: {
+  workspaceId: string;
+  siteId: string;
+  live: SiteLiveVersion;
+  layout: SiteChatPanelLayout;
+  updateLayout: (patch: Partial<SiteChatPanelLayout>) => void;
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  onHide: () => void;
+}) {
+  const { client, accessContext } = useAppContext();
+  const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
+  const publication = useSitePublicationLink({ client, workspaceId, siteId });
+  const [conversation, setConversation] = useState<string | undefined>(undefined);
+  const choose = useCallback(
+    (search: { conversation?: string }) => setConversation(search.conversation),
+    [],
+  );
+  const artifact = live.detail?.artifact;
+  const site = useMemo(() => siteStateOf(artifact, live.failed), [artifact, live.failed]);
+  const { check } = live;
+  return (
+    <SiteChatPanel
+      workspaceId={workspaceId}
+      siteId={siteId}
+      site={site}
+      retrySite={live.retry}
+      canPublish={canPublish}
+      conversation={conversation}
+      startNew={false}
+      publishing={false}
+      choose={choose}
+      layout={layout}
+      updateLayout={updateLayout}
+      open={open}
+      onOpen={onOpen}
+      onHide={onHide}
+      onHasConversations={ignoreHasConversations}
+      agentModel={
+        publication.load.state === "ready" ? (publication.load.link.agentModel ?? null) : null
+      }
+      onEvent={(event) => {
+        if (siteMayHaveChanged(event)) check();
+      }}
+    />
+  );
+}
+
+const ignoreHasConversations = () => {};
 
 /** Right-click the Site's title: copy it or the Site's address. */
 function SiteTitleMenu({
@@ -1015,6 +1086,7 @@ function SiteChatPanel({
   onHasConversations,
   agentModel,
   onEvent,
+  choose,
 }: {
   workspaceId: string;
   siteId: string;
@@ -1043,6 +1115,11 @@ function SiteChatPanel({
   agentModel: string | null;
   /** Each new event in the open conversation, so the Site can follow its edits. */
   onEvent: (event: SessionEvent) => void;
+  /**
+   * Opens a conversation (or none, for the newest) where the address can't
+   * hold it; by default the Site view's address does.
+   */
+  choose?: ((search: { conversation?: string }, replace?: boolean) => void) | undefined;
 }) {
   const context = useAppContext();
   const api = useAppApi();
@@ -1097,7 +1174,7 @@ function SiteChatPanel({
     startingNew.current = false;
   }, [conversation, onOpen]);
 
-  const toSite = useCallback(
+  const toSiteRoute = useCallback(
     (search: { conversation?: string }, replace = false) =>
       void navigate({
         to: SITE_ROUTE,
@@ -1113,6 +1190,7 @@ function SiteChatPanel({
       }),
     [artifactsReturn, navigate, page, publishing, siteId, workspaceId],
   );
+  const toSite = choose ?? toSiteRoute;
 
   // A link may name a conversation that isn't this Site's, or one since
   // archived or deleted; fall back to the Site's own.

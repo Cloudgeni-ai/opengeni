@@ -836,6 +836,64 @@ test("seat caps cover provisioning/reactivation, exclude external/service identi
   });
 }, 180_000);
 
+// The production seat limits (Bendik, 24 November 2026) are catalog data:
+// Free 3, Pro 5, Max 10, Enterprise unlimited. Applying them is a catalog
+// revision, no deploy; every path that adds a person honours them at once.
+test("catalog seat limits Free 3, Pro 5 and Max 10 apply to every way of adding a person; Enterprise stays unlimited", async () => {
+  if (!client || !shared) return;
+  const initial = await readSubscriptionPlanCatalog(client.db);
+  const limits: Record<string, number | null> = { free: 3, pro: 5, max: 10, enterprise: null };
+  const production = initial.plans.map((plan) => ({ ...plan, seatLimit: limits[plan.key] }));
+  await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(production)}, 'catalog-test', 'Production seat limits Free 3, Pro 5, Max 10')`;
+  try {
+    for (const [planKey, limit] of [
+      ["free", 3],
+      ["pro", 5],
+      ["max", 10],
+    ] as const) {
+      const { accountId, subject } = await account();
+      const suspended = `user:${crypto.randomUUID()}`;
+      await provision(accountId, suspended, "suspended");
+      await activate(accountId, planKey);
+      for (let seats = 1; seats < limit; seats++) await invite(accountId, subject);
+      expect((await getBillingBalance(client.db, accountId)).plan).toMatchObject({
+        key: planKey,
+        seatLimit: limit,
+        seatsUsed: limit,
+      });
+      // One more is refused: an invitation (organization user setup starts
+      // from one), a new member row, and reactivating a suspended person.
+      await expectState(() => invite(accountId, subject), "P0S01");
+      await expectState(() => provision(accountId, `user:${crypto.randomUUID()}`), "P0S01");
+      await expectState(async () => {
+        await shared!.admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.organization_tenancy_lifecycle','organization_membership_lifecycle',true),set_config('opengeni.account_id',${accountId},true)`;
+          await tx`update organization_memberships set status='provisioning' where account_id=${accountId} and subject_id=${suspended}`;
+        });
+      }, "P0S01");
+      expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(limit);
+    }
+    // A downgrade keeps everyone and blocks new people until under the limit.
+    const { accountId, subject } = await account();
+    await activate(accountId, "max");
+    for (let seats = 1; seats < 7; seats++) await invite(accountId, subject);
+    await upsertOrganizationPlan(client.db, { accountId, planKey: "pro", status: "active" });
+    expect((await getBillingBalance(client.db, accountId)).plan).toMatchObject({
+      seatLimit: 5,
+      seatsUsed: 7,
+    });
+    await expectState(() => invite(accountId, subject), "P0S01");
+    await upsertOrganizationPlan(client.db, { accountId, planKey: "enterprise", status: "active" });
+    for (let seats = 7; seats < 12; seats++) await invite(accountId, subject);
+    expect((await getBillingBalance(client.db, accountId)).plan).toMatchObject({
+      seatLimit: null,
+      seatsUsed: 12,
+    });
+  } finally {
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(initial.plans)}, 'catalog-test', 'Restore fixture catalog after seat limits')`;
+  }
+}, 180_000);
+
 // Regression for the 19 October 2026 production lockout. Sign-in binds pending
 // email invitations with only the recipient's subject context. The seat
 // trigger must evaluate its own row's organization, whatever the writer's

@@ -20,6 +20,7 @@ import { readOrganizationIntegrationPolicyForServing } from "@opengeni/db/organi
 import { dedicatedMcpIntegrationKey } from "./organization-integration-catalog";
 import {
   personalWorkspaceOwnerOriginConnections,
+  type OmittedConnectionAccount,
   type PersonalWorkspaceOriginConnections,
 } from "./personal-connection-delegations";
 
@@ -56,6 +57,16 @@ export type PersonalWorkspaceConnectorOrigin = {
 export type PersonalWorkspaceExtensionMcpServer = EnabledMcpCapabilityServer & {
   connectionRef: McpServerConnectionRef;
   personalExtension: PersonalWorkspaceConnectorOrigin;
+  /**
+   * Only with `includeLapsed`: the owner's account it is carried for stopped
+   * working, so it is listed as needing reconnecting and never runs.
+   */
+  lapsedConnection?: Pick<
+    ConnectionMetadata,
+    "id" | "workspaceId" | "subjectId" | "providerDomain" | "status"
+  >;
+  /** With `lapsedConnection`: every one of the owner's accounts it matches. */
+  lapsedOwnAccountIds?: string[];
 };
 
 function canonicalUrl(value: string): string {
@@ -180,6 +191,12 @@ export async function personalWorkspaceExtensionMcpServers(
       | (() => Promise<readonly Pick<EnabledMcpCapabilityServer, "id" | "url">[]>);
     /** The owner's origin connections when the caller already read them. */
     origins?: readonly PersonalWorkspaceOriginConnections[];
+    /**
+     * Also carry connectors whose only matching connection stopped working,
+     * so the catalog keeps listing them as needing reconnecting. Listings
+     * only; never for anything that binds or runs a connector.
+     */
+    includeLapsed?: boolean;
   },
 ): Promise<PersonalWorkspaceExtensionMcpServer[]> {
   const subjectId = input.subjectId;
@@ -194,6 +211,7 @@ export async function personalWorkspaceExtensionMcpServers(
       accountId,
       workspaceId: input.workspaceId,
       subjectId,
+      ...(input.includeLapsed ? { includeLapsed: true } : {}),
     }));
   if (origins.length === 0) return [];
   const policy = await readOrganizationIntegrationPolicyForServing(db, {
@@ -213,40 +231,133 @@ export async function personalWorkspaceExtensionMcpServers(
     typeof input.ownServers === "function" ? await input.ownServers() : input.ownServers;
   const takenIds = new Set(ownServers.map((server) => server.id));
   const takenEndpoints = new Set(ownServers.map((server) => canonicalUrl(server.url)));
-  const carried: PersonalWorkspaceExtensionMcpServer[] = [];
+  type Candidate = {
+    origin: PersonalWorkspaceOriginConnections;
+    server: OriginMcpCapabilityServer;
+    connection: PersonalWorkspaceOriginConnections["connections"][number];
+    matchingIds: string[];
+  };
+  const candidates: Candidate[] = [];
   for (const origin of origins) {
     const servers: OriginMcpCapabilityServer[] =
       await listOriginMcpCapabilityServersForPersonalExtension(db, origin.originWorkspaceId);
-    let originWorkspaceName: string | null = null;
     for (const server of servers) {
-      const connection = origin.connections.find((candidate) =>
-        refMatchesConnection(server.connectionRef, candidate),
+      const matching = origin.connections.filter(
+        (candidate) =>
+          (input.includeLapsed || candidate.status === "active") &&
+          refMatchesConnection(server.connectionRef, candidate),
       );
-      if (
-        !connection ||
-        !allowedByPolicy(server) ||
-        personalInstallations.has(server.capabilityId) ||
-        takenIds.has(server.id) ||
-        takenEndpoints.has(canonicalUrl(server.url))
-      )
+      // A working connection wins over one that stopped working.
+      const connection = matching.find((candidate) => candidate.status === "active") ?? matching[0];
+      if (!connection || !allowedByPolicy(server) || personalInstallations.has(server.capabilityId))
         continue;
-      originWorkspaceName ??=
-        (await getWorkspace(db, origin.originWorkspaceId))?.name ?? "another workspace";
-      const { catalogScope, ...definition } = server;
-      takenIds.add(server.id);
-      takenEndpoints.add(canonicalUrl(server.url));
-      carried.push({
-        ...definition,
-        connectionRef: personalSubjectRef(server.connectionRef, connection),
-        personalExtension: {
-          originWorkspaceId: origin.originWorkspaceId,
-          originWorkspaceName,
-          catalogScope,
-        },
+      candidates.push({
+        origin,
+        server,
+        connection,
+        matchingIds: matching.map((candidate) => candidate.id),
       });
     }
   }
+  // Working origins claim a server id or endpoint first, so a lapsed origin
+  // listed earlier never shadows the one the runtime actually serves.
+  const claimed = new Set<Candidate>();
+  for (const working of [true, false]) {
+    for (const candidate of candidates) {
+      if ((candidate.connection.status === "active") !== working) continue;
+      const { server } = candidate;
+      if (takenIds.has(server.id) || takenEndpoints.has(canonicalUrl(server.url))) continue;
+      takenIds.add(server.id);
+      takenEndpoints.add(canonicalUrl(server.url));
+      claimed.add(candidate);
+    }
+  }
+  const originNames = new Map<string, string>();
+  const carried: PersonalWorkspaceExtensionMcpServer[] = [];
+  for (const candidate of candidates) {
+    if (!claimed.has(candidate)) continue;
+    const { origin, server, connection, matchingIds } = candidate;
+    let originWorkspaceName = originNames.get(origin.originWorkspaceId);
+    if (originWorkspaceName === undefined) {
+      originWorkspaceName =
+        (await getWorkspace(db, origin.originWorkspaceId))?.name ?? "another workspace";
+      originNames.set(origin.originWorkspaceId, originWorkspaceName);
+    }
+    const { catalogScope, ...definition } = server;
+    carried.push({
+      ...definition,
+      connectionRef: personalSubjectRef(server.connectionRef, connection),
+      personalExtension: {
+        originWorkspaceId: origin.originWorkspaceId,
+        originWorkspaceName,
+        catalogScope,
+      },
+      ...(connection.status !== "active"
+        ? {
+            lapsedConnection: {
+              id: connection.id,
+              workspaceId: connection.workspaceId,
+              subjectId: connection.subjectId,
+              providerDomain: connection.providerDomain,
+              status: connection.status,
+            },
+            lapsedOwnAccountIds: matchingIds,
+          }
+        : {}),
+    });
+  }
   return carried;
+}
+
+/**
+ * Of `serverIds`, those that are the person's own connectors carried into
+ * their Personal workspace whose account stopped working, as left-out picks.
+ * A request naming one (a chat's tool selection made while it worked, or
+ * from a list that still shows it) runs without it instead of being refused;
+ * any other unknown id is still refused by the caller.
+ */
+export type LapsedCarriedConnector = OmittedConnectionAccount & {
+  /** The person's own accounts for this connector, all stopped working. */
+  ownAccountIds: readonly string[];
+};
+
+export async function lapsedPersonalCarriedConnectors(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string | null | undefined;
+    accountId?: string | undefined;
+    serverIds: readonly string[];
+    ownServers: readonly Pick<EnabledMcpCapabilityServer, "id" | "url">[];
+  },
+): Promise<LapsedCarriedConnector[]> {
+  if (input.serverIds.length === 0) return [];
+  const wanted = new Set(input.serverIds);
+  const carried = await personalWorkspaceExtensionMcpServers(db, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    accountId: input.accountId,
+    ownServers: input.ownServers,
+    includeLapsed: true,
+  });
+  return carried.flatMap((server) =>
+    server.lapsedConnection && wanted.has(server.id)
+      ? [
+          {
+            serverId: server.id,
+            connectionId: server.lapsedConnection.id,
+            reason: "account_inactive" as const,
+            account: {
+              workspaceId: server.lapsedConnection.workspaceId,
+              subjectId: server.lapsedConnection.subjectId,
+              providerDomain: server.lapsedConnection.providerDomain,
+              status: server.lapsedConnection.status,
+            },
+            ownAccountIds: server.lapsedOwnAccountIds ?? [server.lapsedConnection.id],
+          },
+        ]
+      : [],
+  );
 }
 
 export type PersonalWorkspaceExtensionApiIntegration = ApiIntegrationRuntime & {

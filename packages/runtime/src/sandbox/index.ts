@@ -353,13 +353,9 @@ export {
 
 export {
   createTurnToolCancellationController,
-  parseRetainedProcessGroupControl,
-  retainedProcessGroupStopCommand,
-  retainedProcessGroupStopOutcome,
   TurnSandboxCommandCancelledError,
 } from "./turn-tool-cancellation";
 export type {
-  RetainedProcessGroupControl,
   TurnSandboxCommandArgs,
   TurnSandboxCommandSession,
   TurnToolCancellationController,

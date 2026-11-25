@@ -1073,6 +1073,8 @@ by an explicit selection and does not grant tool permissions.
 `builtin:event-triggers` does the same for event triggers when the session also
 has `event_sources_list`. Leave `event_sources_list` and `events_get` out of a
 session's `firstPartyMcpTools` to keep its agent from setting event triggers.
+`builtin:agents` guides creating an agent from a plain description when the
+session has `bot_template_save`.
 
 For an embedded support bot, start the agent from `capabilities: "none"`, which
 already omits the bundled guides; for any other agent, put

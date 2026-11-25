@@ -608,3 +608,62 @@ test("settings remains reachable to remove the last disconnected account", async
   expect(choose).toHaveBeenCalledWith("mail", []);
   expect(change.mock.calls[0]![0].mcpServerIds.size).toBe(0);
 });
+
+test("a picked account that stopped working shows Reconnect required on the connector and the account, and reconnects that account", async () => {
+  const reconnect = mock();
+  const lapsed = {
+    id: "lapsed-id",
+    subjectId: "me",
+    authorityId: "authority",
+    status: "needs_reauth",
+    providerDomain: "mcp.atlassian.com",
+    metadata: { email: "alex@example.com" },
+  } as unknown as ConnectionMetadata;
+  const working = {
+    ...lapsed,
+    id: "working-id",
+    status: "active",
+    metadata: { email: "sam@example.com" },
+  } as unknown as ConnectionMetadata;
+  await act(async () =>
+    root.render(
+      <SessionConnectorsMenuBody
+        presentation="dialog"
+        // The connector's own status is fine; only the chat's pick lapsed.
+        servers={[{ id: "atlassian", name: "Atlassian" }]}
+        firstPartyTools={[]}
+        selection={{ mcpServerIds: new Set(["atlassian"]), firstPartyToolIds: new Set() }}
+        onChange={() => {}}
+        onReconnect={reconnect}
+        accountControls={{
+          groups: [{ serverId: "atlassian", name: "Atlassian", accounts: [lapsed, working] }],
+          choices: { atlassian: ["lapsed-id"] },
+          onChoose: () => {},
+        }}
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Reconnect required");
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Reconnect Atlassian"]')!.click(),
+  );
+  expect(reconnect).toHaveBeenLastCalledWith("atlassian", lapsed);
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="Atlassian account settings"]')!
+      .click(),
+  );
+  const lapsedSwitch = [...container.querySelectorAll('[role="switch"]')].find((node) =>
+    node.getAttribute("aria-label")?.includes("alex@example.com"),
+  )!;
+  // Still picked, and says it needs reconnecting.
+  expect(lapsedSwitch.getAttribute("aria-checked")).toBe("true");
+  expect(lapsedSwitch.getAttribute("aria-label")).toEndWith(", reconnect required");
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="Reconnect alex@example.com"]')!
+      .click(),
+  );
+  expect(reconnect).toHaveBeenCalledTimes(2);
+  expect(reconnect).toHaveBeenLastCalledWith("atlassian", lapsed);
+});

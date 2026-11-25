@@ -3,6 +3,7 @@ import "./lib/content-security-boot";
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
+import "./lib/checkout-return-boot";
 import "./lib/console-host-boot";
 import "./lib/simplified-interface-landing-boot";
 // Backs the shared session UI with this app's router and API helpers.

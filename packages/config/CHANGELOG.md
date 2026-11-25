@@ -1,5 +1,20 @@
 # @opengeni/config
 
+## 6.38.0
+
+### Patch Changes
+
+- 279ae6e: `OPENGENI_ORG_AGENTS_ACCOUNT_IDS` accepts `*` to turn Console agents on for every organization. A list of organization ids still turns them on for those organizations only, and empty (the default) keeps them off.
+- Updated dependencies [f1289fa]
+- Updated dependencies [f9b646c]
+- Updated dependencies [5b2cd0d]
+- Updated dependencies [b193d0c]
+- Updated dependencies [bfe5398]
+- Updated dependencies [b902e4e]
+  - @opengeni/contracts@6.38.0
+  - @opengeni/codex@6.38.0
+  - @opengeni/xai-subscription@6.38.0
+
 ## 6.37.3
 
 ### Patch Changes

@@ -1717,14 +1717,19 @@ describe("SessionChrome compact actions", () => {
     expectChromeCollapsed(mounted.container);
   });
 
-  test("steers the latest queued message without opening the panel", async () => {
-    const ids: string[] = [];
+  test("the chip's Steer sends every queued message, in order, in one command", async () => {
+    const one: string[] = [];
+    const batches: string[][] = [];
     mounted = await renderComponent(
       <SessionChrome
         composer={composer()}
         queue={queue({
           steerTurn: async (id) => {
-            ids.push(id);
+            one.push(id);
+            return true;
+          },
+          steerTurns: async (ids) => {
+            batches.push([...ids]);
             return true;
           },
         })}
@@ -1737,13 +1742,80 @@ describe("SessionChrome compact actions", () => {
     await act(async () => queueChip?.click());
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
     const action = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Steer latest queued message"]',
+      '[aria-label="Steer 2 queued messages"]',
     )!;
     expect(action.closest("button")).toBe(action);
     expect(action.getAttribute("data-analytics-action")).toBe("steer");
+    expect(action.textContent).toBe("Steer 2");
     await act(async () => action.click());
-    expect(ids).toEqual(["22222222-2222-4222-8222-222222222222"]);
+    expect(batches).toEqual([
+      ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
+    ]);
+    expect(one).toEqual([]);
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  });
+
+  test("the chip's Steer on a single queued message steers just that one", async () => {
+    const one: string[] = [];
+    const batches: string[][] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        composer={composer()}
+        queue={queue({
+          queue: [fakeTurn({ id: "22222222-2222-4222-8222-222222222222", prompt: "only" })],
+          steerTurn: async (id) => {
+            one.push(id);
+            return true;
+          },
+          steerTurns: async (ids) => {
+            batches.push([...ids]);
+            return true;
+          },
+        })}
+      />,
+    );
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click(),
+    );
+    const action = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Steer latest queued message"]',
+    )!;
+    expect(action.textContent).toBe("Steer");
+    await act(async () => action.click());
+    expect(one).toEqual(["22222222-2222-4222-8222-222222222222"]);
+    expect(batches).toEqual([]);
+  });
+
+  test("a row's Steer in the opened queue still steers only that message", async () => {
+    const one: string[] = [];
+    const batches: string[][] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        composer={composer()}
+        queue={queue({
+          steerTurn: async (id) => {
+            one.push(id);
+            return true;
+          },
+          steerTurns: async (ids) => {
+            batches.push([...ids]);
+            return true;
+          },
+        })}
+      />,
+    );
+    const rowSteer = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Steer queued prompt 1"]',
+    )!;
+    // Row actions settle after the optimistic-to-authoritative handoff.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 260));
+    });
+    await act(async () => rowSteer.click());
+    expect(one).toEqual(["11111111-1111-4111-8111-111111111111"]);
+    expect(batches).toEqual([]);
   });
 
   test("the collapsed queue chip previews the latest queued message", async () => {
@@ -2454,6 +2526,18 @@ describe("Steer on a just-sent queued message", () => {
     return mounted!.container.querySelector<HTMLButtonElement>('[data-analytics-action="steer"]')!;
   }
 
+  /** A waiting message opens the queue; its chip Steer shows once collapsed. */
+  async function collapse() {
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expect(
+      mounted!.container.querySelector('[data-og-session-chrome-open="false"]'),
+    ).not.toBeNull();
+  }
+
   function render(
     message: ComposerOptimisticMessage | ComposerOptimisticMessage[],
     turns: SessionTurn[],
@@ -2468,6 +2552,10 @@ describe("Steer on a just-sent queued message", () => {
           snapshot: { version } as UseTurnQueueResult["snapshot"],
           steerTurn: async (turnId) => {
             steered.push(turnId);
+            return true;
+          },
+          steerTurns: async (turnIds) => {
+            steered.push(turnIds.join("+"));
             return true;
           },
           ...extra,
@@ -2539,14 +2627,17 @@ describe("Steer on a just-sent queued message", () => {
     expect(steerButton().disabled).toBe(true);
   });
 
-  test("a message the agent started first is not steered, and an older one is never steered instead", async () => {
+  test("a message the agent started first is not steered; the others waiting still are", async () => {
     const steered: string[] = [];
     const older = fakeTurn({
       id: "44444444-4444-4444-8444-444444444444",
       prompt: "older queued prompt",
     });
     mounted = await renderComponent(render(sent(), [older], steered));
+    await collapse();
     await act(async () => steerButton().click());
+    // Nothing is sent while the just-sent message is still landing.
+    expect(steered).toEqual([]);
     // The queue read at version 2 no longer has it: the agent took it.
     await mounted.rerender(
       render(
@@ -2557,7 +2648,7 @@ describe("Steer on a just-sent queued message", () => {
       ),
     );
     await flush();
-    expect(steered).toEqual([]);
+    expect(steered).toEqual([older.id]);
     expect(steerButton().querySelector(".animate-og-spin")).toBeNull();
   });
 
@@ -2574,18 +2665,32 @@ describe("Steer on a just-sent queued message", () => {
     expect(steerButton()).toBeNull();
   });
 
-  test("steering a newer send keeps the earlier request, and both are steered", async () => {
+  test("waiting and just-sent messages are steered together, in order, once all have landed", async () => {
     const steered: string[] = [];
+    const older = fakeTurn({
+      id: "44444444-4444-4444-8444-444444444444",
+      prompt: "older queued prompt",
+    });
     const NEXT_TURN_ID = "55555555-5555-4555-8555-555555555555";
     const nextTurn = fakeTurn({ id: NEXT_TURN_ID, prompt: "And the pricing page" });
     const next = (overrides: Partial<ComposerOptimisticMessage> = {}) =>
       sent({ clientEventId: "client-send-steer-2", text: "And the pricing page", ...overrides });
-    mounted = await renderComponent(render(sent(), [], steered));
+    mounted = await renderComponent(render([sent(), next()], [older], steered));
+    await collapse();
+    expect(steerButton().textContent).toBe("Steer 3");
     await act(async () => steerButton().click());
-    // The chip now shows the newer send, and its Steer is usable too.
-    await mounted.rerender(render([sent(), next()], [], steered));
-    expect(steerButton().disabled).toBe(false);
-    await act(async () => steerButton().click());
+    expect(steerButton().disabled).toBe(true);
+    expect(steered).toEqual([]);
+    // One has landed; the other is still on its way.
+    await mounted.rerender(
+      render(
+        [sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }), next()],
+        [older, sentTurn],
+        steered,
+        2,
+      ),
+    );
+    await flush();
     expect(steered).toEqual([]);
     await mounted.rerender(
       render(
@@ -2593,13 +2698,27 @@ describe("Steer on a just-sent queued message", () => {
           sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
           next({ state: "queued", turnId: NEXT_TURN_ID, appliedQueueVersion: 3 }),
         ],
-        [sentTurn, nextTurn],
+        [older, sentTurn, nextTurn],
         steered,
         3,
       ),
     );
     await flush();
-    expect(steered).toEqual([SENT_TURN_ID, NEXT_TURN_ID]);
+    expect(steered).toEqual([`${older.id}+${SENT_TURN_ID}+${NEXT_TURN_ID}`]);
+    // Never twice, even as the queue keeps re-rendering.
+    await mounted.rerender(
+      render(
+        [
+          sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+          next({ state: "queued", turnId: NEXT_TURN_ID, appliedQueueVersion: 3 }),
+        ],
+        [older, sentTurn, nextTurn],
+        steered,
+        3,
+      ),
+    );
+    await flush();
+    expect(steered).toHaveLength(1);
   });
 
   test("a message something else already acts on is left to that action", async () => {

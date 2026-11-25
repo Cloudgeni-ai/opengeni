@@ -1,4 +1,4 @@
-import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import type { BillingCheckoutStatus, BillingPlanBalance } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { PageHost } from "./navigation";
@@ -13,6 +13,12 @@ import type { PageHost } from "./navigation";
 export type CreditCheckoutClient = Pick<
   ChatClient<OpenGeniBrowserClient>,
   "createBillingCheckout" | "getBillingCheckout"
+>;
+
+/** What the page a checkout returns to reads to confirm credits or a plan. */
+export type CheckoutReturnClient = Pick<
+  ChatClient<OpenGeniBrowserClient>,
+  "getBillingCheckout" | "getBilling" | "getBillingSubscriptionPlans"
 >;
 
 /** Stripe replaces this placeholder in a success URL with the session id. */
@@ -43,6 +49,7 @@ export const CHECKOUT_RETURN_QUERY = {
   outcome: "checkoutReturn",
   account: "checkoutAccount",
   session: "checkoutSession",
+  plan: "checkoutPlan",
 } as const;
 
 /**
@@ -68,7 +75,24 @@ export function checkoutPageReturnUrl(
 
 export type CheckoutPageReturn =
   | { outcome: "success"; accountId: string; checkoutSessionId: string }
+  | { outcome: "plan"; accountId: string; planKey: string }
   | { outcome: "cancelled" };
+
+/**
+ * Where a paid plan checkout returns: the page it started from (Billing or
+ * onboarding), which says the plan is active once billing reports it. Only
+ * the success URL carries these keys: a cancelled plan checkout returns to the
+ * plain page and shows nothing new.
+ */
+export function planCheckoutReturnUrl(href: string, accountId: string, planKey: string): string {
+  const url = new URL(href);
+  url.hash = "";
+  for (const key of Object.values(CHECKOUT_RETURN_QUERY)) url.searchParams.delete(key);
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.outcome, "success");
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.account, accountId);
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.plan, planKey);
+  return url.toString();
+}
 
 /** The checkout return in a page query, or null when there is none or it is malformed. */
 export function readCheckoutPageReturn(query: URLSearchParams): CheckoutPageReturn | null {
@@ -76,6 +100,11 @@ export function readCheckoutPageReturn(query: URLSearchParams): CheckoutPageRetu
   if (outcome === "cancelled") return { outcome };
   if (outcome !== "success") return null;
   const accountId = query.get(CHECKOUT_RETURN_QUERY.account);
+  const planKey = query.get(CHECKOUT_RETURN_QUERY.plan);
+  if (planKey !== null) {
+    if (!accountId || !/^[A-Za-z0-9_-]{1,64}$/u.test(planKey)) return null;
+    return { outcome: "plan", accountId, planKey };
+  }
   const checkoutSessionId = query.get(CHECKOUT_RETURN_QUERY.session);
   if (!accountId || !checkoutSessionId || !/^cs_[A-Za-z0-9_]{1,250}$/u.test(checkoutSessionId))
     return null;
@@ -161,6 +190,21 @@ export async function startCreditCheckout(
   return { checkoutSessionId: session.checkoutSessionId, url: session.url, inNewTab };
 }
 
+/** Wait `ms`, or reject as soon as `signal` aborts, without leaving a listener behind. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const aborted = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", aborted, { once: true });
+  });
+}
+
 /**
  * Poll one checkout until its credits are granted or it expires. Resolves with
  * the final status; rejects only when aborted. Transient read failures keep
@@ -188,16 +232,90 @@ export async function waitForCheckoutCredits(
     } catch {
       // Keep waiting through a dropped request; the checkout itself is unaffected.
     }
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, interval);
-      input.signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(input.signal.reason ?? new Error("aborted"));
-        },
-        { once: true },
-      );
-    });
+    await pause(interval, input.signal);
   }
+}
+
+/** A refusal that waiting can't change: a bad, foreign or unreadable account. */
+function refusedRead(error: unknown): boolean {
+  const status =
+    typeof error === "object" && error !== null && "status" in error ? error.status : null;
+  return status === 400 || status === 401 || status === 403 || status === 404;
+}
+
+/**
+ * Poll billing until the organization is on `planKey`, the plan is active and
+ * its monthly credit has landed. Stripe sends the subscription (the plan) and
+ * the paid invoice (its credit) as separate webhooks in no fixed order, and
+ * until the invoice lands billing still reports the old plan's credit; so the
+ * wait compares the granted credit with the plan's catalog credit. A plan
+ * active for `creditGraceMs` counts as ready anyway (an unreadable catalog, a
+ * credit that differs from the catalog).
+ * `onActive` runs once when the plan first reads active. Resolves with the
+ * plan, so the confirmation names the plan billing reports, never a guess;
+ * null when billing refuses the read. Rejects only when aborted. Transient
+ * read failures keep polling.
+ */
+export async function waitForActivePlan(
+  client: Pick<CheckoutReturnClient, "getBilling" | "getBillingSubscriptionPlans">,
+  input: {
+    accountId: string;
+    planKey: string;
+    signal: AbortSignal;
+    intervalMs?: number | undefined;
+    creditGraceMs?: number | undefined;
+    onActive?: (() => void) | undefined;
+  },
+): Promise<BillingPlanBalance | null> {
+  const interval = input.intervalMs ?? 2_000;
+  const creditGrace = input.creditGraceMs ?? 60_000;
+  const monthlyCredit = await client
+    .getBillingSubscriptionPlans({ accountId: input.accountId })
+    .then(
+      (catalog) =>
+        catalog.plans.find((plan) => plan.key === input.planKey)?.monthlyCreditMicros ?? null,
+    )
+    .catch(() => null);
+  let activeSince: number | null = null;
+  for (;;) {
+    if (input.signal.aborted) throw input.signal.reason ?? new Error("aborted");
+    try {
+      const plan = (await client.getBilling({ accountId: input.accountId })).balance.plan;
+      const active =
+        plan?.key === input.planKey && (plan.status === "active" || plan.status === "trialing");
+      if (active && activeSince === null) input.onActive?.();
+      activeSince = active ? (activeSince ?? Date.now()) : null;
+      const credited =
+        (monthlyCredit !== null && (plan?.creditGrantedMicros ?? 0) >= monthlyCredit) ||
+        (activeSince !== null && Date.now() - activeSince >= creditGrace);
+      if (plan && active && credited) return plan;
+    } catch (error) {
+      if (refusedRead(error)) return null;
+      // Keep waiting through a dropped request; the subscription itself is unaffected.
+    }
+    await pause(interval, input.signal);
+  }
+}
+
+/** The checkout return in the address the app opened with, until the page reads it. */
+let launchCheckoutReturn: URLSearchParams | null = null;
+
+/**
+ * Remember a checkout return from the address the app opened with, before a
+ * route, a host redirect or an unfinished setup step rewrites the address.
+ * The page that confirms checkouts reads it once it mounts.
+ */
+export function rememberCheckoutPageReturn(search: string): void {
+  const query = new URLSearchParams(search);
+  launchCheckoutReturn = query.has(CHECKOUT_RETURN_QUERY.outcome) ? query : null;
+}
+
+/** The remembered launch return, if it hasn't been confirmed yet. */
+export function rememberedCheckoutPageReturn(): URLSearchParams | null {
+  return launchCheckoutReturn;
+}
+
+/** Forget the launch return once a page has handled it. */
+export function forgetCheckoutPageReturn(): void {
+  launchCheckoutReturn = null;
 }

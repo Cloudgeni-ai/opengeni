@@ -435,16 +435,15 @@ export const DEFAULT_MODAL_IMAGE_REF =
 /**
  * Whether Console agents (organization agents, docs/agents.md) are on for this
  * organization. Off for every organization unless its id is listed in
- * OPENGENI_ORG_AGENTS_ACCOUNT_IDS.
+ * OPENGENI_ORG_AGENTS_ACCOUNT_IDS, or the list holds `*` (every organization).
  */
 export function orgAgentsEnabledForAccount(
   settings: Partial<Pick<Settings, "orgAgentsAccountIds">>,
   accountId: string | null | undefined,
 ): boolean {
-  return (
-    typeof accountId === "string" &&
-    (settings.orgAgentsAccountIds ?? []).includes(accountId.toLowerCase())
-  );
+  if (typeof accountId !== "string") return false;
+  const ids = settings.orgAgentsAccountIds ?? [];
+  return ids.includes("*") || ids.includes(accountId.toLowerCase());
 }
 
 /**
@@ -2709,8 +2708,8 @@ const SettingsSchema = z.object({
   // charges. Defaults to DEFAULT_BILLING_LEGACY_ACCOUNT_IDS (CloudGeni's host
   // account and our own team's organizations); "none" lists no account.
   // Organizations with Console agents (organization agents, docs/agents.md
-  // "Console agents") turned on: comma-separated account ids. Empty (the
-  // default) turns them off everywhere.
+  // "Console agents") turned on: comma-separated account ids, or `*` for every
+  // organization. Empty (the default) turns them off everywhere.
   orgAgentsAccountIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -2719,7 +2718,7 @@ const SettingsSchema = z.object({
             .map((id) => id.trim().toLowerCase())
             .filter(Boolean)
         : value,
-    z.array(z.string().uuid()).default([]),
+    z.array(z.union([z.literal("*"), z.string().uuid()])).default([]),
   ),
   billingLegacyAccountIds: z.preprocess(
     (value) =>

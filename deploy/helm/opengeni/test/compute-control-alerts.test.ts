@@ -418,6 +418,49 @@ describe("compute alerts", () => {
         fires: [{ labels: { host_name: "h1" }, value: 0.3 }],
       },
       {
+        name: "swap slots running out",
+        series: [
+          ...fleet,
+          {
+            series: `compute_host_swap_total_bytes{job="compute-host",host_name="h1"}`,
+            values: "1000x60",
+          },
+          {
+            series: `compute_host_swap_free_bytes{job="compute-host",host_name="h1"}`,
+            values: "500x10 100x50",
+          },
+          // Another release's host never fires.
+          {
+            series: `compute_host_swap_total_bytes{job="compute-host",host_name="h2"}`,
+            values: "1000x60",
+          },
+          {
+            series: `compute_host_swap_free_bytes{job="compute-host",host_name="h2"}`,
+            values: "0x60",
+          },
+        ],
+        alert: "OpenGeniComputeHostSwapSlotsLow",
+        at: "20m",
+        fires: [{ labels: { host_name: "h1" }, value: 0.1 }],
+      },
+      {
+        name: "swap slots low only briefly",
+        series: [
+          ...fleet,
+          {
+            series: `compute_host_swap_total_bytes{job="compute-host",host_name="h1"}`,
+            values: "1000x60",
+          },
+          {
+            series: `compute_host_swap_free_bytes{job="compute-host",host_name="h1"}`,
+            values: "500x10 100x2 500x48",
+          },
+        ],
+        alert: "OpenGeniComputeHostSwapSlotsLow",
+        at: "12m",
+        fires: [],
+      },
+      {
         name: "API failures with enough requests",
         series: [
           {

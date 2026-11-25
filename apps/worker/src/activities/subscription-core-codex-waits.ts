@@ -285,7 +285,7 @@ export async function evaluateCoreBlockedTurn(
       return {
         kind: "wait",
         waitReason: evaluation.reason,
-        ...(evaluation.reconnectAccount ? { reconnectAccount: evaluation.reconnectAccount } : {}),
+        ...(evaluation.waitAccount ? { waitAccount: evaluation.waitAccount } : {}),
         earliestResetAt: evaluation.earliestResetAt,
         healthRetryAt: evaluation.healthRetryAt,
       };
@@ -371,7 +371,7 @@ async function evaluateFailoverBlockedTurn(
       return {
         kind: "wait",
         waitReason: evaluation.reason,
-        ...(evaluation.reconnectAccount ? { reconnectAccount: evaluation.reconnectAccount } : {}),
+        ...(evaluation.waitAccount ? { waitAccount: evaluation.waitAccount } : {}),
         earliestResetAt: evaluation.earliestResetAt,
         healthRetryAt: evaluation.healthRetryAt,
         candidateProviders: evaluation.candidateProviders ?? [],

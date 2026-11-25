@@ -79,6 +79,7 @@ export type BundledSkillId =
   | "builtin:sites"
   | "builtin:video-generation"
   | "builtin:secrets"
+  | "builtin:agents"
   | LegacyBundledSkillId;
 /**
  * @deprecated Renamed to the neutral ids above; still accepted and resolved to them.
@@ -6537,6 +6538,11 @@ export type ClientConfig = {
   /** Whether people can connect their own computers; absent on older servers. */
   connectedMachines?: boolean | undefined;
   /**
+   * Whether this deployment can export an editable artifact as an Office file;
+   * absent on older servers.
+   */
+  artifactExport?: boolean | undefined;
+  /**
    * The Chrome extension people add to connect their own Chrome, and its
    * Chrome Web Store page; absent on older servers (Opengeni Browser).
    */
@@ -8824,6 +8830,13 @@ export type SteerSessionQueueItemRequest = {
    * turns an already-waiting Steer into an immediate one.
    */
   interrupt?: boolean;
+  /**
+   * Other waiting prompts to Steer with this one. All of them keep their
+   * queue order and reach the agent together, with no extra interruption.
+   * Prompts that already left the queue (this one included) or wait for a
+   * personal machine's owner are skipped; a changed one refuses the command.
+   */
+  together?: Array<{ turnId: string; expectedTurnVersion: number }>;
 };
 
 export type DeleteSessionQueueItemRequest = {

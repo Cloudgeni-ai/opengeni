@@ -2590,3 +2590,238 @@ describe("canonical queue commands", () => {
     expect(draft).toMatchObject({ revision: 1, text: "preserve me" });
   });
 });
+
+describe("Steer several waiting prompts together", () => {
+  type SessionTurnRow = typeof schema.sessionTurns.$inferSelect;
+
+  async function liveOwner(value: Awaited<ReturnType<typeof fixture>>) {
+    const attemptId = crypto.randomUUID();
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      const [turn] = await db
+        .insert(schema.sessionTurns)
+        .values({
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId!,
+          sessionId: value.session.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${value.session.id}`,
+          status: "running",
+          source: "user",
+          position: 99,
+          prompt: "current direction",
+          resources: [],
+          tools: [],
+          model: "scripted-model",
+          reasoningEffort: "low",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          executionGeneration: 1,
+          activeAttemptId: attemptId,
+        })
+        .returning();
+      const [authority] = await db
+        .select({
+          authorityEpoch: schema.sessions.authorityEpoch,
+          authorityVisibility: schema.sessions.visibility,
+          authorityOwnerOrganizationMembershipId: schema.sessions.ownerOrganizationMembershipId,
+        })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id));
+      await db
+        .update(schema.sessions)
+        .set({ activeTurnId: turn!.id, status: "running" })
+        .where(eq(schema.sessions.id, value.session.id));
+      await db.insert(schema.sessionTurnAttempts).values({
+        id: attemptId,
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        turnId: turn!.id,
+        executionGeneration: 1,
+        state: "running",
+        temporalWorkflowId: `session-${value.session.id}`,
+        temporalWorkflowRunId: `run-${attemptId}`,
+        temporalActivityId: `activity-${attemptId}`,
+        verifiedControlRevision: 0,
+        authorityEpoch: authority!.authorityEpoch,
+        authorityVisibility: authority!.authorityVisibility,
+        authorityOwnerOrganizationMembershipId: authority!.authorityOwnerOrganizationMembershipId,
+        mcpApprovalPolicies: {},
+      });
+    });
+    return attemptId;
+  }
+
+  const steer = async (
+    value: Awaited<ReturnType<typeof fixture>>,
+    target: { id: string; version: number },
+    together: Array<{ turnId: string; expectedTurnVersion: number }>,
+    operationKey: string = crypto.randomUUID(),
+  ) =>
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId!,
+          sessionId: value.session.id,
+          turnId: target.id,
+          expectedTurnVersion: target.version,
+          actor: value.actor,
+          operationKey,
+          together,
+        }),
+      ),
+    );
+
+  test("behind a live owner they wait for one handover, in queue order, with no interruption", async () => {
+    const value = await fixture(4);
+    const attemptId = await liveOwner(value);
+    const [p1, p2, p3, p4] = value.turns as [
+      SessionTurnRow,
+      SessionTurnRow,
+      SessionTurnRow,
+      SessionTurnRow,
+    ];
+    // Listed out of order: the queue's order is the delivery order.
+    const result = await steer(value, p3, [
+      { turnId: p2.id, expectedTurnVersion: p2.version },
+      { turnId: p1.id, expectedTurnVersion: p1.version },
+    ]);
+    expect(result.interruptionCount).toBe(0);
+    expect(result.items.map((row) => row.id)).toEqual([p1.id, p2.id, p3.id, p4.id]);
+    for (const row of result.items.slice(0, 3)) {
+      expect(row.metadata).toMatchObject({
+        delivery: "steer",
+        interruptionCount: 0,
+        deferredUntilModelStep: true,
+      });
+    }
+    expect(result.items[3]!.metadata).not.toHaveProperty("delivery");
+    const interruptions = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .select()
+        .from(schema.sessionAttemptInterruptions)
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId)),
+    );
+    expect(interruptions).toEqual([]);
+    const events = await storedEvents(value.grant.workspaceId!, result.eventIds);
+    const requested = events
+      .filter((event) => event.type === "session.control.steer_requested")
+      .map((event) => (event.payload as { targetTurnId: string }).targetTurnId);
+    expect(requested.sort()).toEqual([p1.id, p2.id, p3.id].sort());
+  });
+
+  test("with nothing running they go first, keeping their order", async () => {
+    const value = await fixture(3);
+    const [p1, p2, p3] = value.turns as [SessionTurnRow, SessionTurnRow, SessionTurnRow];
+    const result = await steer(value, p3, [{ turnId: p1.id, expectedTurnVersion: p1.version }]);
+    expect(result.items.map((row) => row.id)).toEqual([p1.id, p3.id, p2.id]);
+    expect(result.items.slice(0, 2).map((row) => row.metadata.delivery)).toEqual([
+      "steer",
+      "steer",
+    ]);
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([p1.id, p3.id, p2.id]);
+    // The agent takes both in one turn: one handover, not one per message.
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      workflowId: `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`nothing claimed: ${claimed.reason}`);
+    expect(claimed.turn.id).toBe(p3.id);
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([p2.id]);
+  });
+
+  test("a prompt that already left is skipped, a changed one refuses everything, and a retry replays", async () => {
+    const value = await fixture(3);
+    const [p1, p2, p3] = value.turns as [SessionTurnRow, SessionTurnRow, SessionTurnRow];
+    await expect(
+      steer(value, p3, [{ turnId: p1.id, expectedTurnVersion: p1.version + 1 }]),
+    ).rejects.toMatchObject({ code: "PROMPT_CHANGED" });
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([p1.id, p2.id, p3.id]);
+    const key = crypto.randomUUID();
+    const together = [
+      { turnId: crypto.randomUUID(), expectedTurnVersion: 1 },
+      { turnId: p2.id, expectedTurnVersion: p2.version },
+    ];
+    const result = await steer(value, p3, together, key);
+    expect(result.items.map((row) => row.id)).toEqual([p2.id, p3.id, p1.id]);
+    const replay = await steer(value, p3, together, key);
+    expect(replay.replay).toBe(true);
+    await expect(
+      steer(value, p3, [{ turnId: p1.id, expectedTurnVersion: p1.version }], key),
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
+  });
+
+  test("an attachment in the middle splits the claim, and the first part hands over before any inference", async () => {
+    // p2 carries a file, so the worker claims p1 alone. p2 and p3 already
+    // wait as Steers, so p1 hands over at its first model step, before any
+    // request leaves the worker: the agent reads them in one run.
+    const value = await fixture(3);
+    const [p1, p2, p3] = value.turns as [SessionTurnRow, SessionTurnRow, SessionTurnRow];
+    await steer(value, p1, [
+      { turnId: p2.id, expectedTurnVersion: p2.version },
+      { turnId: p3.id, expectedTurnVersion: p3.version },
+    ]);
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      workflowId: `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`nothing claimed: ${claimed.reason}`);
+    expect(claimed.turn.id).toBe(p1.id);
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([p2.id, p3.id]);
+    expect(
+      await hasPendingSteerForTurn(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        turnId: p1.id,
+      }),
+    ).toBe(true);
+  });
+
+  test("a target that already started is skipped while the others are steered", async () => {
+    const value = await fixture(3);
+    const [p1, p2, p3] = value.turns as [SessionTurnRow, SessionTurnRow, SessionTurnRow];
+    // The oldest is the target; it left the queue before the command landed.
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        deleteSessionQueueItemInTransaction(tx as unknown as typeof db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId!,
+          sessionId: value.session.id,
+          turnId: p1.id,
+          expectedTurnVersion: p1.version,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+        }),
+      ),
+    );
+    const started = { id: p1.id, version: p1.version };
+    const result = await steer(value, started, [
+      { turnId: p3.id, expectedTurnVersion: p3.version },
+    ]);
+    expect(result.items.map((row) => row.id)).toEqual([p3.id, p2.id]);
+    await expect(steer(value, { id: p2.id, version: p2.version + 5 }, [])).rejects.toMatchObject({
+      code: "PROMPT_CHANGED",
+    });
+    await expect(
+      steer(value, started, [{ turnId: crypto.randomUUID(), expectedTurnVersion: 1 }]),
+    ).rejects.toMatchObject({ code: "QUEUE_PROMPT_STARTED" });
+  });
+});

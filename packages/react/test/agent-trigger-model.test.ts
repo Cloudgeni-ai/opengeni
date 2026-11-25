@@ -18,6 +18,11 @@ import {
   agentTriggerSaveError,
   agentTriggerWithSources,
   agentTriggerRepositoryEvents,
+  addAgentSuggestedTrigger,
+  agentTriggerOffers,
+  agentUsesGitHub,
+  availableCommonTriggers,
+  AGENT_TRIGGER_OFFERS_MAX,
 } from "../src/app/components/agents/agent-trigger-model";
 import {
   eventConditionFromDraft,
@@ -84,6 +89,111 @@ test("a suggestion starts with its events, conditions and message on the person'
       githubConnected: true,
     }),
   ).toBe("add_source");
+});
+
+const MENTIONED: AgentTemplateTrigger = {
+  name: "Review when mentioned on a PR",
+  instructions: "Someone mentioned you on this pull request. Review it.",
+  schedule: null,
+  oneClick: true,
+  triggers: [
+    {
+      source: { kind: "github" },
+      eventTypes: ["issue_comment.created"],
+      conditions: [
+        { field: "data.issue.pull_request", op: "equals", value: true },
+        { field: "data.comment.mentions_app", op: "equals", value: true },
+        {
+          field: "data.comment.author_association",
+          op: "in",
+          value: ["OWNER", "MEMBER", "COLLABORATOR"],
+        },
+      ],
+    },
+    {
+      source: { kind: "github" },
+      eventTypes: ["pull_request_review_comment.created"],
+      conditions: [{ field: "data.comment.mentions_app", op: "equals", value: true }],
+    },
+  ] as AgentTemplateTrigger["triggers"],
+};
+
+function oneClickClient(sources: EventSource[]) {
+  const calls: [string, unknown][] = [];
+  return {
+    calls,
+    async listEventSources() {
+      return sources;
+    },
+    async createEventSource(_workspaceId: string, request: unknown) {
+      calls.push(["createEventSource", request]);
+      return { source: { ...GITHUB, id: "source-new" } as EventSource };
+    },
+    async createScheduledTask(_workspaceId: string, request: any) {
+      calls.push(["createScheduledTask", request]);
+      return { id: "task-1", name: request.name } as any;
+    },
+  };
+}
+
+test("a one-click suggestion is added as it is, on the person's GitHub source", async () => {
+  const client = oneClickClient([GITHUB]);
+  const outcome = await addAgentSuggestedTrigger(t, {
+    client,
+    workspaceId: "ws",
+    agent: { ...AGENT, visibility: "workspace" },
+    suggestion: MENTIONED,
+    githubConnected: true,
+    now: NOW,
+  });
+  expect(outcome.kind).toBe("created");
+  expect(client.calls.map(([name]) => name)).toEqual(["createScheduledTask"]);
+  const request = client.calls[0]![1] as any;
+  expect(request.name).toBe("Bug fixer: Review when mentioned on a PR");
+  expect(request.visibility).toBe("workspace");
+  expect(request.agentConfig.agentId).toBe(AGENT.id);
+  expect(request.agentConfig.prompt).toBe(MENTIONED.instructions);
+  const triggers = request.events.triggers;
+  expect(triggers.map((entry: any) => [entry.sourceId, entry.eventTypes])).toEqual([
+    ["source-gh", ["issue_comment.created"]],
+    ["source-gh", ["pull_request_review_comment.created"]],
+  ]);
+  expect(triggers[0].conditions).toContainEqual({
+    field: "data.comment.author_association",
+    op: "in",
+    value: ["OWNER", "MEMBER", "COLLABORATOR"],
+  });
+});
+
+test("a one-click suggestion adds the GitHub source it lacks, or asks to set up", async () => {
+  const client = oneClickClient([]);
+  const added = await addAgentSuggestedTrigger(t, {
+    client,
+    workspaceId: "ws",
+    agent: { ...AGENT, visibility: "workspace" },
+    suggestion: MENTIONED,
+    githubConnected: true,
+    now: NOW,
+  });
+  expect(added.kind).toBe("created");
+  expect(client.calls.map(([name]) => name)).toEqual(["createEventSource", "createScheduledTask"]);
+  expect(
+    (client.calls[1]![1] as any).events.triggers.every(
+      (entry: any) => entry.sourceId === "source-new",
+    ),
+  ).toBe(true);
+
+  const unconnected = oneClickClient([]);
+  const waiting = await addAgentSuggestedTrigger(t, {
+    client: unconnected,
+    workspaceId: "ws",
+    agent: { ...AGENT, visibility: "workspace" },
+    suggestion: MENTIONED,
+    githubConnected: false,
+    now: NOW,
+  });
+  expect(waiting.kind).toBe("needs_setup");
+  expect(unconnected.calls).toEqual([]);
 });
 
 test("a pasted webhook waiting for its secret can be picked, and a short secret is refused", () => {
@@ -356,4 +466,136 @@ test("chosen repositories narrow only GitHub triggers; none chosen covers every 
   expect(several.triggers[0]!.conditions.map(eventConditionFromDraft)).toEqual([
     { field: "data.repository.full_name", op: "in", value: ["acme/api", "acme/web"] },
   ]);
+});
+
+test("common triggers need GitHub unless its connection is off or the agent blocks it", () => {
+  expect(agentUsesGitHub([], null)).toBe(true);
+  expect(agentUsesGitHub([], false)).toBe(false);
+  expect(
+    agentUsesGitHub(
+      [{ connector: "github.com", tool: "merge_pull_request", permission: "ask" }],
+      true,
+    ),
+  ).toBe(true);
+  expect(agentUsesGitHub([{ connector: "GitHub.com", permission: "block" }], true)).toBe(false);
+  expect(availableCommonTriggers({ usesGitHub: false }).map((entry) => entry.key)).toEqual([
+    "weekday_morning",
+  ]);
+});
+
+test("offers put the agent's own suggestions first, skip what they cover or what is set up, and stop at three", () => {
+  const mention: AgentTemplateTrigger = {
+    name: "Review when mentioned on a PR",
+    instructions: "Review it.",
+    schedule: null,
+    oneClick: true,
+    triggers: availableCommonTriggers({ usesGitHub: true }).find(
+      (entry) => entry.key === "mentioned_on_pull_request",
+    )!.trigger.triggers,
+  };
+  const offers = agentTriggerOffers({
+    templateSuggestions: [mention],
+    usesGitHub: true,
+    tasks: [],
+  });
+  expect(offers.map((offer) => offer.suggestion.name)).toEqual([
+    "Review when mentioned on a PR",
+    "When a pull request opens",
+    "Every weekday morning",
+  ]);
+  expect(offers[0]!.templateIndex).toBe(0);
+  expect(offers[1]!.common).toBe("pull_request_opened");
+  // A trigger already added under its name isn't offered again.
+  expect(
+    agentTriggerOffers({
+      templateSuggestions: [SUGGESTION, mention],
+      usesGitHub: true,
+      tasks: [
+        {
+          name: "Bug fixer: Review when mentioned on a PR",
+          schedule: { type: "manual" },
+          events: null,
+        } as never,
+      ],
+    }).map((offer) => offer.suggestion.name),
+  ).toEqual([
+    "When an issue is labelled bug",
+    "When a pull request opens",
+    "Every weekday morning",
+  ]);
+  expect(
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, tasks: null }),
+  ).toHaveLength(AGENT_TRIGGER_OFFERS_MAX);
+});
+
+test("a common trigger isn't offered again when an automation already listens to its events", () => {
+  const task = {
+    name: "PRs",
+    schedule: { type: "manual" },
+    events: {
+      triggers: [{ eventTypes: ["pull_request.ready_for_review", "pull_request.opened"] }],
+    },
+  } as never;
+  expect(
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, tasks: [task] }).map(
+      (offer) => offer.common,
+    ),
+  ).toEqual(["mentioned_on_pull_request", "weekday_morning"]);
+});
+
+test("named for an agent, a PR mention must also say its name", () => {
+  const mention = availableCommonTriggers({ usesGitHub: true, agentName: " Bug fixer " }).find(
+    (entry) => entry.key === "mentioned_on_pull_request",
+  )!;
+  for (const trigger of mention.trigger.triggers) {
+    expect(trigger.conditions).toContainEqual({
+      field: "data.comment.body",
+      op: "contains",
+      value: "Bug fixer",
+    });
+  }
+  const unnamed = availableCommonTriggers({ usesGitHub: true }).find(
+    (entry) => entry.key === "mentioned_on_pull_request",
+  )!;
+  expect(
+    unnamed.trigger.triggers.flatMap((trigger) => trigger.conditions.map((c) => c.field)),
+  ).not.toContain("data.comment.body");
+});
+
+test("after a rename, the PR mention for the new name is offered again", () => {
+  const old = availableCommonTriggers({ usesGitHub: true, agentName: "Reviewer" }).find(
+    (entry) => entry.key === "mentioned_on_pull_request",
+  )!;
+  const task = {
+    name: "Reviewer: When mentioned on a PR",
+    schedule: { type: "manual" },
+    events: { triggers: old.trigger.triggers },
+  } as never;
+  const offered = (agentName: string) =>
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, agentName, tasks: [task] }).map(
+      (offer) => offer.common,
+    );
+  expect(offered("reviewer")).not.toContain("mentioned_on_pull_request");
+  expect(offered("Critic")).toContain("mentioned_on_pull_request");
+});
+
+test("only the same calendar hides the weekday offer", () => {
+  const offered = (schedule: unknown) =>
+    agentTriggerOffers({
+      templateSuggestions: [],
+      usesGitHub: false,
+      tasks: [{ name: "Report", schedule, events: null } as never],
+    }).map((offer) => offer.common);
+  expect(offered({ type: "calendar", hour: 9, minute: 0, daysOfMonth: [1] })).toContain(
+    "weekday_morning",
+  );
+  expect(
+    offered({
+      type: "calendar",
+      hour: 9,
+      minute: 0,
+      daysOfWeek: ["FRIDAY", "MONDAY", "THURSDAY", "TUESDAY", "WEDNESDAY"],
+      timeZone: "Europe/Oslo",
+    }),
+  ).not.toContain("weekday_morning");
 });

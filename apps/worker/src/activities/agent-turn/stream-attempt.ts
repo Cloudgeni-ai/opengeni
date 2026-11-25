@@ -221,6 +221,7 @@ import {
   servedRouteProcessingResidency,
 } from "./model-usage";
 import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
+import { createPhaseTimer, SLOW_TURN_SETTLEMENT_MS } from "./phase-timer";
 import {
   sessionTitleGenerationOptions,
   sessionTitleRoute,
@@ -2893,28 +2894,58 @@ export async function runTurnStreamAttempt(
       // the completed step was consumed above. Hand over at this boundary:
       // the turn ends `superseded`, and the Steer runs next on the same,
       // unchanged history.
-      await historySink.reconcileConversationTruth({ requireDurable: true });
-      await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
-      await finalizeTurnOpStreamOps();
-      await finishParallelSessionTitle();
-      await flushHeldSessionUsageReceipts(db, input.sessionId);
-      const settled = await eventing.settle!({
-        events: [
-          {
-            type: "turn.superseded",
-            payload: {
-              reason: "steer",
-              atModelStep: true,
-              ...(preemptedCutOffText ? { cutOffText: preemptedCutOffText } : {}),
-            },
-          },
-          { type: "session.status.changed", payload: { status: "queued" } },
-        ],
-        turnStatus: "superseded",
-        sessionStatus: "queued",
-        activeTurnId: null,
-        requirePendingSteer: true,
-      });
+      // The replacement waits for every step below; a slow handover is
+      // logged with where it spent its time.
+      const handoverTiming = createPhaseTimer();
+      let handoverOutcome = "failed";
+      const settled = await (async () => {
+        try {
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+          handoverTiming.mark("reconcileMs");
+          await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
+          handoverTiming.mark("checkpointMs");
+          await finalizeTurnOpStreamOps();
+          handoverTiming.mark("streamOpsMs");
+          await finishParallelSessionTitle();
+          handoverTiming.mark("titleMs");
+          await flushHeldSessionUsageReceipts(db, input.sessionId);
+          handoverTiming.mark("usageReceiptsMs");
+          const result = await eventing.settle!({
+            events: [
+              {
+                type: "turn.superseded",
+                payload: {
+                  reason: "steer",
+                  atModelStep: true,
+                  ...(preemptedCutOffText ? { cutOffText: preemptedCutOffText } : {}),
+                },
+              },
+              { type: "session.status.changed", payload: { status: "queued" } },
+            ],
+            turnStatus: "superseded",
+            sessionStatus: "queued",
+            activeTurnId: null,
+            requirePendingSteer: true,
+          });
+          handoverTiming.mark("settleMs");
+          handoverOutcome =
+            result === "pending_steer_withdrawn" ? result : result ? "superseded" : "stale";
+          return result;
+        } finally {
+          // Also when a step throws: a slow failed handover still delays the Steer.
+          const totalMs = handoverTiming.elapsedMs();
+          if (totalMs >= SLOW_TURN_SETTLEMENT_MS) {
+            observability.warn("slow Steer handover", {
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              attemptId: input.attemptId,
+              outcome: handoverOutcome,
+              ...handoverTiming.phases(),
+              totalMs,
+            });
+          }
+        }
+      })();
       if (settled === "pending_steer_withdrawn") {
         // The Steer was withdrawn or claimed in between. Keep working:
         // rebuild the input from the durable history and resume sampling.

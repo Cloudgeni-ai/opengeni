@@ -11,6 +11,7 @@ import {
   mcpAccountBindingsFromVisibleConnections,
   mcpAccountRouteId,
   personalDelegationsForAccountBindings,
+  resolveMcpAccountBindings,
 } from "../src/domain/mcp-account-bindings";
 
 const accountId = crypto.randomUUID();
@@ -86,6 +87,119 @@ test("rejected pinned accounts retain safe structured identity and eligibility r
       accounts: [{ serverId: server.id, connectionId: selected.id, reason }],
     });
   }
+});
+
+test("a stale pick is left out on send, and its connector never gets another account", () => {
+  // The composer listed `picked` when the chat opened; its sign-in expired
+  // before Send. `other` is a second working account for the same connector.
+  const picked = connection();
+  const other = connection();
+  const selections = [{ serverId: server.id, connectionId: picked.id }];
+  const expired = { ...picked, status: "needs_reauth" as const };
+  const result = resolveMcpAccountBindings({
+    ...input,
+    connections: [expired, other],
+    selections,
+    unusableSelections: "omit",
+  });
+  // Never swapped: the connector runs without an account this turn.
+  expect(result.bindings).toEqual([]);
+  expect(result.omitted).toEqual([
+    { serverId: server.id, connectionId: picked.id, reason: "account_inactive" },
+  ]);
+  // The default stays strict for callers that did not opt in.
+  expect(() =>
+    mcpAccountBindingsFromVisibleConnections({
+      ...input,
+      connections: [expired, other],
+      selections,
+    }),
+  ).toThrow(ConnectionAccountSelectionError);
+});
+
+test("a stale pick among several keeps only the sender's other picks", () => {
+  const expired = { ...connection(), status: "needs_reauth" as const };
+  const kept = connection();
+  const unpicked = connection();
+  const result = resolveMcpAccountBindings({
+    ...input,
+    connections: [expired, kept, unpicked],
+    selections: [
+      { serverId: server.id, connectionId: expired.id },
+      { serverId: server.id, connectionId: kept.id },
+    ],
+    unusableSelections: "omit",
+  });
+  expect(result.bindings.map((binding) => binding.connectionId)).toEqual([kept.id]);
+  expect(result.omitted).toEqual([
+    { serverId: server.id, connectionId: expired.id, reason: "account_inactive" },
+  ]);
+});
+
+test("a pick the sender can't see is still refused when omitting", () => {
+  // A typo'd, forged or deleted id is not an account that stopped working.
+  const kept = connection();
+  const missingId = crypto.randomUUID();
+  let failure: unknown;
+  try {
+    resolveMcpAccountBindings({
+      ...input,
+      connections: [kept],
+      selections: [
+        { serverId: server.id, connectionId: kept.id },
+        { serverId: server.id, connectionId: missingId },
+      ],
+      unusableSelections: "omit",
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(ConnectionAccountSelectionError);
+  expect((failure as ConnectionAccountSelectionError).diagnostic.accounts).toEqual([
+    { serverId: server.id, connectionId: missingId, reason: "account_not_visible" },
+  ]);
+});
+
+test("a pick naming another connector's account is still refused when omitting", () => {
+  const foreign = { ...connection(), providerDomain: "other.example.test" };
+  // Another connector's account that also stopped working is still a mismatch.
+  const foreignExpired = {
+    ...connection(),
+    providerDomain: "other.example.test",
+    status: "needs_reauth" as const,
+  };
+  const expired = { ...connection(), status: "revoked" as const };
+  let failure: unknown;
+  try {
+    resolveMcpAccountBindings({
+      ...input,
+      connections: [foreign, foreignExpired, expired],
+      selections: [
+        { serverId: server.id, connectionId: foreign.id },
+        { serverId: server.id, connectionId: foreignExpired.id },
+        { serverId: server.id, connectionId: expired.id },
+      ],
+      unusableSelections: "omit",
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(ConnectionAccountSelectionError);
+  expect((failure as ConnectionAccountSelectionError).diagnostic.accounts).toEqual([
+    { serverId: server.id, connectionId: foreign.id, reason: "account_mismatch" },
+    { serverId: server.id, connectionId: foreignExpired.id, reason: "account_mismatch" },
+    { serverId: server.id, connectionId: expired.id, reason: "account_inactive" },
+  ]);
+  // A pick for a connector this turn does not use is refused as before.
+  expect(() =>
+    resolveMcpAccountBindings({
+      ...input,
+      servers: [],
+      connections: [connection()],
+      selections: [{ serverId: server.id, connectionId: crypto.randomUUID() }],
+      unusableSelections: "omit",
+    }),
+  ).toThrow(ConnectionAccountSelectionError);
 });
 
 test("account selection cannot silently replace a persisted legacy session attachment", () => {

@@ -135,11 +135,19 @@ Update the branded extension and its agent together so both use the new name.
 
 ## Publish an update
 
-Run `bun run typecheck`, `bun test`, and `bun run build:store`. Upload the ZIP
-to the existing item's Package tab. Apply the description and links from
-`store/listing.json`, upload the new icon, promo images and screenshots, then
-save the draft and submit it for review with automatic publishing enabled.
-The version in `package.json` must be higher than the published version.
+Publishing is automatic. When main changes the version in `package.json`
+(Changesets does this), the Publish browser extension workflow builds the
+store ZIP and submits it for review with automatic publishing, replacing an
+older version still waiting for review. It first checks that a released agent
+supports the extension's protocol (see below); if not, it waits, and each
+completed agent release runs it again. A run that fails, for example because
+the store dashboard asks for a justification of a new permission, opens a
+"Chrome Web Store publish failed" issue; fix the cause and rerun the workflow.
+It can also be run by hand, with a staged publish or to replace a pending
+review.
+
+Store listing edits (description and links from `store/listing.json`, icons,
+promo images and screenshots) are still made by hand in the dashboard.
 
 Keep distribution **Public**, select all available regions, and leave mature
 content disabled for this extension. After Google approves and publishes the
@@ -147,3 +155,21 @@ update, verify the version and graphics on the
 [public listing](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
 and confirm it appears in [store search](https://chromewebstore.google.com/search/opengeni).
 Google review and search indexing are separate; indexing can take a few hours.
+
+## Extension and agent compatibility
+
+Chrome updates an installed extension on its own schedule, and people update
+their agent on theirs, so new extensions meet old agents and old extensions
+meet new agents. `bridge-compat.json` lists every protocol an installed
+extension uses to reach the agent: its bridge version and native host name,
+per build, and the first agent release that supports it.
+
+- A new agent keeps supporting every protocol in the list that is not
+  retired. The agent test `installed_extension_protocols_stay_supported`
+  fails otherwise.
+- The extension may only use a listed protocol (`test/bridge-compat.test.ts`),
+  and the store release waits until a released agent supports it.
+- To change the protocol, add a new entry with the agent release that first
+  supports it, and keep the old one. Retire the old entry (`retiredOn`,
+  `retiredBy`) no sooner than 60 days after its replacement was released.
+  Never delete an entry.

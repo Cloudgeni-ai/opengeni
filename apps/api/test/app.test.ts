@@ -2605,6 +2605,13 @@ describe("GET /v1/config/client", () => {
     const disabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: false }));
     expect(disabled.connectedMachines).toBe(false);
   });
+
+  test("tells clients whether this deployment can export editable artifacts", async () => {
+    const deployed = await fetchClientConfig(testSettings({ artifactMaterializerDeployed: true }));
+    expect(deployed.artifactExport).toBe(true);
+    const absent = await fetchClientConfig(testSettings({ artifactMaterializerDeployed: false }));
+    expect(absent.artifactExport).toBe(false);
+  });
 });
 
 describe("managed session-set route ownership", () => {

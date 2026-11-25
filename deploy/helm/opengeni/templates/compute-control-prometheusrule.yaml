@@ -378,6 +378,22 @@ spec:
             value: '{{ "{{ $value | humanizePercentage }}" }} stalled'
             user_impact: 'Sandboxes on the host run slowly.'
             next_step: 'Check how much memory its sandboxes hold, and whether hosts need more memory.'
+        - alert: OpenGeniComputeHostSwapSlotsLow
+          expr: |
+            max by (host_name) (
+              compute_host_swap_free_bytes / (compute_host_swap_total_bytes > 0)
+              and on (host_name) {{ $hosts }}
+            ) < 0.15
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host has under 15% of its swap slots free. Every page zswap compresses takes one, so once none are left nothing more is compressed and a host short of memory ends VMs.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} running out of swap slots'
+            value: '{{ "{{ $value | humanizePercentage }}" }} free'
+            user_impact: 'Sandboxes may soon have their VMs ended, losing their running programs.'
+            next_step: 'Make the host''s swap file at least as large as its sandboxes'' memory (COMPUTE_SWAP_SIZE, made anew at the next boot), and see which sandboxes hold the most memory out of RAM.'
+            runbook_url: {{ printf "%s#observing" $runbook }}
         - alert: OpenGeniComputeHostTelemetryDropped
           expr: |
             sum by (host_name) (increase(compute_export_dropped_total[15m]) and on (host_name) {{ $hosts }}) > 0

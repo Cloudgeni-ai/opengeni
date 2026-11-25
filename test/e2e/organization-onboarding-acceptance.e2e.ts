@@ -38,7 +38,7 @@ import {
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
 // Signup first asks how to use Opengeni; these flows take the cloud path.
-const USE_CASE_HEADING = "How do you want to use Opengeni?";
+const USE_CASE_HEADING = "What do you do?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
@@ -356,7 +356,7 @@ async function signUpAndVerify(page: Page, input: { name: string; email: string 
   expect(verificationUrl.startsWith(`${publicOrigin}/v1/auth/verify-email?`)).toBe(true);
   await page.goto(verificationUrl, { waitUntil: "domcontentloaded" });
   const authOrOnboarding = page
-    .getByRole("heading", { name: /^(Sign in|How do you want to use Opengeni\?)$/ })
+    .getByRole("heading", { name: /^(Sign in|What do you do\?)$/ })
     .first();
   await authOrOnboarding.waitFor();
   if ((await authOrOnboarding.textContent())?.trim() === "Sign in") {
@@ -510,7 +510,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/v1/auth/organization-onboarding",
     );
-    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
+    await page.getByRole("button", { name: /^Software engineer/ }).click();
     const setupResponse = await setupSettled;
     expect(setupResponse.ok()).toBe(true);
     expect(setupResponse.request().postDataJSON()).toMatchObject({
@@ -1480,7 +1480,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     const email = `onboarding-embed-${RUN_ID}@example.test`;
     await signUpAndVerify(page, { name: "Onboarding Builder", email });
     await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
-    await page.getByRole("button", { name: /^Add AI agents to my product/ }).click();
+    await page.getByRole("button", { name: "Adding agents to your own product?" }).click();
     await page.getByLabel("Organization name").fill("Onboarding Product Org");
     await page.getByRole("button", { name: "Create organization" }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();

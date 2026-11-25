@@ -226,8 +226,22 @@ describe("skill_read gateway definition", () => {
                 "`!important`",
                 "don't search for one",
                 "text enlarged to 200%",
+                "read `references/design.md`",
+                "a design of its own",
               ])
                 expect(guidance).toContain(rule);
+              // The descriptor asks for the design reference in the first read.
+              const both = await environment.callModel({
+                modelName: "skill_read",
+                arguments: { skill, paths: ["SKILL.md", "references/design.md"] },
+                subjectId: "agent:test",
+              });
+              const read = both.structuredContent as { files: { path: string; content: string }[] };
+              expect(read.files.map((file) => file.path)).toEqual([
+                "SKILL.md",
+                "references/design.md",
+              ]);
+              expect(read.files[1]!.content).toContain("## Signs of a generated page");
             }
           }
         }

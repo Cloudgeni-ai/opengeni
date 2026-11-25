@@ -6,6 +6,7 @@ import { HTTPException } from "hono/http-exception";
 import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
+import { ApiHttpError } from "../src/http/api-error";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import {
@@ -1304,6 +1305,63 @@ describe("BrowserSession route discipline", () => {
     expect(browserTabDiagnosisError(uncertain)).toBe(uncertain);
   });
 
+  test("publishes a page that did not load in time as the website's failure, not a workspace outage", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const notAnswered = new BrowserControlRequestError(
+      504,
+      {
+        code: "timeout",
+        message:
+          "browser could not load the requested URL: its server did not respond within 20 seconds",
+        retryable: false,
+      },
+      null,
+      "destination_not_answered",
+    );
+    app.post("/v1/test/open-tab-not-answered", () => {
+      throw browserRouteError(notAnswered);
+    });
+    const response = await app.request("http://localhost/v1/test/open-tab-not-answered", {
+      method: "POST",
+      headers: { "x-opengeni-correlation-id": "open-tab-request" },
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 504,
+        code: "upstream_unavailable",
+        message:
+          "browser could not load the requested URL: its server did not respond within 20 seconds",
+        retryable: false,
+        requestId: "open-tab-request",
+      },
+    });
+    for (const message of [
+      "browser navigation did not commit a new page in time and was stopped; the tab still shows its previous page",
+      "browser navigation timed out",
+    ]) {
+      const projected = browserRouteError(
+        new BrowserControlRequestError(504, { code: "timeout", message, retryable: false }),
+      );
+      expect(projected).toBeInstanceOf(ApiHttpError);
+      expect(projected.message).toBe(message);
+    }
+    // Any other controller timeout keeps the ordinary envelope, which never
+    // publishes a driver's free-form message.
+    const other = new BrowserControlRequestError(504, {
+      code: "timeout",
+      message: "browser navigation timed out at PRIVATE /home/user/profile",
+      retryable: true,
+    });
+    expect(browserTabDiagnosisError(other)).toBe(other);
+  });
+
   test("publishes a crashed tab as its own definite diagnosis, not a retryable outage", async () => {
     const app = createApp({
       settings: testSettings(),
@@ -1575,6 +1633,23 @@ describe("BrowserSession route discipline", () => {
     expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
     expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  test("browser screenshot response relays what a full-page capture left out", async () => {
+    const frame = {
+      data: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+      mediaType: "image/jpeg" as const,
+      metadataHeader: "frame-metadata",
+    };
+    const full = browserScreenshotResponse({
+      ...frame,
+      inexactScrollbars: true,
+      hiddenScrolledHeight: 1604,
+    });
+    expect(full.headers.get("x-opengeni-browser-frame-note")).toBe("inexact-scrollbars");
+    expect(full.headers.get("x-opengeni-browser-frame-hidden-scrolled-height")).toBe("1604");
+    const viewport = browserScreenshotResponse(frame);
+    expect(viewport.headers.get("x-opengeni-browser-frame-hidden-scrolled-height")).toBeNull();
   });
 
   test("registers the complete lifecycle, semantic control, diagnostics, and frame surface", async () => {

@@ -27,6 +27,32 @@ setDefaultTimeout(180_000);
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
+/**
+ * Use a value by reference, the way browser typing and tools do. Agents never
+ * see connected-vault values (nobody saved them in Opengeni, and agents get no
+ * admin visibility), but they can always use them.
+ */
+async function useValue(
+  deps: { db: DbClient["db"]; encryptionKey: Uint8Array },
+  principal: SecretPrincipal,
+  providers: ReturnType<typeof createVaultProviderRegistry>,
+  reference: string,
+): Promise<string> {
+  const resolver = createSecretResolver(deps, principal, {
+    capabilityEnabled: true,
+    providersForSubject: () => providers,
+  });
+  const resolved = await resolver.resolve(
+    [parseSecretReference(["{{secret", `${reference}}}`].join(":"))],
+    {
+      surface: "browser",
+      toolName: "browser_act",
+    },
+  );
+  const material = [...resolved.values()][0]!.material as { value: string };
+  return material.value;
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("vault-provider-writes");
   if (!shared) {
@@ -269,21 +295,50 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       });
       expect(copied.item.vaultId).toBe(local.id);
       expect(await host.listItems(ctx, "host-rw")).toHaveLength(1);
-      const read = await service.readForAgent(
-        principal,
-        { reference: "Team/Billing login copy/password" },
-        ["secrets:read"],
-      );
-      expect(read.value).toBe("move-me-correct-horse");
+      // The agent couldn't see the connected item, so its copy is use-only.
+      await expect(
+        service.readForAgent(principal, { reference: "Team/Billing login copy/password" }, [
+          "secrets:read",
+        ]),
+      ).rejects.toMatchObject({
+        code: "vault_permission_denied",
+        details: expect.objectContaining({ reason: "use_only" }),
+      });
+      expect(
+        await useValue(
+          { db, encryptionKey: key },
+          principal,
+          providers,
+          "Team/Billing login copy/password",
+        ),
+      ).toBe("move-me-correct-horse");
 
-      // A read-only connected vault never receives items.
+      // A read-only connected vault never receives items, even ones the agent can see.
+      await service.saveForAgent(
+        principal,
+        SecretSaveInput.parse({
+          item: "Spare login",
+          vault: "Team",
+          type: "login",
+          fields: [{ name: "password", value: "spare" }],
+          mode: "create",
+        }),
+      );
+      await expect(
+        service.moveForAgent(principal, {
+          reference: "Team/Spare login",
+          toVault: "Host RO",
+          mode: "move",
+        }),
+      ).rejects.toMatchObject({ code: "vault_read_only" });
+      // A connected item the agent can't see is refused before that.
       await expect(
         service.moveForAgent(principal, {
           reference: "Host RW/Billing login",
           toVault: "Host RO",
           mode: "move",
         }),
-      ).rejects.toMatchObject({ code: "vault_read_only" });
+      ).rejects.toMatchObject({ code: "vault_permission_denied" });
       expect(await host.listItems(ctx, "host-ro")).toEqual([]);
     });
 
@@ -374,8 +429,18 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         }),
       );
       expect(apiKey.item).toMatchObject({ vaultId: vault.id, type: "api_key" });
-      const read = (reference: string) =>
-        service.readForAgent(principal, { reference }, ["secrets:read"]);
+      // Agents can't see connected-vault values, only use them.
+      await expect(
+        service.readForAgent(principal, { reference: "Files/Payments API/credential" }, [
+          "secrets:read",
+        ]),
+      ).rejects.toMatchObject({
+        code: "vault_permission_denied",
+        details: expect.objectContaining({ reason: "use_without_reveal" }),
+      });
+      const read = async (reference: string) => ({
+        value: await useValue({ db, encryptionKey: key }, principal, providers, reference),
+      });
       expect((await read("Files/Payments API/credential")).value).toBe("sk_test_123");
       // Another manager names the same secret `password` or `value`; the reference still works.
       expect((await read("Files/Payments API/password")).value).toBe("sk_test_123");
@@ -548,8 +613,8 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       await syncLinkedProviderVault({ db, context, vaultId: typed.id, providers, force: true });
       const save = (input: Record<string, unknown>) =>
         service.saveForAgent(principal, SecretSaveInput.parse({ mode: "create", ...input }));
-      const read = async (reference: string) =>
-        (await service.readForAgent(principal, { reference }, ["secrets:read"])).value;
+      const read = (reference: string) =>
+        useValue({ db, encryptionKey: key }, principal, providers, reference);
 
       // A card in an Opengeni vault: other managers' field names land in the standard slots.
       const card = await save({
@@ -613,6 +678,12 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         Warehouse: ["api_key", "database"],
       });
       expect(await read("Typed/Deploy key/private key")).toBe(privateKey);
+      // Moved into a password manager, the agent can still use it but not see it.
+      await expect(
+        service.readForAgent(principal, { reference: "Typed/Deploy key/private key" }, [
+          "secrets:read",
+        ]),
+      ).rejects.toMatchObject({ code: "vault_permission_denied" });
       expect(await read("Typed/Company card/security code")).toBe("123");
       expect(await read("Typed/Warehouse/password")).toBe("warehouse-secret");
 

@@ -5,6 +5,7 @@ import {
   canonicalSecretPermissions,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
+import { commentOnRefusedPullRequests } from "../scheduled-refusal-pr-comments";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
 export { scheduledTaskSessionTitle } from "./scheduled-task-title";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
@@ -2520,6 +2521,33 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const result = await retryScheduledTaskAdmission(() =>
         activities.dispatchScheduledTaskRun(input),
       );
+      // A pull request event's run that was refused before its chat started
+      // says so on the pull request (scheduled-refusal-pr-comments.ts). Best
+      // effort and not awaited: GitHub's latency never holds up dispatch.
+      if (input.triggerType === "event" && result.action === "blocked") {
+        let producerKey: string | null = null;
+        try {
+          producerKey = scheduledTaskRunProducerKey(input);
+        } catch {
+          producerKey = null;
+        }
+        if (producerKey) {
+          const key = producerKey;
+          void services()
+            .then(({ db, settings, observability }) =>
+              commentOnRefusedPullRequests(
+                {
+                  db,
+                  settings,
+                  lookup: eventRepositoryLookup(settings),
+                  warn: (message, fields) => observability.warn(message, fields),
+                },
+                { workspaceId: input.workspaceId, taskId: input.taskId, producerKey: key },
+              ),
+            )
+            .catch(() => undefined);
+        }
+      }
       // A one-time event automation (such as a Linked panel wake) woke an
       // existing chat that started in a Slack thread: its answer goes back to
       // that thread. Recurring automations into the chat don't. Best effort;
