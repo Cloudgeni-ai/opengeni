@@ -821,6 +821,48 @@ describe("Codex rows", () => {
     });
   }
 
+  test("a saved reading shows its age; a fresh one doesn't", async () => {
+    for (const hoursAgo of [16, 0]) {
+      const fetchedAt = new Date(Date.now() - hoursAgo * 60 * 60_000).toISOString();
+      const overview = overviewFor("acct-1", 75);
+      const usage = overview.accounts["acct-1"]!.usage;
+      overview.accounts["acct-1"]!.usage = {
+        ...usage,
+        source: hoursAgo ? "cache" : "provider",
+        stale: hoursAgo > 0,
+        fetchedAt,
+        value: { ...usage.value!, fetchedAt },
+      };
+      client.codexOverview.mockImplementation(async () => overview);
+      const view = await render();
+      try {
+        expect(view.container.textContent).toContain("75% left");
+        const checked = view.container.querySelector('[data-slot="subscription-usage-checked"]');
+        if (hoursAgo) expect(checked?.textContent).toMatch(/^Checked .*16/);
+        else expect(checked).toBeNull();
+      } finally {
+        await cleanup(view);
+      }
+    }
+  });
+
+  test("an account Opengeni saw used never reads as unused", async () => {
+    client.listCodexAccounts.mockImplementation(async () => ({
+      ...accounts,
+      accounts: [
+        codexAccount({ usageCheckedAt: new Date(Date.now() - 60 * 60_000).toISOString() }),
+      ],
+    }));
+    client.codexOverview.mockImplementation(async () => overviewFor("acct-1", null));
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain("No recent reading");
+      expect(view.container.textContent).not.toContain("No usage yet");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   for (const outcome of ["weekly", "empty", "error"] as const) {
     test(`waits for the live overview without flashing cached limits: ${outcome}`, async () => {
       let resolve!: (value: CodexOverviewResponse) => void;
