@@ -3801,10 +3801,10 @@ export function SessionList() {
     const observer = new ResizeObserver(schedule);
     observer.observe(viewport);
     observer.observe(list);
-    const rail = viewport.parentElement;
+    const railColumn = viewport.parentElement;
     const appsSlot = railAppsSlot(viewport);
-    if (rail && appsSlot) {
-      observer.observe(rail);
+    if (railColumn && appsSlot) {
+      observer.observe(railColumn);
       observer.observe(appsSlot);
     }
     return () => {
