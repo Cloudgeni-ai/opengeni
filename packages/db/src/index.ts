@@ -47,7 +47,11 @@ export * from "./session-target";
 export * from "./session-resource-removal";
 export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
-import { projectPersonalGitHubDelegationsOntoResources } from "./personal-github-delegation-projection";
+import {
+  droppedPersonalGitHubOwner,
+  ownPersonalGitHubDelegation,
+  projectPersonalGitHubDelegationsOntoResources,
+} from "./personal-github-delegation-projection";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
@@ -85655,12 +85659,49 @@ export async function claimSessionWorkForAttempt(
           );
           // The receiving context's own authority already fits this session;
           // a sender's (an agent message or steer) is fitted to its repositories.
-          const internalPersonalConnectionDelegations = receiverContext
+          let internalPersonalConnectionDelegations = receiverContext
             ? frozenPersonalConnectionDelegations
             : projectPersonalGitHubDelegationsOntoResources(
                 frozenPersonalConnectionDelegations,
                 session.resources,
               );
+          const droppedGitHubOwner = receiverContext
+            ? null
+            : droppedPersonalGitHubOwner(
+                frozenPersonalConnectionDelegations,
+                internalPersonalConnectionDelegations,
+              );
+          if (droppedGitHubOwner) {
+            // Outside the sender's authority: keep what the same person
+            // already gave this chat, so its repositories keep working.
+            const recent = await tx
+              .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.initiatingHumanSubjectId, droppedGitHubOwner),
+                ),
+              )
+              .orderBy(desc(schema.sessionTurns.position))
+              .limit(20);
+            const own = ownPersonalGitHubDelegation(
+              recent.map((row) =>
+                parsedPersonalConnectionDelegations(
+                  row.delegations,
+                  `session_turns:${workspaceId}:${sessionId}:own-github`,
+                ),
+              ),
+              droppedGitHubOwner,
+              session.resources,
+            );
+            if (own)
+              internalPersonalConnectionDelegations = [
+                ...internalPersonalConnectionDelegations,
+                own,
+              ];
+          }
           const internalXaiAuthority = receiverContext
             ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
             : frozenXaiExecutionAuthority(authorityUpdate);

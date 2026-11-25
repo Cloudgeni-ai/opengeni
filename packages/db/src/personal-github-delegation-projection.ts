@@ -77,11 +77,50 @@ export function projectPersonalGitHubDelegationsOntoResources(
   });
 }
 
+/** The owner whose Your GitHub delegation the fit dropped, if it dropped one. */
+export function droppedPersonalGitHubOwner(
+  before: readonly McpPersonalConnectionDelegation[],
+  after: readonly McpPersonalConnectionDelegation[],
+): string | null {
+  const isPersonalGitHub = (delegation: McpPersonalConnectionDelegation) =>
+    delegation.connectionType === "github_personal" &&
+    delegation.personalGitHubRepositorySelection !== undefined;
+  const dropped = before.find(isPersonalGitHub);
+  return dropped && !after.some(isPersonalGitHub) ? dropped.ownerSubjectId : null;
+}
+
+/**
+ * The receiving session's own Your GitHub delegation for the same person,
+ * newest first, fitted to its repositories: what that person already gave
+ * this chat, so a message from a session with fewer repositories doesn't take
+ * this chat's GitHub away. Null when none fits.
+ */
+export function ownPersonalGitHubDelegation(
+  history: readonly (readonly McpPersonalConnectionDelegation[])[],
+  ownerSubjectId: string,
+  resources: readonly unknown[],
+): McpPersonalConnectionDelegation | null {
+  for (const delegations of history) {
+    const own = delegations.find(
+      (delegation) =>
+        delegation.connectionType === "github_personal" &&
+        delegation.ownerSubjectId === ownerSubjectId &&
+        delegation.personalGitHubRepositorySelection !== undefined,
+    );
+    if (!own) continue;
+    const [fitted] = projectPersonalGitHubDelegationsOntoResources([own], resources);
+    if (fitted) return fitted;
+  }
+  return null;
+}
+
 function gitHubFullName(uri: string): string | null {
   try {
     const url = new URL(uri);
     if (url.hostname !== "github.com") return null;
-    const path = url.pathname.split("/").filter(Boolean).join("/");
+    const clonePath = url.pathname.split("/").filter(Boolean).join("/");
+    // The same name the worker derives: a clone URL's ".git" is not part of it.
+    const path = clonePath.endsWith(".git") ? clonePath.slice(0, -4) : clonePath;
     return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(path) ? path : null;
   } catch {
     return null;

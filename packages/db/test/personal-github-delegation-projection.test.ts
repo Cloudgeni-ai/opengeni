@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import type { McpPersonalConnectionDelegation, ResourceRef } from "@opengeni/contracts";
-import { projectPersonalGitHubDelegationsOntoResources } from "../src/personal-github-delegation-projection";
+import {
+  droppedPersonalGitHubOwner,
+  ownPersonalGitHubDelegation,
+  projectPersonalGitHubDelegationsOntoResources,
+} from "../src/personal-github-delegation-projection";
 
 const BINDING = "bbc6992f-3363-4bc3-87a5-2d2daa074318";
 
@@ -95,6 +99,44 @@ test("never beyond the sender's authority: the turn runs without Your GitHub ins
       [repository("cloudgeni", "2", "write")],
     ),
   ).toEqual([]);
+});
+
+test("a clone URL ending in .git fits with the worker's canonical name", () => {
+  const [projected] = projectPersonalGitHubDelegationsOntoResources(
+    [delegation({ allRepositoriesAccess: "write" })],
+    [
+      {
+        ...repository("opengeni", "1", "write"),
+        uri: "https://github.com/Cloudgeni-ai/opengeni.git",
+      },
+    ],
+  );
+  expect(projected?.personalGitHubRepositorySelection?.repositories[0]?.fullName).toBe(
+    "Cloudgeni-ai/opengeni",
+  );
+});
+
+test("a dropped sender delegation falls back to the chat's own Your GitHub for the same person", () => {
+  const sender = [delegation({ repositories: [held] })];
+  const resources = [repository("opengeni", "1", "write"), repository("cloudgeni", "2", "write")];
+  const fitted = projectPersonalGitHubDelegationsOntoResources(sender, resources);
+  expect(fitted).toEqual([]);
+  expect(droppedPersonalGitHubOwner(sender, fitted)).toBe("user:bendik");
+  expect(droppedPersonalGitHubOwner(sender, sender)).toBeNull();
+
+  const own = delegation({ allRepositoriesAccess: "write" });
+  const other = { ...own, ownerSubjectId: "user:other" } as McpPersonalConnectionDelegation;
+  // Newest first; another person's and non-fitting entries are skipped.
+  const restored = ownPersonalGitHubDelegation(
+    [[other], [delegation({ repositories: [held] })], [own]],
+    "user:bendik",
+    resources,
+  );
+  expect(restored?.personalGitHubRepositorySelection?.repositories.map((r) => r.fullName)).toEqual([
+    "Cloudgeni-ai/opengeni",
+    "Cloudgeni-ai/cloudgeni",
+  ]);
+  expect(ownPersonalGitHubDelegation([[other]], "user:bendik", resources)).toBeNull();
 });
 
 test("other delegations pass through; no personal repositories keeps only All my repositories", () => {
