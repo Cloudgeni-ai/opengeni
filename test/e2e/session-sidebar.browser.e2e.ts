@@ -1040,7 +1040,7 @@ test("with apps not grouped, the list waits for that choice instead of drawing a
 const appsSection = () => sidebar().getByRole("region", { name: "Apps", exact: true });
 const sessionsList = () => sidebar().getByRole("region", { name: "Sessions", exact: true });
 
-test("with apps in their own section, Apps is a peer section above Sessions", async () => {
+test("with apps in their own section, Apps is a peer section below Sessions", async () => {
   await page.setViewportSize({ width: 1160, height: 900 });
   await page.goto(`${url}?scenario=sites&theme=light&apps=section`, { timeout: 60_000 });
   await railConversation("Slack community connection test").waitFor();
@@ -1055,7 +1055,7 @@ test("with apps in their own section, Apps is a peer section above Sessions", as
     ).toBe(0);
   expect(await appsSection().locator("a[data-session-row]:not([data-site-row] a)").count()).toBe(0);
   expect(await appsSection().locator("[data-site-row]").count()).toBe(4);
-  // Above Sessions, with the same header and no divider; four apps need no Show more.
+  // Below Sessions, with the same header and no divider; four apps need no Show more.
   const header = (name: string) =>
     sidebar()
       .locator("span")
@@ -1068,12 +1068,15 @@ test("with apps in their own section, Apps is a peer section above Sessions", as
     });
   expect(await style("Apps")).toEqual(await style("Sessions"));
   const appsBox = (await appsSection().boundingBox())!;
-  const sessionsHeaderBox = (await header("Sessions").boundingBox())!;
-  expect(appsBox.y + appsBox.height).toBeLessThanOrEqual(sessionsHeaderBox.y);
-  expect(sessionsHeaderBox.y - (appsBox.y + appsBox.height)).toBeLessThan(16);
-  expect(await appsSection().evaluate((node) => getComputedStyle(node).borderBottomWidth)).toBe(
-    "0px",
-  );
+  const sessionsBox = (await sessionsList().boundingBox())!;
+  expect(appsBox.y).toBeGreaterThanOrEqual(sessionsBox.y + sessionsBox.height);
+  expect(appsBox.y - (sessionsBox.y + sessionsBox.height)).toBeLessThan(16);
+  expect(
+    await appsSection().evaluate((node) => {
+      const css = getComputedStyle(node);
+      return [css.borderTopWidth, css.borderBottomWidth];
+    }),
+  ).toEqual(["0px", "0px"]);
   expect(
     await appsSection()
       .getByRole("button", { name: /^Show / })
@@ -1087,7 +1090,7 @@ test("with apps in their own section, Apps is a peer section above Sessions", as
     await appsSection()
       .getByRole("link", { name: new RegExp(`^Open ${title}\\.`) })
       .waitFor();
-  // The keyboard moves through its chats, and on from the section into Sessions.
+  // The keyboard moves through its chats, and on from Sessions into the section.
   const appChat = (title: string) =>
     appsSection().getByRole("link", { name: new RegExp(`^Open ${title}\\.`) });
   await appChat(usageConversations[0]!).focus();
@@ -1098,15 +1101,17 @@ test("with apps in their own section, Apps is a peer section above Sessions", as
   expect(
     await appChat(usageConversations[1]!).evaluate((row) => row === document.activeElement),
   ).toBe(true);
-  await appsSection().locator("a[data-session-row]").last().focus();
+  await sessionsList().locator("a[data-session-row]").last().focus();
   await page.keyboard.press("ArrowDown");
-  await page.waitForFunction(() => {
-    const active = document.activeElement;
-    return (
-      active?.matches("a[data-session-row]") === true &&
-      active.closest("[data-sessions-apps-section]") === null
-    );
-  });
+  await page.waitForFunction(
+    () => document.activeElement?.closest("[data-sessions-apps-section]") !== null,
+  );
+  expect(
+    await appsSection()
+      .locator("a[data-session-row]")
+      .first()
+      .evaluate((row) => row === document.activeElement),
+  ).toBe(true);
 
   // The view menu moves apps back into Sessions: no Apps section, app rows in the list.
   await page.getByRole("button", { name: /^Session view/ }).click();
@@ -1129,13 +1134,11 @@ test("the Apps section shows its first five apps and Show more for the rest", as
   });
   await appsSection().locator("[data-site-row]").first().waitFor();
   expect(await appsSection().locator("[data-site-row]").count()).toBe(5);
-  // Sessions stays in view without scrolling.
+  // Five apps and Show more stay in view below Sessions without scrolling.
   await railConversation("Slack community connection test").waitFor();
-  const sessionsHeader = sidebar()
-    .locator("span")
-    .filter({ hasText: /^Sessions$/ })
-    .first();
-  expect((await sessionsHeader.boundingBox())!.y).toBeLessThan(900 / 2);
+  const more = appsSection().getByRole("button", { name: "Show 2 more", exact: true });
+  const moreBox = (await more.boundingBox())!;
+  expect(moreBox.y + moreBox.height).toBeLessThanOrEqual(900);
   await capture("apps-section-more");
   await appsSection().getByRole("button", { name: "Show 2 more", exact: true }).click();
   await appsSection().getByRole("button", { name: "Show less", exact: true }).waitFor();
@@ -1162,6 +1165,9 @@ test("with an Apps section, Sessions still fills the rail's spare height", async
     );
   }
   await appsSection().locator("[data-site-row]").first().waitFor();
+  // Filling leaves room for the Apps section below it.
+  const appsBox = (await appsSection().boundingBox())!;
+  expect(appsBox.y + appsBox.height).toBeLessThanOrEqual(1400);
 }, 90_000);
 
 test("the Apps section at desktop and phone widths", async () => {

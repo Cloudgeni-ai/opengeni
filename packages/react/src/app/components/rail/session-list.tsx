@@ -1820,7 +1820,8 @@ export function SessionList() {
   const appsSectionNodes = useMemo(() => {
     if (!appNodes) return null;
     const all = [...appNodes.pinned, ...appNodes.rest];
-    if (appsShowAll || all.length <= APPS_SECTION_ROWS) return { shown: all, hidden: 0 };
+    if (all.length <= APPS_SECTION_ROWS) return { shown: all, hidden: 0, more: false };
+    if (appsShowAll) return { shown: all, hidden: 0, more: true };
     const shown = all.slice(0, APPS_SECTION_ROWS);
     const open = all
       .slice(APPS_SECTION_ROWS)
@@ -1829,10 +1830,8 @@ export function SessionList() {
           (activeSiteId !== null && node.siteGroup?.siteId === activeSiteId) ||
           findSessionTreeNode([node], activeSessionId) !== null,
       );
-    return {
-      shown: open ? [...shown, open] : shown,
-      hidden: all.length - shown.length - (open ? 1 : 0),
-    };
+    const hidden = all.length - shown.length - (open ? 1 : 0);
+    return { shown: open ? [...shown, open] : shown, hidden, more: hidden > 0 };
   }, [appNodes, appsShowAll, activeSessionId, activeSiteId]);
   // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
   const pinnedChatNodes = useMemo(
@@ -2865,15 +2864,15 @@ export function SessionList() {
               const selected = findSessionTreeNode(archivedNodes, activeSessionId);
               return selected ? [{ node: selected, depth: 0 }] : [];
             })();
-    // The Apps section comes before the list.
+    // The Apps section comes after the list.
     const appSectionRows = appsSectionNodes
       ? visibleTreeRows(appsSectionNodes.shown, expanded, activeSessionId)
       : [];
     return [
-      ...appSectionRows,
       ...visibleTreeRows(pinnedNodes, expanded, activeSessionId),
       ...ordinaryRows,
       ...archiveRows,
+      ...appSectionRows,
     ].filter(({ node }) => {
       if (seen.has(node.session.id)) return false;
       seen.add(node.session.id);
@@ -3781,8 +3780,10 @@ export function SessionList() {
     archiveFillFreeze.current = null;
     const previousHeight = lastFillViewportHeight.current;
     lastFillViewportHeight.current = viewportHeight;
+    // The Apps section follows the list, so the list fills only what it leaves.
+    const apps = appsListRef.current?.closest<HTMLElement>("[data-sessions-apps-section]");
     const contentBottom =
-      list.getBoundingClientRect().bottom -
+      Math.max(list.getBoundingClientRect().bottom, apps?.getBoundingClientRect().bottom ?? 0) -
       viewport.getBoundingClientRect().top +
       viewport.scrollTop;
     const free = viewportHeight - contentBottom;
@@ -3821,6 +3822,26 @@ export function SessionList() {
       if (frame) cancelAnimationFrame(frame);
     };
   }, [measureFill]);
+  // The Apps section resizes on Show more and when an app opens.
+  const appsSectionShown =
+    appsSectionNodes !== null && appsSectionNodes.shown.length > 0 && !appRowsPending;
+  useEffect(() => {
+    const apps = appsListRef.current?.closest<HTMLElement>("[data-sessions-apps-section]");
+    if (!appsSectionShown || !apps || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measureFill();
+      });
+    });
+    observer.observe(apps);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [appsSectionShown, measureFill]);
   const fillSignature = fillTargets
     .map(
       (target) =>
@@ -4030,7 +4051,7 @@ export function SessionList() {
         .
       </p>
     ) : null;
-  // Apps in a section of their own: a peer of Sessions, above it, with the
+  // Apps in a section of their own: a peer of Sessions, below it, with the
   // same header. It shows only when it lists apps.
   const appsSectionId = useId();
   const appsGroupProps = {
@@ -4052,11 +4073,11 @@ export function SessionList() {
     onRequestDelete: setSessionPendingDelete,
   };
   const appsSectionView =
-    appsSectionNodes && appsSectionNodes.shown.length > 0 && !appRowsPending ? (
+    appsSectionShown && appsSectionNodes ? (
       <section
         aria-labelledby={`${appsSectionId}-title`}
         data-sessions-apps-section
-        className="mb-2 min-w-0 shrink-0"
+        className="min-w-0 shrink-0"
       >
         <div className="mb-1 flex min-w-0 items-center gap-1 pl-[18px] pr-3 pt-1">
           <span
@@ -4074,7 +4095,7 @@ export function SessionList() {
             nodes={appsSectionNodes.shown}
             {...appsGroupProps}
           />
-          {appsSectionNodes.hidden > 0 || appsShowAll ? (
+          {appsSectionNodes.more ? (
             <div className="px-2 text-center">
               <button
                 type="button"
@@ -4095,7 +4116,6 @@ export function SessionList() {
     <SiteRowActionsContext.Provider value={siteRowActions}>
       <WorkstreamRootsContext.Provider value={workstreamRoots}>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {appsSectionView}
           <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
             <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
               {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
@@ -4523,6 +4543,7 @@ export function SessionList() {
               </>
             )}
           </div>
+          {appsSectionView}
           {projectPendingEdit ? (
             <ProjectProfileDialog
               key={projectPendingEdit.id}
@@ -6064,12 +6085,12 @@ function RowActionsMenu({
   );
 }
 
-/** Where the list's rows are: the Apps section when it shows, then the list. */
+/** Where the list's rows are: the list, then the Apps section when it shows. */
 function sessionRowRoots(list: HTMLElement | null, apps: HTMLElement | null): HTMLElement[] {
-  return [apps, list].filter((root): root is HTMLElement => root !== null);
+  return [list, apps].filter((root): root is HTMLElement => root !== null);
 }
 
-/** The Apps section's key among the list's collapsed sections (projects use their ids). */
+/** How many apps the Apps section shows before Show more. */
 const APPS_SECTION_ROWS = 5;
 
 /** An app row with a chat that needs the person, for the Apps section's Needs you. */

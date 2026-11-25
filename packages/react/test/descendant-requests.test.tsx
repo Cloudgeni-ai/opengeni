@@ -622,6 +622,48 @@ describe("DescendantRequests", () => {
     );
   });
 
+  test("a card-only wait can be dismissed until the sub-session waits again", async () => {
+    const waiting = (overrides: Record<string, unknown> = {}) =>
+      summary("child", {
+        title: "Agents worker",
+        status: "idle",
+        requiresActionSince: null,
+        awaitingConnectionSince: "2026-11-24T21:49:15.000Z",
+        ...overrides,
+      });
+    const { client } = fakeClient({});
+    await render({ client, waiting: [waiting()] });
+    expect(container().textContent).toContain("Agents worker needs you");
+    const dismiss = container().querySelector<HTMLButtonElement>(
+      'button[aria-label="Dismiss: Agents worker"]',
+    );
+    expect(dismiss).not.toBeNull();
+    await click(dismiss!);
+    expect(container().querySelector("[data-descendant-requests]")).toBeNull();
+
+    // Coming back to the parent keeps it dismissed.
+    await mounted!.unmount();
+    mounted = null;
+    await render({ client, waiting: [waiting()] });
+    expect(container().querySelector("[data-descendant-requests]")).toBeNull();
+
+    // A new wait shows again.
+    await mounted!.unmount();
+    mounted = null;
+    await render({
+      client,
+      waiting: [waiting({ awaitingConnectionSince: "2026-11-25T08:00:00.000Z" })],
+    });
+    expect(container().textContent).toContain("Agents worker needs you");
+  });
+
+  test("a question or an approval offers no dismiss", async () => {
+    const child = summary("child", { title: "Asking worker" });
+    const { client } = fakeClient({ requests: { child: [request("child")] } });
+    await render({ client, waiting: [child] });
+    expect(container().querySelector('button[aria-label^="Dismiss:"]')).toBeNull();
+  });
+
   test("stacks several waiting sub-sessions under one line that collapses", async () => {
     const first = summary("first", { title: "First worker" });
     const second = summary("second", { title: "Second worker" });
