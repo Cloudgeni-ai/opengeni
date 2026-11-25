@@ -1916,6 +1916,11 @@ describe("Share targets", () => {
       meetingShareTargets(meeting("workspace", "s"), [personal, sales, design], "Workspace")
         .current,
     ).toBe("s");
+    // Shared with a workspace where they can no longer start work, it still says so.
+    expect(
+      meetingShareTargets(meeting("workspace", "d"), [personal, sales, design], "Workspace")
+        .current,
+    ).toBe("d");
   });
 
   test("shared with a workspace its owner has left reads Only me", () => {

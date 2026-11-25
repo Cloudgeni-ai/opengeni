@@ -334,13 +334,30 @@ test("a Personal workspace meeting shared with a team workspace opens there, rea
     ).rejects.toThrow();
   }
 
+  // A share left behind while it was Only me (by an older server) never comes
+  // back by itself: sharing it again names the workspace.
+  expect((await share(personal, customer, { sharedWorkspaceId: sales })).status).toBe(200);
+  await shared.admin`update recordings set visibility = 'user_private' where id = ${customer}`;
+  expect(await share(personal, customer, { visibility: "workspace" })).toMatchObject({
+    status: 200,
+    body: { sharedWorkspaceId: null },
+  });
+  expect((await at(seller, sales, "GET", `/recordings/${customer}`)).status).toBe(404);
+  expect((await share(personal, customer, { visibility: "private" })).status).toBe(200);
+  // No workspace named shares nothing.
+  expect((await share(team, teamOwn, { visibility: "private" })).status).toBe(200);
+  expect(await share(team, teamOwn, { sharedWorkspaceId: null })).toMatchObject({
+    status: 200,
+    body: { visibility: "private" },
+  });
+
   // Its owner leaving the workspace ends the share.
   expect((await share(personal, customer, { sharedWorkspaceId: team })).status).toBe(200);
   expect((await at(colleague, team, "GET", `/recordings/${customer}`)).status).toBe(200);
   await shared.admin`delete from workspace_memberships
     where workspace_id = ${team} and subject_id = ${owner.subjectId}`;
   expect((await at(colleague, team, "GET", `/recordings/${customer}`)).status).toBe(404);
-  expect(ids(await at(colleague, team, "GET", "/recordings"))).toEqual([teamOwn]);
+  expect(ids(await at(colleague, team, "GET", "/recordings"))).toEqual([]);
 
   // Deleting the meeting removes the share.
   await shared.admin`delete from recordings where id = ${customer}`;

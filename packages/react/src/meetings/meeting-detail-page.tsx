@@ -552,7 +552,12 @@ export function meetingShareTargets(
   const personal = stored?.personal === true;
   const targets = personal
     ? (workspaces ?? [])
-        .filter((workspace) => workspace.personal !== true && workspace.shareable !== false)
+        .filter(
+          (workspace) =>
+            workspace.personal !== true &&
+            // Where it is shared stays listed, so the menu says so.
+            (workspace.shareable !== false || workspace.id === recording.sharedWorkspaceId),
+        )
         .map(({ id, name }) => ({ id, name }))
     : [
         {

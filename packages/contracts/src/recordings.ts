@@ -575,7 +575,8 @@ export const UpdateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
        * Only the owner, sharing a meeting stored in their Personal workspace:
        * the team workspace of the organization to share it with (it implies
        * `visibility: "workspace"`). Its members can then open it there, read
-       * only. Null or the storing workspace shares it where it is stored.
+       * only. With `visibility: "workspace"`, null or the storing workspace
+       * shares it where it is stored.
        */
       sharedWorkspaceId: z.string().uuid().nullable().optional(),
       externalRef: externalRef.nullable().optional(),

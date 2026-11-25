@@ -1122,8 +1122,7 @@ export function registerRecordingRoutes(
     if (sharedWorkspaceId && body.visibility === "private") {
       throw invalid("sharedWorkspaceId needs visibility workspace");
     }
-    const visibility =
-      body.sharedWorkspaceId !== undefined ? (body.visibility ?? "workspace") : body.visibility;
+    const visibility = body.sharedWorkspaceId ? (body.visibility ?? "workspace") : body.visibility;
     // Sharing without naming a workspace shares with the one that stores the
     // meeting, so it is done there, where everyone it is shared with sees it.
     if (

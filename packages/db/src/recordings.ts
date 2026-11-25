@@ -1152,7 +1152,10 @@ export async function updateRecording(
       (visibility ?? row.visibility) !== "workspace_shared"
         ? null
         : input.sharedWorkspaceId === undefined
-          ? currentShare
+          ? // A share left behind while it was Only me never comes back by itself.
+            row.visibility === "workspace_shared"
+            ? currentShare
+            : null
           : input.sharedWorkspaceId && input.sharedWorkspaceId !== row.workspaceId
             ? input.sharedWorkspaceId
             : null;

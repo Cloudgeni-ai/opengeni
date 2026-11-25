@@ -31,8 +31,9 @@ lists and opens it (transcript, notes, speakers, Ask about it) and agents
 there find it with `meetings_search`, read only: changes return 403 for anyone
 but the owner. Like any meeting shared with that workspace, whoever may read
 its shared meetings (an API key, a delegated token or an app's own users)
-reads it too. `sharedWorkspaceId` alone implies `visibility: "workspace"`, and
-`{ visibility: "private" }` unshares it. Deleting the meeting removes the
+reads it too. A workspace id in `sharedWorkspaceId` implies
+`visibility: "workspace"`, and `{ visibility: "private" }` unshares it;
+sharing it again names the workspace. Deleting the meeting removes the
 share. While the owner is not a member of the workspace it is shared with, it
 isn't shared there (their Share menu shows Only me); it is again if they
 rejoin, unless they chose Only me. Chats that wrote its notes stay the owner's. In
