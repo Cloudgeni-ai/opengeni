@@ -405,8 +405,9 @@ describe("published HTML artifacts", () => {
     }
   });
 
-  it("never holds the loading surface past its bound", async () => {
+  it("never holds the loading surface past its bound, and still shows a late frame-host failure", async () => {
     jest.useFakeTimers();
+    configureContentHosting({ htmlFrameHost: "http://127.0.0.1:9" });
     const preview = await mountInlinePreview();
     try {
       expect(preview.loading() !== null).toBe(true);
@@ -415,8 +416,13 @@ describe("published HTML artifacts", () => {
       await act(async () => jest.advanceTimersByTime(1));
       expect(preview.loading() === null).toBe(true);
       expect(preview.failure() === null).toBe(true);
+      // A hung host's page finally loads without announcing itself.
+      await act(async () => preview.fireLoad(preview.container.querySelector("iframe")!));
+      await act(async () => jest.advanceTimersByTime(HTML_FRAME_HOST_READY_GRACE_MS));
+      expect(preview.failure() !== null).toBe(true);
     } finally {
       jest.useRealTimers();
+      configureContentHosting({});
       await preview.cleanup();
     }
   });
