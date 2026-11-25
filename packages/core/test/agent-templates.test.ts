@@ -71,6 +71,23 @@ describe("ready-made agents", () => {
     expect(reviewer?.suggestedTriggers[0]?.oneClick).toBeUndefined();
   });
 
+  test("PR reviewer labels findings Critical, Bug or Nit and posts only Critical and Bug", () => {
+    const instructions = agentTemplateByKey("pr-reviewer")?.instructions ?? "";
+    expect(instructions).toContain(
+      "- Critical: security, data loss, outage, or a broken migration or public API.",
+    );
+    expect(instructions).toContain("- Bug: wrong behaviour in a realistic case.");
+    expect(instructions).toContain("- Nit: style or an optional improvement.");
+    expect(instructions).toContain("its category, the concrete case that triggers it");
+    expect(instructions).toContain("Post only Critical and Bug findings; leave nits out.");
+    expect(instructions).toContain(
+      "Comment on conventions only where the repo has written rules (AGENTS.md, lint config).",
+    );
+    // The rubric replaces the old labels and review levels.
+    expect(instructions).not.toContain("Blocker:");
+    expect(instructions).not.toContain("Review level");
+  });
+
   test("they stay general: no Opengeni-internal skills or names", () => {
     for (const template of agentTemplates()) {
       const text = JSON.stringify(template).toLowerCase();
