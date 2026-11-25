@@ -5799,7 +5799,7 @@ export const englishMessages = {
   "timeline.noticePresentation.youRejectedTitle": "You declined “{title}”.",
   "timeline.noticePresentation.youRejectedTitleWithDetail": "You declined “{title}” ({detail}).",
   "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
-  "timeline.noticePresentation.endedWithoutAnswer": "Ended without an answer.",
+  "timeline.noticePresentation.notAnswered": "Not answered.",
   "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
   "timeline.patchApplyCommand.copiedPasteItInA":

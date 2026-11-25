@@ -5467,6 +5467,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
             "mt-0.5 size-4 shrink-0",
             (item.tone === "cancelled" || resolvedApproval) && "opacity-60",
           )}
+          aria-hidden="true"
         />
       )}
       <div className="min-w-0 flex-1">

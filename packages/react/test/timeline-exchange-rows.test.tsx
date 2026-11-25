@@ -408,11 +408,11 @@ describe("readable per-turn rows", () => {
       return { text, checked };
     };
     const unanswered = await render(false);
-    expect(unanswered.text).toContain("Ended without an answer.");
+    expect(unanswered.text).toContain("Not answered.");
     expect(unanswered.text).not.toContain("You responded");
     expect(unanswered.checked).toBe(false);
     const answered = await render(true);
-    expect(answered.text).not.toContain("Ended without an answer.");
+    expect(answered.text).not.toContain("Not answered.");
     expect(answered.checked).toBe(true);
   });
 

@@ -314,7 +314,8 @@ export function buildTimeline(
   // Open approval waits by the approval ids they ask about, so the person's
   // answer is on the wait the moment it is recorded, before work resumes.
   // A restarted worker can ask the same approvals again before they are
-  // answered, so an id can name several waits, oldest first.
+  // answered: an id names every wait still open when it was asked again,
+  // oldest first, and an answer is on all of them.
   const approvalWaitsById = new Map<string, Array<{ notice: NoticeItem; turnId: string | null }>>();
   // Each turn's latest approval wait, for a decision that names none of its
   // actions, with the one approval id an older request may carry instead.
@@ -1595,7 +1596,10 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         for (const action of approvalActions) {
-          const waits = approvalWaitsById.get(action.id) ?? [];
+          // A wait that had already ended is a separate ask, not this one again.
+          const waits = (approvalWaitsById.get(action.id) ?? []).filter(
+            (wait) => !wait.notice.resolvedAt,
+          );
           waits.push({ notice, turnId });
           approvalWaitsById.set(action.id, waits);
         }
@@ -1643,13 +1647,7 @@ export function buildTimeline(
           break;
         }
         approvalWaitsById.delete(approvalId);
-        // The latest wait that asked it gets the answer, and so does every
-        // earlier one asking it again that is still open (a re-ask). A wait that
-        // already ended without an answer keeps saying so.
-        const answered = waits.filter(
-          (wait, index) => index === waits.length - 1 || !wait.notice.resolvedAt,
-        );
-        for (const open of answered) {
+        for (const open of waits) {
           const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
           if (action) action.decision = decision;
           if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {

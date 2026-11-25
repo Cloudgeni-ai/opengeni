@@ -90,8 +90,8 @@ export function noticeDisplayText(
       return t("timeline.noticePresentation.declinedAutomatically");
     if (item.unmatchedDecision === "person")
       return t("timeline.noticePresentation.youRespondedToThisApproval");
-    // No answer was recorded: the wait ended some other way.
-    return t("timeline.noticePresentation.endedWithoutAnswer");
+    // No answer was recorded (the turn moved on without one).
+    return t("timeline.noticePresentation.notAnswered");
   }
   // Each answered action, by what it asked, in the host's words when it named the action.
   const titleOf = (action: ApprovalAction) =>

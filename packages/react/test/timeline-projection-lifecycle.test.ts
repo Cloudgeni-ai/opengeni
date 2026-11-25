@@ -160,7 +160,7 @@ describe("an answered approval", () => {
         event(4, "session.status.changed", { status: "running" }),
       ]),
     );
-    expect(noticeDisplayText(englishText, item)).toBe("Ended without an answer.");
+    expect(noticeDisplayText(englishText, item)).toBe("Not answered.");
     expect(noticeApprovalAnswered(item)).toBe(false);
   });
 
@@ -184,7 +184,7 @@ describe("an answered approval", () => {
     );
     expect(noticeDisplayText(englishText, first!)).toBe("You approved “Send email”.");
     expect(second!.resolvedAt).toBeDefined();
-    expect(noticeDisplayText(englishText, second!)).toBe("Ended without an answer.");
+    expect(noticeDisplayText(englishText, second!)).toBe("Not answered.");
     expect(noticeApprovalAnswered(second!)).toBe(false);
   });
 
@@ -209,7 +209,7 @@ describe("an answered approval", () => {
     );
     expect(noticeDisplayText(englishText, refused)).toBe("Declined automatically.");
     const unanswered = notice(buildTimeline(englishText, [...bare, running]));
-    expect(noticeDisplayText(englishText, unanswered)).toBe("Ended without an answer.");
+    expect(noticeDisplayText(englishText, unanswered)).toBe("Not answered.");
     // Another turn's decision is not this request's answer.
     const elsewhere = notice(
       buildTimeline(englishText, [
@@ -218,12 +218,12 @@ describe("an answered approval", () => {
         running,
       ]),
     );
-    expect(noticeDisplayText(englishText, elsewhere)).toBe("Ended without an answer.");
+    expect(noticeDisplayText(englishText, elsewhere)).toBe("Not answered.");
     // Nor is a decision for a different approval than the one the request named.
     const other = notice(
       buildTimeline(englishText, [...bare, decide(4, "approval-2", "approve"), running]),
     );
-    expect(noticeDisplayText(englishText, other)).toBe("Ended without an answer.");
+    expect(noticeDisplayText(englishText, other)).toBe("Not answered.");
   });
 
   test("an approval asked again before it is answered reads as answered on every notice", () => {
@@ -243,6 +243,59 @@ describe("an answered approval", () => {
       expect(noticeDisplayText(englishText, each)).toBe("You approved “Send email”.");
       expect(noticeApprovalAnswered(each)).toBe(true);
     }
+  });
+
+  test("a re-asked approval answered after a resume still reads as answered on both notices", () => {
+    const deploy = {
+      id: "call-2",
+      name: "deploy",
+      display: { title: "Deploy" },
+      rawItem: { callId: "call-2" },
+    };
+    const both = (items: ReturnType<typeof buildTimeline>) =>
+      items
+        .filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true)
+        .map((item) => noticeDisplayText(englishText, item));
+    // Asked, asked again by a restarted worker, a resume, then the answer.
+    expect(
+      both(
+        buildTimeline(englishText, [
+          ...asking([sendEmail]),
+          event(4, "turn.preempted"),
+          event(5, "session.requiresAction", { approvals: [sendEmail] }),
+          event(6, "session.status.changed", { status: "running" }),
+          decide(7, "call-1", "approve"),
+        ]),
+      ),
+    ).toEqual(["You approved “Send email”.", "You approved “Send email”."]);
+    // Both asked twice; one answered before a resume, the other after.
+    expect(
+      both(
+        buildTimeline(englishText, [
+          ...asking([sendEmail, deploy]),
+          event(4, "turn.preempted"),
+          event(5, "session.requiresAction", { approvals: [sendEmail, deploy] }),
+          decide(6, "call-1", "approve"),
+          event(7, "session.status.changed", { status: "running" }),
+          decide(8, "call-2", "reject"),
+        ]),
+      ),
+    ).toEqual([
+      "You approved “Send email”.\nYou declined “Deploy”.",
+      "You approved “Send email”.\nYou declined “Deploy”.",
+    ]);
+    // A wait that ended before the ask came again is a separate ask.
+    expect(
+      both(
+        buildTimeline(englishText, [
+          ...asking([sendEmail, deploy]),
+          decide(4, "call-1", "approve"),
+          event(5, "session.status.changed", { status: "running" }),
+          event(6, "session.requiresAction", { approvals: [deploy] }),
+          decide(7, "call-2", "approve"),
+        ]),
+      ),
+    ).toEqual(["You approved “Send email”.", "You approved “Deploy”."]);
   });
 
   test("parallel app-action approvals say what was decided, one line each, told apart", () => {
