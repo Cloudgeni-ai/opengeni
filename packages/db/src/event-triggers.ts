@@ -932,11 +932,13 @@ async function deliveryEvents(
  * event only fires the triggers of the stream it arrived on (an MCP
  * subscription).
  *
- * One delivery starts at most one run per agent: when several automations
- * of the same agent (`agentConfig.agentId`) match it, only the oldest one
- * queues the events, and each other one records a skipped run (reason
- * `duplicate_agent_run`) in its run history. Automations of different
- * agents, and ones without an agent, each run.
+ * One event starts at most one run per agent and owner: when several
+ * automations of the same agent (`agentConfig.agentId`) and owner match an
+ * event, only one queues it: one that isn't held back by the storm guard,
+ * then the oldest. An automation left with none of the delivery's events
+ * records a skipped run (reason `duplicate_agent_run`) in its run history.
+ * Automations of different agents or owners, and ones without an agent,
+ * each run.
  */
 async function queueMatchingEvents(
   tx: Database,
@@ -958,13 +960,16 @@ async function queueMatchingEvents(
     task_account_id: string;
     authority_revision: number;
     execution_digest: string | null;
+    owner_subject_id: string | null;
+    throttled: boolean;
   }>(
     tx,
     sql`select trigger.id, trigger.task_id, trigger.event_types, trigger.conditions,
         trigger.include_own_events, trigger.stream_key,
         nullif(task.agent_config ->> 'agentId', '') as agent_id,
         task.created_at as task_created_at, task.account_id as task_account_id,
-        task.authority_revision, task.execution_digest
+        task.authority_revision, task.execution_digest, task.owner_subject_id,
+        settings.throttled_since is not null as throttled
       from event_triggers trigger
       join scheduled_tasks task
         on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
@@ -1001,25 +1006,33 @@ async function queueMatchingEvents(
     }
   }
   if (queued.size === 0) return [];
-  // At most one run per agent: the oldest matching automation of each agent
-  // keeps the events; the others record that they were skipped.
+  // At most one run per agent and owner for each event.
   const tasks = new Map(triggers.map((trigger) => [trigger.task_id, trigger]));
-  const byAgent = new Map<string, string[]>();
+  const byAgent = new Map<string, (typeof triggers)[number][]>();
   for (const taskId of queued.keys()) {
-    const agentId = tasks.get(taskId)?.agent_id;
-    if (!agentId) continue;
-    byAgent.set(agentId, [...(byAgent.get(agentId) ?? []), taskId]);
+    const task = tasks.get(taskId);
+    if (!task?.agent_id) continue;
+    const key = JSON.stringify([task.agent_id, task.owner_subject_id]);
+    byAgent.set(key, [...(byAgent.get(key) ?? []), task]);
   }
-  for (const taskIds of byAgent.values()) {
-    if (taskIds.length < 2) continue;
-    const [, ...duplicates] = taskIds
-      .map((taskId) => tasks.get(taskId)!)
-      .sort(
-        (a, b) =>
-          asDate(a.task_created_at).getTime() - asDate(b.task_created_at).getTime() ||
-          (a.task_id < b.task_id ? -1 : a.task_id > b.task_id ? 1 : 0),
-      );
-    for (const duplicate of duplicates) {
+  for (const agentTasks of byAgent.values()) {
+    if (agentTasks.length < 2) continue;
+    const ranked = [...agentTasks].sort(
+      (a, b) =>
+        Number(a.throttled) - Number(b.throttled) ||
+        asDate(a.task_created_at).getTime() - asDate(b.task_created_at).getTime() ||
+        (a.task_id < b.task_id ? -1 : a.task_id > b.task_id ? 1 : 0),
+    );
+    const taken = new Set<string>();
+    for (const task of ranked) {
+      const forTask = queued.get(task.task_id)!;
+      for (const eventId of [...forTask.keys()]) {
+        if (taken.has(eventId)) forTask.delete(eventId);
+        else taken.add(eventId);
+      }
+    }
+    for (const duplicate of ranked) {
+      if (queued.get(duplicate.task_id)!.size > 0) continue;
       queued.delete(duplicate.task_id);
       await recordSkippedEventRun(tx, {
         accountId: duplicate.task_account_id,

@@ -1146,8 +1146,11 @@ test("the Apps tab lists its apps under every grouping, and says when a filter l
   expect(await siteRow("Opengeni usage").count()).toBe(0);
   await sidebar().getByRole("button", { name: "Clear search and filters", exact: true }).click();
   await siteRow("Opengeni usage").waitFor();
-  // Needs you never offers to load older sessions here.
+  // Needs you lists only apps with a chat that needs the person (none here),
+  // and never offers to load older sessions in this tab.
   await selectView("Status", "Needs you");
+  await sidebar().getByText("No apps match this view.").waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(0);
   expect(
     await sidebar()
       .getByRole("button", { name: /Load older/ })

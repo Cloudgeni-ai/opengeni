@@ -1496,9 +1496,12 @@ export function buildPinnedRailSections(
 export function railSectionsForTab(
   sections: PinnedRailSections,
   tab: "sessions" | "apps" | null,
+  /** Rows the tab also leaves out (the Apps tab's Needs you). */
+  also: ((node: SessionTreeNode) => boolean) | null = null,
 ): PinnedRailSections {
   if (tab === null) return sections;
-  const keep = (node: SessionTreeNode) => Boolean(node.siteGroup) === (tab === "apps");
+  const keep = (node: SessionTreeNode) =>
+    Boolean(node.siteGroup) === (tab === "apps") && (also === null || also(node));
   return {
     complete: sections.complete,
     pinned: sections.pinned.filter(keep),

@@ -395,4 +395,8 @@ test("with apps in their own tab, each tab lists only its rows; without one noth
     expect(tab.ordinary.grouped.every((bucket) => bucket.sessions.length > 0)).toBe(true);
     expect(tab.complete).toBe(result.complete);
   }
+  // A tab can leave out more rows (the Apps tab's Needs you).
+  const none = railSectionsForTab(result, "apps", () => false);
+  expect([...none.pinned, ...railRoots(none)]).toEqual([]);
+  expect(railSectionsForTab(result, "apps", () => true)).toEqual(apps);
 });

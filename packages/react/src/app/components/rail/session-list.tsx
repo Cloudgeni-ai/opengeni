@@ -1787,9 +1787,15 @@ export function SessionList() {
     ],
   );
   // With apps in a tab of their own, each tab lists only its rows.
+  // Needs you lists the apps with a chat that needs the person.
   const tabSections = useMemo(
-    () => railSectionsForTab(railSections, listTab),
-    [railSections, listTab],
+    () =>
+      railSectionsForTab(
+        railSections,
+        listTab,
+        listTab === "apps" && needsYouOnly ? appNeedsYou : null,
+      ),
+    [railSections, listTab, needsYouOnly],
   );
   // Opening a chat or an app shows the tab that lists it. A tab the person
   // picks stays until they open something else.
@@ -6099,6 +6105,11 @@ const SESSION_LIST_TABS: readonly { value: SessionRailTab; label: string }[] = [
   { value: "sessions", label: "Sessions" },
   { value: "apps", label: "Apps" },
 ];
+
+/** An app row with a chat that needs the person, for the Apps tab's Needs you. */
+function appNeedsYou(node: SessionTreeNode): boolean {
+  return filterNeedsYou([node.session]).length > 0 || node.children.some(appNeedsYou);
+}
 
 /** Sessions and Apps, in place of the list's title when apps have a tab of their own. */
 function SessionListTabs({
