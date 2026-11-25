@@ -1086,6 +1086,23 @@ test("with apps in their own section, Sessions and Apps both stay in view and sc
     await appsSection()
       .getByRole("link", { name: new RegExp(`^Open ${title}\\.`) })
       .waitFor();
+  // The keyboard moves through its chats as through the list's, and on from
+  // the list's last row into the section.
+  const appChat = (title: string) =>
+    appsSection().getByRole("link", { name: new RegExp(`^Open ${title}\\.`) });
+  await appChat(usageConversations[0]!).focus();
+  await page.keyboard.press("ArrowDown");
+  await page.waitForFunction(
+    () => document.activeElement?.closest("[data-sessions-apps-section]") !== null,
+  );
+  expect(
+    await appChat(usageConversations[1]!).evaluate((row) => row === document.activeElement),
+  ).toBe(true);
+  await sessionsList().locator("a[data-session-row]").last().focus();
+  await page.keyboard.press("ArrowDown");
+  await page.waitForFunction(
+    () => document.activeElement?.closest("[data-sessions-apps-section]") !== null,
+  );
 
   // Collapsed, Apps gives its room back to Sessions, and stays collapsed.
   const toggle = appsSection().getByRole("button", { name: "Apps", exact: true });

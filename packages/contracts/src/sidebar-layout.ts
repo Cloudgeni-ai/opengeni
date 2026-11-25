@@ -150,14 +150,9 @@ export const SidebarAppsPlacement = /* @__PURE__ */ defineSchema(() =>
 export type SidebarAppsPlacement = (typeof SIDEBAR_APPS_PLACEMENTS)[number];
 
 /**
- * What a change accepts: the placements and `tab`, the older name of
- * `section` (apps briefly had a tab beside Sessions), stored as `section`.
+ * A stored placement as this version reads it: `tab`, what a preview of apps
+ * in a tab beside Sessions saved, is `section`; anything else unknown is unset.
  */
-export const SidebarAppsPlacementInput = /* @__PURE__ */ defineSchema(() =>
-  z.enum([...SIDEBAR_APPS_PLACEMENTS, "tab"]),
-);
-
-/** A stored or given placement as this version reads it: `tab` is `section`; anything else unknown is unset. */
 export function readSidebarAppsPlacement(value: unknown): SidebarAppsPlacement | undefined {
   if (value === "tab") return "section";
   return (SIDEBAR_APPS_PLACEMENTS as readonly unknown[]).includes(value)
@@ -240,7 +235,7 @@ export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
     ...value,
     ...(hidden ? { hiddenNavEntries: hidden as SidebarNavEntry[] } : {}),
     ...(more ? { settingsMore: more } : {}),
-    // Apps' tab became their own section: a saved tab is kept as a section.
+    // A preview gave apps a tab beside Sessions; a tab it saved is a section.
     ...(value.appsPlacement === "tab" ? { appsPlacement: "section" } : {}),
   } as SidebarLayoutOptions;
 }
@@ -897,12 +892,8 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
         op: z.literal("options"),
         /** Sets appsPlacement too: false is `hidden`, true is `sessions`. */
         sessionsShowApps: z.boolean().nullable().optional(),
-        /**
-         * Sets sessionsShowApps too, for older clients; wins over
-         * sessionsShowApps in the same change. `tab` is the older name of
-         * `section` and is stored as `section`.
-         */
-        appsPlacement: SidebarAppsPlacementInput.nullable().optional(),
+        /** Sets sessionsShowApps too, for older clients; wins over sessionsShowApps in the same change. */
+        appsPlacement: SidebarAppsPlacement.nullable().optional(),
         hiddenNavEntries: z
           .array(SidebarNavEntry)
           .max(SIDEBAR_NAV_ENTRIES.length)

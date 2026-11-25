@@ -117,27 +117,33 @@ export function canUseTools(connector: string, tools: readonly ListedTool[]): Ca
       titled: title !== null,
     });
   }
-  return [...rows.values()].map(({ key, label, names }) => ({ key, label, names }));
+  // Two rows with one name say which tool each is.
+  const labels = new Map<string, number>();
+  for (const row of rows.values()) labels.set(row.label, (labels.get(row.label) ?? 0) + 1);
+  return [...rows.values()].map(({ key, label, names }) => ({
+    key,
+    label: (labels.get(label) ?? 0) > 1 ? `${label} (${key})` : label,
+    names,
+  }));
 }
 
-const STRICTNESS: Record<AgentToolPermission, number> = { allow: 0, ask: 1, block: 2 };
-
 /**
- * The choice a row shows: its tools' rules, or the strictest when they differ.
- * Undefined: none of its tools has a rule.
+ * The choice a row shows: the one rule every name of it has, or `mixed` when
+ * only some names have a rule or their rules differ (what's enforced differs
+ * per name then). Undefined: none of its names has a rule.
  */
 export function canUseToolPermission(
   rules: readonly AgentToolPermissionRule[],
   connector: string,
   tool: CanUseTool,
-): AgentToolPermission | undefined {
-  let shown: AgentToolPermission | undefined;
-  for (const rule of rules) {
-    if (rule.connector !== connector || !tool.names.includes(rule.tool)) continue;
-    if (shown === undefined || STRICTNESS[rule.permission] > STRICTNESS[shown])
-      shown = rule.permission;
-  }
-  return shown;
+): AgentToolPermission | "mixed" | undefined {
+  const set = new Map<string, AgentToolPermission>();
+  for (const rule of rules)
+    if (rule.connector === connector && tool.names.includes(rule.tool))
+      set.set(rule.tool, rule.permission);
+  if (set.size === 0) return undefined;
+  const choices = new Set(set.values());
+  return set.size === tool.names.length && choices.size === 1 ? [...choices][0] : "mixed";
 }
 
 /** The rules with one choice for every name of a row set, or cleared with null. */

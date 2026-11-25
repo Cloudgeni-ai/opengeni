@@ -964,7 +964,7 @@ describe("apps placement", () => {
     ).toBe(false);
   });
 
-  test("a saved or given tab, the older name of section, is a section", () => {
+  test("a tab a preview saved is a section; changes take only the placements", () => {
     // Saved by the version that gave apps a tab beside Sessions.
     const saved = personal({ appsPlacement: "tab", sessionsShowApps: true });
     expect(saved).toEqual({ appsPlacement: "section", sessionsShowApps: true });
@@ -976,14 +976,23 @@ describe("apps placement", () => {
     expect(
       readResolvedSidebarOptions({ appsPlacement: "tab", sessionsShowApps: true }).appsPlacement,
     ).toBe("section");
-    // An older client's change still parses, and is stored as a section.
-    const given = applyPersonalSidebarChanges(
+    // Saving anything else rewrites it as a section.
+    const saved2 = applyPersonalSidebarChanges(
       EMPTY_SIDEBAR_LAYOUT,
-      EMPTY_SIDEBAR_PERSONAL_CHANGES,
-      parseChanges([{ op: "options", appsPlacement: "tab" }]),
+      readStoredSidebarPersonalChanges({
+        ...EMPTY_SIDEBAR_PERSONAL_CHANGES,
+        options: { appsPlacement: "tab", sessionsShowApps: true },
+      }),
+      parseChanges([{ op: "options", hiddenNavEntries: ["inbox"] }]),
       ids(),
     );
-    expect(given.options).toEqual({ appsPlacement: "section", sessionsShowApps: true });
+    expect(saved2.options).toMatchObject({ appsPlacement: "section", sessionsShowApps: true });
+    expect(
+      UpdateSidebarLayoutRequest.safeParse({
+        scope: "personal",
+        changes: [{ op: "options", appsPlacement: "tab" }],
+      }).success,
+    ).toBe(false);
     // A saved tab beside a later Hidden from an older version reads as hidden.
     expect(
       mergeSidebarOptions(undefined, personal({ appsPlacement: "tab", sessionsShowApps: false }))

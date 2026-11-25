@@ -243,6 +243,7 @@ describe("AgentCanUse", () => {
     await settle();
     const rows = [...container.querySelectorAll("[data-agent-can-use-tool]")];
     expect(rows.map((row) => row.textContent?.includes("Merge pull request"))).toEqual([true]);
+    expect(rows[0]!.textContent).toContain("Block");
     expect(container.textContent).not.toContain("merge_pull_request");
     await pick("GitHub: Merge pull request", "Ask first");
     expect(updates).toEqual([
@@ -320,21 +321,35 @@ describe("Can use tool names", () => {
       },
       { key: "brand_new_tool", label: "Brand new tool", names: ["brand_new_tool"] },
     ]);
+    // Two tools with one name say which each is.
+    expect(
+      canUseTools("chat.example", [{ name: "post", title: "Send" }, { name: "send" }]).map(
+        (row) => row.label,
+      ),
+    ).toEqual(["Send (post)", "Send (send)"]);
     // Elsewhere the same names are separate tools.
     expect(canUseTools("other.example", [{ name: "merge_pull_request" }])).toEqual([
       { key: "merge_pull_request", label: "Merge pull request", names: ["merge_pull_request"] },
     ]);
   });
 
-  test("a row shows its rules, the strictest when they differ, and sets or clears every name", () => {
+  test("a row shows its one rule, Mixed when its names differ, and sets or clears every name", () => {
     const [merge] = canUseTools("github.com", [{ name: "merge_pull_request" }]);
     const rules = [
       { connector: "github.com", tool: "merge_pull_request", permission: "allow" },
       { connector: "github.com", tool: "pull_request_merge", permission: "ask" },
       { connector: "other.example", tool: "pull_request_merge", permission: "block" },
     ] as const;
-    expect(canUseToolPermission(rules, "github.com", merge!)).toBe("ask");
-    expect(canUseToolPermission(rules.slice(0, 1), "github.com", merge!)).toBe("allow");
+    // Never a stricter choice than one name has: differing or partial rules are Mixed.
+    expect(canUseToolPermission(rules, "github.com", merge!)).toBe("mixed");
+    expect(canUseToolPermission(rules.slice(0, 1), "github.com", merge!)).toBe("mixed");
+    expect(
+      canUseToolPermission(
+        withAgentToolRules(rules, "github.com", merge!.names, "ask"),
+        "github.com",
+        merge!,
+      ),
+    ).toBe("ask");
     expect(canUseToolPermission([], "github.com", merge!)).toBeUndefined();
     expect(withAgentToolRules(rules, "github.com", merge!.names, "block")).toEqual([
       rules[2],

@@ -221,8 +221,8 @@ export type SidebarLayoutChange =
       op: "options";
       /** Also sets appsPlacement: false is `hidden`, true is `sessions`. */
       sessionsShowApps?: boolean | null;
-      /** Also sets sessionsShowApps; wins over it in the same change. `tab` is the older name of `section`. */
-      appsPlacement?: SidebarAppsPlacement | "tab" | null;
+      /** Also sets sessionsShowApps; wins over it in the same change. */
+      appsPlacement?: SidebarAppsPlacement | null;
       hiddenNavEntries?: SidebarNavEntry[] | null;
       settingsMore?: string[] | null;
     };

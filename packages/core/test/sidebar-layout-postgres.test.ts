@@ -551,13 +551,6 @@ test("apps placement: the default and a person's own choice, as the agent tool s
     changes: [{ op: "options", appsPlacement: "section" }],
   });
   expect(section.options).toMatchObject({ appsPlacement: "section", sessionsShowApps: true });
-  // An older client's "tab" is stored and answered as a section.
-  const tab = await updateSidebarLayoutForGrant(deps, ws.ada, {
-    scope: "personal",
-    changes: [{ op: "options", appsPlacement: "tab" }],
-  });
-  expect(tab.options).toMatchObject({ appsPlacement: "section", sessionsShowApps: true });
-  expect(tab.personal.options).toEqual({ appsPlacement: "section", sessionsShowApps: true });
   // A member can't change the default.
   await expect(
     updateSidebarLayoutForGrant(deps, ws.ada, {

@@ -993,6 +993,9 @@ export function SessionList() {
   const focusRestoreOperation = useRef(0);
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
+  // The Apps section's list, when apps have a section of their own: its rows
+  // follow the list's in keyboard order.
+  const appsListRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const viewport = listRef.current?.closest("[data-rail-scroll-viewport]");
     if (!viewport) return;
@@ -2842,10 +2845,16 @@ export function SessionList() {
               const selected = findSessionTreeNode(archivedNodes, activeSessionId);
               return selected ? [{ node: selected, depth: 0 }] : [];
             })();
+    // The Apps section comes after the list, when it shows its rows.
+    const appSectionRows =
+      appNodes && !collapsedChannelSections.has(APPS_SECTION_KEY)
+        ? visibleTreeRows([...appNodes.pinned, ...appNodes.rest], expanded, activeSessionId)
+        : [];
     return [
       ...visibleTreeRows(pinnedNodes, expanded, activeSessionId),
       ...ordinaryRows,
       ...archiveRows,
+      ...appSectionRows,
     ].filter(({ node }) => {
       if (seen.has(node.session.id)) return false;
       seen.add(node.session.id);
@@ -2853,6 +2862,7 @@ export function SessionList() {
     });
   }, [
     activeSessionId,
+    appNodes,
     archiveExpanded,
     archivedNodes,
     browseStatus,
@@ -2926,8 +2936,8 @@ export function SessionList() {
 
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
-    const root = listRef.current;
-    if (!pending || !root) return;
+    const roots = sessionRowRoots(listRef.current, appsListRef.current);
+    if (!pending || roots.length === 0) return;
     const operation = pending.operation;
     let cancelled = false;
     let frame: number | null = null;
@@ -2937,9 +2947,9 @@ export function SessionList() {
       const current = pendingSessionFocus.current;
       if (!current || current.operation !== operation) return;
       const attribute = sessionFocusAttribute(current.target);
-      const destinations = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].filter(
-        (element) => element.getAttribute(attribute) === current.sessionId,
-      );
+      const destinations = roots
+        .flatMap((root) => [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)])
+        .filter((element) => element.getAttribute(attribute) === current.sessionId);
       const actionMode =
         current.target === "actions" &&
         typeof window.matchMedia === "function" &&
@@ -3943,8 +3953,8 @@ export function SessionList() {
   // Layout timing makes real DOM focus part of the discrete keyboard commit;
   // a passive effect can leave Home/End visibly on the prior row for a frame.
   useLayoutEffect(() => {
-    const root = listRef.current;
-    if (focusIndex < 0 || !root) {
+    const roots = sessionRowRoots(listRef.current, appsListRef.current);
+    if (focusIndex < 0 || roots.length === 0) {
       return;
     }
     const requestedFocusId = rowFocusIntent.current;
@@ -3953,10 +3963,11 @@ export function SessionList() {
     if (!requestedSessionId) {
       return;
     }
-    const row = [...root.querySelectorAll<HTMLElement>("[data-session-row]")].find(
-      (candidate) => candidate.dataset.sessionRow === requestedSessionId,
-    );
-    if (!row) {
+    const row = roots
+      .flatMap((root) => [...root.querySelectorAll<HTMLElement>("[data-session-row]")])
+      .find((candidate) => candidate.dataset.sessionRow === requestedSessionId);
+    const root = row ? roots.find((candidate) => candidate.contains(row)) : undefined;
+    if (!row || !root) {
       return;
     }
     // Arrow/Home/End navigation must move real DOM focus, not just paint a
@@ -3966,7 +3977,7 @@ export function SessionList() {
       const renderedSessionId = flat[focusIndex]?.id ?? null;
       if (
         pendingSessionFocus.current ||
-        !root.contains(document.activeElement) ||
+        !roots.some((candidate) => candidate.contains(document.activeElement)) ||
         !shouldMoveSessionRowFocus(requestedFocusId, renderedSessionId)
       ) {
         rowFocusIntent.current = null;
@@ -4052,7 +4063,9 @@ export function SessionList() {
         </div>
         {appsSectionCollapsed ? null : (
           <div
+            ref={appsListRef}
             id={`${appsSectionId}-list`}
+            onKeyDown={onKeyDown}
             className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain pb-2 pl-2 pr-3"
           >
             {appNodes.pinned.length > 0 ? (
@@ -6051,6 +6064,11 @@ function RowActionsMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** Where the list's rows are: the list, then the Apps section when it shows. */
+function sessionRowRoots(list: HTMLElement | null, apps: HTMLElement | null): HTMLElement[] {
+  return [list, apps].filter((root): root is HTMLElement => root !== null);
 }
 
 /** The Apps section's key among the list's collapsed sections (projects use their ids). */
