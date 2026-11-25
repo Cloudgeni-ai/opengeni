@@ -47,7 +47,7 @@ export function insightsQueryParameters(
   );
 }
 
-/** Frozen interim capabilities: a newer additive contract must not silently widen a raw query. */
+/** Explicit server capabilities: an additive contract must not silently widen a raw query. */
 export function insightsRawQuerySupported(
   query: Record<string, unknown>,
   organization: boolean,
@@ -64,6 +64,7 @@ export function insightsRawQuerySupported(
     "person",
     "rootSessionId",
     "scheduleId",
+    "source",
     "limit",
     ...(organization ? ["workspaceId"] : []),
     ...(calls ? ["cursor"] : ["groupBy", "seriesGroups", "agentId"]),
@@ -87,6 +88,7 @@ export function insightsRawQuerySupported(
       "person",
       "schedule",
       "agent",
+      "source",
       ...(organization ? ["workspace"] : []),
     ]).has(String(query.groupBy))
   );
@@ -128,6 +130,8 @@ export function insightsUsageCoalesceKey(
     scope.workspaceId,
     [...(scope.detailsWorkspaceIds ?? [])].sort(),
     scope.detailsSharedWorkspaces === true,
+    [...(scope.automationWorkspaceIds ?? [])].sort(),
+    scope.automationSharedWorkspaces === true,
     query,
     actor,
   ]);
@@ -145,6 +149,11 @@ export function organizationInsightsScope(
       "sessions:read",
       authority.permissionMode,
     );
+    const automationReadable = hasPermission(
+      authority.permissions,
+      "scheduled_tasks:run",
+      authority.permissionMode,
+    );
     return {
       accountId,
       workspaceId: null,
@@ -153,24 +162,39 @@ export function organizationInsightsScope(
           ? [...authority.workspaceScope.workspaceIds].sort()
           : [],
       detailsSharedWorkspaces: readable && authority.workspaceScope.kind === "all",
+      ...(automationReadable
+        ? authority.workspaceScope.kind === "selected"
+          ? { automationWorkspaceIds: [...authority.workspaceScope.workspaceIds].sort() }
+          : { automationSharedWorkspaces: true }
+        : {}),
     };
   }
+  const memberGrants = context.workspaceGrants.filter(
+    (grant) => grant.accountId === accountId && grant.subjectId === context.subjectId,
+  );
+  const automationWorkspaceIds = [
+    ...new Set(
+      memberGrants
+        .filter((grant) =>
+          hasPermission(grant.permissions, "scheduled_tasks:run", grant.permissionMode),
+        )
+        .map((grant) => grant.workspaceId),
+    ),
+  ].sort();
   return {
     accountId,
     workspaceId: null,
     detailsWorkspaceIds: [
       ...new Set(
-        context.workspaceGrants
-          .filter(
-            (grant) =>
-              grant.accountId === accountId &&
-              grant.subjectId === context.subjectId &&
-              hasPermission(grant.permissions, "sessions:read", grant.permissionMode),
+        memberGrants
+          .filter((grant) =>
+            hasPermission(grant.permissions, "sessions:read", grant.permissionMode),
           )
           .map((grant) => grant.workspaceId),
       ),
     ].sort(),
     detailsSharedWorkspaces: false,
+    ...(automationWorkspaceIds.length ? { automationWorkspaceIds } : {}),
   };
 }
 

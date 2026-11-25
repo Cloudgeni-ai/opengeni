@@ -797,7 +797,7 @@ export async function startApi(options: StartApiOptions = {}) {
       pong: (socket) => socket.data.heard?.(),
     }),
   });
-  const metricsServer = startApiMetricsListener(settings, observability, httpDrain);
+  const metricsServer = startApiMetricsListener(settings, observability, httpDrain, dbClient.db);
   const billingAppUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
   const stopBillingCreditNotificationDelivery =
     routeDeps.managedAuth && billingAppUrl

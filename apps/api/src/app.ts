@@ -355,6 +355,7 @@ import { requireAccessKey } from "./http/auth";
 import {
   publicListenerServesMetrics,
   registerPrometheusMetricsRoute,
+  automationRunMetrics,
 } from "./http/metrics-listener";
 import { allowedCorsOrigin } from "./http/cors";
 import {
@@ -1688,7 +1689,9 @@ export function createAppComposition(
   });
 
   if (publicListenerServesMetrics(deps.settings)) {
-    registerPrometheusMetricsRoute(app, observability);
+    registerPrometheusMetricsRoute(app, observability, () =>
+      automationRunMetrics(deps.db, deps.settings),
+    );
   }
 
   registerMcpOAuthRoutes(app, routeDeps);

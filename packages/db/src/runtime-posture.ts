@@ -3185,6 +3185,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
+  "automation_run_counters",
   "billing_auto_top_up_operations",
   "billing_auto_top_up_settings",
   "billing_card_verifications",

@@ -2630,7 +2630,7 @@ export async function runTurnStreamAttempt(
               processingResidency: turnProcessingResidency,
             });
             if (aggregateAuthoritative && billing) {
-              await recordAuthoritativeModelCallFact({
+              const usageSource = await recordAuthoritativeModelCallFact({
                 db,
                 observability,
                 accountId: input.accountId,
@@ -2655,6 +2655,7 @@ export async function runTurnStreamAttempt(
                 model: turnExecutionPolicy.productModelId,
                 externallyBilled: billingState.isExternallyBilledTurn,
                 billing,
+                usageSource,
               });
             }
             if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {

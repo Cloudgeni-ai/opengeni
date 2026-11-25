@@ -35,6 +35,7 @@ import {
 } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { PromptCacheDiagnostics } from "@opengeni/contracts";
+import type { InsightsUsageSource } from "@opengeni/contracts/insights-usage";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
   createTelemetryClock,
@@ -2333,11 +2334,11 @@ function nonnegativeSafeInteger(value: unknown): number {
  * so a duplicate or late response is not counted twice.
  *   - `opengeni_model_responses_total{provider,model,priced}` — responses with
  *     reported usage; `priced="false"` means no provider cost estimate exists.
- *   - `opengeni_model_tokens_total{provider,model,type}` — `input` (all prompt
+ *   - `opengeni_model_tokens_total{provider,model,type,source}` — `input` (all prompt
  *     tokens, including cached and cache-write), `cached_input` and
  *     `cache_write` (subsets of `input`), `output`, and `reasoning` (a subset
  *     of `output`).
- *   - `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}`
+ *   - `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source,source}`
  *     — estimated upstream cost in USD micros: configured list price, or the
  *     gateway-reported cost. `payer="external"` is a customer-paid subscription
  *     or key, so that cost is a list-price equivalent Opengeni does not pay.
@@ -2348,6 +2349,7 @@ export function recordModelResponseUsage(
     provider: string;
     model: string;
     payer: ModelUsagePayer;
+    source?: InsightsUsageSource;
     tokens: {
       inputTokens: number | null;
       cachedTokens: number | null;
@@ -2382,7 +2384,7 @@ export function recordModelResponseUsage(
       name: "opengeni_model_tokens_total",
       help: "Tokens of authoritative model responses by provider, catalog model and token type (cached_input and cache_write are subsets of input; reasoning is a subset of output).",
       provider: input.provider,
-      labels: { ...base, type },
+      labels: { ...base, type, source: input.source ?? "other" },
       amount,
     });
   }
@@ -2399,7 +2401,12 @@ export function recordModelResponseUsage(
     observability.incrementCounter({
       name: "opengeni_model_provider_cost_micros_total",
       help: "Estimated upstream provider cost in USD micros by provider, catalog model, payer and pricing source.",
-      labels: { ...base, payer: input.payer, pricing_source: input.pricingSource },
+      labels: {
+        ...base,
+        payer: input.payer,
+        pricing_source: input.pricingSource,
+        source: input.source ?? "other",
+      },
       amount: cost,
     });
   }

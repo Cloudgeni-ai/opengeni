@@ -8,12 +8,15 @@ import {
   createApiKey,
   createDb,
   createOrganizationApiKey,
+  createScheduledTask,
   createSession,
   createChannel,
   setSessionChannel,
   deleteSessionTreeIfQuiescent,
+  enqueueSessionTurn,
   ensureManagedAccessForUser,
   recordModelCallFact,
+  recordScheduledTaskAdmissionRefusal,
   updateSessionTitle,
   updateOrganizationApiKey,
   transitionSessionVisibility,
@@ -33,6 +36,7 @@ import { sql } from "drizzle-orm";
 import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 import { createApp } from "../src/app";
+import { automationRunMetrics, registerPrometheusMetricsRoute } from "../src/http/metrics-listener";
 
 const secret = "insights-unified-http-postgres-fixture";
 let shared: SharedTestDatabase;
@@ -494,7 +498,21 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
   await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions)
     values (${scope.accountId},${other.workspaceId},${scope.subjectId},'owner','[]'::jsonb)`;
   const sessions = [];
+  const tasks: string[] = [];
   for (const selected of [scope, other]) {
+    const task = await createScheduledTask(client.db, {
+      ...selected,
+      name: `Inventory in ${selected.workspaceId}`,
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Test", tools: [], resources: [], metadata: {} },
+      createdBy: { kind: "service", subjectId: "scheduler" },
+      metadata: {},
+    });
+    tasks.push(task.id);
     const session = await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
       createSession(client.db, {
         accountId: scope.accountId,
@@ -530,7 +548,12 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
   }
   async function key(
     workspaceIds: string[] | null,
-    permissions: Permission[] = ["billing:read", "workspace:read", "sessions:read"],
+    permissions: Permission[] = [
+      "billing:read",
+      "workspace:read",
+      "sessions:read",
+      "scheduled_tasks:run",
+    ],
   ) {
     const raw = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     const input = {
@@ -581,6 +604,16 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
     );
     expect(response.status, await response.clone().text()).toBe(200);
     const body = InsightsUsageResponse.parse(await response.json());
+    expect(body.automations?.map((task) => task.id).sort()).toEqual(
+      tasks
+        .filter((_, index) =>
+          (expectedIds as readonly string[]).includes(
+            index === 0 ? scope.workspaceId : other.workspaceId,
+          ),
+        )
+        .sort(),
+    );
+    expect(body.automations?.every((task) => task.fires === 0)).toBe(true);
     // Account billing authority still includes unattributed amounts; detail ceiling is independent.
     expect(body.totals).toMatchObject({ calls: 2, listMicros: 26 });
     expect(body.facets.workspaces.map((item) => item.id).sort()).toEqual([...expectedIds].sort());
@@ -636,6 +669,207 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
       nextCursor: null,
     });
   }
+}, 120_000);
+
+test("source grouping conserves list prices and debits; source filters run before calls pagination", async () => {
+  const scope = await fixture();
+  const authorization = await bearer(scope, ["billing:read", "workspace:admin"]);
+  const actors = { subjectId: scope.subjectId };
+  const session = await withSessionRlsActorContext(actors, () =>
+    createSession(client.db, {
+      ...scope,
+      initialMessage: "Source test",
+      resources: [],
+      metadata: {},
+      model: "fixture-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      createdByContext: {},
+    }),
+  );
+  for (const [surface, listMicros, chargedMicros] of [
+    ["web", 91, 18],
+    ["slack", 63, 12],
+    ["scheduled", 17, 4],
+    [null, 5, 1],
+  ] as const) {
+    const turn = await withSessionRlsActorContext(actors, () =>
+      enqueueSessionTurn(client.db, {
+        ...scope,
+        sessionId: session.id,
+        triggerEventId: crypto.randomUUID(),
+        temporalWorkflowId: crypto.randomUUID(),
+        source: "user",
+        surface,
+        prompt: "Source fixture",
+        resources: [],
+        tools: [],
+        model: "fixture-model",
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        metadata: {},
+        initiator: { kind: "subject", subjectId: scope.subjectId },
+      }),
+    );
+    const sourceKey = crypto.randomUUID();
+    const fact = await withSessionRlsActorContext(actors, () =>
+      recordModelCallFact(client.db, {
+        ...scope,
+        sessionId: session.id,
+        turnId: turn.id,
+        sourceKey,
+        provider: "openai",
+        providerApi: "responses",
+        model: "fixture-model",
+        billingPath: "opengeni_credits",
+        pricedCostMicros: chargedMicros,
+        estimatedProviderCostMicros: listMicros,
+        pricingSource: "configured_list_price",
+      }),
+    );
+    expect(fact.turnSurface).toBe(surface);
+    await applyCreditLedgerEntry(client.db, {
+      ...scope,
+      type: "model_usage_debit",
+      amountMicros: -chargedMicros,
+      sourceType: "model_response",
+      sourceId: `${turn.id}:${sourceKey}`,
+      idempotencyKey: sourceKey,
+      metadata: { sessionId: session.id },
+    });
+  }
+  const app = api();
+  for (const organization of [false, true]) {
+    const request = (leaf: "usage" | "calls", query: string) =>
+      app.request(path(scope, organization, leaf, query), { headers: { authorization } });
+    const response = await request("usage", "range=24h&groupBy=source&seriesGroups=true");
+    expect(response.status, await response.clone().text()).toBe(200);
+    const result = InsightsUsageResponse.parse(await response.json());
+    expect(result.facets.sources).toEqual(["web", "api", "slack", "schedule", "agent", "other"]);
+    expect(
+      result.groups.map((group) => [
+        group.key,
+        group.measures.listMicros,
+        group.measures.chargedMicros,
+      ]),
+    ).toEqual([
+      ["web", 91, 18],
+      ["slack", 63, 12],
+      ["schedule", 17, 4],
+      ["other", 5, 1],
+    ]);
+    expect(result.totals).toMatchObject({ calls: 4, listMicros: 176, chargedMicros: 35 });
+    const filtered = await request("usage", "range=1h&groupBy=source&source=schedule");
+    expect(filtered.status, await filtered.clone().text()).toBe(200);
+    expect(InsightsUsageResponse.parse(await filtered.json()).totals).toMatchObject({
+      calls: 1,
+      listMicros: 17,
+      chargedMicros: 4,
+    });
+    const folded = await request("usage", "range=24h&groupBy=source&limit=1&seriesGroups=true");
+    expect(InsightsUsageResponse.parse(await folded.json()).groups.map((g) => g.key)).toContain(
+      "other:folded",
+    );
+    const calls = await request("calls", "range=24h&source=slack&limit=1");
+    expect(calls.status, await calls.clone().text()).toBe(200);
+    expect(InsightsCallsResponse.parse(await calls.json())).toMatchObject({
+      calls: [{ listMicros: 63 }],
+      nextCursor: null,
+    });
+  }
+  const billingOnly = await bearer(scope, ["billing:read"]);
+  const hidden = await app.request(path(scope, true, "usage", "range=24h&groupBy=source"), {
+    headers: { authorization: billingOnly },
+  });
+  expect(hidden.status, await hidden.clone().text()).toBe(200);
+  expect(
+    InsightsUsageResponse.parse(await hidden.json()).groups.map((group) => group.kind),
+  ).toEqual(["restricted"]);
+}, 120_000);
+
+test("inventory includes zero-use and terminal runs; the shared metric increments once and excludes private and tenant labels", async () => {
+  const scope = await fixture();
+  const create = (name: string, visibility: "workspace_shared" | "user_private") =>
+    createScheduledTask(client.db, {
+      ...scope,
+      name,
+      status: "active",
+      schedule: {
+        type: "once",
+        runAt: new Date(Date.now() + 3_600_000).toISOString(),
+        timeZone: "UTC",
+      },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Test", tools: [], resources: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      visibility,
+      metadata: {},
+    });
+  const [ran, unused, privateTask] = await Promise.all([
+    create("Ran once", "workspace_shared"),
+    create("Unused", "workspace_shared"),
+    create("Only me", "user_private"),
+  ]);
+  const settings = testSettings();
+  const metricApp = new Hono();
+  registerPrometheusMetricsRoute(metricApp, { prometheusMetrics: async () => "" }, () =>
+    automationRunMetrics(client.db, settings),
+  );
+  const metrics = async () => (await metricApp.request("/metrics")).text();
+  const count = (text: string, kind: string, outcome: string) =>
+    Number(
+      text.match(
+        new RegExp(
+          `opengeni_automation_runs_total\\{trigger_kind="${kind}",outcome="${outcome}",[^}]+\\} (\\d+)`,
+        ),
+      )?.[1],
+    );
+  const before = await metrics();
+  expect(before).toContain("# TYPE opengeni_automation_runs_total counter");
+  for (const [triggerType, retryable] of [
+    ["scheduled", false],
+    ["provider_event", true],
+  ] as const) {
+    const input = {
+      workspaceId: scope.workspaceId,
+      taskId: ran.id,
+      taskAuthorityRevision: ran.authorityRevision,
+      taskExecutionDigest: ran.executionDigest,
+      triggerType,
+      producerKey: crypto.randomUUID(),
+      reason: "scheduled_authority_unavailable" as const,
+      retryable,
+    };
+    const receipt = await recordScheduledTaskAdmissionRefusal(client.db, input);
+    expect((await recordScheduledTaskAdmissionRefusal(client.db, input)).id).toBe(receipt.id);
+  }
+  const after = await metrics();
+  expect(count(after, "once", "failed")).toBe(count(before, "once", "failed") + 1);
+  expect(count(after, "event", "skipped")).toBe(count(before, "event", "skipped") + 1);
+  expect(after).not.toContain(scope.workspaceId);
+  expect(after).not.toContain(ran.id);
+  const app = api();
+  const authorization = await bearer(scope, ["billing:read", "scheduled_tasks:run"]);
+  const response = await app.request(path(scope, true, "usage", "range=24h"), {
+    headers: { authorization },
+  });
+  expect(response.status, await response.clone().text()).toBe(200);
+  const snapshot = InsightsUsageResponse.parse(await response.json());
+  expect(snapshot.totals.calls).toBe(0);
+  expect(snapshot.automations?.map((row) => [row.id, row.fires])).toEqual([
+    [privateTask.id, 0],
+    [ran.id, 2],
+    [unused.id, 0],
+  ]);
+  const withoutScheduleRead = await bearer(scope, ["billing:read", "sessions:read"]);
+  const noAccess = await app.request(path(scope, true, "usage", "range=24h"), {
+    headers: { authorization: withoutScheduleRead },
+  });
+  expect(InsightsUsageResponse.parse(await noAccess.json()).automations).toEqual([]);
 }, 120_000);
 
 test("HTTP readers preserve actual debit totals while enforcing the delegated detail ceiling", async () => {

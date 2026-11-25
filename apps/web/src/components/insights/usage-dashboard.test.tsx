@@ -411,6 +411,45 @@ describe("Insights usage dashboard", () => {
     }
   });
 
+  test("Organization Insights shows zero-use automations even with no model calls", async () => {
+    const scope = {
+      kind: "organization",
+      accountId: WORKSPACE.accountId,
+      workspaceId: null,
+    } as const;
+    const usage = fixtureUsage({ scope, groupBy: "workspace" });
+    nextUsage = {
+      ...usage,
+      totals: { ...usage.totals, calls: 0 },
+      automations: [
+        {
+          id: "first",
+          name: "Waiting for an event",
+          workspaceId: WORKSPACE.workspaceId,
+          workspaceName: "Support",
+          fires: 0,
+        },
+        {
+          id: "second",
+          name: "Daily summary",
+          workspaceId: WORKSPACE.workspaceId,
+          workspaceName: "Support",
+          fires: 3,
+        },
+      ],
+    };
+    const view = await render({ group: "workspace" }, scope);
+    const inventory = view.container.querySelector('section[aria-label="Automations"]');
+    expect(inventory?.textContent).toContain("Daily summary");
+    expect(inventory?.textContent).toContain("Waiting for an event");
+    expect(inventory?.textContent).toContain("Support");
+    expect(inventory?.textContent).toContain("0");
+    expect(inventory?.textContent?.indexOf("Daily summary")).toBeLessThan(
+      inventory?.textContent?.indexOf("Waiting for an event") ?? -1,
+    );
+    await view.unmount();
+  });
+
   test("organization scope groups by workspace with Personal workspaces as amounts", async () => {
     nextUsage = fixtureUsage({
       groupBy: "workspace",

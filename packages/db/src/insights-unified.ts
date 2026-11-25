@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import {
+  INSIGHTS_USAGE_SOURCE_SURFACES,
+  InsightsUsageSource,
   resolveInsightsUsageWindow,
   type InsightsCall,
   type InsightsCallsQuery,
@@ -10,7 +12,13 @@ import {
   type InsightsUsageResponse,
 } from "@opengeni/contracts/insights-usage";
 import { sql, type SQL } from "drizzle-orm";
-import { withDatabaseStatementTimeout, withRlsContext, type Database } from "./database";
+import {
+  currentSessionRlsActorContext,
+  withDatabaseStatementTimeout,
+  withRlsContext,
+  type Database,
+} from "./database";
+import { listSelfOrganizationMemberships } from "./organization-membership-lifecycle";
 
 type Scope = {
   accountId: string;
@@ -20,7 +28,23 @@ type Scope = {
   detailsWorkspaceIds?: readonly string[];
   /** Only the existing account-scoped API-key authority proof may establish this. */
   detailsSharedWorkspaces?: boolean;
+  automationWorkspaceIds?: readonly string[];
+  automationSharedWorkspaces?: boolean;
 };
+
+async function personalAutomationWorkspaceId(
+  db: Database,
+  scope: Pick<Scope, "accountId" | "automationWorkspaceIds">,
+) {
+  const subject = currentSessionRlsActorContext()?.subjectId;
+  if (!subject?.startsWith("user:") || !scope.automationWorkspaceIds?.length) return null;
+  const memberships = await listSelfOrganizationMemberships(db, subject);
+  const membership = memberships.find(
+    (item) => item.organizationId === scope.accountId && item.status === "active",
+  );
+  const id = membership?.personalWorkspaceId;
+  return id && scope.automationWorkspaceIds.includes(id) ? id : null;
+}
 
 /** Read-only cache invalidation through committed session activity.
  * Every session write stamps sessions.activity_xid with its writer's xid, so the
@@ -33,9 +57,11 @@ type Scope = {
  */
 export async function readInsightsResponseCacheFence(
   db: Database,
-  scope: Pick<Scope, "accountId" | "workspaceId">,
+  scope: Pick<Scope, "accountId" | "workspaceId" | "automationWorkspaceIds">,
 ): Promise<string | null> {
   try {
+    const personal =
+      scope.workspaceId === null ? await personalAutomationWorkspaceId(db, scope) : null;
     const inventory = await withRlsContext(db, scope, async (scoped) => {
       return await cacheMetadataRead(scoped, async (bounded) =>
         rows<{ id: string; name: string }>(
@@ -43,7 +69,7 @@ export async function readInsightsResponseCacheFence(
         select w.id::text,w.name from workspaces w where w.account_id=${scope.accountId}::uuid
         and ${
           scope.workspaceId === null
-            ? sql`w.id in(select workspace_id from list_organization_workspace_ids(${scope.accountId}::uuid))`
+            ? sql`(w.id in(select workspace_id from list_organization_workspace_ids(${scope.accountId}::uuid)) or w.id=${personal}::uuid)`
             : sql`w.id=${scope.workspaceId}::uuid`
         } order by w.id`),
         ),
@@ -67,7 +93,7 @@ export async function readInsightsResponseCacheFence(
             ) as revision,
             (select coalesce(jsonb_agg(jsonb_build_array(c.id,c.name) order by c.id),'[]')
               from channels c where c.account_id=${scope.accountId}::uuid and c.workspace_id=${workspace.id}::uuid) projects,
-            (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at) order by t.id),'[]')
+            (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at,t.visibility,t.owner_subject_id) order by t.id),'[]')
               from scheduled_tasks t where t.account_id=${scope.accountId}::uuid and t.workspace_id=${workspace.id}::uuid) schedules,
             (select coalesce(jsonb_agg(jsonb_build_array(g.id,g.name,g.visibility,g.owner_subject_id) order by g.id),'[]')
               from agents g where g.account_id=${scope.accountId}::uuid and g.workspace_id=${workspace.id}::uuid) agents
@@ -217,6 +243,8 @@ function mini(): SQL {
     'chargedMicros',${sum("chargedMicros")},'listMicros',${sum("listMicros")},'byPayer',${payers()})`;
 }
 
+const usageSourceLabel = sql`coalesce(${JSON.stringify(INSIGHTS_USAGE_SOURCE_SURFACES)}::jsonb ->> (payload->>'usageSurface'), 'other')`;
+
 function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
   const keys = {
     model: sql`payload->>'provider'||'/'||(payload->>'model')`,
@@ -227,6 +255,7 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootSessionId','deleted')`,
     person: sql`coalesce(payload->>'person','service')`,
     schedule: sql`coalesce(payload->>'scheduleId','service')`,
+    source: usageSourceLabel,
     // Agents the caller may not see share one row, so their ids stay hidden.
     agent: sql`case when payload->>'agentId' is null then 'none' when payload->>'agentName' is null then 'unavailable' else payload->>'agentId' end`,
   };
@@ -239,6 +268,7 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootTitle','Untitled chat')`,
     person: sql`coalesce(payload->>'personName','Service')`,
     schedule: sql`coalesce(payload->>'scheduleName',case when payload->>'scheduleId' is null then 'Interactive' else 'Unavailable schedule' end)`,
+    source: usageSourceLabel,
     // agentName is set only for agents the caller may see (migration 1564).
     agent: sql`coalesce(payload->>'agentName',case when payload->>'agentId' is null then 'No agent' else 'Unavailable agent' end)`,
   };
@@ -258,7 +288,8 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
           : sql`'item'::text`;
   return {
     key: sql`case when payload->>'kind' in ('private','personal') then payload->>'kind'||':'||(payload->>'person')
-      when payload->>'kind'<>'item' then payload->>'kind'||case when ${groupBy}='workspace' and payload->>'workspaceId' is not null then ':'||(payload->>'workspaceId') else '' end else (${normalKind})||':'||(${key}) end`,
+      when payload->>'kind'<>'item' then payload->>'kind'||case when ${groupBy}='workspace' and payload->>'workspaceId' is not null then ':'||(payload->>'workspaceId') else '' end
+      else ${groupBy === "source" ? key : sql`(${normalKind})||':'||(${key})`} end`,
     kind: sql`case when payload->>'kind'<>'item' then payload->>'kind' else ${normalKind} end`,
     label: sql`case payload->>'kind' when 'private' then coalesce(payload->>'personName','Private chats')
       when 'personal' then coalesce(payload->>'personName','Personal usage') when 'deleted' then 'Deleted chats'
@@ -279,7 +310,11 @@ export async function readInsightsUsage(
     throw new Error("Workspace Insights does not accept organization grouping or filters");
   }
   const window = insightsUsageWindow(query, input.now);
+  const personal =
+    input.workspaceId === null ? await personalAutomationWorkspaceId(db, input) : null;
   const group = grouping(query.groupBy);
+  const sourceAware = query.groupBy === "source" || query.source !== undefined;
+  const remainder = query.groupBy === "source" ? "other:folded" : "other";
   const queryJson = JSON.stringify(query);
   // The capability already masks hidden identities. Do not call a SQL function
   // once per fact when the request has no identity/dimension predicates.
@@ -304,9 +339,15 @@ export async function readInsightsUsage(
           query.agentId.map((id) => sql`${id}`),
           sql`, `,
         )}))`;
-  const filter = filteredQuery
+  const baseFilter = filteredQuery
     ? sql`opengeni_private.insights_usage_filter(payload,${queryJson}::jsonb) and ${agentFilter}`
     : agentFilter;
+  const filter = query.source
+    ? sql`${baseFilter} and payload->>'kind'='item' and ${usageSourceLabel} in (${sql.join(
+        query.source.map((value) => sql`${value}`),
+        sql`, `,
+      )})`
+    : baseFilter;
   const details = sql`array[${sql.join(
     (input.detailsWorkspaceIds ?? []).map((id) => sql`${id}::uuid`),
     sql`, `,
@@ -317,7 +358,7 @@ export async function readInsightsUsage(
     bucket: InsightsUsageBucket,
   ) => sql`opengeni_private.insights_scoped_usage_rows(
     ${input.accountId}::uuid,${input.workspaceId}::uuid,${since.toISOString()}::timestamptz,
-    ${until.toISOString()}::timestamptz,${bucket}::text,${details},${input.detailsSharedWorkspaces === true}::boolean)`;
+    ${until.toISOString()}::timestamptz,${sourceAware ? `${bucket}:source` : bucket}::text,${details},${input.detailsSharedWorkspaces === true}::boolean)`;
   const payload: Record<string, unknown> = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -355,11 +396,11 @@ export async function readInsightsUsage(
         where r.kind not in ('private','personal','deleted','restricted') and r.rank>${query.limit}),
       selected_groups as (select key,kind,label,measures,provider,model,workspace_id,you from ranked
         where kind in ('private','personal','deleted','restricted') or rank<=${query.limit}
-        union all select 'other','other','Other',${measures()},null,null,null,false from tail having count(*)>0),
+        union all select ${remainder},'other','Other',${measures()},null,null,null,false from tail having count(*)>0),
       top_series as materialized(select key from group_rows order by
         (measures->>'chargedMicros')::bigint+(measures->>'listMicros')::bigint desc,(measures->>'calls')::bigint desc,key limit 6),
-      mini_rows as (select bucket,case when key in(select key from top_series) then key else 'other' end as key,
-        ${mini()} as measures from categorized group by bucket,case when key in(select key from top_series) then key else 'other' end),
+      mini_rows as (select bucket,case when key in(select key from top_series) then key else ${remainder} end as key,
+        ${mini()} as measures from categorized group by bucket,2),
       buckets as (select bucket,${measures()} as measures from categorized group by bucket),
       points as (select generate_series(${bucketStart(window.bucket, sql`${window.since.toISOString()}::timestamptz`)},
         ${window.until.toISOString()}::timestamptz-interval '1 microsecond',
@@ -384,6 +425,7 @@ export async function readInsightsUsage(
             from mini_rows where mini_rows.bucket=points.start),'{}'::jsonb)) else '{}'::jsonb end order by points.start)
           from points left join buckets on buckets.bucket=points.start cross join zero),'[]'::jsonb),
         'facets',jsonb_build_object(
+          'sources',${JSON.stringify(InsightsUsageSource.options)}::jsonb,
           'workspaces',coalesce((select jsonb_agg(jsonb_build_object('id',id,'name',name,'personal',personal) order by name,id)
             from(select payload->>'workspaceId' as id,max(payload->>'workspaceName') as name,bool_or(coalesce((payload->>'personal')::boolean,false)) as personal from visible group by payload->>'workspaceId') v),'[]'::jsonb),
           'providers',coalesce((select jsonb_agg(provider order by provider) from(select distinct payload->>'provider' as provider from visible) v),'[]'::jsonb),
@@ -403,6 +445,16 @@ export async function readInsightsUsage(
       return {
         ...rows<{ payload: Record<string, unknown> }>(result)[0]!.payload,
         prior: prior!.prior,
+        ...(input.workspaceId === null
+          ? {
+              automations: await readOrganizationAutomationInventory(
+                scoped,
+                input,
+                window,
+                personal,
+              ),
+            }
+          : {}),
       };
     },
   );
@@ -427,6 +479,52 @@ export async function readInsightsUsage(
     dataThrough:
       payload.dataThrough === null ? null : new Date(payload.dataThrough as string).toISOString(),
   } as InsightsUsageResponse;
+}
+
+async function readOrganizationAutomationInventory(
+  db: Database,
+  input: Scope & { query: InsightsUsageQuery },
+  window: { since: Date; until: Date },
+  personal: string | null,
+): Promise<NonNullable<InsightsUsageResponse["automations"]>> {
+  const subject = currentSessionRlsActorContext()?.subjectId;
+  if (!subject) return [];
+  const allowed = new Set(input.automationWorkspaceIds ?? []);
+  if (allowed.size === 0 && !input.automationSharedWorkspaces) return [];
+  const selected = input.query.workspaceId && new Set(input.query.workspaceId);
+  const workspaces = rows<{ id: string; name: string }>(
+    await db.execute(sql`
+    select w.id::text,w.name from workspaces w where w.account_id=${input.accountId}::uuid
+      and (w.id in(select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid))
+        or w.id=${personal}::uuid) order by w.name,w.id`),
+  );
+  const inventory: NonNullable<InsightsUsageResponse["automations"]> = [];
+  for (const workspace of workspaces) {
+    if (
+      (!input.automationSharedWorkspaces && !allowed.has(workspace.id)) ||
+      (selected && !selected.has(workspace.id))
+    )
+      continue;
+    const tasks = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: workspace.id },
+      async (scoped) =>
+        rows<{ id: string; name: string; fires: number }>(
+          await scoped.execute(sql`
+        select t.id::text,t.name,(select count(*)::int from scheduled_task_runs r
+          where r.workspace_id=t.workspace_id and r.task_id=t.id
+            and r.created_at>=${window.since.toISOString()}::timestamptz
+            and r.created_at<${window.until.toISOString()}::timestamptz) as fires
+        from scheduled_tasks t where t.account_id=${input.accountId}::uuid
+          and t.workspace_id=${workspace.id}::uuid and t.deleted_at is null
+          and (t.visibility='workspace_shared' or t.owner_subject_id=${subject})
+        order by t.name,t.id`),
+        ),
+    );
+    for (const task of tasks)
+      inventory.push({ ...task, workspaceId: workspace.id, workspaceName: workspace.name });
+  }
+  return inventory;
 }
 
 function cursorScope(input: Scope & { query: InsightsCallsQuery }): string {
@@ -516,7 +614,7 @@ export async function readInsightsCalls(
       const result =
         await scoped.execute(sql`select payload from opengeni_private.insights_scoped_calls_rows(
       ${input.accountId}::uuid,${input.workspaceId}::uuid,${window.since.toISOString()}::timestamptz,${window.until.toISOString()}::timestamptz,
-      ${JSON.stringify({ ...input.query, ...CALLS_READER_FIELDS })}::jsonb,${cursorAt}::timestamptz,${cursorId}::uuid,${input.query.limit + 1}::int,
+      ${JSON.stringify({ ...input.query, ...CALLS_READER_FIELDS, ...(input.query.source ? { usageSourceSurfaces: INSIGHTS_USAGE_SOURCE_SURFACES } : {}) })}::jsonb,${cursorAt}::timestamptz,${cursorId}::uuid,${input.query.limit + 1}::int,
       ${details},${input.detailsSharedWorkspaces === true}::boolean)
       order by (payload->>'occurredAt')::timestamptz desc,payload->>'id' desc limit ${input.query.limit + 1}`);
       return rows<{ payload: InsightsCall }>(result).map((row) => row.payload);

@@ -1,3 +1,7 @@
+import {
+  classifyInsightsUsageSource,
+  type InsightsUsageSource,
+} from "@opengeni/contracts/insights-usage";
 import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
   modelCallProcessingResidency,
@@ -558,7 +562,7 @@ export async function processModelResponseTerminalEvent(input: {
               promptCache: cacheObservation,
               processingResidency: input.processingResidency,
             })
-          : Promise.resolve();
+          : Promise.resolve(undefined);
       const cacheObservation = await timedUsagePhase("response_usage_cache", () =>
         promptCacheObservation(
           responseUsage,
@@ -685,7 +689,7 @@ export async function processModelResponseTerminalEvent(input: {
       // (settleRecordedModelUsage) exactly once.
       // The best-effort call fact (analytics only; it catches its own
       // failures) is written alongside them, off the commit the tools wait on.
-      await Promise.all([
+      const [, usageSource] = await Promise.all([
         timedUsagePhase("response_usage_billing", () =>
           recordModelUsageAndDebitCredits(input.settings, input.db, settlementInput),
         ),
@@ -714,6 +718,7 @@ export async function processModelResponseTerminalEvent(input: {
           model: input.model,
           externallyBilled: input.externallyBilled,
           billing,
+          usageSource,
           webSearchRequests: responseUsage?.webSearchRequests,
         });
       }
@@ -898,7 +903,7 @@ export async function processCompactionModelUsageEvent(input: {
         processingResidency: input.processingResidency,
       });
       if (authoritative && billing) {
-        await recordAuthoritativeModelCallFact({
+        const usageSource = await recordAuthoritativeModelCallFact({
           db: input.db,
           observability: input.observability,
           accountId: input.accountId,
@@ -929,6 +934,7 @@ export async function processCompactionModelUsageEvent(input: {
           model: input.model,
           externallyBilled: input.externallyBilled,
           billing,
+          usageSource,
         });
       }
     },
@@ -1571,6 +1577,7 @@ export function recordAuthoritativeModelUsageMetrics(input: {
   model: string;
   externallyBilled: boolean;
   billing: ModelUsageBillingRecord;
+  usageSource?: InsightsUsageSource | undefined;
   /** Provider-run web searches this response billed, when the provider reports them. */
   webSearchRequests?: number | undefined;
 }): void {
@@ -1583,6 +1590,7 @@ export function recordAuthoritativeModelUsageMetrics(input: {
       tokens: telemetry,
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
       pricingSource: input.billing.pricingSource,
+      source: input.usageSource ?? "other",
       ...(input.webSearchRequests ? { webSearchRequests: input.webSearchRequests } : {}),
     });
   } catch {
@@ -1618,7 +1626,7 @@ export async function recordAuthoritativeModelCallFact(input: {
   promptCache?: PromptCacheObservation | null;
   /** Processing residency of the route that served the call. */
   processingResidency: ModelCallProcessingResidencyV1;
-}): Promise<void> {
+}): Promise<InsightsUsageSource> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
     const fact = (connectionId: string | null) => ({
@@ -1667,10 +1675,12 @@ export async function recordAuthoritativeModelCallFact(input: {
       diagnostics: recorded?.promptCacheDiagnostics ?? null,
       cachedTokens: telemetry.cachedTokens,
     });
+    return classifyInsightsUsageSource(recorded?.turnSurface, recorded?.scheduledTaskId != null);
   } catch (error) {
     input.observability.warn("model call fact persist failed", {
       ...safeErrorDiagnostic(error),
     });
+    return "other";
   }
 }
 

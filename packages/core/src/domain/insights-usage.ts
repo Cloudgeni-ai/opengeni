@@ -35,6 +35,9 @@ export type InsightsQueryScope = {
   detailsWorkspaceIds?: readonly string[];
   /** Existing organization service-key authority applies only to shared workspaces. */
   detailsSharedWorkspaces?: boolean;
+  /** Automation names and runs require the existing automation read permission as well. */
+  automationWorkspaceIds?: readonly string[];
+  automationSharedWorkspaces?: boolean;
 };
 
 export async function getInsightsUsage(

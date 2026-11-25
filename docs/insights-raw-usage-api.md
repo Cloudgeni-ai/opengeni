@@ -10,10 +10,9 @@ are unchanged. No historical total is repriced.
 workspaceId: string | null, query, now, detailsWorkspaceIds?: readonly string[],
 detailsSharedWorkspaces?: boolean })`. A null workspace selects organization
 scope. The result is the existing `@opengeni/contracts/insights-usage` response.
-All six preset UTC ranges and the original grouping/filter/cursor fields are
-supported. Source/plan/session dimensions and custom dates remain preserved
-follow-up work: these queries return HTTP 400 rather than silently using a
-different window or dimension. The interim response omits `facets.sources`.
+The response advertises its supported ranges, including custom UTC dates or
+instants. Unsupported dimensions such as plan return HTTP 400 rather than
+silently using a different dimension.
 
 Core must supply authenticated detail authority, not wire fields: workspace
 routes pass their sessions:read-authorized workspace; organization routes pass
@@ -43,6 +42,25 @@ Like the other identity filters, `agentId` matches visible usage only; hidden
 rows never reveal which agent a hidden chat used. `facets.agents` lists the
 visible agents with usage and marks servers that answer the agent dimension.
 The calls endpoint does not accept `agentId`.
+
+Usage can group by `source`; both usage and calls can filter by `source`.
+The values are `web`, `api` (including SDK/embed and MCP entry), `slack`,
+`schedule`, `agent`, and `other` (including unknown legacy provenance).
+An attributed automation run takes priority over the accepted turn's entry
+surface. Source filters only match visible usage. Hidden amounts remain in
+their usual aggregate rows and never reveal a source. `facets.sources` declares
+the fixed supported values. Exact source breakdowns read raw facts and their
+accepted turns in the requested window; ordinary reads retain hourly rollups.
+
+Organization Insights also returns `automations` on the same usage endpoint
+(`getOrganizationInsightsUsage` in the SDK). Each row contains the automation
+and workspace IDs and names and `fires`: all persisted runs created in the
+selected window, regardless of outcome or whether they used a model. An existing
+automation without runs is included with zero. The inventory respects the
+workspace filter and the existing `scheduled_tasks:run` grant and visibility
+rules; other usage filters don't change the inventory or its counts. An
+all-workspaces organization key includes only Shared workspaces, never another
+person's Personal workspace or Only me automations. Older servers omit the field.
 
 Charged amounts come only from negative `model_usage_debit` / `model_response`
 credit-ledger entries, matched by `turnId:sourceKey`. Requested fact prices are

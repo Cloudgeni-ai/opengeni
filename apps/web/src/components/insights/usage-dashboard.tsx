@@ -251,7 +251,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
       >
         {usage.totals.calls === 0 && activeFilterCount(query.filters) === 0 ? (
           <EmptyState
-            variant="page"
+            variant={usage.automations?.length ? "inline" : "page"}
             icon={<CalendarIcon />}
             title={emptyTitle(usage.range)}
             description="Usage shows here as soon as an agent calls a model."
@@ -320,6 +320,9 @@ export function UsageDashboard(props: UsageDashboardProps) {
           estimates.
         </p>
       </div>
+      {props.scope.kind === "organization" && usage.automations !== undefined ? (
+        <AutomationInventory automations={usage.automations} />
+      ) : null}
       {props.scope.kind === "workspace" ? (
         <SitesUsageSection
           client={client}
@@ -1051,6 +1054,48 @@ function ShareBar(props: {
    -------------------------------------------------------------------------- */
 
 type SortColumn = "name" | "calls" | TokenClassId | "cost";
+
+const AUTOMATION_COLUMNS: RowListColumn[] = [
+  { id: "runs", label: "Runs", width: 88, align: "end", leadsWhenFolded: true },
+];
+
+function AutomationInventory({
+  automations,
+}: {
+  automations: NonNullable<UsageResponse["automations"]>;
+}) {
+  return (
+    <section aria-label="Automations" className="flex min-w-0 flex-col gap-3">
+      <div>
+        <h2 className={SECTION_TITLE_CLASS}>Automations</h2>
+        <p className="text-sm text-fg-muted">
+          Runs in the selected time range, including runs without model usage.
+        </p>
+      </div>
+      {automations.length === 0 ? (
+        <p className="text-sm text-fg-muted">No automations visible in these workspaces.</p>
+      ) : (
+        <RowList
+          variant="table"
+          label="Automation runs"
+          nameLabel="Automation"
+          columns={AUTOMATION_COLUMNS}
+        >
+          {automations
+            .toSorted((a, b) => b.fires - a.fires)
+            .map((task) => (
+              <ListRow
+                key={task.id}
+                title={task.name}
+                meta={[task.workspaceName]}
+                cells={{ runs: <Quiet>{formatCount(task.fires)}</Quiet> }}
+              />
+            ))}
+        </RowList>
+      )}
+    </section>
+  );
+}
 
 const BREAKDOWN_COLUMNS: RowListColumn[] = [
   { id: "calls", label: "Calls", width: 76, align: "end", sortable: true },

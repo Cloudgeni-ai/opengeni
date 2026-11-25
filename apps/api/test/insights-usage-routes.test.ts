@@ -112,7 +112,7 @@ function responseFor(input: Parameters<typeof core.getInsightsUsage>[1]): Insigh
 }
 
 describe("unified Insights route discipline", () => {
-  test("additive source contracts cannot silently widen the raw implementation; its ranges are served", () => {
+  test("source is supported without widening unrelated dimensions or time ranges", () => {
     for (const organization of [false, true])
       for (const calls of [false, true]) {
         for (const query of [
@@ -120,16 +120,17 @@ describe("unified Insights route discipline", () => {
           { range: "1h" },
           { range: "3h", provider: "openai" },
           { range: "24h" },
+          { source: "web" },
+          ...(!calls ? [{ groupBy: "source" }] : []),
           { range: "custom", from: "2024-02-28", to: "2024-02-29" },
           { range: "custom", from: "2024-02-28T09:15Z", to: "2024-02-28T11:00Z" },
         ])
           expect(insightsRawQuerySupported(query, organization, calls)).toBe(true);
         for (const query of [
           { range: "2h" },
-          { source: "web" },
           { plan: "unknown" },
           { sessionId: workspaceId },
-          ...(!calls ? [{ groupBy: "source" }, { groupBy: "session" }, { groupBy: "plan" }] : []),
+          ...(!calls ? [{ groupBy: "session" }, { groupBy: "plan" }] : []),
         ])
           expect(insightsRawQuerySupported(query, organization, calls)).toBe(false);
       }

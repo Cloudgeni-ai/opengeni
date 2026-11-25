@@ -22542,6 +22542,13 @@
       ],
       "shape": {
         "$": "object",
+        "$.automations": "array?",
+        "$.automations[]": "object",
+        "$.automations[].fires": "integer!",
+        "$.automations[].id": "string!",
+        "$.automations[].name": "string!",
+        "$.automations[].workspaceId": "string!",
+        "$.automations[].workspaceName": "string!",
         "$.availableRanges": "array?",
         "$.availableRanges[]": "ref(InsightsUsageRange)",
         "$.bucket": "ref(InsightsUsageBucket)!",
