@@ -32,7 +32,7 @@ import {
   RAIL_ROW_QUICK_ACTIONS_CLASS,
   RailRowQuickAction,
 } from "./rail-row-quick-actions";
-import { SessionBrowseOrderControls } from "./session-browse-order-controls";
+import { SessionBrowseOrderControls, type AppsPlacement } from "./session-browse-order-controls";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -217,6 +217,7 @@ import {
   sortSessionForest,
   compareSessionBrowse,
   projectRailSessions,
+  railSectionsFor,
   groupSessionsForRail,
   mergeSessionForRail,
   parseSiteRowKey,
@@ -491,8 +492,20 @@ export function SessionList() {
   // sidebar options list apps' chats as ordinary chats. Until that's known
   // the list waits, so it never draws app rows only to redraw without them.
   const shellSlots = useContext(SessionShellSlotsContext);
-  const appRowsPending = shellSlots.sessionsShowApps === null;
-  const appRows = shellSlots.sessionsShowApps !== false;
+  // Where apps show: rows here, a section of their own below Sessions, or
+  // hidden (their chats listed as ordinary chats). A surface without the
+  // newer choice still says whether apps are rows.
+  const appsPlacement: AppsPlacement | null =
+    shellSlots.appsPlacement !== undefined
+      ? shellSlots.appsPlacement
+      : shellSlots.sessionsShowApps === null
+        ? null
+        : shellSlots.sessionsShowApps === false
+          ? "hidden"
+          : "sessions";
+  const appRowsPending = appsPlacement === null;
+  const appRows = appsPlacement !== "hidden";
+  const appsSection = appsPlacement === "section";
   const sidebarApps = shellSlots.sidebarApps;
   const channelMode = browseGroupBy === "project";
   const clearBrowseControls = useCallback(() => {
@@ -978,6 +991,9 @@ export function SessionList() {
   const focusRestoreOperation = useRef(0);
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
+  // The Apps section's list, when apps have a section of their own: its rows
+  // follow the list's in keyboard order.
+  const appsListRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const viewport = listRef.current?.closest("[data-rail-scroll-viewport]");
     if (!viewport) return;
@@ -1717,7 +1733,8 @@ export function SessionList() {
         groupSites: appRows && hierarchyMode,
         siteGroups,
         archivedSiteIds,
-        siteRowsByProject: channelMode,
+        // An Apps section lists each app once, whichever projects its chats are in.
+        siteRowsByProject: channelMode && !appsSection,
         workspaceId: rail.workspaceId,
         creator: { kind: "subject", subjectId: context.accessContext.subjectId },
       }),
@@ -1728,19 +1745,25 @@ export function SessionList() {
       siteGroups,
       archivedSiteIds,
       channelMode,
+      appsSection,
       rail.workspaceId,
       context.accessContext.subjectId,
     ],
+  );
+  // With apps in a section of their own, Sessions lists everything else.
+  const sessionSections = useMemo(
+    () => railSectionsFor(railSections, appsSection ? "sessions" : null),
+    [railSections, appsSection],
   );
   const forest = useMemo(
     () =>
       sortSessionForest(
         browseGroupBy === "activity"
-          ? railSections.ordinary
-          : groupSessionForestForBrowse(railSections.ordinary, browseGroupBy, { creatorLabels }),
+          ? sessionSections.ordinary
+          : groupSessionForestForBrowse(sessionSections.ordinary, browseGroupBy, { creatorLabels }),
         browseSortBy,
       ),
-    [browseGroupBy, browseSortBy, creatorLabels, railSections.ordinary],
+    [browseGroupBy, browseSortBy, creatorLabels, sessionSections.ordinary],
   );
   const visibleForest = useMemo(
     () => ({
@@ -1762,12 +1785,62 @@ export function SessionList() {
   // Keep personal pin order while applying the selected sort to shortcut descendants.
   const pinnedNodes = useMemo(
     () =>
-      railSections.pinned.map((node) => ({
+      sessionSections.pinned.map((node) => ({
         ...node,
         children: sortSessionForest({ running: node.children, grouped: [] }, browseSortBy).running,
       })),
-    [railSections.pinned, browseSortBy],
+    [sessionSections.pinned, browseSortBy],
   );
+  // The Apps section's rows: pinned apps first, then the rest in the list's
+  // sort. Needs you lists the apps with a chat that needs the person;
+  // Archived lists no apps.
+  const appNodes = useMemo(() => {
+    if (!appsSection || browseStatus === "archived") return null;
+    const apps = railSectionsFor(railSections, "apps", needsYouOnly ? appNeedsYou : null);
+    return {
+      pinned: apps.pinned.map((node) => ({
+        ...node,
+        children: sortSessionForest({ running: node.children, grouped: [] }, browseSortBy).running,
+      })),
+      rest: sortSessionForest(
+        {
+          running: [
+            ...apps.ordinary.running,
+            ...apps.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+          ],
+          grouped: [],
+        },
+        browseSortBy,
+      ).running,
+    };
+  }, [appsSection, browseStatus, browseSortBy, needsYouOnly, railSections]);
+  // The Apps section shows its first rows and a Show more for the rest; an
+  // open app or app chat beyond them shows too.
+  // The open app: its own page, or the app one of its chats belongs to.
+  const openSiteId =
+    activeSiteId ??
+    (activeSessionId &&
+    context.session?.id === activeSessionId &&
+    context.session.parentSessionId === null
+      ? (sessionSiteOrigin(context.session)?.siteId ?? null)
+      : null);
+  const [appsShowAll, setAppsShowAll] = useState(false);
+  const appsSectionNodes = useMemo(() => {
+    if (!appNodes) return null;
+    const all = [...appNodes.pinned, ...appNodes.rest];
+    if (all.length <= APPS_SECTION_ROWS) return { shown: all, hidden: 0, more: false };
+    if (appsShowAll) return { shown: all, hidden: 0, more: true };
+    const shown = all.slice(0, APPS_SECTION_ROWS);
+    const open = all
+      .slice(APPS_SECTION_ROWS)
+      .find(
+        (node) =>
+          (openSiteId !== null && node.siteGroup?.siteId === openSiteId) ||
+          findSessionTreeNode([node], activeSessionId) !== null,
+      );
+    const hidden = all.length - shown.length - (open ? 1 : 0);
+    return { shown: open ? [...shown, open] : shown, hidden, more: hidden > 0 };
+  }, [appNodes, appsShowAll, activeSessionId, openSiteId]);
   // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
   const pinnedChatNodes = useMemo(
     () => pinnedNodes.filter((node) => !node.siteGroup),
@@ -2745,13 +2818,6 @@ export function SessionList() {
   // to that Site, as a person's own expansion would: it stays open when
   // another session is selected, and closing it again is respected while
   // switching between the Site's conversations.
-  const openSiteId =
-    activeSiteId ??
-    (activeSessionId &&
-    context.session?.id === activeSessionId &&
-    context.session.parentSessionId === null
-      ? (sessionSiteOrigin(context.session)?.siteId ?? null)
-      : null);
   const siteRouteExpansion = useRef<string | null>(null);
   useEffect(() => {
     if (!hierarchyMode || !openSiteId) {
@@ -2799,10 +2865,15 @@ export function SessionList() {
               const selected = findSessionTreeNode(archivedNodes, activeSessionId);
               return selected ? [{ node: selected, depth: 0 }] : [];
             })();
+    // The Apps section comes after the list.
+    const appSectionRows = appsSectionNodes
+      ? visibleTreeRows(appsSectionNodes.shown, expanded, activeSessionId)
+      : [];
     return [
       ...visibleTreeRows(pinnedNodes, expanded, activeSessionId),
       ...ordinaryRows,
       ...archiveRows,
+      ...appSectionRows,
     ].filter(({ node }) => {
       if (seen.has(node.session.id)) return false;
       seen.add(node.session.id);
@@ -2810,6 +2881,7 @@ export function SessionList() {
     });
   }, [
     activeSessionId,
+    appsSectionNodes,
     archiveExpanded,
     archivedNodes,
     browseStatus,
@@ -2883,8 +2955,8 @@ export function SessionList() {
 
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
-    const root = listRef.current;
-    if (!pending || !root) return;
+    const roots = sessionRowRoots(listRef.current, appsListRef.current);
+    if (!pending || roots.length === 0) return;
     const operation = pending.operation;
     let cancelled = false;
     let frame: number | null = null;
@@ -2894,9 +2966,9 @@ export function SessionList() {
       const current = pendingSessionFocus.current;
       if (!current || current.operation !== operation) return;
       const attribute = sessionFocusAttribute(current.target);
-      const destinations = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].filter(
-        (element) => element.getAttribute(attribute) === current.sessionId,
-      );
+      const destinations = roots
+        .flatMap((root) => [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)])
+        .filter((element) => element.getAttribute(attribute) === current.sessionId);
       const actionMode =
         current.target === "actions" &&
         typeof window.matchMedia === "function" &&
@@ -3709,8 +3781,10 @@ export function SessionList() {
     archiveFillFreeze.current = null;
     const previousHeight = lastFillViewportHeight.current;
     lastFillViewportHeight.current = viewportHeight;
+    // The Apps section follows the list, so the list fills only what it leaves.
+    const apps = appsListRef.current?.closest<HTMLElement>("[data-sessions-apps-section]");
     const contentBottom =
-      list.getBoundingClientRect().bottom -
+      Math.max(list.getBoundingClientRect().bottom, apps?.getBoundingClientRect().bottom ?? 0) -
       viewport.getBoundingClientRect().top +
       viewport.scrollTop;
     const free = viewportHeight - contentBottom;
@@ -3749,6 +3823,26 @@ export function SessionList() {
       if (frame) cancelAnimationFrame(frame);
     };
   }, [measureFill]);
+  // The Apps section resizes on Show more and when an app opens.
+  const appsSectionShown =
+    appsSectionNodes !== null && appsSectionNodes.shown.length > 0 && !appRowsPending;
+  useEffect(() => {
+    const apps = appsListRef.current?.closest<HTMLElement>("[data-sessions-apps-section]");
+    if (!appsSectionShown || !apps || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measureFill();
+      });
+    });
+    observer.observe(apps);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [appsSectionShown, measureFill]);
   const fillSignature = fillTargets
     .map(
       (target) =>
@@ -3900,8 +3994,8 @@ export function SessionList() {
   // Layout timing makes real DOM focus part of the discrete keyboard commit;
   // a passive effect can leave Home/End visibly on the prior row for a frame.
   useLayoutEffect(() => {
-    const root = listRef.current;
-    if (focusIndex < 0 || !root) {
+    const roots = sessionRowRoots(listRef.current, appsListRef.current);
+    if (focusIndex < 0 || roots.length === 0) {
       return;
     }
     const requestedFocusId = rowFocusIntent.current;
@@ -3910,10 +4004,11 @@ export function SessionList() {
     if (!requestedSessionId) {
       return;
     }
-    const row = [...root.querySelectorAll<HTMLElement>("[data-session-row]")].find(
-      (candidate) => candidate.dataset.sessionRow === requestedSessionId,
-    );
-    if (!row) {
+    const row = roots
+      .flatMap((root) => [...root.querySelectorAll<HTMLElement>("[data-session-row]")])
+      .find((candidate) => candidate.dataset.sessionRow === requestedSessionId);
+    const root = row ? roots.find((candidate) => candidate.contains(row)) : undefined;
+    if (!row || !root) {
       return;
     }
     // Arrow/Home/End navigation must move real DOM focus, not just paint a
@@ -3923,7 +4018,7 @@ export function SessionList() {
       const renderedSessionId = flat[focusIndex]?.id ?? null;
       if (
         pendingSessionFocus.current ||
-        !root.contains(document.activeElement) ||
+        !roots.some((candidate) => candidate.contains(document.activeElement)) ||
         !shouldMoveSessionRowFocus(requestedFocusId, renderedSessionId)
       ) {
         rowFocusIntent.current = null;
@@ -3942,6 +4037,81 @@ export function SessionList() {
     const count = sessionBrowseResultCount(browseSessions, hierarchyMode);
     setAnnouncement(`${count} matching session${count === 1 ? "" : "s"}.`);
   }, [browseControlsActive, browseSessions, hierarchyMode, loading, search]);
+
+  const siteGroupsTruncatedNote =
+    hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
+      <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+        Some older apps aren&apos;t shown. Find them in{" "}
+        <Link
+          to="/workspaces/$workspaceId/artifacts"
+          params={{ workspaceId: rail.workspaceId }}
+          className="underline underline-offset-2 hover:text-fg"
+        >
+          Artifacts
+        </Link>
+        .
+      </p>
+    ) : null;
+  // Apps in a section of their own: a peer of Sessions, below it, with the
+  // same header. It shows only when it lists apps.
+  const appsSectionId = useId();
+  const appsGroupProps = {
+    localDeliveryAttention,
+    flat,
+    activeSessionId,
+    focusIndex,
+    onFocusSession: setFocusedSessionId,
+    expanded,
+    onToggleExpand: toggleExpand,
+    childPages,
+    onLoadMoreChildren: loadChildPage,
+    onRename: context.updateSessionTitle,
+    onPin,
+    channels,
+    onMoveToChannel,
+    onUpdateAttention,
+    onArchive,
+    onRequestDelete: setSessionPendingDelete,
+  };
+  const appsSectionView =
+    appsSectionShown && appsSectionNodes ? (
+      <section
+        aria-labelledby={`${appsSectionId}-title`}
+        data-sessions-apps-section
+        className="min-w-0 shrink-0"
+      >
+        <div className="mb-1 flex min-w-0 items-center gap-1 pl-[18px] pr-3 pt-1">
+          <span
+            id={`${appsSectionId}-title`}
+            className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label"
+          >
+            Apps
+          </span>
+        </div>
+        <div ref={appsListRef} onKeyDown={onKeyDown} className="min-w-0 pl-2 pr-3">
+          <SessionGroup
+            label="Apps"
+            hideHeading
+            sectionId="apps"
+            nodes={appsSectionNodes.shown}
+            {...appsGroupProps}
+          />
+          {appsSectionNodes.more ? (
+            <div className="px-2 text-center">
+              <button
+                type="button"
+                aria-expanded={appsShowAll}
+                onClick={() => setAppsShowAll((current) => !current)}
+                className="min-h-8 rounded-md px-2 text-xs font-normal text-fg-muted hover:bg-hover hover:text-fg pointer-coarse:min-h-11"
+              >
+                {appsShowAll ? "Show less" : `Show ${appsSectionNodes.hidden} more`}
+              </button>
+            </div>
+          ) : null}
+          {siteGroupsTruncatedNote}
+        </div>
+      </section>
+    ) : null;
 
   return (
     <SiteRowActionsContext.Provider value={siteRowActions}>
@@ -4030,6 +4200,8 @@ export function SessionList() {
                   onShowEmptyGroupsChange={(show) =>
                     updateBrowsePreferences({ showEmptyGroups: show })
                   }
+                  appsPlacement={appsPlacement ?? undefined}
+                  onAppsPlacementChange={shellSlots.onAppsPlacementChange}
                 />
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -4154,19 +4326,7 @@ export function SessionList() {
                     ) : null}
                   </>
                 ) : null}
-                {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
-                  <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                    Some older apps aren&apos;t shown. Find them in{" "}
-                    <Link
-                      to="/workspaces/$workspaceId/artifacts"
-                      params={{ workspaceId: rail.workspaceId }}
-                      className="underline underline-offset-2 hover:text-fg"
-                    >
-                      Artifacts
-                    </Link>
-                    .
-                  </p>
-                ) : null}
+                {appsSection ? null : siteGroupsTruncatedNote}
                 {browseStatus === "archived" ? null : channelMode ? (
                   renderedChannelSections.map((section) => (
                     <SessionGroup
@@ -4384,6 +4544,7 @@ export function SessionList() {
               </>
             )}
           </div>
+          {appsSectionView}
           {projectPendingEdit ? (
             <ProjectProfileDialog
               key={projectPendingEdit.id}
@@ -5923,6 +6084,19 @@ function RowActionsMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** Where the list's rows are: the list, then the Apps section when it shows. */
+function sessionRowRoots(list: HTMLElement | null, apps: HTMLElement | null): HTMLElement[] {
+  return [list, apps].filter((root): root is HTMLElement => root !== null);
+}
+
+/** How many apps the Apps section shows before Show more. */
+const APPS_SECTION_ROWS = 5;
+
+/** An app row with a chat that needs the person, for the Apps section's Needs you. */
+function appNeedsYou(node: SessionTreeNode): boolean {
+  return filterNeedsYou([node.session]).length > 0 || node.children.some(appNeedsYou);
 }
 
 function EmptySessions({ archived = false }: { archived?: boolean | undefined }) {

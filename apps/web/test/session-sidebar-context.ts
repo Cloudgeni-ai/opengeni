@@ -242,7 +242,14 @@ if (sitesScenario) {
     session(7, "Pricing page copy", redesignId, 400),
     session(8, "Flaky checkout test", bugfixesId, 200),
     siteConversation(901, "Time filters across all graphs", usage, null, 2),
-    siteConversation(902, "Weekly active users by plan", usage, null, 180),
+    // `?splitApp=1`: one of the app's chats sits in another project.
+    siteConversation(
+      902,
+      "Weekly active users by plan",
+      usage,
+      previewParameters.get("splitApp") === "1" ? redesignId : null,
+      180,
+    ),
     siteConversation(903, "Export usage to CSV", usage, null, 2600),
     siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
   );
@@ -266,6 +273,19 @@ if (sitesScenario) {
       updatedAt: timeBefore(2880),
     },
   );
+  // `?manyApps=1`: three more apps, seven in all.
+  if (previewParameters.get("manyApps") === "1")
+    for (const [index, title] of [
+      "Churn dashboard",
+      "Roadmap tracker",
+      "Hiring pipeline",
+    ].entries())
+      createdSites.push({
+        siteId: `00000000-0000-4000-a000-00000000001${index}`,
+        title,
+        channelId: null,
+        updatedAt: timeBefore(3000 + index * 60),
+      });
   if (rowActionsScenario) {
     // A workstream whose agent spawned a chat, nested under it in the rail.
     const parent = rows.find((row) => row.title === "Slack community connection test")!;

@@ -130,6 +130,7 @@ describe("options before the layout arrives", () => {
       expect(reload.result.current.layout).toBeNull();
       expect(reload.result.current.options).toEqual({
         sessionsShowApps: false,
+        appsPlacement: "hidden",
         hiddenNavEntries: ["meetings"],
         settingsMore: null,
       });
@@ -164,6 +165,7 @@ describe("options before the layout arrives", () => {
       await flush();
       expect(hook.result.current.options).toEqual({
         sessionsShowApps: true,
+        appsPlacement: "sessions",
         hiddenNavEntries: [],
         settingsMore: null,
       });

@@ -352,6 +352,43 @@ const RESUMING_CHILD = {
   requiresActionSince: null,
 } as never;
 
+// A finished sub-session whose connection card is still open: nothing to
+// answer here, so the line offers Dismiss.
+const CARD_WAIT_CHILD = {
+  id: "session-kit-agents",
+  workspaceId: "ws-kit",
+  status: "idle",
+  title: "Agents: create by chat, common triggers, cost per agent",
+  titleSource: "agent",
+  lastSequence: 5410,
+  createdAt: "2026-11-24T15:16:03Z",
+  updatedAt: "2026-11-24T21:53:20Z",
+  requiresActionSince: null,
+  awaitingConnectionSince: "2026-11-24T21:49:15Z",
+} as never;
+
+const cardWaitChildClient = {
+  getSession: async () => CARD_WAIT_CHILD,
+  streamEvents: async function* () {},
+  listHumanInputRequests: async () => [],
+  submitHumanInputResponse: async () => {
+    throw new OpenGeniApiError(409, "No question is waiting");
+  },
+  listEventPage: async () => ({ events: [], hasMore: false }),
+  sendMessage: async () => {
+    throw new OpenGeniApiError(409, "Nothing to send");
+  },
+  sendApprovalDecision: async () => {
+    throw new OpenGeniApiError(409, "Nothing to decide");
+  },
+  getToolActionReview: async () => {
+    throw new OpenGeniApiError(404, "No review");
+  },
+  getToolReviewDetails: async () => {
+    throw new OpenGeniApiError(404, "No review");
+  },
+} as never;
+
 const resumingChildClient = {
   getSession: async () => RESUMING_CHILD,
   streamEvents: async function* () {},
@@ -480,6 +517,20 @@ export default function ChatApprovalsSection() {
               workspaceId="ws-kit"
               parentSessionId="session-kit"
               waiting={[RESUMING_CHILD]}
+            />
+          </KitBlock>
+        ) : null}
+
+        {showPart("card-wait-sub-session") ? (
+          <KitBlock
+            title="A sub-session waiting only on a connection card"
+            description="Nothing to answer in the parent: the line links to the sub-session and can be dismissed until it waits again."
+          >
+            <DescendantRequests
+              client={cardWaitChildClient}
+              workspaceId="ws-kit"
+              parentSessionId="session-kit"
+              waiting={[CARD_WAIT_CHILD]}
             />
           </KitBlock>
         ) : null}

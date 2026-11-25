@@ -14584,7 +14584,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`,
  * `session_usage_limit` (an existing-session task reached its per-task usage
  * limit; admitted again once a person raises or clears it)
- * (transient). Readers must tolerate new reasons.
+ * (transient), and for event runs `chain_limit` (too deep a chain of
+ * automations) and `duplicate_agent_run` (another automation of the same
+ * agent took the delivery). Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z

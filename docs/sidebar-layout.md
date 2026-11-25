@@ -38,7 +38,8 @@ default sets them for everyone and a person's own value wins:
 
 | Option             | Effect                                                                                     |
 | ------------------ | ------------------------------------------------------------------------------------------ |
-| `sessionsShowApps` | `false`: project apps don't show as rows of their own in the Sessions list; their chats show as ordinary chats. Default `true`. |
+| `appsPlacement`    | Where apps show: `sessions` (rows of their own in the Sessions list, their chats under them), `section` (an **Apps** section of their own below Sessions, with the same kind of header, listing the app rows, pinned ones first, in the list's sort, search and filters; Sessions then leaves them out) or `hidden` (no app rows; their chats show as ordinary chats). The Apps section shows its first five apps, then **Show more**, so it stays in view; an open app beyond those still shows, and with no apps the section is hidden. A `tab` saved by a preview that gave apps a tab beside Sessions reads as `section`. Default `sessions`. |
+| `sessionsShowApps` | The older form of `appsPlacement`, kept for existing layouts and callers: `false` is `hidden`, `true` is `sessions`. Setting either one sets the other (`section` stores `sessionsShowApps: true`, so clients from before `appsPlacement` show those apps in the Sessions list), and an `appsPlacement` that disagrees with `sessionsShowApps` (a version from before it changed only `sessionsShowApps`) is ignored, as is an `appsPlacement` stored without `sessionsShowApps` (what such a version's clear leaves). Clients write In Sessions and Hidden as `sessionsShowApps`, which every server takes; during a rollout, an older server refuses or ignores Own section. Answers carry both; resolved `sessionsShowApps` is `false` only when apps are hidden. |
 | `hiddenNavEntries` | Built-in rail entries left out: any of `inbox`, `capabilities`, `knowledge`, `automations`, `agents`, `meetings`, `artifacts`, `apps`, `get_started`. Hiding `artifacts` hides `apps` (its Apps tab) too. An entry still shows while it is the current page or has something waiting (a Knowledge review, an Inbox item, a recording). Default none. |
 | `settingsMore`     | Settings rail entry ids (`workspace:general`, `organization:members`, ...) moved under one collapsed **More**, which opens while it holds the current page; every other entry, including new ones, stays at the top. Settings search still finds everything. Default unset: every entry at the top. |
 
@@ -210,8 +211,11 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   leaving the field saves, Escape cancels) for your own groups, and for the
   default's groups under Workspace default; rows also have Icon and, for
   lists, Show. The page's More (next to Add) switches the options above
-  (Group chats under their app, and Menu entries for each rail entry) and
-  holds Reset to workspace default; for you and, for admins, as the default.
+  (Apps: In Sessions, Own section or Hidden, and Menu entries for each rail
+  entry) and holds Reset to workspace default; for you and, for admins, as
+  the default. The Sessions list's view menu has the same **Apps** choice
+  for you. With Own section, **Apps** shows below Sessions with its own
+  header.
   A settings entry's button says what it does, **Move to More** or **Show
   at top**, while the pointer is over the entry (a small arrow, always shown,
   on touch screens). The rail draws the options as this browser last saw
