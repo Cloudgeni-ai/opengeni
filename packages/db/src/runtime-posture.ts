@@ -2102,6 +2102,7 @@ export const FORCE_RLS_TABLES = [
   "attached_browser_inventories",
   "audit_events",
   "auth_runs",
+  "automation_run_counters",
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
