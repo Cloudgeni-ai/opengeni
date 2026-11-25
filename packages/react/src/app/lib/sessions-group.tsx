@@ -1488,6 +1488,33 @@ export function buildPinnedRailSections(
   };
 }
 
+/**
+ * The rail sections one part of the list shows when apps have a section of
+ * their own: the Apps section keeps only app rows, Sessions everything else.
+ * Without a part (null) the sections are unchanged. `complete` stays whole
+ * for lookups.
+ */
+export function railSectionsFor(
+  sections: PinnedRailSections,
+  part: "sessions" | "apps" | null,
+  /** Rows the part also leaves out (the Apps section's Needs you). */
+  also: ((node: SessionTreeNode) => boolean) | null = null,
+): PinnedRailSections {
+  if (part === null) return sections;
+  const keep = (node: SessionTreeNode) =>
+    Boolean(node.siteGroup) === (part === "apps") && (also === null || also(node));
+  return {
+    complete: sections.complete,
+    pinned: sections.pinned.filter(keep),
+    ordinary: {
+      running: sections.ordinary.running.filter(keep),
+      grouped: sections.ordinary.grouped
+        .map((bucket) => ({ ...bucket, sessions: bucket.sessions.filter(keep) }))
+        .filter((bucket) => bucket.sessions.length > 0),
+    },
+  };
+}
+
 /** The selected descendant under a collapsed node, projected one level deeper. */
 export function selectedDescendantNode(
   node: SessionTreeNode,

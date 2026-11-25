@@ -64,6 +64,7 @@ import { Switch } from "@opengeni/react/ui/switch";
 import { UsageMeterGroup } from "@opengeni/react/ui/usage-meter";
 import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
+import { codexNoReadingLabel } from "./codex-overview-usage";
 import { OwnWhereItWorksSection } from "@opengeni/react/app/components/own-where-it-works";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
@@ -481,10 +482,11 @@ function CodexRow({
               windows={windows}
               loading={loadingUsage}
               now={codex.now}
+              checkedAt={live?.usage?.fetchedAt}
               fallback={
                 live?.status === "error" || (!live && codex.usageError)
                   ? "Usage unavailable"
-                  : "No usage yet"
+                  : codexNoReadingLabel(account)
               }
             />
           ),

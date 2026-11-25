@@ -1,5 +1,24 @@
 # @opengeni/sdk
 
+## 6.39.0
+
+### Minor Changes
+
+- e4598af: Insights usage can group by agent (`groupBy=agent`) and filter by `agentId`; a worker's usage counts toward its root chat's agent, and responses add `facets.agents`. An agent's page shows what it cost in the last 30 days and per run to people who can see Usage.
+- e4598af: Agents are easier to set up. **Add agent ▾ → Create with chat** opens a chat that drafts the agent from a plain description and creates it once the person confirms, using the new bundled `agents` Skill (`builtin:agents`); `bot_template_save` also accepts `toolPermissions` and `skills`. New agents in the form start with short Instructions and ask before merging pull requests. The form and the agent's page offer common triggers as switches: when a pull request opens, when mentioned on a PR, and every weekday morning (`commonAgentTriggers()`).
+
+### Patch Changes
+
+- fb71d94: Onboarding asks one question with two answers: **Software engineer** ends on a new Get started page with guided setups (review pull requests, triage Linear issues, weekly PostHog report), and **Not an engineer** turns on the simplified interface, which the account menu can switch back. Adding agents to your own product is a small link. The rail keeps Agents and a new Apps entry up front and groups Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under **Setup**; saved sidebar layouts still apply, and `apps` and `get_started` join the hideable entries. New ready-made agent: Product analyst.
+- b8a49e1: Using a shared secret no longer implies seeing it. In workspace, task and organization vaults, only the person who saved an item and admins can reveal, copy or download its values or see its one-time codes; everyone else who may use it, including on existing items and items from connected password managers, uses it by reference and can still replace it. Only me secrets work as before. A new **Use only** setting makes a secret unrevealable for everyone, its creator and admins included; it can't be undone. Vault items gain `useOnly` and `canReveal`, and item create and update accept `useOnly: true`.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/connect@6.39.0
+
 ## 6.38.0
 
 ### Minor Changes

@@ -9954,6 +9954,19 @@
     },
     {
       "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-settings",
+      "sdk": [
+        "OpenGeniEmbeddingClient.setSessionModelSettings"
+      ],
+      "request": [
+        "SetSessionModelSettingsRequest"
+      ],
+      "response": [
+        "SetSessionModelSettingsResponse"
+      ]
+    },
+    {
+      "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/pin",
       "sdk": [
         "OpenGeniClient.updateSessionPin"
@@ -29044,6 +29057,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appsPlacement": "ref(SidebarAppsPlacement)!",
         "$.hiddenNavEntries": "array!",
         "$.hiddenNavEntries[]": "string",
         "$.sessionsShowApps": "boolean!",
@@ -32274,6 +32288,36 @@
         "$.provider": "string! null"
       }
     },
+    "SetSessionModelSettingsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expected": "object?",
+        "$.expected.latencyMode": "ref(LatencyMode)?",
+        "$.expected.model": "string?",
+        "$.expected.reasoningEffort": "ref(ReasoningEffort)?",
+        "$.idempotencyKey": "string!",
+        "$.latencyMode": "ref(LatencyMode)!",
+        "$.model": "string!",
+        "$.reasoningEffort": "ref(ReasoningEffort)!"
+      }
+    },
+    "SetSessionModelSettingsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.effectiveFrom": "const!=[\"\\\"future_turns\\\"\"]",
+        "$.latencyMode": "ref(LatencyMode)!",
+        "$.model": "string!",
+        "$.reasoningEffort": "ref(ReasoningEffort)!",
+        "$.releasedCapacityWaitTurnId": "string! null",
+        "$.sessionId": "string!"
+      }
+    },
     "SetSessionUsageLimitRequest": {
       "io": [
         "input"
@@ -32359,6 +32403,15 @@
         "$.text": "string!"
       }
     },
+    "SidebarAppsPlacement": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"hidden\\\"\",\"\\\"section\\\"\",\"\\\"sessions\\\"\"]"
+      }
+    },
     "SidebarItemIcon": {
       "io": [
         "input"
@@ -32415,6 +32468,7 @@
         "$|op=reset": "object",
         "$|op=reset.op": "const!=[\"\\\"reset\\\"\"]",
         "$|op=options": "object",
+        "$|op=options.appsPlacement": "ref(SidebarAppsPlacement)? null",
         "$|op=options.hiddenNavEntries": "array? null",
         "$|op=options.hiddenNavEntries[]": "ref(SidebarNavEntry)",
         "$|op=options.op": "const!=[\"\\\"options\\\"\"]",
@@ -32429,6 +32483,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.appsPlacement": "ref(SidebarAppsPlacement)?",
         "$.hiddenNavEntries": "array?",
         "$.hiddenNavEntries[]": "ref(SidebarNavEntry)",
         "$.sessionsShowApps": "boolean?",
@@ -40244,6 +40299,7 @@
       "SessionMessageSearchResponse": "type",
       "SessionModelAccountChoiceResponse": "type",
       "SessionModelContextResponse": "type",
+      "SessionModelSettings": "type",
       "SessionOrgAgent": "type",
       "SessionPendingInputPreview": "type",
       "SessionPromptRouting": "type",
@@ -40309,12 +40365,15 @@
       "SetOwnResourceReachResponse": "type",
       "SetSessionModelAccountChoiceRequest": "type",
       "SetSessionModelAccountChoiceResponse": "type",
+      "SetSessionModelSettingsRequest": "type",
+      "SetSessionModelSettingsResponse": "type",
       "SetVaultItemApprovalRequest": "type",
       "SetWorkspaceAllowanceRequest": "type",
       "SetWorkspaceArtifactStatusRequest": "type",
       "SetWorkspaceModelKeyListPriceRequest": "type",
       "SharedSession": "type",
       "SharedSessionMessage": "type",
+      "SidebarAppsPlacement": "type",
       "SidebarItemIcon": "type",
       "SidebarItemOrigin": "type",
       "SidebarLayoutChange": "type",
@@ -44092,6 +44151,7 @@
       "WINDOW_LABEL": "value"
     },
     "@opengeni/react/markdown-math": {
+      "displayMathRanges": "value",
       "mayContainMath": "value",
       "PreparedMathMarkdown": "type",
       "prepareMathMarkdown": "value"
@@ -48718,6 +48778,7 @@
       "setOwnResourceReach",
       "setSessionInboxMute",
       "setSessionModelAccount",
+      "setSessionModelSettings",
       "setSessionUsageLimit",
       "setSiteSessionAccess",
       "setSuperGrokAccountAllocator",
@@ -51701,6 +51762,9 @@
       ],
       "setSessionModelAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelAccountChoiceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelAccountChoiceResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setSessionModelSettings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelSettingsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionModelSettingsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setSessionUsageLimit": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SetSessionUsageLimitRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionUsageLimit\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

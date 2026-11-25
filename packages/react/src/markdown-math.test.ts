@@ -1,5 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { mayContainMath, prepareMathMarkdown } from "./markdown-math";
+import { displayMathRanges, mayContainMath, prepareMathMarkdown } from "./markdown-math";
+
+describe("display math scanning is linear", () => {
+  test.each(["$$ a\n", "$$\n", "\\[\n", "\\[ a\n"])(
+    "many unclosed %j openers stay fast and stay text",
+    (opener) => {
+      const text = opener.repeat(Math.floor(65_536 / opener.length));
+      const started = performance.now();
+      const prepared = prepareMathMarkdown(text);
+      // Quadratic rescanning took about a second here; linear is a few milliseconds.
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(prepared.hasMath).toBe(false);
+    },
+  );
+
+  test("displayMathRanges finds the blocks the math pass rewrites, skipping fences", () => {
+    const lines = ["a", "$$", "x", "", "y", "$$", "```", "$$", "z", "$$", "```", "\\[ w \\]", "$$"];
+    expect(displayMathRanges(lines)).toEqual([
+      { start: 1, end: 5 },
+      { start: 11, end: 11 },
+    ]);
+    expect(displayMathRanges(["no math", "here"])).toEqual([]);
+  });
+});
 
 const prepared = (text: string) => prepareMathMarkdown(text);
 

@@ -307,6 +307,8 @@ function BillingOverview({
   const showPlans = Boolean(subscriptions.catalog && visibleBilling?.balance.plan);
 
   const stripe = visibleBilling?.mode === "stripe";
+  // Sibling keys must differ: React leaks the DOM of siblings that share a key,
+  // so a shared `identityKey` here duplicated the plan block on every render.
   return (
     <SectionStack>
       {redeemed ? (
@@ -322,7 +324,7 @@ function BillingOverview({
       ) : null}
       {subscriptions.catalog && visibleBilling?.balance.plan ? (
         <SubscriptionPlans
-          key={identityKey}
+          key={`plans:${identityKey}`}
           client={client}
           accountId={accountId}
           returnUrl={returnUrl}
@@ -421,7 +423,7 @@ function BillingOverview({
       {canReadBilling && accountId ? (
         <Suspense fallback={null}>
           <CreditProtectionSettings
-            key={identityKey}
+            key={`protection:${identityKey}`}
             client={client}
             accountId={accountId}
             canManageAlerts={canManageBilling}
@@ -432,7 +434,11 @@ function BillingOverview({
       ) : null}
 
       {stripe && canReadBilling && accountId ? (
-        <BillingReceiptsSection key={identityKey} client={client} accountId={accountId} />
+        <BillingReceiptsSection
+          key={`receipts:${identityKey}`}
+          client={client}
+          accountId={accountId}
+        />
       ) : null}
 
       <EntitlementsSection

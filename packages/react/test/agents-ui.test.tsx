@@ -1406,15 +1406,18 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   const github = container.querySelector<HTMLElement>("[data-agent-can-use='github.com']")!;
   expect(github.textContent).toContain("GitHub");
   expect(github.querySelector("[data-slot='logo-tile']")).not.toBeNull();
-  expect(github.textContent).toContain("merge_pull_request");
+  // Tools show by readable name; the built-in and GitHub MCP names of one
+  // action share a row.
+  expect(github.textContent).toContain("Merge pull request");
+  expect(github.textContent).not.toContain("merge_pull_request");
   await act(async () =>
     [...github.querySelectorAll("button")]
       .find((b) => b.textContent?.includes("Choose per tool"))!
       .click(),
   );
   await flush();
-  expect(github.textContent).toContain("pull_request_merge");
-  expect(github.textContent).toContain("merge_pull_request");
+  expect(github.textContent?.split("Merge pull request").length).toBe(2);
+  expect(github.textContent).not.toContain("pull_request_merge");
   expect(container.textContent).not.toContain("github.com · merge_pull_request");
   // Memory entries are listed and can be removed at the version read.
   expect(container.textContent).toContain("Releases go out on Tuesdays.");
@@ -2073,12 +2076,12 @@ test("a listed GitHub connection's row also offers Opengeni's own GitHub tools",
   )!;
   await act(async () => perTool.click());
   await flush();
-  expect(rows[0]!.textContent).toContain("search_code");
+  expect(rows[0]!.textContent).toContain("Search code");
   // The toggle names the tool list it opens.
   expect(document.getElementById(perTool.getAttribute("aria-controls")!)?.textContent).toContain(
-    "search_code",
+    "Search code",
   );
-  expect(rows[0]!.textContent).toContain("pull_request_merge");
+  expect(rows[0]!.textContent).toContain("Merge pull request");
 });
 
 test("Add agent offers every ready-made agent's content file not yet added here", async () => {

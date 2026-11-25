@@ -1,5 +1,48 @@
 # @opengeni/api-router
 
+## 6.39.0
+
+### Patch Changes
+
+- 9012657: A script that keeps calling `ogtool` or the native `codemode` client after its turn ended no longer hammers the API: a bearer refused with 401, or with 403 `agent_attempt_caller_stale`, is remembered across processes in a private per-user marker (a hash, never the bearer), and later calls with it fail locally with the same error. A refused API request now also logs who sent it: the worker's hashed attempt key (`callerCorrelationId`) for an agent-attempt bearer, a hashed credential key otherwise, and the User-Agent product.
+- 7b76136: A turn someone else started (such as meeting notes) that waits for Codex usage in your Personal workspace now says it can't use your own ChatGPT account, and offers "Continue on my account" when that account has room. The button takes over the wait as you, also after you paused the chat.
+
+  A ChatGPT account that Opengeni saw used no longer reads "No usage yet". When a live usage check returns no windows (for example a personal account the viewer can't read live), the Codex overview keeps the saved reading, and list rows show an older reading with its age ("Checked 16 hours ago"), or "No recent reading" when none is left.
+
+- a190e2a: A refused site-runtime request now logs which gateway check failed as `rejectionDetail` (for example `missing_headers` for unsigned traffic, `bad_signature` or `skew` for a gateway secret or clock problem), so direct probes are told apart from a real gateway fault from the API log alone.
+- Updated dependencies [e4598af]
+- Updated dependencies [e4598af]
+- Updated dependencies [9012657]
+- Updated dependencies [58b1b0e]
+- Updated dependencies [1f28f11]
+- Updated dependencies [fb71d94]
+- Updated dependencies [b8a49e1]
+  - @opengeni/contracts@6.39.0
+  - @opengeni/codemode@6.39.0
+  - @opengeni/runtime@6.39.0
+  - @opengeni/core@6.39.0
+  - @opengeni/artifact-tool@6.39.0
+  - @opengeni/capabilities@6.39.0
+  - @opengeni/codex@6.39.0
+  - @opengeni/config@6.39.0
+  - @opengeni/db@6.39.0
+  - @opengeni/decisions@6.39.0
+  - @opengeni/documents@6.39.0
+  - @opengeni/events@6.39.0
+  - @opengeni/github@6.39.0
+  - @opengeni/interaction@6.39.0
+  - @opengeni/observability@6.39.0
+  - @opengeni/storage@6.39.0
+  - @opengeni/tool-gateway@6.39.0
+  - @opengeni/vaults@6.39.0
+  - @opengeni/vaults-bitwarden@6.39.0
+  - @opengeni/vaults-keeper@6.39.0
+  - @opengeni/vaults-onepassword@6.39.0
+  - @opengeni/vaults-protonpass@6.39.0
+  - @opengeni/agent-proto@6.39.0
+  - @opengeni/network@6.39.0
+  - @opengeni/xai-subscription@6.39.0
+
 ## 6.38.0
 
 ### Minor Changes

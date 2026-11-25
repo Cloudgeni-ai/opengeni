@@ -3,7 +3,12 @@
 // when it resets. The account menu, the model settings rows and the account
 // pages all render it from `subscriptionWindows` (lib/subscription-accounts),
 // so Claude, ChatGPT and SuperGrok read the same way.
-import { formatAbsoluteTime, formatShortTime, useMinuteNow } from "../../../ui/relative-time";
+import {
+  RelativeTime,
+  formatAbsoluteTime,
+  formatShortTime,
+  useMinuteNow,
+} from "../../../ui/relative-time";
 import {
   UsageTrack,
   UsageReadout,
@@ -163,22 +168,26 @@ export function subscriptionUsageReadings(
 
 /**
  * The usage cell at the end of an account row in settings: every reported
- * window, one per line, right-aligned. Words when there is no reading.
+ * window, one per line, right-aligned. Words when there is no reading. A
+ * saved reading older than `SUBSCRIPTION_READING_AGED_MS` says how old it is.
  */
 export function SubscriptionUsageCell({
   windows,
   loading = false,
   fallback = "No usage yet",
   now,
+  checkedAt,
 }: {
   windows: readonly SubscriptionWindow[];
   loading?: boolean | undefined;
   /** Words for a missing reading: "No usage yet", "Usage unavailable"; null shows nothing. */
   fallback?: string | null | undefined;
   now?: number | undefined;
+  /** When the shown reading was taken. */
+  checkedAt?: string | number | null | undefined;
 }) {
   if (loading) return <UsageReadout percent={null} window="" loading />;
-  return (
+  const reading = (
     <SubscriptionUsageWindows
       windows={windows}
       layout="stack"
@@ -188,4 +197,23 @@ export function SubscriptionUsageCell({
       className="text-xs leading-4.5"
     />
   );
+  const checked = typeof checkedAt === "string" ? Date.parse(checkedAt) : (checkedAt ?? null);
+  if (
+    windows.length === 0 ||
+    checked === null ||
+    !Number.isFinite(checked) ||
+    (now ?? Date.now()) - checked < SUBSCRIPTION_READING_AGED_MS
+  )
+    return reading;
+  return (
+    <span className="inline-flex flex-col items-end">
+      {reading}
+      <span data-slot="subscription-usage-checked" className="text-2xs leading-4 text-fg-subtle">
+        <RelativeTime date={checked} prefix="Checked" now={now} />
+      </span>
+    </span>
+  );
 }
+
+/** A list row's reading older than this says when it was taken. */
+export const SUBSCRIPTION_READING_AGED_MS = 15 * 60_000;

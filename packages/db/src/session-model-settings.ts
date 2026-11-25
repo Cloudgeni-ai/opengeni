@@ -1,5 +1,11 @@
 import { and, eq } from "drizzle-orm";
-import { LatencyMode, ReasoningEffort, type TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import {
+  LatencyMode,
+  ReasoningEffort,
+  type SessionModelSettings,
+  type SetSessionModelSettingsRequest,
+  type TurnExecutionPolicyV1,
+} from "@opengeni/contracts";
 import type { SessionActivityDatabase } from "./database";
 import * as schema from "./schema";
 import { releaseCapacityWaitingTurnInTransaction } from "./capacity-wait-release";
@@ -11,9 +17,17 @@ import {
   lockSessionEventWriteRows,
   reserveSessionCommandReceipt,
   SessionCommandIdempotencyError,
+  SessionMissingFromWorkspaceError,
   updateSessionCommandReceiptResult,
   type SessionCommandActor,
 } from "./session-control";
+
+export class SessionModelSettingsMismatchError extends Error {
+  constructor(readonly current: SessionModelSettings) {
+    super("The session's model settings changed before this update.");
+    this.name = "SessionModelSettingsMismatchError";
+  }
+}
 
 /**
  * Caller owns the RLS transaction. This never accepts a turn. With
@@ -29,9 +43,13 @@ export async function setSessionModelInTransaction(
     actor: SessionCommandActor;
     operationKey: string;
     model: string;
+    /** The REST request identity stays stable even if a catalog alias moves. */
+    requestedModel?: string;
     reasoningEffort: ReasoningEffort;
-    /** Synchronous validation against the locked session, not an earlier read. */
-    validate?: (session: typeof schema.sessions.$inferSelect) => void;
+    latencyMode?: LatencyMode;
+    expected?: SetSessionModelSettingsRequest["expected"];
+    /** Validate the replacement after replay and comparison, while the session is locked. */
+    validate?: (settings: SessionModelSettings) => void | Promise<void>;
     /** The chat's capacity-waiting turn and its policy on the new model. */
     capacityRelease?: { turnId: string; executionPolicy: TurnExecutionPolicyV1 };
   },
@@ -48,7 +66,12 @@ export async function setSessionModelInTransaction(
     attemptIds: agent ? [agent.attemptId] : [],
   });
   const session = locks.sessions.find((row) => row.id === input.sessionId);
-  if (!session || session.accountId !== input.accountId) throw new Error("Session not found");
+  if (!session || session.accountId !== input.accountId) {
+    if (input.latencyMode !== undefined || input.expected !== undefined) {
+      throw new SessionMissingFromWorkspaceError(input.sessionId);
+    }
+    throw new Error("Session not found");
+  }
   if (agent) {
     await assertAgentCommandAuthorityInTransaction(db, {
       workspaceId: input.workspaceId,
@@ -58,8 +81,11 @@ export async function setSessionModelInTransaction(
     });
   }
   const canonicalRequestHash = canonicalSessionCommandHash({
-    model: input.model,
+    model: input.requestedModel ?? input.model,
     reasoningEffort: input.reasoningEffort,
+    // Omitted fields keep receipt hashes from existing MCP calls identical.
+    ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),
+    ...(input.expected !== undefined ? { expected: input.expected } : {}),
   });
   // A reconnect can replace the caller attempt, not the command's identity.
   // The target lock serializes this lookup with every settings writer. Bind
@@ -120,12 +146,26 @@ export async function setSessionModelInTransaction(
     };
   }
   const [effective] = await withEffectiveSessionPolicy(db, input.workspaceId, [session]);
-  input.validate?.(effective!);
+  const { expected } = input;
+  if (
+    expected &&
+    ((expected.model !== undefined && expected.model !== effective!.model) ||
+      (expected.reasoningEffort !== undefined &&
+        expected.reasoningEffort !== effective!.reasoningEffort) ||
+      (expected.latencyMode !== undefined && expected.latencyMode !== effective!.latencyMode))
+  ) {
+    throw new SessionModelSettingsMismatchError({
+      model: effective!.model,
+      reasoningEffort: ReasoningEffort.parse(effective!.reasoningEffort),
+      latencyMode: LatencyMode.parse(effective!.latencyMode),
+    });
+  }
   const settings = {
     model: input.model,
     reasoningEffort: ReasoningEffort.parse(input.reasoningEffort),
-    latencyMode: LatencyMode.parse(effective!.latencyMode),
+    latencyMode: input.latencyMode ?? LatencyMode.parse(effective!.latencyMode),
   };
+  await input.validate?.(settings);
   const sequence = session.lastSequence + 1;
   const now = new Date();
   await db

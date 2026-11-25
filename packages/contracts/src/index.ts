@@ -9623,6 +9623,33 @@ export const SetSessionModelRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
 
+export const SessionModelSettings = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject({
+    model: z.string().min(1).max(512),
+    reasoningEffort: ReasoningEffort,
+    latencyMode: LatencyMode,
+  }),
+);
+export type SessionModelSettings = z.infer<typeof SessionModelSettings>;
+
+/** Replace the session defaults, optionally comparing fields from a session read. */
+export const SetSessionModelSettingsRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionModelSettings.extend({
+    expected: SessionModelSettings.partial().optional(),
+    idempotencyKey: primitives.uuid,
+  }),
+);
+export type SetSessionModelSettingsRequest = z.infer<typeof SetSessionModelSettingsRequest>;
+
+export const SetSessionModelSettingsResponse = /* @__PURE__ */ defineSchema(() =>
+  SessionModelSettings.extend({
+    sessionId: primitives.uuid,
+    effectiveFrom: z.literal("future_turns"),
+    releasedCapacityWaitTurnId: primitives.uuid.nullable(),
+  }),
+);
+export type SetSessionModelSettingsResponse = z.infer<typeof SetSessionModelSettingsResponse>;
+
 /**
  * Replace the complete durable session tool policy, or explicitly opt back in
  * to current workspace defaults. MCP servers and individual Opengeni tools
@@ -14557,7 +14584,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`,
  * `session_usage_limit` (an existing-session task reached its per-task usage
  * limit; admitted again once a person raises or clears it)
- * (transient). Readers must tolerate new reasons.
+ * (transient), and for event runs `chain_limit` (too deep a chain of
+ * automations) and `duplicate_agent_run` (another automation of the same
+ * agent took the delivery). Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z

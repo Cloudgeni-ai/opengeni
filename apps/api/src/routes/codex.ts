@@ -646,7 +646,13 @@ async function fetchCodexAccountOverview(
   ]);
   const liveUsage = usageSettled.status === "fulfilled" ? usageSettled.value : null;
   const cached = cachedUsage(row);
-  const usageFromProvider = liveUsage != null && liveUsage.status !== "error";
+  // A live read with no windows (`no-data`, for example a personal account
+  // this caller's context can't read live) never hides a saved reading: the
+  // account was used, so its last known usage shows, marked by its age.
+  const usageFromProvider =
+    liveUsage != null &&
+    liveUsage.status !== "error" &&
+    !(liveUsage.status === "no-data" && (cached?.fiveHour || cached?.weekly));
   const usageValue = usageFromProvider ? liveUsage : cached;
   const usageSource = usageFromProvider ? "provider" : cached ? "cache" : "none";
   const liveSummary = liveUsage?.rateLimitResetCredits ?? null;

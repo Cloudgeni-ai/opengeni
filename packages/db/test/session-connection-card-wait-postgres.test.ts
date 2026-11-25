@@ -5,8 +5,10 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  createSessionGoal,
   getSession,
   listSessionEntriesForSubject,
+  setSessionGoalStatusWithEvent,
 } from "../src";
 
 // A connection card the agent waits on needs the person, as an approval does
@@ -177,4 +179,67 @@ test("a connection card notice marks the idle chat as needing the person until i
   ]);
   expect((await state()).keys).toEqual([cardB]);
   expect(await inboxStatus(cardB)).toBe("open");
+});
+
+test("completing the goal withdraws the chat's open connection cards", async () => {
+  // A card the agent worked around mid-turn stays open after the turn ends;
+  // once the goal is done nothing waits on it, so the chat (and its parent's
+  // sub-session bar) must stop showing it as needing the person.
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "session-connection-card-wait",
+    accountExternalId: `account-${suffix}`,
+    accountName: "Connection card goal",
+    workspaceExternalSource: "session-connection-card-wait",
+    workspaceExternalId: `workspace-${suffix}`,
+    workspaceName: "Connection card goal",
+    subjectId: `user:${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const workspaceId = grant.workspaceId!;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    createdBy: { kind: "subject" as const, subjectId: grant.subjectId },
+    initialMessage: "Ship it",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+  });
+  await createSessionGoal(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    sessionId: session.id,
+    text: "Ship it",
+    createdBy: "agent",
+  });
+  const cardA = "connection-card:00000000000000cc";
+  const cardB = "connection-card:00000000000000dd";
+  for (const key of [cardA, cardB])
+    await appendSessionEvents(client.db, workspaceId, session.id, [
+      { type: "session.notification.posted", payload: { key, title: "Connect" } },
+    ]);
+  const before = await getSession(client.db, workspaceId, session.id);
+  expect(before?.awaitingConnectionSince).toBeDefined();
+
+  const { events } = await setSessionGoalStatusWithEvent(client.db, workspaceId, session.id, {
+    status: "completed",
+    evidence: "Shipped",
+    event: { type: "goal.completed", evidence: "Shipped" },
+  });
+  expect(events.map((event) => [event.type, event.sequence])).toEqual([
+    ["goal.completed", before!.lastSequence + 1],
+    ["session.notification.withdrawn", before!.lastSequence + 2],
+    ["session.notification.withdrawn", before!.lastSequence + 3],
+  ]);
+  const after = await getSession(client.db, workspaceId, session.id);
+  expect(after?.awaitingConnectionSince).toBeUndefined();
+  expect(after?.lastSequence).toBe(before!.lastSequence + 3);
+  const inbox = await shared.admin<Array<{ status: string }>>`
+    select status from opengeni_private.inbox_items
+    where session_id = ${session.id}::uuid and kind = 'notification'`;
+  expect(inbox.map((row) => row.status)).toEqual(["withdrawn", "withdrawn"]);
 });

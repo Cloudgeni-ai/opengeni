@@ -4125,7 +4125,7 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(visibility|forks)$/,
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(visibility|forks|model-settings)$/,
     label: (match) => `/v1/workspaces/:workspaceId/sessions/:id/${match[1]}`,
   },
   {

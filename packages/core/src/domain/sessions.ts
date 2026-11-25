@@ -87,6 +87,7 @@ import {
   CLAUDE_CONNECTION_KINDS,
   claudeProviderId,
   canonicalizeConfiguredModelId,
+  resolveModelProviderForTurn,
   configuredAllowedModels,
   withCodexCatalogProvider,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
@@ -106,6 +107,8 @@ import {
   policyChargesCreditsForModel,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
+  TurnExecutionPolicyModelUnavailableError,
+  UnsupportedLatencyModeError,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
@@ -171,6 +174,7 @@ import {
   type SessionEvent,
   SessionMcpApprovalPolicy,
   SetSessionModelRequest,
+  type SetSessionModelSettingsRequest,
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
@@ -5730,11 +5734,15 @@ export async function setSessionModel(
     Partial<Pick<ApiRouteDeps, "workflowClient">>,
   grant: AccessGrant,
   sessionId: string,
-  request: SetSessionModelRequest,
+  request: SetSessionModelRequest &
+    Partial<Pick<SetSessionModelSettingsRequest, "latencyMode" | "expected">>,
   surface: SessionAuthorizationSurface = "core",
 ) {
   requirePermission(grant, "sessions:control");
-  const input = SetSessionModelRequest.parse(request);
+  const { latencyMode, expected, ...base } = request;
+  // The MCP contract deliberately still rejects the REST-only fields.
+  const input = SetSessionModelRequest.parse(surface === "first_party_mcp" ? request : base);
+  const extended = latencyMode !== undefined || expected !== undefined;
   const authorization = await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: "session.model.write",
@@ -5743,8 +5751,12 @@ export async function setSessionModel(
   const settings = await resolveWorkspaceModelBoundarySettings(deps, grant, grant.workspaceId, [
     input.model,
   ]);
-  const model = canonicalConfiguredModel(settings, input.model)!;
-  await assertWorkspaceModelPolicyAllows(deps.db, settings, grant.workspaceId, model);
+  const model = extended
+    ? canonicalizeConfiguredModelId(settings, input.model)
+    : canonicalConfiguredModel(settings, input.model)!;
+  if (!extended) {
+    await assertWorkspaceModelPolicyAllows(deps.db, settings, grant.workspaceId, model);
+  }
   const caller = authorization?.actor;
   const service = serviceInitiatorForGrant(grant);
   const actor: SessionCommandActor =
@@ -5764,6 +5776,8 @@ export async function setSessionModel(
     model,
     requestedModel: input.model,
     reasoningEffort: input.reasoningEffort,
+    deferValidation: extended,
+    ...(latencyMode !== undefined ? { latencyMode } : {}),
   });
   const result = await runIdempotentPersistenceTransaction(
     {
@@ -5784,9 +5798,18 @@ export async function setSessionModel(
           actor,
           operationKey: input.idempotencyKey,
           model,
+          ...(extended ? { requestedModel: input.model } : {}),
           reasoningEffort: input.reasoningEffort,
+          ...(latencyMode !== undefined ? { latencyMode } : {}),
+          ...(expected !== undefined ? { expected } : {}),
           ...(capacityRelease ? { capacityRelease } : {}),
-          validate: (session) => {
+          validate: async (replacement) => {
+            if (extended) {
+              // A committed retry must not be rejected by a newer model policy,
+              // and a failed comparison must return the locked current settings.
+              canonicalConfiguredModel(settings, input.model);
+              await assertWorkspaceModelPolicyAllows(tx, settings, grant.workspaceId, model);
+            }
             try {
               // Validate fresh selection/provider and preserved latency exactly as
               // prompt admission does; never silently clamp requested settings.
@@ -5796,9 +5819,19 @@ export async function setSessionModel(
                 modelSource: "explicit",
                 reasoningEffort: input.reasoningEffort,
                 reasoningSource: "explicit",
-                latencyMode: session.latencyMode as Session["latencyMode"],
-                latencyModeSource: "session",
+                latencyMode: replacement.latencyMode,
+                latencyModeSource: latencyMode === undefined ? "session" : "explicit",
               });
+              if (latencyMode !== undefined) {
+                const reasoning = resolveModelProviderForTurn(settings, model)!.model.capabilities
+                  .reasoning;
+                const allowed = reasoning.runnable ? reasoning.efforts : ["none"];
+                if (!allowed.includes(replacement.reasoningEffort)) {
+                  throw new Error(
+                    `Reasoning effort ${replacement.reasoningEffort} is not runnable for model ${model} (allowed: ${allowed.join(", ")})`,
+                  );
+                }
+              }
             } catch (error) {
               throw new HTTPException(422, {
                 message: error instanceof Error ? error.message : "Invalid model settings",
@@ -5852,10 +5885,14 @@ async function capacityWaitReleaseForModelSwitch(
     model: string;
     requestedModel: string;
     reasoningEffort: SetSessionModelRequest["reasoningEffort"];
+    latencyMode?: Session["latencyMode"];
+    deferValidation: boolean;
   },
 ): Promise<{ turnId: string; executionPolicy: TurnExecutionPolicyV1 } | null> {
-  const session = await requireSession(deps.db, grant.workspaceId, input.sessionId);
-  if (!session.activeTurnId) return null;
+  const session = input.deferValidation
+    ? await getSession(deps.db, grant.workspaceId, input.sessionId)
+    : await requireSession(deps.db, grant.workspaceId, input.sessionId);
+  if (!session?.activeTurnId) return null;
   const turn = await getSessionTurn(deps.db, grant.workspaceId, session.activeTurnId);
   if (
     !turn ||
@@ -5873,8 +5910,8 @@ async function capacityWaitReleaseForModelSwitch(
         modelSource: "explicit",
         reasoningEffort: input.reasoningEffort,
         reasoningSource: "explicit",
-        latencyMode: turn.latencyMode,
-        latencyModeSource: "session",
+        latencyMode: input.latencyMode ?? turn.latencyMode,
+        latencyModeSource: input.latencyMode === undefined ? "session" : "explicit",
       }),
       { grant, trustedMetadata: [session.metadata, turn.metadata] },
     );
@@ -5907,6 +5944,15 @@ async function capacityWaitReleaseForModelSwitch(
     return { turnId: turn.id, executionPolicy };
   } catch (error) {
     if (error instanceof HTTPException) return null;
+    // REST compares and checks replay under the lock before validating the
+    // replacement. An optional capacity release must not preempt that result.
+    if (
+      input.deferValidation &&
+      (error instanceof TurnExecutionPolicyModelUnavailableError ||
+        error instanceof UnsupportedLatencyModeError)
+    ) {
+      return null;
+    }
     throw error;
   }
 }

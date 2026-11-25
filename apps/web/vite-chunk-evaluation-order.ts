@@ -181,8 +181,9 @@ type LoadTimeRead = { name: string; statement: AstNode; node: AstNode };
 /**
  * Identifier reads that happen while the module body runs: top-level
  * statements, immediately invoked functions, functions the top level calls,
- * callbacks passed to method calls (array helpers run them at once), class
- * heritage and static members. Ordinary function bodies are deferred.
+ * callbacks passed to calls (array helpers and schema builders such as
+ * `defineSchema(() => …)` run them at once), class heritage and static
+ * members. Ordinary function bodies are deferred.
  */
 function loadTimeReads(program: AstNode, peers: ReadonlyMap<string, ImportedBinding>) {
   const reads: LoadTimeRead[] = [];
@@ -349,8 +350,15 @@ function loadTimeReads(program: AstNode, peers: ReadonlyMap<string, ImportedBind
         }
         for (const argument of children(node, "arguments")) {
           const value = unwrap(argument);
-          // Array helpers and similar method calls run their callbacks at once.
-          if (isFunction(value) && callee.type === "MemberExpression") runFunction(value, scope);
+          // Array helpers run their callbacks at once, and so does
+          // `defineSchema(() => …)`, a plain call once minified. Namespace
+          // calls such as `(0, React.forwardRef)(fn)` and `(0, React.lazy)(fn)`
+          // keep theirs for later.
+          if (
+            isFunction(value) &&
+            (callee.type === "MemberExpression" || callee.type === "Identifier")
+          )
+            runFunction(value, scope);
           else visit(argument, scope);
         }
         return;

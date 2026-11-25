@@ -28,31 +28,18 @@ const FENCE = /^( {0,3})(`{3,}|~{3,})/;
 export function prepareMathMarkdown(text: string): PreparedMathMarkdown {
   if (!mayContainMath(text)) return { text, hasMath: false };
   const lines = text.split("\n");
+  const findBlock = displayMathBlocks(lines);
   const out: string[] = [];
   let hasMath = false;
-  let fence: { char: string; length: number } | null = null;
+  let fence: OpenFence | null = null;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    if (fence) {
-      out.push(line);
-      const close = FENCE.exec(line);
-      if (
-        close &&
-        close[2]![0] === fence.char &&
-        close[2]!.length >= fence.length &&
-        line.slice(close[0].length).trim() === ""
-      ) {
-        fence = null;
-      }
-      continue;
-    }
-    const open = FENCE.exec(line);
-    if (open) {
-      fence = { char: open[2]![0]!, length: open[2]!.length };
+    if (fence || FENCE.test(line)) {
+      fence = nextFence(line, fence);
       out.push(line);
       continue;
     }
-    const block = displayBlock(lines, index);
+    const block = findBlock(index);
     if (block) {
       if (block.body !== null) {
         hasMath = true;
@@ -83,12 +70,83 @@ type DisplayBlock = {
   end: number;
 };
 
+type Closer = "$$" | "\\]";
+
+/**
+ * Finds display blocks in `lines` in linear total time. The line that ends a block's
+ * scan (its closer, a fence, or for `\[` a blank line) is looked up in a table built
+ * once per closer, so an opener that never closes costs O(1) instead of a scan to the
+ * end of the message, and many unclosed openers cannot add up to quadratic work.
+ */
+function displayMathBlocks(lines: string[]): (start: number) => DisplayBlock | null {
+  const tables = new Map<Closer, Int32Array>();
+  const stops = (closer: Closer): Int32Array => {
+    let table = tables.get(closer);
+    if (!table) {
+      table = new Int32Array(lines.length + 1).fill(lines.length);
+      for (let index = lines.length - 1; index >= 0; index--) {
+        const current = lines[index]!.trim();
+        const stop =
+          FENCE.test(lines[index]!) ||
+          current.endsWith(closer) ||
+          (current === "" && closer === "\\]");
+        table[index] = stop ? index : table[index + 1]!;
+      }
+      tables.set(closer, table);
+    }
+    return table;
+  };
+  return (start) => displayBlock(lines, start, stops);
+}
+
+type OpenFence = { char: string; length: number };
+
+/** The code fence open after `line`, given the one open before it (`prepareMathMarkdown`'s rule). */
+function nextFence(line: string, fence: OpenFence | null): OpenFence | null {
+  const match = FENCE.exec(line);
+  if (!fence) return match ? { char: match[2]![0]!, length: match[2]!.length } : null;
+  const closes =
+    !!match &&
+    match[2]![0] === fence.char &&
+    match[2]!.length >= fence.length &&
+    line.slice(match[0].length).trim() === "";
+  return closes ? null : fence;
+}
+
+/**
+ * The closed display blocks `prepareMathMarkdown` would find in `lines`, as first and last
+ * line indexes, by the same walk (code fences skipped). Linear. A caller that cuts the text
+ * into pieces keeps these blocks whole.
+ */
+export function displayMathRanges(lines: string[]): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  if (!lines.some(mayContainMath)) return ranges;
+  const findBlock = displayMathBlocks(lines);
+  let fence: OpenFence | null = null;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (fence || FENCE.test(line)) {
+      fence = nextFence(line, fence);
+      continue;
+    }
+    const block = findBlock(index);
+    if (!block) continue;
+    if (block.body !== null) ranges.push({ start: index, end: block.end });
+    index = block.end;
+  }
+  return ranges;
+}
+
 /**
  * A display block starting at `lines[start]`: `$$` or `\[` on a line of its own (math on
  * the following lines up to a matching `$$` or `\]` line), or a whole line that is
  * `$$…$$` or `\[…\]`.
  */
-function displayBlock(lines: string[], start: number): DisplayBlock | null {
+function displayBlock(
+  lines: string[],
+  start: number,
+  stops: (closer: Closer) => Int32Array,
+): DisplayBlock | null {
   const line = lines[start]!;
   const indent = /^\s*/.exec(line)![0];
   const trimmed = line.trim();
@@ -108,18 +166,17 @@ function displayBlock(lines: string[], start: number): DisplayBlock | null {
   if (opener === "$$" && rest.includes("$")) return null;
   if (opener === "\\[" && rest.includes("\\]")) return null;
   const body: string[] = rest.trim() === "" ? [] : [rest.trim()];
-  for (let index = start + 1; index < lines.length; index++) {
-    const current = lines[index]!.trim();
-    if (FENCE.test(lines[index]!)) break;
-    if (current.endsWith(closer)) {
-      const last = current.slice(0, -closer.length).trim();
-      if (last !== "") body.push(last);
-      if (body.length === 0) return null;
-      return { indent, opener, rest, body, end: index };
-    }
-    // A blank line ends a `\[` paragraph in Markdown; `$$` math may contain blank lines.
-    if (current === "" && opener === "\\[") break;
-    body.push(current);
+  // The first line that ends the scan: a fence (unclosed), the closer, or, since a blank
+  // line ends a `\[` paragraph in Markdown, a blank line for `\[` (unclosed). `$$` math
+  // may contain blank lines.
+  const stop = stops(closer)[start + 1]!;
+  const current = stop < lines.length ? lines[stop]!.trim() : "";
+  if (stop < lines.length && !FENCE.test(lines[stop]!) && current.endsWith(closer)) {
+    for (let index = start + 1; index < stop; index++) body.push(lines[index]!.trim());
+    const last = current.slice(0, -closer.length).trim();
+    if (last !== "") body.push(last);
+    if (body.length === 0) return null;
+    return { indent, opener, rest, body, end: stop };
   }
   return { indent, opener, rest, body: null, end: start };
 }

@@ -44,6 +44,7 @@ import {
   type OrganizationCompatibleEndpoints,
 } from "@/components/models/organization-compatible-endpoints";
 import { codexAccountName, codexUsageWindows, planLabel } from "@/components/codex-connection";
+import { codexNoReadingLabel } from "@/components/models/codex-overview-usage";
 import { useConnectionAccess } from "@/components/connection-access-settings";
 import {
   AllowedModelsRow,
@@ -1204,7 +1205,11 @@ function OrganizationCodexRow({
         ) : live.error || live.data?.status === "error" ? (
           <span className="text-xs text-fg-muted">Usage unavailable</span>
         ) : live.data ? (
-          <SubscriptionUsageCell windows={windows} />
+          <SubscriptionUsageCell
+            windows={windows}
+            checkedAt={live.data.usage?.fetchedAt}
+            fallback={codexNoReadingLabel(account)}
+          />
         ) : (
           usage
         ),

@@ -74,6 +74,7 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId`
+- `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/model-settings`
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream` (SSE; backfills from Postgres by event sequence)
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
@@ -90,6 +91,45 @@ including `search`, still apply, and the response carries
 last queued turn, else the executing turn, else the most recently finished one.
 Hosts that keep their own record of a chat read its title and state this way
 instead of copying events.
+
+### Changing a session's model settings
+
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/model-settings` requires
+`sessions:control` and ordinary access to the target session. A workspace API
+key with that permission can update sessions it can access in its own workspace.
+Agent attempts keep using the existing `session_set_model` tool; their attempt
+credentials are not accepted on this endpoint.
+Pass all three desired settings and a UUID `idempotencyKey`. For example:
+
+```json
+{
+  "model": "gpt-5.6-sol",
+  "reasoningEffort": "high",
+  "latencyMode": "standard",
+  "expected": { "model": "gpt-5.6-terra", "latencyMode": "ultrafast" },
+  "idempotencyKey": "2348d108-9bc0-436d-8428-74e8f23e2b57"
+}
+```
+
+- **200:** Returns `sessionId`, the applied `model`, `reasoningEffort`,
+  `latencyMode`, `effectiveFrom: "future_turns"`, and
+  `releasedCapacityWaitTurnId` (a turn ID or `null`). An exact retry with the
+  same key returns the original result, even if defaults or policy changed later.
+- **400:** Invalid input, a model disallowed by policy, or a model that cannot
+  run with the requested reasoning effort or latency mode. The server does
+  not substitute a different setting.
+- **409:** If any field supplied in `expected` differs from the current
+  session defaults (as exposed by `GET`), nothing changes and
+  `error.details.current` contains all three current settings. Omitting
+  `expected` is an unconditional update. Using an applied key with different
+  input returns `idempotency_conflict`.
+
+No message is sent and idle or paused sessions are not resumed. Newly
+admitted turns, including scheduled and automated turns that continue the
+session, inherit the new defaults unless they specify an override. A running
+turn and already accepted queued turns keep their execution settings. As with
+the existing model switch, an eligible turn waiting on subscription capacity
+can continue on the new model; its ID is returned if it was moved.
 
 `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
 `{ "keepLive": true | false }` exempts a session from the idle-session archive

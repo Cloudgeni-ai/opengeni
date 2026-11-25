@@ -67,7 +67,9 @@ const shots: Shot[] = [
     ready: text("Choose per tool"),
     act: async (page) => {
       await page.locator("[data-agent-can-use='gmail.com']").getByText("Choose per tool").click();
-      await page.getByText("send_email").waitFor();
+      await page.getByText("Send email", { exact: true }).waitFor();
+      await page.locator("[data-agent-can-use='github.com']").getByText("Choose per tool").click();
+      await page.getByText("Create pull request", { exact: true }).waitFor();
     },
   },
   {

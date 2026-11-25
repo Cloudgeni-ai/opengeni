@@ -64,7 +64,9 @@ describe("load-time reads of cycle peers", () => {
         const arrow = () => Icon;
         const object = { method() { return Icon; }, get icon() { return Icon; } };
         class Lazy { render() { return Icon; } }
-        export { arrow, object, Lazy };`),
+        const Wrapped = (0, React.forwardRef)(function Wrapped() { return Icon; });
+        const Later = (0, React.lazy)(() => Icon);
+        export { arrow, object, Lazy, Wrapped, Later };`),
     ).toEqual([]);
   });
 
@@ -82,6 +84,8 @@ describe("load-time reads of cycle peers", () => {
       `import { Icon } from "./peer.js"; const value = (() => Icon)();`,
       `import { Icon } from "./peer.js"; function labels() { return { icon: Icon }; } const defaults = { ...labels() };`,
       `import { Icon } from "./peer.js"; const mapped = [1].map(() => Icon);`,
+      // A schema builder (defineSchema, minified to a plain call) runs its factory at once.
+      `import { Icon } from "./peer.js"; import { s as build } from "./leaf.js"; const Schema = build(() => ({ avatar: Icon }));`,
       `import { Icon } from "./peer.js"; class Widget extends Icon {}`,
       `import { Icon } from "./peer.js"; class Widget { static icon = Icon; }`,
       `import { Icon } from "./peer.js"; class Widget { static { this.icon = Icon; } }`,

@@ -45,15 +45,21 @@ export function matchLinuxBrowserArguments(input: {
   }
 
   const profileArgument = `--user-data-dir=${resolve(input.profileDirectory)}`;
+  // Every profile switch must name this exact profile. A launcher may repeat
+  // the same switch (the desktop image's browser wrapper did before it learned
+  // to keep a caller's own profile); in exact arguments that is still one
+  // profile. A space-joined title cannot tell a repeat from one argument that
+  // contains a space, so there it stays refused.
   let profiles = 0;
   for (const argument of argumentsList) {
     if (argument !== argument.trim() || argument === "--" || /\0/u.test(argument)) return null;
     if (/^--?type(?:=|$)/u.test(argument)) return null;
     if (/^--?user-data-dir(?:=|$)/u.test(argument)) {
-      if (argument !== profileArgument || ++profiles !== 1) return null;
+      if (argument !== profileArgument) return null;
+      if (++profiles > 1 && representation === "title") return null;
     }
   }
-  return profiles === 1 ? representation : null;
+  return profiles > 0 ? representation : null;
 }
 
 /** A birth-time fence spans the procfs reads and every later signal check. */

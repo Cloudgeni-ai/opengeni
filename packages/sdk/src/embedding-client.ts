@@ -1,6 +1,10 @@
 import { OpenGeniClient as OpenGeniArtifactClient } from "./artifact-client";
 import type { OpenGeniClientOptions } from "./client";
-import type { AddWorkspaceMemberRequest } from "./types";
+import type {
+  AddWorkspaceMemberRequest,
+  SetSessionModelSettingsRequest,
+  SetSessionModelSettingsResponse,
+} from "./types";
 import type {
   ExternalIdentityLink,
   BeginExternalIdentityLinkRequest,
@@ -106,6 +110,19 @@ function serializeServiceContext(context: ServiceContext): string {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
+  /** Replace model defaults without sending a message. Reuse the key for an exact retry. */
+  async setSessionModelSettings(
+    workspaceId: string,
+    sessionId: string,
+    request: SetSessionModelSettingsRequest,
+  ): Promise<SetSessionModelSettingsResponse> {
+    return await this.requestJson<SetSessionModelSettingsResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/model-settings`,
+      request,
+    );
+  }
+
   /** Read configuration (null means no configured ceiling). Requires a person who can start chats in the workspace, admin, or organization-key read authority. */
   async getWorkspaceAllowance(
     workspaceId: string,

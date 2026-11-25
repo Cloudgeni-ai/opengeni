@@ -499,17 +499,63 @@ test("during a rolling deploy, this version's writes keep what a newer replica s
     hidden: [],
     added: [],
     order: {},
-    options: { ...newer, settingsMore: ["workspace:usage"], sessionsShowApps: true },
+    options: {
+      ...newer,
+      settingsMore: ["workspace:usage"],
+      sessionsShowApps: true,
+      appsPlacement: "sessions",
+    },
     sections: [],
   });
   // Answers carry only the options this version knows.
   expect(answer.personal.options).toEqual({
     sessionsShowApps: true,
+    appsPlacement: "sessions",
     settingsMore: ["workspace:usage"],
   });
   expect(answer.options).toEqual({
     sessionsShowApps: true,
+    appsPlacement: "sessions",
     hiddenNavEntries: [],
     settingsMore: ["workspace:usage"],
   });
+});
+
+test("apps placement: the default and a person's own choice, as the agent tool sets them", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  // Today's behaviour until someone chooses.
+  expect((await readSidebarLayoutForGrant(deps, ws.ada)).options).toMatchObject({
+    appsPlacement: "sessions",
+    sessionsShowApps: true,
+  });
+  await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    changes: [{ op: "options", appsPlacement: "section" }],
+  });
+  expect((await readSidebarLayoutForGrant(deps, ws.ada)).options).toMatchObject({
+    appsPlacement: "section",
+    sessionsShowApps: true,
+  });
+  // "I don't want apps in the sidebar", through the older option a saved layout may hold.
+  const hidden = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [{ op: "options", sessionsShowApps: false }],
+  });
+  expect(hidden.options).toMatchObject({ appsPlacement: "hidden", sessionsShowApps: false });
+  expect(hidden.personal.options).toEqual({ appsPlacement: "hidden", sessionsShowApps: false });
+  // "Give apps their own section."
+  const section = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [{ op: "options", appsPlacement: "section" }],
+  });
+  expect(section.options).toMatchObject({ appsPlacement: "section", sessionsShowApps: true });
+  // A member can't change the default.
+  await expect(
+    updateSidebarLayoutForGrant(deps, ws.ada, {
+      scope: "workspace",
+      changes: [{ op: "options", appsPlacement: "hidden" }],
+    }),
+  ).rejects.toThrow();
 });

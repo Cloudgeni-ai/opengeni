@@ -24,6 +24,13 @@ import { useAppContext } from "../../app-context";
 import { connectionLogoResolver } from "../../lib/composer-connectors";
 import { FIRST_PARTY_CAPABILITY_LOGOS } from "../capabilities/capability-logo-source";
 import { PermissionSelect } from "../capabilities/connector-tool-permissions";
+import {
+  canUseToolPermission,
+  canUseTools,
+  withAgentToolRules,
+  type CanUseTool,
+  type ListedTool,
+} from "./agent-tool-names";
 
 /** The rule key a connection is named by: its provider's domain, else its server id. */
 export function agentConnectorKey(
@@ -134,7 +141,7 @@ function ConnectionLogo({ connection }: { connection: Pick<CanUseConnection, "na
   return <LogoTile size="sm" src={connection.logo} name={connection.name} />;
 }
 
-/** One connection's rules: all its tools, then any tool set on its own. */
+/** One connection's rules: all its tools, then any tool set on its own, by readable name. */
 function CanUseRuleRow({
   connection,
   loadTools,
@@ -143,7 +150,7 @@ function CanUseRuleRow({
   onChange,
 }: {
   connection: CanUseConnection;
-  loadTools: () => Promise<string[]>;
+  loadTools: () => Promise<ListedTool[]>;
   rules: readonly AgentToolPermissionRule[];
   disabled: boolean;
   onChange: (rules: AgentToolPermissionRule[]) => void;
@@ -154,7 +161,7 @@ function CanUseRuleRow({
   const toolRules = own.filter((rule) => rule.tool !== "*");
   const [open, setOpen] = useState(false);
   const toolsId = useId();
-  const [tools, setTools] = useState<string[] | null>(null);
+  const [tools, setTools] = useState<ListedTool[] | null>(null);
   // Read once, the first time the list opens.
   const loadToolsOnce = useRef(loadTools);
   loadToolsOnce.current = loadTools;
@@ -164,9 +171,11 @@ function CanUseRuleRow({
     requested.current = true;
     loadToolsOnce.current().then(setTools, () => setTools([]));
   }, [open]);
-  const toolNames = [
-    ...new Set([...toolRules.map((rule) => rule.tool), ...(open ? (tools ?? []) : [])]),
-  ];
+  // Ruled tools first, then the rest it lists; one row per action.
+  const toolRows = canUseTools(key, [
+    ...toolRules.map((rule) => ({ name: rule.tool })),
+    ...(open ? (tools ?? []) : []),
+  ]);
   return (
     <SettingRow
       data-agent-can-use={key}
@@ -198,22 +207,25 @@ function CanUseRuleRow({
         />
       }
     >
-      {toolNames.length > 0 || open ? (
+      {toolRows.length > 0 || open ? (
         <div id={toolsId} className="flex min-w-0 flex-col">
-          {toolNames.map((tool) => {
-            const value = toolRules.find((rule) => rule.tool === tool)?.permission;
+          {toolRows.map((tool) => {
+            const value = canUseToolPermission(toolRules, key, tool);
             return (
               <SettingRow
-                key={tool}
-                label={<code className="text-xs">{tool}</code>}
+                key={tool.key}
+                data-agent-can-use-tool={tool.key}
+                label={tool.label}
                 controlWidth="select"
                 control={
                   <PermissionSelect
-                    label={`${name}: ${tool}`}
+                    label={`${name}: ${tool.label}`}
                     value={value ?? "default"}
                     disabled={disabled}
                     resetLabel={value ? "Remove" : all ? "Same as all tools" : defaultLabel}
-                    onChange={(permission) => onChange(withAgentRule(rules, key, tool, permission))}
+                    onChange={(permission) =>
+                      onChange(withAgentToolRules(rules, key, tool.names, permission))
+                    }
                   />
                 }
               />
@@ -237,14 +249,15 @@ export function AddCanUseRule({
   onCancel,
 }: {
   connections: readonly CanUseConnection[];
-  loadTools: (connection: CanUseConnection) => Promise<string[]>;
+  loadTools: (connection: CanUseConnection) => Promise<ListedTool[]>;
   disabled: boolean;
-  onAdd: (connector: string, tool: string, permission: AgentToolPermission) => void;
+  /** `tools`: every name the chosen row covers, or `*` for all its tools. */
+  onAdd: (connector: string, tools: string[], permission: AgentToolPermission) => void;
   onCancel: () => void;
 }) {
   const [key, setKey] = useState<string | null>(null);
   const [tool, setTool] = useState(ALL_TOOLS);
-  const [tools, setTools] = useState<{ key: string; names: string[] } | null>(null);
+  const [tools, setTools] = useState<{ key: string; rows: CanUseTool[] } | null>(null);
   const connection = connections.find((entry) => entry.key === key);
   const loadToolsRef = useRef(loadTools);
   loadToolsRef.current = loadTools;
@@ -252,14 +265,15 @@ export function AddCanUseRule({
     if (!connection) return;
     let live = true;
     loadToolsRef.current(connection).then(
-      (names) => live && setTools({ key: connection.key, names }),
-      () => live && setTools({ key: connection.key, names: [] }),
+      (listed) =>
+        live && setTools({ key: connection.key, rows: canUseTools(connection.key, listed) }),
+      () => live && setTools({ key: connection.key, rows: [] }),
     );
     return () => {
       live = false;
     };
   }, [connection]);
-  const toolNames = tools && tools.key === key ? tools.names : null;
+  const toolRows = tools && tools.key === key ? tools.rows : null;
   return (
     <div data-agent-add-rule="" className="flex flex-wrap items-center gap-2 py-3">
       <SelectMenu
@@ -293,11 +307,15 @@ export function AddCanUseRule({
           value={tool}
           searchPlaceholder="Search tools"
           disabled={disabled}
-          loading={toolNames === null}
+          loading={toolRows === null}
           loadingLabel="Loading tools…"
           options={[
             { value: ALL_TOOLS, label: "All tools" },
-            ...(toolNames ?? []).map((name) => ({ value: name, label: name })),
+            ...(toolRows ?? []).map((row) => ({
+              value: row.key,
+              label: row.label,
+              keywords: row.names,
+            })),
           ]}
           onValueChange={setTool}
         />
@@ -316,7 +334,15 @@ export function AddCanUseRule({
             { value: "ask", label: "Ask first", description: "Review each action before it runs." },
             { value: "block", label: "Block", description: "Do not run this action." },
           ]}
-          onValueChange={(permission) => onAdd(connection.key, tool, permission)}
+          onValueChange={(permission) =>
+            onAdd(
+              connection.key,
+              tool === ALL_TOOLS
+                ? [ALL_TOOLS]
+                : (toolRows?.find((row) => row.key === tool)?.names ?? [tool]),
+              permission,
+            )
+          }
         />
       ) : null}
       <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
@@ -362,18 +388,22 @@ export function AgentCanUse({
       logoFor(undefined, domain),
     );
   }, [agent.toolPermissions, assetUrl, catalog, connections]);
-  const loadTools = async (connection: CanUseConnection): Promise<string[]> => {
+  const loadTools = async (connection: CanUseConnection): Promise<ListedTool[]> => {
     const lists = await Promise.all(
       connection.itemIds.map((id) =>
         client
           .getConnectorToolPermissions(workspaceId, id)
-          .then((response) => response.tools.map((tool) => tool.name)),
+          .then((response) =>
+            response.tools.map((tool) => ({ name: tool.name, title: tool.title })),
+          ),
       ),
     );
     // A github.com rule also covers Opengeni's own GitHub tools.
     const builtIn =
-      connection.key === AGENT_BUILT_IN_GITHUB_CONNECTOR ? GITHUB_REST_TOOL_NAMES : [];
-    return [...new Set([...lists.flat(), ...builtIn])];
+      connection.key === AGENT_BUILT_IN_GITHUB_CONNECTOR
+        ? GITHUB_REST_TOOL_NAMES.map((name) => ({ name }))
+        : [];
+    return [...lists.flat(), ...builtIn];
   };
   // One change at a time: each saves at the version the last one returned.
   const [saving, setSaving] = useState(false);
@@ -434,8 +464,8 @@ export function AgentCanUse({
           loadTools={loadTools}
           disabled={saving}
           onCancel={() => setAdding(false)}
-          onAdd={(connector, tool, permission) =>
-            void save(withAgentRule(agent.toolPermissions, connector, tool, permission)).then(
+          onAdd={(connector, tools, permission) =>
+            void save(withAgentToolRules(agent.toolPermissions, connector, tools, permission)).then(
               (saved) => saved && setAdding(false),
             )
           }
