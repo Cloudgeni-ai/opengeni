@@ -1,8 +1,8 @@
 -- deployment-mode: rolling
 -- opengeni:batched-backfill batch-size=1 lock-timeout=5s statement-timeout=120s
 -- online-safety-exception: unbatched-data: each transaction completes one turn selected by LIMIT, committing before the next; it reads only that turn's records and holds only that turn's two totals rows from its recount to its commit.
--- Completes 1599's not-ready turn totals online: for one turn per
--- transaction, session_turn_credit_totals_recount locks the turn's two rows
+-- Recounts the turns 1599 found not ready, while writers continue: for one
+-- turn per transaction, session_turn_credit_totals_recount locks the turn's two rows
 -- (a writer of that turn waits at most for this one turn's recount), recounts
 -- the turn's records in a snapshot taken after the locks and returns the
 -- absolute sums, which this statement writes and marks ready. A turn whose

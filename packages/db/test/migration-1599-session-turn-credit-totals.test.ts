@@ -849,7 +849,9 @@ test("the sampled drift check compares kept turns and reports a corrupted one", 
   const turns = await Promise.all(Array.from({ length: 3 }, () => seedTurn(scope)));
   const random = prng(5);
   for (const turn of turns) await burst(random, newHistory(turn), 3);
-  const clean = await checkSessionTurnCreditTotals(db(), [scope.accountId], 10);
+  const clean = await checkSessionTurnCreditTotals(db(), [scope.accountId], {
+    turnsPerAccount: 10,
+  });
   expect(clean.mismatchedTurnIds).toEqual([]);
   const kept = (await keptAgainstFull(turns)).kept;
   expect(clean.checked).toBe(kept);
@@ -861,8 +863,20 @@ test("the sampled drift check compares kept turns and reports a corrupted one", 
     update session_turn_credit_totals set model_micros = model_micros + 1
     where turn_id = ${plain.turnId} and side = 'events' returning turn_id`;
   expect(corrupt?.turn_id).toBe(plain.turnId);
-  const drifted = await checkSessionTurnCreditTotals(db(), [scope.accountId], 10);
+  const drifted = await checkSessionTurnCreditTotals(db(), [scope.accountId], {
+    turnsPerAccount: 10,
+  });
   expect(drifted.mismatchedTurnIds).toEqual([plain.turnId]);
+  // A turn above the call bound is skipped, never recounted.
+  const bounded = await checkSessionTurnCreditTotals(db(), [scope.accountId], {
+    turnsPerAccount: 10,
+    maxCalls: 0,
+  });
+  expect(bounded.mismatchedTurnIds).toEqual([]);
+  expect(bounded.skipped).toBeGreaterThanOrEqual(1);
+  // The worker's default: one turn per account.
+  const single = await checkSessionTurnCreditTotals(db(), [scope.accountId]);
+  expect(single.checked + single.skipped).toBeLessThanOrEqual(1);
 });
 
 test("the runtime writes totals only through the triggers; updates mark a turn for recount", async () => {
@@ -905,13 +919,15 @@ test("the runtime writes totals only through the triggers; updates mark a turn f
         ${`${turn.turnId}:x`}, ${turn.accountId}::uuid, ${turn.workspaceId}::uuid, null, null, 5)`),
     ),
   ).toContain("row-level security");
+  // Provisioning may grant EXECUTE on every opengeni_private routine; the
+  // recount still cannot write as the runtime (its policies need a trigger).
   expect(
     await failure(
       asRuntime(
         sql`select opengeni_private.session_turn_credit_totals_recount(${turn.turnId}::uuid)`,
       ),
     ),
-  ).toContain("permission denied");
+  ).toMatch(/permission denied|row-level security/);
   expect((await keptAgainstFull([turn])).kept).toBe(1);
 
   // An update of a counted row has no exact delta: the turn is recounted.
@@ -1053,8 +1069,10 @@ test("direct reads see a turn's totals only in its scope and for a session the p
   expect({ totals: stranger.totals, calls: stranger.calls }).toEqual(
     stranger.sessions === 1 ? { totals: 2, calls: 1 } : { totals: 0, calls: 0 },
   );
-  const checked = await checkSessionTurnCreditTotals(db(), [turn.accountId], 10);
-  expect(checked).toEqual({ checked: 1, mismatchedTurnIds: [] });
+  const checked = await checkSessionTurnCreditTotals(db(), [turn.accountId], {
+    turnsPerAccount: 10,
+  });
+  expect(checked).toEqual({ checked: 1, skipped: 0, mismatchedTurnIds: [] });
 });
 
 test("deleting a session deletes its turns' kept rows", async () => {
@@ -1076,6 +1094,96 @@ test("deleting a session deletes its turns' kept rows", async () => {
   const [orphans] = await owned.admin<{ calls: number }[]>`
     select count(*)::int as calls from session_turn_credit_calls where turn_id = ${turn.turnId}`;
   expect(orphans?.calls).toBe(0);
+});
+
+test("a session delete takes the turn's totals rows before its call rows", async () => {
+  if (!owned) return;
+  const scope = await seedSession("forget order");
+  const turn = await seedTurn(scope);
+  // Calls known only from usage rows: the session's event cascade (which
+  // marks counted turns inexact first) does not touch this turn's rows.
+  await usageRows(turn, [
+    {
+      eventType: "model.cost",
+      quantity: 10,
+      source: `${turn.turnId}:a`,
+      key: `k:${turn.turnId}:a`,
+    },
+    {
+      eventType: "model.cost",
+      quantity: 20,
+      source: `${turn.turnId}:b`,
+      key: `k:${turn.turnId}:b`,
+    },
+  ]);
+  // A writer (or the 1600 recount) holds the turn's events row and would take
+  // call rows next. The delete must wait for it before it takes any call row,
+  // or the two deadlock.
+  const holder = await owned.admin.reserve();
+  const deleter = await owned.admin.reserve();
+  try {
+    await holder`begin`;
+    await holder`select 1 from session_turn_credit_totals
+      where turn_id = ${turn.turnId} and side = 'events' for update`;
+    const deleted = deleter`delete from sessions where id = ${scope.sessionId}`.then(() => null);
+    // Until the delete waits on the events row (polled on the holder: the
+    // pool's other connections are reserved here).
+    for (let waited = 0; ; waited += 1) {
+      await holder`select pg_stat_clear_snapshot()`;
+      const [blocked] = await holder<{ n: number }[]>`
+        select count(*)::int as n from pg_stat_activity
+        where wait_event_type = 'Lock' and query like 'delete from sessions%'`;
+      if (blocked!.n > 0) break;
+      if (waited > 200) throw new Error("the session delete never waited");
+      await Bun.sleep(25);
+    }
+    // No call row is taken yet: the holder can still lock every one at once.
+    const calls = await holder<{ source_id: string }[]>`
+      select source_id from session_turn_credit_calls where turn_id = ${turn.turnId}
+      order by source_id for update nowait`;
+    expect(calls.length).toBe(2);
+    await holder`commit`;
+    await deleted;
+  } finally {
+    holder.release();
+    deleter.release();
+  }
+  const [left] = await owned.admin<{ totals: number; calls: number }[]>`
+    select (select count(*)::int from session_turn_credit_totals where turn_id = ${turn.turnId}) as totals,
+      (select count(*)::int from session_turn_credit_calls where turn_id = ${turn.turnId}) as calls`;
+  expect(left).toEqual({ totals: 0, calls: 0 });
+});
+
+test("a turn's usage events written in another session are not counted", async () => {
+  if (!owned) return;
+  const scope = await seedSession("other session");
+  const turn = await seedTurn(scope);
+  const elsewhere = await createSession(db(), {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    initialMessage: "elsewhere",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: `user:${crypto.randomUUID()}`, label: "Bo" },
+    createdByContext: { label: "Bo" },
+  });
+  const history = newHistory(turn);
+  await writeEvents(history, [
+    { type: "agent.model.usage", turnId: turn.turnId, payload: productionCall(prng(27), "own") },
+  ]);
+  // The previous release's sum reads only the turn's own session.
+  await appendSessionEvents(db(), scope.workspaceId, elsewhere.id, [
+    { type: "agent.model.usage", turnId: turn.turnId, payload: productionCall(prng(28), "stray") },
+  ]);
+  await terminal(prng(29), history);
+  expect(await keptAgainstFull([turn])).toEqual({ kept: 1, differ: [] });
+  const compared = await terminalMismatches([turn.turnId]);
+  expect(compared.compared).toBe(1);
+  expect(compared.differ).toEqual([]);
 });
 
 test("terminal insert at production shape: kept totals against the previous full sum", async () => {
@@ -1252,6 +1360,11 @@ test("a turn whose records were written before its row starts not ready and keep
   const history = newHistory(early);
   await burst(prng(9), history, 3);
   await terminal(prng(10), history);
+  // Its rows exist but are not ready: the early call is not in them.
+  const [earlyState] = await owned.admin<{ sides: number; ready: boolean }[]>`
+    select count(*)::int as sides, bool_or(ready) as ready from session_turn_credit_totals
+    where turn_id = ${turnId}`;
+  expect(earlyState).toEqual({ sides: 2, ready: false });
   expect((await keptAgainstFull([early])).kept).toBe(0);
   const compared = await terminalMismatches([turnId]);
   expect(compared.compared).toBe(1);

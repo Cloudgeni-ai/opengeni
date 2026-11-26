@@ -189,6 +189,7 @@ export {
 export {
   checkSessionTurnCreditTotals,
   type SessionTurnCreditTotalsCheck,
+  type SessionTurnCreditTotalsCheckBounds,
 } from "./session-turn-credit-totals";
 import {
   lockTurnAttemptWriteFenceTx,

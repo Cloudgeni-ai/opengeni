@@ -150,12 +150,23 @@ describe("turn lifecycle metrics", () => {
     recordSessionTurnCreditTotalsCheck(observability, { checked: 16, mismatchedTurnIds: [] });
     metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_session_turn_credit_totals_mismatched_turns\{[^}]*\} 0/);
+    expect(metrics).toMatch(/opengeni_session_turn_credit_totals_checked_turns\{[^}]*\} 16/);
     expect(warnings).toHaveLength(1);
+
+    // Nothing compared is visible as such.
+    recordSessionTurnCreditTotalsCheck(observability, {
+      checked: 0,
+      skipped: 2,
+      mismatchedTurnIds: [],
+    });
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_session_turn_credit_totals_checked_turns\{[^}]*\} 0/);
 
     // A check that could not run is never read as "no drift".
     recordSessionTurnCreditTotalsCheck(observability, null);
     metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_session_turn_credit_totals_mismatched_turns\{[^}]*\} -1/);
+    expect(metrics).toMatch(/opengeni_session_turn_credit_totals_checked_turns\{[^}]*\} -1/);
     expect(warnings).toHaveLength(1);
   });
 

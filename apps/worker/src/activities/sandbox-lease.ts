@@ -4443,7 +4443,7 @@ async function refreshQueueLeaseAndCreditGauges(
         });
       }
       try {
-        // Likewise a few turns of a few random accounts: their kept turn
+        // Likewise one bounded turn of a few random accounts: its kept turn
         // credit totals against the terminal trigger's full sum.
         recordSessionTurnCreditTotalsCheck(
           observability,

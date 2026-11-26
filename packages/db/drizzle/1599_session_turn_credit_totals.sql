@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: explicit-lock: takes the SHARE ROW EXCLUSIVE locks its foreign keys and triggers need anyway, once, up front in the application's lock order, with a one-second timeout and bounded retries, so no step waits while holding another.
 -- Running per-turn credit totals, so writing a turn's terminal event no longer
 -- re-reads every model call of the turn.
 --
@@ -20,13 +21,17 @@
 -- transaction:
 --   * session_events BEFORE INSERT, row level: a BEFORE trigger is what the
 --     terminal trigger can see, because a statement's earlier rows are visible
---     to its later rows' BEFORE triggers and its later rows are not. Inserts
---     here never skip rows after BEFORE triggers (no ON CONFLICT writer), and
---     the name sorts after the sequence/source-key fill triggers.
+--     to its later rows' BEFORE triggers and its later rows are not. No
+--     counted row is skipped after its BEFORE triggers: the only ON CONFLICT
+--     writer of session_events inserts turn.dispatch.expired, which is never
+--     counted. The name sorts after the sequence/source-key fill triggers.
 --   * usage_events AFTER INSERT, row level (fires only for rows an
 --     ON CONFLICT DO NOTHING actually inserted).
 --   * session_turns AFTER INSERT: a turn created from now on starts with
---     ready rows, since all its records come later.
+--     ready rows, since all its records come later: a turn's events are
+--     written under its turn row (lockSessionEventWriteRows), so none commits
+--     before the row, and a record that does exist already (checked) starts
+--     the turn not ready.
 --   * an UPDATE or DELETE of a counted row, which no writer issues today,
 --     marks the turn inexact (permanently recounted), and a TRUNCATE of
 --     either source table clears every kept row.
@@ -43,11 +48,15 @@
 -- (opengeni_session_turn_credit_totals_mismatched_turns).
 --
 -- Rollout: a turn that existed before this migration gets not-ready rows on
--- its first later change (deltas apply from then on); 1600 completes them
--- online, one turn per transaction. A pre-existing turn with no later change
--- has no rows and keeps the full sum.
+-- its first later change (deltas apply from then on); 1600 recounts them one
+-- turn per transaction while writers continue, and a turn it cannot recount
+-- (or one that becomes not ready later) keeps the full sum. A pre-existing
+-- turn with no later change has no rows and keeps the full sum.
 --
--- Locks: a writer locks its side's totals row, then the call row. Session
+-- Locks: every writer of these rows locks totals rows before call rows (a
+-- writer its side's totals row, then the call row; the 1600 recount the
+-- events row, then the usage row, then the turn's call rows; the session
+-- delete and TRUNCATE cleanups the totals rows, then the call rows). Session
 -- event writers already serialize per session on the event cursor, so the
 -- events row adds no wait for them; usage writers of one turn now serialize
 -- on the usage row until commit. The only new cross-family edge is the call
@@ -63,11 +72,15 @@
 -- request's person (as session_events); the triggers read and write their
 -- own account's rows (pg_trigger_depth() > 0).
 --
--- Nobody sets a total directly: every routine is SECURITY INVOKER with a
--- pinned search_path (a definer trigger needs an earlier binary's contract),
--- the runtime's INSERT, UPDATE and DELETE policies admit its own account's
--- rows only from inside a trigger (pg_trigger_depth() > 0), and the owner
--- policy serves workspace cascades and the backfill.
+-- Writes: every routine is SECURITY INVOKER with a pinned search_path (a
+-- definer trigger needs an earlier binary's contract), and the runtime's
+-- INSERT, UPDATE and DELETE policies admit its own account's rows only from
+-- inside a trigger (pg_trigger_depth() > 0), so application statements never
+-- write them. This is not a boundary against a runtime role that runs its own
+-- SQL: it could fire a pg_temp trigger of its own and write its account's
+-- rows. That only changes the `usage` shown for its own turns (never a
+-- charge: billing reads the ledger), and the sampled drift check reports it.
+-- The owner policy serves workspace cascades and the backfill.
 --
 -- Rolling: new FORCE RLS tables (runtime SELECT, INSERT, UPDATE, DELETE), invoker
 -- routines and triggers. The previous release writes the same records and
@@ -75,6 +88,27 @@
 -- function returns the same `usage`.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
+
+-- The tables this migration's foreign keys and triggers lock (SHARE ROW
+-- EXCLUSIVE), taken together up front in the application's lock order
+-- (workspace, session, turn, its events, its usage), so no step waits while
+-- holding an earlier one. A busy table gives up within a short timeout and
+-- retries; the locks are held until commit.
+DO $session_turn_credit_totals_locks$
+BEGIN
+  FOR attempt IN 1..20 LOOP
+    BEGIN
+      PERFORM pg_catalog.set_config('lock_timeout', '1s', true);
+      LOCK TABLE workspaces, sessions, session_turns, session_events, usage_events
+        IN SHARE ROW EXCLUSIVE MODE;
+      RETURN;
+    EXCEPTION WHEN lock_not_available THEN
+      PERFORM pg_catalog.pg_sleep(0.2 * least(attempt, 5));
+    END;
+  END LOOP;
+  RAISE EXCEPTION 'session turn credit totals: the source tables stayed busy'
+    USING ERRCODE = 'lock_not_available';
+END $session_turn_credit_totals_locks$;
 
 CREATE TABLE session_turn_credit_totals (
   turn_id uuid NOT NULL,
@@ -433,27 +467,34 @@ BEGIN
     END $body$;
   $create$, data_schema);
 
-  -- A TRUNCATE of a source: no kept row holds its sums any more.
+  -- A TRUNCATE of a source: no kept row holds its sums any more. Totals rows
+  -- first, as every writer locks them.
   EXECUTE format($create$
     CREATE FUNCTION opengeni_private.clear_session_turn_credit_totals() RETURNS trigger
     LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, %1$I, pg_temp AS $body$
     BEGIN
-      DELETE FROM %1$I.session_turn_credit_calls;
       DELETE FROM %1$I.session_turn_credit_totals;
+      DELETE FROM %1$I.session_turn_credit_calls;
       RETURN NULL;
     END $body$;
   $create$, data_schema);
 
   -- A deleted session: its turns' rows go with it (the workspace foreign key
-  -- covers a deleted workspace). Calls first, by the turn's events row.
+  -- covers a deleted workspace).
   EXECUTE format($create$
     CREATE FUNCTION opengeni_private.forget_session_turn_credit_totals() RETURNS trigger
     LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, %1$I, pg_temp AS $body$
     BEGIN
-      DELETE FROM %1$I.session_turn_credit_calls kc
-      USING %1$I.session_turn_credit_totals total
-      WHERE total.session_id = OLD.id AND total.side = 'events' AND kc.turn_id = total.turn_id;
-      DELETE FROM %1$I.session_turn_credit_totals WHERE session_id = OLD.id;
+      -- Totals rows first, in (turn, side) order, as every writer locks them.
+      WITH locked AS (
+        SELECT total.turn_id, total.side FROM %1$I.session_turn_credit_totals total
+        WHERE total.session_id = OLD.id ORDER BY total.turn_id, total.side FOR UPDATE
+      ), gone AS (
+        DELETE FROM %1$I.session_turn_credit_totals total USING locked
+        WHERE total.turn_id = locked.turn_id AND total.side = locked.side
+        RETURNING total.turn_id
+      )
+      DELETE FROM %1$I.session_turn_credit_calls kc WHERE kc.turn_id IN (SELECT turn_id FROM gone);
       RETURN NULL;
     END $body$;
   $create$, data_schema);
