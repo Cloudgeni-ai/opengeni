@@ -321,7 +321,7 @@ test("idle checkpoint claims do not multiply artifacts by leases", async () => {
     expect(before.Plan["Actual Rows"]).toBe(0);
     expect(after.Plan["Actual Rows"]).toBe(0);
     // Assert work rather than elapsed time; both queries still use the owner's
-    // real FORCE-RLS capability predicates. (Since 1582/1583 index the lease
+    // real FORCE-RLS capability predicates. (Since 1583/1584 index the lease
     // references, the old OR join probes them too, so only the current shape
     // is bounded here; the lease projection test below covers the scans.)
     expect(comparisons(after.Plan)).toBeLessThan(10_000);
@@ -427,9 +427,13 @@ test("checkpoint GC, its due probe and the inventories read the lease projection
     expect(relations(claimPlan.Plan)).not.toContain("sandbox_leases");
     expect(relations(prunePlan.Plan)).not.toContain("sandbox_leases");
     expect(relations(claimPlan.Plan)).toContain("maintenance_probe_sandbox_leases");
-    // The due probe asks per reference too: the old OR join compared every
-    // candidate with every lease.
-    expect(comparisons(duePlan.Plan)).toBeLessThan(1_000);
+    // The due probe asks per reference too. The old OR test was one BitmapOr
+    // of three lease-index probes per candidate artifact.
+    const nodeTypes = (node: PlanNode & { "Node Type"?: string }): string[] => [
+      String(node["Node Type"]),
+      ...(node.Plans ?? []).flatMap(nodeTypes),
+    ];
+    expect(nodeTypes(duePlan.Plan)).not.toContain("BitmapOr");
     console.info(
       "checkpoint-gc-lease-projection-plan",
       JSON.stringify({

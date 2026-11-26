@@ -5,27 +5,38 @@
 -- The claim tested "still referenced" against the UNION of every lease's
 -- current and previous checkpoint ids, and the tombstone prune tested
 -- "current = id OR previous = id", both on public.sandbox_leases. Neither
--- shape can probe an index, so every GC tick read the whole lease table, and
--- each lease row paid its row-security policies (FORCE RLS binds the owner),
--- which is most of the claim's time. The lease projection
--- (opengeni_private.maintenance_probe_sandbox_leases, 0848) carries the same
--- reference, capture and epoch columns, is written by a row trigger in the
--- writing transaction, has no row security and indexes both references and
--- the id. The due probe already decides from it.
+-- shape can probe an index (the table had none on those columns), so every
+-- GC tick read the whole lease table. That table carries each box's resume
+-- state and is heavily updated: in production its heap is about 200 MB for
+-- about 6,000 rows, so each scan read about 25,000 pages. Where the owner is
+-- bound by FORCE RLS, each row also paid the table's policies.
+--
+-- The lease projection (opengeni_private.maintenance_probe_sandbox_leases,
+-- 0848) carries the same reference, capture and epoch columns in a few MB,
+-- has no row security and indexes both references and the id. Its row
+-- trigger writes it in the lease's own transaction; a read-only comparison
+-- of the projection with the table on 26 Nov 2026 found no missing, extra or
+-- differing rows in production (4,967 leases) or staging (3,035). The due
+-- probe already decides from it.
 --
 -- Each test is now one NOT EXISTS per reference (and the capture test by
 -- lease id), so it is an index probe. An artifact is referenced exactly when
 -- a probe finds a lease, as before (NULL references never matched), so the
--- claimed, pruned and due answers are unchanged. The real tables still guard
--- every write: the deferred artifact validator rejects a 'deleting' state for
--- an artifact a lease references, and the lease foreign keys reject deleting
--- one.
+-- claimed, pruned and due answers are unchanged. For the current and
+-- previous references the real tables still guard every write: the deferred
+-- artifact validator rejects a 'deleting' state for an artifact a lease
+-- references, and the lease foreign keys reject deleting one. The
+-- native-capture reference (a lease capturing into the artifact) has no such
+-- guard; for it the projection is the only check, as the lease table was
+-- before.
 --
 -- The lease liveness and artifact state inventories (worker gauges, polled
--- often) count the projections too. Counted through the row-secured tables
--- by their owner, which FORCE RLS binds, they paid the policies per row and
--- saw only the rows some policy admitted (none for an ordinary gauge read);
--- the projections hold every row, so the gauges report the real counts.
+-- often) count the projections too, which hold exactly the rows of the
+-- tables, so the gauges report the same counts without scanning the heaps.
+-- (An owner bound by FORCE RLS saw only the rows some policy admitted.)
+--
+-- 1583-1585 add indexes on the lease references, used by the deferred
+-- artifact validator, and on the artifact state for the tombstone prune.
 --
 -- Rolling: the routines keep their signatures, owners, grants and locking;
 -- the GC claim, prune and due answers are unchanged. The previous release
@@ -270,7 +281,8 @@ CREATE OR REPLACE FUNCTION opengeni_private.maintenance_claim_checkpoint_prune_i
     END $body$;
 
   CREATE OR REPLACE FUNCTION opengeni_private.count_sandbox_leases_by_liveness() RETURNS TABLE(liveness text, count bigint)
-    LANGUAGE sql SECURITY DEFINER
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog'
     AS $body$
   SELECT L.liveness, pg_catalog.count(*)::bigint
   FROM opengeni_private.maintenance_probe_sandbox_leases L
