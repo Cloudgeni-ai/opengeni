@@ -73,7 +73,8 @@ export function deleteAccountSections(
                 kind: "navigate",
                 id: `blocker-${blocker.organizationId}`,
                 title: blocker.name,
-                subtitle: "You're its only owner",
+                subtitle:
+                  "You're its only owner · Transfer ownership in its People settings on the web",
               };
         }),
         {
@@ -90,7 +91,8 @@ export function deleteAccountSections(
     sections.push({
       id: "closes",
       title: "Closed with your account",
-      footer: "Deleted with everything in them.",
+      footer:
+        "Deleted with everything in them. Billing records the law requires us to keep are kept.",
       rows: preview.closeOrganizations.map((organization) => ({
         kind: "navigate" as const,
         id: `close-${organization.organizationId}`,

@@ -106,13 +106,19 @@ export function canRequestDeletion(input: {
   );
 }
 
-/** What happens to what the person made in an organization they leave. */
+/**
+ * What happens to the person's own workspace in an organization they leave.
+ * Shared chats and files stay with the organization either way.
+ */
 export function retentionText(retention: AccountDeletionRetention): string {
-  if (retention.mode === "retain") return "What you made there stays with the organization";
-  if (retention.days === null || retention.days <= 0) return "What you made there is deleted";
+  if (retention.mode === "retain") return "Your personal workspace there is kept";
+  // Without a number the organization's own retention decides when; it isn't at once.
+  if (retention.days === null || retention.days <= 0) {
+    return "Your personal workspace there is deleted later";
+  }
   return retention.days === 1
-    ? "What you made there is deleted after 1 day"
-    : `What you made there is deleted after ${retention.days} days`;
+    ? "Your personal workspace there is deleted after 1 day"
+    : `Your personal workspace there is deleted after ${retention.days} days`;
 }
 
 export type AccountDeletionFailure =
@@ -169,7 +175,7 @@ export function accountDeletionFailure(error: unknown): AccountDeletionFailure {
       kind: "unavailable",
       message:
         error.status === 503
-          ? "Account deletion isn't available right now. Try again later."
+          ? "Account deletion isn't available yet. Try again later."
           : "This Opengeni server doesn't support deleting your account from the app. You can delete it on the web.",
     };
   }

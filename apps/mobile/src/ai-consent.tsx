@@ -304,7 +304,7 @@ export function AiConsentSheet({
           label="Allow"
           busy={prompt.granting}
           onPress={onAllow}
-          style={{ height: 48 }}
+          style={{ height: 44 }}
         />
         <Button
           variant="ghost"

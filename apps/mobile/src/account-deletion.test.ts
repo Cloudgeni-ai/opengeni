@@ -65,16 +65,16 @@ describe("account deletion", () => {
 
   test("says what stays and what goes in an organization you leave", () => {
     expect(retentionText({ mode: "retain", days: null })).toBe(
-      "What you made there stays with the organization",
+      "Your personal workspace there is kept",
     );
     expect(retentionText({ mode: "delete_after", days: 30 })).toBe(
-      "What you made there is deleted after 30 days",
+      "Your personal workspace there is deleted after 30 days",
     );
     expect(retentionText({ mode: "delete_after", days: 1 })).toBe(
-      "What you made there is deleted after 1 day",
+      "Your personal workspace there is deleted after 1 day",
     );
     expect(retentionText({ mode: "delete_after", days: null })).toBe(
-      "What you made there is deleted",
+      "Your personal workspace there is deleted later",
     );
   });
 
@@ -107,7 +107,7 @@ describe("account deletion", () => {
     );
     expect(accountDeletionFailure(apiError(503, { error: { code: "unavailable" } }))).toEqual({
       kind: "unavailable",
-      message: "Account deletion isn't available right now. Try again later.",
+      message: "Account deletion isn't available yet. Try again later.",
     });
     expect(accountDeletionFailure(apiError(404, { error: { code: "not_found" } })).kind).toBe(
       "unavailable",

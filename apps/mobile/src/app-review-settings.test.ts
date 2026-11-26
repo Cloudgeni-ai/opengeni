@@ -106,7 +106,7 @@ describe("Delete account", () => {
     const sections = deleteAccountSections(preview(), deleteActions());
     expect(sections.map((section) => section.id)).toEqual(["intro", "closes", "leaves", "confirm"]);
     expect(rows(sections).find((row) => row.id === "leave-o")).toMatchObject({
-      subtitle: "What you made there is deleted after 30 days",
+      subtitle: "Your personal workspace there is deleted after 30 days",
     });
     expect(rows(sections).find((row) => row.id === "delete")).toMatchObject({ disabled: true });
     const typed = deleteAccountSections(preview(), deleteActions({ typed: "DELETE" }));
