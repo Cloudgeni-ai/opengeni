@@ -361,11 +361,13 @@ export function settingsSearchEntries(
   const entries: SettingsSearchEntry[] = [];
   for (const section of sections) {
     for (const group of section.groups) {
+      // Under Advanced, a page's place is the scope it belongs to.
+      const location = section.collapsible && group.label ? group.label : section.label;
       for (const item of group.items) {
         entries.push({
           id: item.id,
           label: item.label,
-          location: section.label,
+          location,
           icon: item.icon,
           link: item.link,
           keywords: PAGE_KEYWORDS[item.id] ?? [],
@@ -374,7 +376,7 @@ export function settingsSearchEntries(
           entries.push({
             id: `${item.id}#${topic.label}`,
             label: topic.label,
-            location: `${section.label} · ${item.label}`,
+            location: `${location} · ${item.label}`,
             icon: item.icon,
             link: withSearch(item.link, topic.search),
             keywords: topic.keywords ?? [],

@@ -27,6 +27,7 @@ GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { Link } = await import("@tanstack/react-router");
 const { SettingsShell, settingsHomeLink } = await import("./settings-sidebar");
+const { foldAdvancedSettings } = await import("./settings-advanced");
 const { CpuIcon, SlidersHorizontalIcon, SparklesIcon } = await import("lucide-react");
 const originalMatchMedia = window.matchMedia;
 let narrow = true;
@@ -427,12 +428,35 @@ test("search finds settings by name and keeps the keyboard in the rail", async (
   }
 });
 
-test("a row's More button says what it does, with an arrow kept for touch", async () => {
+test("Advanced stays folded until opened, and is open while it holds the current page", async () => {
   narrow = false;
-  const moved: string[] = [];
   const container = document.createElement("div");
   const root = createRoot(container);
-  try {
+  const sections = foldAdvancedSettings([
+    {
+      id: "workspace",
+      label: "Workspace",
+      groups: [
+        {
+          items: [
+            {
+              id: "workspace:general",
+              label: "General",
+              icon: SlidersHorizontalIcon,
+              link: <a href="#general" />,
+            },
+            {
+              id: "workspace:developer",
+              label: "Developer",
+              icon: SlidersHorizontalIcon,
+              link: <a href="#developer" />,
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+  const render = async (activeId: string) =>
     await act(async () =>
       root.render(
         <main>
@@ -440,30 +464,8 @@ test("a row's More button says what it does, with an arrow kept for touch", asyn
             label="Settings"
             back={{ label: "Back to sessions", link: <a href="#back" /> }}
             home={settingsHomeLink("workspace")}
-            sections={[
-              {
-                id: "workspace",
-                label: "Workspace",
-                groups: [
-                  {
-                    items: [
-                      {
-                        id: "workspace:general",
-                        label: "General",
-                        icon: SlidersHorizontalIcon,
-                        link: <a href="#general" />,
-                        place: {
-                          label: "Move to More",
-                          toMore: true,
-                          run: () => moved.push("workspace:general"),
-                        },
-                      },
-                    ],
-                  },
-                ],
-              },
-            ]}
-            activeId="workspace:general"
+            sections={sections}
+            activeId={activeId}
             currentPage="General"
             currentScope="Workspace"
             page={{ title: "General" }}
@@ -473,17 +475,25 @@ test("a row's More button says what it does, with an arrow kept for touch", asyn
         </main>,
       ),
     );
-    const button = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Move to More: General"]',
-    );
-    expect(button).not.toBeNull();
-    // Its words show with a mouse; touch keeps the arrow. No tooltip is needed.
-    expect(button!.textContent).toBe("Move to More");
-    expect(button!.querySelector("span")?.className).toContain("not-pointer-fine:hidden");
-    expect(button!.querySelector("svg")?.getAttribute("class")).toContain("pointer-fine:hidden");
-    expect(button!.hasAttribute("title")).toBe(false);
-    await act(async () => button!.click());
-    expect(moved).toEqual(["workspace:general"]);
+  const developer = () => container.querySelector('a[href="#developer"]');
+  const header = () =>
+    container.querySelector<HTMLButtonElement>('[data-settings-section="advanced"] button')!;
+  try {
+    await render("workspace:general");
+    expect(header().textContent).toBe("Advanced");
+    expect(header().getAttribute("aria-expanded")).toBe("false");
+    expect(developer()).toBeNull();
+    // No per-row buttons to move pages around.
+    expect(container.textContent).not.toContain("Move to More");
+    await act(async () => header().click());
+    expect(developer()).not.toBeNull();
+    await act(async () => header().click());
+    expect(developer()).toBeNull();
+
+    // A deep link to an Advanced page shows it open.
+    await render("workspace:developer");
+    expect(header().getAttribute("aria-expanded")).toBe("true");
+    expect(developer()).not.toBeNull();
   } finally {
     await act(async () => root.unmount());
   }

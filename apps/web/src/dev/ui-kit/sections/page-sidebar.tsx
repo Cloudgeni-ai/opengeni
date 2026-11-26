@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   BotIcon,
+  CodeIcon,
   KeyRoundIcon,
   PanelLeftIcon,
   ShieldCheckIcon,
@@ -22,7 +23,6 @@ import {
   isSidebarItemIcon,
   mergeSidebarLayout,
   mergeSidebarOptions,
-  readResolvedSidebarOptions,
   SIDEBAR_LIVE_LIST_DEFAULT_LIMIT,
   SIDEBAR_LIVE_LIST_LABELS,
   sidebarPersonalChangesCustomized,
@@ -38,8 +38,7 @@ import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
 import { resetSidebarLayoutCache } from "@/components/sidebar-layout/use-sidebar-layout";
 import { SettingsShell, type SettingsRailSection } from "@/components/settings/settings-sidebar";
-import { foldSettingsRail } from "@/components/settings/settings-more";
-import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
+import { foldAdvancedSettings } from "@/components/settings/settings-advanced";
 import { SidebarCustomizeRoute } from "@/routes/sidebar-customize";
 import { currentWorkspace } from "../fixtures";
 import { KitBlock, KitCanvas, KitSection } from "../kit";
@@ -267,44 +266,27 @@ function Provider({ children }: { children: ReactNode }) {
 }
 
 function SettingsSearchPreview() {
-  const sections = useMemo<SettingsRailSection[]>(
-    () => [
+  // The production fold: rarely used pages under one collapsed Advanced.
+  const rail = useMemo<SettingsRailSection[]>(() => {
+    const row = (id: string, label: string, icon: typeof SlidersHorizontalIcon) => ({
+      id,
+      label,
+      icon,
+      link: <Link to="/dev/ui-kit" />,
+    });
+    return foldAdvancedSettings([
       {
         id: "workspace",
         label: "Workspace",
         groups: [
           {
             items: [
-              {
-                id: "workspace:general",
-                label: "General",
-                icon: SlidersHorizontalIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:members",
-                label: "Members",
-                icon: UsersIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:agents",
-                label: "Agent settings",
-                icon: BotIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:keys",
-                label: "API keys",
-                icon: KeyRoundIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:security",
-                label: "Security",
-                icon: ShieldCheckIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
+              row("workspace:general", "General", SlidersHorizontalIcon),
+              row("workspace:access", "Access", UsersIcon),
+              row("workspace:available", "Available here", BotIcon),
+              row("workspace:learning", "Agent learning", BotIcon),
+              row("workspace:api-keys", "API keys", KeyRoundIcon),
+              row("workspace:developer", "Developer", CodeIcon),
             ],
           },
         ],
@@ -318,15 +300,22 @@ function SettingsSearchPreview() {
           },
         ],
       },
-    ],
-    [],
-  );
-  // The person's own choice of top-level entries; the rest fold under More.
-  const { layout, update } = useSidebarLayout(WORKSPACE_ID);
-  const more = readResolvedSidebarOptions(layout?.options).settingsMore;
-  const rail = foldSettingsRail(sections, more, (settingsMore) => {
-    void update({ scope: "personal", changes: [{ op: "options", settingsMore }] });
-  });
+      {
+        id: "organization",
+        label: "Organization",
+        groups: [
+          {
+            items: [
+              row("organization:people", "People", UsersIcon),
+              row("organization:billing", "Billing", KeyRoundIcon),
+              row("organization:security", "Security & data", ShieldCheckIcon),
+              row("organization:developer", "Developer", CodeIcon),
+            ],
+          },
+        ],
+      },
+    ]);
+  }, []);
   return (
     <div
       data-kit-settings-search

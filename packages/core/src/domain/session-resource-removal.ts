@@ -15,7 +15,8 @@ import {
   appendSessionEventsWithLockedSessionUpdate,
   assertSessionIsNotImported,
   listSessionDescendantIdsForResourceRemoval,
-  recordSessionRemovedRepositories,
+  listSessionIdsAttachingRepositories,
+  recordSessionRemovedRepositoriesForSessions,
   requireSession,
   type Database,
 } from "@opengeni/db";
@@ -33,6 +34,12 @@ type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
 
 /** Most passes over a session tree one removal makes; see the cascade below. */
 const SESSION_RESOURCE_REMOVAL_MAX_PASSES = 8;
+
+/**
+ * Sessions narrowed at once. Each is its own one-row transaction, so they
+ * never wait on each other; this leaves most of the connection pool free.
+ */
+const SESSION_RESOURCE_REMOVAL_CONCURRENCY = 4;
 
 /**
  * Remove repositories from a session and every descendant session. Session
@@ -108,20 +115,76 @@ export async function removeSessionResources(
       await listSessionDescendantIdsForResourceRemoval(deps.db, grant.workspaceId, sessionId)
     ).filter((id) => !visited.has(id));
     if (pending.length === 0) break;
-    for (const descendantId of pending) {
-      visited.add(descendantId);
-      remember(
-        await removeRepositoriesFromSession(deps, grant.workspaceId, descendantId, keys, sessionId),
-      );
-      await recordSessionRemovedRepositories(
-        deps.db,
-        grant.workspaceId,
-        descendantId,
-        [...known.values()].map((resource) => removalRecord(resource, false)),
-      );
+    for (const descendantId of pending) visited.add(descendantId);
+    // Only the descendants that hold a repository need their own locked
+    // removal (and event), a few at a time; the rest get the record in
+    // batches, so a chat with a thousand sub-sessions answers quickly.
+    const records = () => [...known.values()].map((resource) => removalRecord(resource, false));
+    const removeFrom = async (ids: readonly string[]): Promise<string[]> => {
+      const gone: string[] = [];
+      await forEachConcurrently(ids, SESSION_RESOURCE_REMOVAL_CONCURRENCY, async (id) => {
+        const removed = await removeRepositoriesFromSession(
+          deps,
+          grant.workspaceId,
+          id,
+          keys,
+          sessionId,
+        );
+        remember(removed);
+        // It no longer attached them (detached meanwhile): it still needs the record.
+        if (removed.length === 0) gone.push(id);
+      });
+      return gone;
+    };
+    await removeFrom(
+      await listSessionIdsAttachingRepositories(deps.db, grant.workspaceId, pending, keys),
+    );
+    // Every descendant gets the record; those already narrowed have it. One
+    // that attached a repository meanwhile gets none and is reported: remove
+    // it there too, so an agent there loses it as well. One that detached it
+    // meanwhile still needs the record.
+    const attachedMeanwhile = await recordSessionRemovedRepositoriesForSessions(
+      deps.db,
+      grant.workspaceId,
+      pending,
+      records(),
+    );
+    // Repeat for sessions that keep changing under the cascade (bounded).
+    let unsettled = attachedMeanwhile;
+    for (
+      let round = 0;
+      unsettled.length > 0 && round < SESSION_RESOURCE_REMOVAL_MAX_PASSES;
+      round += 1
+    ) {
+      const detached = await removeFrom(unsettled);
+      unsettled =
+        detached.length > 0
+          ? await recordSessionRemovedRepositoriesForSessions(
+              deps.db,
+              grant.workspaceId,
+              detached,
+              records(),
+            )
+          : [];
     }
   }
   return await requireSession(deps.db, grant.workspaceId, sessionId);
+}
+
+/** Run `run` over `items`, at most `limit` at a time. */
+async function forEachConcurrently<T>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++] as T;
+      await run(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
 function removalRecord(

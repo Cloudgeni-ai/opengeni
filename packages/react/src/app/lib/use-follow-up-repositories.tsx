@@ -80,7 +80,7 @@ function repositoryDisplayName(uri: string): string {
 export function RepositoryRemovalDialog(props: {
   open: boolean;
   name: string;
-  /** Remove waits while the folder is `checking`. */
+  /** Remove works at once; the copy follows the folder check when it answers. */
   folder: RepositoryRemovalFolderState;
   onClose: () => void;
   onConfirm: () => Promise<boolean>;
@@ -95,7 +95,6 @@ export function RepositoryRemovalDialog(props: {
       description={REMOVAL_FOLDER_COPY[props.folder]}
       confirmLabel="Remove"
       pendingLabel="Removing…"
-      confirmDisabled={props.folder === "checking"}
       onConfirm={props.onConfirm}
     />
   );
@@ -570,6 +569,9 @@ export function useFollowUpRepositories(
   const confirmRepositoryRemoval = useCallback(async (): Promise<boolean> => {
     if (!removal) return false;
     const { resource } = removal;
+    // Removing doesn't wait for the folder check, which may still be waking the sandbox.
+    removalCheck.current?.abort();
+    removalCheck.current = null;
     const acceptedSessionId = session.id;
     const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
     if (!acceptedTransition) return false;
