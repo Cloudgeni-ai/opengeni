@@ -299,6 +299,10 @@ class FakeStore implements ComputeAgentLinkStore {
   /** The claims of each batched renewal, by connection instance. */
   readonly renewBatches: string[][] = [];
   renewThrows = false;
+  /** The batched renewal itself fails (single renewals still answer). */
+  renewManyThrows = false;
+  /** Connection instances a batched renewal answers busy. */
+  readonly busyInstances = new Set<string>();
   /** An open for this epoch waits until the promise settles. */
   readonly openGates = new Map<number, Promise<void>>();
   private release_: (() => void) | null = null;
@@ -317,8 +321,15 @@ class FakeStore implements ComputeAgentLinkStore {
     if (new Set(claims.map((claim) => claim.workspaceId)).size > 1) {
       throw new Error("a renewal batch spans workspaces");
     }
-    const results = [];
-    for (const claim of claims) results.push(await this.renew(claim));
+    if (this.renewManyThrows) throw new Error("deadlock detected");
+    const results: Awaited<ReturnType<ComputeAgentLinkStore["renewMany"]>> = [];
+    for (const claim of claims) {
+      if (this.busyInstances.has(claim.connectionInstanceId)) {
+        results.push({ renewed: false, busy: true });
+        continue;
+      }
+      results.push(await this.renew(claim));
+    }
     return results;
   }
   async release(claim: ComputeAgentLinkClaim) {
@@ -532,6 +543,39 @@ describe("agent gateway sessions", () => {
     store.renewBatches.length = 0;
     await gateway.tick();
     expect(store.renewBatches.flat().sort()).toEqual([instance(1), instance(3)]);
+  });
+
+  test("a busy claim only misses one renewal, and a failed batch falls back to single renewals", async () => {
+    let now = 1_000_000;
+    const { gateway, socket, send, settle, store } = await gatewayWithLink({ now: () => now });
+    const instance = (n: number) => `cccccccc-cccc-4ccc-8ccc-cccccccccc0${n}`;
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "w1a1", connection: instance(1) });
+    send({ t: "open", s: 2, sandbox: "sbx-2", ticket: "w1a2", connection: instance(2) });
+    await settle();
+    // A busy row is neither refused nor renewed.
+    store.busyInstances.add(instance(1));
+    await gateway.tick();
+    expect(socket.frames.some((frame) => frame.t === "closed")).toBe(false);
+    store.busyInstances.clear();
+
+    // The batch fails as a whole: each claim is renewed on its own, so only
+    // the claim that is refused on its own ends.
+    store.renewManyThrows = true;
+    store.renewAnswers.set(instance(2), { renewed: false, code: "revoked" });
+    store.calls.length = 0;
+    now += 10_000;
+    await gateway.tick();
+    expect(store.calls.filter((call) => call.startsWith("renew:")).sort()).toEqual([
+      `renew:${instance(1)}`,
+      `renew:${instance(2)}`,
+    ]);
+    const closed = socket.frames.filter((frame) => frame.t === "closed");
+    expect(closed).toHaveLength(1);
+    expect(closed[0]).toMatchObject({ s: 2, code: "revoked" });
+    // The fallback renewal extended session 1's lease past the first one.
+    now += 15_000;
+    await gateway.tick();
+    expect(socket.frames.filter((frame) => frame.t === "closed")).toHaveLength(1);
   });
 
   test("a session whose renewals keep failing loses its authority at the lease deadline", async () => {

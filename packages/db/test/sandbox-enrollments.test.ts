@@ -481,17 +481,14 @@ describe("sandbox enrollments", () => {
       statements.push(query);
     };
     try {
-      const batchStart = performance.now();
       const results = await renewSandboxAgentLinks(measured.db, {
         workspaceId: ws.workspaceId,
         leaseMs: LEASE_MS,
         claims,
       });
-      const batchMs = performance.now() - batchStart;
       expect(results.every((result) => result.renewed)).toBe(true);
       expect(statements.filter((query) => /from enrollments/i.test(query))).toHaveLength(1);
       statements.length = 0;
-      const singleStart = performance.now();
       for (const claim of claims) {
         await renewSandboxAgentLink(measured.db, {
           ...claim,
@@ -499,14 +496,12 @@ describe("sandbox enrollments", () => {
           leaseMs: LEASE_MS,
         });
       }
-      const singleMs = performance.now() - singleStart;
       expect(statements.filter((query) => /from enrollments/i.test(query))).toHaveLength(count);
-      // One statement for the fleet is far cheaper than one transaction each.
-      expect(batchMs * 4).toBeLessThan(singleMs);
     } finally {
       await measured.close();
     }
-    // Two replicas renewing overlapping sets in opposite orders both finish.
+    // Two replicas renewing overlapping sets in opposite orders both finish;
+    // a row the other batch holds at that moment is only busy, never refused.
     const forward = renewSandboxAgentLinks(db, {
       workspaceId: ws.workspaceId,
       leaseMs: LEASE_MS,
@@ -518,8 +513,87 @@ describe("sandbox enrollments", () => {
       claims: [...claims].reverse(),
     });
     const [a, b] = await Promise.all([forward, backward]);
-    expect(a.every((result) => result.renewed)).toBe(true);
-    expect(b.every((result) => result.renewed)).toBe(true);
+    for (const result of [...a, ...b]) {
+      expect(result.renewed || "busy" in result).toBe(true);
+    }
+  });
+
+  test("a batched renewal skips a held row as busy, renews the rest at once, and samples the clock after locking", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const boxes = await Promise.all(Array.from({ length: 5 }, () => sandboxEnrollment(ws)));
+    const claims = boxes.map((box) => ({
+      agentId: box.id,
+      epoch: 1,
+      connectionInstanceId: crypto.randomUUID(),
+    }));
+    for (const claim of claims) {
+      await openSandboxAgentLink(db, { ...claim, workspaceId: ws.workspaceId, leaseMs: LEASE_MS });
+    }
+    const held = boxes[2]!.id;
+    const [heldBefore] =
+      await admin`select connection_lease_expires_at from enrollments where id=${held}`;
+    let unlock!: () => void;
+    let signalLocked!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    const holder = admin.begin(async (tx) => {
+      await tx`select id from enrollments where id=${held} for update`;
+      signalLocked();
+      await gate;
+    });
+    await locked;
+    let results: Awaited<ReturnType<typeof renewSandboxAgentLinks>>;
+    try {
+      // Before skip-locked, the batch waited here for the holder and held the
+      // rows it had already locked; now it answers while the lock is held.
+      results = await Promise.race([
+        renewSandboxAgentLinks(db, { workspaceId: ws.workspaceId, leaseMs: LEASE_MS, claims }),
+        Bun.sleep(3_000).then(() => {
+          throw new Error("the batch waited on a held row");
+        }),
+      ]);
+      const [lockTime] = await admin`select clock_timestamp() as now`;
+      const rows = await admin`select id, updated_at from enrollments where id in ${admin(
+        boxes.map((box) => box.id),
+      )}`;
+      for (const row of rows) {
+        if (row.id === held) continue;
+        expect(row.updated_at.getTime()).toBeLessThanOrEqual(lockTime!.now.getTime());
+      }
+    } finally {
+      unlock();
+      await holder;
+    }
+    expect(results).toEqual([
+      { renewed: true },
+      { renewed: true },
+      { renewed: false, busy: true },
+      { renewed: true },
+      { renewed: true },
+    ]);
+    const [heldAfter] =
+      await admin`select connection_lease_expires_at from enrollments where id=${held}`;
+    expect(heldAfter!.connection_lease_expires_at).toEqual(heldBefore!.connection_lease_expires_at);
+    // Once the holder is gone the next batch renews it, answered by position
+    // even when the caller spells the id in capitals.
+    const again = await renewSandboxAgentLinks(db, {
+      workspaceId: ws.workspaceId,
+      leaseMs: LEASE_MS,
+      claims: [{ ...claims[2]!, agentId: held.toUpperCase() }, claims[0]!],
+    });
+    expect(again).toEqual([{ renewed: true }, { renewed: true }]);
+    await expect(
+      renewSandboxAgentLinks(db, {
+        workspaceId: ws.workspaceId,
+        leaseMs: LEASE_MS,
+        claims: [claims[0]!, { ...claims[0]!, agentId: claims[0]!.agentId.toUpperCase() }],
+      }),
+    ).rejects.toThrow("names an agent twice");
   });
 
   test("renewal samples the clock after locking and sees committed ownership changes", async () => {

@@ -58,10 +58,14 @@ export type ComputeAgentLinkStore = {
   /** Renew many claims of one workspace at once, with the same answer per
    * claim as `renew`, in the order given. The gateway renews every open
    * session each tick through this, so a large fleet costs a few database
-   * statements per tick rather than one transaction per sandbox. */
+   * statements per tick rather than one transaction per sandbox. `busy`
+   * means another transaction held the claim's row: that claim missed this
+   * renewal and keeps its last confirmed lease. */
   renewMany(
     input: ReadonlyArray<ComputeAgentLinkClaim>,
-  ): Promise<Array<{ renewed: true } | { renewed: false; code: ClosedCode }>>;
+  ): Promise<
+    Array<{ renewed: true } | { renewed: false; code: ClosedCode } | { renewed: false; busy: true }>
+  >;
   release(input: ComputeAgentLinkClaim): Promise<void>;
   /** Record that the session's sandbox fell asleep or woke, for metering its
    * awake time, and whether its host is handing it off, which keeps it from
@@ -423,35 +427,79 @@ export class ComputeAgentGateway {
     for (const session of sessions) session.renewing = true;
     const startedAtMs = this.now();
     try {
-      const results = await this.options.store.renewMany(sessions.map((session) => session.claim));
-      if (results.length !== sessions.length) {
-        throw new Error("renewal answered a different number of claims");
-      }
-      sessions.forEach((session, index) => {
-        const result = results[index]!;
-        if (!result.renewed) {
-          if (session.state === "open") {
-            session.link.end(session, result.code, closedMessage(result.code));
-          }
-          return;
+      let results: Awaited<ReturnType<ComputeAgentLinkStore["renewMany"]>>;
+      try {
+        results = await this.options.store.renewMany(sessions.map((session) => session.claim));
+        if (results.length !== sessions.length) {
+          throw new Error("renewal answered a different number of claims");
         }
-        session.leaseDeadlineMs = Math.max(
-          session.leaseDeadlineMs,
-          this.leaseDeadline(startedAtMs),
-        );
-      });
-    } catch {
-      // The lease outlives several missed renewals and the next tick retries;
-      // once the last confirmed lease runs out the session ends.
-      this.options.logger?.warn("compute gateway: a session renewal failed", {
-        errorCode: "compute_link_renew_failed",
-        workspaceId: sessions[0]!.claim.workspaceId,
-        sessions: sessions.length,
-      });
-      for (const session of sessions) this.authorized(session);
+      } catch (error) {
+        // One bad claim must not cost its neighbours their lease: renew this
+        // batch one claim at a time, so only a claim that fails on its own
+        // misses the renewal.
+        this.options.logger?.warn("compute gateway: a batched session renewal failed", {
+          errorCode: "compute_link_renew_batch_failed",
+          error: errorMessage(error),
+          workspaceId: sessions[0]!.claim.workspaceId,
+          sessions: sessions.length,
+          agentIds: sessions
+            .slice(0, 3)
+            .map((session) => session.claim.agentId)
+            .join(","),
+        });
+        await this.renewEach(sessions, startedAtMs);
+        return;
+      }
+      sessions.forEach((session, index) =>
+        this.applyRenewal(session, results[index]!, startedAtMs),
+      );
     } finally {
       for (const session of sessions) session.renewing = false;
     }
+  }
+
+  /** Renew `sessions` one claim at a time, a few at once. */
+  private async renewEach(sessions: readonly Session[], startedAtMs: number): Promise<void> {
+    let next = 0;
+    const worker = async () => {
+      while (next < sessions.length) {
+        const session = sessions[next++]!;
+        try {
+          this.applyRenewal(session, await this.options.store.renew(session.claim), startedAtMs);
+        } catch (error) {
+          // The lease outlives several missed renewals and the next tick
+          // retries; once the last confirmed lease runs out the session ends.
+          this.options.logger?.warn("compute gateway: a session renewal failed", {
+            errorCode: "compute_link_renew_failed",
+            error: errorMessage(error),
+            workspaceId: session.claim.workspaceId,
+            agentId: session.claim.agentId,
+          });
+          this.authorized(session);
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(RENEW_BATCH_CONCURRENCY, sessions.length) }, worker),
+    );
+  }
+
+  private applyRenewal(
+    session: Session,
+    result: Awaited<ReturnType<ComputeAgentLinkStore["renewMany"]>>[number],
+    startedAtMs: number,
+  ): void {
+    if (result.renewed) {
+      session.leaseDeadlineMs = Math.max(session.leaseDeadlineMs, this.leaseDeadline(startedAtMs));
+      return;
+    }
+    if ("busy" in result) {
+      // Another transaction held the row: a missed renewal, retried next tick.
+      this.authorized(session);
+      return;
+    }
+    if (session.state === "open")
+      session.link.end(session, result.code, closedMessage(result.code));
   }
 
   /** @internal Commit the host's latest reported power state for `session`,

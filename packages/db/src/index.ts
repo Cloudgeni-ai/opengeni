@@ -74794,14 +74794,24 @@ export async function renewSandboxAgentLink(
 /** The most claims one batched renewal statement takes. */
 export const SANDBOX_AGENT_LINK_RENEW_BATCH_MAX = 500;
 
+/** One claim's answer from a batched renewal: renewed, refused for good, or
+ * `busy` when another transaction held its row, which counts as one missed
+ * renewal; the next tick renews it again. */
+export type SandboxAgentLinkRenewal =
+  | { renewed: true }
+  | { renewed: false; code: SandboxAgentLinkEnd }
+  | { renewed: false; busy: true };
+
 /**
  * RENEW many open link sessions' claims in one workspace with one statement,
  * the batched form of {@link renewSandboxAgentLink} with the same decision per
  * claim. The gateway renews every open session every few seconds; one
  * transaction per session made a fleet of sleeping sandboxes the largest
- * write load on the database. Rows are locked in id order, so two batches
- * that overlap (a hand-over between replicas) cannot deadlock. Results come
- * back in the order of `claims`.
+ * write load on the database. Rows are locked in id order and a row another
+ * transaction holds (an open, release, power write or revoke) is skipped and
+ * answered `busy`, so a batch never waits on one contended row while it holds
+ * the others, and two overlapping batches cannot deadlock. Results come back
+ * in the order of `claims`.
  */
 export async function renewSandboxAgentLinks(
   db: Database,
@@ -74810,7 +74820,7 @@ export async function renewSandboxAgentLinks(
     leaseMs: number;
     claims: ReadonlyArray<Omit<SandboxAgentLinkInput, "workspaceId">>;
   },
-): Promise<Array<{ renewed: true } | { renewed: false; code: SandboxAgentLinkEnd }>> {
+): Promise<SandboxAgentLinkRenewal[]> {
   if (input.claims.length === 0) return [];
   if (input.claims.length > SANDBOX_AGENT_LINK_RENEW_BATCH_MAX) {
     throw new Error(`at most ${SANDBOX_AGENT_LINK_RENEW_BATCH_MAX} claims per renewal batch`);
@@ -74818,8 +74828,9 @@ export async function renewSandboxAgentLinks(
   const seen = new Set<string>();
   for (const claim of input.claims) {
     assertSandboxAgentLinkInput({ ...claim, workspaceId: input.workspaceId }, input.leaseMs);
-    if (seen.has(claim.agentId)) throw new Error("a renewal batch names an agent twice");
-    seen.add(claim.agentId);
+    const agentId = claim.agentId.toLowerCase();
+    if (seen.has(agentId)) throw new Error("a renewal batch names an agent twice");
+    seen.add(agentId);
   }
   const agentIds = input.claims.map((claim) => claim.agentId);
   const epochs = input.claims.map((claim) => claim.epoch);
@@ -74827,16 +74838,21 @@ export async function renewSandboxAgentLinks(
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     // As in renewSandboxAgentLink: lock first, then sample time per row, so a
     // contended lock never shortens the lease it grants.
-    const rows = await rawRows<{ agentId: string; renewed: boolean; code: SandboxAgentLinkEnd }>(
+    const rows = await rawRows<{
+      ordinal: string | number;
+      renewed: boolean;
+      busy: boolean;
+      code: SandboxAgentLinkEnd;
+    }>(
       scopedDb,
       sql`
         with claim as materialized (
-          select agent_id, epoch, connection_instance_id
+          select agent_id, epoch, connection_instance_id, ordinal
           from unnest(
             ${new Param(agentIds)}::uuid[],
             ${new Param(epochs)}::bigint[],
             ${new Param(instances)}::text[]
-          ) as claim(agent_id, epoch, connection_instance_id)
+          ) with ordinality as claim(agent_id, epoch, connection_instance_id, ordinal)
         ), locked as materialized (
           select e.id, e.kind, e.status, e.link_epoch, e.connection_instance_id,
             e.connection_lease_expires_at
@@ -74844,10 +74860,17 @@ export async function renewSandboxAgentLinks(
           join claim on claim.agent_id = e.id
           where e.workspace_id = ${input.workspaceId}
           order by e.id
-          for update of e
+          for update of e skip locked
+        ), present as materialized (
+          -- Rows this statement's snapshot sees; one present but not locked
+          -- was held by another transaction and is answered busy.
+          select e.id from enrollments e
+          join claim on claim.agent_id = e.id
+          where e.workspace_id = ${input.workspaceId}
         ), checked as materialized (
-          select claim.agent_id, locked.id as locked_id,
+          select claim.agent_id, claim.ordinal, locked.id as locked_id,
             locked.connection_lease_expires_at,
+            (locked.id is null and present.id is not null) as busy,
             case
               when locked.id is null then 'revoked'
               when locked.kind <> 'sandbox' or locked.status <> 'active' then 'revoked'
@@ -74859,6 +74882,7 @@ export async function renewSandboxAgentLinks(
             date_trunc('milliseconds', clock_timestamp()) as renewed_at
           from claim
           left join locked on locked.id = claim.agent_id
+          left join present on present.id = claim.agent_id
         ), updated as (
           update enrollments e set
             connection_lease_expires_at = greatest(
@@ -74876,19 +74900,20 @@ export async function renewSandboxAgentLinks(
             and checked.refusal is null
           returning e.id
         )
-        select checked.agent_id::text as "agentId",
+        select checked.ordinal,
           (updated.id is not null) as renewed,
+          checked.busy,
           coalesce(checked.refusal, 'revoked') as code
         from checked
         left join updated on updated.id = checked.agent_id
       `,
     );
-    const byAgent = new Map(rows.map((row) => [row.agentId, row]));
-    return input.claims.map((claim) => {
-      const row = byAgent.get(claim.agentId);
-      return row?.renewed
-        ? { renewed: true as const }
-        : { renewed: false as const, code: row?.code ?? "revoked" };
+    const byOrdinal = new Map(rows.map((row) => [Number(row.ordinal), row]));
+    return input.claims.map((_claim, index): SandboxAgentLinkRenewal => {
+      const row = byOrdinal.get(index + 1);
+      if (row?.renewed) return { renewed: true };
+      if (row?.busy) return { renewed: false, busy: true };
+      return { renewed: false, code: row?.code ?? "revoked" };
     });
   });
 }

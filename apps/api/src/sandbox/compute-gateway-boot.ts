@@ -19,6 +19,7 @@ import {
   releaseSandboxAgentLink,
   renewSandboxAgentLink,
   renewSandboxAgentLinks,
+  SANDBOX_AGENT_LINK_RENEW_BATCH_MAX,
   type Database,
 } from "@opengeni/db";
 import { createAgentLinkNatsConnection, type AgentLinkNats } from "@opengeni/events";
@@ -51,15 +52,23 @@ export function databaseComputeAgentLinkStore(db: Database): ComputeAgentLinkSto
       if (claims.some((claim) => claim.workspaceId !== workspaceId)) {
         throw new Error("a renewal batch spans workspaces");
       }
-      return await renewSandboxAgentLinks(db, {
-        workspaceId,
-        leaseMs: AGENT_CONNECTION_LEASE_MS,
-        claims: claims.map(({ agentId, epoch, connectionInstanceId }) => ({
-          agentId,
-          epoch,
-          connectionInstanceId,
-        })),
-      });
+      const results = [];
+      for (let start = 0; start < claims.length; start += SANDBOX_AGENT_LINK_RENEW_BATCH_MAX) {
+        results.push(
+          ...(await renewSandboxAgentLinks(db, {
+            workspaceId,
+            leaseMs: AGENT_CONNECTION_LEASE_MS,
+            claims: claims
+              .slice(start, start + SANDBOX_AGENT_LINK_RENEW_BATCH_MAX)
+              .map(({ agentId, epoch, connectionInstanceId }) => ({
+                agentId,
+                epoch,
+                connectionInstanceId,
+              })),
+          })),
+        );
+      }
+      return results;
     },
     release: async (claim) => {
       await releaseSandboxAgentLink(db, claim);
