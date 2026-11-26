@@ -263,7 +263,7 @@ export async function scheduledConnectionTools(
   db: Database,
   workspaceId: string,
   settings: Settings,
-  target: Session | null,
+  target: Pick<Session, "tools" | "toolPolicy" | "mcpServers"> | null,
   taskTools: ToolRef[],
   subjectId?: string,
 ): Promise<ToolRef[]> {

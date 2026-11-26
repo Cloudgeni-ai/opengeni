@@ -302,3 +302,341 @@ test("effective session policy reads recent history only, however long the sessi
   });
   await measure({ model: "person-model", walked: 1 });
 }, 180_000);
+
+async function policyWorkspace(name: string) {
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: suffix,
+    accountName: name,
+    workspaceExternalSource: "test",
+    workspaceExternalId: suffix,
+    workspaceName: name,
+    subjectId: `policy-${suffix}`,
+  });
+  return access.workspaceGrants[0]!;
+}
+
+async function policySession(grant: { accountId: string; workspaceId: string }) {
+  return await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "",
+    resources: [],
+    metadata: {},
+    model: "stored-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none" as const,
+  });
+}
+
+type SyntheticTurn = { id: string; sessionId: string; source: string; model: string };
+type SyntheticEvent = {
+  sessionId: string;
+  turnId: string | null;
+  sequence: number;
+  type: "turn.queued" | "turn.started" | "session.model_settings.updated";
+};
+
+/** Synthetic history from the harness administrator, writer triggers off. */
+async function insertHistory(
+  grant: { accountId: string; workspaceId: string },
+  turns: SyntheticTurn[],
+  events: SyntheticEvent[],
+) {
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    if (turns.length > 0) {
+      await tx`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+          status, source, position, prompt, model, reasoning_effort, latency_mode,
+          sandbox_backend, resources, tools, metadata, started_at, finished_at
+        ) select turn.id, ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, turn.session_id,
+          gen_random_uuid(), 'synthetic', 'completed', turn.source, turn.position,
+          repeat('prompt ', 200), turn.model, 'medium', 'standard', 'none', '[]'::jsonb,
+          '[]'::jsonb, '{}'::jsonb, now(), now()
+        from unnest(
+          ${turns.map((turn) => turn.id)}::uuid[], ${turns.map((turn) => turn.sessionId)}::uuid[],
+          ${turns.map((turn) => turn.source)}::text[], ${turns.map((turn) => turn.model)}::text[],
+          ${turns.map((_, index) => index + 1)}::bigint[]
+        ) as turn(id, session_id, source, model, position)`;
+    }
+    await tx`
+      insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      select ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, event.session_id, event.turn_id,
+        event.sequence, event.type, '{}'::jsonb
+      from unnest(
+        ${events.map((event) => event.sessionId)}::uuid[],
+        ${events.map((event) => event.turnId)}::uuid[],
+        ${events.map((event) => event.sequence)}::bigint[],
+        ${events.map((event) => event.type)}::text[]
+      ) as event(session_id, turn_id, sequence, type)`;
+  });
+  await shared.admin`analyze session_events`;
+  await shared.admin`analyze session_turns`;
+}
+
+/** Plan statistics of one effective-policy read under the caller's RLS. */
+async function explainEffectivePolicy(
+  grant: { workspaceId: string; subjectId: string },
+  sessionId: string,
+  mode: "force_generic_plan" | "force_custom_plan",
+) {
+  const query = effectiveSessionPolicyQuery(client.db, grant.workspaceId, [sessionId]).toSQL();
+  return await withWorkspaceSubjectRls(
+    client.db,
+    grant.workspaceId,
+    grant.subjectId,
+    async (tx) => {
+      const [row] = await effectiveSessionPolicyQuery(tx, grant.workspaceId, [sessionId]);
+      await tx.execute(sql.raw(`set local plan_cache_mode = ${mode}`));
+      await tx.execute(sql.raw(`prepare effective_policy_walk as ${query.sql}`));
+      try {
+        const explained = await tx.execute(
+          sql.raw(
+            `explain (analyze, buffers, format json) execute effective_policy_walk(${query.params
+              .map(sqlParameterLiteral)
+              .join(", ")})`,
+          ),
+        );
+        const plan = explained[0]?.["QUERY PLAN"] as Array<{ Plan: Record<string, unknown> }>;
+        const root = plan[0]!.Plan;
+        // Every primary-key probe of a turn the walk considered.
+        let turnProbes = 0;
+        const walk = (value: unknown): void => {
+          if (Array.isArray(value)) return value.forEach(walk);
+          if (!value || typeof value !== "object") return;
+          const node = value as Record<string, unknown>;
+          if (
+            node["Relation Name"] === "session_turns" &&
+            String(node["Alias"]).startsWith("candidate")
+          ) {
+            turnProbes += Number(node["Actual Loops"] ?? 0);
+          }
+          Object.values(node).forEach(walk);
+        };
+        walk(root);
+        return {
+          row,
+          turnProbes,
+          blocks: Number(root["Shared Hit Blocks"] ?? 0) + Number(root["Shared Read Blocks"] ?? 0),
+        };
+      } finally {
+        await tx.execute(sql.raw("deallocate effective_policy_walk"));
+      }
+    },
+  );
+}
+
+test("after a settings write, a schedule's long run of automated turns is not walked", async () => {
+  const grant = await policyWorkspace("Policy automated run");
+  const session = await policySession(grant);
+  // A person changed the chat's model and sent a turn; a schedule then ran
+  // on the chat many times. Only the person's turn can set the effective
+  // policy, and the read must not visit every automated start to find it.
+  const turns: SyntheticTurn[] = [];
+  const events: SyntheticEvent[] = [
+    { sessionId: session.id, turnId: null, sequence: 1000, type: "session.model_settings.updated" },
+  ];
+  const person = crypto.randomUUID();
+  turns.push({ id: person, sessionId: session.id, source: "user", model: "person-model" });
+  events.push(
+    { sessionId: session.id, turnId: person, sequence: 1001, type: "turn.queued" },
+    { sessionId: session.id, turnId: person, sequence: 1002, type: "turn.started" },
+  );
+  for (let index = 0; index < AUTOMATED_RUNS; index += 1) {
+    const id = crypto.randomUUID();
+    turns.push({ id, sessionId: session.id, source: "scheduled_task", model: "automated-model" });
+    events.push(
+      { sessionId: session.id, turnId: id, sequence: 2000 + index * 2, type: "turn.queued" },
+      { sessionId: session.id, turnId: id, sequence: 2001 + index * 2, type: "turn.started" },
+    );
+  }
+  await insertHistory(grant, turns, events);
+  for (const mode of ["force_generic_plan", "force_custom_plan"] as const) {
+    const measured = await explainEffectivePolicy(grant, session.id, mode);
+    expect(measured.row?.model).toBe("person-model");
+    // The newest few starts, then the person's turns: never one probe per run.
+    expect(measured.turnProbes).toBeLessThanOrEqual(16);
+    expect(measured.blocks).toBeLessThan(300);
+  }
+
+  // With no person turn since the write, the stored defaults apply, still
+  // without walking the automated runs.
+  const quiet = await policySession(grant);
+  const quietEvents: SyntheticEvent[] = [
+    { sessionId: quiet.id, turnId: null, sequence: 1000, type: "session.model_settings.updated" },
+  ];
+  const quietTurns: SyntheticTurn[] = [];
+  for (let index = 0; index < AUTOMATED_RUNS; index += 1) {
+    const id = crypto.randomUUID();
+    quietTurns.push({ id, sessionId: quiet.id, source: "event_trigger", model: "automated-model" });
+    quietEvents.push(
+      { sessionId: quiet.id, turnId: id, sequence: 2000 + index * 2, type: "turn.queued" },
+      { sessionId: quiet.id, turnId: id, sequence: 2001 + index * 2, type: "turn.started" },
+    );
+  }
+  await insertHistory(grant, quietTurns, quietEvents);
+  const measured = await explainEffectivePolicy(grant, quiet.id, "force_generic_plan");
+  expect(measured.row?.model).toBe("stored-model");
+  expect(measured.turnProbes).toBeLessThanOrEqual(16);
+  expect(measured.blocks).toBeLessThan(300);
+}, 180_000);
+
+const AUTOMATED_RUNS = 1500;
+
+test("the bounded read picks the same turn as the full walk for any history", async () => {
+  const grant = await policyWorkspace("Policy equivalence");
+  // Deterministic pseudo-random histories: mixed sources, settings writes
+  // anywhere, re-queued and restarted turns, a person's turn accepted before
+  // a write that starts after it, and starts whose turn row is missing.
+  let seed = 0x5eed;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  const sources = ["user", "api", "scheduled_task", "event_trigger", "agent"];
+  const sessions: string[] = [];
+  const turns: SyntheticTurn[] = [];
+  const events: SyntheticEvent[] = [];
+  for (let sessionIndex = 0; sessionIndex < 60; sessionIndex += 1) {
+    const session = await policySession(grant);
+    sessions.push(session.id);
+    let sequence = 1000;
+    const own: SyntheticTurn[] = [];
+    // Schedule-driven sessions after a write exercise the person/API read
+    // past the probed starts; the rest mix sources freely.
+    const scheduled = random() < 0.4;
+    if (scheduled) {
+      events.push({
+        sessionId: session.id,
+        turnId: null,
+        sequence: sequence++,
+        type: "session.model_settings.updated",
+      });
+    }
+    const turnCount = scheduled ? 20 + Math.floor(random() * 40) : Math.floor(random() * 60);
+    const automatedShare = scheduled ? 0.97 : random();
+    const writeChance = scheduled ? 0.01 : 0.06;
+    for (let index = 0; index < turnCount; index += 1) {
+      if (random() < writeChance) {
+        events.push({
+          sessionId: session.id,
+          turnId: null,
+          sequence: sequence++,
+          type: "session.model_settings.updated",
+        });
+      }
+      const source =
+        random() < automatedShare
+          ? sources[2 + Math.floor(random() * 3)]!
+          : sources[Math.floor(random() * 2)]!;
+      const turn = {
+        id: crypto.randomUUID(),
+        sessionId: session.id,
+        source,
+        model: `model-${sessionIndex}-${index}`,
+      };
+      // A start without a turn row, as in imported history.
+      if (random() >= 0.04) {
+        turns.push(turn);
+        own.push(turn);
+      }
+      if (random() >= 0.05) {
+        events.push({
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: sequence++,
+          type: "turn.queued",
+        });
+      }
+      // A write between admission and start.
+      if (random() < 0.04) {
+        events.push({
+          sessionId: session.id,
+          turnId: null,
+          sequence: sequence++,
+          type: "session.model_settings.updated",
+        });
+      }
+      if (random() >= 0.1) {
+        events.push({
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: sequence++,
+          type: "turn.started",
+        });
+      }
+    }
+    // Re-queues and restarts of earlier turns.
+    for (const turn of own) {
+      if (random() < 0.05) {
+        events.push({
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: sequence++,
+          type: "turn.queued",
+        });
+      }
+      if (random() < 0.05) {
+        events.push({
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence: sequence++,
+          type: "turn.started",
+        });
+      }
+    }
+  }
+  await insertHistory(grant, turns, events);
+
+  // The rule itself, applied to the whole history of each session.
+  const turnById = new Map(turns.map((turn) => [turn.id, turn]));
+  const expected = new Map<string, string>();
+  let personApiFallbacks = 0;
+  for (const sessionId of sessions) {
+    const own = events.filter((event) => event.sessionId === sessionId);
+    const boundary = Math.max(
+      -1,
+      ...own
+        .filter((event) => event.type === "session.model_settings.updated")
+        .map((event) => event.sequence),
+    );
+    const firstQueued = (turnId: string) => {
+      const queued = own
+        .filter((event) => event.type === "turn.queued" && event.turnId === turnId)
+        .map((event) => event.sequence);
+      return queued.length > 0 ? Math.min(...queued) : null;
+    };
+    const starts = own
+      .filter((event) => event.type === "turn.started" && event.sequence > boundary)
+      .sort((left, right) => right.sequence - left.sequence);
+    const eligible = (event: SyntheticEvent) => {
+      const turn = turnById.get(event.turnId!);
+      if (!turn) return false;
+      if (boundary < 0) return true;
+      if (turn.source !== "user" && turn.source !== "api") return false;
+      return (firstQueued(turn.id) ?? 0) > boundary;
+    };
+    const chosen = starts.find(eligible);
+    // Sessions the newest starts cannot answer: the person/API turn read does.
+    if (boundary >= 0 && starts.length > 16 && !starts.slice(0, 16).some(eligible)) {
+      personApiFallbacks += 1;
+    }
+    expected.set(sessionId, chosen ? turnById.get(chosen.turnId!)!.model : "stored-model");
+  }
+
+  const fallbacks = [...expected.values()].filter((model) => model === "stored-model").length;
+  expect(fallbacks).toBeGreaterThan(0);
+  expect(fallbacks).toBeLessThan(sessions.length);
+  expect(personApiFallbacks).toBeGreaterThan(0);
+  const actual = await withWorkspaceSubjectRls(
+    client.db,
+    grant.workspaceId,
+    grant.subjectId,
+    async (tx) => await effectiveSessionPolicyQuery(tx, grant.workspaceId, sessions),
+  );
+  expect(new Map(actual.map((row) => [row.id, row.model]))).toEqual(expected);
+}, 180_000);

@@ -18,19 +18,36 @@ export function latestStartedSessionTurnQuery(
  * Original queue admission, not the mutable approval/recovery trigger, orders
  * that choice. Actual latest-started identity is unchanged.
  *
- * Cost is bounded by recent history, not session length: the newest
- * `turn.started` event is found by a backward walk of
+ * Cost is bounded by recent history, not session length. The newest
+ * `turn.started` events after the boundary are read by a backward walk of
  * session_events_workspace_session_type_sequence_idx that probes each
- * candidate's turn by primary key and stops at the first eligible one. With a
- * settings boundary the walk also stops at the boundary, because an eligible
- * turn was queued after it and so started after it. Joining all start events
- * to all turns instead would hash the whole session per read.
+ * candidate's turn by primary key and stops at the first eligible one. An
+ * eligible turn was queued after the boundary and so started after it.
+ *
+ * After a settings write the walk reads at most {@link RECENT_START_PROBES} starts. After a settings
+ * write only person/API turns are eligible, so a session that a schedule or
+ * trigger keeps running would otherwise visit every automated start since the
+ * write (thousands of turn probes, seconds per read in production). When the
+ * newest starts are all ineligible and more exist, the answer is computed
+ * from the session's person/API turns instead, through
+ * session_turns_session_person_api_idx: the eligible turn with the newest
+ * start after the boundary. Both paths pick the same turn. Without a write
+ * every started turn is eligible, so the walk is not limited: it stops at the
+ * newest start whose turn exists.
+ * Joining all start events to all turns instead would hash the whole session
+ * per read.
  *
  * The turn check is a scalar subquery, not EXISTS, so the planner cannot
  * flatten it into a join. A generic plan for a prepared statement does not
  * know how long the session is; given a join it may drive from every turn of
  * the session and sort, which costs tens of milliseconds to seconds on a long
  * session instead of one backward index probe.
+ *
+ * Each turn is read by id. Its session is compared with IS NOT DISTINCT FROM,
+ * which is not an index operator: with `=` a generic plan that expects short
+ * sessions may probe by (workspace, session) through
+ * session_turns_session_position_idx and read every turn of the session for
+ * each probe. sessionId is never null, so the two comparisons agree.
  */
 function startedSessionTurnQuery(
   db: Database,
@@ -38,58 +55,140 @@ function startedSessionTurnQuery(
   sessionId: string | SQL,
   respectSettingsBoundary: boolean,
 ) {
-  // Coalesce inside the scalar subquery: the comparison then reads a plain
-  // parameter, which row-level security accepts as an index bound. An outer
-  // COALESCE is not leakproof, so RLS would demote the bound to a filter.
-  const settingsBoundary = sql`(
-    select coalesce(max(boundary.sequence), -1) from ${schema.sessionEvents} boundary
-    where boundary.workspace_id = ${workspaceId}
-      and boundary.session_id = ${sessionId}
-      and boundary.type = 'session.model_settings.updated'
+  if (!respectSettingsBoundary) {
+    const newestStartedTurn = sql`(
+      select started.turn_id from ${schema.sessionEvents} started
+      where started.workspace_id = ${workspaceId}
+        and started.session_id = ${sessionId}
+        and started.type = 'turn.started'
+        and (
+          select true from ${schema.sessionTurns} candidate
+          where candidate.workspace_id = ${workspaceId}
+            and candidate.id = started.turn_id
+            and candidate.session_id is not distinct from ${sessionId}
+          limit 1
+        )
+      order by started.sequence desc
+      limit 1
+    )`;
+    return db
+      .select(turnPolicyColumns)
+      .from(schema.sessionTurns)
+      .where(turnById(workspaceId, sessionId, newestStartedTurn))
+      .limit(1);
+  }
+  // The latest explicit settings write, read once for every branch below.
+  // Planning, not execution, dominates this statement's cost, and each extra
+  // reference to a row-security table adds its policy expansion to planning.
+  const settingsBoundary = sql`settings_boundary.sequence`;
+  // Newest starts after the boundary, newest first; the first eligible one
+  // is the answer. Without a write every started turn is eligible and the
+  // walk is unlimited, so it stops at the newest start whose turn exists.
+  // After a write it reads at most the newest few starts.
+  const recentWalk = sql`(
+    select recent.turn_id from (
+      select started.turn_id, started.sequence from ${schema.sessionEvents} started
+      where started.workspace_id = ${workspaceId}
+        and started.session_id = ${sessionId}
+        and started.type = 'turn.started'
+        and started.sequence > ${settingsBoundary}
+      order by started.sequence desc
+      limit case when ${settingsBoundary} >= 0 then ${sql.raw(String(RECENT_START_PROBES))} end
+    ) recent
+    where (
+      select true from ${schema.sessionTurns} candidate
+      where candidate.workspace_id = ${workspaceId}
+        and candidate.id = recent.turn_id
+        and candidate.session_id is not distinct from ${sessionId}
+        and coalesce(case when candidate.source in ('user', 'api') then (
+          select min(accepted.sequence) from ${schema.sessionEvents} accepted
+          where accepted.workspace_id = ${workspaceId}
+            and accepted.session_id = ${sessionId}
+            and accepted.turn_id = candidate.id
+            and accepted.type = 'turn.queued'
+        ) end, 0) > ${settingsBoundary}
+      limit 1
+    )
+    order by recent.sequence desc
+    limit 1
   )`;
-  const latestStartedTurnId = sql`(
-    select started.turn_id from ${schema.sessionEvents} started
+  // True only when starts beyond the probed ones exist after the boundary.
+  const olderStartsRemain = sql`exists (
+    select 1 from ${schema.sessionEvents} started
     where started.workspace_id = ${workspaceId}
       and started.session_id = ${sessionId}
       and started.type = 'turn.started'
-      ${respectSettingsBoundary ? sql`and started.sequence > ${settingsBoundary}` : sql``}
-      and (
-        select true from ${schema.sessionTurns} candidate
-        where candidate.workspace_id = started.workspace_id
-          and candidate.session_id = started.session_id
-          and candidate.id = started.turn_id
-          ${
-            respectSettingsBoundary
-              ? sql`and coalesce(case when candidate.source in ('user', 'api') then (
-                  select min(accepted.sequence) from ${schema.sessionEvents} accepted
-                  where accepted.workspace_id = ${workspaceId}
-                    and accepted.session_id = ${sessionId}
-                    and accepted.turn_id = candidate.id
-                    and accepted.type = 'turn.queued'
-                ) end, 0) > ${settingsBoundary}`
-              : sql``
-          }
-        limit 1
-      )
-    order by started.sequence desc
+      and started.sequence > ${settingsBoundary}
+    offset ${sql.raw(String(RECENT_START_PROBES))}
+  )`;
+  // After a write only person/API turns queued after it are eligible; take the
+  // one whose newest start is the newest, if that start is after the write.
+  // Same predicate as the walk, driven from the few person/API turns instead
+  // of every start. A turn's own events are read by turn id through
+  // session_events_workspace_turn_type_idx: the session is compared with IS
+  // NOT DISTINCT FROM and the aggregates read `sequence + 0`, so neither a
+  // (workspace, session) range nor a max/min rewrite can turn each lookup into
+  // a backward walk of the whole session's events.
+  const personApiTurn = sql`(
+    select person.id from ${schema.sessionTurns} person
+    cross join lateral (
+      select
+        max(own.sequence + 0) filter (where own.type = 'turn.started') as started,
+        min(own.sequence + 0) filter (where own.type = 'turn.queued') as queued
+      from ${schema.sessionEvents} own
+      where own.workspace_id = ${workspaceId}
+        and own.turn_id = person.id
+        and own.type in ('turn.started', 'turn.queued')
+        and own.session_id is not distinct from ${sessionId}
+    ) own_events
+    where person.workspace_id = ${workspaceId}
+      and person.session_id = ${sessionId}
+      and person.source in ('user', 'api')
+      and own_events.started > ${settingsBoundary}
+      and coalesce(own_events.queued, 0) > ${settingsBoundary}
+    order by own_events.started desc
     limit 1
   )`;
+  // One scalar subquery over the boundary row, so the turn lookup keeps a
+  // primary-key bound.
+  const latestStartedTurnId = sql`(
+    select coalesce(${recentWalk}, case when ${settingsBoundary} >= 0 and ${olderStartsRemain}
+      then ${personApiTurn} end)
+    from (
+      select coalesce(max(boundary.sequence), -1) as sequence from ${schema.sessionEvents} boundary
+      where boundary.workspace_id = ${workspaceId}
+        and boundary.session_id = ${sessionId}
+        and boundary.type = 'session.model_settings.updated'
+    ) settings_boundary
+  )`;
   return db
-    .select({
-      id: schema.sessionTurns.id,
-      model: schema.sessionTurns.model,
-      reasoningEffort: schema.sessionTurns.reasoningEffort,
-      latencyMode: schema.sessionTurns.latencyMode,
-    })
+    .select(turnPolicyColumns)
     .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, workspaceId),
-        eq(schema.sessionTurns.sessionId, sessionId),
-        sql`${schema.sessionTurns.id} = ${latestStartedTurnId}`,
-      ),
-    )
+    .where(turnById(workspaceId, sessionId, latestStartedTurnId))
     .limit(1);
+}
+
+/** Starts read newest-first before the person/API fallback; see
+ * {@link startedSessionTurnQuery}. A person's newest turn is almost always
+ * among them. */
+const RECENT_START_PROBES = 16;
+
+const turnPolicyColumns = {
+  id: schema.sessionTurns.id,
+  model: schema.sessionTurns.model,
+  reasoningEffort: schema.sessionTurns.reasoningEffort,
+  latencyMode: schema.sessionTurns.latencyMode,
+};
+
+/** The chosen turn, read by id. The id is one scalar subquery so the lookup
+ * keeps a primary-key bound; the session is compared with IS NOT DISTINCT FROM
+ * (see startedSessionTurnQuery). */
+function turnById(workspaceId: string, sessionId: string | SQL, turnId: SQL) {
+  return and(
+    eq(schema.sessionTurns.workspaceId, workspaceId),
+    sql`${schema.sessionTurns.id} = ${turnId}`,
+    sql`${schema.sessionTurns.sessionId} is not distinct from ${sessionId}`,
+  );
 }
 
 type PolicyRow = Pick<
