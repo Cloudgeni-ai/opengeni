@@ -97281,6 +97281,70 @@ export async function latestConnectionAuthNotice(
   });
 }
 
+/**
+ * The latest auth notice this chat showed for one capability, such as a
+ * Connected Machine, with whom it asked, so the caller can
+ * tell which request is still open, and for whom, before it clears that
+ * request's wait. Null when the chat showed none.
+ */
+export async function latestCapabilityAuthNotice(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; capabilityId: string },
+): Promise<{
+  id: string;
+  payload: Record<string, unknown>;
+  /** The person whose turn posted it, or the chat's creator for a service turn. */
+  askedBySubjectId: string;
+  /** The notice keys the chat still waits on the person for. */
+  awaitingConnectionKeys: string[];
+} | null> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const tx = scoped as unknown as Database;
+    const [card] = await tx
+      .select({
+        id: schema.sessionEvents.id,
+        payload: schema.sessionEvents.payload,
+        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      })
+      .from(schema.sessionEvents)
+      .leftJoin(schema.sessionTurns, eq(schema.sessionTurns.id, schema.sessionEvents.turnId))
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "tool.auth_needed"),
+          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    if (!card) return null;
+    const [session] = await tx
+      .select({
+        awaitingKeys: schema.sessions.awaitingConnectionKeys,
+        createdBySubjectId: schema.sessions.createdBySubjectId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    const payload =
+      card.payload && typeof card.payload === "object" && !Array.isArray(card.payload)
+        ? (card.payload as Record<string, unknown>)
+        : {};
+    return {
+      id: card.id,
+      payload,
+      askedBySubjectId: card.initiatingHumanSubjectId ?? session?.createdBySubjectId ?? "",
+      awaitingConnectionKeys: session?.awaitingKeys ?? [],
+    };
+  });
+}
+
 async function userMessageAfterSequenceTx(
   tx: Database,
   input: Pick<EnqueueCapabilitySetupContinuationInput, "workspaceId" | "sessionId">,

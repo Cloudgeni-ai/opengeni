@@ -9,6 +9,7 @@ import {
   siteRowKey,
   summarizeRailNodes,
   visibleTreeRows,
+  withoutSidebarApps,
   type SessionTreeNode,
 } from "./sessions-group";
 import type { Session } from "../types";
@@ -399,4 +400,17 @@ test("with apps in their own section, each part lists only its rows; without one
   const none = railSectionsFor(result, "apps", () => false);
   expect([...none.pinned, ...railRoots(none)]).toEqual([]);
   expect(railSectionsFor(result, "apps", () => true)).toEqual(apps);
+});
+
+test("the Apps section leaves out apps pinned to the person's sidebar, and keeps chats", () => {
+  const rows = [
+    { siteGroup: { siteId: siteId.toUpperCase(), title: "In sidebar" } },
+    { siteGroup: { siteId: otherSiteId, title: "Here" } },
+    { siteGroup: undefined },
+  ] as unknown as SessionTreeNode[];
+  const linked = new Set([siteId]);
+  const kept = withoutSidebarApps(rows, (id) => linked.has(id.toLowerCase()));
+  expect(kept.map((node) => node.siteGroup?.siteId ?? null)).toEqual([otherSiteId, null]);
+  // Without a sidebar, every row stays.
+  expect(withoutSidebarApps(rows, undefined)).toEqual(rows);
 });

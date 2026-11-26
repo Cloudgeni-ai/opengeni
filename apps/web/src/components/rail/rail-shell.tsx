@@ -10,7 +10,10 @@ import { PrimaryNavExtras, WorkspaceShortcutLinks } from "@/components/rail/prim
 import { RailFooter } from "@/components/rail/rail-footer";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
-import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
+import {
+  appsArchivedFromSidebar,
+  SidebarLayoutSection,
+} from "@/components/sidebar-layout/sidebar-layout-section";
 import { appsPlacementChange } from "@/components/sidebar-layout/apps-placement-change";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -61,8 +64,12 @@ function useSessionsSidebarOptions(workspaceId: string) {
         for (const child of item.items)
           if (child.type === "app") linked.add(child.appId.toLowerCase());
     }
+    // A link shown again means the app was restored: it no longer needs the
+    // stand-in, so unpinning it later returns it to the Apps section.
+    for (const appId of linked) appsArchivedFromSidebar.delete(appId);
     return {
-      has: (appId: string) => linked.has(appId.toLowerCase()),
+      has: (appId: string) =>
+        linked.has(appId.toLowerCase()) || appsArchivedFromSidebar.has(appId.toLowerCase()),
       add: (appId: string) =>
         void update({
           scope: "personal",
