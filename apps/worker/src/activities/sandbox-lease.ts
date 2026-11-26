@@ -19,6 +19,8 @@ import { publishDurableSessionEvents } from "../session-event-fanout";
 import {
   warnRetainedProcessProofFailure,
   warnRetainedProcessObservationFailure,
+  warnRetainedProcessSettlementFailure,
+  warnSandboxDrainFailure,
 } from "../retained-process-diagnostics";
 import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
 
@@ -1275,7 +1277,12 @@ export function createSandboxLeaseActivities(
             details,
           );
         } else {
-          observability.warn("sandbox reaper: per-sandbox drain failed", details);
+          warnSandboxDrainFailure(observability, error, {
+            workspaceId: row.workspaceId,
+            sandboxGroupId: row.sandboxGroupId,
+            leaseEpoch: row.leaseEpoch,
+            backend: details.backend,
+          });
         }
         // Turns waiting on the replacement of a box that could not start
         // programs stop with clear copy instead of waiting on saves that keep
@@ -3492,10 +3499,7 @@ async function reconcileTerminalRetainedProcesses(
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
       recordRetainedProcessReconciliation(observability, "settlement_failed");
-      observability.warn("sandbox reaper: retained-process settlement failed", {
-        processId: process.id,
-        error: errorMessage(error),
-      });
+      warnRetainedProcessSettlementFailure(observability, error, process);
       await deferRetainedProcessClaim(
         db,
         settings,

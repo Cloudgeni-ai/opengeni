@@ -28,6 +28,7 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 import { projectErrorCauseAttributes, projectErrorCauseMessage } from "./error-cause";
+import { MESSAGE_FINGERPRINT_PATTERN } from "./message-fingerprint";
 import { operationalErrorDiagnostic } from "./operational-error";
 export {
   errorCauseAttributes,
@@ -35,8 +36,10 @@ export {
   ERROR_CAUSE_MESSAGE_MAX_BYTES,
   PUBLIC_ERROR_CAUSE_NAMES,
   PUBLIC_INTERACTION_ERROR_CODES,
+  PUBLIC_SANDBOX_FENCE_CODES,
   type ErrorCauseAttributes,
 } from "./error-cause";
+export { messageFingerprint, normalizeFingerprintMessage } from "./message-fingerprint";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
 export {
   AGENT_TOOL_CALL_OUTCOMES,
@@ -745,6 +748,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "ParallelSessionTitlePersistenceError",
   "RunCredentialRenewalOperationError",
   "SandboxChannelAOperationError",
+  "SandboxReaperOperationError",
   "SessionArchiveOperationError",
   "SnapshotOperationError",
   "StartupDependencyError",
@@ -827,6 +831,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "sandbox_channel_a_operation_failed",
   "sandbox_channel_a_provider_busy",
   "sandbox_channel_a_provider_unavailable",
+  "sandbox_reaper_drain_failed",
+  "sandbox_reaper_settlement_failed",
   "screenshot_capture_failed",
   "session_event_live_publish_failed",
   "session_archive_failed",
@@ -2047,6 +2053,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectSqlStateDiagnosticAttributes(attributes),
+      ...projectSandboxReaperDiagnosticAttributes(attributes),
       ...projectIndependentSessionTitleDiagnosticAttributes(attributes),
       ...projectTemporalSdkDiagnosticAttributes(attributes),
       ...projectContextCompactionAttributes(attributes),
@@ -2280,6 +2287,32 @@ function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes
   if (typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch >= 0)
     projected.leaseEpoch = epoch;
   return projected;
+}
+
+/**
+ * A sandbox reaper drain or retained-process settlement that failed
+ * (worker retained-process-diagnostics.ts): the hashed lease key, backend and
+ * epoch, the reviewed cause classification (class, fence code, SQLSTATE), and
+ * a one-way fingerprint of the cause's message. Never message text or IDs;
+ * the protected diagnostic named by `correlationId` holds the throw site.
+ */
+function projectSandboxReaperDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "SandboxReaperOperationError") return {};
+  const { backend, leaseEpoch, sandboxLeaseKey, causeFingerprint } = attributes;
+  return {
+    ...(typeof backend === "string" && SANDBOX_OPERATION_BACKENDS.has(backend) ? { backend } : {}),
+    ...(typeof leaseEpoch === "number" && Number.isSafeInteger(leaseEpoch) && leaseEpoch >= 0
+      ? { leaseEpoch }
+      : {}),
+    ...(typeof sandboxLeaseKey === "string" &&
+    PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("sandboxLeaseKey")?.test(sandboxLeaseKey)
+      ? { sandboxLeaseKey }
+      : {}),
+    ...(typeof causeFingerprint === "string" && MESSAGE_FINGERPRINT_PATTERN.test(causeFingerprint)
+      ? { causeFingerprint }
+      : {}),
+    ...projectErrorCauseAttributes(attributes),
+  };
 }
 
 /** Error classes whose logs may name the SQLSTATE of the database step that failed. */

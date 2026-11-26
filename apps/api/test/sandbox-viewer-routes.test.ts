@@ -109,6 +109,21 @@ describe("P1.4 viewer/stream-capabilities route discipline", () => {
       expect(call).not.toContain("streamControlEnabled");
     }
   });
+
+  test("an attach whose caller disconnected during the lifecycle wait answers 499, not a 500", () => {
+    // A client that gives up (for example a 30 s client timeout) while the
+    // attach waits on a draining box aborts `waitSignal`. That is a client
+    // disconnect, not an internal error, so it must not be logged or alerted
+    // as a 500 (client-gone convention, mcp/request-abort.ts).
+    const body = handlerBody(sessionsRoute, "post", NEW_ROUTES[1]!.path);
+    const attach = body.slice(body.indexOf("result = await attachViewer("));
+    expect(attach).toContain("waitSignal: c.req.raw.signal");
+    const handler = attach.slice(attach.indexOf("} catch (error) {"));
+    expect(handler.slice(0, 600)).toContain(
+      "if (c.req.raw.signal.aborted) return new Response(null, { status: 499 });",
+    );
+    expect(handler.slice(0, 600)).toContain("throw error;");
+  });
 });
 
 describe("P1.4 capability negotiation read returns a coherent SessionCapabilities", () => {
