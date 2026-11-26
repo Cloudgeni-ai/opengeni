@@ -3,11 +3,14 @@ import { createRoot } from "react-dom/client";
 import { createRootRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { PurchasePresentationProvider } from "@opengeni/react/app/lib/purchase-presentation";
+import { EmptyCreditsNotice } from "@opengeni/react/app/components/credit-required-prompt";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { SectionVariantProvider } from "@opengeni/react/ui/section";
 import { OrganizationBillingPage } from "../src/components/organization/billing-page";
 import { OrganizationDirectoryProvider } from "../src/components/organization/organization-directory";
-import { previewReceipts } from "../src/dev/subscription-plans-preview";
+import { previewPlan, previewPlans, previewReceipts } from "../src/dev/subscription-plans-preview";
+import { iosAppContext } from "../src/lib/ios-app-context-boot";
 import "../src/styles.css";
 
 const params = new URLSearchParams(location.search);
@@ -15,6 +18,11 @@ const theme = params.get("theme") === "dark" ? "dark" : "light";
 document.documentElement.dataset.ogTheme = theme;
 document.documentElement.classList.toggle("dark", theme === "dark");
 const scenario = params.get("scenario") ?? "ready";
+const withPlans = params.has("plans");
+const composer = params.has("composer");
+const plan = composer
+  ? { ...previewPlan("free"), creditGrantedMicros: 0, creditRemainingMicros: 0 }
+  : previewPlan("free");
 const canManage = scenario !== "readonly";
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -49,16 +57,33 @@ const client = new OpenGeniBrowserClient({
         mode: "stripe",
         balance: {
           accountId,
-          balanceMicros: 25_000_000,
-          creditsMicros: 25_000_000,
-          generalBalanceMicros: 25_000_000,
+          balanceMicros: composer ? 0 : 25_000_000,
+          creditsMicros: composer ? 0 : 25_000_000,
+          generalBalanceMicros: composer ? 0 : 25_000_000,
           byokPlatformFeeMonthMicros: 0,
           currency: "usd",
           updatedAt: "2026-11-03T19:00:00Z",
+          ...(withPlans ? { plan } : {}),
         },
       });
+    if (composer && url.pathname === "/v1/billing/card-verification") {
+      return Response.json({
+        accountId,
+        required: true,
+        verified: false,
+        canVerify: true,
+        card: null,
+      });
+    }
     if (url.pathname === "/v1/billing/entitlements")
       return Response.json({ accountId, mode: "managed", entitlements: {} });
+    if (withPlans && url.pathname === "/v1/billing/subscription/plans")
+      return Response.json({
+        accountId,
+        revision: 1,
+        plans: previewPlans,
+        plan,
+      });
     if (url.pathname === "/v1/billing/receipts") {
       if (scenario === "no-receipts") return Response.json({ receipts: [], nextCursor: null });
       const start = Math.max(
@@ -147,14 +172,25 @@ const rootRoute = createRootRoute({
               <p className="mb-4 text-xs text-fg-muted">
                 Implementation preview · Sample data · No payments
               </p>
-              <h1 className="mb-6 text-xl font-semibold">Billing &amp; usage</h1>
+              <h1 className="mb-6 text-xl font-semibold">
+                {composer ? "New chat" : "Billing & usage"}
+              </h1>
               <SectionVariantProvider variant="group">
-                <OrganizationBillingPage
-                  identity={identity}
-                  canReadBilling
-                  canManageBilling={canManage}
-                  canManageAutomaticTopUp={canManage}
-                />
+                {composer ? (
+                  <EmptyCreditsNotice
+                    accountId={accountId}
+                    workspaceId={workspaceId}
+                    canBuyCredits
+                    canReadBilling
+                  />
+                ) : (
+                  <OrganizationBillingPage
+                    identity={identity}
+                    canReadBilling
+                    canManageBilling={canManage}
+                    canManageAutomaticTopUp={canManage}
+                  />
+                )}
               </SectionVariantProvider>
             </div>
           </main>
@@ -164,5 +200,7 @@ const rootRoute = createRootRoute({
   ),
 });
 createRoot(document.getElementById("root")!).render(
-  <RouterProvider router={createRouter({ routeTree: rootRoute })} />,
+  <PurchasePresentationProvider showPurchasePrompts={!iosAppContext}>
+    <RouterProvider router={createRouter({ routeTree: rootRoute })} />
+  </PurchasePresentationProvider>,
 );

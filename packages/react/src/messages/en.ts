@@ -2174,6 +2174,13 @@ export const englishMessages = {
     "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
   "lib.format.apiCreditsRequiredHeadline":
     "API usage uses credits, not your plan credit. Add credits to continue.",
+  "lib.format.apiCreditsUnavailable": "No credits are available for API use.",
+  "lib.format.modelCreditsUnavailable": "There aren't enough credits for this model.",
+  "lib.format.ownKeyCreditsUnavailable": "No credits are available for using your own key.",
+  "lib.format.ownKeyUnavailableOnPlan":
+    "Your organization's plan doesn't include using your own key.",
+  "lib.format.subscriptionUnavailableOnPlan":
+    "Your organization's plan doesn't include using your own subscription.",
   "lib.format.byokPaidCreditRequired":
     "Add credits to use your own key. The conversation is preserved.",
   "lib.format.byokPaidCreditRequiredAskOwner":
@@ -2205,6 +2212,8 @@ export const englishMessages = {
   "lib.format.minutes": "{count}m",
   "lib.format.accountUnavailable":
     "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.",
+  "lib.format.sandboxUnavailableInApp": "The sandbox is unavailable for this organization.",
+  "lib.format.providerPaymentUnavailable": "The model provider couldn’t bill this request.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue.",
   "lib.format.newChatModelUnavailable": "This model isn't available to you. Choose another model.",

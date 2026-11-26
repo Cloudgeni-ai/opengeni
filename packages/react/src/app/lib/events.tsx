@@ -22,8 +22,9 @@ export function projectSessionTimeline(
   events: SessionEvent[],
   creationClientEventId?: string,
   projectedItems?: TimelineItem[],
+  showPurchasePrompts = true,
 ): TimelineItem[] {
-  const items = projectedItems ?? buildTimeline(t, events);
+  const items = projectedItems ?? buildTimeline(t, events, { showPurchasePrompts });
   if (creationClientEventId) {
     const reconciliationKey = `user-message:${creationClientEventId}`;
     if (

@@ -1,4 +1,5 @@
 import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import type { BillingSummary } from "@opengeni/react/app/types";
 import { CreditScopeDetails } from "@/components/credits/credit-scope-details";
 import { PromotionReviewNotice } from "@/components/promotion-review-notice";
@@ -22,15 +23,18 @@ export function OrganizationCreditBalance({
   showPlanCredit?: boolean;
   supportEmail?: string | undefined;
 }) {
+  const showPurchasePrompts = useShowPurchasePrompts();
   const balance = billing?.balance;
   const holdNotice =
     balance?.promotionDecision && balance.promotionDecision !== "eligible" ? (
       <div className="mt-2">
-        <PromotionReviewNotice
-          decision={balance.promotionDecision}
-          accountId={balance.accountId}
-          supportEmail={supportEmail}
-        />
+        {showPurchasePrompts ? (
+          <PromotionReviewNotice
+            decision={balance.promotionDecision}
+            accountId={balance.accountId}
+            supportEmail={supportEmail}
+          />
+        ) : null}
         {(balance.heldCreditMicros ?? 0) > 0 ? (
           <p className="mt-2 text-sm text-fg-muted">
             {formatMoneyMicros(balance.heldCreditMicros!, balance.currency)} of the balance is on
@@ -136,7 +140,9 @@ export function OrganizationCreditBalance({
               <p className="text-sm font-medium text-fg">Credits</p>
               <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
                 {general < 0
-                  ? "Future purchases cover prior usage first."
+                  ? showPurchasePrompts
+                    ? "Future purchases cover prior usage first."
+                    : "Prior usage."
                   : general === 0 && balance.promotionalCredits?.length
                     ? "Other models need credits."
                     : plan
@@ -162,7 +168,9 @@ export function OrganizationCreditBalance({
       </p>
       <p className="mt-1 text-xs leading-[18px] text-fg-muted">
         {isNegative
-          ? "Future credit purchases cover prior usage first. Your card is not charged automatically."
+          ? showPurchasePrompts
+            ? "Future credit purchases cover prior usage first. Your card is not charged automatically."
+            : null
           : "Total balance"}
       </p>
       {holdNotice}

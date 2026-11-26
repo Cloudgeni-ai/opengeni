@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createContext, useContext, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { BillingPlanBalance } from "@opengeni/sdk";
+import { PurchasePresentationProvider } from "../lib/purchase-presentation";
 
 type TestBillingSummary = {
   mode: "stripe" | "disabled";
@@ -87,6 +88,7 @@ beforeAll(() => {
 let root: Root | undefined;
 afterEach(async () => {
   await act(async () => root?.unmount());
+  providedContext.client = client;
   document.body.replaceChildren();
   getBilling.mockClear();
   getBilling.mockImplementation(async () => ({
@@ -97,6 +99,48 @@ afterEach(async () => {
 });
 
 describe("credit required prompt", () => {
+  test("iOS presentation keeps an empty-balance explanation but no card, top-up or promo actions", async () => {
+    const getBillingCardVerification = mock(async () => ({
+      required: true,
+      verified: false,
+      canVerify: true,
+    }));
+    const custom = { ...client, getBillingCardVerification } as unknown as Parameters<
+      typeof CreditRequiredPromptView
+    >[0]["client"];
+    providedContext.client = custom;
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <PurchasePresentationProvider showPurchasePrompts={false}>
+          <MockAppContext.Provider value={providedContext}>
+            <EmptyCreditsNotice
+              workspaceId="workspace-a"
+              accountId="account-a"
+              canBuyCredits
+              canReadBilling
+            />
+            <CreditRequiredPromptView
+              client={custom}
+              open
+              workspaceId="workspace-a"
+              accountId="account-a"
+              canBuyCredits
+              onOpenChange={() => {}}
+            />
+          </MockAppContext.Provider>
+        </PurchasePresentationProvider>,
+      ),
+    );
+    expect(container.textContent).toContain("No credits left");
+    expect(container.textContent).toContain("Use your own provider account");
+    expect(container.textContent).not.toMatch(/add a card|add credits|have a code|stripe/i);
+    expect(getBillingCardVerification).not.toHaveBeenCalled();
+    expect(createBillingCheckout).not.toHaveBeenCalled();
+  });
+
   test("a Free organization without a verified card is offered Add a card for its Free credit", async () => {
     const plan: BillingPlanBalance = {
       key: "free",

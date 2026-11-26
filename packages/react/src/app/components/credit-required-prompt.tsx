@@ -32,6 +32,7 @@ import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-check
 import { subscriptionAction } from "../lib/subscription-plans";
 import type { PaymentRefusalCode } from "../lib/model-access";
 import { AddCardButton } from "./add-card-button";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -55,7 +56,13 @@ export function CreditRequiredPrompt(props: CreditRequiredPromptProps) {
   return <CreditRequiredPromptView {...props} client={useAppContext().client} />;
 }
 
-export function CreditRequiredPromptView({
+export function CreditRequiredPromptView(
+  props: CreditRequiredPromptProps & { client: ChatClient<OpenGeniBrowserClient> },
+) {
+  return useShowPurchasePrompts() ? <PurchasePrompt {...props} /> : null;
+}
+
+function PurchasePrompt({
   client,
   open,
   workspaceId,
@@ -345,6 +352,7 @@ export function EmptyCreditsNotice({
   onAddCredits?: (() => void) | undefined;
 }) {
   const client = useAppContext().client;
+  const showPurchasePrompts = useShowPurchasePrompts();
   const { simplified, productName } = useSimplifiedInterface();
   // The balance is positive but this model can't use it (for example free
   // credit for other models), so "you don't have any" would be untrue. Only
@@ -357,7 +365,7 @@ export function EmptyCreditsNotice({
 
   const empty =
     stripeEnabled && (creditFunding === undefined ? legacyEmpty : creditFunding === "unavailable");
-  const canAdd = canBuyCredits && stripeEnabled;
+  const canAdd = showPurchasePrompts && canBuyCredits && stripeEnabled;
   // An unverified Free organization gets its Free credit once its owner adds
   // a card (card verification gate): that is the one action, not buying.
   const [cardAccountId, setCardAccountId] = useState<string | null>(null);
@@ -389,13 +397,17 @@ export function EmptyCreditsNotice({
       </Notice>
     );
   }
-  const body = someCredit
-    ? canAdd
-      ? `This model can't use the ${productName} credits you have right now. Add credits, or choose another model.`
-      : `This model can't use your organization's ${productName} credits right now. Choose another model, or ask an organization owner to add credits.`
-    : canAdd
-      ? `Chats here are paid with ${productName} credits, and you don't have any right now.`
-      : `Chats here are paid with ${productName} credits, and there are none left. Ask an organization owner to add some.`;
+  const body = !showPurchasePrompts
+    ? someCredit
+      ? `This model can't use the ${productName} credits available right now.`
+      : `This organization is out of ${productName} credits.`
+    : someCredit
+      ? canAdd
+        ? `This model can't use the ${productName} credits you have right now. Add credits, or choose another model.`
+        : `This model can't use your organization's ${productName} credits right now. Choose another model, or ask an organization owner to add credits.`
+      : canAdd
+        ? `Chats here are paid with ${productName} credits, and you don't have any right now.`
+        : `Chats here are paid with ${productName} credits, and there are none left. Ask an organization owner to add some.`;
   return (
     <Notice
       tone="waiting"
@@ -410,53 +422,55 @@ export function EmptyCreditsNotice({
       }
     >
       {body}
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-        {canAdd ? (
-          onAddCredits ? (
-            <Button
-              type="button"
-              size="sm"
-              onClick={onAddCredits}
-              {...analyticsAction("buy_credits")}
-            >
-              <CreditCardIcon className="size-3.5" />
-              Add credits
-            </Button>
-          ) : (
-            <Button asChild type="button" size="sm">
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: "billing" }}
+      {canAdd || !simplified ? (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+          {canAdd ? (
+            onAddCredits ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={onAddCredits}
                 {...analyticsAction("buy_credits")}
               >
                 <CreditCardIcon className="size-3.5" />
                 Add credits
+              </Button>
+            ) : (
+              <Button asChild type="button" size="sm">
+                <Link
+                  to="/workspaces/$workspaceId/organization"
+                  params={{ workspaceId }}
+                  search={{ section: "billing" }}
+                  {...analyticsAction("buy_credits")}
+                >
+                  <CreditCardIcon className="size-3.5" />
+                  Add credits
+                </Link>
+              </Button>
+            )
+          ) : null}
+          {/* Beside Add credits it is a quiet link, flush with the text when it wraps.
+            Geni chats run on credits only, so it has no provider account to offer. */}
+          {simplified ? null : (
+            <Button
+              asChild
+              type="button"
+              size="sm"
+              variant={canAdd ? "link" : "outline"}
+              className={canAdd ? "px-0" : undefined}
+            >
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "models", workspace: workspaceId }}
+                {...analyticsAction("connect_model")}
+              >
+                Use your own provider account
               </Link>
             </Button>
-          )
-        ) : null}
-        {/* Beside Add credits it is a quiet link, flush with the text when it wraps.
-            Geni chats run on credits only, so it has no provider account to offer. */}
-        {simplified ? null : (
-          <Button
-            asChild
-            type="button"
-            size="sm"
-            variant={canAdd ? "link" : "outline"}
-            className={canAdd ? "px-0" : undefined}
-          >
-            <Link
-              to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId }}
-              search={{ section: "models", workspace: workspaceId }}
-              {...analyticsAction("connect_model")}
-            >
-              Use your own provider account
-            </Link>
-          </Button>
-        )}
-      </div>
+          )}
+        </div>
+      ) : null}
     </Notice>
   );
 }

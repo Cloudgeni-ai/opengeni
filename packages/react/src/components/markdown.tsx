@@ -22,6 +22,7 @@ import remarkGfm from "remark-gfm";
 import { PanelsTopLeftIcon } from "lucide-react";
 import { ActivityDisclosure } from "../timeline/shared";
 import { cn } from "../lib/cn";
+import { isStripePaymentLink, useShowPurchasePrompts } from "../lib/purchase-presentation";
 import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
@@ -355,6 +356,7 @@ const markdownComponents: Components = {
   },
   a: ({ children, href, ...linkProps }) => {
     const t = useOpenGeniText();
+    const showPurchasePrompts = useShowPurchasePrompts();
     const { onSandboxFile, artifactHref, resolveLink, renderLink, inline } =
       useContext(MarkdownLinkContext);
     const linkClass = inline ? INLINE_MARKDOWN_LINK_CLASS : MARKDOWN_LINK_CLASS;
@@ -363,6 +365,7 @@ const markdownComponents: Components = {
       linkProps as typeof linkProps & Record<typeof STANDALONE_LINK_ATTRIBUTE, unknown>;
     const parsed = parseOpenGeniLink(href);
     const resolved = useArtifactLinkTarget(parsed);
+    if (!showPurchasePrompts && isStripePaymentLink(href)) return null;
     if (resolved.pending) return <span aria-busy="true">{children}</span>;
     if (resolved.error) {
       return (

@@ -9,6 +9,7 @@ import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { billingCheckoutReturnUrl } from "@opengeni/react/app/lib/credit-checkout";
 import {
   CREDIT_BALANCE_CHANGED,
@@ -121,6 +122,7 @@ function BillingOverview({
   onOpenBudget: (workspaceId: string) => void;
 }) {
   const { client, clientConfig } = useAppContext();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const navigate = useNavigate();
   const routes = useOrganizationRoutes();
   const accountId = identity.organizationId;
@@ -302,11 +304,11 @@ function BillingOverview({
     client,
     accountId,
     identityKey,
-    visibleBilling?.balance.plan,
+    showPurchasePrompts ? visibleBilling?.balance.plan : undefined,
   );
   const showPlans = Boolean(subscriptions.catalog && visibleBilling?.balance.plan);
 
-  const stripe = visibleBilling?.mode === "stripe";
+  const stripe = showPurchasePrompts && visibleBilling?.mode === "stripe";
   // Sibling keys must differ: React leaks the DOM of siblings that share a key,
   // so a shared `identityKey` here duplicated the plan block on every render.
   return (
@@ -347,16 +349,22 @@ function BillingOverview({
           onRetry={subscriptions.retry}
         />
       ) : null}
-      <section aria-label="Credits and payments" className="min-w-0">
+      <section
+        aria-label={showPurchasePrompts ? "Credits and payments" : "Credits"}
+        className="min-w-0"
+      >
         <Section title={showPlans ? "Credit balance and top-ups" : "Credits"}>
           <div className="mt-1 flex min-w-0 flex-col gap-4">
+            {!showPurchasePrompts && visibleBilling?.balance.plan ? (
+              <p className="text-sm text-fg-muted">Plan: {visibleBilling.balance.plan.label}</p>
+            ) : null}
             <OrganizationCreditBalance
               billing={visibleBilling}
               canReadBilling={canReadBilling}
               hasAccount={Boolean(accountId)}
               loading={visibleBillingLoading}
               hasError={Boolean(visibleBillingError)}
-              showPlanCredit={showPlans}
+              showPlanCredit={showPlans || !showPurchasePrompts}
               supportEmail={clientConfig.supportEmail}
             />
             {visibleBillingError ? (
@@ -411,7 +419,7 @@ function BillingOverview({
               <p className="text-xs leading-[18px] text-fg-muted">
                 Only organization owners can buy credits.
               </p>
-            ) : visibleBilling ? (
+            ) : showPurchasePrompts && visibleBilling ? (
               <p className="text-xs leading-[18px] text-fg-muted">
                 Buying credits needs Stripe billing, which this deployment hasn't turned on.
               </p>
@@ -420,7 +428,7 @@ function BillingOverview({
         </Section>
       </section>
 
-      {canReadBilling && accountId ? (
+      {showPurchasePrompts && canReadBilling && accountId ? (
         <Suspense fallback={null}>
           <CreditProtectionSettings
             key={`protection:${identityKey}`}
