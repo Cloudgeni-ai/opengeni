@@ -9494,6 +9494,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "requestSetupConnection",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/setup-connection-requests",
+    "request": [
+      "SetupConnectionRequest"
+    ],
+    "response": [
+      "SetupConnectionRequestResponse"
+    ]
+  },
+  {
     "id": "requestSlackUserLinkWorkspaceAccess",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/request-access",

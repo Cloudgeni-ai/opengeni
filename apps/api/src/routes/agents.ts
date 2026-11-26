@@ -30,6 +30,9 @@ import {
   PutAgentSlackAvailabilityRequest,
   SessionAvatar,
   AgentReadinessListResponse,
+  SetupConnectionRequest,
+  SetupConnectionRequestResponse,
+  type SetupConnection,
   SetupReadinessResponse,
   UpdateAgentRequest,
   AGENTS_PER_WORKSPACE_MAX,
@@ -56,6 +59,7 @@ import {
   listAgentSlackInstalls,
   listSlackInstallationBindings,
   putAgentSlackInstall,
+  requestSetupConnection,
   updateAgent,
   type AgentRecord,
   type AgentSlackInstallRecord,
@@ -93,6 +97,7 @@ import { z } from "zod";
 
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
+import { personLabel } from "../mcp/notification-tools";
 import { parseRequestJson } from "../http/request-body";
 import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
 import {
@@ -104,6 +109,7 @@ import {
   type AgentSlackNameRefusal,
 } from "../integrations/agent-slack-availability";
 import { slackAgentInstallationFor } from "../integrations/slack-agent-create";
+import { PublicSetupRateLimiter } from "./managed-onboarding";
 import { requireUsableSessionAvatar } from "./session-avatar";
 import { postSlackAgentIntro, slackAgentChannelList } from "./slack-agents";
 
@@ -203,6 +209,13 @@ async function ensureAgentMemory(
 export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;
   const base = "/v1/workspaces/:workspaceId/agents";
+  // Ask an admin: five requests at once per person and workspace, then one a minute.
+  const setupRequestLimiter = new PublicSetupRateLimiter({
+    clientCapacity: 5,
+    clientRefillPerSecond: 1 / 60,
+    globalCapacity: 1_000,
+    globalRefillPerSecond: 50,
+  });
 
   async function requestContext(
     c: Context,
@@ -435,6 +448,87 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           githubEvents: templateTriggerUsesGitHubEvents(template, c.req.query("trigger")),
         }),
       }),
+    );
+  });
+
+  /**
+   * "Ask an admin" on the Enable page: someone who can't connect what a setup
+   * needs asks the workspace's admins in their inbox, linking back to that
+   * Enable step. Asking again never asks twice. `unavailable` when no admin
+   * could be asked (a Personal workspace, or the database doesn't allow it
+   * yet); the page then shares a link instead.
+   */
+  app.post("/v1/workspaces/:workspaceId/setup-connection-requests", async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    const requester = context.grant.subjectId;
+    if (!requester) {
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: "Only a person can ask an admin.",
+      });
+    }
+    const request = await parseRequestJson(c, SetupConnectionRequest);
+    const workspaceId = context.grant.workspaceId;
+    // The Enable step, on the Enable page or on Get started, in this workspace.
+    if (
+      !["enable", "get-started"].some((page) =>
+        request.returnPath.startsWith(`/workspaces/${workspaceId}/${page}?`),
+      )
+    ) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "returnPath must be an Enable step in this workspace.",
+      });
+    }
+    // Only a connection some ready-made item needs, named as that item names it.
+    const connection = readyMadeSetupConnection(request.provider);
+    if (!connection) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "No ready-made setup needs this connection.",
+      });
+    }
+    if (!setupRequestLimiter.take(`${context.grant.accountId}:${workspaceId}:${requester}`)) {
+      throw new ApiHttpError(429, {
+        code: "limit_exceeded",
+        message: "Too many requests. Try again in a minute.",
+        retryable: true,
+      });
+    }
+    // Someone who may connect it (or already has) connects it instead. GitHub
+    // is read for event triggers, the App only an admin installs.
+    const readiness = await setupReadinessFor(
+      deps,
+      context.grant,
+      { connections: [{ ...connection, required: true }] },
+      { githubEvents: true },
+    );
+    const state = readiness.connections[0];
+    if (state?.connected || state?.canConnect) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: state.connected
+          ? `${connection.name} is already connected.`
+          : `You can connect ${connection.name} yourself.`,
+      });
+    }
+    const asked = await requestSetupConnection(db, {
+      accountId: context.grant.accountId,
+      workspaceId,
+      requesterSubjectId: requester,
+      requesterLabel: await personLabel(deps, workspaceId, requester),
+      provider: connection.provider,
+      name: connection.name,
+      link: request.returnPath,
+    });
+    return c.json(
+      SetupConnectionRequestResponse.parse(
+        asked === null
+          ? { status: "unavailable", adminsAsked: 0 }
+          : asked > 0
+            ? { status: "requested", adminsAsked: asked }
+            : { status: "already_asked", adminsAsked: 0 },
+      ),
     );
   });
 
@@ -956,4 +1050,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = await parseRequestJson(c, AgentSlackIntroRequest);
     return c.json(await postSlackAgentIntro(deps, context.grant, projection, payload));
   });
+}
+
+/** The connection some ready-made agent needs with this provider, as it names it. */
+export function readyMadeSetupConnection(provider: string): SetupConnection | undefined {
+  for (const template of agentTemplates()) {
+    const connection = template.setup?.connections.find((entry) => entry.provider === provider);
+    if (connection) return connection;
+  }
+  return undefined;
 }

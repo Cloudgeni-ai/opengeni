@@ -160,6 +160,35 @@ export const AgentReadinessListResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentReadinessListResponse = z.output<typeof AgentReadinessListResponse>;
 
+/**
+ * `POST /setup-connection-requests` ("Ask an admin" on the Enable page): the
+ * caller can't connect `provider` and asks the workspace's admins in their
+ * inbox. `returnPath` is the Enable step the admins open.
+ */
+export const SetupConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      provider: z.string().regex(/^[a-z0-9][a-z0-9.-]{0,99}$/u),
+      name: z.string().trim().min(1).max(80),
+      returnPath: z.string().min(1).max(1024),
+    })
+    .strict(),
+);
+export type SetupConnectionRequest = z.output<typeof SetupConnectionRequest>;
+
+/**
+ * `requested`: the admins were asked. `already_asked`: they already have an
+ * open request (asking again never asks twice).
+ * `unavailable`: no admin could be asked here yet; the page shares a link instead.
+ */
+export const SetupConnectionRequestResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    status: z.enum(["requested", "already_asked", "unavailable"]),
+    adminsAsked: z.number().int().min(0),
+  }),
+);
+export type SetupConnectionRequestResponse = z.output<typeof SetupConnectionRequestResponse>;
+
 /** The facts the readiness check reads about one connection; the server derives them from the catalog. */
 export type SetupConnectionFacts = {
   connected: boolean;

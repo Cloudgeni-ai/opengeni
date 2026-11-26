@@ -16,12 +16,13 @@ import { KitCanvas, KitSection } from "../kit";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 
-type State = "showcase" | "enable-nothing" | "enable-ready" | "onboarding";
+type State = "showcase" | "enable-nothing" | "enable-ready" | "enable-ask-admin" | "onboarding";
 
 const STATES: { value: State; label: string }[] = [
   { value: "showcase", label: "Get started" },
   { value: "enable-nothing", label: "Enable: nothing connected" },
   { value: "enable-ready", label: "Enable: ready" },
+  { value: "enable-ask-admin", label: "Enable: ask an admin" },
   { value: "onboarding", label: "First run" },
 ];
 
@@ -107,10 +108,14 @@ const TEMPLATES = [
   },
 ] as unknown as AgentTemplate[];
 
-function readiness(connected: boolean): SetupReadiness {
+function readiness(connected: boolean, canConnect = true): SetupReadiness {
   return {
     ready: connected,
-    reason: connected ? null : "Connect GitHub to turn this on.",
+    reason: connected
+      ? null
+      : canConnect
+        ? "Connect GitHub to turn this on."
+        : "An admin needs to connect GitHub.",
     connections: [
       {
         provider: "github.com",
@@ -119,7 +124,7 @@ function readiness(connected: boolean): SetupReadiness {
         required: true,
         why: "Reads the repository and opens the upgrade pull request.",
         connected,
-        canConnect: true,
+        canConnect,
         catalogItemId: "github",
         connectVia: null,
       },
@@ -146,7 +151,9 @@ function readiness(connected: boolean): SetupReadiness {
 function fixtureClient(state: State) {
   const client = {
     listAgentTemplates: async () => TEMPLATES,
-    getAgentTemplateReadiness: async () => readiness(state === "enable-ready"),
+    getAgentTemplateReadiness: async () =>
+      readiness(state === "enable-ready", state !== "enable-ask-admin"),
+    requestSetupConnection: async () => ({ status: "requested", adminsAsked: 2 }),
     listAgents: async () => [],
     listScheduledTasks: async () => [],
   };
