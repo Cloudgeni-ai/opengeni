@@ -123,11 +123,11 @@ test("an admin resuming someone's trigger is told who must connect what", () => 
   const readiness = (canConnect: boolean) =>
     ({ connections: [{ provider: "github.com", canConnect }] }) as never;
   expect(ownerMissingMessage(readiness(true), github, false)).toBe(
-    "Its owner needs to connect GitHub.",
+    "Its owner needs to connect GitHub, or an admin can connect it for the workspace.",
   );
-  // The owner can't connect it either.
+  // The same whoever may connect it.
   expect(ownerMissingMessage(readiness(false), github, false)).toBe(
-    "Connect GitHub; its owner can't.",
+    "Its owner needs to connect GitHub, or an admin can connect it for the workspace.",
   );
   expect(ownerMissingMessage(readiness(true), github, true)).toBe(
     "A GitHub admin needs to install the GitHub App.",

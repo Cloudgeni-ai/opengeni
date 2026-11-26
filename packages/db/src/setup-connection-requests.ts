@@ -5,11 +5,12 @@ const ROUTINE = "opengeni_private.request_setup_connection_v1(uuid, uuid, text, 
 
 /**
  * Ask the workspace's admins, in their inbox, to connect something a setup
- * needs (migration 1580). The routine trusts only this transaction's scope:
+ * needs (migration 1581). The routine trusts only this transaction's scope:
  * the requester is the scope's subject. Returns how many notices were opened
- * or reopened (0 when they were already asked), or null while the database
- * still withholds the routine from the runtime (1580 creates it withheld; a
- * later migration grants it).
+ * or reopened (0 when they were already asked), or null when nobody can be
+ * asked: no admin it may ask here, or the database still withholds the
+ * routine from the runtime (1581 creates it withheld; a later migration
+ * grants it).
  */
 export async function requestSetupConnection(
   db: Database,
@@ -43,7 +44,8 @@ export async function requestSetupConnection(
         ${input.link}
       ) as asked`,
       );
-      return Number(row?.asked ?? 0);
+      const asked = Number(row?.asked ?? -1);
+      return asked < 0 ? null : asked;
     }),
   );
 }

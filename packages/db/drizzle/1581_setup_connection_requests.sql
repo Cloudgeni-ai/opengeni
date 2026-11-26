@@ -13,7 +13,7 @@
 --   workspace must be the ones `opengeni.account_id` and
 --   `opengeni.workspace_id` name, the requester is `opengeni.subject_id`
 --   and must belong to that workspace or its organization. Otherwise it asks
---   nobody and returns 0. `workspaces` and `workspace_memberships` aren't
+--   nobody and returns -1. `workspaces` and `workspace_memberships` aren't
 --   FORCE row security, so the definer reads them unscoped: that check is
 --   what keeps it to the caller's workspace. It reads the organization's
 --   memberships (FORCE row security) through their
@@ -22,7 +22,9 @@
 -- * One notice per requester, workspace and connection. Asking again while
 --   it is open changes nothing; a settled one reopens, with fresh text, only
 --   a day after it was settled, and a dismissed one stays dismissed. Returns
---   how many notices it opened or reopened.
+--   how many notices it opened or reopened (0: they were already asked), or
+--   -1 when there is nobody it may ask (another scope, a Personal workspace,
+--   no admin), so the page shares a link instead.
 -- * The runtime role's EXECUTE is withheld for one release
 --   (DEFERRED_RUNTIME_PRIVATE_ROUTINES): the previous release refuses a
 --   runtime grant on a definer it doesn't know. Until a later migration
@@ -70,7 +72,7 @@ BEGIN
         OR p_account_id::text IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')
         OR p_workspace_id::text IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')
       THEN
-        RETURN 0;
+        RETURN -1;
       END IF;
       IF char_length(v_requester) > 300
         OR p_provider IS NULL OR p_provider !~ '^[a-z0-9][a-z0-9.-]{0,99}$'
@@ -130,8 +132,8 @@ BEGIN
       END IF;
       PERFORM pg_catalog.set_config(
         'opengeni.organization_tenancy_lifecycle', coalesce(v_previous_lifecycle, ''), true);
-      IF NOT v_allowed THEN
-        RETURN 0;
+      IF NOT v_allowed OR cardinality(v_recipients) = 0 THEN
+        RETURN -1;
       END IF;
 
       v_key := 'setup-request:' || p_workspace_id::text || ':' || p_provider || ':'

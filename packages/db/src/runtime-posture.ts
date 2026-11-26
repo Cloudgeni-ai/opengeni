@@ -76,7 +76,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the subscription needs-sign-in notice sync (1503), and the one-statement
  * lookup of the Slack event sources a shared Slack bot reaches (1552), and
  * the inbox notice sync for a blocked automation with no chat (1562), and
- * the admins' inbox notice when a member asks for a connection (1580).
+ * the admins' inbox notice when a member asks for a connection (1581).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -176,7 +176,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * or resolves a notice, and the person dismisses one left after a reconnect.
  * 1552 withholds the shared Slack bot's one-statement source lookup; until it
  * is granted, a Slack callback keeps 1538's per-workspace probe.
- * 1580 withholds the admins' notice for a member's connection request; until
+ * 1581 withholds the admins' notice for a member's connection request; until
  * it is granted, "Ask an admin" copies a link to the step instead.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [

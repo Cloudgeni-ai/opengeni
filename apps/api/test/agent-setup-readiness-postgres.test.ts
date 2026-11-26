@@ -209,7 +209,9 @@ test("a ready-made agent's trigger stays off until GitHub is connected, on every
   const adminResume = await f.call(f.service, "POST", `/scheduled-tasks/${taskId}/resume`);
   expectSetupIncomplete(adminResume);
   // Checked against the owner's connections, and says so.
-  expect(adminResume.json.error.message).toBe("Its owner needs to connect GitHub.");
+  expect(adminResume.json.error.message).toBe(
+    "Its owner needs to connect GitHub, or an admin can connect it for the workspace.",
+  );
 
   // Opengeni's own tools go through the same check.
   const tools = await f.mcp();
@@ -312,7 +314,7 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
     values (${f.accountId}::uuid, ${orgAdmin}, 'active', 'admin', ${orgAdminPersonal!.id}::uuid)`;
   const recipients = [admin, orgAdmin].sort();
 
-  // Withheld for a release (1580): nobody is asked, and the page shares a link.
+  // Withheld for a release (1581): nobody is asked, and the page shares a link.
   const before = await ask();
   expect(before.status, JSON.stringify(before.json)).toBe(200);
   expect(before.json).toEqual({ status: "unavailable", adminsAsked: 0 });
@@ -356,7 +358,7 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
 
     // The routine trusts only the transaction's own scope: another account or
     // workspace than the scope names, or a requester outside the workspace,
-    // asks nobody. The requester is always the scope's subject.
+    // asks nobody (-1, "unavailable": the page shares a link). The requester is always the scope's subject.
     const direct = async (
       settings: { account: string; workspace: string; subject: string },
       target = { workspace: f.workspaceId, link: returnPath },
@@ -382,21 +384,31 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
         workspace: otherWorkspace.id,
         subject: f.owner.subjectId,
       }),
-    ).toBe(0);
+    ).toBe(-1);
     expect(
       await direct({
         account: crypto.randomUUID(),
         workspace: f.workspaceId,
         subject: f.owner.subjectId,
       }),
-    ).toBe(0);
+    ).toBe(-1);
     expect(
       await direct({
         account: f.accountId,
         workspace: f.workspaceId,
         subject: `user:${crypto.randomUUID()}`,
       }),
-    ).toBe(0);
+    ).toBe(-1);
+    // A Personal workspace has no admin to ask.
+    expect(
+      await direct(
+        { account: f.accountId, workspace: orgAdminPersonal!.id, subject: orgAdmin },
+        {
+          workspace: orgAdminPersonal!.id,
+          link: `/workspaces/${orgAdminPersonal!.id}/enable?agent=pr-reviewer&step=connect`,
+        },
+      ),
+    ).toBe(-1);
     expect((await notices()).filter((notice) => notice.title === "Connect Slack")).toEqual([]);
 
     // The same request in another workspace is its own notice; it never
