@@ -783,6 +783,39 @@ describe("observability", () => {
     expect(observed.join(" ")).not.toContain("0ffbda8c-11c6-49dc-b636-b15a58163753");
   });
 
+  test("session archive logs keep the reviewed class, code, and SQLSTATE only", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const sentinel = "private-archive-value";
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "worker-control" },
+      );
+      obs.warn("session archive restore failed; it will be retried", {
+        errorClass: "SessionArchiveOperationError",
+        errorCode: "session_archive_failed",
+        sqlState: "23514",
+        detail: sentinel,
+      });
+      obs.warn("session archive restore failed; it will be retried", {
+        errorClass: "SessionArchiveOperationError",
+        errorCode: "session_archive_failed",
+        sqlState: sentinel,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      errorClass: "SessionArchiveOperationError",
+      errorCode: "session_archive_failed",
+      sqlState: "23514",
+    });
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("sqlState");
+    expect(observed.join(" ")).not.toContain(sentinel);
+  });
+
   test("keeps safe retry context in structured startup logs", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;
