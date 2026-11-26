@@ -101,11 +101,32 @@ describe("account deletion", () => {
     });
   });
 
-  test("an ended session, an unavailable server and other failures each read plainly", () => {
+  test("an ended session, a busy account, an unavailable server and other failures each read plainly", () => {
     expect(accountDeletionFailure(apiError(401, { error: { code: "unauthorized" } })).kind).toBe(
       "signedOut",
     );
-    expect(accountDeletionFailure(apiError(503, { error: { code: "unavailable" } }))).toEqual({
+    expect(
+      accountDeletionFailure(
+        apiError(409, {
+          error: {
+            code: "conflict",
+            message: "Your account is busy. Wait a moment and try again.",
+            details: { code: "ACCOUNT_DELETION_BUSY" },
+          },
+        }),
+      ),
+    ).toEqual({ kind: "busy", message: "Your account is busy. Wait a moment and try again." });
+    expect(
+      accountDeletionFailure(
+        apiError(503, {
+          error: {
+            code: "upstream_unavailable",
+            message: "Account deletion is not available yet.",
+            details: { code: "ACCOUNT_DELETION_UNAVAILABLE" },
+          },
+        }),
+      ),
+    ).toEqual({
       kind: "unavailable",
       message: "Account deletion isn't available yet. Try again later.",
     });
@@ -115,58 +136,49 @@ describe("account deletion", () => {
     expect(accountDeletionFailure(apiError(400, { error: { code: "invalid" } })).kind).toBe(
       "failed",
     );
-    // A 409 that isn't about owners isn't a blocker.
+    // A 409 that isn't about owners or a busy account isn't a blocker.
     expect(accountDeletionFailure(apiError(409, { error: { code: "conflict" } })).kind).toBe(
       "failed",
     );
     expect(accountDeletionFailure(new TypeError("Network request failed")).kind).toBe("failed");
   });
 
+  test("a request that got no answer stays apart from one that was accepted", () => {
+    const lost = new OpenGeniApiError(0, "", {
+      code: "network_error",
+      outcomeUnknown: true,
+      mutation: true,
+    });
+    expect(accountDeletionFailure(lost).kind).toBe("unconfirmed");
+    // Starting deletion signs every device out, so a 401 on the retry most likely means it started.
+    const after = accountDeletionFailure(apiError(401, { error: { code: "unauthorized" } }), {
+      afterUnconfirmed: true,
+    });
+    expect(after.kind).toBe("signedOut");
+    expect(after.message).toContain("we'll email you when it's complete");
+  });
+
   test("reads and requests through the signed-in client", async () => {
-    const calls: { input: string; init?: RequestInit }[] = [];
-    const responses = [
-      new Response(JSON.stringify(preview()), { status: 200 }),
-      new Response(
-        JSON.stringify({
-          request: {
-            id: "r1",
-            operationId: "op-1",
-            status: "pending",
-            requestedAt: "2026-11-26T00:00:00Z",
-            completedAt: null,
-          },
-        }),
-        { status: 202 },
-      ),
-      new Response(
-        JSON.stringify({
-          error: {
-            code: "conflict",
-            message: "Transfer ownership before deleting your account.",
-            details: { code: "LAST_ORGANIZATION_OWNER", blockers: [] },
-          },
-        }),
-        { status: 409 },
-      ),
-    ];
+    const calls: unknown[] = [];
+    const receipt = {
+      id: "r1",
+      operationId: "op-1",
+      status: "pending" as const,
+      requestedAt: "2026-11-26T00:00:00Z",
+      completedAt: null,
+    };
     const api = accountDeletionApi({
-      fetchApi: async (input, init) => {
-        calls.push({ input, ...(init ? { init } : {}) });
-        return responses.shift()!;
+      getAccountDeletion: async () => {
+        calls.push("get");
+        return preview();
+      },
+      requestAccountDeletion: async (input) => {
+        calls.push(input);
+        return { request: receipt };
       },
     });
     expect((await api.read()).closeOrganizations).toHaveLength(1);
-    expect((await api.request("op-1")).status).toBe("pending");
-    const refused = await api.request("op-1").catch((error: unknown) => error);
-    expect(accountDeletionFailure(refused).kind).toBe("blocked");
-    expect(calls.map((call) => [call.init?.method, call.input])).toEqual([
-      ["GET", "/v1/me/account-deletion"],
-      ["POST", "/v1/me/account-deletion"],
-      ["POST", "/v1/me/account-deletion"],
-    ]);
-    expect(JSON.parse(String(calls[1]!.init!.body))).toEqual({
-      confirm: "DELETE",
-      operationId: "op-1",
-    });
+    expect(await api.request("op-1")).toEqual(receipt);
+    expect(calls).toEqual(["get", { confirm: "DELETE", operationId: "op-1" }]);
   });
 });

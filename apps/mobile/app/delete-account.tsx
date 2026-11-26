@@ -66,6 +66,8 @@ export function DeleteAccount({ lab }: { lab?: AccountDeletionApi }) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   // One request however often it's retried: the server treats a repeat as the same deletion.
   const [operationId] = useState(() => Crypto.randomUUID());
+  // A request went out without an answer, so deletion may already have started.
+  const [unconfirmed, setUnconfirmed] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -93,8 +95,9 @@ export function DeleteAccount({ lab }: { lab?: AccountDeletionApi }) {
     try {
       await api.request(operationId);
     } catch (caught) {
-      const failure = accountDeletionFailure(caught);
+      const failure = accountDeletionFailure(caught, { afterUnconfirmed: unconfirmed });
       setSubmitting(false);
+      if (failure.kind === "unconfirmed") setUnconfirmed(true);
       if (failure.kind === "blocked") {
         // Show what blocks it now; the server's list is the current one.
         setScreen({

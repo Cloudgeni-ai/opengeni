@@ -30,6 +30,8 @@ const STATES = [
   ["delete-preview", "Delete account"],
   ["delete-blocked", "Delete account: only owner"],
   ["delete-unavailable", "Delete account: unavailable"],
+  ["delete-busy", "Delete account: account busy"],
+  ["delete-unconfirmed", "Delete account: no answer"],
   ["credit-stop", "Chat: out of credits"],
 ] as const;
 type LabState = (typeof STATES)[number][0];
@@ -146,17 +148,49 @@ function labDeletion(state: LabState): AccountDeletionApi {
   return {
     read: async () => {
       if (state === "delete-unavailable") {
-        throw new OpenGeniApiError(503, JSON.stringify({ error: { code: "unavailable" } }));
+        throw new OpenGeniApiError(
+          503,
+          JSON.stringify({
+            error: {
+              code: "upstream_unavailable",
+              message: "Account deletion is not available yet.",
+              details: { code: "ACCOUNT_DELETION_UNAVAILABLE" },
+            },
+          }),
+          { mutation: false },
+        );
       }
       return deletionPreview(state);
     },
-    request: async (operationId) => ({
-      id: "lab-request",
-      operationId,
-      status: "pending",
-      requestedAt: new Date().toISOString(),
-      completedAt: null,
-    }),
+    request: async (operationId) => {
+      if (state === "delete-busy") {
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({
+            error: {
+              code: "conflict",
+              message: "Your account is busy. Wait a moment and try again.",
+              details: { code: "ACCOUNT_DELETION_BUSY" },
+            },
+          }),
+          { mutation: true },
+        );
+      }
+      if (state === "delete-unconfirmed") {
+        throw new OpenGeniApiError(0, "", {
+          code: "network_error",
+          outcomeUnknown: true,
+          mutation: true,
+        });
+      }
+      return {
+        id: "lab-request",
+        operationId,
+        status: "pending",
+        requestedAt: new Date().toISOString(),
+        completedAt: null,
+      };
+    },
   };
 }
 

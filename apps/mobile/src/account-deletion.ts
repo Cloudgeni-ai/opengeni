@@ -4,39 +4,28 @@
  * blocks it, the typed confirmation, and how each refusal reads. No React
  * Native here, so it is tested on its own; `app/delete-account.tsx` draws it.
  */
-import { OpenGeniApiError } from "@opengeni/sdk";
+import {
+  ACCOUNT_DELETION_LAST_OWNER,
+  type AccountDeletionBlocker,
+  type AccountDeletionPreview,
+  type AccountDeletionRequest,
+} from "@opengeni/contracts";
+import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
+
+export type { AccountDeletionBlocker, AccountDeletionPreview, AccountDeletionRequest };
 
 export const ACCOUNT_DELETION_CONFIRMATION = "DELETE";
-export const LAST_ORGANIZATION_OWNER = "LAST_ORGANIZATION_OWNER";
+/** A retryable 409: the account is changing at that moment. */
+export const ACCOUNT_DELETION_BUSY = "ACCOUNT_DELETION_BUSY";
+/** The 503 while this deployment hasn't switched account deletion on. */
+export const ACCOUNT_DELETION_UNAVAILABLE = "ACCOUNT_DELETION_UNAVAILABLE";
 
 /** What the server tells people once deletion has started (and on its confirmation screen). */
 export const ACCOUNT_DELETION_STARTED_COPY =
   "You'll be signed out on all devices immediately. Deletion usually takes a few minutes and can take up to 30 days. We'll email you when it's complete.";
 
-export type AccountDeletionOrganization = { organizationId: string; name: string };
-
-export type AccountDeletionRetention = { mode: "retain" | "delete_after"; days: number | null };
-
-export type AccountDeletionBlocker = {
-  code: typeof LAST_ORGANIZATION_OWNER | (string & {});
-  organizationId: string;
-  name: string;
-};
-
-export type AccountDeletionRequest = {
-  id: string;
-  operationId: string;
-  status: "pending" | "running" | "blocked" | "completed";
-  requestedAt: string;
-  completedAt: string | null;
-};
-
-export type AccountDeletionPreview = {
-  closeOrganizations: AccountDeletionOrganization[];
-  leaveOrganizations: (AccountDeletionOrganization & { retention: AccountDeletionRetention })[];
-  blockers: AccountDeletionBlocker[];
-  request: AccountDeletionRequest | null;
-};
+export type AccountDeletionRetention =
+  AccountDeletionPreview["leaveOrganizations"][number]["retention"];
 
 export interface AccountDeletionApi {
   read(): Promise<AccountDeletionPreview>;
@@ -44,41 +33,15 @@ export interface AccountDeletionApi {
   request(operationId: string): Promise<AccountDeletionRequest>;
 }
 
-type ApiFetcher = { fetchApi(input: string, init?: RequestInit): Promise<Response> };
-
-async function json<T>(response: Response, mutation: boolean): Promise<T> {
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OpenGeniApiError(response.status, body, {
-      mutation,
-      correlationId: response.headers.get("x-request-id") ?? undefined,
-    });
-  }
-  return JSON.parse(body) as T;
-}
-
 /** The account-deletion endpoints over the signed-in client's credential. */
-export function accountDeletionApi(client: ApiFetcher): AccountDeletionApi {
+export function accountDeletionApi(
+  client: Pick<OpenGeniClient, "getAccountDeletion" | "requestAccountDeletion">,
+): AccountDeletionApi {
   return {
-    read: async () =>
-      json<AccountDeletionPreview>(
-        await client.fetchApi("/v1/me/account-deletion", {
-          method: "GET",
-          headers: { Accept: "application/json" },
-        }),
-        false,
-      ),
+    read: () => client.getAccountDeletion(),
     request: async (operationId) =>
-      (
-        await json<{ request: AccountDeletionRequest }>(
-          await client.fetchApi("/v1/me/account-deletion", {
-            method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify({ confirm: ACCOUNT_DELETION_CONFIRMATION, operationId }),
-          }),
-          true,
-        )
-      ).request,
+      (await client.requestAccountDeletion({ confirm: ACCOUNT_DELETION_CONFIRMATION, operationId }))
+        .request,
   };
 }
 
@@ -124,6 +87,13 @@ export function retentionText(retention: AccountDeletionRetention): string {
 export type AccountDeletionFailure =
   /** Someone must become an owner first; the server's current blockers. */
   | { kind: "blocked"; message: string; blockers: AccountDeletionBlocker[] }
+  /** The account was changing; the same request can be sent again in a moment. */
+  | { kind: "busy"; message: string }
+  /**
+   * The request went out but no answer came back, so deletion may have
+   * started. Sending it again with the same operation ID is safe.
+   */
+  | { kind: "unconfirmed"; message: string }
   /** The session ended: sign in again to delete the account. */
   | { kind: "signedOut"; message: string }
   /** This deployment can't delete accounts from the app (yet, or at the moment). */
@@ -140,43 +110,72 @@ function blockersFrom(error: OpenGeniApiError): AccountDeletionBlocker[] {
     return [];
   }
   if (!Array.isArray(blockers)) return [];
-  return blockers.filter(
-    (each): each is AccountDeletionBlocker =>
-      typeof each === "object" &&
-      each !== null &&
-      typeof (each as AccountDeletionBlocker).organizationId === "string" &&
-      typeof (each as AccountDeletionBlocker).name === "string",
-  );
+  return blockers
+    .filter(
+      (each): each is { organizationId: string; name: string } =>
+        typeof each === "object" &&
+        each !== null &&
+        typeof (each as AccountDeletionBlocker).organizationId === "string" &&
+        typeof (each as AccountDeletionBlocker).name === "string",
+    )
+    .map(({ organizationId, name }) => ({
+      code: ACCOUNT_DELETION_LAST_OWNER,
+      organizationId,
+      name,
+    }));
 }
 
-/** A refused read or request, in the person's terms. */
-export function accountDeletionFailure(error: unknown): AccountDeletionFailure {
+/**
+ * A refused read or request, in the person's terms. `afterUnconfirmed` is
+ * set when an earlier request got no answer: an ended session then most
+ * likely means deletion started, since starting it signs every device out.
+ */
+export function accountDeletionFailure(
+  error: unknown,
+  options: { afterUnconfirmed?: boolean } = {},
+): AccountDeletionFailure {
   if (!(error instanceof OpenGeniApiError)) {
     return {
       kind: "failed",
       message: "Couldn't reach Opengeni. Check your connection and try again.",
     };
   }
-  if (error.status === 409 && error.details?.code === LAST_ORGANIZATION_OWNER) {
+  const code = error.details?.code;
+  if (error.status === 409 && code === ACCOUNT_DELETION_LAST_OWNER) {
     return {
       kind: "blocked",
       message: "Transfer ownership before deleting your account.",
       blockers: blockersFrom(error),
     };
   }
+  if (error.status === 409 && code === ACCOUNT_DELETION_BUSY) {
+    return { kind: "busy", message: "Your account is busy. Wait a moment and try again." };
+  }
   if (error.status === 401) {
     return {
       kind: "signedOut",
-      message: "You've been signed out. Sign in again to delete your account.",
+      message: options.afterUnconfirmed
+        ? "You've been signed out, which happens on every device once deletion starts. If it started, we'll email you when it's complete. If you don't get an email, sign in again to check."
+        : "You've been signed out. Sign in again to delete your account.",
     };
   }
-  if (error.status === 404 || error.status === 405 || error.status === 503) {
+  if (error.status === 503 && code === ACCOUNT_DELETION_UNAVAILABLE) {
+    return {
+      kind: "unavailable",
+      message: "Account deletion isn't available yet. Try again later.",
+    };
+  }
+  if (error.status === 404 || error.status === 405) {
     return {
       kind: "unavailable",
       message:
-        error.status === 503
-          ? "Account deletion isn't available yet. Try again later."
-          : "This Opengeni server doesn't support deleting your account from the app. You can delete it on the web.",
+        "This Opengeni server doesn't support deleting your account from the app. You can delete it on the web.",
+    };
+  }
+  if (error.outcomeUnknown) {
+    return {
+      kind: "unconfirmed",
+      message: "We couldn't confirm that deletion started. Check your connection and try again.",
     };
   }
   return { kind: "failed", message: "Your account wasn't deleted. Try again." };
