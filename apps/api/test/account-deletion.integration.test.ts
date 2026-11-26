@@ -673,13 +673,50 @@ test("ordinary Postgres retention records Site SQL only after a confirmed gatewa
     membershipId: seat!.id,
     transition: { kind: "offboard", expectedAuthorizationRevision: seat!.authorization_revision },
   });
-  await shared.admin`update organization_memberships set personal_retention_until=now()-interval '1 day' where id=${seat!.id}`;
-  const sweep = (gatewayConfigured: boolean) =>
+  await shared.admin`update organization_memberships set personal_retention_until=now()-interval '2 days' where id=${seat!.id}`;
+  async function addDueMember(inviter: typeof owner, person: typeof member) {
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: inviter.organizationId,
+      actorSubjectId: `user:${inviter.userId}`,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: `user:${person.userId}`,
+      targetEmail: person.email,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    await acceptOrganizationInvitation(client.db, {
+      organizationId: inviter.organizationId,
+      invitationId: invitation.id,
+      actorSubjectId: `user:${person.userId}`,
+      operationId: crypto.randomUUID(),
+      expectedRevision: invitation.revision,
+    });
+    const [membership] =
+      await shared.admin`select id,authorization_revision from organization_memberships
+      where account_id=${inviter.organizationId} and subject_id=${`user:${person.userId}`}`;
+    await updateOrganizationMember(client.db, {
+      organizationId: inviter.organizationId,
+      actorSubjectId: `user:${inviter.userId}`,
+      operationId: crypto.randomUUID(),
+      membershipId: membership!.id,
+      transition: {
+        kind: "offboard",
+        expectedAuthorizationRevision: membership!.authorization_revision,
+      },
+    });
+    await shared.admin`update organization_memberships set personal_retention_until=now()-interval '1 day' where id=${membership!.id}`;
+    return membership!.id;
+  }
+  const otherOwner = await human(rt);
+  const noSitesMember = await human(rt);
+  const sameOrgSeat = await addDueMember(owner, noSitesMember);
+  const otherOrgSeat = await addDueMember(otherOwner, noSitesMember);
+  const sweep = (gatewayConfigured: boolean, organizationId = owner.organizationId) =>
     runOrganizationRetentionSweep(
       {
-        organizationId: owner.organizationId,
+        organizationId,
         dryRun: false,
-        limit: 1,
+        limit: 2,
         objectBucket: "test-account-deletion",
       },
       {
@@ -714,8 +751,13 @@ test("ordinary Postgres retention records Site SQL only after a confirmed gatewa
     );
   expect(await sweep(false)).toMatchObject({
     dryRun: false,
-    completed: [],
+    completed: [{ membershipId: sameOrgSeat }],
     failed: [{ membershipId: seat!.id, reasonCode: "site_sql_gateway_not_configured" }],
+  });
+  expect(await sweep(false, otherOwner.organizationId)).toMatchObject({
+    dryRun: false,
+    completed: [{ membershipId: otherOrgSeat }],
+    failed: [],
   });
   const result = await sweep(true);
   expect(result).toMatchObject({
