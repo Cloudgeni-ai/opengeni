@@ -82,8 +82,12 @@ describe("runtime failures dashboard", () => {
 
     const ratio = panels.get("Platform failures, customer provider failures and recoveries");
     expect(ratio?.targets).toHaveLength(3);
-    expect(ratio?.targets?.[0]?.expr).toContain('failure_origin!="customer_provider"');
-    expect(ratio?.targets?.[2]?.expr).toContain('failure_origin="customer_provider"');
+    expect(ratio?.targets?.[0]?.expr).toContain(
+      'failure_origin!~"customer_provider|customer_plan"',
+    );
+    expect(ratio?.targets?.[2]?.expr).toContain(
+      'failure_origin=~"customer_provider|customer_plan"',
+    );
     for (const target of ratio?.targets ?? []) {
       expect(target.expr).toContain("or vector(0)");
       expect(target.expr).toContain("clamp_min");
