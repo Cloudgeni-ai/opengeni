@@ -162,6 +162,22 @@ resource "azurerm_kubernetes_cluster" "this" {
     }
   }
 
+  # Unset means no node OS window: Terraform removes one created outside it.
+  # Set it to keep a weekly window for node image upgrades.
+  dynamic "maintenance_window_node_os" {
+    for_each = var.aks.node_os_maintenance_window == null ? [] : [var.aks.node_os_maintenance_window]
+
+    content {
+      frequency   = "Weekly"
+      interval    = maintenance_window_node_os.value.interval_weeks
+      day_of_week = maintenance_window_node_os.value.day_of_week
+      start_time  = maintenance_window_node_os.value.start_time
+      duration    = maintenance_window_node_os.value.duration_hours
+      utc_offset  = maintenance_window_node_os.value.utc_offset
+      start_date  = maintenance_window_node_os.value.start_date
+    }
+  }
+
   network_profile {
     network_plugin    = "azure"
     load_balancer_sku = "standard"

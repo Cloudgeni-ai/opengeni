@@ -1077,3 +1077,113 @@ run "autoscaler_threshold_rejects_out_of_range" {
     var.aks,
   ]
 }
+
+run "node_os_maintenance_window_is_absent_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(azurerm_kubernetes_cluster.this.maintenance_window_node_os) == 0
+    error_message = "Without a configured window the module must not set a node OS window."
+  }
+}
+
+run "node_os_maintenance_window_is_set_weekly" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "02:00"
+        duration_hours = 4
+        start_date     = "2026-10-04T00:00:00Z"
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].frequency == "Weekly" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].interval == 1 &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].day_of_week == "Tuesday" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].start_time == "02:00" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].duration == 4 &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].utc_offset == "+00:00" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].start_date == "2026-10-04T00:00:00Z"
+    )
+    error_message = "The node OS maintenance window must reach the cluster as configured."
+  }
+}
+
+run "node_os_maintenance_window_rejects_short_duration" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "02:00"
+        duration_hours = 2
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_bad_day" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tue"
+        start_time     = "02:00"
+        duration_hours = 4
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_bad_start_time" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "2:00"
+        duration_hours = 4
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_fractional_interval" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "02:00"
+        duration_hours = 4
+        interval_weeks = 1.5
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
