@@ -198,7 +198,7 @@ const RECENT_START_PROBES = 16;
 
 /** Most person/API turns a session may have for the person/API read; see
  * {@link startedSessionTurnQuery}. */
-const PERSON_API_TURN_CAP = 1000;
+const PERSON_API_TURN_CAP = 200;
 
 const turnPolicyColumns = {
   id: schema.sessionTurns.id,

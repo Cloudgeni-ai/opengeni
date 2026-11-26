@@ -590,6 +590,38 @@ test("the bounded read picks the same turn as the full walk for any history", as
       }
     }
   }
+  // Around the person/API cap: either side must pick the same turn. Some
+  // person turns were queued before the write and start after it.
+  for (const personTurns of [195, 199, 200, 201, 205]) {
+    for (const variant of ["after", "straddling", "none"] as const) {
+      const session = await policySession(grant);
+      sessions.push(session.id);
+      let sequence = 1000;
+      const turn = (source: string, model: string) => {
+        const id = crypto.randomUUID();
+        turns.push({ id, sessionId: session.id, source, model });
+        return id;
+      };
+      const event = (turnId: string | null, type: SyntheticEvent["type"]) =>
+        events.push({ sessionId: session.id, turnId, sequence: sequence++, type });
+      const before = personTurns - (variant === "none" ? 0 : 1);
+      for (let index = 0; index < before; index += 1) {
+        const id = turn(index % 2 === 0 ? "user" : "api", `person-${personTurns}-${index}`);
+        event(id, "turn.queued");
+        event(id, "turn.started");
+      }
+      const late = variant === "none" ? null : turn("api", `late-${personTurns}-${variant}`);
+      if (late && variant === "straddling") event(late, "turn.queued");
+      event(null, "session.model_settings.updated");
+      if (late && variant === "after") event(late, "turn.queued");
+      if (late) event(late, "turn.started");
+      for (let index = 0; index < 20; index += 1) {
+        const id = turn("scheduled_task", "automated-model");
+        event(id, "turn.queued");
+        event(id, "turn.started");
+      }
+    }
+  }
   await insertHistory(grant, turns, events);
 
   // The rule itself, applied to the whole history of each session.
@@ -640,81 +672,65 @@ test("the bounded read picks the same turn as the full walk for any history", as
   }
 }, 180_000);
 
-test("a long API-driven chat after a settings write is not read turn by turn", async () => {
+/** A chat with `personTurns` API turns, then a settings write, one person
+ * turn and `runs` schedule runs; the person's turn is the answer. */
+async function personHeavyChat(personTurns: number, runs: number) {
   const grant = await policyWorkspace("Policy API chat");
   const session = await policySession(grant);
-  // Thousands of API turns, then a settings write, one person turn and a
-  // schedule's runs. Reading every person/API turn would cost one lookup per
-  // API turn on every read; the start walk costs one probe per run.
   const turns: SyntheticTurn[] = [];
   const events: SyntheticEvent[] = [];
   let sequence = 1000;
-  for (let index = 0; index < 5000; index += 1) {
+  const add = (source: string, model: string) => {
     const id = crypto.randomUUID();
-    turns.push({ id, sessionId: session.id, source: "api", model: "api-model" });
+    turns.push({ id, sessionId: session.id, source, model });
     events.push(
       { sessionId: session.id, turnId: id, sequence: sequence++, type: "turn.queued" },
       { sessionId: session.id, turnId: id, sequence: sequence++, type: "turn.started" },
     );
-  }
+  };
+  for (let index = 0; index < personTurns; index += 1) add("api", "api-model");
   events.push({
     sessionId: session.id,
     turnId: null,
     sequence: sequence++,
     type: "session.model_settings.updated",
   });
-  const person = crypto.randomUUID();
-  turns.push({ id: person, sessionId: session.id, source: "user", model: "person-model" });
-  events.push(
-    { sessionId: session.id, turnId: person, sequence: sequence++, type: "turn.queued" },
-    { sessionId: session.id, turnId: person, sequence: sequence++, type: "turn.started" },
-  );
-  for (let index = 0; index < 300; index += 1) {
-    const id = crypto.randomUUID();
-    turns.push({ id, sessionId: session.id, source: "scheduled_task", model: "automated-model" });
-    events.push(
-      { sessionId: session.id, turnId: id, sequence: sequence++, type: "turn.queued" },
-      { sessionId: session.id, turnId: id, sequence: sequence++, type: "turn.started" },
-    );
-  }
+  add("user", "person-model");
+  for (let index = 0; index < runs; index += 1) add("scheduled_task", "automated-model");
   await insertHistory(grant, turns, events);
+  return { grant, session };
+}
+
+test("a long API-driven chat after a settings write is not read turn by turn", async () => {
+  // Reading all 5,000 API turns took about 50,000 buffers on every read; past
+  // the cap the read walks the 300 runs since the write instead.
+  const long = await personHeavyChat(5000, 300);
+  // At the cap the person/API read is used: 200 turns, a few runs.
+  const atCap = await personHeavyChat(199, 30);
+  // Past the cap with few runs: reading 1,000 person turns cost about 11,000.
+  const pastCap = await personHeavyChat(999, 20);
   for (const mode of ["force_generic_plan", "force_custom_plan"] as const) {
-    const measured = await explainEffectivePolicy(grant, session.id, mode);
-    expect(measured.row?.model).toBe("person-model");
-    // Reading all 5,000 API turns took about 50,000 buffers on every read.
-    // Now the read counts at most 1,001 person/API turns (each checked by
-    // row security), then walks the 300 runs as the old statement did.
-    const previousBlocks = await explainPreviousPolicyBlocks(grant, session.id, mode);
-    expect(measured.blocks).toBeLessThan(previousBlocks + 3_500);
-    console.info(
-      "effective-policy-api-chat",
-      JSON.stringify({ mode, blocks: measured.blocks, previousBlocks }),
-    );
-    const { current, previous } = await currentAndPreviousPolicies(grant, [session.id], mode);
-    expect(current).toEqual(previous);
+    for (const [chat, limit] of [
+      [long, 6_000],
+      [atCap, 3_000],
+      [pastCap, 3_000],
+    ] as const) {
+      const measured = await explainEffectivePolicy(chat.grant, chat.session.id, mode);
+      expect(measured.row?.model).toBe("person-model");
+      expect(measured.blocks).toBeLessThan(limit);
+      console.info(
+        "effective-policy-person-heavy",
+        JSON.stringify({ mode, limit, blocks: measured.blocks }),
+      );
+      const { current, previous } = await currentAndPreviousPolicies(
+        chat.grant,
+        [chat.session.id],
+        mode,
+      );
+      expect(current).toEqual(previous);
+    }
   }
 }, 180_000);
-
-async function explainPreviousPolicyBlocks(
-  grant: { workspaceId: string; subjectId: string },
-  sessionId: string,
-  mode: "force_generic_plan" | "force_custom_plan",
-) {
-  return await withWorkspaceSubjectRls(
-    client.db,
-    grant.workspaceId,
-    grant.subjectId,
-    async (tx) => {
-      await tx.execute(sql.raw(`set local plan_cache_mode = ${mode}`));
-      const explained = await tx.execute(
-        sql`explain (analyze, buffers, format json) ${previousPolicyStatement(grant.workspaceId, [sessionId])}`,
-      );
-      const plan = explained[0]!["QUERY PLAN"] as Array<{ Plan: Record<string, unknown> }>;
-      const root = plan[0]!.Plan;
-      return Number(root["Shared Hit Blocks"] ?? 0) + Number(root["Shared Read Blocks"] ?? 0);
-    },
-  );
-}
 
 type PolicyColumns = { model: string; reasoningEffort: string; latencyMode: string };
 
