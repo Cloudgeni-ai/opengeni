@@ -709,8 +709,8 @@ async function explainPreviousPolicyBlocks(
       const explained = await tx.execute(
         sql`explain (analyze, buffers, format json) ${previousPolicyStatement(grant.workspaceId, [sessionId])}`,
       );
-      const root = (explained[0]?.["QUERY PLAN"] as Array<{ Plan: Record<string, unknown> }>)[0]!
-        .Plan;
+      const plan = explained[0]!["QUERY PLAN"] as Array<{ Plan: Record<string, unknown> }>;
+      const root = plan[0]!.Plan;
       return Number(root["Shared Hit Blocks"] ?? 0) + Number(root["Shared Read Blocks"] ?? 0);
     },
   );
