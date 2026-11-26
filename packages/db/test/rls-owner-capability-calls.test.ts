@@ -103,9 +103,9 @@ test("the runtime role filters other tenants' rows without calling the owner def
     `alter role opengeni_app in database "${database!.name}" set track_functions = 'all'`,
   );
 
-  const [{ visible }] = await shared.admin<{ visible: number }[]>`
+  const [seeded] = await shared.admin<{ visible: number }[]>`
     select count(*)::int as visible from sessions where workspace_id = ${other.workspaceId}::uuid`;
-  expect(visible).toBe(OTHER_TENANT_SESSIONS + 1);
+  expect(seeded!.visible).toBe(OTHER_TENANT_SESSIONS + 1);
 
   // A fresh connection after the reset, so no earlier scan's pending
   // statistics can land in the measurement.
@@ -168,19 +168,13 @@ test("the guarded fence policy admits the owner exactly when the unguarded one d
     "$2",
   );
   expect(plain).not.toBe(guarded);
-  const evaluate = async (tx: typeof shared.admin) =>
-    await tx.unsafe<{ guarded: boolean; plain: boolean }[]>(
-      `select (${guarded}) as guarded, (${plain}) as plain from sessions where id = $1`,
-      [target.sessionId],
-    );
+  const query = `select (${guarded}) as guarded, (${plain}) as plain from sessions where id = $1`;
   await shared.admin.begin(async (tx) => {
-    expect(await evaluate(tx as unknown as typeof shared.admin)).toEqual([
-      { guarded: false, plain: false },
-    ]);
+    const evaluate = async (): Promise<unknown[]> =>
+      Array.from(await tx.unsafe(query, [target.sessionId]), (row) => ({ ...row }));
+    expect(await evaluate()).toEqual([{ guarded: false, plain: false }]);
     await tx`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${target.workspaceId}`}, 0))`;
     await tx`select opengeni_private.open_session_tenancy_fenced_access('public'::regnamespace::oid)`;
-    expect(await evaluate(tx as unknown as typeof shared.admin)).toEqual([
-      { guarded: true, plain: true },
-    ]);
+    expect(await evaluate()).toEqual([{ guarded: true, plain: true }]);
   });
 });
