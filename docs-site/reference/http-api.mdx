@@ -43,6 +43,33 @@ API and embedded-product usage spends credits, not plan credit. Connected AI sub
 
 The defaults apply to newly admitted turns, including scheduled turns that inherit the session defaults. Running and already queued turns keep their settings; a turn waiting on subscription capacity can continue on the new model. The response includes `releasedCapacityWaitTurnId` when that happens.
 
+### Organization Skills from a product backend
+
+Use a server-side organization API key with explicit `account:admin` and
+`workspace:read` and an all-shared-workspaces key policy. Do not use `asUser()`
+or send the key to a browser. Name a shared workspace of that organization in
+the path; the saved Skill belongs to the organization, not to that workspace.
+
+`POST /v1/workspaces/:workspaceId/organization-skills/save` (`saveOrganizationSkill`)
+accepts `operationId`, `skillId`, `expectedRevisionId`, `expectedScopeVersion`,
+`stableKey`, `files` (`{ path, content }[]`), optional `deletions` (file paths),
+`reason`, and optional `initialReach`. For a new Skill, use a new Skill UUID,
+`expectedRevisionId: null` and `expectedScopeVersion: 1`. It is active on
+success; the write is attributed to the key, not to a person or agent.
+
+`initialReach` is `{ allowedWorkspaceIds, allowPersonalWorkspaces }`. A list
+allows those shared workspaces only (at most 500); `null` allows every shared
+workspace, including new ones. `allowPersonalWorkspaces` is a separate boolean.
+Omitting `initialReach` on creation retains the default of every workspace,
+including Personal. If supplied, reach and activation commit together.
+
+For later reach changes use `PUT /v1/workspaces/:workspaceId/organization-skills/:skillId/reach`
+(`updateOrganizationSkillReach`) with the same reach object. For permanent removal
+use `POST /v1/workspaces/:workspaceId/organization-skills/:skillId/remove`
+(`removeOrganizationSkill`) with `operationId`, `expectedRevisionId`,
+`expectedScopeVersion`, and `reason`. Save and remove return a `SkillWriteReceipt`;
+retry uncertainty with the same operation ID and input.
+
 ## Streaming
 
 The event stream is Server-Sent Events. Every event has a sequence number, so a client can reconnect with the last sequence it saw and fill any gap from the replay route. Disable proxy buffering and set read timeouts of at least an hour.

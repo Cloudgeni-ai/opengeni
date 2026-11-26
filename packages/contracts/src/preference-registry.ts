@@ -24,6 +24,7 @@ export type PreferenceRegistryStatus = z.infer<typeof PreferenceRegistryStatus>;
 export const PreferenceRegistryProvenanceSource = /* @__PURE__ */ defineSchema(() =>
   z.enum([
     "human",
+    "organization_api_key",
     "onboarding",
     "knowledge_proposal",
     "imported_document",
@@ -290,7 +291,9 @@ export const CreatePreferenceRegistryProposalRequest = /* @__PURE__ */ defineSch
       stableKey: RequestStableKey,
       scope: PreferenceRegistryScope,
       ...revisionInput,
-      provenanceSource: PreferenceRegistryProvenanceSource.default("human"),
+      provenanceSource: PreferenceRegistryProvenanceSource.exclude([
+        "organization_api_key",
+      ]).default("human"),
       provenanceSourceId: primitives.nonEmptyString
         .max(PREFERENCE_REGISTRY_SOURCE_ID_MAX_CHARS)
         .nullable()

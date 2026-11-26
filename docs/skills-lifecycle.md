@@ -61,7 +61,7 @@ human scope authorization as Save and the core removal lifecycle below. Retries
 retain the operation ID and exact version arguments; after deletion, the
 content-free receipt supplies scope for authorization before lifecycle replay.
 Organization Skills and shared distribution owners retain their existing removal
-restrictions. Opening details preserves the source Capabilities tab, and inactive
+restrictions in this editor. Opening details preserves the source Capabilities tab, and inactive
 and pending status remain visible in the installed list.
 
 The lazy agent tool `skill_remove` and core `removeSkill` permanently delete the
@@ -149,6 +149,18 @@ Skill. Legacy single-text saves of source-bound Skills fail closed rather than
 silently dropping supporting files.
 
 ## Authority and receipts
+
+Product backends use the direct `organization-skills` API to save, edit or
+permanently remove organization Skills. Only an organization API key with
+literal `account:admin`, `workspace:read`, and all shared workspaces in scope
+qualifies. The key may not be acting for an external user or service initiator.
+This is organization authoring, not agent learning or human approval: the
+lifecycle applies it immediately and records the key as the actor. It cannot
+change another scope or review an agent's work. Creation may set initial reach
+in the same write; later reach edits still use a `PUT .../reach` endpoint.
+The backend routes are not advertised as MCP actions. Both the live Skill
+catalog and the legacy attempt descriptor snapshot respect reach; already
+materialized attempt snapshots and previously sent context are not rewritten.
 
 The session UI also offers nonblocking approval of pending Skills. It reads the
 paginated Skill content catalog with `sessionId`, after session-read authorization,

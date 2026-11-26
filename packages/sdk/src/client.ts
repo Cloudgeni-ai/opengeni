@@ -319,6 +319,7 @@ import type {
   SkillScope,
   SkillSummary,
   SkillWriteReceipt,
+  SaveOrganizationSkillRequest,
   SaveWorkspaceSkillRequest,
   RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
@@ -11917,6 +11918,44 @@ export class OpenGeniClient {
     request: SaveWorkspaceSkillRequest,
   ): Promise<SkillWriteReceipt> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
+  }
+
+  /** Save an organization Skill as a direct organization API key with account:admin. */
+  async saveOrganizationSkill(
+    workspaceId: string,
+    request: SaveOrganizationSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/organization-skills/save`,
+      request,
+    );
+  }
+
+  /** Permanently remove an organization Skill as a direct organization API key. */
+  async removeOrganizationSkill(
+    workspaceId: string,
+    skillId: string,
+    request: RemoveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/organization-skills/${encodeURIComponent(skillId)}/remove`,
+      request,
+    );
+  }
+
+  /** Change reach after creation as a direct organization API key. */
+  async updateOrganizationSkillReach(
+    workspaceId: string,
+    skillId: string,
+    reach: OrganizationSkillReach,
+  ): Promise<{ reach: OrganizationSkillReach }> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/organization-skills/${encodeURIComponent(skillId)}/reach`,
+      reach,
+    );
   }
 
   /** Permanently remove a personal/workspace Skill and all its saved revisions. */

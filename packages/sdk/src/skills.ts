@@ -69,6 +69,10 @@ export type SaveWorkspaceSkillRequest = {
   deletions?: string[];
   reason: string;
 };
+/** Backend only. Set initial reach on creation, not on a later edit. */
+export type SaveOrganizationSkillRequest = Omit<SaveWorkspaceSkillRequest, "scope"> & {
+  initialReach?: OrganizationSkillReach;
+};
 export type ApplyWorkspaceSkillRevisionRequest = {
   removalOperationId?: string;
   operationId: string;

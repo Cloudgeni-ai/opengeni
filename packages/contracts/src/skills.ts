@@ -31,6 +31,11 @@ export const SkillActor = /* @__PURE__ */ defineSchema(() =>
       principalKind: z.literal("human_session"),
     }),
     z.object({
+      kind: z.literal("organization_api_key"),
+      subjectId: primitives.nonEmptyString,
+      principalKind: z.literal("api_key"),
+    }),
+    z.object({
       kind: z.literal("agent"),
       sessionId: z.uuid(),
       turnId: z.uuid(),
@@ -97,6 +102,7 @@ export type SkillSaveInput = SkillWriteContext & {
    * refuses it). Sent for Skills a connected agent uploads.
    */
   learningPolicy?: "follow";
+  initialReach?: OrganizationSkillReach;
 };
 export type SkillRevisionInput = SkillWriteContext & {
   removalOperationId?: string | undefined;
@@ -200,6 +206,13 @@ export const OrganizationSkillReach = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type OrganizationSkillReach = z.infer<typeof OrganizationSkillReach>;
+/** Direct backend requests only; the agent-facing Skill save contract is unchanged. */
+export const SaveOrganizationSkillRequest = /* @__PURE__ */ defineSchema(() =>
+  SaveWorkspaceSkillRequest.omit({ scope: true }).extend({
+    initialReach: OrganizationSkillReach.optional(),
+  }),
+);
+export type SaveOrganizationSkillRequest = z.infer<typeof SaveOrganizationSkillRequest>;
 /** `PUT .../skills/content/:skillId/reach`: organization Skills only. */
 export const UpdateOrganizationSkillReachRequest = OrganizationSkillReach;
 export type UpdateOrganizationSkillReachRequest = OrganizationSkillReach;

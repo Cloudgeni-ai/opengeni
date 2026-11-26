@@ -1,13 +1,16 @@
 import { z } from "zod";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   ApplyWorkspaceSkillRevisionRequest,
   OrganizationSkillReachResponse,
   RemoveWorkspaceSkillRequest,
+  SaveOrganizationSkillRequest,
   SaveWorkspaceSkillRequest,
   UpdateOrganizationSkillReachRequest,
+  type OrganizationSkillReach,
   type PreferenceRegistryScope,
+  type SkillActor,
   type SkillWriteReceipt,
 } from "@opengeni/contracts";
 import {
@@ -17,6 +20,8 @@ import {
 } from "@opengeni/db";
 import {
   approveSkill,
+  accountScopedApiKeyWorkspaceAuthority,
+  isVerifiedOrganizationServiceAuthorization,
   rejectSkill,
   removeSkill,
   listSkills,
@@ -24,6 +29,7 @@ import {
   readSkill,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireAccessContext,
   restoreSkill,
   saveSkill,
   validateSkillFiles,
@@ -67,6 +73,7 @@ function skillIdentifier(value: string): string {
 /** Human folder editing and the legacy Skill admin share scope authorization. */
 export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/skills/content";
+  const backend = "/v1/workspaces/:workspaceId/organization-skills";
   app.get(base, async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
@@ -107,7 +114,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       {
         limit: query.limit + 1,
         metadataOnly: true,
-        ...everywhere,
+        ...(grant.principalKind === "agent_attempt" || outsideAgentReach(grant) ? {} : everywhere),
         ...(after ? { after } : {}),
         ...(query.sessionId ? { sessionId: query.sessionId } : {}),
         ...(query.scope ? { scope: query.scope } : {}),
@@ -136,7 +143,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
       skillId,
       revisionId,
-      everywhere,
+      grant.principalKind === "agent_attempt" || outsideAgentReach(grant) ? {} : everywhere,
     );
     if (!skill) throw new HTTPException(404, { message: "Skill not found" });
     return c.json(skill);
@@ -150,65 +157,31 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       invalidSkillRequest,
     );
     authorizeSkillScopeMutation(access, request.scope);
-    const context = {
-      accountId: access.grant.accountId,
-      workspaceId,
-      subjectId: access.grant.subjectId,
-    };
-    const skillId = request.skillId;
-    const current = await readSkill(
-      deps.db,
-      context,
-      skillId,
-      request.expectedRevisionId ?? undefined,
-      everywhere,
-    );
-    if (request.expectedRevisionId && !current)
-      throw new HTTPException(404, { message: "Skill not found" });
-    if (current) {
-      authorizeSkillScopeMutation(access, current.scope);
-      if (current.scope !== request.scope)
-        throw new HTTPException(409, {
-          message: "Move Skill scope through the existing scope-management workflow.",
-        });
-    }
-    let files;
-    try {
-      files = validateSkillFiles(
-        applySkillFileChanges(
-          request.expectedRevisionId ? (current?.files ?? []) : [],
-          request.files,
-          request.deletions,
-        ),
-      );
-      buildPortableSkillArtifact(files);
-    } catch (error) {
-      // Say what is wrong, so whoever uploaded the folder can fix it.
-      const reason =
-        error instanceof Error && error.message ? ` (${error.message.slice(0, 300)})` : "";
-      throw new HTTPException(400, {
-        message: `Invalid Skill folder${reason}. SKILL.md requires valid YAML frontmatter with a name and description. Use unique relative text-file paths and respect the file and folder size limits.`,
-      });
-    }
-    const receipt = await skillMutation(() =>
-      saveSkill(deps.db, {
-        accountId: context.accountId,
-        workspaceId,
-        actor: { kind: "human", principalKind: "human_session", subjectId: context.subjectId },
-        operationId: request.operationId,
-        skillId,
-        expectedRevisionId: request.expectedRevisionId,
-        expectedScopeVersion: request.expectedScopeVersion,
-        scope: request.scope,
-        stableKey: current?.stableKey ?? request.stableKey,
-        files,
-        reason: request.reason,
-        // A connected outside agent's upload follows Agent learning, like an
-        // agent's save: Review first leaves it pending for the person.
-        ...(outsideAgentReach(access.grant) ? { learningPolicy: "follow" as const } : {}),
+    return c.json(
+      await saveSkillFolder(deps, access, request, {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: access.grant.subjectId,
       }),
     );
-    return c.json(receipt);
+  });
+  app.post(`${backend}/save`, async (c) => {
+    const { access, actor } = await authorizeOrganizationSkillBackend(c, deps);
+    const request = parseRequestBody(
+      SaveOrganizationSkillRequest,
+      await c.req.json().catch(() => null),
+      invalidSkillRequest,
+    );
+    const { initialReach, ...folder } = request;
+    return c.json(
+      await saveSkillFolder(
+        deps,
+        access,
+        { ...folder, scope: "organization" },
+        actor,
+        initialReach,
+      ),
+    );
   });
   app.post(`${base}/:skillId/remove`, async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -240,6 +213,26 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
           accountId: context.accountId,
           workspaceId,
           actor: { kind: "human", principalKind: "human_session", subjectId: context.subjectId },
+        }),
+      ),
+    );
+  });
+  app.post(`${backend}/:skillId/remove`, async (c) => {
+    const { access, actor } = await authorizeOrganizationSkillBackend(c, deps);
+    const skillId = skillIdentifier(c.req.param("skillId"));
+    const request = parseRequestBody(
+      RemoveWorkspaceSkillRequest,
+      await c.req.json().catch(() => null),
+      invalidSkillRequest,
+    );
+    return c.json(
+      await skillMutation(() =>
+        removeSkill(deps.db, {
+          ...request,
+          skillId,
+          accountId: access.grant.accountId,
+          workspaceId: access.grant.workspaceId,
+          actor,
         }),
       ),
     );
@@ -320,26 +313,139 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       invalidSkillRequest,
     );
     authorizeSkillScopeMutation(access, "organization");
-    const result = await updateOrganizationSkillReach(deps.db, {
-      accountId: access.grant.accountId,
-      workspaceId,
-      subjectId: access.grant.subjectId,
-      skillId,
-      allowedWorkspaceIds: request.allowedWorkspaceIds,
-      allowPersonalWorkspaces: request.allowPersonalWorkspaces,
-    });
-    if (result.status === "not_found") throw new HTTPException(404, { message: "Skill not found" });
-    if (result.status === "not_organization")
-      throw new HTTPException(409, {
-        message:
-          "Only an organization Skill works in chosen workspaces. A workspace Skill works in its workspace, and a personal one wherever its owner works.",
-      });
-    if (result.status === "unknown_workspaces")
-      throw new HTTPException(422, {
-        message: `These aren't shared workspaces of this organization: ${result.workspaceIds.join(", ")}`,
-      });
-    return c.json(OrganizationSkillReachResponse.parse({ reach: result.reach }));
+    return c.json(await setSkillReach(deps, access, skillId, request));
   });
+  app.put(`${backend}/:skillId/reach`, async (c) => {
+    const { access } = await authorizeOrganizationSkillBackend(c, deps);
+    const skillId = skillIdentifier(c.req.param("skillId"));
+    const request = parseRequestBody(
+      UpdateOrganizationSkillReachRequest,
+      await c.req.json().catch(() => null),
+      invalidSkillRequest,
+    );
+    return c.json(await setSkillReach(deps, access, skillId, request));
+  });
+}
+
+async function authorizeOrganizationSkillBackend(c: Context, deps: ApiRouteDeps) {
+  const access = await requireAccessGrantAuthorization(
+    c,
+    deps,
+    c.req.param("workspaceId")!,
+    "workspace:read",
+  );
+  const key = accountScopedApiKeyWorkspaceAuthority(await requireAccessContext(c, deps));
+  const { grant, accountGrant } = access;
+  if (
+    !isVerifiedOrganizationServiceAuthorization(access) ||
+    key?.workspaceScope.kind !== "all" ||
+    !accountGrant?.permissions.includes("account:admin") ||
+    grant.serviceInitiator ||
+    grant.serviceInitiatorContext
+  ) {
+    throw new HTTPException(403, {
+      message:
+        "Organization Skill management requires a direct organization API key with account:admin and all shared workspaces in scope.",
+    });
+  }
+  return {
+    access,
+    actor: {
+      kind: "organization_api_key",
+      principalKind: "api_key",
+      subjectId: grant.subjectId,
+    } as const,
+  };
+}
+
+async function saveSkillFolder(
+  deps: ApiRouteDeps,
+  access: AccessGrantAuthorization,
+  request: SaveWorkspaceSkillRequest,
+  actor: Exclude<SkillActor, { kind: "agent" }>,
+  initialReach?: OrganizationSkillReach,
+): Promise<SkillWriteReceipt> {
+  const { accountId, workspaceId, subjectId } = access.grant;
+  const { skillId, expectedRevisionId, expectedScopeVersion, scope } = request;
+  const current = await readSkill(
+    deps.db,
+    { accountId, workspaceId, subjectId },
+    skillId,
+    expectedRevisionId ?? undefined,
+    everywhere,
+  );
+  if (expectedRevisionId && !current) throw new HTTPException(404, { message: "Skill not found" });
+  if (current) {
+    if (actor.kind === "human") authorizeSkillScopeMutation(access, current.scope);
+    if (current.scope !== scope)
+      throw new HTTPException(409, {
+        message: "Move Skill scope through the existing scope-management workflow.",
+      });
+  }
+  let files;
+  try {
+    files = validateSkillFiles(
+      applySkillFileChanges(
+        expectedRevisionId ? (current?.files ?? []) : [],
+        request.files,
+        request.deletions,
+      ),
+    );
+    buildPortableSkillArtifact(files);
+  } catch (error) {
+    const reason =
+      error instanceof Error && error.message ? ` (${error.message.slice(0, 300)})` : "";
+    throw new HTTPException(400, {
+      message: `Invalid Skill folder${reason}. SKILL.md requires valid YAML frontmatter with a name and description. Use unique relative text-file paths and respect the file and folder size limits.`,
+    });
+  }
+  return await skillMutation(() =>
+    saveSkill(deps.db, {
+      accountId,
+      workspaceId,
+      actor,
+      operationId: request.operationId,
+      skillId,
+      expectedRevisionId,
+      expectedScopeVersion,
+      scope,
+      stableKey: current?.stableKey ?? request.stableKey,
+      files,
+      reason: request.reason,
+      // A connected outside agent's upload follows Agent learning.
+      ...(outsideAgentReach(access.grant) ? { learningPolicy: "follow" as const } : {}),
+      ...(initialReach ? { initialReach } : {}),
+    }),
+  );
+}
+
+function unknownReachWorkspaces(ids: string[]): HTTPException {
+  return new HTTPException(422, {
+    message: `These aren't shared workspaces of this organization: ${ids.join(", ")}`,
+  });
+}
+
+async function setSkillReach(
+  deps: ApiRouteDeps,
+  { grant }: AccessGrantAuthorization,
+  skillId: string,
+  request: OrganizationSkillReach,
+) {
+  const result = await updateOrganizationSkillReach(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    skillId,
+    ...request,
+  });
+  if (result.status === "not_found") throw new HTTPException(404, { message: "Skill not found" });
+  if (result.status === "not_organization")
+    throw new HTTPException(409, {
+      message:
+        "Only an organization Skill works in chosen workspaces. A workspace Skill works in its workspace, and a personal one wherever its owner works.",
+    });
+  if (result.status === "unknown_workspaces") throw unknownReachWorkspaces(result.workspaceIds);
+  return OrganizationSkillReachResponse.parse({ reach: result.reach });
 }
 
 async function skillMutation(run: () => Promise<SkillWriteReceipt>): Promise<SkillWriteReceipt> {
@@ -358,6 +464,11 @@ async function skillMutation(run: () => Promise<SkillWriteReceipt>): Promise<Ski
         throw new HTTPException(403, {
           message: "Skill change is not permitted for this actor or scope.",
         });
+      if (candidate.code === "PT422")
+        throw new HTTPException(422, {
+          message: "Initial reach must name shared workspaces of this organization.",
+        });
+      if (candidate.code === "P0002") throw new HTTPException(404, { message: "Skill not found" });
       if (candidate.code === "22023" || candidate.code === "23514")
         throw new HTTPException(400, { message: "Skill content or revision request is invalid." });
       current = candidate.cause;

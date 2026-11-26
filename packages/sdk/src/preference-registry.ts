@@ -8,6 +8,7 @@ export type PreferenceRegistryStatus =
   | "expired";
 export type PreferenceRegistryProvenanceSource =
   | "human"
+  | "organization_api_key"
   | "onboarding"
   | "knowledge_proposal"
   | "agent"
@@ -156,7 +157,7 @@ export type CreatePreferenceRegistryProposalRequest = {
   conflictStrategy?: PreferenceRegistryConflictStrategy;
   conflictsWith?: string[];
   expiresAt?: string | null;
-  provenanceSource?: PreferenceRegistryProvenanceSource;
+  provenanceSource?: Exclude<PreferenceRegistryProvenanceSource, "organization_api_key">;
   provenanceSourceId?: string | null;
 };
 

@@ -39,7 +39,15 @@ export class SkillLifecycleRefusedError extends Error {
   }
 }
 
-const SKILL_LIFECYCLE_REFUSAL_CODES = new Set(["42501", "40001", "23505", "23514", "22023"]);
+const SKILL_LIFECYCLE_REFUSAL_CODES = new Set([
+  "42501",
+  "40001",
+  "23505",
+  "23514",
+  "22023",
+  "P0002",
+  "PT422",
+]);
 
 /** The lifecycle routine's RAISE, if that is what failed; driver errors wrap it. */
 function skillLifecycleRefusal(error: unknown): SkillLifecycleRefusedError | null {
@@ -459,15 +467,12 @@ export async function updateOrganizationSkillReach(
     allowPersonalWorkspaces: boolean;
   },
 ): Promise<OrganizationSkillReachUpdate> {
-  let allowedWorkspaceIds: string[] | null = null;
-  if (input.allowedWorkspaceIds !== null) {
-    const listed = [...new Set(input.allowedWorkspaceIds)].sort();
-    if (listed.length > 0) {
-      const sharedIds = new Set(await listSharedWorkspaceIdsForAccount(db, input.accountId));
-      const unknown = listed.filter((workspaceId) => !sharedIds.has(workspaceId));
-      if (unknown.length > 0) return { status: "unknown_workspaces", workspaceIds: unknown };
-    }
-    allowedWorkspaceIds = listed;
+  const allowedWorkspaceIds =
+    input.allowedWorkspaceIds === null ? null : [...new Set(input.allowedWorkspaceIds)].sort();
+  if (allowedWorkspaceIds?.length) {
+    const sharedIds = new Set(await listSharedWorkspaceIdsForAccount(db, input.accountId));
+    const unknown = allowedWorkspaceIds.filter((workspaceId) => !sharedIds.has(workspaceId));
+    if (unknown.length > 0) return { status: "unknown_workspaces", workspaceIds: unknown };
   }
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const scope = async () =>
