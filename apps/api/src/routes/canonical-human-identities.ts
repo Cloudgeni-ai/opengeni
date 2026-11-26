@@ -154,7 +154,9 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
 
   app.post(`${base}/login-bindings`, async (context) => {
     const request = await parseBody(context, LinkCanonicalHumanLoginBindingRequest);
-    if (["google", "github", "credential"].includes(request.providerId.trim().toLowerCase())) {
+    if (
+      ["google", "github", "apple", "credential"].includes(request.providerId.trim().toLowerCase())
+    ) {
       throw new HTTPException(403, {
         message: "Use personal sign-in method settings with fresh provider proof",
       });
@@ -174,7 +176,7 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
       projection.loginBindings.some(
         (binding) =>
           binding.id === bindingId(context) &&
-          ["google", "github", "credential"].includes(binding.providerId),
+          ["google", "github", "apple", "credential"].includes(binding.providerId),
       )
     ) {
       throw new HTTPException(403, {
@@ -197,7 +199,7 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
       projection.loginBindings.some(
         (binding) =>
           binding.id === bindingId(context) &&
-          ["google", "github", "credential"].includes(binding.providerId),
+          ["google", "github", "apple", "credential"].includes(binding.providerId),
       )
     ) {
       throw new HTTPException(403, {
@@ -219,7 +221,7 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
     const managed = projection.loginBindings.some(
       (binding) =>
         binding.id === bindingId(context) &&
-        ["google", "github", "credential"].includes(binding.providerId),
+        ["google", "github", "apple", "credential"].includes(binding.providerId),
     );
     if (managed) await admitManagedSignInMutation(context, deps);
     return await mutate(context, deps, {

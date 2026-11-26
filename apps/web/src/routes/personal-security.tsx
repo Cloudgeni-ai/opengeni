@@ -1,5 +1,6 @@
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import { isPasskeyOnlyAccountEmail } from "@opengeni/contracts/managed-sign-in-methods";
+import type { ManagedSocialProvider } from "@/components/managed-social-auth-buttons";
 import { RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiBaseUrl } from "@/api";
@@ -58,7 +59,7 @@ function changeDescription(command: PreparedSignInCommand): string {
     case "passkey/remove":
       return "Passkey removed. It can no longer sign in to your account.";
     default:
-      return `${providerLabel((command.body as { provider: "google" | "github" }).provider)} was disconnected from sign-in.`;
+      return `${providerLabel((command.body as { provider: ManagedSocialProvider }).provider)} was disconnected from sign-in.`;
   }
 }
 
@@ -325,7 +326,7 @@ export function SecurityController({
   async function mutate(
     path: PreparedSignInCommand["path"],
     fields:
-      | { provider: "google" | "github" }
+      | { provider: ManagedSocialProvider }
       | { newPassword: string; currentPassword?: string }
       | { passkeyId: string },
   ) {
@@ -497,7 +498,7 @@ export function SecurityController({
           methods={inventory.methods
             .filter((method) => method.provider !== "credential" && !passkeyOnly)
             .map((method) => ({
-              provider: method.provider as "google" | "github",
+              provider: method.provider as ManagedSocialProvider,
               connected: method.connected,
               available: method.available,
               email: method.connected ? inventory.email : null,

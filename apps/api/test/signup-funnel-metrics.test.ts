@@ -36,6 +36,7 @@ describe("sign-up funnel metrics", () => {
     expect(authFunnelMethod("credential")).toBe("email");
     expect(authFunnelMethod("google")).toBe("google");
     expect(authFunnelMethod("github")).toBe("github");
+    expect(authFunnelMethod("apple")).toBe("apple");
     expect(authFunnelMethod("saml-acme")).toBe("other");
     expect(authFunnelMethod(undefined)).toBe("other");
   });
@@ -43,7 +44,10 @@ describe("sign-up funnel metrics", () => {
   test("publishes every closed series at zero before the first event", async () => {
     const observability = metrics();
     createSignupFunnelMetrics(observability);
-    expect(await series(observability, "opengeni_auth_events_total")).toHaveLength(12);
+    const events = await series(observability, "opengeni_auth_events_total");
+    expect(events).toHaveLength(15);
+    expect(events).toContain('opengeni_auth_events_total{event="sign_in",method="apple"} 0');
+    expect(events).toContain('opengeni_auth_events_total{event="sign_up",method="apple"} 0');
     expect(await series(observability, "opengeni_signup_acquisition_total")).toEqual([
       'opengeni_signup_acquisition_total{source="direct"} 0',
       'opengeni_signup_acquisition_total{source="other"} 0',

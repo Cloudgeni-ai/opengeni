@@ -216,7 +216,7 @@ export type AppStateHost = Readonly<{
   }) => Promise<unknown>;
   signOutManaged: () => Promise<unknown>;
   startManagedSocialSignIn: (
-    provider: "google" | "github",
+    provider: "google" | "github" | "apple",
     signupChallengeToken?: string,
   ) => Promise<void>;
   /**
@@ -2616,7 +2616,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   async function handleManagedSocialAuth(
-    provider: "google" | "github",
+    provider: "google" | "github" | "apple",
     signupChallengeToken?: string,
   ) {
     invalidatePrincipalWorkspaceState({

@@ -46,7 +46,7 @@ export const NATIVE_APP_CODE_TTL_MS = 2 * 60 * 1_000;
 const CODE_IDENTIFIER_PREFIX = "opengeni-native-app-code:";
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/u;
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/u;
-const MANAGED_PROVIDERS = ["credential", "google", "github"] as const;
+const MANAGED_PROVIDERS = ["credential", "google", "github", "apple"] as const;
 export const NATIVE_APP_PLATFORMS = [
   "ios",
   "android",

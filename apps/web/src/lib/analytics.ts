@@ -413,7 +413,10 @@ function captureAuthReturn(marker: AuthReturnEvent | null): void {
     captureAnalyticsEvent("signup_completed", { method: "email", is_new_user: true });
     return;
   }
-  const [method, outcome] = marker.split("_") as ["google" | "github", "signup" | "signin"];
+  const [method, outcome] = marker.split("_") as [
+    "google" | "github" | "apple",
+    "signup" | "signin",
+  ];
   captureAnalyticsEvent("signup_completed", { method, is_new_user: outcome === "signup" });
 }
 
