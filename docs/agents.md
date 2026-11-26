@@ -707,12 +707,12 @@ adds one as an ordinary agent with `templateKey` set (SDK
 listed in gallery order in its `index.ts`: Triage, Bug fixer, PR reviewer,
 CVE scanner, Incident responder, Dependency updater and Product analyst, general for any software team, with
 Instructions written for autonomy with judgment (pick up work with what they
-can reach instead of asking for setup first, hand off to each other by name,
+can reach instead of asking for setup first, hand off to another ready-made agent by name only when it exists here,
 and involve a person only when blocked or a decision needs one), suggested Can use rules
 (each blocks merging a pull request, through a GitHub connection or
 Opengeni's own GitHub tools) and suggested triggers:
 
-| Agent | Does | Hands off to | Suggested triggers |
+| Agent | Does | Works well with | Suggested triggers |
 | --- | --- | --- | --- |
 | Triage | Sorts new issues and reports | Bug fixer | A GitHub issue opens; a new message in a Slack channel; a Linear issue is created |
 | Bug fixer | Reproduces and fixes a bug in a pull request | PR reviewer | An issue is labelled `bug` |
@@ -751,25 +751,86 @@ name no internal Skills. Each names the `team` it is for ("Engineering"); Capabi
 ### Guided setups
 
 The workspace's **Get started** page (`/workspaces/<id>/get-started`, under
-the rail's Setup group) offers three engineering setups, each three steps that
-end with an agent at work: connect a tool, add a ready-made agent, turn on one
-of its suggested triggers.
+the rail's Setup group) is the front door into [Enable](#enable): an example
+of what the selected setup produces (labelled **Example**), the three setups
+beside it, and one button that opens the selected setup on Enable, with what
+it needs underneath ("Needs GitHub"). Hovering or selecting a setup swaps the
+example. `?setup=<key>` opens that setup on Enable, with its own title and
+**Get started** as the way back.
 
-| Setup | Connect | Agent | Trigger |
+| Setup | Needs | Agent | Trigger |
 | --- | --- | --- | --- |
 | Review pull requests | GitHub | PR reviewer | When a pull request opens |
-| Triage issues | Linear | Triage | When a Linear issue is created |
-| Track product analytics | PostHog | Product analyst | Every Monday morning |
+| Triage new issues | Linear | Triage | When a Linear issue is created |
+| Weekly product report | PostHog | Product analyst | Every Monday morning |
 
-They are a list in `apps/web/src/components/get-started/guided-setups.ts` and
-add no machinery: Connect opens GitHub's connect page or the connector's
-Capabilities page (found by its MCP address; a deployment that doesn't offer it
-says so; so does GitHub without its app here), Add is the Agents page's
-ready-made add (for people who may start chats), and Turn on adds a one-click
-suggestion at once or opens the agent page's Add trigger dialog with it. Each
-step reads its state from the workspace, so work done elsewhere shows as done;
-a paused trigger isn't on. Onboarding's **Software engineer** choice ends on
-this page.
+They are a list in `apps/web/src/components/get-started/guided-setups.ts`:
+the agent, the trigger it turns on and the example. What a setup needs comes
+from its agent's `setup.connections`; a setup may only make more of them
+required (Triage alone works from GitHub, Linear or Slack, so none is
+required; the Linear setup requires Linear). Onboarding's **Software
+engineer** choice ends on this page.
+
+### Enable
+
+One guided page turns on a ready-made agent (`/workspaces/<id>/enable?agent=<key>`),
+a ready-made app (`?app=<key>`) or a Get started setup (`get-started?setup=<key>`);
+`&step=connect|check|turn-on` opens it on that step. Capabilities
+**Ready-made** opens it for an agent. Three steps:
+
+1. **Connect**: every connection from the template's `setup.connections`, up
+   front, with "N of M required connected" and a Required or Optional chip.
+   Connections the person can already use show **Connected**. **Connect**
+   returns to the same step: GitHub through its app flow (its return path
+   may be this page), anything else through the connector's Capabilities
+   page, whose back link and finished sign-in return here (`from`). Someone
+   who may not connect it (the same rule as Connect pages) sees **Ask an
+   admin**, which copies a link to this step to send to an admin. A
+   repository row shows when its trigger needs one; it is picked when the
+   trigger is turned on.
+2. **Check**: what gets set up (the agent, the trigger, a first message), at
+   most one "Works well with" line (display only) and what it won't do
+   without asking (`setup.wontDoWithoutAsking`, enforced by its Can use
+   rules and approvals).
+3. **Turn on**: the one primary, off with the reason in words beside it
+   until the required connections are on. It adds the agent if needed, turns
+   on the trigger (a one-click suggestion at once, a paused one resumed,
+   anything else through the agent page's Add trigger dialog), then starts an
+   ordinary chat with the agent's `setup.firstMessage` so it introduces
+   itself. The page ends with **Open chat** and one suggested first job
+   (`setup.firstJob`) that starts a chat with it. **Finish later** adds the
+   agent and leaves it off. For an app, Turn on adds it and opens it.
+
+The server agrees: `GET /v1/workspaces/:id/agent-templates/:key/readiness`
+and `GET /v1/workspaces/:id/agents/:agentId/readiness` (SDK
+`getAgentTemplateReadiness`, `getAgentReadiness`) return `{ readiness }`:
+`ready`, `reason`, each connection with `connected`, `canConnect` and its
+catalog item, `missing` (each with its reason in words) and the required
+counts. Creating, resuming or turning on a trigger of a ready-made agent
+whose required connections aren't on is a 409 with `details.code`
+`agent_setup_incomplete` and `details.missing`. An agent without a template,
+or a check that can't run, is never blocked.
+
+### Keep setup simple
+
+An item's required steps are only its own connections, and a repository
+where it truly needs one. Another agent or setup is never a required step;
+`setup.worksWellWith` names at most one, for display. A hand-off in an
+agent's Instructions works without the other agent ("If there is a PR
+reviewer agent here, it may review; if there isn't, just open the pull
+request"). `ReadyMadeSetup` is strict, and core's template tests fail when
+a template requires another agent or setup.
+
+### First run
+
+Onboarding's answer fills the person's **own** sidebar once with one group
+of suggestions (never the workspace default): **Software engineer** gets
+Engineering (Set up PR reviews, Issue tracker, Incident log), **Not an
+engineer** gets Your work (Weekly product report, Decision log, Feedback
+board). The links open Get started or Enable, so nothing is added until the
+person turns it on. It is written only while their sidebar is unchanged, at
+the revision just read; they edit or reset it as usual
+(`apps/web/src/components/onboarding/persona-sidebar.ts`).
 
 ### Delegation by name
 

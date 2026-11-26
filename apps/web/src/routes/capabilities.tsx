@@ -14,6 +14,7 @@ import {
   sortConnectorsForPresentation,
 } from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
+import { parseReturnTo, returnToOf, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import {
   ConnectionCatalog,
   ConnectionInstalled,
@@ -383,6 +384,12 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
   const navigate = useNavigate();
   const searchStr = useLocation({ select: (location) => location.searchStr });
   const openKey = new URLSearchParams(searchStr).get("open");
+  // Opened from a page's Connect step (Enable, Get started): Back, and a
+  // finished sign-in, return there.
+  const returnTo = useMemo(
+    () => returnToOf(parseReturnTo(Object.fromEntries(new URLSearchParams(searchStr)))),
+    [searchStr],
+  );
   const goTo = useCallback(
     (key: string | null, replace = false) => {
       const url = new URL(window.location.href);
@@ -396,7 +403,7 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
   const clearReturnParams = useCallback(() => {
     const current = new URLSearchParams(window.location.search);
     const kept = new URLSearchParams();
-    for (const key of ["section", "kind", "open"]) {
+    for (const key of ["section", "kind", "open", "from", "fromLabel"]) {
       const value = current.get(key);
       if (value) kept.set(key, value);
     }
@@ -1301,7 +1308,8 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
           connectReturnUrl: window.location.href,
           returnPathFor: (id) => {
             returnItemId = id;
-            return `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`;
+            const back = new URLSearchParams(returnToSearch(returnTo) as Record<string, string>);
+            return `${window.location.pathname}?connect_item=${encodeURIComponent(id)}${back.size > 0 ? `&${back.toString()}` : ""}`;
           },
           redirect: (url) => {
             watchDesktopConnect(targetItem, returnItemId, action);
@@ -1523,13 +1531,16 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
       setDesktopWatch(null);
     }
     if (outcome === "success") {
+      const backTo = returnToOf(parseReturnTo(Object.fromEntries(params)));
       void resumeOAuthConnect(
         itemId,
         connectionId,
         params.get("providerDomain"),
         oauthConnectionOwnership(params.get("ownership")),
         oauthServerFinish(params.get("capability")),
-      );
+      ).then((finished) => {
+        if (finished && backTo) void navigate({ href: backTo.path });
+      });
     } else {
       const reason = params.get("reason");
       const message = mcpOAuthCallbackFailureMessage(params.get("stage"), reason);
@@ -1919,7 +1930,9 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
     const service = serviceOf(optionId);
     return service
       ? { label: service.name, onBack: () => goTo(`service:${service.id}`) }
-      : { label: "Capabilities", onBack: () => goTo(null) };
+      : returnTo
+        ? { label: returnTo.label, onBack: () => void navigate({ href: returnTo.path }) }
+        : { label: "Capabilities", onBack: () => goTo(null) };
   };
   const servicePage = openService
     ? (allConnectionServices.find(
