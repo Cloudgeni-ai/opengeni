@@ -39,7 +39,8 @@ export function agentReadinessItems(readiness: SetupReadiness): AgentReadinessIt
 
 /**
  * Readiness per agent, for agents added from a ready-made one (any other is
- * ready). Absent until read, and when the server has no check.
+ * ready), read in one request. Absent until read, and when the server has no
+ * check.
  */
 export function useAgentsReadiness(
   workspaceId: string,
@@ -53,13 +54,30 @@ export function useAgentsReadiness(
     .map((agent) => agent.id)
     .join(",");
   useEffect(() => {
-    if (!ids || typeof client.getAgentReadiness !== "function") return;
+    if (!ids) return;
     let live = true;
-    for (const agentId of ids.split(",")) {
-      client.getAgentReadiness(workspaceId, agentId).then(
-        (readiness) => live && setRead((current) => new Map(current).set(agentId, readiness)),
+    const wanted = new Set(ids.split(","));
+    if (typeof client.listAgentReadiness === "function") {
+      client.listAgentReadiness(workspaceId).then(
+        (entries) =>
+          live &&
+          setRead(
+            new Map(
+              entries
+                .filter((entry) => wanted.has(entry.agentId))
+                .map((entry) => [entry.agentId, entry.readiness] as const),
+            ),
+          ),
         () => undefined,
       );
+    } else if (typeof client.getAgentReadiness === "function") {
+      // A client without the batch read.
+      for (const agentId of wanted) {
+        client.getAgentReadiness(workspaceId, agentId).then(
+          (readiness) => live && setRead((current) => new Map(current).set(agentId, readiness)),
+          () => undefined,
+        );
+      }
     }
     return () => {
       live = false;

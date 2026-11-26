@@ -102,6 +102,7 @@ import {
 
 // The one-click add beside the dialog, for pages outside this package (Get started).
 export { addAgentSuggestedTrigger, agentTriggerSaveError } from "./agent-trigger-model";
+export { agentTriggerRunsAs } from "./agent-trigger-words";
 
 export interface AgentTriggerDialogProps {
   agent: Agent;

@@ -13,12 +13,37 @@
   "toolPermissions": [
     {
       "connector": "github.com",
+      "tool": "create_or_update_file",
+      "permission": "block"
+    },
+    {
+      "connector": "github.com",
+      "tool": "create_pull_request",
+      "permission": "block"
+    },
+    {
+      "connector": "github.com",
+      "tool": "delete_file",
+      "permission": "block"
+    },
+    {
+      "connector": "github.com",
       "tool": "merge_pull_request",
       "permission": "block"
     },
     {
       "connector": "github.com",
+      "tool": "pull_request_create",
+      "permission": "block"
+    },
+    {
+      "connector": "github.com",
       "tool": "pull_request_merge",
+      "permission": "block"
+    },
+    {
+      "connector": "github.com",
+      "tool": "push_files",
       "permission": "block"
     }
   ],
@@ -97,7 +122,26 @@
     ],
     "repository": null,
     "worksWellWith": "bug-fixer",
-    "wontDoWithoutAsking": ["Close or delete someone's report", "Fix code itself"],
+    "wontDoWithoutAsking": [
+      {
+        "text": "Merge a pull request",
+        "permission": "block",
+        "connector": "github.com",
+        "tools": ["merge_pull_request", "pull_request_merge"]
+      },
+      {
+        "text": "Change code",
+        "permission": "block",
+        "connector": "github.com",
+        "tools": [
+          "push_files",
+          "create_or_update_file",
+          "delete_file",
+          "create_pull_request",
+          "pull_request_create"
+        ]
+      }
+    ],
     "firstMessage": "You were just turned on. In three short lines, say what you do and what starts you, then look at the newest open issues you can reach and say how you would sort the first three. Don't change anything yet.",
     "firstJob": "Sort this week's open issues."
   }

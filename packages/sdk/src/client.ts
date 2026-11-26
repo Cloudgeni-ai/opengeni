@@ -118,6 +118,7 @@ import type {
   ListAgentTemplatesResponse,
   SetupReadiness,
   SetupReadinessResponse,
+  AgentReadinessListResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -8926,6 +8927,15 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/readiness`,
     );
     return response.readiness;
+  }
+
+  /** Readiness of every agent the caller can see, read in one request (the Agents list). */
+  async listAgentReadiness(workspaceId: string): Promise<AgentReadinessListResponse["agents"]> {
+    const response = await this.requestJson<AgentReadinessListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/readiness`,
+    );
+    return response.agents;
   }
 
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */

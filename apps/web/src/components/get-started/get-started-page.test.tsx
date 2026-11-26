@@ -72,6 +72,7 @@ mock.module("@opengeni/react/app/lib/navigation", () => ({
 mock.module("@opengeni/react/app/components/agents/agent-trigger-dialog", () => ({
   addAgentSuggestedTrigger: mock(async () => ({ kind: "needs_setup" })),
   agentTriggerSaveError: () => "error",
+  agentTriggerRunsAs: () => "Runs as you",
   AgentTriggerDialog: () => null,
 }));
 

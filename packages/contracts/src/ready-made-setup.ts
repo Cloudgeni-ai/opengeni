@@ -45,6 +45,23 @@ export const SetupConnection = /* @__PURE__ */ defineSchema(() =>
 );
 export type SetupConnection = z.output<typeof SetupConnection>;
 
+/** One line of what it won't do without asking, and the tools whose rule enforces it. */
+export const SetupGuardrail = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Short, plain words: "Merge a pull request". */
+      text: z.string().trim().min(1).max(120),
+      /** `block`: it never does this. `ask`: it asks a person first. */
+      permission: z.enum(["ask", "block"]),
+      /** The connection the tools belong to, as its Can use rules name it (`github.com`). */
+      connector: z.string().trim().min(1).max(512),
+      /** The tool names its rules cover; each has a rule with this permission. */
+      tools: z.array(z.string().trim().min(1).max(256)).min(1).max(8),
+    })
+    .strict(),
+);
+export type SetupGuardrail = z.output<typeof SetupGuardrail>;
+
 /** The optional, display-and-readiness facts of a ready-made item. */
 export const ReadyMadeSetup = /* @__PURE__ */ defineSchema(() =>
   z
@@ -57,8 +74,13 @@ export const ReadyMadeSetup = /* @__PURE__ */ defineSchema(() =>
       repository: z.enum(["required", "optional"]).nullable().default(null),
       /** One other ready-made agent that complements it. Display only; never a step. */
       worksWellWith: ReadyMadeKey.nullable().default(null),
-      /** Short lines: what it asks a person before doing (backed by its Can use rules). */
-      wontDoWithoutAsking: z.array(z.string().trim().min(1).max(120)).max(5).default([]),
+      /**
+       * What it won't do, or asks first about, each line backed by one of its
+       * own Can use rules (`toolPermissions`) for the tools it names: `block`
+       * never does it, `ask` asks a person in a chat and, in a run on its
+       * own, stops instead.
+       */
+      wontDoWithoutAsking: z.array(SetupGuardrail).max(5).default([]),
       /**
        * Right after it is turned on, it starts a chat with this message so the
        * person sees it work without writing a prompt. Null: it doesn't.
@@ -125,6 +147,14 @@ export const SetupReadinessResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type SetupReadinessResponse = z.output<typeof SetupReadinessResponse>;
 
+/** `GET /agents/readiness`: each visible agent's readiness, read in one pass. */
+export const AgentReadinessListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    agents: z.array(z.object({ agentId: z.string(), readiness: SetupReadiness })),
+  }),
+);
+export type AgentReadinessListResponse = z.output<typeof AgentReadinessListResponse>;
+
 /** The facts the readiness check reads about one connection; the server derives them from the catalog. */
 export type SetupConnectionFacts = {
   connected: boolean;
@@ -183,3 +213,12 @@ export function evaluateSetupReadiness(
     requiredTotal: required.length,
   };
 }
+
+/** One guardrail line in words, as it really behaves: "Merge a pull request: never". */
+export function setupGuardrailWords(line: Pick<SetupGuardrail, "text" | "permission">): string {
+  return `${line.text}: ${line.permission === "block" ? "never" : "asks first"}`;
+}
+
+/** Said once under the lines when any asks first: an unattended run has no one to ask. */
+export const SETUP_GUARDRAIL_UNATTENDED_NOTE =
+  "When it runs on its own, it stops instead of asking.";

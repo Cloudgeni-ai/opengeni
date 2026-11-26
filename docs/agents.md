@@ -785,31 +785,51 @@ a ready-made app (`?app=<key>`) or a Get started setup (`get-started?setup=<key>
    may be this page), anything else through the connector's Capabilities
    page, whose back link and finished sign-in return here (`from`). Someone
    who may not connect it (the same rule as Connect pages) sees **Ask an
-   admin**, which copies a link to this step to send to an admin. A
-   repository row shows when its trigger needs one; it is picked when the
-   trigger is turned on.
+   admin**, which copies a link to this step to send to an admin (not in a
+   Personal workspace, which has no admin to ask). A repository row shows
+   when its trigger needs one; it is picked when the trigger is turned on.
+   A Get started setup can require a connection its agent template doesn't
+   (the Linear setup requires Linear); that is client-side only
+   (`withRequiredProviders` in `apps/web/src/components/enable/enable-subject.ts`),
+   and the server's check reads the template alone.
 2. **Check**: what gets set up (the agent, the trigger, a first message), at
    most one "Works well with" line (display only) and what it won't do
-   without asking (`setup.wontDoWithoutAsking`, enforced by its Can use
-   rules and approvals).
+   without asking (`setup.wontDoWithoutAsking`). Each line names a
+   connector, its tools and a permission, and the template has a Can use
+   rule with that permission for every tool named (core's template tests
+   check it): `block` reads **Never**, `ask` reads **Asks first**, with
+   "When it runs on its own, it stops instead of asking", since an
+   unattended run refuses what would ask.
 3. **Turn on**: the one primary, off with the reason in words beside it
-   until the required connections are on. It adds the agent if needed, turns
+   until the required connections are on, and off when its triggers can't be
+   read (so it never adds a second one). It adds the agent if needed, turns
    on the trigger (a one-click suggestion at once, a paused one resumed,
    anything else through the agent page's Add trigger dialog), then starts an
    ordinary chat with the agent's `setup.firstMessage` so it introduces
-   itself. The page ends with **Open chat** and one suggested first job
+   itself (only for a new trigger, not a resumed one). The page ends with
+   **Open chat** and one suggested first job
    (`setup.firstJob`) that starts a chat with it. **Finish later** adds the
    agent and leaves it off. For an app, Turn on adds it and opens it.
 
 The server agrees: `GET /v1/workspaces/:id/agent-templates/:key/readiness`
 and `GET /v1/workspaces/:id/agents/:agentId/readiness` (SDK
-`getAgentTemplateReadiness`, `getAgentReadiness`) return `{ readiness }`:
+`getAgentTemplateReadiness`, `getAgentReadiness`) return `{ readiness }`,
+and `GET /v1/workspaces/:id/agents/readiness` (SDK `listAgentReadiness`)
+returns every visible agent's in one read (`{ agents: [{ agentId, readiness }] }`,
+the Agents list):
 `ready`, `reason`, each connection with `connected`, `canConnect` and its
 catalog item, `missing` (each with its reason in words) and the required
-counts. Creating, resuming or turning on a trigger of a ready-made agent
-whose required connections aren't on is a 409 with `details.code`
-`agent_setup_incomplete` and `details.missing`. An agent without a template,
-or a check that can't run, is never blocked.
+counts. GitHub isn't a capability catalog item: it counts as connected when
+the workspace's GitHub App is installed or the viewer has their own GitHub
+connected, and the viewer can connect it with `github:manage` (when the App
+is configured) or when people may connect their own GitHub. The check lives
+in core (`packages/core/src/domain/ready-made-setup-readiness.ts`):
+`createValidatedScheduledTask` and `validatedScheduledTaskUpdate` run it, so
+every path (the API, Opengeni's own tools, app sync) is covered. Creating an
+active trigger, turning one on, or pointing an active one at another agent,
+when that ready-made agent's required connections aren't on, is a 409 with
+`details.code` `agent_setup_incomplete` and `details.missing`. An agent
+without a template, or a check that can't run, is never blocked.
 
 ### Keep setup simple
 

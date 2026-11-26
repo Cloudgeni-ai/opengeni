@@ -47,7 +47,14 @@
     ],
     "repository": "required",
     "worksWellWith": "pr-reviewer",
-    "wontDoWithoutAsking": ["Merge a pull request", "Upgrade a major version"],
+    "wontDoWithoutAsking": [
+      {
+        "text": "Merge a pull request",
+        "permission": "block",
+        "connector": "github.com",
+        "tools": ["merge_pull_request", "pull_request_merge"]
+      }
+    ],
     "firstMessage": "You were just turned on. In three short lines, say what you do and when you run, then check the repository you work on and list which dependencies are behind (patch and minor only), without opening a pull request yet.",
     "firstJob": "Open this week's upgrade pull request now."
   }

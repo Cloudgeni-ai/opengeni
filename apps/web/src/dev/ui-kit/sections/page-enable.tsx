@@ -51,7 +51,20 @@ const TEMPLATES = [
       ],
       repository: "required",
       worksWellWith: "pr-reviewer",
-      wontDoWithoutAsking: ["Merge a pull request", "Upgrade a major version"],
+      wontDoWithoutAsking: [
+        {
+          text: "Merge a pull request",
+          permission: "block",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+        {
+          text: "Upgrade a major version",
+          permission: "block",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+      ],
       firstMessage: "Say hello.",
       firstJob: "Open this week's upgrade pull request now.",
     },

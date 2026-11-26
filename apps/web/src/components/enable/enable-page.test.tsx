@@ -20,7 +20,14 @@ const template = {
     connections: [],
     repository: "required",
     worksWellWith: "pr-reviewer",
-    wontDoWithoutAsking: ["Merge a pull request"],
+    wontDoWithoutAsking: [
+      {
+        text: "Merge a pull request",
+        permission: "block",
+        connector: "github.com",
+        tools: ["merge_pull_request"],
+      },
+    ],
     firstMessage: "Say hello.",
     firstJob: "Open this week's upgrade pull request now.",
   },
@@ -85,6 +92,7 @@ const client = {
 };
 const context: Record<string, unknown> = {
   client,
+  workspaces: [{ id: "workspace-a", kind: "shared" }],
   githubStatus: { status: "bound" },
   accessContext: {
     workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
@@ -101,6 +109,7 @@ mock.module("@opengeni/react/app/lib/navigation", () => ({
 mock.module("@opengeni/react/app/components/agents/agent-trigger-dialog", () => ({
   addAgentSuggestedTrigger: addTrigger,
   agentTriggerSaveError: () => "error",
+  agentTriggerRunsAs: () => "Runs as you",
   AgentTriggerDialog: ({ open }: { open: boolean }) =>
     open ? <div data-testid="trigger-dialog" /> : null,
 }));
@@ -301,6 +310,29 @@ test("a paused trigger is resumed rather than added again", async () => {
   await settle();
   expect(client.resumeScheduledTask).toHaveBeenCalledWith("workspace-a", "task-1");
   expect(addTrigger).not.toHaveBeenCalled();
+  // Turning a paused one back on doesn't say hello again.
+  expect(client.createSession).not.toHaveBeenCalled();
+  root.unmount();
+});
+
+test("its triggers can't be read: Turn on stays off so it can't add a second one", async () => {
+  agents = [{ ...agent, templateKey: "dependency-updater" }];
+  client.listScheduledTasks.mockImplementationOnce(async () => {
+    throw new Error("offline");
+  });
+  const { container, root } = await render();
+  expect(turnOnButton(container).disabled).toBe(true);
+  expect(container.textContent).toContain("Couldn't check its triggers.");
+  root.unmount();
+});
+
+test("in a Personal workspace there is no admin to ask", async () => {
+  context.workspaces = [{ id: "workspace-a", kind: "personal" }];
+  readiness = readinessOf([connection({ canConnect: false })]);
+  const { container, root } = await render();
+  expect(row(container, "github.com").querySelector("button")).toBeNull();
+  expect(row(container, "github.com").textContent).toContain("GitHub isn't offered here.");
+  context.workspaces = [{ id: "workspace-a", kind: "shared" }];
   root.unmount();
 });
 

@@ -231,10 +231,12 @@ export function ReadyMadeAgentPreview({
                     aria-hidden="true"
                     className="mt-0.5 size-4 shrink-0 text-fg-subtle"
                   />
-                  Asks you first
+                  Won't do without asking
                 </span>
               }
-              description={setup.wontDoWithoutAsking.join(" · ")}
+              description={[setup.wontDoWithoutAsking.join(" · "), setup.guardrailNote]
+                .filter(Boolean)
+                .join(" ")}
             />
           ) : null}
         </Section>

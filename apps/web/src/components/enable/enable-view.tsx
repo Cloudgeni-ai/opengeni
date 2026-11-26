@@ -5,6 +5,7 @@
  */
 import { useEffect, useRef, type ReactNode } from "react";
 import { CheckIcon } from "lucide-react";
+import { SETUP_GUARDRAIL_UNATTENDED_NOTE, type SetupGuardrail } from "@opengeni/contracts";
 import type { SetupConnectionState, SetupReadiness } from "@opengeni/sdk";
 
 import { cn } from "@opengeni/react/app/lib/utils";
@@ -46,7 +47,7 @@ export interface EnableViewProps {
   repository?: "required" | "optional" | null | undefined;
   /** What gets set up, as label and line. */
   facts: readonly EnableFact[];
-  wontDoWithoutAsking: readonly string[];
+  wontDoWithoutAsking: readonly SetupGuardrail[];
   /** One optional line, display only: "Works well with PR reviewer". */
   worksWellWith?: { name: string; onOpen: () => void } | null | undefined;
   stage: EnableStage;
@@ -56,7 +57,8 @@ export interface EnableViewProps {
   /** Providers an admin was asked about from here. */
   asked: ReadonlySet<string>;
   onConnect: (connection: SetupConnectionState) => void;
-  onAskAdmin: (connection: SetupConnectionState) => void;
+  /** Absent in a Personal workspace, where there is no admin to ask. */
+  onAskAdmin?: ((connection: SetupConnectionState) => void) | undefined;
   onTurnOn: () => void;
   /** Keeps it added but off. Absent for apps, which have nothing to keep off. */
   onFinishLater?: (() => void) | undefined;
@@ -123,7 +125,7 @@ function ConnectionRow({
   connection: SetupConnectionState;
   asked: boolean;
   onConnect: () => void;
-  onAskAdmin: () => void;
+  onAskAdmin: (() => void) | undefined;
 }) {
   const control = connectControlOf(connection);
   return (
@@ -136,7 +138,9 @@ function ConnectionRow({
         </span>
       }
       description={
-        control === "not-offered" ? `${connection.name} isn't offered here.` : connection.why
+        control === "not-offered" || (control === "ask-admin" && !onAskAdmin)
+          ? `${connection.name} isn't offered here.`
+          : connection.why
       }
       control={
         control === "connected" ? (
@@ -145,7 +149,7 @@ function ConnectionRow({
           </StatusBadge>
         ) : control === "connect" ? (
           <RowButton onClick={onConnect}>Connect</RowButton>
-        ) : control === "ask-admin" ? (
+        ) : control === "ask-admin" && onAskAdmin ? (
           asked ? (
             <StatusBadge tone="neutral" variant="dot">
               Link copied
@@ -267,7 +271,7 @@ export function EnableView(props: EnableViewProps) {
                   connection={connection}
                   asked={asked.has(connection.provider)}
                   onConnect={() => onConnect(connection)}
-                  onAskAdmin={() => onAskAdmin(connection)}
+                  onAskAdmin={onAskAdmin ? () => onAskAdmin(connection) : undefined}
                 />
               ))}
               {repository === "required" ? (
@@ -308,15 +312,19 @@ export function EnableView(props: EnableViewProps) {
         {wontDoWithoutAsking.length > 0 ? (
           <DetailSection
             title="What it won't do without asking"
-            description="It asks you in the chat first."
+            description={
+              wontDoWithoutAsking.some((line) => line.permission === "ask")
+                ? SETUP_GUARDRAIL_UNATTENDED_NOTE
+                : undefined
+            }
           >
             <ul className="flex flex-col gap-2 text-sm text-fg">
               {wontDoWithoutAsking.map((line) => (
-                <li key={line} className="flex gap-2">
-                  <span aria-hidden="true" className="text-fg-muted">
-                    –
-                  </span>
-                  {line}
+                <li key={line.text} className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1">{line.text}</span>
+                  <MetaChip variant="outline">
+                    {line.permission === "block" ? "Never" : "Asks first"}
+                  </MetaChip>
                 </li>
               ))}
             </ul>

@@ -22,7 +22,6 @@ import type { Hono } from "hono";
 import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
-import { requireAgentTriggerReady, triggerAgentIdOf } from "../agent-setup-readiness";
 import {
   isAuthenticatedPersonAuthorization,
   requireAccessGrant,
@@ -246,9 +245,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       status: 400,
       message: "invalid scheduled task create request",
     });
-    if (payload.status !== "paused") {
-      await requireAgentTriggerReady(deps, grant, triggerAgentIdOf(rawPayload));
-    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -435,13 +431,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       status: 400,
       message: "invalid scheduled task update request",
     });
-    if (payload.status === "active" && existing.status !== "active") {
-      await requireAgentTriggerReady(
-        deps,
-        grant,
-        triggerAgentIdOf(rawPayload) ?? existing.agentConfig.agentId ?? null,
-      );
-    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -515,7 +504,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       const [resumed] = await withEventsAndBlockers([task]);
       return c.json(scheduledTaskForGrant(resumed ?? task, grant));
     }
-    await requireAgentTriggerReady(deps, grant, existing.agentConfig.agentId ?? null);
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,

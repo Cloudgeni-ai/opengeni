@@ -29,6 +29,7 @@ import {
   ListAgentsResponse,
   PutAgentSlackAvailabilityRequest,
   SessionAvatar,
+  AgentReadinessListResponse,
   SetupReadinessResponse,
   UpdateAgentRequest,
   AGENTS_PER_WORKSPACE_MAX,
@@ -82,12 +83,13 @@ import {
   type AgentViewContext,
   type AgentViewer,
   type ApiRouteDeps,
+  setupReadinessFor,
+  setupReadinessForMany,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
-import { setupReadinessFor } from "../agent-setup-readiness";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
 import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
@@ -322,6 +324,31 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const view = await viewContext(context, agents);
     return c.json(
       ListAgentsResponse.parse({ agents: agents.map((agent) => agentSummaryView(agent, view)) }),
+    );
+  });
+
+  /**
+   * Readiness of every agent the viewer can see, reading the catalog once
+   * (the Agents list). Registered before `/:agentId`.
+   */
+  app.get(`${base}/readiness`, async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    c.header("cache-control", "private, no-store");
+    const agents = await listAgents(db, context.home, {
+      viewerSubjectId: context.viewer.subjectId,
+      filter: "all",
+    });
+    const readiness = await setupReadinessForMany(
+      deps,
+      context.grant,
+      agents.map((agent) =>
+        agent.templateKey ? agentTemplateByKey(agent.templateKey)?.setup : undefined,
+      ),
+    );
+    return c.json(
+      AgentReadinessListResponse.parse({
+        agents: agents.map((agent, index) => ({ agentId: agent.id, readiness: readiness[index] })),
+      }),
     );
   });
 

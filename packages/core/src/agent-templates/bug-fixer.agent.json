@@ -57,9 +57,12 @@
     "repository": "required",
     "worksWellWith": "pr-reviewer",
     "wontDoWithoutAsking": [
-      "Merge a pull request",
-      "Change behaviour people rely on",
-      "Touch security, data or billing code"
+      {
+        "text": "Merge a pull request",
+        "permission": "block",
+        "connector": "github.com",
+        "tools": ["merge_pull_request", "pull_request_merge"]
+      }
     ],
     "firstMessage": "You were just turned on. In three short lines, say what you do and what starts you, then list the open issues labelled bug that you can see in the repository you work on, newest first, at most five. Don't fix anything yet.",
     "firstJob": "Fix the oldest open issue labelled bug."

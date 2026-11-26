@@ -49,7 +49,7 @@
     ],
     "repository": null,
     "worksWellWith": null,
-    "wontDoWithoutAsking": ["Change feature flags or experiments", "Change tracking"],
+    "wontDoWithoutAsking": [],
     "firstMessage": "You were just turned on. In three short lines, say what you do and when you report, then write a first short report on last week's product analytics.",
     "firstJob": "Find where most new users drop off."
   }

@@ -7,11 +7,13 @@ import {
 } from "@opengeni/contracts";
 
 import {
+  githubSetupFacts,
+  isAgentSetupIncompleteCause,
+  requireAgentTriggerReady,
   setupConnectionFacts,
-  triggerAgentIdOf,
   viewerCanConnectItem,
   type SetupViewerRights,
-} from "../src/agent-setup-readiness";
+} from "../src/domain/ready-made-setup-readiness";
 
 const GITHUB: SetupConnection = {
   provider: "github.com",
@@ -150,10 +152,55 @@ describe("setup readiness", () => {
     expect(viewerCanConnectItem(app, { ...LOCKED, githubManage: true })).toBe(true);
   });
 
-  test("finds the agent a trigger request starts", () => {
-    expect(triggerAgentIdOf({ agentConfig: { agentId: "a-1" } })).toBe("a-1");
-    expect(triggerAgentIdOf({ agentConfig: {} })).toBeNull();
-    expect(triggerAgentIdOf(null)).toBeNull();
+  test("an organization's connector that is unavailable here is for its admins", () => {
+    const orgItem = item({
+      id: "org",
+      providerDomain: "linear.app",
+      lifecycle: { status: "available", readiness: "unavailable", managedBy: "organization" },
+    });
+    expect(viewerCanConnectItem(orgItem, ADMIN)).toBe(false);
+    expect(viewerCanConnectItem(orgItem, MEMBER)).toBe(false);
+  });
+
+  test("GitHub isn't a catalog item: its own facts decide, even with an empty catalog", () => {
+    expect(
+      setupConnectionFacts([], GITHUB, LOCKED, { connected: true, canConnect: false }),
+    ).toEqual({ connected: true, canConnect: false, catalogItemId: null });
+    expect(
+      setupConnectionFacts([], GITHUB, LOCKED, { connected: false, canConnect: true }),
+    ).toEqual({ connected: false, canConnect: true, catalogItemId: null });
+    // Without GitHub facts an empty catalog means not connected.
+    expect(setupConnectionFacts([], GITHUB, ADMIN).connected).toBe(false);
+  });
+
+  test("who may connect GitHub: github:manage with the App configured, or personal GitHub", async () => {
+    const grant = { accountId: "acc", workspaceId: "ws", subjectId: null } as never;
+    const db = {} as never;
+    const none = { githubAppId: "", githubAppPrivateKey: "", githubPersonalOauthEnabled: false };
+    expect(
+      await githubSetupFacts({ db, settings: none as never }, grant, { githubManage: true }),
+    ).toEqual({ connected: false, canConnect: false });
+    const personal = { ...none, githubPersonalOauthEnabled: true };
+    expect(
+      await githubSetupFacts({ db, settings: personal as never }, grant, { githubManage: false }),
+    ).toEqual({ connected: false, canConnect: true });
+    // The App is configured but this workspace's installations can't be read: not connected.
+    const app = { ...none, githubAppId: "1", githubAppPrivateKey: "key" };
+    expect(
+      await githubSetupFacts({ db, settings: app as never }, grant, { githubManage: true }),
+    ).toEqual({ connected: false, canConnect: true });
+    expect(
+      await githubSetupFacts({ db, settings: app as never }, grant, { githubManage: false }),
+    ).toEqual({ connected: false, canConnect: false });
+  });
+
+  test("a trigger with no agent, or a check that can't be read, never blocks", async () => {
+    const grant = { accountId: "acc", workspaceId: "ws", subjectId: "s" } as never;
+    const deps = { db: {} as never, settings: {} as never };
+    await expect(requireAgentTriggerReady(deps, grant, null)).resolves.toBeUndefined();
+    await expect(requireAgentTriggerReady(deps, grant, "agent-1")).resolves.toBeUndefined();
+    expect(isAgentSetupIncompleteCause({ code: "agent_setup_incomplete", missing: [] })).toBe(true);
+    expect(isAgentSetupIncompleteCause({ code: "other" })).toBe(false);
   });
 
   test("setup fields are optional with safe defaults, and strict", () => {

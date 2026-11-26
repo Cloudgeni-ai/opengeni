@@ -13,6 +13,16 @@
   "toolPermissions": [
     {
       "connector": "github.com",
+      "tool": "create_or_update_file",
+      "permission": "ask"
+    },
+    {
+      "connector": "github.com",
+      "tool": "delete_file",
+      "permission": "ask"
+    },
+    {
+      "connector": "github.com",
       "tool": "merge_pull_request",
       "permission": "block"
     },
@@ -20,6 +30,11 @@
       "connector": "github.com",
       "tool": "pull_request_merge",
       "permission": "block"
+    },
+    {
+      "connector": "github.com",
+      "tool": "push_files",
+      "permission": "ask"
     }
   ],
   "skills": [],
@@ -105,7 +120,20 @@
     ],
     "repository": "optional",
     "worksWellWith": null,
-    "wontDoWithoutAsking": ["Approve or merge a pull request", "Push to someone else's branch"],
+    "wontDoWithoutAsking": [
+      {
+        "text": "Merge a pull request",
+        "permission": "block",
+        "connector": "github.com",
+        "tools": ["merge_pull_request", "pull_request_merge"]
+      },
+      {
+        "text": "Push to a branch",
+        "permission": "ask",
+        "connector": "github.com",
+        "tools": ["push_files", "create_or_update_file", "delete_file"]
+      }
+    ],
     "firstMessage": "You were just turned on. In three short lines, say what you do and what starts you, then list the open pull requests you can see that wait for a review, at most five, oldest first.",
     "firstJob": "Review the oldest open pull request."
   }

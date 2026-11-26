@@ -3564,6 +3564,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Agent",
+      "AgentReadinessListResponse",
       "AgentResponse"
     ]
   },
@@ -5606,6 +5607,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningOverrideRecord"
+    ]
+  },
+  {
+    "id": "listAgentReadiness",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/readiness",
+    "request": [],
+    "response": [
+      "AgentReadinessListResponse"
     ]
   },
   {

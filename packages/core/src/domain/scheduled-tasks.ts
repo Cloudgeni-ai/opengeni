@@ -130,6 +130,7 @@ import {
 } from "./scheduled-task-audience";
 import { lockActiveCustomModelForAdmission, workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { agentTriggerTurnsOn, requireAgentTriggerReady } from "./ready-made-setup-readiness";
 import {
   resolveSessionToolPolicy,
   workspaceSessionToolPolicyDefaultServerIds,
@@ -374,6 +375,9 @@ export async function createValidatedScheduledTask(input: {
   // public schema until the next SDK major, so refuse it clearly.
   if (input.payload.agentConfig.knowledgeSource)
     throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
+  // A ready-made agent's trigger stays off until its required connections are on.
+  if (input.payload.status !== "paused")
+    await requireAgentTriggerReady(input, input.grant, input.payload.agentConfig.agentId);
   // The requested Opengeni tools and permissions become the task's creator
   // selection below; they are never stored in its agentConfig.
   const {
@@ -1597,6 +1601,17 @@ export async function validatedScheduledTaskUpdate(
   // The agent each run starts a chat with, checked against the automation as
   // it will be after this edit (its agent, run mode and who can see it).
   const nextAgentId = (update.agentConfig ?? input.existing.agentConfig).agentId;
+  // Turning a trigger on, or pointing an active one at another agent, needs
+  // that ready-made agent's required connections.
+  if (
+    agentTriggerTurnsOn({
+      previousStatus: input.existing.status,
+      previousAgentId: input.existing.agentConfig.agentId,
+      nextStatus: update.status ?? input.existing.status,
+      nextAgentId,
+    })
+  )
+    await requireAgentTriggerReady(input, input.grant, nextAgentId);
   if (
     nextAgentId !== input.existing.agentConfig.agentId ||
     runMode !== input.existing.runMode ||

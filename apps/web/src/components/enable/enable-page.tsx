@@ -21,10 +21,12 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   addAgentSuggestedTrigger,
   AgentTriggerDialog,
+  agentTriggerRunsAs,
   agentTriggerSaveError,
 } from "@opengeni/react/app/components/agents/agent-trigger-dialog";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { githubConnectedOf } from "@opengeni/react/app/lib/github-connect";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import { useNavigate } from "@opengeni/react/app/lib/navigation";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { installReadyMadeApp } from "@opengeni/react/app/lib/ready-made-apps";
@@ -46,7 +48,7 @@ import { EnableView, type EnableFact } from "./enable-view";
 
 type TriggerState =
   | { kind: "on" }
-  | { kind: "paused"; taskId: string }
+  | { kind: "paused"; taskId: string; runsAs: string }
   | { kind: "off" }
   | { kind: "unknown" };
 
@@ -95,6 +97,13 @@ function useAskAdmin(returnPath: string) {
     [returnPath],
   );
   return { asked, ask };
+}
+
+/** Ask an admin, only where there is one to ask: never in a Personal workspace. */
+function useCanAskAdmin(workspaceId: string): boolean {
+  const { workspaces, managedSelfContext } = useAppContext();
+  const workspace = (workspaces ?? []).find((row) => row.id === workspaceId) ?? null;
+  return !isPersonalWorkspace(workspace, managedSelfContext);
 }
 
 function useConnect(workspaceId: string, returnPath: string, label: string, reload: () => void) {
@@ -156,6 +165,7 @@ function AgentEnable({
 }: EnablePageProps & { subject: Extract<EnableSubject, { kind: "agent" }> }) {
   const context = useAppContext();
   const { client, accessContext } = context;
+  const subjectId = accessContext.subjectId;
   const navigate = useNavigate();
   const [data, setData] = useState<AgentData | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -207,7 +217,11 @@ function AgentEnable({
               ? { kind: "off" }
               : task.status === "active"
                 ? { kind: "on" }
-                : { kind: "paused", taskId: task.id },
+                : {
+                    kind: "paused",
+                    taskId: task.id,
+                    runsAs: agentTriggerRunsAs(task, subjectId),
+                  },
         });
       } catch (error) {
         if (live) setFailed(userErrorText(error, "Couldn't read this agent."));
@@ -216,7 +230,7 @@ function AgentEnable({
     return () => {
       live = false;
     };
-  }, [client, revision, setupTriggerName, templateKey, workspaceId]);
+  }, [client, revision, setupTriggerName, subjectId, templateKey, workspaceId]);
 
   const template = data?.template ?? null;
   const name = template?.name ?? subject.templateKey;
@@ -224,6 +238,7 @@ function AgentEnable({
     returnPath ??
     enableHref(workspaceId, { kind: "agent", templateKey: subject.templateKey }, "connect");
   const { asked, ask } = useAskAdmin(pagePath);
+  const canAskAdmin = useCanAskAdmin(workspaceId);
   const connect = useConnect(workspaceId, pagePath, title ?? name, reload);
   const readiness = data?.readiness
     ? withRequiredProviders(data.readiness, subject.requireProviders)
@@ -234,17 +249,21 @@ function AgentEnable({
   const agent = data?.agent ?? null;
   const on = justOn || data?.trigger.kind === "on";
   const canAdd = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
+  const triggersUnknown = data?.trigger.kind === "unknown";
   const blocker =
     data && !template
       ? "This ready-made agent isn't offered here."
-      : turnOnBlocker({
-          readiness,
-          canAdd,
-          canEdit: agent?.viewer.canEdit !== false,
-          added: agent !== null,
-          triggerFound: suggestion !== null,
-          subjectName: name,
-        });
+      : // Without its triggers, Turn on could add a second one.
+        triggersUnknown
+        ? "Couldn't check its triggers."
+        : turnOnBlocker({
+            readiness,
+            canAdd,
+            canEdit: agent?.viewer.canEdit !== false,
+            added: agent !== null,
+            triggerFound: suggestion !== null,
+            subjectName: name,
+          });
 
   const openAgent = (id: string) =>
     void navigate({
@@ -264,11 +283,12 @@ function AgentEnable({
     setData((current) => (current ? { ...current, agent: created } : current));
     return created;
   };
-  // After its trigger is on: it says hello on its own, in an ordinary chat.
-  const afterOn = async (target: Agent) => {
+  // After a new trigger is on: it says hello on its own, in an ordinary chat.
+  // Turning a paused one back on doesn't repeat the hello.
+  const afterOn = async (target: Agent, greet = true) => {
     setJustOn(true);
     const firstMessage = template?.setup?.firstMessage;
-    if (!firstMessage) return;
+    if (!greet || !firstMessage) return;
     try {
       const session = await client.createSession(workspaceId, {
         agentId: target.id,
@@ -287,7 +307,7 @@ function AgentEnable({
       const trigger = data?.trigger;
       if (trigger?.kind === "paused") {
         await client.resumeScheduledTask(workspaceId, trigger.taskId);
-        await afterOn(target);
+        await afterOn(target, false);
         return;
       }
       if (!suggestion.oneClick) {
@@ -358,8 +378,17 @@ function AgentEnable({
       label: "Agent",
       description: agent ? `${name}, already added.` : `Adds ${name}. Everyone here can edit it.`,
     },
-    ...(suggestion ? [{ label: "Trigger", description: `${suggestion.name}. Runs as you.` }] : []),
-    ...(template?.setup?.firstMessage
+    ...(suggestion
+      ? [
+          {
+            label: "Trigger",
+            description: `${suggestion.name}. ${
+              data?.trigger.kind === "paused" ? data.trigger.runsAs : "Runs as you"
+            }.`,
+          },
+        ]
+      : []),
+    ...(template?.setup?.firstMessage && data?.trigger.kind !== "paused"
       ? [{ label: "First message", description: "It says hello in a new chat right away." }]
       : []),
   ];
@@ -377,7 +406,14 @@ function AgentEnable({
         step={step}
         readiness={readiness}
         loading={data === null && failed === null}
-        loadError={failed ?? (data?.readinessFailed ? "Couldn't check its connections." : null)}
+        loadError={
+          failed ??
+          (data?.readinessFailed
+            ? "Couldn't check its connections."
+            : triggersUnknown
+              ? "Couldn't check its triggers."
+              : null)
+        }
         onRetry={reload}
         repository={template?.setup?.repository ?? null}
         facts={facts}
@@ -398,7 +434,7 @@ function AgentEnable({
         busy={busy}
         asked={asked}
         onConnect={(connection) => void connect(connection)}
-        onAskAdmin={ask}
+        onAskAdmin={canAskAdmin ? ask : undefined}
         onTurnOn={() => void turnOn()}
         onFinishLater={() => void finishLater()}
         done={{
@@ -498,6 +534,7 @@ function AppEnable({
     returnPath ??
     enableHref(workspaceId, { kind: "app", templateKey: subject.templateKey }, "connect");
   const { asked, ask } = useAskAdmin(pagePath);
+  const canAskAdmin = useCanAskAdmin(workspaceId);
   const name = template?.name ?? subject.templateKey;
   const connect = useConnect(workspaceId, pagePath, title ?? name, () =>
     setRevision((value) => value + 1),
@@ -561,7 +598,7 @@ function AppEnable({
       busy={busy}
       asked={asked}
       onConnect={(connection) => void connect(connection)}
-      onAskAdmin={ask}
+      onAskAdmin={canAskAdmin ? ask : undefined}
       onTurnOn={() => void turnOn()}
       done={{
         title: `${name} is ready.`,

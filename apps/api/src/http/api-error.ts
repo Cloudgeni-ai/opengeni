@@ -26,6 +26,7 @@ import {
 import {
   AuthenticationRequiredRefusal,
   ConnectionAccountSelectionError,
+  isAgentSetupIncompleteCause,
   MissingPermissionRefusal,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
@@ -148,6 +149,15 @@ export function approvalForbiddenHttpError(error: unknown): ApiHttpError | null 
 
 export function scheduledTaskTargetAccessHttpError(error: unknown): ApiHttpError | null {
   if (!(error instanceof HTTPException) || error.status !== 409) return null;
+  // A ready-made agent's trigger refused until its required connections are on.
+  if (isAgentSetupIncompleteCause(error.cause))
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: error.cause.code, missing: error.cause.missing },
+    });
   const result = ScheduledTaskTargetAccessChange.safeParse(error.cause);
   return result.success
     ? new ApiHttpError(409, {

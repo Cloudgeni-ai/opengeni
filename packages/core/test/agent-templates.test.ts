@@ -215,10 +215,9 @@ describe("ready-made agents", () => {
     }
   });
 
-  test("each declares what it needs, what it won't do and a first job", () => {
+  test("each declares what it needs and a first job", () => {
     for (const template of agentTemplates()) {
       expect(template.setup).not.toBeNull();
-      expect(template.setup?.wontDoWithoutAsking.length).toBeGreaterThan(0);
       expect(template.setup?.firstMessage).toBeTruthy();
       expect(template.setup?.firstJob).toBeTruthy();
     }
@@ -240,6 +239,25 @@ describe("ready-made agents", () => {
       "dependency-updater": ["github.com"],
       "product-analyst": ["posthog.com"],
     });
+  });
+
+  test("every line of what it won't do without asking is one of its own Can use rules", () => {
+    for (const template of agentTemplates()) {
+      for (const line of template.setup?.wontDoWithoutAsking ?? []) {
+        for (const tool of line.tools) {
+          const rule = template.toolPermissions.find(
+            (entry) => entry.connector === line.connector && entry.tool === tool,
+          );
+          expect({ template: template.key, line: line.text, tool, rule: rule?.permission }).toEqual(
+            { template: template.key, line: line.text, tool, rule: line.permission },
+          );
+        }
+      }
+    }
+    // The GitHub ones say it can't merge.
+    expect(
+      agentTemplateByKey("bug-fixer")?.setup?.wontDoWithoutAsking.map((line) => line.text),
+    ).toContain("Merge a pull request");
   });
 
   test("Triage listens where reports arrive and hands bugs to Bug fixer by name", () => {

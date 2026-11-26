@@ -5,7 +5,11 @@
  * one agent it works well with. A template without setup (an older server)
  * needs nothing listed. Pure.
  */
-import type { AgentTemplate } from "@opengeni/contracts";
+import {
+  SETUP_GUARDRAIL_UNATTENDED_NOTE,
+  setupGuardrailWords,
+  type AgentTemplate,
+} from "@opengeni/contracts";
 
 export interface ReadyMadeNeed {
   key: string;
@@ -17,7 +21,10 @@ export interface ReadyMadeNeed {
 
 export interface ReadyMadeSetupWords {
   does: string[];
+  /** Each line as it really behaves: "Merge a pull request: never". */
   wontDoWithoutAsking: string[];
+  /** Said when a line asks first: on its own it stops instead. */
+  guardrailNote: string | null;
   needs: ReadyMadeNeed[];
   /** The name of at most one agent it works well with; never required. */
   worksWellWith: string | null;
@@ -46,7 +53,10 @@ export function readyMadeAgentSetup(
   const partner = setup?.worksWellWith ?? null;
   return {
     does: template.description ? [template.description] : [],
-    wontDoWithoutAsking: [...(setup?.wontDoWithoutAsking ?? [])],
+    wontDoWithoutAsking: (setup?.wontDoWithoutAsking ?? []).map(setupGuardrailWords),
+    guardrailNote: (setup?.wontDoWithoutAsking ?? []).some((line) => line.permission === "ask")
+      ? SETUP_GUARDRAIL_UNATTENDED_NOTE
+      : null,
     needs,
     worksWellWith: partner ? (nameOf(partner) ?? null) : null,
   };

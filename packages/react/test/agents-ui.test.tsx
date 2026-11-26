@@ -2247,7 +2247,14 @@ test("a ready-made agent's preview says what it does, when and what it needs; on
           ],
           repository: null,
           worksWellWith: "bug-fixer",
-          wontDoWithoutAsking: ["Close an issue"],
+          wontDoWithoutAsking: [
+            {
+              text: "Close an issue",
+              permission: "block",
+              connector: "github.com",
+              tools: ["merge_pull_request"],
+            },
+          ],
           firstMessage: null,
           firstJob: null,
         },

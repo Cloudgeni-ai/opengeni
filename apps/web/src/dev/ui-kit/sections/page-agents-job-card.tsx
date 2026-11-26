@@ -70,7 +70,20 @@ const TEMPLATES = [
       connections: [github("Reads pull requests and posts reviews.")],
       repository: "optional",
       worksWellWith: "bug-fixer",
-      wontDoWithoutAsking: ["Approve or merge a pull request", "Push to someone else's branch"],
+      wontDoWithoutAsking: [
+        {
+          text: "Approve or merge a pull request",
+          permission: "block",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+        {
+          text: "Push to someone else's branch",
+          permission: "ask",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+      ],
       firstMessage: null,
       firstJob: null,
     },
@@ -97,7 +110,14 @@ const TEMPLATES = [
       connections: [github("Reads issues and opens pull requests.")],
       repository: "required",
       worksWellWith: null,
-      wontDoWithoutAsking: ["Merge its own pull request"],
+      wontDoWithoutAsking: [
+        {
+          text: "Merge its own pull request",
+          permission: "block",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+      ],
       firstMessage: null,
       firstJob: null,
     },
@@ -118,7 +138,14 @@ const TEMPLATES = [
       connections: [github("Opens the update pull request.")],
       repository: "required",
       worksWellWith: "pr-reviewer",
-      wontDoWithoutAsking: ["Merge the update"],
+      wontDoWithoutAsking: [
+        {
+          text: "Merge the update",
+          permission: "block",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+      ],
       firstMessage: null,
       firstJob: null,
     },
@@ -147,7 +174,20 @@ const TEMPLATES = [
       ],
       repository: null,
       worksWellWith: null,
-      wontDoWithoutAsking: ["Change feature flags or experiments", "Change tracking"],
+      wontDoWithoutAsking: [
+        {
+          text: "Change feature flags or experiments",
+          permission: "block",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+        {
+          text: "Change tracking",
+          permission: "block",
+          connector: "github.com",
+          tools: ["merge_pull_request"],
+        },
+      ],
       firstMessage: null,
       firstJob: null,
     },
@@ -398,6 +438,11 @@ function fixtureClient() {
     listAgentTemplates: async () => TEMPLATES,
     getAgentReadiness: async (_workspaceId: string, id: string) =>
       id === ANALYST.id ? ANALYST_READINESS : GITHUB_READY,
+    listAgentReadiness: async () =>
+      AGENTS.map((entry) => ({
+        agentId: entry.id,
+        readiness: entry.id === ANALYST.id ? ANALYST_READINESS : GITHUB_READY,
+      })),
     getAgentTemplateReadiness: async (_workspaceId: string, key: string) =>
       key === "product-analyst" ? ANALYST_READINESS : GITHUB_READY,
     listScheduledTasks: async (_workspaceId: string, request: { agentId?: string } = {}) =>
