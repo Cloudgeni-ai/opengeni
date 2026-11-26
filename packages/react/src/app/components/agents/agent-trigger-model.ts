@@ -188,10 +188,13 @@ export function agentTriggerOffers(input: {
   const covered = new Set(
     fromTemplate.map((offer) => eventTypes(offer.suggestion)).filter((s) => s !== ""),
   );
+  // A schedule isn't offered to every agent: Add trigger's "On a schedule"
+  // sets one up, with its time and repository.
   const common: AgentTriggerOffer[] = availableCommonTriggers({
     usesGitHub: input.usesGitHub,
     agentName: input.agentName,
   })
+    .filter((entry) => entry.trigger.schedule === null)
     .filter((entry) => !covered.has(eventTypes(entry.trigger)))
     .map((entry) => ({ key: `common-${entry.key}`, suggestion: entry.trigger, common: entry.key }));
   return (

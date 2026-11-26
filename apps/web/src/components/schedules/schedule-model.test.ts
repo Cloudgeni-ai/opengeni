@@ -219,9 +219,21 @@ describe("simplified interface templates", () => {
     // The full interface keeps the shared templates.
     expect(scheduleTemplates(false).map((template) => template.id)).toEqual([
       "morning-brief",
-      "dependency-pr",
       "cost-check",
     ]);
+  });
+
+  test("a template a ready-made agent does is offered under Agents, not here", () => {
+    const ids = scheduleTemplates(true).map((template) => template.id);
+    for (const id of ["pr-review", "issue-triage", "dependency-pr"]) {
+      expect(ids).not.toContain(id);
+      // A link to it still opens the form.
+      expect(templateById(id)?.readyMadeAgent).toBeTruthy();
+    }
+    expect(ids).toEqual(["meeting-notes", "automation-failed", "morning-brief", "cost-check"]);
+    expect(templateById("pr-review")?.readyMadeAgent).toBe("pr-reviewer");
+    expect(templateById("issue-triage")?.readyMadeAgent).toBe("triage");
+    expect(templateById("dependency-pr")?.readyMadeAgent).toBe("dependency-updater");
   });
 
   test("they run on a schedule and leave sending to the person", () => {

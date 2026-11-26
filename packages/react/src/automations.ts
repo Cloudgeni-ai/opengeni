@@ -38,6 +38,7 @@ export {
   automationTemplateSourceChoice,
   automationTemplateSourceId,
   automationTemplatesFor,
+  automationTemplatesWithoutAgent,
   automationTemplateWhenWords,
   builtinAutomationTemplates,
   eventSourceFitsTemplate,

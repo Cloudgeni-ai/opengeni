@@ -9,10 +9,11 @@ import { PlusIcon, Trash2Icon } from "lucide-react";
 import { slackAgentCallText } from "@opengeni/contracts";
 import type { Agent, AgentTemplate, KnowledgeEntrySummary, ScheduledTask } from "@opengeni/sdk";
 
-import { automationWhenWords } from "../../../components/automations/automation-model";
 import { userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
-import { DetailSection } from "../../../ui/detail-sheet";
+import { inAppClick } from "../../../ui/in-app-click";
+import { RelativeTime } from "../../../ui/relative-time";
+import { Section } from "../../../ui/section";
 import { RowButton } from "../../../ui/page-actions";
 import { SettingRow, SettingRowSkeleton } from "../../../ui/setting-row";
 import { Switch } from "../../../ui/switch";
@@ -21,7 +22,9 @@ import { useAppContext } from "../../app-context";
 import { agentErrorCode } from "../../lib/agents";
 import { t } from "../../lib/console-text";
 import { useNavigate } from "../../lib/navigation";
+import { hasWorkspacePermission } from "../../lib/permissions";
 import { toast } from "../../lib/toast";
+import { usePersonName } from "../../lib/use-person-name";
 import { AgentCanUse as AgentCanUseSection } from "./agent-can-use";
 import { AgentSkills as AgentSkillsSection } from "./agent-skills";
 import { AgentTriggerDialog } from "./agent-trigger-dialog";
@@ -36,6 +39,13 @@ import {
   type AgentTriggerOffer,
   type AgentTriggerChat,
 } from "./agent-trigger-model";
+import {
+  agentTriggerAccess,
+  agentTriggerDetails,
+  agentTriggerRunsAs,
+  agentTriggerSentence,
+  agentTriggerShapeOfTask,
+} from "./agent-trigger-words";
 
 const VERSION_CONFLICT =
   "Someone else changed this agent. Reload to see their change, then try again.";
@@ -59,23 +69,110 @@ export function agentTriggers(tasks: readonly ScheduledTask[], agentId: string):
   return tasks.filter((task) => task.agentConfig.agentId === agentId);
 }
 
-export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
+/** The agent's triggers, read once for its page: null while they load. */
+export function useAgentTriggerTasks(workspaceId: string, agentId: string) {
+  const { client } = useAppContext();
+  const [tasks, setTasks] = useState<ScheduledTask[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    client.listScheduledTasks(workspaceId, { agentId, limit: 200 }).then(
+      (list) => live && setTasks(agentTriggers(list, agentId)),
+      () => live && setTasks([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [agentId, client, workspaceId]);
+  return { tasks, setTasks };
+}
+
+/** When each trigger last started a run, read per trigger; absent until known or never. */
+function useLastRuns(workspaceId: string, tasks: readonly ScheduledTask[] | null) {
+  const { client } = useAppContext();
+  const [lastRuns, setLastRuns] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const ids = (tasks ?? []).map((task) => task.id).join(",");
+  useEffect(() => {
+    if (!ids) return;
+    let live = true;
+    for (const id of ids.split(",")) {
+      client.listScheduledTaskRuns(workspaceId, id, { limit: 1 }).then(
+        (runs) => {
+          const fired = runs[0]?.firedAt;
+          if (live && fired) setLastRuns((current) => new Map(current).set(id, fired));
+        },
+        () => undefined,
+      );
+    }
+    return () => {
+      live = false;
+    };
+  }, [client, ids, workspaceId]);
+  return lastRuns;
+}
+
+/** The catalog's wording of the events a trigger listens to, per source: "A chat stopped with an error". */
+function useEventDescriptions(workspaceId: string, sourceIds: readonly string[]) {
+  const { client } = useAppContext();
+  const [described, setDescribed] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const key = [...new Set(sourceIds)].sort().join(",");
+  useEffect(() => {
+    if (!key) return;
+    let live = true;
+    for (const sourceId of key.split(",")) {
+      client.listEventSourceTypes(workspaceId, sourceId).then(
+        (types) =>
+          live &&
+          setDescribed((current) => {
+            const next = new Map(current);
+            for (const type of types) next.set(`${sourceId} ${type.type}`, type.description);
+            return next;
+          }),
+        () => undefined,
+      );
+    }
+    return () => {
+      live = false;
+    };
+  }, [client, key, workspaceId]);
+  return (sourceId: string, eventType: string) => described.get(`${sourceId} ${eventType}`);
+}
+
+/**
+ * When it works: each trigger as one readable sentence, whose access it runs
+ * with and when it last ran, with a switch and remove for whoever may change
+ * it; then a few suggestions still to set up, and Add trigger.
+ */
+export function AgentWhenItWorks({
+  agent,
+  workspaceId,
+  tasks,
+  setTasks,
+}: {
+  agent: Agent;
+  workspaceId: string;
+  tasks: ScheduledTask[] | null;
+  setTasks: (update: (current: ScheduledTask[] | null) => ScheduledTask[] | null) => void;
+}) {
   const context = useAppContext();
   const { productName } = useSimplifiedInterface();
-  const { client } = context;
+  const { client, accessContext } = context;
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<ScheduledTask[] | null>(null);
+  const nameOf = usePersonName(workspaceId);
   const [template, setTemplate] = useState<AgentTemplate | null>(null);
-  const [sources, setSources] = useState<{ id: string; name: string }[]>([]);
+  const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   // The light Add trigger dialog, blank or at one offer.
   const [adding, setAdding] = useState<{ offer?: AgentTriggerOffer } | null>(null);
+  const viewer = {
+    subjectId: accessContext.subjectId,
+    canManage: hasWorkspacePermission(accessContext, workspaceId, "scheduled_tasks:manage"),
+    isAdmin: hasWorkspacePermission(accessContext, workspaceId, "workspace:admin"),
+  };
+  // Adding a trigger is adding an automation: anyone who may add automations
+  // here can, whether or not they may edit the agent (docs/agents.md).
+  const canAdd = viewer.canManage;
   useEffect(() => {
     let live = true;
-    client.listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 }).then(
-      (list) => live && setTasks(agentTriggers(list, agent.id)),
-      () => live && setTasks([]),
-    );
     // Names the sources its triggers listen to.
     client.listEventSources(workspaceId).then(
       (list) => live && setSources(list),
@@ -91,7 +188,14 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
     return () => {
       live = false;
     };
-  }, [agent.id, agent.templateKey, client, workspaceId]);
+  }, [agent.templateKey, client, workspaceId]);
+  const lastRuns = useLastRuns(workspaceId, tasks);
+  const eventDescription = useEventDescriptions(
+    workspaceId,
+    (tasks ?? []).flatMap((task) =>
+      (task.events?.triggers ?? []).map((trigger) => trigger.sourceId),
+    ),
+  );
   // The full form starts at the suggestion, or at the source picked in the dialog.
   const openFullForm = (
     offer: AgentTriggerOffer | undefined,
@@ -196,11 +300,14 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
   });
   // A shared agent already starts when someone asks it in Slack.
   const inSlack = agent.visibility !== "private" && agent.slack.length > 0;
+  const now = new Date();
   return (
-    <DetailSection
-      title="Starts when"
+    <Section
+      title="When it works"
+      variant="group"
+      data-agent-when-it-works=""
       action={
-        agent.viewer.canEdit ? (
+        canAdd ? (
           <Button type="button" variant="outline" size="sm" onClick={() => setAdding({})}>
             <PlusIcon />
             Add trigger
@@ -211,44 +318,79 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
       {tasks === null ? (
         <SettingRowSkeleton />
       ) : tasks.length === 0 && offers.length === 0 && !inSlack ? (
-        <p className="m-0 text-sm text-fg-muted">Only when someone starts a chat with it.</p>
+        <SettingRow label="Only when someone starts a chat with it" />
       ) : null}
       {inSlack ? (
         <SettingRow
           data-agent-slack-trigger=""
-          label="When mentioned in Slack"
-          description={`Always on: ${slackAgentCallText(agent.name)}`}
+          label={`When someone mentions ${agent.name} in Slack`}
+          description={`Runs as the person who mentions it · ${slackAgentCallText(agent.name)}`}
         />
       ) : null}
-      {tasks?.map((task) => (
-        <SettingRow
-          key={task.id}
-          data-agent-trigger=""
-          label={automationWhenWords(t, task, sources, new Date())}
-          description={task.name}
-          control={
-            <div className="flex items-center gap-1">
-              <Switch
-                aria-label={`${task.name} on`}
-                checked={task.status === "active"}
-                pending={busy === task.id}
-                onCheckedChange={(on) => void setOn(task, on)}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Remove ${task.name}`}
-                disabled={busy === task.id}
-                onClick={() => void remove(task)}
+      {tasks?.map((task) => {
+        const shape = agentTriggerShapeOfTask(task, sources);
+        const sentence = agentTriggerSentence(t, shape, {
+          agentName: agent.name,
+          now,
+          eventDescription,
+        });
+        const access = agentTriggerAccess(task, viewer);
+        const lastRun = lastRuns.get(task.id);
+        const href = `/workspaces/${encodeURIComponent(workspaceId)}/automations/${encodeURIComponent(task.id)}`;
+        return (
+          <SettingRow
+            key={task.id}
+            data-agent-trigger=""
+            label={
+              <a
+                href={href}
+                title={agentTriggerDetails(shape) ?? undefined}
+                onClick={inAppClick(() => void navigate({ href }))}
+                className="text-fg no-underline hover:underline"
+                data-agent-trigger-sentence=""
               >
-                <Trash2Icon />
-              </Button>
-            </div>
-          }
-        />
-      ))}
-      {agent.viewer.canEdit
+                {sentence}
+              </a>
+            }
+            description={
+              <span data-agent-trigger-meta="">
+                {agentTriggerRunsAs(task, accessContext.subjectId, nameOf)}
+                {" · "}
+                {lastRun ? (
+                  <RelativeTime date={lastRun} prefix="last ran" inSentence />
+                ) : (
+                  "hasn't run yet"
+                )}
+              </span>
+            }
+            control={
+              <div className="flex items-center gap-1">
+                <Switch
+                  aria-label={`${sentence} on`}
+                  checked={task.status === "active"}
+                  pending={busy === task.id}
+                  disabled={!access.canToggle}
+                  disabledReason={access.reason ?? undefined}
+                  onCheckedChange={(on) => void setOn(task, on)}
+                />
+                {access.canRemove ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`Remove ${sentence}`}
+                    disabled={busy === task.id}
+                    onClick={() => void remove(task)}
+                  >
+                    <Trash2Icon />
+                  </Button>
+                ) : null}
+              </div>
+            }
+          />
+        );
+      })}
+      {canAdd
         ? offers.map((offer) => (
             <SettingRow
               key={offer.key}
@@ -258,9 +400,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
               description={
                 offer.common === "mentioned_on_pull_request"
                   ? mentionHint(agent.name, productName)
-                  : offer.suggestion.oneClick
-                    ? undefined
-                    : "Off until you choose where it listens."
+                  : "Suggested"
               }
               control={
                 offer.suggestion.oneClick ? (
@@ -280,7 +420,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
             />
           ))
         : null}
-      {agent.viewer.canEdit ? (
+      {canAdd ? (
         <AgentTriggerDialog
           agent={agent}
           workspaceId={workspaceId}
@@ -298,7 +438,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
           onAddSource={addSource}
         />
       ) : null}
-    </DetailSection>
+    </Section>
   );
 }
 
