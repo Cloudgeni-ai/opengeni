@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { normalizeError } from "../lib/error-message";
+import { MOUNT_READ_REUSE_MS } from "../lib/mount-read-reuse";
 import { usePageLiveActivity } from "./internal";
 
 /**
@@ -85,7 +86,6 @@ export type SharedQueryResult<T> = SharedQuerySnapshot<T> & {
 /** Records data read some other way; false when the write was refused. */
 export type SharedQueryWriter = <T>(parts: SharedQueryKey, data: T) => boolean;
 
-const DEFAULT_STALE_TIME_MS = 10_000;
 const DEFAULT_RETAIN_MS = 10 * 60_000;
 
 type Loader<T> = (signal: AbortSignal) => Promise<T>;
@@ -516,13 +516,14 @@ export async function fetchSharedQuery<T>(
   }
   const entry = existing ?? getOrCreate(scope, key, false);
   if (!options.fresh) {
-    const staleTimeMs = options.staleTimeMs ?? DEFAULT_STALE_TIME_MS;
-    if (entry.snapshot.data !== null && !isStale(entry, staleTimeMs)) {
-      return entry.snapshot.data as T;
-    }
-    if (entry.inFlight) {
+    // A read in flight is newer than retained data (for example a fresh read
+    // after a change), so join it before reusing what is retained.
+    while (entry.inFlight) {
       const generation = entry.generation;
-      await entry.inFlight;
+      await entry.inFlight.catch(() => undefined);
+      // A newer read replaced the one joined: wait for that one instead.
+      const newer = entry.inFlight as Promise<void> | null;
+      if (entry.generation !== generation && newer) continue;
       if (
         entry.generation === generation &&
         entry.snapshot.error === null &&
@@ -531,6 +532,11 @@ export async function fetchSharedQuery<T>(
       ) {
         return entry.snapshot.data as T;
       }
+      break;
+    }
+    const staleTimeMs = options.staleTimeMs ?? MOUNT_READ_REUSE_MS;
+    if (!entry.inFlight && entry.snapshot.data !== null && !isStale(entry, staleTimeMs)) {
+      return entry.snapshot.data as T;
     }
   }
   return await readInto(state, entry, load);
@@ -732,7 +738,7 @@ export function useSharedQuery<T>(
   useLayoutEffect(() => {
     binding.current = { key, load: load as Loader<unknown> };
   }, [key, load]);
-  const staleTimeMs = options.staleTimeMs ?? DEFAULT_STALE_TIME_MS;
+  const staleTimeMs = options.staleTimeMs ?? MOUNT_READ_REUSE_MS;
   const retainMs = options.retainMs ?? DEFAULT_RETAIN_MS;
   const pollIntervalMs = options.pollIntervalMs;
 
@@ -825,7 +831,7 @@ export function useSharedQueryValue<T>(
       enabled: false,
       pageLive: true,
       pollIntervalMs: undefined,
-      staleTimeMs: DEFAULT_STALE_TIME_MS,
+      staleTimeMs: MOUNT_READ_REUSE_MS,
       retainMs: DEFAULT_RETAIN_MS,
     };
     registerSubscriber(scope, entry, subscriber);

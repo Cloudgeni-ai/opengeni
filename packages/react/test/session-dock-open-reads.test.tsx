@@ -1,9 +1,9 @@
 // Opening a chat reads the dock's links and artifacts once. History arriving
 // after the dock mounts (the first page, then older pages) is not a change:
-// only events newer than the loaded history re-read them.
+// only events newer than the loaded history re-read them. That the route
+// mounts the dock once is covered by session-dock-mounts-once.test.tsx.
 import type { SessionEvent } from "@opengeni/sdk";
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import type { ReactNode } from "react";
 
 import { AppContext, type AppContextValue } from "../src/app/app-context";
@@ -94,19 +94,5 @@ describe("dock reads when a chat opens", () => {
     expect(latestSequenceAfter(tail, 41, isTurnEnd)).toBe(0);
     expect(latestSequenceAfter([event(2, "turn.completed"), ...tail], 41, isTurnEnd)).toBe(0);
     expect(latestSequenceAfter([...tail, event(50, "turn.completed")], 41, isTurnEnd)).toBe(50);
-  });
-
-  test("the session route renders one dock across loading and loaded", () => {
-    // A dock that moves between parent slots, or loses its key, remounts once
-    // the history arrives and repeats every dock read (capabilities, capture,
-    // links, artifacts) a few hundred milliseconds after opening the chat.
-    const source = readFileSync(new URL("../src/app/routes/session.tsx", import.meta.url), "utf8");
-    const keyed = source.match(/<SessionDock\s+key=\{SESSION_DOCK_KEY\}/g) ?? [];
-    const all = source.match(/<SessionDock\b/g) ?? [];
-    expect(all.length).toBe(2);
-    expect(keyed.length).toBe(all.length);
-    expect(source).toContain(
-      "<SessionStartupProvider session={null}>{loadingView}</SessionStartupProvider>",
-    );
   });
 });

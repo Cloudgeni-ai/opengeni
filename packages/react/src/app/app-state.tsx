@@ -45,7 +45,7 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
-import { rememberClientConfigRead } from "../lib/client-config-read";
+import { noteClientCreated, rememberClientConfigRead } from "../lib/client-config-read";
 import { isTransientServiceFailure } from "../lib/transient-retry";
 import { createQuietRetry } from "./lib/quiet-retry";
 import { claimHumanInputDraftOwner } from "../human-input-draft-store";
@@ -441,8 +441,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
-  // When the bootstrap read `clientConfig` (epoch ms).
-  const clientConfigReadAt = useRef(0);
+  // When the bootstrap's read of `clientConfig` started and settled (epoch ms).
+  const clientConfigRead = useRef({ startedAt: 0, readAt: 0 });
   const [workspaceConfig, setWorkspaceConfig] = useState<WorkspaceClientConfig | undefined>(
     undefined,
   );
@@ -667,16 +667,19 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     // The version is an explicit identity fence: credentials are read lazily,
     // but consumers need a new client object to reconnect hooks and streams.
     void accessKeyVersion;
-    return createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
+    const created = createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
+    noteClientCreated(created);
+    return created;
   }, [accessKeyVersion, createOpenGeniClient, sessionChannelProjectionAuthority]);
   // Account lists and usage limits read through this client stay across
   // navigation and are cleared with it when an identity change replaces it;
   // "Available in" changes re-read them.
   useConsoleSharedQueries(client);
   // The bootstrap's config read also serves the API client's first contract
-  // check and capability flags, which would otherwise read it again moments later.
+  // check and capability flags, which would otherwise read it again moments
+  // later. Only a read started after this client was created is taken, briefly.
   useEffect(() => {
-    if (clientConfig) rememberClientConfigRead(client, clientConfig, clientConfigReadAt.current);
+    if (clientConfig) rememberClientConfigRead(client, clientConfig, clientConfigRead.current);
   }, [client, clientConfig]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
@@ -835,6 +838,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     if (appStateOptions.bootstrapSuspended) return;
     let cancelled = false;
     let stopDeploymentRefresh = () => {};
+    let startedAt = 0;
     const controller = new AbortController();
     // Let synchronous effect cleanup (including StrictMode's discarded mount)
     // cancel before starting I/O. Active requests still abort on real cleanup.
@@ -842,7 +846,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       .then(() =>
         readBootstrap({
           context: "client_configuration",
-          request: () => fetchClientConfig(controller.signal),
+          request: () => {
+            startedAt = Date.now();
+            return fetchClientConfig(controller.signal);
+          },
           signal: controller.signal,
           // An update parks the API for a while: say so calmly and continue
           // on our own as soon as it answers.
@@ -861,7 +868,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         if (cancelled) {
           return;
         }
-        clientConfigReadAt.current = Date.now();
+        clientConfigRead.current = { startedAt, readAt: Date.now() };
         setClientConfig(config);
         setConfigError(null);
         setModel(config.defaultModel);

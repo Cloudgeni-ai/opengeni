@@ -16,6 +16,7 @@ import { toast } from "./toast";
 import { useAppContext, type AppContextValue } from "../app-context";
 import { userErrorText } from "../../ui/api-error";
 import { inboxBillingAccountIds } from "./inbox-billing";
+import { MOUNT_READ_REUSE_MS } from "../../lib/mount-read-reuse";
 
 /**
  * The inbox as the app shows it: items from chats and notices about something
@@ -46,8 +47,6 @@ type InboxClient = Pick<ChatClient<OpenGeniClient>, "listInbox"> &
 
 const EMPTY: InboxState = { data: null, error: null, loading: true };
 const NO_INBOX: InboxState = { data: null, error: null, loading: false };
-/** A reader mounting this soon after the last good read shows it without reading again. */
-const INBOX_MOUNT_REUSE_MS = 10_000;
 
 /**
  * Only a person has an inbox: a signed-in person, or a local install's one
@@ -225,7 +224,7 @@ export function useInbox(
       if (document.visibilityState === "hidden") return;
       void store.refresh();
     };
-    if (document.visibilityState !== "hidden") void store.refreshUnlessRecent(INBOX_MOUNT_REUSE_MS);
+    if (document.visibilityState !== "hidden") void store.refreshUnlessRecent(MOUNT_READ_REUSE_MS);
     const timer = window.setInterval(refresh, pollMs);
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);

@@ -237,7 +237,9 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/machine-swap-copy.ts"))).toBe(true);
     // The new-chat controller resolves its model-level fallback without a renderer.
     expect(reactSources.some((id) => id.endsWith("/src/model-levels.ts"))).toBe(true);
-    expect(reactSources.length).toBe(68);
+    // One reuse window for reads mounting moments apart (a constant, no imports).
+    expect(reactSources.some((id) => id.endsWith("/src/lib/mount-read-reuse.ts"))).toBe(true);
+    expect(reactSources.length).toBe(69);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

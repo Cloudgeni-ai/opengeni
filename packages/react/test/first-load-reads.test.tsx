@@ -14,11 +14,12 @@ import {
   loadConnectionHealthAccounts,
   loadWorkspaceCapabilities,
 } from "../src/app/lib/capabilities";
-import { retainSharedQueries } from "../src/hooks/shared-query";
+import { fetchSharedQuery, retainSharedQueries } from "../src/hooks/shared-query";
 import { useChannels } from "../src/hooks/use-channels";
 import {
   cachedClientConfigRead,
   joinClientConfigRead,
+  noteClientCreated,
   rememberClientConfigRead,
 } from "../src/lib/client-config-read";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
@@ -133,7 +134,13 @@ describe("first load", () => {
 
     // The bootstrap reads the config itself; the API client's first contract
     // check and the capability flags follow a moment later.
-    rememberClientConfigRead(client, { apiContractRevision: "contract" }, Date.now());
+    const startedAt = Date.now();
+    noteClientCreated(client, startedAt);
+    rememberClientConfigRead(
+      client,
+      { apiContractRevision: "contract" },
+      { startedAt, readAt: Date.now() },
+    );
     await joinClientConfigRead(client, undefined, { settledWithinMs: 10_000 });
     await cachedClientConfigRead(client);
 
@@ -183,5 +190,53 @@ describe("first load", () => {
     expect(requests.get("GET /v1/inbox")).toBe(2);
     expect(requests.get("GET /v1/config/client")).toBe(1);
     await view.unmount();
+  });
+
+  test("a startup config read before the client existed, or an old one, is not taken", async () => {
+    const config = { apiContractRevision: "contract" };
+    // Read before this client was created (before sign-in, or another identity's).
+    const early = countingClient();
+    const readStarted = Date.now() - 1;
+    noteClientCreated(early.client, Date.now());
+    rememberClientConfigRead(early.client, config, { startedAt: readStarted, readAt: Date.now() });
+    await cachedClientConfigRead(early.client);
+    expect(early.requests.get("GET /v1/config/client")).toBe(1);
+
+    // Read by this client's host, but past the startup window.
+    const late = countingClient();
+    const created = Date.now() - 60_000;
+    noteClientCreated(late.client, created);
+    rememberClientConfigRead(late.client, config, { startedAt: created, readAt: created + 1 });
+    await joinClientConfigRead(late.client, undefined, { settledWithinMs: 10_000 });
+    expect(late.requests.get("GET /v1/config/client")).toBe(1);
+
+    // A client the host never noted takes nothing.
+    const unknown = countingClient();
+    rememberClientConfigRead(unknown.client, config, { startedAt: Date.now(), readAt: Date.now() });
+    await cachedClientConfigRead(unknown.client);
+    expect(unknown.requests.get("GET /v1/config/client")).toBe(1);
+  });
+
+  test("a read reusing recent data joins a fresh read in flight", async () => {
+    const scope = {};
+    const stop = retainSharedQueries(scope);
+    try {
+      let version = "old";
+      let finish!: () => void;
+      const load = async () => {
+        if (version === "new") await new Promise<void>((resolve) => (finish = resolve));
+        return version;
+      };
+      expect(await fetchSharedQuery(scope, ["accounts"], load)).toBe("old");
+      // A connect finishes: the next read is fresh, and still in flight.
+      version = "new";
+      const fresh = fetchSharedQuery(scope, ["accounts"], load, { fresh: true });
+      const reuse = fetchSharedQuery(scope, ["accounts"], load);
+      finish();
+      expect(await fresh).toBe("new");
+      expect(await reuse).toBe("new");
+    } finally {
+      stop();
+    }
   });
 });

@@ -17,6 +17,7 @@ import { useRetainedReads } from "./hooks/shared-query";
 import { OpenGeniContext } from "./session-context";
 import { ErrorMessageContext, type ErrorMessageFormatter } from "./lib/error-message";
 import { joinClientConfigRead } from "./lib/client-config-read";
+import { MOUNT_READ_REUSE_MS } from "./lib/mount-read-reuse";
 import {
   OpenGeniMessagesProvider,
   useOpenGeniText,
@@ -28,8 +29,6 @@ export type { ErrorMessageFormatter } from "./lib/error-message";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
 const CONTRACT_RELOAD_STORAGE_PREFIX = "opengeni.reloadForApiContract:";
-/** A contract check takes a config read that settled this recently (the host's startup read). */
-const CONTRACT_CHECK_REUSE_MS = 10_000;
 
 export type OpenGeniProviderProps<Client extends ChatClient = OpenGeniClient> = {
   client: SessionClientLike<Client>;
@@ -148,7 +147,8 @@ export function OpenGeniProvider({
       // same endpoint on mount), or one a moment old (the host's startup read),
       // instead of sending a second request. An older one is read again.
       const config = await joinClientConfigRead(client, undefined, {
-        settledWithinMs: CONTRACT_CHECK_REUSE_MS,
+        // A config read that settled moments ago (the host's startup read).
+        settledWithinMs: MOUNT_READ_REUSE_MS,
       });
       if (strictContract && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
         throw new OpenGeniApiContractMismatchError(

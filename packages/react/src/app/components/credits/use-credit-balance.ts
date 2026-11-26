@@ -1,7 +1,8 @@
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useSharedQuery } from "../../../hooks/shared-query";
+import { MOUNT_READ_REUSE_MS } from "../../../lib/mount-read-reuse";
 import { billingSummaryQueryKey } from "../../lib/billing-summary-read";
 
 /**
@@ -32,8 +33,14 @@ export function useCreditBalance(
   const summary = useSharedQuery(client, billingSummaryQueryKey(key ?? ""), load, {
     enabled: key !== null,
   });
+  // The rail may hold a summary read a while ago: while it is re-read, the
+  // balance is not settled, so a notice waits for the current one.
+  const [mountedAt] = useState(() => Date.now());
   if (!key) return { balance: null, settled: true };
   if (summary.loading) return { balance: null, settled: false };
+  const current =
+    summary.updatedAt !== null && summary.updatedAt >= mountedAt - MOUNT_READ_REUSE_MS;
+  if (summary.fetching && !current && !summary.error) return { balance: null, settled: false };
   const data = summary.error ? null : summary.data;
   return {
     balance: data

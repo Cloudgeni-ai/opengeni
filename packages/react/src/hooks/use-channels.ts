@@ -11,9 +11,7 @@ import { useCallback, useMemo, useRef, useSyncExternalStore } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { channelCacheFor } from "./channel-cache";
 import { useMutationRunner, usePolledValue } from "./internal";
-
-/** A consumer's first read takes a list read this recently by another consumer. */
-const FIRST_READ_REUSE_MS = 10_000;
+import { MOUNT_READ_REUSE_MS } from "../lib/mount-read-reuse";
 
 export type UseChannelsOptions<Client extends ChatClient = OpenGeniClient> =
   ClientOverride<Client> & {
@@ -55,7 +53,7 @@ export function useChannels(
   const load = useCallback(async () => {
     const first = readOnce.current !== cache;
     readOnce.current = cache;
-    const shared = first ? cache.recentLoad(FIRST_READ_REUSE_MS) : null;
+    const shared = first ? cache.recentLoad(MOUNT_READ_REUSE_MS) : null;
     if (shared) return (await shared) as Channel[];
     const read = (async () => {
       const ticket = cache.beginLoad();

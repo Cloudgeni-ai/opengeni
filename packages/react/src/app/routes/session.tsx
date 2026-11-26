@@ -608,6 +608,9 @@ export function SessionRoute({
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
   useLiveSessionEvents(sessionId, events, initialHistoryReady, onEvent);
+  // The dock's own reads (links, artifacts) wait for the history, or for its
+  // read to fail, so a chat whose history can't load still shows them.
+  const dockHistoryReady = initialHistoryReady || Boolean(streamError && !initialLoading);
   // The embedding host follows the open chat from this stream.
   // A chat in a panel beside another view isn't the page's open chat.
   useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading }, routed);
@@ -1707,7 +1710,7 @@ export function SessionRoute({
           sessionId={sessionId}
           session={null}
           events={events}
-          historyReady={initialHistoryReady}
+          historyReady={dockHistoryReady}
           connectionState={connectionState}
           primary={
             session && streamError && !initialLoading ? (
@@ -1910,7 +1913,7 @@ export function SessionRoute({
         sessionId={sessionId}
         session={session}
         events={events}
-        historyReady={initialHistoryReady}
+        historyReady={dockHistoryReady}
         connectionState={connectionState}
         primary={
           <ChatPaymentPages
@@ -2010,7 +2013,7 @@ type SessionDockProps = {
   sessionId: string;
   session: Session | null;
   events: SessionEvent[];
-  /** The chat's history has loaded once; the dock's own reads start then. */
+  /** The chat's history has loaded (or failed to) once; the dock's own reads start then. */
   historyReady: boolean;
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;

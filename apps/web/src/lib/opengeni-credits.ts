@@ -60,10 +60,16 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
   const plans = useSharedQuery(
     client,
     ["model-settings", "credits", accountId, "plans"],
-    async () => await client.getBillingSubscriptionPlans({ accountId }).catch(() => null),
+    // A failed read is an error, not an empty catalog: the row falls back to
+    // the basic label and the next poll reads it again.
+    async () => await client.getBillingSubscriptionPlans({ accountId }),
     { enabled: canRead && needsPlans, staleTimeMs: 60_000, pollIntervalMs: 60_000 },
   );
-  const balance = creditsBalance(stripe, split, needsPlans ? plans : null);
+  const balance = creditsBalance(
+    stripe,
+    split,
+    needsPlans ? { loading: plans.loading, data: plans.error ? null : plans.data } : null,
+  );
   useEffect(() => {
     const changed = (event: Event) => {
       if ((event as CustomEvent<{ accountId: string }>).detail.accountId === accountId)
