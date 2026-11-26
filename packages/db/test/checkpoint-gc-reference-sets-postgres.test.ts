@@ -321,7 +321,7 @@ test("idle checkpoint claims do not multiply artifacts by leases", async () => {
     expect(before.Plan["Actual Rows"]).toBe(0);
     expect(after.Plan["Actual Rows"]).toBe(0);
     // Assert work rather than elapsed time; both queries still use the owner's
-    // real FORCE-RLS capability predicates. (Since 1576/1577 index the lease
+    // real FORCE-RLS capability predicates. (Since 1582/1583 index the lease
     // references, the old OR join probes them too, so only the current shape
     // is bounded here; the lease projection test below covers the scans.)
     expect(comparisons(after.Plan)).toBeLessThan(10_000);
