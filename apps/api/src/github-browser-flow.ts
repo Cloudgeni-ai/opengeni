@@ -46,9 +46,10 @@ export function continuedGitHubBrowserGrantClaims(
 }
 
 /**
- * GitHub may return only to the session that initiated setup. This rejects
- * absolute/protocol-relative URLs and paths for another workspace before the
- * value is signed into provider state.
+ * GitHub may return only to the session that initiated setup, or to the
+ * same workspace's Get started or Enable page (their Connect step returns to
+ * the step it came from). This rejects absolute/protocol-relative URLs and
+ * paths for another workspace before the value is signed into provider state.
  */
 export function githubSessionReturnPath(
   value: string | undefined | null,
@@ -58,11 +59,13 @@ export function githubSessionReturnPath(
     return null;
   }
   const parsed = new URL(value, "https://opengeni.local");
-  const sessionPrefix = `/workspaces/${encodeURIComponent(workspaceId)}/sessions/`;
+  const workspacePrefix = `/workspaces/${encodeURIComponent(workspaceId)}`;
+  const sessionPrefix = `${workspacePrefix}/sessions/`;
+  const setupPages = [`${workspacePrefix}/get-started`, `${workspacePrefix}/enable`];
   if (
     parsed.origin !== "https://opengeni.local" ||
     parsed.pathname.startsWith("//") ||
-    !parsed.pathname.startsWith(sessionPrefix)
+    !(parsed.pathname.startsWith(sessionPrefix) || setupPages.includes(parsed.pathname))
   ) {
     return null;
   }

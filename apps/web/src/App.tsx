@@ -25,9 +25,12 @@
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
 //   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
 //   /workspaces/:id/agents                   → agents (all or yours; new, import)
+//   /workspaces/:id/enable                   → turn on a ready-made agent or app (?agent|?app, ?step)
 //   /workspaces/:id/agents/new               → new agent (?sourceSessionId: Make this an agent)
 //   /workspaces/:id/agents/:agentId          → one agent (chats, instructions, memory, Slack)
+//   /workspaces/:id/agents/:agentId/settings → an agent's setup (Instructions, Can use, Memory, access, Skills)
 //   /workspaces/:id/agents/:agentId/edit     → edit agent
+//   /workspaces/:id/agents/ready-made/:templateKey → a ready-made agent's preview, with one Add agent
 //   /workspaces/:id/agents/:agentId/introduce/:connectionId → introduce it in Slack channels
 //   /workspaces/:id/bot-templates            → old links, redirect to agents
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
@@ -176,6 +179,12 @@ import {
   type CapabilitiesSection,
   type ReadyMadeKind,
 } from "@/components/capabilities/capabilities-section";
+import {
+  enableStepOf,
+  parseEnableSearch,
+  type EnableSearch,
+  type EnableStep,
+} from "@/components/enable/enable-subject";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
@@ -335,9 +344,18 @@ const LazyGetStartedRoute = lazyRouteComponent(
   () => import("@/routes/get-started"),
   "GetStartedRoute",
 );
+const LazyEnableRoute = lazyRouteComponent(() => import("@/routes/enable"), "EnableRoute");
 const LazyAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentRoute");
 const LazyNewAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "NewAgentRoute");
 const LazyEditAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "EditAgentRoute");
+const LazyAgentSettingsRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "AgentSettingsRoute",
+);
+const LazyReadyMadeAgentRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "ReadyMadeAgentRoute",
+);
 const LazyAgentSlackIntroRoute = lazyRouteComponent(
   () => import("@/routes/agents"),
   "AgentSlackIntroRoute",
@@ -1107,11 +1125,23 @@ const workspaceAgentsRoute = createRoute({
 const workspaceGetStartedRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "get-started",
-  validateSearch: (search: Record<string, unknown>): { setup?: string } =>
-    typeof search.setup === "string" && /^[a-z][a-z0-9-]{0,39}$/u.test(search.setup)
-      ? { setup: search.setup }
-      : {},
+  validateSearch: (search: Record<string, unknown>): { setup?: string; step?: EnableStep } => {
+    const step = enableStepOf(search.step);
+    return {
+      ...(typeof search.setup === "string" && /^[a-z][a-z0-9-]{0,39}$/u.test(search.setup)
+        ? { setup: search.setup }
+        : {}),
+      ...(step ? { step } : {}),
+    };
+  },
   component: GetStarted,
+});
+// Enable: one ready-made agent (?agent=) or app (?app=), opened on a step (?step=).
+const workspaceEnableRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "enable",
+  validateSearch: (search: Record<string, unknown>): EnableSearch => parseEnableSearch(search),
+  component: Enable,
 });
 const workspaceAgentNewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1131,6 +1161,16 @@ const workspaceAgentEditRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agents/$agentId/edit",
   component: AgentEdit,
+});
+const workspaceAgentSettingsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId/settings",
+  component: AgentSettings,
+});
+const workspaceReadyMadeAgentRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/ready-made/$templateKey",
+  component: ReadyMadeAgent,
 });
 const workspaceAgentIntroRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1493,10 +1533,13 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
     workspaceGetStartedRoute,
+    workspaceEnableRoute,
     workspaceAgentsRoute,
     workspaceAgentNewRoute,
     workspaceAgentDetailRoute,
     workspaceAgentEditRoute,
+    workspaceAgentSettingsRoute,
+    workspaceReadyMadeAgentRoute,
     workspaceAgentIntroRoute,
     workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
@@ -1814,8 +1857,14 @@ function Agents() {
 
 function GetStarted() {
   const { workspaceId } = workspaceGetStartedRoute.useParams();
-  const { setup } = workspaceGetStartedRoute.useSearch();
-  return <LazyGetStartedRoute workspaceId={workspaceId} setup={setup} />;
+  const { setup, step } = workspaceGetStartedRoute.useSearch();
+  return <LazyGetStartedRoute workspaceId={workspaceId} setup={setup} step={step} />;
+}
+
+function Enable() {
+  const { workspaceId } = workspaceEnableRoute.useParams();
+  const search = workspaceEnableRoute.useSearch();
+  return <LazyEnableRoute workspaceId={workspaceId} search={search} />;
 }
 
 function AgentNew() {
@@ -1832,6 +1881,16 @@ function AgentDetail() {
 function AgentEdit() {
   const { workspaceId, agentId } = workspaceAgentEditRoute.useParams();
   return <LazyEditAgentRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function AgentSettings() {
+  const { workspaceId, agentId } = workspaceAgentSettingsRoute.useParams();
+  return <LazyAgentSettingsRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function ReadyMadeAgent() {
+  const { workspaceId, templateKey } = workspaceReadyMadeAgentRoute.useParams();
+  return <LazyReadyMadeAgentRoute workspaceId={workspaceId} templateKey={templateKey} />;
 }
 
 function AgentIntro() {

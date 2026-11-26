@@ -41,13 +41,10 @@ export function parseSiteFence(content: string): { siteId: string; versionId?: s
  * documents that run outside this bundle. Release React Native builds compile
  * functions to bytecode, so `Function.prototype.toString` cannot be used.
  */
-export const PREVIEW_LOADING_PAINT_SCRIPT = `function paintPreviewLoading(context,width,height,time,ink,glowColor){
+export const PREVIEW_LOADING_PAINT_SCRIPT = `function paintPreviewLoading(context,width,height,time,ink,_glowColor){
 context.clearRect(0,0,width,height);
 const cx=width*(0.5+0.13*Math.sin(time*0.21));
 const cy=height*(0.5+0.12*Math.cos(time*0.27));
-const glow=context.createRadialGradient(cx,cy,0,cx,cy,Math.max(width,height)*0.65);
-glow.addColorStop(0,glowColor);glow.addColorStop(1,"transparent");
-context.globalAlpha=0.09;context.fillStyle=glow;context.fillRect(0,0,width,height);
 const rows=Math.ceil(height/18)+7;const cols=Math.ceil(width/18)+7;
 const points=Array.from({length:rows},(_row,r)=>Array.from({length:cols},(_col,c)=>{
 const x=(c-3)*18;const y=(r-3)*18;const dist=Math.hypot((x-cx)*0.8,y-cy);

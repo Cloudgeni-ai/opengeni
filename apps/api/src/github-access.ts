@@ -25,6 +25,7 @@ import {
   GitHubAppConfigurationError,
   getGitHubAppWebhookSetup,
   getGitHubAppInstallationSummary,
+  githubAppMissingSettings,
   listGitHubAppRepositories,
   listGitHubAppRepositoryBranches,
   setGitHubAppWebhookUrl,
@@ -104,6 +105,37 @@ const workspaceGitHubRepositoryBranchServices: WorkspaceGitHubRepositoryBranchSe
         ? null
         : await listGitHubAppRepositoryBranches(deps.settings, input),
 };
+
+/**
+ * Whether the workspace's GitHub App binding is active, as the GitHub
+ * integration page reads it: the App fully configured and an installation
+ * whose lifecycle is active (not suspended, removed or unverified). The
+ * readiness check of ready-made agents reads GitHub through this.
+ * `null` when GitHub couldn't be reached to check a stored installation, so
+ * the caller falls back to the stored binding and an outage never blocks.
+ */
+export function githubAppBoundReader(
+  deps: ApiRouteDeps,
+): (workspaceId: string) => Promise<boolean | null> {
+  return async (workspaceId) => {
+    if (githubAppMissingSettings(deps.settings).length > 0) return false;
+    const { installations, liveById, lifecycleVerified } = await readWorkspaceGitHubInstallations(
+      deps,
+      workspaceId,
+    );
+    if (installations.length === 0) return false;
+    if (!lifecycleVerified) return null;
+    return installations.some(
+      (installation) =>
+        githubInstallationBindingLifecycle(
+          installation,
+          liveById,
+          installation.installationId,
+          true,
+        ) === "active",
+    );
+  };
+}
 
 export async function listWorkspaceGitHubInstallationBindings(
   deps: ApiRouteDeps,

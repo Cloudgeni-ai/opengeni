@@ -234,7 +234,12 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { createGitHubSkillSourceClient, readSkillRepository } from "@opengeni/core";
+import {
+  createGitHubSkillSourceClient,
+  readSkillRepository,
+  setSetupReadinessMetricsSink,
+  setGitHubAppBindingReader,
+} from "@opengeni/core";
 import {
   eventTriggersEnabled,
   PersonalWorkspacesOffError,
@@ -534,6 +539,7 @@ import { createFfmpegTranscriptionSegmenter } from "@opengeni/core/transcription
 import { registerTeamsBotRoutes } from "./integrations/teams-bot";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 import { resolveSignedStateSecret } from "./signed-state-secret";
+import { githubAppBoundReader } from "./github-access";
 
 export { allowedCorsOrigin } from "./http/cors";
 
@@ -656,6 +662,8 @@ export function createAppComposition(
   setConnectAttemptTransitionObserver((transition) =>
     observeConnectAttemptTransition(observability, transition),
   );
+  // Readiness checks that couldn't run (and so didn't hold a trigger back).
+  setSetupReadinessMetricsSink(observability);
   const managedAuthNewSignupsGate = createManagedAuthNewSignupsGate({
     db: deps.db,
     settings: deps.settings,
@@ -856,6 +864,9 @@ export function createAppComposition(
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
+  // Every readiness check (routes, Opengeni's own tools, app sync, an admin's
+  // resume) reads the GitHub App as the GitHub integration page does.
+  setGitHubAppBindingReader(routeDeps.db, githubAppBoundReader(routeDeps));
   const app = new Hono();
   // Body/auth middleware may replace c.req.raw. The Hono context remains the
   // same for the response, diagnostic and completion log of this request.

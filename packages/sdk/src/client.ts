@@ -116,6 +116,9 @@ import type {
   CreateAgentFromTemplateRequest,
   AgentTemplate,
   ListAgentTemplatesResponse,
+  SetupReadiness,
+  SetupReadinessResponse,
+  AgentReadinessListResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -8896,6 +8899,47 @@ export class OpenGeniClient {
       request,
     );
     return response.agent;
+  }
+
+  /**
+   * Readiness of a ready-made agent before it is added: each connection it
+   * uses, whether the caller already has it on, whether they may connect it,
+   * and what keeps it off, in words. `trigger` names the suggested trigger
+   * that will be turned on (default: its first); a trigger on GitHub events
+   * needs the workspace's GitHub App.
+   */
+  async getAgentTemplateReadiness(
+    workspaceId: string,
+    templateKey: string,
+    options: { trigger?: string | undefined } = {},
+  ): Promise<SetupReadiness> {
+    const query = options.trigger ? `?trigger=${encodeURIComponent(options.trigger)}` : "";
+    const response = await this.requestJson<SetupReadinessResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/readiness${query}`,
+    );
+    return response.readiness;
+  }
+
+  /**
+   * Readiness of an agent for the caller. An agent added from a ready-made one
+   * needs its required connections before a trigger can be turned on.
+   */
+  async getAgentReadiness(workspaceId: string, agentId: string): Promise<SetupReadiness> {
+    const response = await this.requestJson<SetupReadinessResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/readiness`,
+    );
+    return response.readiness;
+  }
+
+  /** Readiness of every agent the caller can see, read in one request (the Agents list). */
+  async listAgentReadiness(workspaceId: string): Promise<AgentReadinessListResponse["agents"]> {
+    const response = await this.requestJson<AgentReadinessListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/readiness`,
+    );
+    return response.agents;
   }
 
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */

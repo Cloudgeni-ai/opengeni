@@ -93,7 +93,7 @@ describe("host surfaces", () => {
 
   test("host-customized tokens are detected so they survive a theme switch", () => {
     const embed = mount(
-      `<div style="--og-color-accent: #7c3aed; --og-color-bg: #303030"><div data-embed></div></div>`,
+      `<div style="--og-color-accent: #7c3aed; --og-color-bg: #141414"><div data-embed></div></div>`,
     );
     expect(hostTokenOverrides(embed)).toEqual({ "--og-color-accent": "#7c3aed" });
   });
@@ -103,7 +103,7 @@ describe("host surfaces", () => {
     // oklch(0.52 0.16 22) -> oklch(.52 .16 22). These are still the stock
     // dark values and must not be re-applied on a light theme.
     const embed = mount(
-      `<div style="--og-color-surface-1: #333; --og-color-border-strong: #555; --og-color-primary-fg: #eee; --og-color-danger-fill: oklch(.52 .16 22); --og-color-status-failed: oklch(.77 .12 22); --og-color-accent: #7c3aed"><div data-embed></div></div>`,
+      `<div style="--og-color-surface-1: #1a1a1a; --og-color-border-strong: #4a4a4a; --og-color-danger-fg: #fff; --og-color-danger-fill: oklch(.52 .16 22); --og-color-status-failed: oklch(.77 .12 22); --og-color-accent: #7c3aed"><div data-embed></div></div>`,
     );
     expect(hostTokenOverrides(embed)).toEqual({ "--og-color-accent": "#7c3aed" });
   });
@@ -163,7 +163,7 @@ describe("review regressions", () => {
       `<div data-og-theme="light" style="--og-color-fg: #111111; --og-color-accent: #7c3aed"><div data-embed></div></div>`,
     );
     const state = resolveHostThemeState(embed, "dark", "theme");
-    expect(state.style?.["--og-color-fg"]).toBe("#e6e6e6");
+    expect(state.style?.["--og-color-fg"]).toBe("#f5f5f5");
     expect(state.style?.["--og-color-accent"]).toBe("#7c3aed");
     expect(state.style?.["--og-session-chrome-surface"]).toContain("--og-color-surface-2");
   });

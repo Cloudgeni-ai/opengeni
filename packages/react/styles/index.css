@@ -677,6 +677,20 @@
 }
 
 /*
+ * Hued icon tile (LogoTile `hue`): the glyph in the hue, the fill at 16% of it
+ * and the hairline at 30%. Lightness and chroma come from the theme
+ * (--og-tile-lightness / --og-tile-chroma) so the glyph stays readable.
+ */
+.og-hued-tile {
+  --_og-tile-ink: oklch(var(--og-tile-lightness, 0.52) var(--og-tile-chroma, 0.15) var(--og-tile-hue, 250));
+  color: var(--_og-tile-ink);
+  background-color: color-mix(in oklch, var(--_og-tile-ink) 16%, transparent);
+}
+.og-hued-tile::after {
+  border-color: color-mix(in oklch, var(--_og-tile-ink) 30%, transparent);
+}
+
+/*
  * Legacy shimmer helper for host markup: gradient text the keyframe scrolls
  * through. It repaints every frame; Opengeni's own components use ShimmerText.
  */

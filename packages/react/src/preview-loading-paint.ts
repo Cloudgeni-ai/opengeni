@@ -1,6 +1,8 @@
 /**
- * One frame of the "Preparing preview…" ripple: a soft drifting glow under an
- * 18px lattice whose points swell along an outward wave. DOM-free and
+ * One frame of the "Preparing preview…" ripple: an 18px lattice whose points
+ * swell along an outward wave from a slowly drifting centre. `glowColor` is
+ * kept for callers and embedded documents; no wash is painted (no
+ * gradients, DESIGN.md "Tokens"). DOM-free and
  * self-contained (it closes over nothing), so the web canvas effect and the
  * native preview document (which embeds its source) draw the same thing.
  */
@@ -10,17 +12,11 @@ export function paintPreviewLoading(
   height: number,
   time: number,
   ink: string,
-  glowColor: string,
+  _glowColor: string,
 ): void {
   context.clearRect(0, 0, width, height);
   const cx = width * (0.5 + 0.13 * Math.sin(time * 0.21));
   const cy = height * (0.5 + 0.12 * Math.cos(time * 0.27));
-  const glow = context.createRadialGradient(cx, cy, 0, cx, cy, Math.max(width, height) * 0.65);
-  glow.addColorStop(0, glowColor);
-  glow.addColorStop(1, "transparent");
-  context.globalAlpha = 0.09;
-  context.fillStyle = glow;
-  context.fillRect(0, 0, width, height);
   const rows = Math.ceil(height / 18) + 7;
   const cols = Math.ceil(width / 18) + 7;
   const points = Array.from({ length: rows }, (_row, r) =>

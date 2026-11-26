@@ -30,7 +30,7 @@ import { cn } from "../lib/cn";
  */
 
 /** The section title type. Shared by every heading that sits above setting rows. */
-export const SECTION_TITLE_CLASS = "text-base leading-6 font-semibold tracking-[-0.2px] text-fg";
+export const SECTION_TITLE_CLASS = "text-base leading-6 font-semibold tracking-[-0.012em] text-fg";
 
 import { SectionCardContext, SectionVariantContext, type SectionVariant } from "./section-variant";
 

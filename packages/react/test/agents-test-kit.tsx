@@ -119,6 +119,14 @@ export function fakeAgentsClient(
     /** Makes createEventSource fail with this error. */
     createSourceError?: unknown;
     updateSourceError?: unknown;
+    /** Workspace members, for "Runs as Ada". */
+    members?: { subjectId: string; subjectLabel?: string | null }[];
+    /** When each automation last ran, by its id. */
+    lastRuns?: Record<string, string>;
+    /** The catalog's event types, for every source. */
+    eventTypes?: { type: string; description: string }[];
+    /** The server's readiness check, per agent id or template key. */
+    readiness?: Record<string, unknown>;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
@@ -261,7 +269,28 @@ export function fakeAgentsClient(
     },
     async listEventSourceTypes(workspaceId: string, sourceId: string) {
       calls.push(["listEventSourceTypes", workspaceId, sourceId]);
-      return [];
+      return options.eventTypes ?? [];
+    },
+    async getAgentReadiness(workspaceId: string, id: string) {
+      calls.push(["getAgentReadiness", workspaceId, id]);
+      const found = options.readiness?.[id];
+      if (!found) throw Object.assign(new Error("Not found"), { status: 404 });
+      return found;
+    },
+    async getAgentTemplateReadiness(workspaceId: string, key: string) {
+      calls.push(["getAgentTemplateReadiness", workspaceId, key]);
+      const found = options.readiness?.[key];
+      if (!found) throw Object.assign(new Error("Not found"), { status: 404 });
+      return found;
+    },
+    async listWorkspaceMembers(workspaceId: string) {
+      calls.push(["listWorkspaceMembers", workspaceId]);
+      return options.members ?? [];
+    },
+    async listScheduledTaskRuns(workspaceId: string, id: string, request: unknown) {
+      calls.push(["listScheduledTaskRuns", workspaceId, id, request]);
+      const firedAt = options.lastRuns?.[id];
+      return firedAt ? [{ id: `run-${id}`, scheduledTaskId: id, firedAt }] : [];
     },
     async createEventSource(workspaceId: string, request: Record<string, unknown>) {
       calls.push(["createEventSource", workspaceId, request]);
@@ -426,7 +455,14 @@ export function appContext(
     accessContext: {
       subjectId: "user-me",
       subjectLabel: "Maja",
-      workspaceGrants: [],
+      // A member who may add automations, as most are.
+      workspaceGrants: [
+        {
+          workspaceId: WORKSPACE_ID,
+          subjectId: "user-me",
+          permissions: ["scheduled_tasks:manage"],
+        },
+      ],
       accountGrants: [
         {
           accountId: "account-1",

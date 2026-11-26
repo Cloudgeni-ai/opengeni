@@ -72,8 +72,8 @@ describe("agents in the browser", () => {
     await page.close();
   }, 60_000);
 
-  test("an agent's page shows how to call it in each linked Slack workspace", async () => {
-    const page = await open("agent");
+  test("an agent's Settings show how to call it in each linked Slack workspace", async () => {
+    const page = await open("agent-settings");
     // One handle per linked Slack workspace, so wait on the first.
     await page.getByText("@Opengeni Release manager", { exact: true }).first().waitFor();
     // There is no switch to make it available: it is, wherever it can be.
@@ -87,7 +87,7 @@ describe("agents in the browser", () => {
   }, 60_000);
 
   test("an Only me agent says why it can't be in Slack", async () => {
-    const page = await open("agent-private");
+    const page = await open("agent-private-settings");
     await page.getByText("Only me agents stay in the app.", { exact: false }).first().waitFor();
     await page.close();
   }, 60_000);

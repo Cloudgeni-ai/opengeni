@@ -108,7 +108,7 @@ export function SecurityPageHeader({ headingRef }: { headingRef?: Ref<HTMLHeadin
         ref={headingRef}
         tabIndex={-1}
         className={cn(
-          "text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg",
+          "text-xl leading-7 font-semibold tracking-[-0.012em] break-words text-fg",
           titleInWindowBar && "sr-only",
         )}
       >

@@ -30,6 +30,7 @@ import {
   type OnboardingDestination,
 } from "@/components/onboarding/developer-setup-step";
 import { OnboardingUseCaseStep } from "@/components/onboarding/use-case-step";
+import { applyPersonaSidebar } from "@/components/onboarding/persona-sidebar";
 import { Button } from "@opengeni/react/ui/button";
 import { TechnicalDetails } from "@opengeni/react/ui/error-message";
 import { Input } from "@opengeni/react/ui/input";
@@ -389,6 +390,16 @@ export function OrganizationOnboardingPanel({
             organizationId: created.organizationId,
             organizationName: normalizedName,
           });
+        }
+        // The answer fills the person's own sidebar once (never the workspace
+        // default). A failure only means no suggestions there.
+        if (client && useCase) {
+          void applyPersonaSidebar(
+            client,
+            created.personalWorkspaceId,
+            useCase,
+            window.location.origin,
+          ).catch(() => undefined);
         }
         setCreatedSetup({
           organizationId: created.organizationId,

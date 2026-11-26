@@ -3,6 +3,14 @@
   "name": "Incident log",
   "description": "Log incidents with their impact, timeline and follow-ups.",
   "team": "Engineering",
+  "setup": {
+    "connections": [],
+    "repository": null,
+    "worksWellWith": null,
+    "wontDoWithoutAsking": [],
+    "firstMessage": null,
+    "firstJob": "Log your most recent incident."
+  },
   "package": {
     "format": "opengeni.app-package",
     "version": 1,

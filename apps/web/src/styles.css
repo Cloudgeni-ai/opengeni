@@ -28,8 +28,8 @@
    under the Geni name, for people who arrive from gogeni.ai. It takes that
    site's palette so the app continues the page they came from: warm paper
    chrome, soft hairlines, the green ink as the accent (focus, active marks,
-   links), and a solid ink primary button. Neutrals, status hues and the glow
-   are already shared. Nested themed subtrees follow, so a preview inside the
+   links), and a solid ink primary button. Neutrals and status hues are
+   already shared. Nested themed subtrees follow, so a preview inside the
    app matches the page. Values are the site's own tokens (--paper, --line,
    --mint-ink). */
 [data-og-simplified-interface][data-og-theme="light"],
@@ -207,7 +207,7 @@ html:is([data-desktop="macos"], [data-desktop="windows"]) [data-window-layer] {
 
 /* macOS: one window frame, as in native Mac apps. The bar, the rails and the
    margin around the main pane are a single surface: the window's sidebar
-   glass through the app's background, with the rail's quiet glow. The main
+   glass through the app's background, with no wash on top. The main
    pane (the canvas next to a rail) sits on it as an inset, rounded panel,
    and the sidebar toggle sits in the bar beside the traffic lights. */
 html[data-desktop="macos"] {
@@ -217,10 +217,7 @@ html[data-desktop="macos"] {
 }
 
 html[data-desktop="macos"] body {
-  background:
-    radial-gradient(ellipse 26rem 45% at 0 0, var(--og-glow-teal-quiet), transparent 85%),
-    radial-gradient(ellipse 30rem 45% at 0 100%, var(--og-glow-peach-quiet), transparent 85%),
-    color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+  background: color-mix(in srgb, var(--og-color-bg) 62%, transparent);
 }
 
 html[data-desktop="macos"] [data-window-frame] {
@@ -304,8 +301,8 @@ html[data-desktop="macos"][data-window-layer-open] [data-window-bar-controls] {
 }
 
 @layer components {
-  /* The docked rails are part of the window frame, which carries the glow.
-     A rail in a sheet (a narrow window) keeps its own. */
+  /* The docked rails are part of the window frame, which carries the
+     background. A rail in a sheet (a narrow window) keeps its own. */
   html[data-desktop="macos"] [data-shell-rail] .og-rail-glow {
     background: transparent;
   }

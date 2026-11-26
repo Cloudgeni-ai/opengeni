@@ -547,7 +547,7 @@ export function ArtifactRow({
           item.kind === "image" ? (
             <ImageTile workspaceId={workspaceId} item={item} />
           ) : (
-            <ArtifactKindTile kind={item.kind} />
+            <ArtifactKindTile kind={item.kind} seed={item.id} />
           )
         }
         title={item.title}

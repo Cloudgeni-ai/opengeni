@@ -165,7 +165,7 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
               ) : null}
               <h1
                 className={cn(
-                  "min-w-0 font-semibold tracking-[-0.5px] break-words text-fg",
+                  "min-w-0 font-semibold tracking-[-0.012em] break-words text-fg",
                   large ? "text-2xl leading-8" : "text-xl leading-7",
                   titleInWindowBar && "sr-only",
                 )}

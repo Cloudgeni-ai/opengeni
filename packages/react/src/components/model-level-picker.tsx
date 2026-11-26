@@ -489,7 +489,7 @@ function LevelStrip(props: {
     >
       <motion.span
         aria-hidden
-        className="pointer-events-none absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-transparent to-og-charge/30"
+        className="pointer-events-none absolute inset-y-0 left-0 rounded-full bg-og-charge/20"
         style={{ width: fill, opacity: glow }}
       />
       <LevelDots

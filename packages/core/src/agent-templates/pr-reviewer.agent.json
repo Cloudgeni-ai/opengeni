@@ -56,8 +56,16 @@
           },
           "eventTypes": ["issue_comment.created"],
           "conditions": [
-            { "field": "data.issue.pull_request", "op": "equals", "value": true },
-            { "field": "data.comment.mentions_app", "op": "equals", "value": true },
+            {
+              "field": "data.issue.pull_request",
+              "op": "equals",
+              "value": true
+            },
+            {
+              "field": "data.comment.mentions_app",
+              "op": "equals",
+              "value": true
+            },
             {
               "field": "data.comment.author_association",
               "op": "in",
@@ -71,7 +79,11 @@
           },
           "eventTypes": ["pull_request_review_comment.created"],
           "conditions": [
-            { "field": "data.comment.mentions_app", "op": "equals", "value": true },
+            {
+              "field": "data.comment.mentions_app",
+              "op": "equals",
+              "value": true
+            },
             {
               "field": "data.comment.author_association",
               "op": "in",
@@ -81,5 +93,27 @@
         }
       ]
     }
-  ]
+  ],
+  "setup": {
+    "connections": [
+      {
+        "provider": "github.com",
+        "name": "GitHub",
+        "required": true,
+        "why": "Reads pull requests and posts reviews."
+      }
+    ],
+    "repository": "optional",
+    "worksWellWith": null,
+    "wontDoWithoutAsking": [
+      {
+        "text": "Merge a pull request",
+        "permission": "block",
+        "connector": "github.com",
+        "tools": ["merge_pull_request", "pull_request_merge"]
+      }
+    ],
+    "firstMessage": "You were just turned on. In three short lines, say what you do and what starts you, then list the open pull requests you can see that wait for a review, at most five, oldest first.",
+    "firstJob": "Review the oldest open pull request."
+  }
 }
