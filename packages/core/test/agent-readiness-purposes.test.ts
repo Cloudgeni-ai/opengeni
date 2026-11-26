@@ -3,10 +3,14 @@ import { expect, mock, test } from "bun:test";
 // The Agents list reads each agent's readiness for its own triggers: GitHub
 // events only when one of them runs on GitHub events.
 let tasks: unknown[] = [];
+const reads: unknown[] = [];
 const actualDb = await import("@opengeni/db");
 mock.module("@opengeni/db", () => ({
   ...actualDb,
-  listScheduledTasks: async () => tasks,
+  listScheduledTasks: async (...args: unknown[]) => {
+    reads.push(args[6]);
+    return tasks;
+  },
   getEventSource: async () => null,
   // A stored binding that looks fine: its owner's proof and repositories.
   listGitHubInstallationAccessForWorkspace: async () => [{ installationId: 1 }],
@@ -28,10 +32,13 @@ function task(agentId: string, sourceKind?: string) {
 
 test("an agent with only a schedule isn't read for GitHub events", async () => {
   tasks = [task(fixer.id)];
+  reads.length = 0;
   expect(await agentsReadinessPurposes(db, "ws", "user:a", [fixer, custom])).toEqual([
     { githubEvents: false },
     { githubEvents: false },
   ]);
+  // One read, filtered to the listed ready-made agents.
+  expect(reads).toEqual([{ agentIds: [fixer.id] }]);
 });
 
 test("one GitHub-event trigger makes it need the GitHub App", async () => {

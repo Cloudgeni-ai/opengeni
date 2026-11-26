@@ -22522,8 +22522,8 @@ export async function listScheduledTasks(
    * null reads shared schedules only.
    */
   viewerSubjectId?: string | null,
-  /** Only automations whose runs are chats with this agent (`agentConfig.agentId`). */
-  filters: { agentId?: string } = {},
+  /** Only automations whose runs are chats with this agent, or one of these (`agentConfig.agentId`). */
+  filters: { agentId?: string; agentIds?: readonly string[] } = {},
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -22535,6 +22535,15 @@ export async function listScheduledTasks(
           isNull(schema.scheduledTasks.deletedAt),
           ...(filters.agentId
             ? [sql`${schema.scheduledTasks.agentConfig} ->> 'agentId' = ${filters.agentId}`]
+            : []),
+          ...(filters.agentIds
+            ? [
+                filters.agentIds.length > 0
+                  ? inArray(sql`${schema.scheduledTasks.agentConfig} ->> 'agentId'`, [
+                      ...filters.agentIds,
+                    ])
+                  : sql`false`,
+              ]
             : []),
           ...(viewerSubjectId === undefined
             ? []

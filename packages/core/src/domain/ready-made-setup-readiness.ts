@@ -425,21 +425,24 @@ export async function agentsReadinessPurposes(
 ): Promise<SetupCheckPurpose[]> {
   const templated = agents.filter((agent) => agent.templateKey);
   if (templated.length === 0) return agents.map(() => ({ githubEvents: false }));
-  // Each ready-made agent's own triggers, read by agent (few agents come
-  // from a ready-made one), so a busy workspace's other triggers don't count.
-  const triggersByAgent = new Map<string, ScheduledTask[]>(
-    await Promise.all(
-      templated.map(
-        async (agent) =>
-          [
-            agent.id,
-            await listScheduledTasks(db, workspaceId, 100, 0, undefined, viewerSubjectId, {
-              agentId: agent.id,
-            }),
-          ] as const,
-      ),
-    ),
+  // The listed ready-made agents' own triggers, in one read filtered by
+  // agent, so a busy workspace's other triggers don't count.
+  const ids = templated.map((agent) => agent.id);
+  const tasks = await listScheduledTasks(
+    db,
+    workspaceId,
+    Math.max(100, ids.length * 20),
+    0,
+    undefined,
+    viewerSubjectId,
+    { agentIds: ids },
   );
+  const triggersByAgent = new Map<string, ScheduledTask[]>();
+  for (const task of tasks) {
+    const agentId = task.agentConfig.agentId;
+    if (agentId && ids.includes(agentId))
+      triggersByAgent.set(agentId, [...(triggersByAgent.get(agentId) ?? []), task]);
+  }
   return await Promise.all(
     agents.map(async (agent) => {
       const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
@@ -497,6 +500,7 @@ export async function requireAgentTriggerReady(
 ): Promise<void> {
   if (!agentId) return;
   let readiness: SetupReadiness;
+  let githubEvents = false;
   try {
     const agent = await getAgent(
       deps.db,
@@ -505,7 +509,7 @@ export async function requireAgentTriggerReady(
     );
     const setup = agent?.templateKey ? agentTemplateByKey(agent.templateKey)?.setup : null;
     if (!setup || !setup.connections.some((connection) => connection.required)) return;
-    const githubEvents =
+    githubEvents =
       setup.connections.some(isGitHub) && options.githubEvents
         ? await options.githubEvents()
         : false;
@@ -523,7 +527,10 @@ export async function requireAgentTriggerReady(
   throw new HTTPException(409, {
     message:
       options.forOwner && first
-        ? `Its owner needs to connect ${first.name}.`
+        ? // For GitHub events the missing piece is the workspace's App, not the owner's GitHub.
+          githubEvents && isGitHub(first)
+          ? "A GitHub admin needs to install the GitHub App."
+          : `Its owner needs to connect ${first.name}.`
         : (readiness.reason ?? "This agent isn't ready to turn on yet."),
     cause,
   });
