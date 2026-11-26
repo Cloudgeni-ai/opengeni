@@ -38,7 +38,7 @@ export type OrganizationRetentionSweepPorts = Readonly<{
     limit: number;
   }) => Promise<OrganizationRetentionDeletionObject[]>;
   deleteObject: (input: { objectBucket: string; objectKey: string }) => Promise<void>;
-  deleteSiteSql?: (siteId: string) => Promise<void>;
+  deleteSiteSql?: (siteId: string) => Promise<"dropped" | "not_configured">;
   recordObjectDeleted: (input: {
     organizationId: string;
     membershipId: string;
@@ -107,6 +107,7 @@ export async function runOrganizationRetentionSweep(
     });
     if (!claim) break;
     attemptedMembershipIds.push(claim.membershipId);
+    let reasonCode = "operator_execution_failed";
     try {
       await ports.finalizeDatabase({
         organizationId: input.organizationId,
@@ -128,8 +129,10 @@ export async function runOrganizationRetentionSweep(
             throw new Error("Retention object bucket does not match configured storage");
           }
           if (object.objectKind === "site_sql") {
-            if (!ports.deleteSiteSql) throw new Error("Site SQL cleanup is not configured");
-            await ports.deleteSiteSql(object.objectKey);
+            if ((await ports.deleteSiteSql?.(object.objectKey)) !== "dropped") {
+              reasonCode = "site_sql_gateway_not_configured";
+              throw new Error("Site SQL cleanup is not configured");
+            }
           } else {
             await ports.deleteObject({
               objectBucket: object.objectBucket,
@@ -157,7 +160,6 @@ export async function runOrganizationRetentionSweep(
         }),
       );
     } catch {
-      const reasonCode = "operator_execution_failed";
       await ports
         .fail({
           organizationId: input.organizationId,
@@ -222,13 +224,14 @@ async function main(): Promise<void> {
         deleteSiteSql: async (siteId) => {
           const erased = await dropSiteSqlDatabases({ settings }, [siteId]);
           if (erased.status === "not_configured") {
-            console.warn(
-              "[organization-retention] No Site SQL gateway is configured; nothing to drop",
-            );
-            return;
+            console.warn("[organization-retention] Site SQL cleanup awaits a configured gateway", {
+              siteId,
+            });
+            return "not_configured";
           }
           if (!erased.dropped.includes(siteId))
             throw new Error("Site SQL cleanup did not complete");
+          return "dropped";
         },
         finalizeDatabase: async (request) =>
           await finalizeOrganizationRetentionDeletion(client.db, request),

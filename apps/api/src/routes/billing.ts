@@ -48,10 +48,11 @@ import {
   recordStripeWebhookEvent,
   upsertBillingCustomer,
 } from "@opengeni/db";
+import { managedAccounts } from "@opengeni/db/schema";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import Stripe from "stripe";
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { requireAccessContext, MissingPermissionRefusal } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
@@ -1342,9 +1343,16 @@ export async function getOrCreateStripeCustomer(
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`);
         // Whole-row projection keeps the billing path compatible before the
         // rolling migration adds the closure field.
-        const closed = await tx.execute(sql`select 1 from managed_accounts account
-          where id = ${accountId}::uuid and to_jsonb(account)->>'closed_by_account_deletion' is not null`);
-        if (closed.rowCount) throw new HTTPException(404, { message: "account not found" });
+        const [closed] = await tx
+          .select({ id: managedAccounts.id })
+          .from(managedAccounts)
+          .where(
+            and(
+              eq(managedAccounts.id, accountId),
+              sql`to_jsonb(${sql.identifier("managed_accounts")})->>'closed_by_account_deletion' is not null`,
+            ),
+          );
+        if (closed) throw new HTTPException(404, { message: "account not found" });
         return await run({
           read: async () =>
             (await getBillingCustomer(tx, accountId, provider))?.providerCustomerId ?? null,

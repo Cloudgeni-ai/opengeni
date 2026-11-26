@@ -1,6 +1,8 @@
 import type Stripe from "stripe";
 
-export function stripeProviderForSecretKey(secret: string | undefined): "stripe:live" | "stripe:test" {
+export function stripeProviderForSecretKey(
+  secret: string | undefined,
+): "stripe:live" | "stripe:test" {
   return secret?.startsWith("sk_live_") || secret?.startsWith("rk_live_")
     ? "stripe:live"
     : "stripe:test";

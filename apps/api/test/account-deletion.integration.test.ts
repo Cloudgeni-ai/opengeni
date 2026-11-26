@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import type { ManagedEmailMessage } from "@opengeni/core";
+import type { ApiRouteDeps, ManagedEmailMessage } from "@opengeni/core";
+import type Stripe from "stripe";
 import { dbSearchPath } from "@opengeni/config";
 import { AccountDeletionPreview, StartAccountDeletionResponse } from "@opengeni/contracts";
 import {
@@ -41,6 +42,7 @@ import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
 import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
 import { dropSiteSqlDatabases } from "../src/site-sql/service";
+import { getOrCreateStripeCustomer } from "../src/routes/billing";
 import { runOrganizationRetentionSweep } from "../../../scripts/sweep-organization-retention";
 
 let shared: RestrictedRuntimeTestDatabase;
@@ -613,9 +615,30 @@ test("provisioning cannot create a seat during or after deletion, and a closed o
   expect(
     await shared.admin`select account_id from billing_customers where account_id in (${person.organizationId},${other.organizationId})`,
   ).toEqual([{ account_id: other.organizationId }]);
+  const billingDeps = {
+    db: client.db,
+    settings: testSettings({ stripeSecretKey: "sk_test_fixture" }),
+  } as ApiRouteDeps;
+  const attemptedCustomerCreation = { count: 0 };
+  const stripe = {
+    customers: {
+      create: async () => {
+        attemptedCustomerCreation.count++;
+        throw new Error("unexpected Stripe call");
+      },
+    },
+  } as unknown as Stripe;
+  const access = { subjectLabel: person.email } as Parameters<typeof getOrCreateStripeCustomer>[2];
+  await expect(
+    getOrCreateStripeCustomer(billingDeps, stripe, access, person.organizationId),
+  ).rejects.toMatchObject({ status: 404 });
+  expect(attemptedCustomerCreation.count).toBe(0);
+  expect(await getOrCreateStripeCustomer(billingDeps, stripe, access, other.organizationId)).toBe(
+    `cus_${other.organizationId}`,
+  );
 });
 
-test("ordinary Postgres retention can settle Site SQL, but an older sweeper cannot acknowledge it", async () => {
+test("ordinary Postgres retention records Site SQL only after a confirmed gateway deletion", async () => {
   const rt = runtime();
   const owner = await human(rt);
   const member = await human(rt);
@@ -651,37 +674,50 @@ test("ordinary Postgres retention can settle Site SQL, but an older sweeper cann
     transition: { kind: "offboard", expectedAuthorizationRevision: seat!.authorization_revision },
   });
   await shared.admin`update organization_memberships set personal_retention_until=now()-interval '1 day' where id=${seat!.id}`;
-  const result = await runOrganizationRetentionSweep(
-    {
-      organizationId: owner.organizationId,
-      dryRun: false,
-      limit: 1,
-      objectBucket: "test-account-deletion",
-    },
-    {
-      preview: (input) => previewOrganizationRetentionDeletions(client.db, input),
-      claim: (input) => claimOrganizationRetentionDeletion(client.db, input),
-      finalizeDatabase: (input) => finalizeOrganizationRetentionDeletion(client.db, input),
-      listObjects: (input) => listOrganizationRetentionDeletionObjects(client.db, input),
-      deleteObject: async () => {
-        throw new Error("Site SQL is not an object storage key");
+  const sweep = (gatewayConfigured: boolean) =>
+    runOrganizationRetentionSweep(
+      {
+        organizationId: owner.organizationId,
+        dryRun: false,
+        limit: 1,
+        objectBucket: "test-account-deletion",
       },
-      deleteSiteSql: async (id) => {
-        expect(id).toBe(site!.id);
-        expect((await dropSiteSqlDatabases({}, [id])).status).toBe("not_configured");
+      {
+        preview: (input) => previewOrganizationRetentionDeletions(client.db, input),
+        claim: (input) => claimOrganizationRetentionDeletion(client.db, input),
+        finalizeDatabase: (input) => finalizeOrganizationRetentionDeletion(client.db, input),
+        listObjects: (input) => listOrganizationRetentionDeletionObjects(client.db, input),
+        deleteObject: async () => {
+          throw new Error("Site SQL is not an object storage key");
+        },
+        deleteSiteSql: async (id) => {
+          expect(id).toBe(site!.id);
+          if (gatewayConfigured) return "dropped";
+          const result = await dropSiteSqlDatabases({}, [id]);
+          expect(result.status).toBe("not_configured");
+          return "not_configured";
+        },
+        recordObjectDeleted: async (input) => {
+          expect(input.objectKind).toBe("site_sql");
+          await expect(
+            recordOrganizationRetentionObjectDeleted(client.db, {
+              ...input,
+              siteSqlHandled: false,
+            }),
+          ).rejects.toThrow();
+          return recordOrganizationRetentionObjectDeleted(client.db, input);
+        },
+        complete: (input) => completeOrganizationRetentionDeletion(client.db, input),
+        fail: (input) => failOrganizationRetentionDeletion(client.db, input),
+        newOperationId: () => crypto.randomUUID(),
       },
-      recordObjectDeleted: async (input) => {
-        expect(input.objectKind).toBe("site_sql");
-        await expect(
-          recordOrganizationRetentionObjectDeleted(client.db, { ...input, siteSqlHandled: false }),
-        ).rejects.toThrow();
-        return recordOrganizationRetentionObjectDeleted(client.db, input);
-      },
-      complete: (input) => completeOrganizationRetentionDeletion(client.db, input),
-      fail: (input) => failOrganizationRetentionDeletion(client.db, input),
-      newOperationId: () => crypto.randomUUID(),
-    },
-  );
+    );
+  expect(await sweep(false)).toMatchObject({
+    dryRun: false,
+    completed: [],
+    failed: [{ membershipId: seat!.id, reasonCode: "site_sql_gateway_not_configured" }],
+  });
+  const result = await sweep(true);
   expect(result).toMatchObject({
     dryRun: false,
     completed: [{ membershipId: seat!.id }],
