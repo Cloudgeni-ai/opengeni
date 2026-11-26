@@ -32,7 +32,7 @@ describe("shared tool row presentation", () => {
               {
                 path: "SKILL.md",
                 content:
-                  "---\nname: operate-smart-home\ndescription: Use for the house.\n---\n# Home",
+                  "---\nname: prepare-summary\ndescription: Prepare a summary.\n---\n# Drafting a summary",
               },
             ],
           }),
@@ -48,7 +48,7 @@ describe("shared tool row presentation", () => {
       }),
     );
     expect(read.title).toBe("Read skill");
-    expect(read.preview).toEqual({ kind: "text", text: "Operate smart home" });
+    expect(read.preview).toEqual({ kind: "text", text: "Drafting a summary" });
     const running = toolRowPresentation(
       englishText,
       call({ name: "skill_read", status: "running", arguments: { skill: "builtin:documents" } }),
@@ -84,8 +84,17 @@ describe("shared tool row presentation", () => {
         }),
       ).preview;
     const id = "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53";
-    expect(preview(id, '---\r\nname: "quoted-name"\r\n---\r\n# Body')).toMatchObject({
+    expect(preview(id, '---\r\nname: "quoted-name"\r\n---\r\nNo heading.')).toMatchObject({
       text: "Quoted name",
+    });
+    expect(
+      preview(id, '---\nname: sample-skill\ntitle: "Guide: résumé" # title\n---\n# Other heading'),
+    ).toMatchObject({ text: "Guide: résumé" });
+    expect(preview("sample-skill", "```md\n# Not a heading\n```\n\nRésumé\n======")).toMatchObject({
+      text: "Résumé",
+    });
+    expect(preview("sample-skill", "## A section\n\nNo title.")).toMatchObject({
+      text: "Sample skill",
     });
     expect(preview(id, "---\ndescription: none\n---\nname: body-line\n")).toEqual({
       kind: "text",

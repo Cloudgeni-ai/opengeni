@@ -1,3 +1,5 @@
+import { parseDocument } from "yaml";
+
 /* ----------------------------------------------------------------------------
    How people read a Skill's name. Registries and SKILL.md frontmatter hand us
    slugs ("vercel-react-best-practices"); a Skill written in Opengeni without a
@@ -7,6 +9,7 @@
    -------------------------------------------------------------------------- */
 
 const SMALL_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"]);
+const FRONTMATTER = /^\uFEFF?---\r?\n((?:[^\n]*\n)*?)---[ \t]*(?:\r?\n|$)/;
 
 /** "agent-browser" -> "Agent browser". Names that already read as names are kept. */
 export function humanizeName(value: string): string {
@@ -38,6 +41,43 @@ export function skillDisplayName(skill: { title: string | null; stableKey: strin
   return humanizeName(raw) || "Untitled Skill";
 }
 
+/** Display metadata only: a title is distinct from the Skill's stable name. */
+export function skillReadLabels(markdown: string): { title: string | null; name: string | null } {
+  const header = FRONTMATTER.exec(markdown);
+  const doc = header ? parseDocument(header[1]!) : null;
+  const field = (key: "title" | "name") => {
+    const value = doc?.errors.length === 0 ? doc.get(key) : undefined;
+    return typeof value === "string" ? value.trim() || null : null;
+  };
+  const body = header ? markdown.slice(header[0].length) : markdown.replace(/^\uFEFF/, "");
+  return { title: field("title") ?? firstSkillHeading(body), name: field("name") };
+}
+
+function firstSkillHeading(body: string): string | null {
+  let fence = "";
+  let previous = "";
+  for (const line of body.split(/\r?\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (marker && marker[1]!.startsWith(fence) && !marker[2]!.trim()) fence = "";
+      continue;
+    }
+    if (marker) {
+      fence = marker[1]!;
+      previous = "";
+      continue;
+    }
+    const atx = /^ {0,3}#[ \t]+(.+)$/
+      .exec(line)?.[1]
+      ?.replace(/[ \t]+#+[ \t]*$/, "")
+      .trim();
+    if (atx) return atx;
+    if (/^ {0,3}=+[ \t]*$/.test(line) && previous) return previous;
+    previous = /^ {0,3}[^\s#>]/.test(line) ? line.trim() : "";
+  }
+  return null;
+}
+
 /** The first sentence of a Skill's description, for one line in a list. */
 export function skillShortDescription(description: string | null | undefined): string | null {
   const text = description?.replace(/\s+/g, " ").trim();
@@ -48,7 +88,7 @@ export function skillShortDescription(description: string | null | undefined): s
 
 /** The SKILL.md body without its YAML frontmatter. */
 export function skillBody(markdown: string | null | undefined): string {
-  return (markdown ?? "").replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim();
+  return (markdown ?? "").replace(FRONTMATTER, "").trim();
 }
 
 /**
