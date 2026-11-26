@@ -86,6 +86,11 @@ type RowActions = {
   groups?: readonly SidebarGroupChoice[];
   /** An item's group, or null at the top level. */
   parentOf?: (id: string) => string | null;
+  /**
+   * Archive an app from this person's sidebar, as its row in the Sessions
+   * list does. Its link stays saved and shows again once it's restored.
+   */
+  archive?: ((appId: string, label: string) => void) | undefined;
 };
 
 /** Whether this person edits the item itself (their own), rather than hiding it. */
@@ -169,12 +174,17 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
           </DropdownMenuItem>
         ) : null}
         {actions.canChange ? (
-          <>
-            <DropdownMenuItem onSelect={() => actions.change([{ op: "remove", itemId: item.id }])}>
-              {item.origin === "workspace" ? "Hide" : "Remove"}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-          </>
+          <DropdownMenuItem onSelect={() => actions.change([{ op: "remove", itemId: item.id }])}>
+            {item.type === "app" ? "Unpin" : item.origin === "workspace" ? "Hide" : "Remove"}
+          </DropdownMenuItem>
+        ) : null}
+        {item.type === "app" && actions.archive ? (
+          <DropdownMenuItem onSelect={() => actions.archive?.(item.appId, item.label)}>
+            Archive
+          </DropdownMenuItem>
+        ) : null}
+        {actions.canChange || (item.type === "app" && actions.archive) ? (
+          <DropdownMenuSeparator />
         ) : null}
         <DropdownMenuItem
           onSelect={() => {
@@ -750,11 +760,57 @@ export function CustomizeRow() {
   );
 }
 
+/**
+ * Apps archived from the sidebar on this page. Their links leave the layout
+ * the server returns, so the Sessions list's Apps section counts them as still
+ * in the sidebar until its own read shows them archived (never both places).
+ */
+export const appsArchivedFromSidebar = new Set<string>();
+
+/**
+ * Archive for app rows: the same personal sidebar archive as the app's row in
+ * the Sessions list, so it leaves both places. Absent where the client
+ * predates it.
+ */
+export function useSidebarAppArchive(
+  workspaceId: string,
+  reload: () => void,
+): RowActions["archive"] {
+  const { client } = useAppContext();
+  if (typeof client.updateSiteSidebarState !== "function") return undefined;
+  const run = (appId: string, label: string, archived: boolean): void => {
+    if (archived) appsArchivedFromSidebar.add(appId.toLowerCase());
+    void client
+      .updateSiteSidebarState(workspaceId, appId, { archived })
+      .then(() => {
+        if (!archived) appsArchivedFromSidebar.delete(appId.toLowerCase());
+        reload();
+        toast.success(archived ? "App archived" : "App restored", {
+          ...(archived
+            ? {
+                description: "Hidden from your sidebar only.",
+                duration: 8000,
+                action: { label: "Undo", onClick: () => run(appId, label, false) },
+              }
+            : {}),
+        });
+      })
+      .catch((error: unknown) => {
+        if (archived) appsArchivedFromSidebar.delete(appId.toLowerCase());
+        toast.error(archived ? `Couldn't archive ${label}.` : `Couldn't restore ${label}.`, {
+          description: userErrorText(error),
+        });
+      });
+  };
+  return (appId, label) => run(appId, label, true);
+}
+
 export function SidebarLayoutSection() {
   const rail = useRail();
   const router = useRouter();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const { layout, update } = useSidebarLayout(rail.workspaceId);
+  const { layout, update, reload } = useSidebarLayout(rail.workspaceId);
+  const archive = useSidebarAppArchive(rail.workspaceId, reload);
   const [openGroups, setOpenGroups] = useState(readOpenGroups);
   // Groups closed while they hold the open page, until the page changes: such
   // a group opens by itself, as before, and the person can still close it.
@@ -786,7 +842,13 @@ export function SidebarLayoutSection() {
   };
   if (rail.isMobile) {
     const items = flattenSidebarItemsForMobile(shownItems);
-    const actions: RowActions = { change, canChange: false, renaming: null, setRenaming };
+    const actions: RowActions = {
+      change,
+      canChange: false,
+      renaming: null,
+      setRenaming,
+      archive,
+    };
     return (
       <nav aria-label="Workspace links" className="mt-2 grid gap-0.5 px-2" data-sidebar-layout>
         {items.map((item) => (
@@ -827,6 +889,7 @@ export function SidebarLayoutSection() {
     neighbors,
     groups,
     parentOf,
+    archive,
   };
   return (
     <nav

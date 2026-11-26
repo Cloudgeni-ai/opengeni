@@ -1489,6 +1489,18 @@ export function buildPinnedRailSections(
 }
 
 /**
+ * The Apps section's rows without the apps pinned to the person's sidebar
+ * above it (`inSidebar`): a pinned app sits there, never in both places.
+ */
+export function withoutSidebarApps<Node extends Pick<SessionTreeNode, "siteGroup">>(
+  nodes: readonly Node[],
+  inSidebar: ((appId: string) => boolean) | undefined,
+): Node[] {
+  if (!inSidebar) return [...nodes];
+  return nodes.filter((node) => !node.siteGroup || !inSidebar(node.siteGroup.siteId));
+}
+
+/**
  * The rail sections one part of the list shows when apps have a section of
  * their own: the Apps section keeps only app rows, Sessions everything else.
  * Without a part (null) the sections are unchanged. `complete` stays whole

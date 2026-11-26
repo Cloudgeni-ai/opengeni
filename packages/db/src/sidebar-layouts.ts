@@ -118,7 +118,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * What the sidebar can show about apps for this viewer: the active apps among
  * `appIds` they can open, the workspace's pinned apps and the ones they
  * opened or edited (published a version of) most recently. Archived, deleted
- * and other people's Only me apps are left out.
+ * and other people's Only me apps are left out, and so are apps this person
+ * archived from their own sidebar (their links stay stored, and show again
+ * once they restore it).
  */
 export async function readSidebarApps(
   db: Database,
@@ -201,7 +203,33 @@ export async function readSidebarApps(
           "none",
         )
       : [];
-  return { ...read, recent };
+  // Apps this person archived from their sidebar: row-level security shows a
+  // person's sidebar state only under their own identity.
+  const hidden =
+    viewerSubject !== null && (read.apps.size || read.pinned.length || recent.length)
+      ? await withWorkspaceSubjectRls(
+          db,
+          scope.workspaceId,
+          viewerSubject,
+          async (tx) =>
+            new Set(
+              rows<{ id: string }>(
+                await tx.execute(sql`select s.site_id::text as id from site_sidebar_states s
+                  where s.workspace_id = ${scope.workspaceId}::uuid
+                    and s.subject_id = ${viewerSubject} and s.archived_at is not null`),
+              ).map((row) => row.id),
+            ),
+          { isolationLevel: "repeatable read", accessMode: "read only" },
+          "none",
+        )
+      : new Set<string>();
+  if (!hidden.size) return { ...read, recent };
+  const shown = (app: SidebarAppSummary) => !hidden.has(app.appId);
+  return {
+    apps: new Map([...read.apps].filter(([, app]) => shown(app))),
+    pinned: read.pinned.filter(shown),
+    recent: recent.filter(shown),
+  };
 }
 
 /**
