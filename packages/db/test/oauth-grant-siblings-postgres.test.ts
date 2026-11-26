@@ -396,7 +396,8 @@ describe("migration 1611 shared OAuth grant checks", () => {
       expect(
         results.some((result) => "reason" in result && result.reason === "refresh_failed"),
       ).toBe(true);
-      expect(checks.length).toBeGreaterThanOrEqual(1);
+      // Only the resolve that moved the connection checks its siblings.
+      expect(checks).toHaveLength(1);
       await Promise.all(checks);
       expect((await row(source.id)).status).toBe("needs_reauth");
 
