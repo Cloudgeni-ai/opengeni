@@ -52,8 +52,8 @@ If dispatch of a scheduled or event occurrence exhausts Temporal's existing
 retries before a run was recorded, the fire workflow writes an immutable failed
 receipt with `scheduled_dispatch_exhausted` and then fails as before. It never
 copies the exception or retries dispatch again. A receipt already committed for
-that producer wins. Later occurrences can still run; the owner gets an inbox
-notice on the first such failure in an episode, without pausing the automation.
+that producer wins. Later occurrences can still run; an automation with an owner
+gets an inbox notice on the first such failure in an episode, without pausing it.
 
 ## Blocked schedules
 

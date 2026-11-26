@@ -2534,14 +2534,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           producerKey: scheduledTaskRunProducerKey(input),
           reason: SCHEDULED_TASK_DISPATCH_EXHAUSTED,
           retryable: true,
-          onRecorded: async (tx, run) => {
-            if (run.actionKind !== "agent_turn") return;
+          onRecorded: async (tx, run, ownerSubjectId) => {
+            if (ownerSubjectId === null) return;
             // Reuse the blocker receipt and its owner inbox notice. Commit
             // them with the run, so a later fire or an older API reviewer
             // cannot supersede the failure before the owner is told.
             await reviewScheduledTaskBlockers(tx, run.workspaceId, run.taskId, ({ review }) =>
               review && review.state !== "clear"
-                ? { kind: "none", reviewedRunId: run.id }
+                ? { kind: "none", reviewedRunId: review.state === "notified" ? run.id : null }
                 : {
                     kind: "block",
                     state: "notified",

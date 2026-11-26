@@ -22837,7 +22837,11 @@ type ScheduledTaskExhaustedDispatchInput = ScheduledTaskRefusalIdentity & {
   reason: typeof SCHEDULED_TASK_DISPATCH_EXHAUSTED;
   retryable: true;
   /** Same-transaction settlement for a new receipt, never a replay. */
-  onRecorded?: (tx: Database, run: ScheduledTaskRun) => Promise<void>;
+  onRecorded?: (
+    tx: Database,
+    run: ScheduledTaskRun,
+    ownerSubjectId: string | null,
+  ) => Promise<void>;
 };
 
 /**
@@ -22923,10 +22927,9 @@ export async function recordScheduledTaskAdmissionRefusal(
         scheduledAt: input.scheduledAt ?? null,
         firedAt: now,
         completedAt: now,
-        actionKind:
-          dispatchExhausted && (task.action as ScheduledTaskAction | null)?.kind === "app_sync"
-            ? "app_sync"
-            : "agent_turn",
+        actionKind: dispatchExhausted
+          ? ((task.action as ScheduledTaskAction | null)?.kind ?? "agent_turn")
+          : "agent_turn",
         status: dispatchExhausted || !refusal.retryable ? "failed" : "skipped",
         error: refusal.reason,
         admissionRefusal: refusal,
@@ -22939,7 +22942,7 @@ export async function recordScheduledTaskAdmissionRefusal(
     const result = inserted ?? (await readPrior());
     if (!result) throw new Error("scheduled refusal receipt missing");
     const run = mapScheduledTaskRun(result);
-    if (dispatchExhausted && inserted) await input.onRecorded?.(tx, run);
+    if (dispatchExhausted && inserted) await input.onRecorded?.(tx, run, task.ownerSubjectId);
     return run;
   });
 }

@@ -14586,7 +14586,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * limit; admitted again once a person raises or clears it)
  * (transient), and for event runs `chain_limit` (too deep a chain of
  * automations) and `duplicate_agent_run` (another automation of the same
- * agent took the delivery). Readers must tolerate new reasons.
+ * agent took the delivery). `scheduled_dispatch_exhausted` records a failed
+ * occurrence whose dispatch retries have run out; it is `retryable: true`
+ * because later occurrences can still start. Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z

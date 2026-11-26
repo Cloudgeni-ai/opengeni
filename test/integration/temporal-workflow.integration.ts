@@ -2977,6 +2977,7 @@ describe("Temporal workflow integration", () => {
       createDb,
       createScheduledTask,
       getScheduledTask,
+      getScheduledTaskBlockers,
       getScheduledTaskRunByProducerKey,
       listScheduledTaskRuns,
     } = await import("@opengeni/db");
@@ -2998,17 +2999,20 @@ describe("Temporal workflow integration", () => {
         subjectId,
       });
       const { accountId, workspaceId } = access.workspaceGrants[0]!;
-      const task = await createScheduledTask(db.db, {
+      const schedule = {
         accountId,
         workspaceId,
         name: "Review activity",
-        status: "active",
-        schedule: { type: "interval", everySeconds: 3_600 },
-        temporalScheduleId: `schedule-${crypto.randomUUID()}`,
-        runMode: "new_session_per_run",
-        overlapPolicy: "allow_concurrent",
+        status: "active" as const,
+        schedule: { type: "interval" as const, everySeconds: 3_600 },
+        runMode: "new_session_per_run" as const,
+        overlapPolicy: "allow_concurrent" as const,
         agentConfig: { prompt: "Review activity", resources: [], tools: [], metadata: {} },
         metadata: {},
+      };
+      const task = await createScheduledTask(db.db, {
+        ...schedule,
+        temporalScheduleId: `schedule-${crypto.randomUUID()}`,
         createdBy: { kind: "subject", subjectId },
       });
       expect(task.ownerSubjectId).toBe(subjectId);
@@ -3090,6 +3094,21 @@ describe("Temporal workflow integration", () => {
           expect((await getScheduledTask(db.db, workspaceId, task.id))?.status).toBe("active");
         }
       });
+      const ownerless = await createScheduledTask(db.db, {
+        ...schedule,
+        temporalScheduleId: `schedule-${crypto.randomUUID()}`,
+      });
+      expect(ownerless.ownerSubjectId).toBeNull();
+      await recording.recordScheduledTaskDispatchFailure({
+        workspaceId,
+        taskId: ownerless.id,
+        triggerType: "scheduled",
+        producerKey: `scheduled-fire-${crypto.randomUUID()}`,
+      });
+      expect(await listScheduledTaskRuns(db.db, workspaceId, ownerless.id)).toMatchObject([
+        { status: "failed", error: "scheduled_dispatch_exhausted" },
+      ]);
+      expect((await getScheduledTaskBlockers(db.db, workspaceId, [ownerless.id])).size).toBe(0);
     } finally {
       await db.close();
       await shared.release();

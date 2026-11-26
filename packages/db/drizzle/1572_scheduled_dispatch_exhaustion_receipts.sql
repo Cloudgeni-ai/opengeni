@@ -22,8 +22,7 @@ BEGIN
   END IF;
   IF NEW.admission_refusal IS NULL THEN RETURN NEW; END IF;
   dispatch_exhausted := coalesce(NEW.admission_refusal ->> 'reason' = 'scheduled_dispatch_exhausted', false);
-  IF (NEW.action_kind IS DISTINCT FROM 'agent_turn'
-      AND NOT (dispatch_exhausted AND NEW.action_kind = 'app_sync'))
+  IF (NOT dispatch_exhausted AND NEW.action_kind IS DISTINCT FROM 'agent_turn')
     OR (dispatch_exhausted AND (NEW.trigger_type NOT IN ('scheduled', 'event')
       OR NEW.admission_refusal -> 'retryable' IS DISTINCT FROM 'true'::jsonb))
     OR NEW.admission_diagnostic IS NOT NULL
