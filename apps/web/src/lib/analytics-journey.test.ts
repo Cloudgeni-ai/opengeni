@@ -77,6 +77,7 @@ describe("content-free customer journey", () => {
     expect(journeyPageLabels().has("teams-connect")).toBe(true);
     expect(journeyPage("/teams/connect/private")).toEqual({ page: "other" });
     expect(journeyPage("/settings/security")).toEqual({ page: "personal-security" });
+    expect(journeyPage("/account-deletion-requested", "?client=ios")).toEqual({ page: "other" });
     // Ids in top-level paths are never reported.
     expect(journeyPage(`/sessions/${session}`)).toEqual({ page: "session-link" });
     expect(journeyPage(`/identity-links/${session}`)).toEqual({ page: "identity-link" });
@@ -159,8 +160,13 @@ describe("content-free customer journey", () => {
       (match) => ({ parent: match[1]!, path: match[2]! }),
     );
     expect(routes.length).toBeGreaterThan(30);
-    // Legacy redirects and DEV-only harnesses intentionally stay "other".
-    const unlabeled = new Set(["workspaceRoute:agent", "workspaceRoute:account"]);
+    // Don't add a dedicated analytics label to the signed-out deletion receipt.
+    // Legacy redirects and DEV-only harnesses also intentionally stay "other".
+    const unlabeled = new Set([
+      "rootRoute:account-deletion-requested",
+      "workspaceRoute:agent",
+      "workspaceRoute:account",
+    ]);
     const concrete = (path: string) => path.replace(/\$\w+/g, session);
     const missing = routes.filter(({ parent, path }) => {
       if (unlabeled.has(`${parent}:${path}`) || path.startsWith("dev/")) return false;
