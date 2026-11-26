@@ -85,6 +85,12 @@ export const scheduledTaskActivity = proxyActivities<
   },
 });
 
+/** Keep retrying the idempotent receipt even if Postgres outlasts the dispatch
+ * retry window. This activity never re-dispatches the run. */
+export const scheduledTaskFailureActivity = proxyActivities<
+  Pick<typeof activities, "recordScheduledTaskDispatchFailure">
+>({ startToCloseTimeout: "2 minutes" });
+
 /** Goal continuation evaluates a durable Postgres obligation at an idle
  * boundary. A transient failure gets a short retry window, then records an
  * explicit delayed outbox wake instead of relying on an unrelated mutation or

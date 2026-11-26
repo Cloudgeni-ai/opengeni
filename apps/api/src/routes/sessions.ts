@@ -493,6 +493,7 @@ import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { allSettledInOrder } from "../http/settled-in-order";
 import { liveStreamSignal } from "../http/server-drain";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { measureSessionCreatePhase } from "../session-create-observability";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -5646,16 +5647,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         }
       }
     } else {
-      result = await attachViewer(viewerServices, {
-        accountId: grant.accountId,
-        workspaceId,
-        session,
-        viewerSubjectId: grant.subjectId,
-        grant,
-        waitSignal: c.req.raw.signal,
-        ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
-        ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
-      });
+      try {
+        // The attach bounds its own lifecycle wait, so the server idle timeout
+        // must not cut it (that abort would then read as a client disconnect).
+        result = await withoutRequestIdleTimeout(c, () =>
+          attachViewer(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerSubjectId: grant.subjectId,
+            grant,
+            waitSignal: c.req.raw.signal,
+            ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
+            ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
+          }),
+        );
+      } catch (error) {
+        // A caller that disconnects while the attach waits on a lifecycle
+        // transition cancels that wait through `waitSignal`. That is a client
+        // disconnect, not a server failure: answer with the client-gone
+        // convention (mcp/request-abort.ts), 499 and no body.
+        if (c.req.raw.signal.aborted) return new Response(null, { status: 499 });
+        throw error;
+      }
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
       // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS

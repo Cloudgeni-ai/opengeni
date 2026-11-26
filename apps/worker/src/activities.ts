@@ -114,6 +114,8 @@ export const expireSessionInteractionIntervention =
 export const expireScheduledRunHumanWait = defaultControlActivities.expireScheduledRunHumanWait;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
+export const recordScheduledTaskDispatchFailure =
+  defaultControlActivities.recordScheduledTaskDispatchFailure;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;

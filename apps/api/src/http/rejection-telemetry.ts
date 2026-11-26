@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { ErrorCode, Permission, signedDelegatedAccessTokenClaims } from "@opengeni/contracts";
-import { turnExecutionTelemetryKey } from "@opengeni/observability";
+import {
+  messageFingerprint,
+  normalizeFingerprintMessage,
+  turnExecutionTelemetryKey,
+} from "@opengeni/observability";
 import { SITE_GATEWAY_REFUSAL_REASONS } from "../site-publishing/gateway-signature";
 
 /**
@@ -106,18 +110,12 @@ export function rejectedCredentialTelemetryKey(credential: string): string {
 }
 
 export function rejectionFingerprint(message: string): string {
-  return `m_${createHash("sha256").update(normalizeRejectionMessage(message)).digest("hex").slice(0, 10)}`;
+  return messageFingerprint(message);
 }
 
 /** Identifiers, quoted values, and numbers never distinguish two fingerprints. */
 export function normalizeRejectionMessage(message: string): string {
-  return message
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<id>")
-    .replace(/"[^"]*"|'[^']*'|`[^`]*`/g, "<q>")
-    .replace(/[0-9]+/g, "0")
-    .replace(/\s+/g, " ")
-    .trim();
+  return normalizeFingerprintMessage(message);
 }
 
 export function rejectionReasonFromMessage(message: string | undefined): string | null {

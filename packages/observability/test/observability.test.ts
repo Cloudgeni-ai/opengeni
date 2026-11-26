@@ -738,6 +738,91 @@ describe("observability", () => {
       expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
   });
 
+  test("sandbox reaper failure logs keep lease key, fence code, SQLSTATE and fingerprint only", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const leaseKey = "slk_0123456789abcdef0123456789abcdef";
+    const sentinel = "private-reaper-value";
+    const processId = "0ffbda8c-11c6-49dc-b636-b15a58163753";
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "worker" },
+      );
+      obs.warn("sandbox reaper: retained-process settlement failed", {
+        errorClass: "SandboxReaperOperationError",
+        errorCode: "sandbox_reaper_settlement_failed",
+        origin: "worker",
+        sandboxLeaseKey: leaseKey,
+        leaseEpoch: 4,
+        backend: "modal",
+        causeName: "SandboxWorkspaceMutationFencedError",
+        causeFenceCode: "admission_fenced",
+        causeSqlState: "40P01",
+        causeFingerprint: "m_0123456789",
+        correlationId: "00000000-0000-4000-8000-000000000009",
+        processId,
+        error: sentinel,
+        causeMessage: sentinel,
+      });
+      obs.warn("sandbox reaper: per-sandbox drain failed", {
+        errorClass: "SandboxReaperOperationError",
+        errorCode: "sandbox_reaper_drain_failed",
+        sandboxLeaseKey: sentinel,
+        leaseEpoch: -1,
+        backend: sentinel,
+        causeName: sentinel,
+        causeFenceCode: sentinel,
+        causeFingerprint: sentinel,
+      });
+      obs.warn("unrelated failure", {
+        errorClass: "SnapshotOperationError",
+        causeName: "Error",
+        causeFenceCode: "process_fenced",
+        causeFingerprint: "m_0123456789",
+      });
+      obs.warn("wrong cause class", {
+        errorClass: "SandboxReaperOperationError",
+        errorCode: "sandbox_reaper_drain_failed",
+        causeName: "Error",
+        causeFenceCode: "process_fenced",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      errorClass: "SandboxReaperOperationError",
+      errorCode: "sandbox_reaper_settlement_failed",
+      errorMessage: "sandbox reaper settlement failed",
+      origin: "worker",
+      sandboxLeaseKey: leaseKey,
+      leaseEpoch: 4,
+      backend: "modal",
+      causeName: "SandboxWorkspaceMutationFencedError",
+      causeFenceCode: "admission_fenced",
+      causeSqlState: "40P01",
+      causeFingerprint: "m_0123456789",
+      correlationId: "00000000-0000-4000-8000-000000000009",
+    });
+    const all = observed.join(" ");
+    expect(all).not.toContain(sentinel);
+    expect(all).not.toContain(processId);
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("causeMessage");
+    for (const key of [
+      "sandboxLeaseKey",
+      "leaseEpoch",
+      "backend",
+      "causeName",
+      "causeFenceCode",
+      "causeFingerprint",
+    ])
+      expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
+    expect(JSON.parse(observed[2]!)).not.toHaveProperty("causeFenceCode");
+    expect(JSON.parse(observed[2]!)).not.toHaveProperty("causeFingerprint");
+    expect(JSON.parse(observed[3]!)).not.toHaveProperty("causeFenceCode");
+  });
+
   test("Knowledge indexing logs keep the reviewed class, code, status, and SQLSTATE only", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;
