@@ -61,8 +61,8 @@ to check:
    --print-to-pdf=out.pdf in.html`.
    Managed sandboxes already include python-docx, pypdf, Chromium and the
    `pdftotext`/`pdfinfo` readers, and no LibreOffice or pandoc, so do not
-   check for tools or install any for a new file; if an import fails, run
-   `pip install <package>` and continue.
+   check for tools or install any for a new file; on an import or missing
+   dependency error, run `pip install <package>` and continue.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content. For a PDF made from HTML, check

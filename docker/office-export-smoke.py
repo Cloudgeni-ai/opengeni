@@ -20,6 +20,12 @@ from reportlab.pdfgen import canvas
 TEXT = "Opengeni export smoke"
 
 
+def check(ok: bool, what: str) -> None:
+    # Not `assert`: python -O would skip it and let a broken image through.
+    if not ok:
+        raise SystemExit(f"office export smoke failed: {what}")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
@@ -31,25 +37,26 @@ def main() -> None:
         table.rows[0].cells[1].text = "92"
         document.save(out / "smoke.docx")
         reread = docx.Document(out / "smoke.docx")
-        assert reread.paragraphs[0].text == TEXT
-        assert reread.tables[0].rows[0].cells[1].text == "92"
+        check(reread.paragraphs[0].text == TEXT, "docx heading")
+        check(reread.tables[0].rows[0].cells[1].text == "92", "docx table")
 
         workbook = openpyxl.Workbook()
         workbook.active.append([TEXT, 92])
         workbook.save(out / "smoke.xlsx")
         sheet = openpyxl.load_workbook(out / "smoke.xlsx").active
-        assert sheet["A1"].value == TEXT and sheet["B1"].value == 92
+        check(sheet["A1"].value == TEXT and sheet["B1"].value == 92, "xlsx cells")
 
         deck = pptx.Presentation()
         slide = deck.slides.add_slide(deck.slide_layouts[0])
         slide.shapes.title.text = TEXT
         deck.save(out / "smoke.pptx")
-        assert pptx.Presentation(out / "smoke.pptx").slides[0].shapes.title.text == TEXT
+        title = pptx.Presentation(out / "smoke.pptx").slides[0].shapes.title.text
+        check(title == TEXT, "pptx title")
 
         pdf = canvas.Canvas(str(out / "smoke.pdf"), pagesize=A4)
         pdf.drawString(72, 760, TEXT)
         pdf.save()
-        assert TEXT in PdfReader(out / "smoke.pdf").pages[0].extract_text()
+        check(TEXT in PdfReader(out / "smoke.pdf").pages[0].extract_text(), "pdf text")
 
     print("office export smoke: docx xlsx pptx pdf ok", file=sys.stderr)
 
