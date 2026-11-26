@@ -41,6 +41,7 @@ import {
   type ScheduledTaskPolicyDrift,
   type ScheduledTaskRun,
   type ScheduledTaskRunAccessFailure,
+  type Session,
   type SessionAuthorizationPort,
   type SessionAuthorizationSurface,
   type ToolRef,
@@ -48,7 +49,7 @@ import {
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
-  getSession,
+  getSessionToolConfigs,
   listActiveScheduledTasksWithPinnedAccounts,
   listScheduledTaskAccessAttentionEvents,
   listScheduledTaskHumanWaitAttention,
@@ -438,14 +439,54 @@ export type ScheduledTaskAccessPlan = {
   changed: boolean;
 };
 
+/** The parts of a schedule's target chat its access plan reads. */
+type ScheduledTaskTargetToolConfig = Pick<Session, "id" | "tools" | "toolPolicy" | "mcpServers">;
+
 /** Request-local reads shared by every task one viewer's list decorates. */
 export type ScheduledTaskAccessReadCache = {
   registries: Map<string, Promise<Settings>>;
   connections: Map<string, Promise<ConnectionMetadata[]>>;
+  /** Keyed by {@link targetKey}. */
+  targets: Map<string, Promise<ScheduledTaskTargetToolConfig | null>>;
 };
 
 export function scheduledTaskAccessReadCache(): ScheduledTaskAccessReadCache {
-  return { registries: new Map(), connections: new Map() };
+  return { registries: new Map(), connections: new Map(), targets: new Map() };
+}
+
+function targetKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}:${sessionId}`;
+}
+
+/**
+ * Read the target chats of every listed schedule that runs in one, in a single
+ * query, so decorating a list costs one read rather than one full session read
+ * per schedule. A failed read fails each schedule that uses it, as a per-task
+ * read would, and only omits that schedule's advisory fields. One failed
+ * batched read therefore drops the plan and drift fields of every listed
+ * schedule with a target chat; they are advisory, so the list still loads.
+ */
+function primeScheduledTaskTargets(
+  db: Database,
+  workspaceId: string,
+  tasks: readonly ScheduledTask[],
+  cache: ScheduledTaskAccessReadCache,
+): void {
+  const ids = [
+    ...new Set(
+      tasks.flatMap((task) =>
+        task.runMode === "existing_session" && task.targetSessionId ? [task.targetSessionId] : [],
+      ),
+    ),
+  ].filter((id) => !cache.targets.has(targetKey(workspaceId, id)));
+  if (ids.length === 0) return;
+  const read = getSessionToolConfigs(db, workspaceId, ids);
+  for (const id of ids) {
+    const target = read.then((configs) => configs.get(id) ?? null);
+    // Observed by the schedule that awaits it; never an unhandled rejection.
+    target.catch(() => undefined);
+    cache.targets.set(targetKey(workspaceId, id), target);
+  }
 }
 
 function cached<T>(cache: Map<string, Promise<T>>, key: string, read: () => Promise<T>) {
@@ -508,10 +549,15 @@ export async function computeScheduledTaskAccessPlan(input: {
       : requireWorkspace(db, task.workspaceId).then((workspace) => workspace.settings),
   ]);
   const followsTask = scheduledTaskToolsFollowTask(task);
-  const target =
-    task.runMode === "existing_session" && task.targetSessionId
-      ? await getSession(db, task.workspaceId, task.targetSessionId)
-      : null;
+  const targetSessionId =
+    task.runMode === "existing_session" ? (task.targetSessionId ?? null) : null;
+  const target = targetSessionId
+    ? await cached(cache.targets, targetKey(task.workspaceId, targetSessionId), () =>
+        getSessionToolConfigs(db, task.workspaceId, [targetSessionId]).then(
+          (configs) => configs.get(targetSessionId) ?? null,
+        ),
+      )
+    : null;
   const accountRegistry = target
     ? settingsWithSessionMcpServerMetadata(ownerRegistry, target.mcpServers)
     : ownerRegistry;
@@ -670,6 +716,7 @@ export async function withScheduledTaskPolicyDrift(input: {
     hasPermission(grant.permissions, "scheduled_tasks:manage") &&
     isScheduledTaskAccessRefreshHuman(input.authorization, workspaceId);
   const cache = scheduledTaskAccessReadCache();
+  primeScheduledTaskTargets(input.db, workspaceId, actionable, cache);
   const decorations = new Map<
     string,
     { policyDrift: ScheduledTaskPolicyDrift | null; accountPlan: ScheduledTaskAccountPlan }
@@ -912,6 +959,7 @@ export async function scheduledTasksWithUnavailableAccounts(input: {
     return [];
   }
   const cache = scheduledTaskAccessReadCache();
+  primeScheduledTaskTargets(input.db, input.grant.workspaceId, actionable, cache);
   const blocked: Array<{
     task: ScheduledTask;
     unavailableAccounts: ScheduledTaskAccessConnector[];

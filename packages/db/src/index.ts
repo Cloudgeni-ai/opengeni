@@ -34917,6 +34917,43 @@ export async function getSession(
   return readSession(db, workspaceId, sessionId, "full");
 }
 
+/** The tool configuration of sessions a schedule runs in, read in one
+ * workspace-scoped pass: the same row visibility as {@link getSession}, without
+ * its control, event-cursor and effective-model reads. Missing ids are absent. */
+export async function getSessionToolConfigs(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, Pick<Session, "id" | "tools" | "toolPolicy" | "mcpServers">>> {
+  const configs = new Map<string, Pick<Session, "id" | "tools" | "toolPolicy" | "mcpServers">>();
+  const ids = [...new Set(sessionIds)];
+  if (ids.length === 0) return configs;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        tools: schema.sessions.tools,
+        toolPolicy: schema.sessions.toolPolicy,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
+    const servers = await sessionMcpServerMetadataForSessions(
+      scopedDb,
+      workspaceId,
+      rows.map((row) => row.id),
+    );
+    for (const row of rows) {
+      configs.set(row.id, {
+        id: row.id,
+        tools: row.tools as ToolRef[],
+        toolPolicy: row.toolPolicy as SessionToolPolicy,
+        mcpServers: servers.get(row.id) ?? [],
+      });
+    }
+    return configs;
+  });
+}
+
 /** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
 export async function getSessionModelGate(
   db: Database,
