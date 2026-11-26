@@ -49,7 +49,14 @@ describe("foldAdvancedSettings", () => {
   test("rarely used pages go under one collapsed Advanced at the end, grouped by scope", () => {
     const folded = foldAdvancedSettings(SECTIONS);
     expect(ids(folded)).toEqual([
-      ["workspace", [[null, ["workspace:general"]]]],
+      // Computer use stays at the top, where the desktop app shows it.
+      [
+        "workspace",
+        [
+          [null, ["workspace:general"]],
+          [null, ["workspace:/workspaces/$workspaceId/computer-use"]],
+        ],
+      ],
       [
         "organization",
         [
@@ -61,14 +68,7 @@ describe("foldAdvancedSettings", () => {
       [
         "advanced",
         [
-          [
-            "Workspace",
-            [
-              "workspace:api-keys",
-              "workspace:developer",
-              "workspace:/workspaces/$workspaceId/computer-use",
-            ],
-          ],
+          ["Workspace", ["workspace:api-keys", "workspace:developer"]],
           ["Organization", ["organization:developer"]],
         ],
       ],

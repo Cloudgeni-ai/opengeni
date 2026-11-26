@@ -12,7 +12,6 @@ export const SETTINGS_ADVANCED_ENTRIES: readonly string[] = [
   "workspace:learning",
   "workspace:api-keys",
   "workspace:developer",
-  "workspace:/workspaces/$workspaceId/computer-use",
   "organization:shared",
   "organization:identity",
   "organization:security",
