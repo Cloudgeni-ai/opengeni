@@ -121,7 +121,7 @@ describe("shared tool row presentation", () => {
         `${header}description: ${"x".repeat(930)}\n---\n# ${"Partial heading ".repeat(12)}\n\n${body}`,
         "Document review",
       ],
-    ]) {
+    ] as const) {
       const text = withOmission(JSON.stringify({ files: [{ path: "SKILL.md", content }] }));
       for (const output of [
         text,
