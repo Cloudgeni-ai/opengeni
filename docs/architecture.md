@@ -1390,6 +1390,8 @@ provider require boundaries without requiring a full runtime dependency tree.
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
+   iOS app inference admission checks the signed-in person's current
+   [AI processing consent](product-integration.md#native-app-ai-processing-consent).
 2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
    intent commit in Postgres.
 3. Child spans time creation; fanout/wake start post-commit, detached from

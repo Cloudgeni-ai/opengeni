@@ -2085,6 +2085,7 @@ export const FORCE_RLS_TABLES = [
   "agent_slack_installs",
   "agent_workspace_access",
   "agents",
+  "ai_processing_consents",
   "api_keys",
   "app_notifications",
   "app_package_exports",
@@ -3183,6 +3184,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "agent_calls",
   "agent_publish_operations",
+  "ai_processing_consents",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",

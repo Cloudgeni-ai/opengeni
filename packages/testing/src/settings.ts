@@ -33,6 +33,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     heedeoScriptUrl: "https://heedeo.dev/i.js",
     heedeoTimeoutMs: 1_500,
     adminPasskeyStepUp: "off",
+    aiProcessingConsentProviders: [],
     decisionModelAuth: "api_key",
     serviceName: "opengeni",
     officeAddinName: "Opengeni",

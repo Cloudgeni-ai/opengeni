@@ -8,6 +8,46 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
+## Native app AI processing consent
+
+`GET /v1/me/ai-processing-consent` returns `{ required, disclosure, consent }`
+for a signed-in human (browser or native app). Render the server's `disclosure`
+as-is and ask explicitly; opening the screen is not consent. `POST` to the same
+path with `{ "version": "<disclosure.version>" }` grants permission. `DELETE`
+withdraws it. Both return the same state shape. A browser mutation must be
+same-origin. API keys, delegated callers and agents cannot use these routes.
+The SDK methods are `getAiProcessingConsent`, `grantAiProcessingConsent`, and
+`withdrawAiProcessingConsent`.
+
+The version is an opaque digest of the rendered title, body, provider names
+and privacy URL. The response contains only the current active grant or `null`.
+Granting a new version ends the previous grant and preserves the old receipt.
+The server keeps the rendered disclosure with each receipt. When `POST` returns
+409 with `error.details.code = "ai_processing_consent_version_mismatch"`,
+reload and show the new disclosure; do not accept it automatically.
+
+Requests from an iOS app session that start new model processing are refused with 403 and
+`error.details.code = "ai_processing_consent_required"` until the person grants
+the current version. This includes chat submission, realtime voice and
+dictation. Reading chats, pausing work and settling or stopping an existing
+call remain available. Finalizing already-recorded audio saves the capture,
+but without consent the transcript returns `state: "failed"` with
+`errorCode: "ai_processing_consent_required"` and can be retried after consent.
+Only iOS enforces consent initially. Other native clients, ordinary web, and
+API-key processing are unchanged. Withdrawal does not recall data from a
+provider or cancel work already admitted.
+
+Set `OPENGENI_AI_PROCESSING_CONSENT_PROVIDERS` to the comma-separated display
+names of the deployment's providers that receive data from AI features, and
+`OPENGENI_AI_PROCESSING_CONSENT_PRIVACY_URL` to an HTTPS privacy page (defaults
+to `OPENGENI_LEGAL_PRIVACY_POLICY_URL` if set). Configure the real names before
+distributing a native app; the generic upstream disclosure is not a deployment
+provider list. The disclosure also covers providers people or their organizations
+connect through a subscription or API key. Keep these settings consistent across
+API replicas.
+
+## Chat client response shape
+
 The console, mobile and packaged chat UI explicitly select `client.withSessionResponse("chat")`.
 These SDK clients send `Accept: application/json; opengeni-session=chat` on JSON requests. Session
 responses for chat reads, lists and mutations then omit `instructions`, `skills`

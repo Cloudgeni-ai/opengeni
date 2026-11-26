@@ -521,6 +521,10 @@ import {
   registerManagedPasskeyRoutes,
 } from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import {
+  registerAiProcessingConsentRoutes,
+  requireAiProcessingConsent,
+} from "./routes/ai-processing-consent";
 import { registerConsoleSignInRoutes } from "./routes/console-sign-in";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -1425,6 +1429,7 @@ export function createAppComposition(
   registerManagedSignInMethodRoutes(app, routeDeps);
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
+  registerAiProcessingConsentRoutes(app, routeDeps);
   registerConsoleSignInRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
@@ -2567,6 +2572,7 @@ export function createAppComposition(
         workspaceId,
         "workspace:read",
       );
+      if (operation === "invoke") await requireAiProcessingConsent(c, routeDeps);
       let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
@@ -2753,6 +2759,7 @@ export function createAppComposition(
       workspaceId,
       "workspace:read",
     );
+    await requireAiProcessingConsent(c, routeDeps);
     const parsed = parseRequestBody(ToolGatewayCallRequest, await c.req.json().catch(() => null), {
       status: 400,
       message: "Invalid tool gateway call",

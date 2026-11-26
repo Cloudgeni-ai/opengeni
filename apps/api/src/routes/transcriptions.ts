@@ -15,11 +15,13 @@ import type { Hono } from "hono";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import { voiceInputRegionRestricted } from "../transcription/region";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 
 export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/transcriptions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    await requireAiProcessingConsent(c, deps);
     const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) return c.json({ code: "not_found" }, 404);
     if (resolveWorkspaceVoiceInputEnabled(workspace.settings) === false) {

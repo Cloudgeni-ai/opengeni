@@ -2659,6 +2659,8 @@ const SettingsSchema = z.object({
   // with a passkey (CASA 3.3.1). Off by default; production sets required.
   // Applies only where passkey sign-in is offered.
   adminPasskeyStepUp: z.enum(["off", "required"]).default("off"),
+  aiProcessingConsentProviders: z.array(z.string().trim().min(1)).default([]),
+  aiProcessingConsentPrivacyUrl: z.url({ protocol: /^https$/u }).optional(),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app
   // adds its scheme here.
@@ -7186,6 +7188,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     adminPasskeyStepUp: optional("OPENGENI_ADMIN_PASSKEY_STEP_UP"),
+    aiProcessingConsentProviders: optional("OPENGENI_AI_PROCESSING_CONSENT_PROVIDERS")
+      ?.split(",")
+      .map((provider) => provider.trim())
+      .filter(Boolean),
+    aiProcessingConsentPrivacyUrl: optional("OPENGENI_AI_PROCESSING_CONSENT_PRIVACY_URL"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
         ? undefined
