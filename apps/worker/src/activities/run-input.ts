@@ -887,6 +887,8 @@ export function withCurrentUserAttachmentRefs(
  * model must check actual state before repeating side effects. Resuming from
  * an answered approval or question also advances the generation, but that
  * execution ended cleanly at the pause.
+ * A recovery claim that re-pauses before any model request leaves the note
+ * unsent; each cut-off call's own result still says to check before repeating.
  */
 export function turnExecutionInterrupted(turn: {
   executionGeneration: number;

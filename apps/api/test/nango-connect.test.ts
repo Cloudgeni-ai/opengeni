@@ -264,11 +264,12 @@ describe("Nango Connect", () => {
     listener!({ origin: data.connectOrigin, source: frameWindow, data: { type: "connect" } });
     // Nango's success screen (and its Finish button) is gone before navigation.
     expect(frame.isConnected).toBe(false);
-    expect(status.textContent).toBe("Connected. Returning to Opengeni…");
+    expect(status.textContent).toBe("Finishing connection…");
     expect(replaced).toEqual([]);
     resolveFetch({ ok: true, status: 200, json: async () => ({ status: "complete", redirectTo }) });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(replaced).toEqual([redirectTo]);
+    expect(status.textContent).toBe("Connected. Returning to Opengeni…");
   });
 
   test("completion stores nothing until Nango has a connection with this attempt's tags", async () => {

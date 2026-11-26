@@ -421,7 +421,7 @@ const PAGE_SCRIPT = `(() => {
       );
     } else if (type === "connect") {
       removeFrame();
-      status.textContent = data.text.done;
+      status.textContent = data.text.finishing;
       void finishAfterConnect();
     } else if (type === "close") {
       closed = true;
@@ -500,6 +500,7 @@ export async function nangoConnectPage(
     expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 30 * 60 * 1000,
     text: {
       done: "Connected. Returning to Opengeni…",
+      finishing: "Finishing connection…",
       failed: "The connection could not be completed. Close this window and try again.",
       closed: "Closed without connecting. Close this window and try again.",
     },
