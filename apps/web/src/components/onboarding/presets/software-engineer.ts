@@ -2,8 +2,7 @@ import type { PersonaPreset } from "./types";
 
 /**
  * "Software engineer". Not yet ready-mades, so left out: the Deployments and
- * Work summary apps. Rail order (Agents, Inbox, Apps first) needs the personal
- * nav order from #8183.
+ * Work summary apps.
  */
 export const SOFTWARE_ENGINEER_PRESET: PersonaPreset = {
   group: "Engineering",
@@ -16,4 +15,8 @@ export const SOFTWARE_ENGINEER_PRESET: PersonaPreset = {
   setup: { key: "pr-reviews", label: "PR reviewer" },
   apps: [],
   connections: ["GitHub", "Slack", "Linear"],
+  rail: {
+    top: ["new_session", "agents", "inbox", "apps", "setup"],
+    setup: ["automations", "knowledge", "artifacts", "meetings"],
+  },
 };

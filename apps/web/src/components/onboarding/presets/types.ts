@@ -15,4 +15,10 @@ export type PersonaPreset = {
   apps: readonly { key: string; label: string; icon: "megaphone" | "list-checks" }[];
   /** Connections to suggest, by name, in one Connect link. */
   connections: readonly string[];
+  /**
+   * The rail's built-in entries up front (`navOrder`, `setup` being the
+   * folded group) and inside the group (`navSetup`). Entries not named keep
+   * their own place.
+   */
+  rail: { top: readonly string[]; setup: readonly string[] };
 };

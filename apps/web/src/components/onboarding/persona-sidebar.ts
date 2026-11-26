@@ -115,13 +115,18 @@ export async function applyPersonaSidebar(
   origin: string,
 ): Promise<"applied" | "skipped"> {
   const group = personaSidebarGroup(useCase, { origin, workspaceId });
-  if (!group) return "skipped";
+  const preset = useCase === "cloud" || useCase === "everyday" ? PERSONA_PRESETS[useCase] : null;
+  if (!group || !preset) return "skipped";
   const layout = await client.getSidebarLayout(workspaceId);
   if (!layout.personal.available || layout.personal.customized) return "skipped";
   await client.updateSidebarLayout(workspaceId, {
     scope: "personal",
     expectedRevision: layout.personal.revision,
-    changes: [{ op: "add", item: group, index: 0 }],
+    changes: [
+      { op: "add", item: group, index: 0 },
+      // The answer's rail order, in the person's own layout only.
+      { op: "options", navOrder: [...preset.rail.top], navSetup: [...preset.rail.setup] },
+    ],
   });
   return "applied";
 }

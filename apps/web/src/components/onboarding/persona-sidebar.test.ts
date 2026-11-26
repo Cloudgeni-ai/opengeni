@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import type { SidebarLayoutResponse, UpdateSidebarLayoutRequest } from "@opengeni/sdk";
+import { SIDEBAR_NAV_ENTRIES } from "@opengeni/contracts";
 
 import { applyPersonaSidebar, PERSONA_PRESETS, personaSidebarGroup } from "./persona-sidebar";
 import { guidedSetupByKey } from "../get-started/guided-setups";
@@ -74,6 +75,20 @@ describe("persona first run", () => {
     expect(client.updates).toHaveLength(1);
     expect(client.updates[0]).toMatchObject({ scope: "personal", expectedRevision: 0 });
     expect(client.updates.some((update) => update.scope === "workspace")).toBe(false);
+    // The engineer's rail order: Agents, Inbox and Apps up front.
+    expect(client.updates[0]?.changes).toContainEqual({
+      op: "options",
+      navOrder: ["new_session", "agents", "inbox", "apps", "setup"],
+      navSetup: ["automations", "knowledge", "artifacts", "meetings"],
+    });
+  });
+
+  test("each preset's rail order names only entries the rail can order", () => {
+    const known = new Set<string>([...SIDEBAR_NAV_ENTRIES, "new_session", "setup"]);
+    for (const preset of Object.values(PERSONA_PRESETS)) {
+      for (const key of [...preset.rail.top, ...preset.rail.setup]) expect(known).toContain(key);
+      expect(preset.rail.top).toContain("setup");
+    }
   });
 
   test("leaves a sidebar the person already changed, or one they can't have", async () => {
