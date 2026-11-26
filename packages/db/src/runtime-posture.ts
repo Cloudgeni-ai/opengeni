@@ -2073,7 +2073,6 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  * commit as the migration so startup cannot silently accept an unreviewed gap.
  */
 export const FORCE_RLS_TABLES = [
-  "ai_processing_consents",
   "additional_organization_creation_receipts",
   "agent_call_host_phones",
   "agent_calls",
@@ -2086,6 +2085,7 @@ export const FORCE_RLS_TABLES = [
   "agent_slack_installs",
   "agent_workspace_access",
   "agents",
+  "ai_processing_consents",
   "api_keys",
   "app_notifications",
   "app_package_exports",
@@ -3180,9 +3180,9 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
-  "ai_processing_consents",
   "agent_calls",
   "agent_publish_operations",
+  "ai_processing_consents",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
