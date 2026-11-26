@@ -949,7 +949,9 @@ export const InboundEventSummary = /* @__PURE__ */ defineSchema(() =>
      * Only the automation's owner may see what this event is about (a
      * "This workspace" event about their private meeting or chat): its run
      * is an Only me chat, and anyone else reading the run history gets the
-     * event without its subject, summary, link or actor.
+     * event without its subject, summary, link or actor. Stated for every
+     * This workspace event; one stored before it was stated is treated as
+     * owner-only in run history.
      */
     ownerOnly: z.boolean().optional(),
   }),

@@ -21853,6 +21853,7 @@
         "$.actor": "ref(EventActor)!",
         "$.id": "string!",
         "$.occurredAt": "string!",
+        "$.ownerOnly": "boolean?",
         "$.sourceId": "string!",
         "$.sourceKind": "ref(EventSourceKind)!",
         "$.subject": "string! null",

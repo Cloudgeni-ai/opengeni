@@ -145,7 +145,7 @@ function transcriptReady(title: string, visibility: "private" | "workspace"): St
   };
 }
 
-async function fire(grant: Grant, sourceId: string, taskId: string, event: StoredEventInput) {
+async function deliver(grant: Grant, sourceId: string, event: StoredEventInput) {
   const body = new TextEncoder().encode(JSON.stringify([event.externalId]));
   const dedupeKey = `webhook-id:${crypto.randomUUID()}`;
   await recordEventDelivery(client.db, {
@@ -163,6 +163,10 @@ async function fire(grant: Grant, sourceId: string, taskId: string, event: Store
     match: eventMatchesTrigger,
     settleMs: 0,
   });
+}
+
+async function fire(grant: Grant, sourceId: string, taskId: string, event: StoredEventInput) {
+  await deliver(grant, sourceId, event);
   const dispatch = await claimEventTriggerDispatch(client.db, grant.workspaceId, taskId);
   expect(dispatch.start).toHaveLength(1);
   const occurrence = dispatch.start[0]!;
@@ -216,18 +220,32 @@ describe("an event only the automation's owner may see", () => {
     expect((await chatOf(run.sessionId!)).visibility).toBe("workspace_shared");
   });
 
-  test("an automation that keeps one shared chat skips the private meeting", async () => {
+  test("an automation that keeps one shared chat leaves the private meeting out", async () => {
     if (!available) return;
     const grant = await workspace();
     const { source, task } = await transcriptWatcher(grant, "reusable_session");
+    // Left out when claimed, before it is batched with shared events or counted.
+    await deliver(grant, source.id, transcriptReady("Salary talk", "private"));
+    await deliver(grant, source.id, transcriptReady("Budget review", "private"));
+    const withheld = await claimEventTriggerDispatch(client.db, grant.workspaceId, task.id);
+    expect(withheld.start).toHaveLength(0);
+    const runs = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+    // One receipt for the streak, naming no meeting.
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "skipped",
+      sessionId: null,
+      error: "owner_only_event",
+    });
+
+    // A meeting the workspace can see still runs in the automation's chat.
     const { result, run } = await fire(
       grant,
       source.id,
       task.id,
-      transcriptReady("Salary talk", "private"),
+      transcriptReady("Standup", "workspace"),
     );
-    expect(result.action).not.toBe("start");
-    expect(run).toMatchObject({ status: "skipped", sessionId: null });
-    expect(run.error).toContain("owner_only_event");
+    expect(result).toMatchObject({ action: "start" });
+    expect((await chatOf(run.sessionId!)).visibility).toBe("workspace_shared");
   });
 });

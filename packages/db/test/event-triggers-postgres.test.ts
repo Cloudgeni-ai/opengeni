@@ -1692,7 +1692,7 @@ describe("Opengeni's own events (migration 1105)", () => {
     ]);
     expect(mixed.summaries.map((summary) => [summary.subject, summary.ownerOnly])).toEqual([
       ["Salary talk", true],
-      ["Standup", undefined],
+      ["Standup", false],
     ]);
     const mixedKey = eventOccurrenceProducerKey(mixed.id);
     expect(await eventProducerOwnerOnly(client.db, space.workspaceId, mixedKey)).toBe(true);
@@ -1721,9 +1721,21 @@ describe("Opengeni's own events (migration 1105)", () => {
       eventSummariesForReader(history, { ownerSubjectId: owner, readerSubjectId: null })[0]
         ?.summary,
     ).toBe("");
+    // History stored before ownerOnly was stated keeps This workspace events from others.
+    const legacy = history.map(({ ownerOnly: _, ...rest }) => rest);
+    expect(
+      eventSummariesForReader(legacy, { ownerSubjectId: owner, readerSubjectId: bob }).map(
+        (summary) => summary.subject,
+      ),
+    ).toEqual([null, null]);
+    expect(
+      eventSummariesForReader(legacy, { ownerSubjectId: owner, readerSubjectId: owner }).map(
+        (summary) => summary.subject,
+      ),
+    ).toEqual(["Salary talk", "Standup"]);
 
     const sharedOnly = await occurrenceOf([transcriptReady("Retro", "workspace", 1)]);
-    expect(sharedOnly.summaries[0]?.ownerOnly).toBeUndefined();
+    expect(sharedOnly.summaries[0]?.ownerOnly).toBe(false);
     const sharedKey = eventOccurrenceProducerKey(sharedOnly.id);
     expect(await eventProducerOwnerOnly(client.db, space.workspaceId, sharedKey)).toBe(false);
     // An event that doesn't say counts as private.

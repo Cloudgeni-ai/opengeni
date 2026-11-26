@@ -1739,6 +1739,18 @@ export function eventChainLimitProducerKey(firstInboxId: string): string {
 /** Why an automation's run was skipped: another automation of its agent took the same delivery. */
 export const EVENT_DUPLICATE_AGENT_RUN_REASON = "duplicate_agent_run";
 
+/**
+ * Why events were left out of an automation's runs: they are only its
+ * owner's (a private meeting or chat) and its chat is shared with the
+ * workspace.
+ */
+export const EVENT_OWNER_ONLY_REASON = "owner_only_event";
+
+/** The producer key of the skipped run that records owner-only events left out of a shared chat. */
+export function eventOwnerOnlyProducerKey(firstInboxId: string): string {
+  return `scheduled-task-event-owner-only:${firstInboxId}`;
+}
+
 /** The producer key of the skipped run that records one delivery left to another automation of the agent. */
 export function eventDuplicateAgentRunProducerKey(deliveryId: string, taskId: string): string {
   return `scheduled-task-event-duplicate:${deliveryId}:${taskId}`;
@@ -1764,6 +1776,8 @@ type DispatchFacts = {
   oldest_recent_occurrence_at: Date | string | null;
   task_owner: string | null;
   sync_owner: string | null;
+  task_visibility: string;
+  task_run_mode: string;
 };
 
 function byteLength(value: unknown): number {
@@ -1806,10 +1820,12 @@ export async function claimEventTriggerDispatch(
             task.deleted_at is not null as task_deleted, task.name as task_name,
             task.authority_revision, task.execution_digest,
             task.owner_subject_id as task_owner, task.action ->> 'ownerSubjectId' as sync_owner,
+            task.visibility as task_visibility, task.run_mode as task_run_mode,
             coalesce((select run.error = 'chain_limit' and run.admission_refusal is not null
               from scheduled_task_runs run
               where run.workspace_id = task.workspace_id and run.task_id = task.id
                 and run.error is distinct from ${EVENT_DUPLICATE_AGENT_RUN_REASON}
+                and run.error is distinct from ${EVENT_OWNER_ONLY_REASON}
               order by run.created_at desc, run.id desc limit 1), false) as chain_limit_engaged,
             coalesce(task.reusable_session_id, (
               select run.session_id from scheduled_task_runs run
@@ -1821,7 +1837,8 @@ export async function claimEventTriggerDispatch(
             (exists (select 1 from scheduled_task_runs run
                 where run.workspace_id = task.workspace_id and run.task_id = task.id
                   and run.created_at >= settings.armed_at
-                  and run.error is distinct from ${EVENT_DUPLICATE_AGENT_RUN_REASON})
+                  and run.error is distinct from ${EVENT_DUPLICATE_AGENT_RUN_REASON}
+                  and run.error is distinct from ${EVENT_OWNER_ONLY_REASON})
               or exists (select 1 from scheduled_task_event_occurrences occurrence
                 where occurrence.workspace_id = task.workspace_id and occurrence.task_id = task.id
                   and occurrence.created_at >= settings.armed_at)) as consumed_since_armed,
@@ -1932,7 +1949,43 @@ export async function claimEventTriggerDispatch(
       // events that would take it past the limit, before the storm guard
       // counts anything, so a loop of automations stops here.
       const limited = queued.filter((entry) => entry.event.chainDepth >= maxChainDepth);
-      const pending = queued.filter((entry) => entry.event.chainDepth < maxChainDepth);
+      // An event only the owner may see runs only in a new Only me chat of
+      // the owner. An automation that keeps one chat shared with the
+      // workspace leaves it out here, before it is batched or counted, with
+      // one skipped run receipt per streak.
+      const ownerOnlyHere =
+        facts.task_visibility === "private" || facts.task_run_mode === "new_session_per_run";
+      const withheld = ownerOnlyHere
+        ? []
+        : queued.filter(
+            (entry) =>
+              entry.event.chainDepth < maxChainDepth &&
+              workspaceEventOwnerOnly(entry.sourceKind, entry.event.visibility),
+          );
+      const pending = queued.filter(
+        (entry) => entry.event.chainDepth < maxChainDepth && !withheld.includes(entry),
+      );
+      if (withheld.length > 0) {
+        await tx
+          .update(schema.scheduledTaskEventInbox)
+          .set({ status: "skipped" })
+          .where(
+            inArray(
+              schema.scheduledTaskEventInbox.id,
+              withheld.map((entry) => entry.inbox.id),
+            ),
+          );
+        await recordSkippedEventRun(tx, {
+          accountId: facts.account_id,
+          workspaceId,
+          taskId,
+          authorityRevision: facts.authority_revision,
+          executionDigest: facts.execution_digest,
+          producerKey: eventOwnerOnlyProducerKey(withheld[0]!.inbox.id),
+          reason: EVENT_OWNER_ONLY_REASON,
+          oncePerStreak: true,
+        });
+      }
       let chainLimitNotice: EventChainLimitNotice | null = null;
       if (limited.length > 0) {
         await tx
@@ -2022,7 +2075,9 @@ export async function claimEventTriggerDispatch(
                 url: entry.event.url,
                 actor: { kind: entry.event.actorKind, name: entry.event.actorName },
               }),
-          ...(ownerOnly ? { ownerOnly: true } : {}),
+          // Stated for every This workspace event, so history from before
+          // the field existed is told apart (and kept from other readers).
+          ...(entry.sourceKind === "workspace" ? { ownerOnly } : {}),
         });
         const size = byteLength(summary) + 1;
         if (summaryBytes + size > EVENT_OCCURRENCE_SUMMARIES_MAX_BYTES) break;
@@ -2207,10 +2262,10 @@ export function workspaceEventOwnerOnly(sourceKind: string, visibility: unknown)
 
 /** Whether an occurrence's stored events include one only the automation's owner may see. */
 function storedEventsOwnerOnly(events: unknown): boolean {
+  // The same rule as the database fences: an Opengeni-written event marked
+  // ownerOnly. Unreadable stored events reach neither the prompt nor history.
   const parsed = storedSummaries.safeParse(events);
-  // Unreadable stored events never widen who may see a run.
-  if (!parsed.success) return true;
-  return parsed.data.some((event) => event.ownerOnly === true);
+  return parsed.success && parsed.data.some((event) => event.ownerOnly === true);
 }
 
 /**
@@ -2253,15 +2308,19 @@ export async function scheduledTaskRunOwnerOnly(
 
 /**
  * A run's events as one reader may see them: an event only the automation's
- * owner may see keeps only which event it was for anyone else.
+ * owner may see keeps only which event it was for anyone else. A This
+ * workspace event stored before `ownerOnly` was stated counts as one.
  */
 export function eventSummariesForReader(
   events: readonly InboundEventSummary[],
   reader: { ownerSubjectId: string | null; readerSubjectId: string | null },
 ): InboundEventSummary[] {
   const owner = reader.ownerSubjectId !== null && reader.readerSubjectId === reader.ownerSubjectId;
+  if (owner) return [...events];
   return events.map((event) =>
-    event.ownerOnly === true && !owner ? { ...event, ...REDACTED_EVENT_SUMMARY } : event,
+    event.ownerOnly === true || (event.sourceKind === "workspace" && event.ownerOnly !== false)
+      ? { ...event, ...REDACTED_EVENT_SUMMARY }
+      : event,
   );
 }
 
