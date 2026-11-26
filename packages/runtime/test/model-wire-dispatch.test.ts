@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { withModelTransportStartedObserver } from "../src/model-preparation-diagnostics";
-import { configureRuntimeMetricsHooks, instrumentedModelFetch } from "../src/model-provider-client";
+import {
+  configureRuntimeMetricsHooks,
+  instrumentedModelFetch,
+  isModelEndpointTransportFailure,
+} from "../src/model-provider-client";
 import { withModelCallLifecycle } from "../src/model-request-capture";
 import { withClaudeUsageObserver } from "../src/claude-subscription-usage";
 import {
@@ -281,6 +285,58 @@ test("model call metrics carry provider HTTP status without consuming the error 
     ]);
   } finally {
     configureRuntimeMetricsHooks(null);
+  }
+});
+
+test("a model request that never reaches its endpoint is reported as a transport failure", async () => {
+  const observed: Array<{ outcome: string; transportFailure?: true }> = [];
+  configureRuntimeMetricsHooks({
+    onModelCall: ({ outcome, transportFailure }) =>
+      observed.push({ outcome, ...(transportFailure ? { transportFailure } : {}) }),
+  });
+  const refused = Object.assign(new Error("connect ECONNREFUSED 203.0.113.7:443"), {
+    code: "ECONNREFUSED",
+  });
+  try {
+    for (const failure of [
+      new TypeError("fetch failed", { cause: refused }),
+      new Error("an internal request bug"),
+    ]) {
+      const fetcher = instrumentedModelFetch("organization-compatible-x", (async () => {
+        throw failure;
+      }) as unknown as typeof fetch);
+      await expect(
+        fetcher("https://models.example.com/v1/chat/completions", { method: "POST", body: "{}" }),
+      ).rejects.toBe(failure);
+    }
+    expect(observed).toEqual([
+      { outcome: "failed", transportFailure: true },
+      { outcome: "failed" },
+    ]);
+  } finally {
+    configureRuntimeMetricsHooks(null);
+  }
+  const dns = Object.assign(new Error("Model endpoint hostname was not found"), {
+    name: "DestinationPolicyError",
+    reason: "dns_not_found",
+  });
+  const badUrl = Object.assign(new Error("Model endpoint URL is invalid"), {
+    name: "DestinationPolicyError",
+    reason: "invalid_url",
+  });
+  expect(isModelEndpointTransportFailure(dns)).toBe(true);
+  expect(isModelEndpointTransportFailure(new DOMException("timed out", "TimeoutError"))).toBe(true);
+  expect(
+    isModelEndpointTransportFailure(Object.assign(new Error("tls"), { code: "CERT_HAS_EXPIRED" })),
+  ).toBe(true);
+  for (const notTransport of [
+    badUrl,
+    new DOMException("cancelled", "AbortError"),
+    new Error("plain"),
+    "ECONNREFUSED",
+    null,
+  ]) {
+    expect(isModelEndpointTransportFailure(notTransport)).toBeUndefined();
   }
 });
 

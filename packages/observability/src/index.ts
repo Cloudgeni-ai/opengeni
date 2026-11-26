@@ -1,5 +1,6 @@
 export {
   failureOrigin,
+  isCustomerEndpointMetricProvider,
   isCustomerManagedMetricProvider,
   isProviderAccountRefusal,
   PROVIDER_ACCOUNT_REFUSALS,

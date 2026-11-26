@@ -929,10 +929,91 @@ export function instrumentedModelFetch(
       return response;
     } catch (error) {
       capture.cancel();
-      recordModelCallMetric(provider, "failed", started);
+      recordModelCallMetric(
+        provider,
+        "failed",
+        started,
+        undefined,
+        undefined,
+        isModelEndpointTransportFailure(error),
+      );
       throw error;
     }
   }) as typeof fetch;
+}
+
+/** Connection, DNS, TLS and socket failures (Node, undici and Bun spellings). */
+const ENDPOINT_TRANSPORT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "EHOSTDOWN",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EPIPE",
+  "ConnectionRefused",
+  "ConnectionClosed",
+  "ConnectionReset",
+  "FailedToOpenSocket",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+]);
+const ENDPOINT_TRANSPORT_ERROR_CODE_PREFIXES = ["UND_ERR_", "ERR_TLS_", "ERR_SSL_", "CERT_"];
+const ENDPOINT_TRANSPORT_ERROR_NAMES = new Set([
+  "TimeoutError",
+  "RequestDeadlineError",
+  "ConnectTimeoutError",
+  "HeadersTimeoutError",
+  "BodyTimeoutError",
+  "SocketError",
+]);
+/** The endpoint's own hostname does not resolve to a usable public address. */
+const ENDPOINT_DESTINATION_REASONS = new Set([
+  "dns_not_found",
+  "dns_failed",
+  "dns_empty",
+  "invalid_dns_answer",
+  "private_or_special_use",
+]);
+
+/**
+ * Whether a failed model request never got an HTTP answer because its
+ * endpoint could not be reached: connection refused/reset, DNS, TLS or a
+ * timeout. Our own refusals before the request leaves (residency, admission,
+ * cancellation) carry none of these marks. Walks a short `cause` chain because
+ * fetch wraps socket errors in `TypeError("fetch failed")`.
+ */
+export function isModelEndpointTransportFailure(error: unknown): true | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && typeof current === "object"; depth += 1) {
+    const { name, code, reason, cause } = current as {
+      name?: unknown;
+      code?: unknown;
+      reason?: unknown;
+      cause?: unknown;
+    };
+    if (typeof name === "string" && ENDPOINT_TRANSPORT_ERROR_NAMES.has(name)) return true;
+    if (
+      name === "DestinationPolicyError" &&
+      typeof reason === "string" &&
+      ENDPOINT_DESTINATION_REASONS.has(reason)
+    )
+      return true;
+    if (
+      typeof code === "string" &&
+      (ENDPOINT_TRANSPORT_ERROR_CODES.has(code) ||
+        ENDPOINT_TRANSPORT_ERROR_CODE_PREFIXES.some((prefix) => code.startsWith(prefix)))
+    )
+      return true;
+    current = cause;
+  }
+  return undefined;
 }
 
 /** Whether a request can be sent a second time unchanged (its body is not a consumed stream). */
@@ -955,6 +1036,7 @@ function recordModelCallMetric(
   started: number,
   httpStatus?: number,
   providerAccountRefusal?: ProviderAccountRefusal,
+  transportFailure?: true,
 ): void {
   recordModelCallMetricWithDuration(
     provider,
@@ -962,6 +1044,7 @@ function recordModelCallMetric(
     Math.max(0, (performance.now() - started) / 1000),
     httpStatus,
     providerAccountRefusal,
+    transportFailure,
   );
 }
 
@@ -971,6 +1054,7 @@ function recordModelCallMetricWithDuration(
   durationSeconds: number,
   httpStatus?: number,
   providerAccountRefusal?: ProviderAccountRefusal,
+  transportFailure?: true,
 ): void {
   try {
     runtimeMetricsHooks?.onModelCall?.({
@@ -979,6 +1063,7 @@ function recordModelCallMetricWithDuration(
       durationSeconds,
       ...(httpStatus !== undefined ? { httpStatus } : {}),
       ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+      ...(transportFailure ? { transportFailure } : {}),
     });
   } catch {
     // Metrics emission must never affect a model call.

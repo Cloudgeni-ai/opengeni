@@ -1295,6 +1295,82 @@ describe("idle command containment", () => {
     );
   }, 180_000);
 
+  // Production regression (OpenGeniSandboxDrainExpiredLong): a drain
+  // published the checkpoint and stamped its stop cutoff, but the box was
+  // not confirmed stopped; by the next tick it was gone. Every later tick
+  // got NotFound and threw before the cold commit, leaving the lease
+  // draining with its contained commands' holders forever.
+  test("a contained drain whose box vanished after its save commits cold on the next tick", async () => {
+    const fixture = await idleFixture({ outcome: "settlement_failed", reconcileAttempts: 300 });
+    await idleFor(fixture, 31);
+    expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    const target = {
+      workspaceId: fixture.workspaceId,
+      sandboxGroupId: fixture.sandboxGroupId,
+      instanceId: fixture.instanceId,
+      leaseEpoch: EPOCH,
+    };
+    const drainInput = {
+      target,
+      timeoutClass: "fast" as const,
+      snapshotTimeoutMs: 60_000,
+      captureTimeoutMs: 120_000,
+    };
+    // First attempt: the save publishes and the cutoff is stamped, then the
+    // provider stop is not confirmed.
+    const unconfirmedStop: TerminateBoxFn = async (...args) => {
+      const archive = Buffer.from("SAVED_BEFORE_BOX_VANISHED").toString("base64");
+      expect((await args[3](archive, archiveDescriptor(archive))).wrote).toBe(true);
+      await args[10]?.();
+      return false;
+    };
+    const first = await createSandboxLeaseActivities(services(), {
+      terminateBox: unconfirmedStop,
+    }).drainSandboxLease({ ...drainInput, operationId: crypto.randomUUID() });
+    expect(first.status).not.toBe("terminated");
+    const stuck = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(stuck?.liveness).toBe("draining");
+    expect(stuck?.refcount).toBe(1);
+
+    // Next tick: the real provider seam, whose box is gone.
+    const goneClient = {
+      backendId: "modal",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async resume(): Promise<never> {
+        throw Object.assign(new Error(`Sandbox ${fixture.instanceId} was not found`), {
+          status: 404,
+          code: "NOT_FOUND",
+        });
+      },
+      async resumeExact(): Promise<never> {
+        return await this.resume();
+      },
+    };
+    const second = await createSandboxLeaseActivities(services(), {
+      createClientForBackend: (() => goneClient) as never,
+    }).drainSandboxLease({ ...drainInput, operationId: crypto.randomUUID() });
+    expect(second.status).toBe("terminated");
+
+    const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(lease?.liveness).toBe("cold");
+    expect(lease?.refcount).toBe(0);
+    expect(lease?.leaseEpoch).toBe(EPOCH + 1);
+    expect(lease?.recovery.archive.status).toBe("available");
+    expect(lease?.recovery.provider.status).not.toBe("missing");
+    const record = await commandTerminalRecord(fixture);
+    expect(record.command).toEqual({
+      state: "lost",
+      exit_code: null,
+      settlement_reason: "idle_containment",
+    });
+    expect(record.finished).toHaveLength(1);
+    const [holders] = await admin<{ n: number }[]>`select count(*)::int as n
+      from sandbox_lease_holders where lease_id = ${fixture.leaseId}`;
+    expect(holders?.n).toBe(0);
+  }, 180_000);
+
   test("an idle-containment notice never leads a batch ahead of a real command result", async () => {
     // Under a held wait a real command result may start a turn, but the older
     // passive notice must not take its place: the planner closes a batch on

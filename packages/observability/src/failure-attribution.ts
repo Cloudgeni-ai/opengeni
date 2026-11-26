@@ -47,10 +47,20 @@ export function isProviderAccountRefusal(value: unknown): value is ProviderAccou
   );
 }
 const PROVIDER_QUOTA_SCOPES = new Set(["daily", "monthly", "credits", "quota"]);
+/**
+ * Client-error answers that can be our own malformed request (a serialization
+ * or request-shape bug); they stay platform even from a customer's endpoint.
+ */
+const REQUEST_SHAPE_STATUSES = new Set([400, 422]);
 
 /** Unknown errors, malformed requests and internal lease failures remain platform failures. */
 export function failureOrigin(input: {
   customerManaged: boolean;
+  /** The provider is a customer-supplied endpoint URL (an OpenAI-compatible
+   * connection), so reaching that URL is the customer's responsibility. */
+  customerEndpoint?: boolean;
+  /** The request got no HTTP answer: connection, DNS, TLS or timeout. */
+  transportFailure?: boolean;
   outcome: string;
   code?: unknown;
   waitReason?: unknown;
@@ -93,6 +103,18 @@ export function failureOrigin(input: {
       (input.httpStatus >= 500 && input.httpStatus <= 599))
   )
     return "customer_provider";
+  // A customer's own endpoint that cannot be reached, or that answers any
+  // other client error than a request-shape refusal (unknown model or path,
+  // payload limits, its own policies), is the customer's endpoint failing.
+  if (
+    input.customerEndpoint === true &&
+    (input.transportFailure === true ||
+      (input.httpStatus !== undefined &&
+        input.httpStatus >= 400 &&
+        input.httpStatus <= 499 &&
+        !REQUEST_SHAPE_STATUSES.has(input.httpStatus)))
+  )
+    return "customer_provider";
   return "platform";
 }
 
@@ -123,4 +145,9 @@ export function isCustomerManagedMetricProvider(provider: string): boolean {
     (isDirectModelProviderId(provider) && !provider.endsWith("-")) ||
     /^organization-compatible-.+$/.test(provider)
   );
+}
+
+/** An OpenAI-compatible connection whose endpoint URL the customer supplied. */
+export function isCustomerEndpointMetricProvider(provider: string): boolean {
+  return /^(organization|workspace)-compatible-.+$/.test(provider);
 }

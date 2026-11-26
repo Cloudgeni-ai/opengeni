@@ -1,5 +1,6 @@
 import {
   failureOrigin,
+  isCustomerEndpointMetricProvider,
   isCustomerManagedMetricProvider,
   type FailureOrigin,
 } from "@opengeni/observability";
@@ -239,7 +240,14 @@ export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
   return {
-    onModelCall: ({ provider, outcome, durationSeconds, httpStatus, providerAccountRefusal }) => {
+    onModelCall: ({
+      provider,
+      outcome,
+      durationSeconds,
+      httpStatus,
+      providerAccountRefusal,
+      transportFailure,
+    }) => {
       completedOperationSpan(observability, "worker.model.call", durationSeconds, {
         provider,
         outcome,
@@ -252,9 +260,11 @@ export function runtimeMetricsHooksForObservability(
           outcome,
           failure_origin: failureOrigin({
             customerManaged: isCustomerManagedMetricProvider(provider),
+            customerEndpoint: isCustomerEndpointMetricProvider(provider),
             outcome,
             ...(httpStatus !== undefined ? { httpStatus } : {}),
             ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+            ...(transportFailure ? { transportFailure } : {}),
           }),
         },
       });
