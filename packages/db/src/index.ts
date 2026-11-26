@@ -186,6 +186,10 @@ export {
   VOICE_CREDIT_USAGE,
   type CreditUsage,
 } from "./credit-balances";
+export {
+  checkSessionTurnCreditTotals,
+  type SessionTurnCreditTotalsCheck,
+} from "./session-turn-credit-totals";
 import {
   lockTurnAttemptWriteFenceTx,
   type TurnAttemptFenceRejectReason,

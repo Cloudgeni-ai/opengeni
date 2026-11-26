@@ -1580,6 +1580,23 @@ export function recordCreditLedgerTotalsCheck(
   }
 }
 
+export function recordSessionTurnCreditTotalsCheck(
+  observability: Observability,
+  check: { checked: number; mismatchedTurnIds: string[] },
+): void {
+  observability.setGauge({
+    name: "opengeni_session_turn_credit_totals_mismatched_turns",
+    help: "Sampled turns whose kept credit totals give a different usage than a full recount.",
+    value: check.mismatchedTurnIds.length,
+  });
+  if (check.mismatchedTurnIds.length > 0) {
+    observability.warn("session turn credit totals differ from a full recount", {
+      checked: check.checked,
+      turnIds: check.mismatchedTurnIds.join(","),
+    });
+  }
+}
+
 /** Up to `count` distinct ids chosen uniformly at random (partial Fisher-Yates). */
 export function sampleAccountIds(
   accountIds: readonly string[],

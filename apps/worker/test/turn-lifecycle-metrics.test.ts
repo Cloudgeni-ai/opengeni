@@ -5,6 +5,7 @@ import {
   initializeWorkerOutcomeMetrics,
   recordCreditBalanceGauges,
   recordCreditLedgerTotalsCheck,
+  recordSessionTurnCreditTotalsCheck,
   sampleAccountIds,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -122,6 +123,34 @@ describe("turn lifecycle metrics", () => {
     expect(metrics).toMatch(
       new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} 0`),
     );
+  });
+
+  test("records sampled session turn credit totals drift as a gauge and a warning", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+    const warnings: unknown[] = [];
+    const warn = observability.warn.bind(observability);
+    observability.warn = (message, fields) => {
+      warnings.push({ message, fields });
+      warn(message, fields);
+    };
+
+    recordSessionTurnCreditTotalsCheck(observability, {
+      checked: 16,
+      mismatchedTurnIds: ["22222222-2222-4222-8222-222222222222"],
+    });
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_session_turn_credit_totals_mismatched_turns\{[^}]*\} 1/);
+    expect(warnings).toEqual([
+      {
+        message: "session turn credit totals differ from a full recount",
+        fields: { checked: 16, turnIds: "22222222-2222-4222-8222-222222222222" },
+      },
+    ]);
+
+    recordSessionTurnCreditTotalsCheck(observability, { checked: 16, mismatchedTurnIds: [] });
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_session_turn_credit_totals_mismatched_turns\{[^}]*\} 0/);
+    expect(warnings).toHaveLength(1);
   });
 
   test("records sampled credit ledger totals drift as a gauge", async () => {

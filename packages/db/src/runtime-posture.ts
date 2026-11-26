@@ -2500,6 +2500,9 @@ export const FORCE_RLS_TABLES = [
   "session_title_operations",
   "session_turn_app_action_grants",
   "session_turn_attempts",
+  // 1599_session_turn_credit_totals: per-turn credit sums its triggers keep.
+  "session_turn_credit_calls",
+  "session_turn_credit_totals",
   "session_turn_machine_consents",
   "session_turn_startup_milestones",
   "session_turns",
@@ -3244,6 +3247,11 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "scheduled_tasks",
   "session_attempt_codemode_calls",
   "session_attempt_model_context_snapshots",
+  // 1599_session_turn_credit_totals: written only by the session_events and
+  // usage_events invoker triggers (RLS admits runtime writes at
+  // pg_trigger_depth() > 0).
+  "session_turn_credit_calls",
+  "session_turn_credit_totals",
   "session_turn_startup_milestones",
   "site_auth_connections",
   // 1557_sticky_tool_data_marks: when a manager last reset a target.
@@ -7509,15 +7517,98 @@ export function reportRuntimeDatabaseDegraded(
   };
 }
 
+/**
+ * How long a passing readiness inspection stands for one process (pod).
+ *
+ * Freshness: a probe within this long of the start of the last passing full
+ * inspection only proves the database answers (`select 1`). Any failed probe
+ * (unreachable database, a fatal finding, a timeout that settles as an error)
+ * clears the pass, so every following probe inspects in full until one
+ * passes again: an incompatible posture is never cached, and it reports
+ * unready on every probe. A posture that turns incompatible after a pass is
+ * seen by the first full inspection after the pass expires, at most this long
+ * plus one probe period later. That is safe because migrations run before a
+ * rollout: a change a running pod sees late is additive for its release.
+ * Degraded findings are reported at each full inspection.
+ */
+export const RUNTIME_DATABASE_READINESS_TTL_MS = 60_000;
+
+/** Per-process readiness state: the catalog cache and the last passing inspection. */
+export type RuntimeDatabaseReadinessState = {
+  catalogCache: RuntimeDatabaseCatalogPostureCache;
+  /** Start of the last passing full inspection; cleared by any failed probe. */
+  passedAt?: number | undefined;
+};
+
+export function createRuntimeDatabaseReadinessState(): RuntimeDatabaseReadinessState {
+  return { catalogCache: createRuntimeDatabaseCatalogPostureCache() };
+}
+
+export type RuntimeDatabaseReadinessCacheOptions = {
+  /** Defaults to {@link RUNTIME_DATABASE_READINESS_TTL_MS}; 0 inspects every probe. */
+  ttlMs?: number;
+  now?: () => number;
+};
+
+/**
+ * One readiness probe under {@link RUNTIME_DATABASE_READINESS_TTL_MS}'s
+ * freshness rule: a full posture inspection, or within the TTL of a passing
+ * one a connectivity check. Throws like {@link assertRuntimeDatabaseReadiness}.
+ */
+export async function checkRuntimeDatabaseReadiness(
+  db: Database,
+  options: RuntimeDatabasePostureOptions,
+  state: RuntimeDatabaseReadinessState,
+  onDegraded?: RuntimeDatabaseDegradedListener,
+  cache: RuntimeDatabaseReadinessCacheOptions = {},
+): Promise<"inspected" | "cached"> {
+  return await runCachedRuntimeDatabaseReadiness(
+    state,
+    {
+      connect: async () => {
+        await db.execute(sql`select 1`);
+      },
+      inspect: async () => {
+        await assertRuntimeDatabaseReadiness(db, options, onDegraded, state.catalogCache);
+      },
+    },
+    cache,
+  );
+}
+
+/** {@link checkRuntimeDatabaseReadiness}'s freshness rule over its two probes. */
+export async function runCachedRuntimeDatabaseReadiness(
+  state: Pick<RuntimeDatabaseReadinessState, "passedAt">,
+  probes: { connect: () => Promise<void>; inspect: () => Promise<void> },
+  cache: RuntimeDatabaseReadinessCacheOptions = {},
+): Promise<"inspected" | "cached"> {
+  const ttlMs = cache.ttlMs ?? RUNTIME_DATABASE_READINESS_TTL_MS;
+  const now = cache.now ?? Date.now;
+  const startedAt = now();
+  const passedAt = state.passedAt;
+  // Cleared first: a probe that throws (or never settles) leaves no pass.
+  state.passedAt = undefined;
+  if (passedAt !== undefined && startedAt >= passedAt && startedAt - passedAt < ttlMs) {
+    await probes.connect();
+    state.passedAt = passedAt;
+    return "cached";
+  }
+  await probes.inspect();
+  state.passedAt = startedAt;
+  return "inspected";
+}
+
 export function runtimeDatabaseReadyCheck(
   db: Database,
   options: RuntimeDatabasePostureOptions,
   onDegraded?: RuntimeDatabaseDegradedListener,
+  cache?: RuntimeDatabaseReadinessCacheOptions,
 ): () => Promise<void> {
   let inFlight: Promise<void> | undefined;
-  // Every probe evaluates the full posture; the catalogs are re-read only
-  // when they changed since the previous probe.
-  const catalogCache = createRuntimeDatabaseCatalogPostureCache();
+  // A passing posture stands for RUNTIME_DATABASE_READINESS_TTL_MS (see its
+  // freshness rule); full inspections re-read the catalogs only when they
+  // changed since the previous one.
+  const state = createRuntimeDatabaseReadinessState();
   return () => {
     // The HTTP timeout cannot cancel a driver query. Concurrent probes share
     // the outstanding inspection, as the worker readiness check does, so slow
@@ -7525,7 +7616,7 @@ export function runtimeDatabaseReadyCheck(
     // next probe after it settles always runs a fresh inspection.
     if (inFlight) return inFlight;
     inFlight = (async () => {
-      await assertRuntimeDatabaseReadiness(db, options, onDegraded, catalogCache);
+      await checkRuntimeDatabaseReadiness(db, options, state, onDegraded, cache);
     })().finally(() => {
       inFlight = undefined;
     });
