@@ -2262,6 +2262,23 @@ test("Available lists ready-made apps not added here, archived ones count as not
   expect(availableTemplates([APP_TEMPLATE as never], [status(true)]).length).toBe(1);
 });
 
+test("a newer ready-made version is offered again beside a customized copy, which gets no updates", () => {
+  const version = (APP_TEMPLATE.package as { packageVersion: string }).packageVersion;
+  const app = (customized: boolean, packageVersion: string) =>
+    ({
+      appId: "a",
+      packageId: APP_PACKAGE_ID,
+      archived: false,
+      customized,
+      packageVersion,
+    }) as never;
+  const template = [APP_TEMPLATE as never];
+  expect(availableTemplates(template, [app(true, "0.0.1")]).length).toBe(1);
+  expect(availableTemplates(template, [app(true, version)])).toEqual([]);
+  expect(availableTemplates(template, [app(false, "0.0.1")])).toEqual([]);
+  expect(availableTemplates(template, [app(true, "0.0.1"), app(false, "0.0.1")])).toEqual([]);
+});
+
 test("Installing a ready-made app names its Skills and automations, then opens it", async () => {
   const installer = appInstaller([{ id: "app-9", status: "active", replayed: false }]);
   const client = Object.assign(fakeAgentsClient([]), installer, {

@@ -94,7 +94,7 @@ export async function createWorkspaceEventSource(input: {
 
 function appUrl(publicBaseUrl: string | undefined, workspaceId: string, appId: string | null) {
   if (!publicBaseUrl || !appId) return null;
-  return `${publicBaseUrl.replace(/\/+$/u, "")}/workspaces/${workspaceId}/sites/${appId}`;
+  return `${publicBaseUrl.replace(/\/+$/u, "")}/workspaces/${workspaceId}/apps/${appId}`;
 }
 
 function chatUrl(publicBaseUrl: string | undefined, workspaceId: string, sessionId: string | null) {

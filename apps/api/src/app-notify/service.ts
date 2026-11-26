@@ -103,9 +103,14 @@ function canOpen(site: SiteDataSite, subjectId: string): boolean {
   return site.visibility === "workspace_shared" || site.ownerSubjectId === subjectId;
 }
 
+/** The app's own page, at its `path` (`/releases?tab=2`) when given. */
 function appLink(scope: Sender["scope"], siteId: string, path: string | undefined): string {
-  const base = `/workspaces/${scope.workspaceId}/sites/${siteId}`;
-  return path && path !== "/" ? `${base}?page=${encodeURIComponent(path)}` : base;
+  const base = `/workspaces/${scope.workspaceId}/apps/${siteId}`;
+  if (!path || path === "/" || !path.startsWith("/")) return base;
+  const cut = path.search(/[?#]/u);
+  const pathname = (cut < 0 ? path : path.slice(0, cut)).replace(/^\/+/u, "");
+  const rest = cut < 0 ? "" : path.slice(cut);
+  return `${base}${pathname ? `/${encodeURI(pathname)}` : ""}${rest ? `?at=${encodeURIComponent(rest)}` : ""}`;
 }
 
 export async function notifyFromApp(

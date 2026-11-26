@@ -1272,7 +1272,7 @@ const PUBLICATION_FIX =
 const SAVE_RETRY_WINDOW_MS = 60 * 60 * 1000;
 
 function appUrl(context: OrganizationActionContext, workspaceId: string, id: string): string {
-  return new URL(`/workspaces/${workspaceId}/sites/${id}`, webOrigin(context)).href;
+  return new URL(`/workspaces/${workspaceId}/apps/${id}`, webOrigin(context)).href;
 }
 
 function fileUrl(context: OrganizationActionContext, workspaceId: string, id: string): string {

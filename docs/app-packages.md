@@ -291,7 +291,10 @@ with its `packageVersion`, `archived`, `customized`, its Skills (each with
   never **Update available** or **Restore previous version** (`update` and
   `previous` are null), and the API refuses its package upgrades and going
   back with 409 (`details.reason: "customized"`), for the console, the API
-  and `app_upgrade` alike. To get a newer version, add it as a separate app.
+  and `app_upgrade` alike. Undoing the changes doesn't bring updates back:
+  any change publishes a new version. A newer ready-made version shows under
+  Available again, to add as a separate app. A Skill shared by copies of one
+  package is workspace state: editing it customizes every copy.
 - **Update**: the Apps page shows **Update available**; it opens the
   ordinary upgrade with the ready-made app's package, dry run first.
 - **Going back**: before applying an upgrade that changes something, the API
@@ -383,5 +386,5 @@ adds them.
   change these.
 - An app installed before migration 1571 has no install record: it is
   listed with no version or Customized, and a ready-made one offers its update.
-- A shared Skill's update saved for review (Review first) relinks only the
-  app that upgraded; other copies show as Customized once it is approved.
+- A shared Skill's update saved for review (Review first) is linked as
+  pending on every copy that shares it, so approving it customizes none.

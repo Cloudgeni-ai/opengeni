@@ -108,19 +108,26 @@ export async function appPackageSkillIds(
 }
 
 /**
- * Point every app linked to this Skill at its new revision, so copies of one
- * package that share the Skill don't show it as changed here.
+ * Point every app linked to this Skill at its new revision (or, saved for
+ * review, at the revision waiting for approval), so copies of one package
+ * that share the Skill don't show it as changed there.
  */
 export async function relinkAppPackageSkill(
   db: Database,
   workspaceId: string,
-  link: { skillId: string; revisionId: string },
+  link: { skillId: string } & (
+    | { revisionId: string; pendingRevisionId?: undefined }
+    | { revisionId?: undefined; pendingRevisionId: string }
+  ),
 ): Promise<void> {
+  const patch = link.revisionId
+    ? { revisionId: link.revisionId, pendingRevisionId: null }
+    : { pendingRevisionId: link.pendingRevisionId };
   await withWorkspaceRls(db, workspaceId, async (tx) => {
     await tx.execute(
       sql`update app_package_installs i set skills = (
           select jsonb_agg(case when entry->>'skillId' = ${link.skillId}
-            then entry || jsonb_build_object('revisionId', ${link.revisionId}::text, 'pendingRevisionId', null)
+            then entry || ${JSON.stringify(patch)}::jsonb
             else entry end order by ord)
           from jsonb_array_elements(i.skills) with ordinality as e(entry, ord))
         where i.workspace_id = ${workspaceId}::uuid

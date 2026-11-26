@@ -180,7 +180,7 @@ describe("App data change facts as events", () => {
         recordId: "r1",
         recordKey: "ada@example.com",
       },
-      url: "https://opengeni.example/workspaces/w/sites/a",
+      url: "https://opengeni.example/workspaces/w/apps/a",
       ...overrides,
     });
 

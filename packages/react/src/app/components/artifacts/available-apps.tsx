@@ -6,6 +6,7 @@
  * and opens it.
  */
 import { useEffect, useState } from "react";
+import { compareAppPackageVersions } from "@opengeni/contracts";
 import type { AppPackageStatus, AppTemplate } from "@opengeni/sdk";
 
 import { CapabilityCatalogRow } from "../../../capability-catalog-row";
@@ -24,16 +25,35 @@ import { AppTemplatePreview } from "./app-template-preview";
 import { ArtifactKindTile } from "./artifact-page-chrome";
 import "../../../../styles/connect.css";
 
-/** Ready-made apps with no active app here from the same package. */
+/**
+ * Ready-made apps with no active app here from the same package. A
+ * customized app gets no updates, so a newer version than it is offered
+ * again, to add as a separate app.
+ */
 export function availableTemplates(
   templates: readonly AppTemplate[],
   installed: Iterable<AppPackageStatus>,
 ): AppTemplate[] {
-  const active = new Set<string>();
-  for (const app of installed) if (app.packageId && !app.archived) active.add(app.packageId);
+  const active = new Map<string, AppPackageStatus[]>();
+  for (const app of installed)
+    if (app.packageId && !app.archived)
+      active.set(app.packageId, [...(active.get(app.packageId) ?? []), app]);
   return templates.filter((template) => {
-    const packageId = (template.package as { packageId?: unknown }).packageId;
-    return typeof packageId !== "string" || !active.has(packageId);
+    const { packageId, packageVersion } = template.package as {
+      packageId?: unknown;
+      packageVersion?: unknown;
+    };
+    if (typeof packageId !== "string") return true;
+    const apps = active.get(packageId);
+    if (!apps) return true;
+    return (
+      typeof packageVersion === "string" &&
+      apps.every(
+        (app) =>
+          app.customized &&
+          compareAppPackageVersions(packageVersion, app.packageVersion ?? "0") > 0,
+      )
+    );
   });
 }
 

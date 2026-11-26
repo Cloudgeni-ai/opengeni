@@ -241,6 +241,12 @@ export async function applyPackageSkills(
           revisionId: current ? (current.activeRevisionId ?? current.revisionId) : null,
           pendingRevisionId: receipt.revisionId,
         });
+        // Other copies that share it expect the same revision once approved.
+        if (current)
+          await relinkAppPackageSkill(deps.db, grant.workspaceId, {
+            skillId: receipt.skillId,
+            pendingRevisionId: receipt.revisionId,
+          }).catch(() => undefined);
       } else {
         links.set(skill.name, {
           skillId: receipt.skillId,
