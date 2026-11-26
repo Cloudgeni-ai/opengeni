@@ -76,6 +76,32 @@ export const PUBLIC_ERROR_CAUSE_NAMES: ReadonlySet<string> = new Set([
   "ChannelAUnsupportedError",
   "ChannelAPartialMutationError",
   "ChannelAFileSystemRouteChangedError",
+  // Sandbox lease/process fences (packages/db), so a reaper or API failure
+  // says which durable fence refused it.
+  "SandboxWorkspaceMutationFencedError",
+  "SandboxRetainedProcessTerminalError",
+]);
+
+/** The closed `code` of a sandbox workspace mutation fence
+ * (packages/db SandboxWorkspaceMutationFencedError). */
+export const PUBLIC_SANDBOX_FENCE_CODES: ReadonlySet<string> = new Set([
+  "attempt_fenced",
+  "holder_fenced",
+  "lease_fenced",
+  "rotation_in_progress",
+  "route_fenced",
+  "process_fenced",
+  "capture_in_progress",
+  "admission_fenced",
+  "operation_invalid",
+  "generation_exhausted",
+  "authority_unattributed",
+  "authority_revoked",
+]);
+
+const SANDBOX_FENCE_ERROR_NAMES = new Set([
+  "SandboxWorkspaceMutationFencedError",
+  "SandboxRetainedProcessTerminalError",
 ]);
 
 /** The interaction controller's closed error codes (contracts InteractionError). */
@@ -111,6 +137,7 @@ const SQLSTATE = /^[0-9A-Z]{5}$/;
 export type ErrorCauseAttributes = {
   causeName?: string;
   causeCode?: string;
+  causeFenceCode?: string;
   causeDriverClass?: string;
   causeDriverFrame?: string;
   causeDriverMessage?: string;
@@ -135,6 +162,21 @@ export const ERROR_CAUSE_MESSAGE_MAX_BYTES = CLIENT_ERROR_DETAIL_MAX_BYTES.messa
  * message is used instead.
  */
 export function errorCauseMessage(error: unknown): string | undefined {
+  const message = errorCauseSourceMessage(error);
+  if (message === undefined) return undefined;
+  const projected = boundClientErrorText(
+    scrubClientErrorText(message.slice(0, 16_384)).trim(),
+    ERROR_CAUSE_MESSAGE_MAX_BYTES,
+  );
+  return projected.length > 0 ? projected : undefined;
+}
+
+/**
+ * The raw message of the same cause `errorCauseAttributes` classifies (the
+ * database cause for a query builder error). Only for one-way fingerprinting;
+ * never log it.
+ */
+export function errorCauseSourceMessage(error: unknown): string | undefined {
   const cause = firstCause(error);
   if (!cause) return undefined;
   let message = ownValue(cause.error, "message");
@@ -142,12 +184,7 @@ export function errorCauseMessage(error: unknown): string | undefined {
     const database = ownValue(cause.error, "cause");
     message = database && typeof database === "object" ? ownValue(database, "message") : undefined;
   }
-  if (typeof message !== "string") return undefined;
-  const projected = boundClientErrorText(
-    scrubClientErrorText(message.slice(0, 16_384)).trim(),
-    ERROR_CAUSE_MESSAGE_MAX_BYTES,
-  );
-  return projected.length > 0 ? projected : undefined;
+  return typeof message === "string" && message.length > 0 ? message : undefined;
 }
 
 function firstCause(error: unknown): { error: object; name: string | null } | null {
@@ -167,7 +204,8 @@ function firstCause(error: unknown): { error: object; name: string | null } | nu
 export function projectErrorCauseAttributes(
   attributes: Record<string, unknown>,
 ): ErrorCauseAttributes {
-  const { causeName, causeCode, causeAgentCode, causeStatus, causeSqlState } = attributes;
+  const { causeName, causeCode, causeFenceCode, causeAgentCode, causeStatus, causeSqlState } =
+    attributes;
   const driverFailed = causeName === "BrowserControlRequestError" && causeCode === "driver_failed";
   // A read that kept failing reports resource_unavailable with the driver's
   // class and frame, as a driver failure does.
@@ -192,6 +230,12 @@ export function projectErrorCauseAttributes(
       : {}),
     ...(typeof causeCode === "string" && PUBLIC_INTERACTION_ERROR_CODES.has(causeCode)
       ? { causeCode }
+      : {}),
+    ...(typeof causeName === "string" &&
+    SANDBOX_FENCE_ERROR_NAMES.has(causeName) &&
+    typeof causeFenceCode === "string" &&
+    PUBLIC_SANDBOX_FENCE_CODES.has(causeFenceCode)
+      ? { causeFenceCode }
       : {}),
     ...(causeDriverClass ? { causeDriverClass } : {}),
     ...(causeDriverFrame ? { causeDriverFrame } : {}),
@@ -261,6 +305,12 @@ function classify(error: object, name: string | null): ErrorCauseAttributes {
   if (name === "PostgresError") {
     const code = ownValue(error, "code");
     if (typeof code === "string" && SQLSTATE.test(code)) result.causeSqlState = code;
+  }
+  if (SANDBOX_FENCE_ERROR_NAMES.has(name)) {
+    const code = ownValue(error, "code");
+    if (typeof code === "string" && PUBLIC_SANDBOX_FENCE_CODES.has(code)) {
+      result.causeFenceCode = code;
+    }
   }
   return result;
 }

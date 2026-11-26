@@ -509,6 +509,18 @@ diagnostic UUID. Inspect the protected cause location before treating a warning
 as a persistent defect: a concurrent owner may already have settled the process.
 This instrumentation neither releases claims nor changes retry or settlement.
 
+Retained-command settlement failures use `sandbox_retained_processes.settlement`
+(`retained_process_fenced`, a database code, or `retained_process_settlement_failed`),
+and per-sandbox drain failures use `sandbox_leases.drain` (`sandbox_drain_failed` or
+a database code). Their public warnings (`errorClass` `SandboxReaperOperationError`)
+carry the diagnostic UUID as `correlationId`, the hashed `sandboxLeaseKey`, lease
+epoch and backend, the cause's reviewed `causeName`, `causeFenceCode` (the closed
+`SandboxWorkspaceMutationFencedError` code) and `causeSqlState`, and `causeFingerprint`,
+a one-way hash of the cause message that `bun run scripts/resolve-rejection-fingerprint.ts`
+maps back to the source literal (a database cause has `causeSqlState` instead). A
+message built from a template literal does not resolve; follow `correlationId` to
+the protected diagnostic instead. Never message text or raw identifiers.
+
 Original causes are inspected before generic public error projection. At most
 four causes and 32 frames per cause are retained. **Raw stack text and messages
 are not retained**: even filenames/functions may contain secrets. Frames retain

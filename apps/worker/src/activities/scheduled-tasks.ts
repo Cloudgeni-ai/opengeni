@@ -86,6 +86,9 @@ import {
   enqueueAppSyncRun,
   recordScheduledTaskAdmissionFailure,
   recordScheduledTaskAdmissionRefusal,
+  reviewScheduledTaskBlockers,
+  SCHEDULED_TASK_DISPATCH_EXHAUSTED,
+  WorkspaceNotFoundError,
   type ScheduledTaskAdmissionRefusalReason,
   createSession,
   createSessionWithIdempotencyKeyResult,
@@ -458,6 +461,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         triggerType: input.triggerType,
         producerKey: stableProducerKey,
       });
+      if (priorRun?.error === SCHEDULED_TASK_DISPATCH_EXHAUSTED) {
+        return scheduledRunTerminalResult(priorRun.error);
+      }
       // An App data sync runs no model: the run is queued for the API's
       // executor, which calls the tool and writes the App's data.
       if (priorRun?.actionKind === "app_sync") {
@@ -639,9 +645,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       });
       const taskAuthoritySubjectId = task.ownerSubjectId;
       // Every pre-admission refusal below is recorded as a visible run receipt
-      // under this producer identity instead of throwing (a thrown activity is
-      // retried to exhaustion and leaves no run) or returning a bare blocked
-      // result (the occurrence silently disappears). Terminal refusals are
+      // under this producer identity instead of throwing (which unnecessarily
+      // retries dispatch) or returning a bare blocked result. Terminal refusals are
       // deterministic for this task revision and digest; transient ones
       // (`retryable`) are skipped and a later occurrence is admitted normally.
       // Redelivery replays the same receipt, so no occurrence gets two runs.
@@ -2541,6 +2546,48 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
     },
   };
   return {
+    recordScheduledTaskDispatchFailure: async (
+      input: Extract<DispatchScheduledTaskRunInput, { triggerType: "scheduled" | "event" }>,
+    ): Promise<void> => {
+      const { db } = await services();
+      try {
+        await recordScheduledTaskAdmissionRefusal(db, {
+          workspaceId: input.workspaceId,
+          taskId: input.taskId,
+          triggerType: input.triggerType,
+          producerKey: scheduledTaskRunProducerKey(input),
+          reason: SCHEDULED_TASK_DISPATCH_EXHAUSTED,
+          retryable: true,
+          onRecorded: async (tx, run, ownerSubjectId) => {
+            if (ownerSubjectId === null) return;
+            // Reuse the blocker receipt and its owner inbox notice. Commit
+            // them with the run, so a later fire or an older API reviewer
+            // cannot supersede the failure before the owner is told.
+            await reviewScheduledTaskBlockers(tx, run.workspaceId, run.taskId, ({ review }) =>
+              review && review.state !== "clear"
+                ? { kind: "none", reviewedRunId: review.state === "notified" ? run.id : null }
+                : {
+                    kind: "block",
+                    state: "notified",
+                    reason: SCHEDULED_TASK_DISPATCH_EXHAUSTED,
+                    message:
+                      "Opengeni could not start this run after several attempts. Open the automation to see the failed run.",
+                    blockedRunId: run.id,
+                    blockedSince: new Date(run.createdAt),
+                    reviewedRunId: run.id,
+                    notice: null,
+                    requireInboxNotice: true,
+                  },
+            );
+          },
+        });
+      } catch (error) {
+        // A workspace deleted while dispatch was retrying has no run history.
+        if (!(error instanceof WorkspaceNotFoundError && error.workspaceId === input.workspaceId)) {
+          throw error;
+        }
+      }
+    },
     dispatchScheduledTaskRun: async (input: DispatchScheduledTaskRunInput) => {
       const result = await retryScheduledTaskAdmission(() =>
         activities.dispatchScheduledTaskRun(input),

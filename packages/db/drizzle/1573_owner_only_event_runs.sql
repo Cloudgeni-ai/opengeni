@@ -4,7 +4,7 @@
 -- owner. An automation that continues a chat shared with the workspace
 -- records a skipped run with reason owner_only_event instead, which the
 -- refusal guard now allows.
--- The refusal guard is unchanged from migration 1565 apart from the new
+-- The refusal guard is unchanged from migration 1572 apart from the new
 -- reason. The session authority guard also accepts the scheduler's private
 -- create for such a run: a new-chat-per-run event run of the owner's whose
 -- occurrence (written by Opengeni, never by the automation) marks an event
@@ -17,7 +17,9 @@ CREATE OR REPLACE FUNCTION opengeni_private.guard_scheduled_admission_refusal() 
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path FROM CURRENT
     AS $$
-DECLARE task_row scheduled_tasks%ROWTYPE;
+DECLARE
+  task_row scheduled_tasks%ROWTYPE;
+  dispatch_exhausted boolean;
 BEGIN
   IF TG_OP = 'UPDATE' THEN
     IF NEW.admission_refusal IS DISTINCT FROM OLD.admission_refusal
@@ -26,7 +28,10 @@ BEGIN
     RETURN NEW;
   END IF;
   IF NEW.admission_refusal IS NULL THEN RETURN NEW; END IF;
-  IF NEW.action_kind IS DISTINCT FROM 'agent_turn'
+  dispatch_exhausted := coalesce(NEW.admission_refusal ->> 'reason' = 'scheduled_dispatch_exhausted', false);
+  IF (NOT dispatch_exhausted AND NEW.action_kind IS DISTINCT FROM 'agent_turn')
+    OR (dispatch_exhausted AND (NEW.trigger_type NOT IN ('scheduled', 'event')
+      OR NEW.admission_refusal -> 'retryable' IS DISTINCT FROM 'true'::jsonb))
     OR NEW.admission_diagnostic IS NOT NULL
     OR jsonb_typeof(NEW.admission_refusal) IS DISTINCT FROM 'object'
     OR NEW.admission_refusal - ARRAY['version','reason','retryable'] <> '{}'::jsonb
@@ -37,10 +42,11 @@ BEGIN
       'machine_target_unavailable', 'machine_enrollment_inactive',
       'variable_set_unavailable', 'rig_version_unavailable',
       'insufficient_credits', 'monthly_model_cost_limit', 'monthly_agent_run_limit', 'allowance_exhausted', 'scheduled_model_unavailable', 'session_usage_limit',
-      'chain_limit', 'duplicate_agent_run', 'owner_only_event')
+      'chain_limit', 'duplicate_agent_run', 'scheduled_dispatch_exhausted', 'owner_only_event')
     OR NEW.error IS DISTINCT FROM NEW.admission_refusal ->> 'reason'
-    OR NEW.status IS DISTINCT FROM (CASE WHEN (NEW.admission_refusal ->> 'retryable')::boolean
-      THEN 'skipped' ELSE 'failed' END)
+    OR NEW.status IS DISTINCT FROM (CASE
+      WHEN dispatch_exhausted OR NOT (NEW.admission_refusal ->> 'retryable')::boolean
+      THEN 'failed' ELSE 'skipped' END)
     OR NEW.completed_at IS NULL OR nullif(btrim(NEW.producer_key),'') IS NULL
     OR NEW.session_id IS NOT NULL OR NEW.trigger_event_id IS NOT NULL
     OR NEW.accepted_execution_snapshot IS NOT NULL OR NEW.accepted_execution_digest IS NOT NULL
@@ -50,7 +56,7 @@ BEGIN
     WHERE task.id = NEW.task_id AND task.workspace_id = NEW.workspace_id
       AND task.account_id = NEW.account_id FOR UPDATE;
   IF task_row.status <> 'active' OR task_row.deleted_at IS NOT NULL
-    OR task_row.action ->> 'kind' IS DISTINCT FROM 'agent_turn'
+    OR task_row.action ->> 'kind' IS DISTINCT FROM NEW.action_kind
     OR NEW.task_authority_revision IS DISTINCT FROM task_row.authority_revision
     OR NEW.task_execution_digest IS DISTINCT FROM task_row.execution_digest
   THEN RAISE EXCEPTION 'scheduled task changed before refusal recording' USING ERRCODE = '40001'; END IF;

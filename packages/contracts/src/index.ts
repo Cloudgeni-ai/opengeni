@@ -14588,7 +14588,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * automations), `duplicate_agent_run` (another automation of the same
  * agent took the delivery) and `owner_only_event` (an event only the
  * automation's owner may see, such as their private meeting, would have run in
- * a chat shared with the workspace). Readers must tolerate new reasons.
+ * a chat shared with the workspace). `scheduled_dispatch_exhausted` records a failed
+ * occurrence whose dispatch retries have run out; it is `retryable: true`
+ * because later occurrences can still start. Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z

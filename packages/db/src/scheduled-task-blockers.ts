@@ -76,6 +76,8 @@ export type ScheduledTaskBlockerDecision =
       blockedSince: Date;
       reviewedRunId: string;
       notice: ScheduledTaskBlockerNotice | null;
+      /** For a producer committing the failed run and this notice together. */
+      requireInboxNotice?: true;
     }
   /** The blocker is gone or a person acted: withdraw any notice. */
   | { kind: "clear"; reviewedRunId: string | null };
@@ -283,6 +285,13 @@ export async function reviewScheduledTaskBlockers(
             then excluded.notice_payload
             else scheduled_task_blocker_reviews.notice_payload end,
           updated_at = now()`);
+      if (decision.requireInboxNotice) {
+        // The existing trigger only attempts this sync. The same routine is
+        // idempotent and, called directly, fails the enclosing transaction if
+        // the inbox write did not succeed. No receipt can bypass that retry.
+        await exec.execute(sql`
+          select opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1(${task.id}::uuid)`);
+      }
       let paused = false;
       if (decision.state === "paused") {
         // Like exhausted-schedule retirement: pause only a still-active task and

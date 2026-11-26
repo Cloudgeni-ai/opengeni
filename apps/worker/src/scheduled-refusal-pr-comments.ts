@@ -28,6 +28,7 @@ import {
   getScheduledTaskRunByProducerKey,
   listAllowedGitHubRepositoryIdsForWorkspace,
   listGitHubInstallationIdsForWorkspace,
+  SCHEDULED_TASK_DISPATCH_EXHAUSTED,
   type Database,
 } from "@opengeni/db";
 import {
@@ -168,6 +169,7 @@ export function refusedRunCause(
   >,
 ): string | null {
   if ((run.status !== "failed" && run.status !== "skipped") || run.sessionId !== null) return null;
+  if (run.error === SCHEDULED_TASK_DISPATCH_EXHAUSTED) return null;
   if (run.admissionDiagnostic) return "connection_account_unavailable";
   if (run.admissionRefusal) return run.admissionRefusal.reason;
   return run.error && CAUSE_TEXT[run.error] ? run.error : null;
