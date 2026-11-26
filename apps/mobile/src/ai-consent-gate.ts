@@ -1,3 +1,9 @@
+import {
+  AI_PROCESSING_CONSENT_REQUIRED,
+  AI_PROCESSING_CONSENT_VERSION_MISMATCH,
+  type AiProcessingConsentResponse,
+  type AiProcessingDisclosure,
+} from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 /*
@@ -11,23 +17,12 @@ import { OpenGeniApiError } from "@opengeni/sdk";
  * and the answers. `ai-consent.tsx` draws the question.
  */
 
-export const AI_CONSENT_REQUIRED_CODE = "ai_processing_consent_required";
-export const AI_CONSENT_VERSION_MISMATCH_CODE = "ai_processing_consent_version_mismatch";
+export const AI_CONSENT_REQUIRED_CODE = AI_PROCESSING_CONSENT_REQUIRED;
+export const AI_CONSENT_VERSION_MISMATCH_CODE = AI_PROCESSING_CONSENT_VERSION_MISMATCH;
 
-export type AiConsentDisclosure = {
-  /** Opaque: names exactly this text. Granting sends it back. */
-  version: string;
-  title: string;
-  body: string;
-  providers: string[];
-  privacyUrl: string | null;
-};
-
-export type AiConsentStatus = {
-  required: boolean;
-  disclosure: AiConsentDisclosure;
-  consent: { version: string; grantedAt: string; platform: string } | null;
-};
+/** Its `version` is opaque: it names exactly this text, and granting sends it back. */
+export type AiConsentDisclosure = AiProcessingDisclosure;
+export type AiConsentStatus = AiProcessingConsentResponse;
 
 /** The server's consent routes for the signed-in person. */
 export interface AiConsentApi {
