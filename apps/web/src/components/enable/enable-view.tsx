@@ -138,9 +138,12 @@ function ConnectionRow({
         </span>
       }
       description={
-        control === "not-offered" || (control === "ask-admin" && !onAskAdmin)
+        control === "not-offered"
           ? `${connection.name} isn't offered here.`
-          : connection.why
+          : control === "ask-admin" && !onAskAdmin
+            ? // A Personal workspace has no admin to ask: an organization setting blocks it.
+              `Your organization lets only admins connect ${connection.name}.`
+            : connection.why
       }
       control={
         control === "connected" ? (

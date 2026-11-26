@@ -108,6 +108,11 @@ export const SetupConnectionState = /* @__PURE__ */ defineSchema(() =>
     canConnect: z.boolean(),
     /** The catalog item to open for Connect; null when this deployment doesn't offer one. */
     catalogItemId: z.string().nullable().default(null),
+    /**
+     * How the viewer connects GitHub here: the workspace's GitHub App, or
+     * their own GitHub. Null for anything else, or when they can't.
+     */
+    connectVia: z.enum(["github_app", "github_personal"]).nullable().default(null),
   }),
 );
 export type SetupConnectionState = z.output<typeof SetupConnectionState>;
@@ -160,6 +165,7 @@ export type SetupConnectionFacts = {
   connected: boolean;
   canConnect: boolean;
   catalogItemId: string | null;
+  connectVia?: "github_app" | "github_personal" | null;
 };
 
 /** The reason a connection keeps an item off, in words. */
@@ -191,6 +197,7 @@ export function evaluateSetupReadiness(
       connected: facts.connected,
       canConnect: facts.canConnect,
       catalogItemId: facts.catalogItemId,
+      connectVia: facts.connectVia ?? null,
     });
   });
   const missing = connections

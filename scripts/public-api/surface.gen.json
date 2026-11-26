@@ -32472,6 +32472,7 @@
         "$": "object",
         "$.canConnect": "boolean!",
         "$.catalogItemId": "string! null",
+        "$.connectVia": "enum! null=[\"\\\"github_app\\\"\",\"\\\"github_personal\\\"\"]",
         "$.connected": "boolean!",
         "$.mcpUrl": "string! null",
         "$.name": "string!",

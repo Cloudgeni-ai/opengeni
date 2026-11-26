@@ -5,7 +5,8 @@ import { testSettings } from "@opengeni/testing/settings";
 
 // Every way a trigger is created (the API, Opengeni's own tools, app sync)
 // goes through createValidatedScheduledTask, which asks the readiness check
-// before anything else touches the database.
+// only after the agent is known to be the caller's to use. The refusal itself
+// is covered against a real database (apps/api agent-setup-readiness-postgres).
 const asked: (string | null | undefined)[] = [];
 const actual = await import("../src/domain/ready-made-setup-readiness");
 mock.module("../src/domain/ready-made-setup-readiness", () => ({
@@ -42,10 +43,10 @@ function request(status: "active" | "paused") {
   });
 }
 
-test("creating an active trigger for an agent that isn't ready is refused with the reason", async () => {
+test("the readiness check never answers before the agent is checked", async () => {
   const db = new Proxy({} as never, {
     get() {
-      throw new Error("Unexpected database effect before the readiness refusal");
+      throw new Error("agent checks read the database first");
     },
   });
   await expect(
@@ -56,8 +57,9 @@ test("creating an active trigger for an agent that isn't ready is refused with t
       grant,
       payload: request("active"),
     }),
-  ).rejects.toMatchObject({ status: 409, message: "Connect GitHub to turn this on." });
-  expect(asked).toEqual([agentId]);
+  ).rejects.toThrow("agent checks read the database first");
+  // A private agent's id can't earn a readiness message.
+  expect(asked).toEqual([]);
 });
 
 test("a paused trigger isn't checked: it can be added and turned on later", async () => {

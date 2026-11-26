@@ -44,6 +44,7 @@ function connection(overrides: Partial<SetupConnectionState>): SetupConnectionSt
     connected: false,
     canConnect: true,
     catalogItemId: "github",
+    connectVia: null,
     ...overrides,
   };
 }
@@ -90,8 +91,10 @@ const client = {
   createSession: mock(async () => ({ id: "session-1" })),
   getGitHubApp: mock(async () => ({ status: "unbound", configured: true, linkUrl: null })),
 };
+const connectPersonalGitHub = mock(async (_workspaceId: string) => undefined);
 const context: Record<string, unknown> = {
   client,
+  connectPersonalGitHub,
   workspaces: [{ id: "workspace-a", kind: "shared" }],
   githubStatus: { status: "bound" },
   accessContext: {
@@ -215,6 +218,18 @@ test("Connect returns to the same step: GitHub gets this page's Connect address"
   root.unmount();
 });
 
+test("a member without github:manage connects their own GitHub, not the App", async () => {
+  client.getGitHubApp.mockClear();
+  readiness = readinessOf([connection({ connectVia: "github_personal" })]);
+  const { container, root } = await render();
+  await act(async () => {
+    row(container, "github.com").querySelector("button")?.click();
+  });
+  expect(connectPersonalGitHub).toHaveBeenCalledWith("workspace-a");
+  expect(client.getGitHubApp).not.toHaveBeenCalled();
+  root.unmount();
+});
+
 test("a catalog connector opens its Connect page with the way back", async () => {
   readiness = readinessOf([
     connection({ provider: "posthog.com", name: "PostHog", catalogItemId: "item-9" }),
@@ -331,7 +346,9 @@ test("in a Personal workspace there is no admin to ask", async () => {
   readiness = readinessOf([connection({ canConnect: false })]);
   const { container, root } = await render();
   expect(row(container, "github.com").querySelector("button")).toBeNull();
-  expect(row(container, "github.com").textContent).toContain("GitHub isn't offered here.");
+  expect(row(container, "github.com").textContent).toContain(
+    "Your organization lets only admins connect GitHub.",
+  );
   context.workspaces = [{ id: "workspace-a", kind: "shared" }];
   root.unmount();
 });

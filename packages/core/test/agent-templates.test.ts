@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { ReadyMadeSetup } from "@opengeni/contracts";
+import {
+  AGENT_BUILT_IN_GITHUB_CONNECTOR,
+  GITHUB_REST_TOOL_NAMES,
+  ReadyMadeSetup,
+} from "@opengeni/contracts";
 import { agentTemplateByKey, agentTemplates } from "../src/index";
 
 describe("ready-made agents", () => {
@@ -258,6 +262,26 @@ describe("ready-made agents", () => {
     expect(
       agentTemplateByKey("bug-fixer")?.setup?.wontDoWithoutAsking.map((line) => line.text),
     ).toContain("Merge a pull request");
+  });
+
+  test("every line of what it won't do names a tool the agent really has", () => {
+    // A rule on a tool the agent never gets (for example a GitHub MCP tool
+    // with no built-in twin, or a git push from the sandbox) promises nothing.
+    const builtIn = new Set<string>(GITHUB_REST_TOOL_NAMES);
+    for (const template of agentTemplates()) {
+      for (const line of template.setup?.wontDoWithoutAsking ?? []) {
+        expect({ template: template.key, line: line.text, connector: line.connector }).toEqual({
+          template: template.key,
+          line: line.text,
+          connector: AGENT_BUILT_IN_GITHUB_CONNECTOR,
+        });
+        expect({
+          template: template.key,
+          line: line.text,
+          builtIn: line.tools.some((tool) => builtIn.has(tool)),
+        }).toEqual({ template: template.key, line: line.text, builtIn: true });
+      }
+    }
   });
 
   test("Triage listens where reports arrive and hands bugs to Bug fixer by name", () => {

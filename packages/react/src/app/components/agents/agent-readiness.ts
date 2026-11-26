@@ -57,6 +57,17 @@ export function useAgentsReadiness(
     if (!ids) return;
     let live = true;
     const wanted = new Set(ids.split(","));
+    // One at a time: a client without the batch read, or an API that hasn't
+    // got it yet (a rolling deploy).
+    const readEach = () => {
+      if (typeof client.getAgentReadiness !== "function") return;
+      for (const agentId of wanted) {
+        client.getAgentReadiness(workspaceId, agentId).then(
+          (readiness) => live && setRead((current) => new Map(current).set(agentId, readiness)),
+          () => undefined,
+        );
+      }
+    };
     if (typeof client.listAgentReadiness === "function") {
       client.listAgentReadiness(workspaceId).then(
         (entries) =>
@@ -68,16 +79,12 @@ export function useAgentsReadiness(
                 .map((entry) => [entry.agentId, entry.readiness] as const),
             ),
           ),
-        () => undefined,
+        () => {
+          if (live) readEach();
+        },
       );
-    } else if (typeof client.getAgentReadiness === "function") {
-      // A client without the batch read.
-      for (const agentId of wanted) {
-        client.getAgentReadiness(workspaceId, agentId).then(
-          (readiness) => live && setRead((current) => new Map(current).set(agentId, readiness)),
-          () => undefined,
-        );
-      }
+    } else {
+      readEach();
     }
     return () => {
       live = false;

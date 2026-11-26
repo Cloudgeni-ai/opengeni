@@ -796,8 +796,10 @@ a ready-made app (`?app=<key>`) or a Get started setup (`get-started?setup=<key>
    most one "Works well with" line (display only) and what it won't do
    without asking (`setup.wontDoWithoutAsking`). Each line names a
    connector, its tools and a permission, and the template has a Can use
-   rule with that permission for every tool named (core's template tests
-   check it): `block` reads **Never**, `ask` reads **Asks first**, with
+   rule with that permission for every tool named, and at least one named
+   tool is one of Opengeni's built-in GitHub tools (`GITHUB_REST_TOOL_NAMES`),
+   so a line never promises a rule on a tool the agent doesn't get (core's
+   template tests check both): `block` reads **Never**, `ask` reads **Asks first**, with
    "When it runs on its own, it stops instead of asking", since an
    unattended run refuses what would ask.
 3. **Turn on**: the one primary, off with the reason in words beside it
@@ -827,7 +829,12 @@ request opened, an issue labelled, a mention) needs the workspace's GitHub
 App, which only `github:manage` connects (when the App is configured). A
 trigger on a schedule or run by hand also accepts the viewer's own GitHub
 (or a GitHub connector), which they may connect when the deployment allows
-it. The readiness reads say which trigger with `?trigger=<name>` (SDK
+it. Each GitHub connection says how this viewer connects it (`connectVia`:
+`github_app`, `github_personal` or null), and Enable's Connect follows it.
+The App counts as connected only when it is fully configured and its
+binding is active, as the GitHub integration page reads it (the API reads
+the installation live; core's trigger gate reads the stored binding). The
+readiness reads say which trigger with `?trigger=<name>` (SDK
 `getAgentTemplateReadiness(..., { trigger })`); without it, the one Enable
 turns on by default (the first one-click suggestion, else the first). The
 check lives in core (`packages/core/src/domain/ready-made-setup-readiness.ts`):

@@ -22,6 +22,7 @@ function connection(overrides: Partial<SetupConnectionState>): SetupConnectionSt
     connected: false,
     canConnect: true,
     catalogItemId: null,
+    connectVia: null,
     ...overrides,
   };
 }

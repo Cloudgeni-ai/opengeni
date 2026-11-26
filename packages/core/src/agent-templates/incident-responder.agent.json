@@ -20,11 +20,6 @@
       "connector": "github.com",
       "tool": "pull_request_merge",
       "permission": "block"
-    },
-    {
-      "connector": "github.com",
-      "tool": "run_workflow",
-      "permission": "block"
     }
   ],
   "skills": [],
@@ -87,12 +82,6 @@
         "permission": "block",
         "connector": "github.com",
         "tools": ["merge_pull_request", "pull_request_merge"]
-      },
-      {
-        "text": "Run a workflow, such as a deploy",
-        "permission": "block",
-        "connector": "github.com",
-        "tools": ["run_workflow"]
       }
     ],
     "firstMessage": "You were just turned on. In three short lines, say what you do and what starts you, then list which logs, metrics and alerts you can reach right now and what is missing for a good first look at an incident.",

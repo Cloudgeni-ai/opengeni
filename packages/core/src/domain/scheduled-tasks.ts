@@ -379,16 +379,6 @@ export async function createValidatedScheduledTask(input: {
   // public schema until the next SDK major, so refuse it clearly.
   if (input.payload.agentConfig.knowledgeSource)
     throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
-  // A ready-made agent's trigger stays off until its required connections are on.
-  if (input.payload.status !== "paused")
-    await requireAgentTriggerReady(input, input.grant, input.payload.agentConfig.agentId, {
-      githubEvents: () =>
-        eventTriggersUseGitHub(
-          input.db,
-          input.grant.workspaceId,
-          "events" in input.payload ? input.payload.events?.triggers : undefined,
-        ),
-    });
   // The requested Opengeni tools and permissions become the task's creator
   // selection below; they are never stored in its agentConfig.
   const {
@@ -684,6 +674,18 @@ export async function createValidatedScheduledTask(input: {
     ownerSubjectId: ownerSubjectId ?? input.grant.subjectId ?? null,
     privateTask: visibility === "user_private" || (visibility as string) === "private",
   });
+  // A ready-made agent's trigger stays off until its required connections
+  // are on. Checked once the agent is known to be the caller's to use, so a
+  // private agent's id never earns a readiness message.
+  if (input.payload.status !== "paused")
+    await requireAgentTriggerReady(input, input.grant, agentConfig.agentId, {
+      githubEvents: () =>
+        eventTriggersUseGitHub(
+          input.db,
+          input.grant.workspaceId,
+          "events" in input.payload ? input.payload.events?.triggers : undefined,
+        ),
+    });
   // Every run is billed as whoever set the task up: in the app, plan credit
   // first; over the API, credits only.
   const billingOrigin = await resolveTurnBillingOrigin(input.db, {
@@ -1618,24 +1620,6 @@ export async function validatedScheduledTaskUpdate(
   // The agent each run starts a chat with, checked against the automation as
   // it will be after this edit (its agent, run mode and who can see it).
   const nextAgentId = (update.agentConfig ?? input.existing.agentConfig).agentId;
-  // Turning a trigger on, or pointing an active one at another agent, needs
-  // that ready-made agent's required connections.
-  if (
-    agentTriggerTurnsOn({
-      previousStatus: input.existing.status,
-      previousAgentId: input.existing.agentConfig.agentId,
-      nextStatus: update.status ?? input.existing.status,
-      nextAgentId,
-    })
-  )
-    await requireAgentTriggerReady(input, input.grant, nextAgentId, {
-      githubEvents: () =>
-        eventTriggersUseGitHub(
-          input.db,
-          input.grant.workspaceId,
-          input.payload.events?.triggers ?? input.existing.events?.triggers,
-        ),
-    });
   if (
     nextAgentId !== input.existing.agentConfig.agentId ||
     runMode !== input.existing.runMode ||
@@ -1655,6 +1639,24 @@ export async function validatedScheduledTaskUpdate(
       privateTask: visibility === "user_private",
     });
   }
+  // Turning a trigger on, or pointing an active one at another agent, needs
+  // that ready-made agent's required connections (after the agent check).
+  if (
+    agentTriggerTurnsOn({
+      previousStatus: input.existing.status,
+      previousAgentId: input.existing.agentConfig.agentId,
+      nextStatus: update.status ?? input.existing.status,
+      nextAgentId,
+    })
+  )
+    await requireAgentTriggerReady(input, input.grant, nextAgentId, {
+      githubEvents: () =>
+        eventTriggersUseGitHub(
+          input.db,
+          input.grant.workspaceId,
+          input.payload.events?.triggers ?? input.existing.events?.triggers,
+        ),
+    });
   const audited = withScheduledTaskAgentChatChangeAudit(
     input.grant,
     input.existing,

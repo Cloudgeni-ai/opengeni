@@ -107,11 +107,17 @@ function useCanAskAdmin(workspaceId: string): boolean {
 }
 
 function useConnect(workspaceId: string, returnPath: string, label: string, reload: () => void) {
-  const { client } = useAppContext();
+  const { client, connectPersonalGitHub } = useAppContext();
   const navigate = useNavigate();
   return useCallback(
     async (connection: SetupConnectionState) => {
       if (connection.provider === "github.com") {
+        // The server says how this viewer connects GitHub: their own GitHub
+        // (back to this page and step), or the workspace's GitHub App.
+        if (connection.connectVia === "github_personal") {
+          await connectPersonalGitHub(workspaceId);
+          return;
+        }
         try {
           const github = await client.getGitHubApp(workspaceId, { returnPath });
           if (github.status === "bound") {
@@ -138,7 +144,7 @@ function useConnect(workspaceId: string, returnPath: string, label: string, relo
         }),
       });
     },
-    [client, label, navigate, reload, returnPath, workspaceId],
+    [client, connectPersonalGitHub, label, navigate, reload, returnPath, workspaceId],
   );
 }
 

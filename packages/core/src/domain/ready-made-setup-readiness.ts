@@ -36,7 +36,8 @@ import type { Settings } from "@opengeni/config";
 import {
   getAgent,
   getEventSource,
-  listGitHubInstallationIdsForWorkspace,
+  hasAuditableGitHubInstallationAuthority,
+  listGitHubInstallationAccessForWorkspace,
   type Database,
 } from "@opengeni/db";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
@@ -47,7 +48,16 @@ import { agentTemplateByKey } from "../agent-templates";
 import { buildCapabilityCatalog } from "./capabilities";
 import { activePersonalGitHubConnection } from "./personal-github-reader";
 
-type ReadinessDeps = { db: Database; settings: Settings };
+type ReadinessDeps = {
+  db: Database;
+  settings: Settings;
+  /**
+   * Whether the workspace's GitHub App binding is active, read live the way
+   * the GitHub integration page reads it (suspended or removed doesn't
+   * count). The API passes it; without it, the stored binding is read.
+   */
+  githubAppBound?: ((workspaceId: string) => Promise<boolean>) | undefined;
+};
 
 /** The provider a template names for GitHub. */
 export const GITHUB_SETUP_PROVIDER = "github.com";
@@ -145,6 +155,7 @@ export function setupConnectionFacts(
         connected: github.appInstalled,
         canConnect: github.canConnectApp,
         catalogItemId: null,
+        connectVia: github.canConnectApp ? "github_app" : null,
       };
     }
     if (github.appInstalled || github.personalConnected || ready) {
@@ -154,6 +165,11 @@ export function setupConnectionFacts(
       connected: false,
       canConnect: github.canConnectApp || github.canConnectPersonal,
       catalogItemId: null,
+      connectVia: github.canConnectApp
+        ? "github_app"
+        : github.canConnectPersonal
+          ? "github_personal"
+          : null,
     };
   }
   if (ready) return { connected: true, canConnect: true, catalogItemId: ready.id };
@@ -181,20 +197,49 @@ export async function setupViewerRights(
   };
 }
 
+/**
+ * The GitHub App is fully set up on this deployment: the same settings as
+ * `githubAppMissingSettings` in `@opengeni/github` (a parity test keeps them
+ * equal).
+ */
+export function githubAppConfigured(
+  settings: Pick<
+    Settings,
+    | "githubAppId"
+    | "githubClientId"
+    | "githubClientSecret"
+    | "githubAppSlug"
+    | "githubAppPrivateKey"
+  >,
+): boolean {
+  return [
+    settings.githubAppId,
+    settings.githubClientId,
+    settings.githubClientSecret,
+    settings.githubAppSlug,
+    settings.githubAppPrivateKey,
+  ].every((value) => Boolean(value?.trim()));
+}
+
+/** Without a live reader: a stored binding with its owner's proof and repositories. */
+async function storedGitHubAppBound(db: Database, workspaceId: string): Promise<boolean> {
+  const installations = await listGitHubInstallationAccessForWorkspace(db, workspaceId);
+  return installations.some(hasAuditableGitHubInstallationAuthority);
+}
+
 /** GitHub here: the workspace's App installation, and the viewer's own GitHub. */
 export async function githubSetupFacts(
   deps: ReadinessDeps,
   grant: AccessGrant,
   rights: Pick<SetupViewerRights, "githubManage">,
 ): Promise<GitHubSetupFacts> {
-  const appConfigured = Boolean(
-    deps.settings.githubAppId?.trim() && deps.settings.githubAppPrivateKey?.trim(),
-  );
+  const appConfigured = githubAppConfigured(deps.settings);
   const [appInstalled, personalConnected] = await Promise.all([
     appConfigured
-      ? listGitHubInstallationIdsForWorkspace(deps.db, grant.workspaceId)
-          .then((ids) => ids.length > 0)
-          .catch(() => false)
+      ? (deps.githubAppBound
+          ? deps.githubAppBound(grant.workspaceId)
+          : storedGitHubAppBound(deps.db, grant.workspaceId)
+        ).catch(() => false)
       : false,
     grant.subjectId
       ? activePersonalGitHubConnection(deps, {

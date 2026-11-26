@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 
 import {
+  githubAppConfigured,
   githubSetupFacts,
   isAgentSetupIncompleteCause,
   requireAgentTriggerReady,
@@ -189,7 +190,12 @@ describe("setup readiness", () => {
     expect(setupConnectionFacts([], GITHUB, LOCKED, personal).connected).toBe(true);
     expect(
       setupConnectionFacts([], GITHUB, LOCKED, { ...NO_GITHUB, canConnectPersonal: true }),
-    ).toEqual({ connected: false, canConnect: true, catalogItemId: null });
+    ).toEqual({
+      connected: false,
+      canConnect: true,
+      catalogItemId: null,
+      connectVia: "github_personal",
+    });
     expect(setupConnectionFacts([], GITHUB, LOCKED, NO_GITHUB).canConnect).toBe(false);
     // Without GitHub facts an empty catalog means not connected.
     expect(setupConnectionFacts([], GITHUB, ADMIN).connected).toBe(false);
@@ -198,14 +204,21 @@ describe("setup readiness", () => {
   test("a trigger on GitHub events needs the GitHub App: one's own GitHub isn't enough", () => {
     const events = { githubEvents: true };
     const personal = { ...NO_GITHUB, personalConnected: true, canConnectPersonal: true };
+    // A member without github:manage asks an admin for the App.
     expect(setupConnectionFacts([], GITHUB, LOCKED, personal, events)).toEqual({
       connected: false,
       canConnect: false,
       catalogItemId: null,
+      connectVia: null,
     });
     expect(
       setupConnectionFacts([], GITHUB, LOCKED, { ...personal, canConnectApp: true }, events),
-    ).toEqual({ connected: false, canConnect: true, catalogItemId: null });
+    ).toEqual({
+      connected: false,
+      canConnect: true,
+      catalogItemId: null,
+      connectVia: "github_app",
+    });
     expect(
       setupConnectionFacts([], GITHUB, LOCKED, { ...NO_GITHUB, appInstalled: true }, events)
         .connected,
@@ -232,7 +245,14 @@ describe("setup readiness", () => {
   test("who may connect GitHub: github:manage with the App configured, or personal GitHub", async () => {
     const grant = { accountId: "acc", workspaceId: "ws", subjectId: null } as never;
     const db = {} as never;
-    const none = { githubAppId: "", githubAppPrivateKey: "", githubPersonalOauthEnabled: false };
+    const none = {
+      githubAppId: "",
+      githubClientId: "",
+      githubClientSecret: "",
+      githubAppSlug: "",
+      githubAppPrivateKey: "",
+      githubPersonalOauthEnabled: false,
+    };
     expect(
       await githubSetupFacts({ db, settings: none as never }, grant, { githubManage: true }),
     ).toEqual(NO_GITHUB);
@@ -241,13 +261,58 @@ describe("setup readiness", () => {
       await githubSetupFacts({ db, settings: personal as never }, grant, { githubManage: false }),
     ).toEqual({ ...NO_GITHUB, canConnectPersonal: true });
     // The App is configured but this workspace's installations can't be read: not installed.
-    const app = { ...none, githubAppId: "1", githubAppPrivateKey: "key" };
+    const app = {
+      ...none,
+      githubAppId: "1",
+      githubClientId: "client",
+      githubClientSecret: "secret",
+      githubAppSlug: "opengeni",
+      githubAppPrivateKey: "key",
+    };
     expect(
       await githubSetupFacts({ db, settings: app as never }, grant, { githubManage: true }),
     ).toEqual({ ...NO_GITHUB, canConnectApp: true });
     expect(
       await githubSetupFacts({ db, settings: app as never }, grant, { githubManage: false }),
     ).toEqual(NO_GITHUB);
+  });
+
+  test("a member without github:manage connects their own GitHub, not the App", () => {
+    // Schedules and by-hand runs accept one's own GitHub: Connect opens it.
+    const member = { ...NO_GITHUB, canConnectPersonal: true };
+    expect(setupConnectionFacts([], GITHUB, LOCKED, member).connectVia).toBe("github_personal");
+    // Someone who can install the App is sent to the App.
+    expect(
+      setupConnectionFacts([], GITHUB, ADMIN, { ...member, canConnectApp: true }).connectVia,
+    ).toBe("github_app");
+    // Nobody can: no route, and the reason says ask an admin.
+    const none = setupConnectionFacts([], GITHUB, LOCKED, NO_GITHUB);
+    expect(none).toMatchObject({ canConnect: false, connectVia: null });
+  });
+
+  test("the App counts only when fully set up and its binding is active", async () => {
+    const grant = { accountId: "acc", workspaceId: "ws", subjectId: null } as never;
+    const full = {
+      githubAppId: "1",
+      githubClientId: "client",
+      githubClientSecret: "secret",
+      githubAppSlug: "opengeni",
+      githubAppPrivateKey: "key",
+      githubPersonalOauthEnabled: false,
+    };
+    const facts = (settings: object, bound: boolean) =>
+      githubSetupFacts(
+        { db: {} as never, settings: settings as never, githubAppBound: async () => bound },
+        grant,
+        { githubManage: true },
+      );
+    // Suspended or removed (the live reader says not bound): not connected.
+    expect((await facts(full, false)).appInstalled).toBe(false);
+    expect((await facts(full, true)).appInstalled).toBe(true);
+    // Partly configured: never asked, never connected.
+    expect(await facts({ ...full, githubClientSecret: "" }, true)).toEqual(NO_GITHUB);
+    expect(githubAppConfigured(full)).toBe(true);
+    expect(githubAppConfigured({ ...full, githubAppSlug: " " })).toBe(false);
   });
 
   test("a trigger with no agent, or a check that can't be read, never blocks", async () => {

@@ -121,6 +121,7 @@ function readiness(connected: boolean): SetupReadiness {
         connected,
         canConnect: true,
         catalogItemId: "github",
+        connectVia: null,
       },
       {
         provider: "slack.com",
@@ -131,6 +132,7 @@ function readiness(connected: boolean): SetupReadiness {
         connected: false,
         canConnect: true,
         catalogItemId: "slack",
+        connectVia: null,
       },
     ],
     missing: connected

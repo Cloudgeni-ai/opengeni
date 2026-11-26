@@ -91,6 +91,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import { githubAppBoundReader } from "../github-access";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
 import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
@@ -202,6 +203,8 @@ async function ensureAgentMemory(
 export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;
   const base = "/v1/workspaces/:workspaceId/agents";
+  // Readiness reads GitHub live, as the GitHub integration page does.
+  const readinessDeps = { ...deps, githubAppBound: githubAppBoundReader(deps) };
 
   async function requestContext(
     c: Context,
@@ -340,7 +343,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       filter: "all",
     });
     const readiness = await setupReadinessForMany(
-      deps,
+      readinessDeps,
       context.grant,
       agents.map((agent) =>
         agent.templateKey ? agentTemplateByKey(agent.templateKey)?.setup : undefined,
@@ -427,7 +430,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(
       SetupReadinessResponse.parse({
-        readiness: await setupReadinessFor(deps, context.grant, template.setup, {
+        readiness: await setupReadinessFor(readinessDeps, context.grant, template.setup, {
           githubEvents: templateTriggerUsesGitHubEvents(template, c.req.query("trigger")),
         }),
       }),
@@ -445,7 +448,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
     return c.json(
       SetupReadinessResponse.parse({
-        readiness: await setupReadinessFor(deps, context.grant, template?.setup, {
+        readiness: await setupReadinessFor(readinessDeps, context.grant, template?.setup, {
           githubEvents: template
             ? templateTriggerUsesGitHubEvents(template, c.req.query("trigger"))
             : false,
