@@ -200,6 +200,21 @@ test("reconnecting after a drop reads once", async () => {
   expect(shown()).toBe("22000000");
 });
 
+test("the stream's first connect when a chat opens is not a reconnect", async () => {
+  const { client, state } = server();
+  await mount(client, { active: false, connectionState: "connecting" });
+  await act(async () => undefined);
+  expect(state.reads).toBe(1);
+  await rerender(client, { active: false, connectionState: "live" });
+  await act(async () => undefined);
+  expect(state.reads).toBe(1);
+  // A real drop after that still reads once.
+  await rerender(client, { active: false, connectionState: "reconnecting" });
+  await rerender(client, { active: false, connectionState: "live" });
+  await act(async () => undefined);
+  expect(state.reads).toBe(2);
+});
+
 test("reads never overlap: a read asked for mid-flight runs once, right after", async () => {
   const { client, state, holdReads } = server();
   const release = holdReads();
