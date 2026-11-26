@@ -32,6 +32,7 @@ const BROWSER_VIEWER_FIT_E2E = "test/e2e/browser-viewer-fit.browser.e2e.ts";
 const SECRETS_FAKE_LOGIN_E2E = "test/e2e/secrets-fake-login.browser.e2e.ts";
 const EMBEDDED_INTERACTION_VIEWER_E2E = "test/e2e/embedded-interaction-viewer.browser.e2e.ts";
 const CLAUDE_SUBSCRIPTION_E2E = "test/e2e/claude-subscription.browser.e2e.ts";
+const IOS_PURCHASE_PRESENTATION_E2E = "test/e2e/ios-purchase-presentation.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
 const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
@@ -415,6 +416,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/form-page-footer.browser.e2e.ts",
+      IOS_PURCHASE_PRESENTATION_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -1081,6 +1083,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/form-page-footer.browser.e2e.ts",
+      IOS_PURCHASE_PRESENTATION_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",

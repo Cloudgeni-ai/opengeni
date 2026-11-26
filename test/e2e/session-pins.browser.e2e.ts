@@ -4888,23 +4888,33 @@ async function expectRowPrompt(
 // A 44px target is either a 44px box or a slimmer box with an invisible hit
 // area (::before); for the latter, hit-test points 22px either side of the centre.
 async function expectTouchTarget(locator: ReturnType<Page["getByRole"]>): Promise<void> {
-  const hits = await locator.evaluate((element) => {
-    const box = element.getBoundingClientRect();
-    if (box.width >= 44 && box.height >= 44) return [true, true, true, true];
-    const x = box.left + box.width / 2;
-    const y = box.top + box.height / 2;
-    const reach = 21.5;
-    return [
-      [x - reach, y],
-      [x + reach, y],
-      [x, y - reach],
-      [x, y + reach],
-    ].map(([px, py]) => {
-      const hit = document.elementFromPoint(px!, py!);
-      return hit !== null && element.contains(hit);
-    });
-  });
-  expect(hits).toEqual([true, true, true, true]);
+  // Visible is not the same as stable: the mobile composer can still be
+  // settling while its status chips are already visible. The actionable point
+  // must pass on every side once the layout settles, not necessarily on the
+  // first frame that produced a chip.
+  await waitFor(
+    async () => {
+      const hits = await locator.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        if (box.width >= 44 && box.height >= 44) return [true, true, true, true];
+        const x = box.left + box.width / 2;
+        const y = box.top + box.height / 2;
+        const reach = 21.5;
+        return [
+          [x - reach, y],
+          [x + reach, y],
+          [x, y - reach],
+          [x, y + reach],
+        ].map(([px, py]) => {
+          const hit = document.elementFromPoint(px!, py!);
+          return hit !== null && element.contains(hit);
+        });
+      });
+      if (!hits.every(Boolean)) throw new Error(`Touch target hit test: ${JSON.stringify(hits)}`);
+      return true;
+    },
+    { timeoutMs: 3_000 },
+  );
 }
 
 async function expectContainedInViewport(

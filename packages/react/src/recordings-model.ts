@@ -260,10 +260,15 @@ export function transcriptErrorText(
     funding?: string | undefined;
     pinned?: boolean | undefined;
   } | null,
+  showPurchasePrompts = true,
 ): string {
   switch (code) {
     case "subscription_plan_required":
-      return msg("lib.format.subscriptionUpgradeRequiredHeadline");
+      return msg(
+        showPurchasePrompts
+          ? "lib.format.subscriptionUpgradeRequiredHeadline"
+          : "lib.format.subscriptionUnavailableOnPlan",
+      );
     case "subscription_api_unavailable":
       return msg("meetings.recordings.errorSubscriptionApiUnavailable");
     case "missing_provider_key": {
@@ -296,6 +301,7 @@ export function transcriptErrorText(
     case "region_restricted":
       return msg("inferenceRegion.notSupportedInEu");
     case "insufficient_credits":
+      if (!showPurchasePrompts) return msg("lib.format.modelCreditsUnavailable");
       return model
         ? msg("meetings.recordings.errorInsufficientCreditsFor", { modelName: model.modelName })
         : msg("meetings.recordings.errorInsufficientCredits");

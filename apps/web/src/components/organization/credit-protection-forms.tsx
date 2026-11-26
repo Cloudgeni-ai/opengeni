@@ -4,6 +4,7 @@ import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section } from "@opengeni/react/ui/section";
 import { SettingRow, SettingRowGroup, useSettingRowControl } from "@opengeni/react/ui/setting-row";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { dollarsInputValue, formatBudget, parseDollars } from "@/lib/usage-allowances";
 import {
   autoTopUpDraft,
@@ -175,6 +176,7 @@ export function AutoTopUpForm(props: {
   onSave: (values: AutoTopUpValues, idempotencyKey: string) => Promise<AutoTopUpView>;
   onSetupPaymentMethod: () => Promise<void>;
 }) {
+  const showPurchasePrompts = useShowPurchasePrompts();
   const [saved, setSaved] = useState(props.settings);
   const [draft, setDraft] = useState(() => autoTopUpDraft(props.settings));
   const [busy, setBusy] = useState(false);
@@ -223,6 +225,7 @@ export function AutoTopUpForm(props: {
       !props.canManage ||
       pending.current ||
       !requested ||
+      (!showPurchasePrompts && requested.enabled) ||
       (!unconfirmed && sameAutoTopUpValues(requested, saved)) ||
       (requested.enabled && !saved.paymentMethod)
     )
@@ -266,7 +269,7 @@ export function AutoTopUpForm(props: {
   }
 
   async function setup() {
-    if (!props.canManage || pending.current) return;
+    if (!showPurchasePrompts || !props.canManage || pending.current) return;
     pending.current = true;
     setBusy(true);
     setError(null);
@@ -280,6 +283,34 @@ export function AutoTopUpForm(props: {
     }
   }
 
+  if (!showPurchasePrompts) {
+    if (!saved.enabled && !error && !message) return null;
+    return (
+      <Section title="Automatic top-up">
+        <SettingRow
+          label={saved.enabled ? "On" : "Off"}
+          description={
+            saved.status === "processing"
+              ? "Turning this off won’t cancel a payment already in progress."
+              : undefined
+          }
+          controlWidth="auto"
+          control={
+            props.canManage && (saved.enabled || unconfirmed) ? (
+              <RowButton
+                type="button"
+                disabled={busy}
+                onClick={() => void save({ ...saved, enabled: false })}
+              >
+                {busy ? "Turning off…" : "Turn off automatic top-up"}
+              </RowButton>
+            ) : undefined
+          }
+        />
+        <FormMessage error={error} message={message} />
+      </Section>
+    );
+  }
   const statusMessage =
     saved.status === "payment_failed"
       ? "Automatic top-up is paused because a payment failed. Update your card, then turn it on again."

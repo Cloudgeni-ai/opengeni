@@ -228,6 +228,7 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import { isChunkLoadError } from "../lib/chunk-load-error";
 import { LazyPart } from "./lazy-part";
 import { MessageAttachments } from "./message-attachments";
@@ -747,10 +748,11 @@ export function MessageTimeline({
   className,
 }: MessageTimelineProps) {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const formatError = useErrorMessage();
   const agentSignals = resolveAgentSignals(agentSignalsProp).turnDetail;
   const resolvedItems = useMemo(() => {
-    const builtItems = items ?? buildTimeline(t, events ?? []);
+    const builtItems = items ?? buildTimeline(t, events ?? [], { showPurchasePrompts });
     // A person who never sees the agent's work reads an automation run as
     // its line and its answer only.
     const projectedItems = agentSignals ? builtItems : automationRunOutcomesOnly(builtItems);
@@ -760,7 +762,7 @@ export function MessageTimeline({
     return projectedItems.filter(
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
-  }, [items, events, shouldRenderAuthNeeded, agentSignals, t]);
+  }, [items, events, shouldRenderAuthNeeded, agentSignals, showPurchasePrompts, t]);
   const searchItem = searchTarget
     ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
     : undefined;

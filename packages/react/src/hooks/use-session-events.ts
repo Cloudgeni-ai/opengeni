@@ -34,6 +34,7 @@ import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache
 import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import { isToolOutputPreviewEvent, useToolOutputReads } from "./tool-output-reads";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -193,6 +194,7 @@ export function useSessionEvents(
   options: UseSessionEventsOptions = {},
 ): UseSessionEventsResult {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const { client, workspaceId, reconcileSession } = useEmbeddedSession(options);
   const enabled = options.enabled ?? true;
   const pageLive = usePageLiveActivity();
@@ -2027,6 +2029,7 @@ export function useSessionEvents(
         : EMPTY_EVENTS;
     const timelineOptions = {
       partialStart: visibleHasOlder || visibleTruncated || after > 0,
+      showPurchasePrompts,
       ...(turnSteps ? { turnSteps } : {}),
       ...(liveSteps ? { toolOutputs: toolOutputs.reader } : {}),
     };
@@ -2049,6 +2052,7 @@ export function useSessionEvents(
     turnSteps,
     liveSteps,
     toolOutputs.reader,
+    showPurchasePrompts,
     t,
   ]);
 

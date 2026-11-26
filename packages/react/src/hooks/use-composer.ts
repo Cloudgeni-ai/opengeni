@@ -36,6 +36,7 @@ import {
 } from "../lib/transient-retry";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import type { StoredFileClientLike, StoredFileSource } from "../stored-file-preview";
 
 export type ComposerPolicy = {
@@ -296,6 +297,7 @@ function restoreOptimisticSendOperations(
   t: OpenGeniText,
   key: string | null,
   canBuyCredits = true,
+  showPurchasePrompts = true,
 ): OptimisticSendOperation[] {
   if (!key) return [];
   let stored = optimisticSendOperations.get(key);
@@ -345,7 +347,12 @@ function restoreOptimisticSendOperations(
           : operation.outcomeUnknown
             ? t("hooks.useComposer.theRequestCouldNotBe")
             : operation.error
-              ? composerSubmissionErrorMessage(t, new Error(operation.error), canBuyCredits)
+              ? composerSubmissionErrorMessage(
+                  t,
+                  new Error(operation.error),
+                  canBuyCredits,
+                  showPurchasePrompts,
+                )
               : undefined,
     ),
     retryable:
@@ -913,6 +920,7 @@ export function useComposer(
   options: UseComposerOptions = {},
 ): ComposerControllerState {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const { client, workspaceId, registerSessionReconciler, workspaceDraftsEvent } =
     useEmbeddedSession(options);
   const formatError = useErrorMessage();
@@ -927,6 +935,7 @@ export function useComposer(
     t,
     pendingOperationKey,
     options.canBuyCredits ?? true,
+    showPurchasePrompts,
   );
   const initialShadow =
     initialPendingOperation?.newerShadow ??
@@ -1095,6 +1104,8 @@ export function useComposer(
   // Who is viewing decides a credit refusal's fix, without invalidating `send`.
   const canBuyCreditsRef = useRef(options.canBuyCredits ?? true);
   canBuyCreditsRef.current = options.canBuyCredits ?? true;
+  const showPurchasePromptsRef = useRef(showPurchasePrompts);
+  showPurchasePromptsRef.current = showPurchasePrompts;
   const effectiveControlRef = useRef<EffectiveSessionControl | null>(
     acceptedControl ?? options.effectiveControl ?? null,
   );
@@ -1121,6 +1132,7 @@ export function useComposer(
       t,
       pendingOperationKey,
       canBuyCreditsRef.current,
+      showPurchasePromptsRef.current,
     );
     optimisticSendsRef.current = restoredOptimisticSends;
     optimisticProcessorBusyRef.current = false;
@@ -2359,7 +2371,12 @@ export function useComposer(
                             reference: problem.correlationId,
                           })
                         : t("hooks.useComposer.notConfirmedCheckStatus")
-                      : composerSubmissionErrorMessage(t, problem, canBuyCreditsRef.current),
+                      : composerSubmissionErrorMessage(
+                          t,
+                          problem,
+                          canBuyCreditsRef.current,
+                          showPurchasePromptsRef.current,
+                        ),
                   ),
                   retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
@@ -3030,7 +3047,12 @@ export function useComposer(
           state: "failed",
           error: formatError(
             cause,
-            composerSubmissionErrorMessage(t, problem, canBuyCreditsRef.current),
+            composerSubmissionErrorMessage(
+              t,
+              problem,
+              canBuyCreditsRef.current,
+              showPurchasePromptsRef.current,
+            ),
           ),
           retryable: composerSubmissionCanRetry(problem),
           outcomeUnknown: false,
@@ -3046,7 +3068,12 @@ export function useComposer(
           replaceOptimisticSends((current) => [...current, failed]);
         } else {
           rememberOptimisticSendOperations(operationKey, [
-            ...restoreOptimisticSendOperations(t, operationKey, canBuyCreditsRef.current),
+            ...restoreOptimisticSendOperations(
+              t,
+              operationKey,
+              canBuyCreditsRef.current,
+              showPurchasePromptsRef.current,
+            ),
             failed,
           ]);
         }

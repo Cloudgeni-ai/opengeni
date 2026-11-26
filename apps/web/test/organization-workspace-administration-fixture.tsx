@@ -13,6 +13,8 @@ import { createRoot } from "react-dom/client";
 import { Toaster } from "sonner";
 
 import { Button } from "@opengeni/react/ui/button";
+import { PurchasePresentationProvider } from "@opengeni/react/app/lib/purchase-presentation";
+import { iosAppContext } from "../src/lib/ios-app-context-boot";
 import { OrganizationDirectoryProvider } from "../src/components/organization/organization-directory";
 import { OrganizationPeoplePage } from "../src/components/organization/people-page";
 import { OrganizationWorkspacesPage } from "../src/components/organization/workspaces-page";
@@ -594,4 +596,8 @@ const router = createRouter({
   history: createHashHistory(),
 });
 
-createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);
+createRoot(document.getElementById("root")!).render(
+  <PurchasePresentationProvider showPurchasePrompts={!iosAppContext}>
+    <RouterProvider router={router} />
+  </PurchasePresentationProvider>,
+);

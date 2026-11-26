@@ -7,6 +7,7 @@ import { inferenceFeatureRestriction } from "@opengeni/react";
 import { MeetingDetailPage, MeetingsListPage } from "@opengeni/react/meetings";
 import { useRecordingsClient } from "@opengeni/react/recordings";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { orgLabel } from "@opengeni/react/app/lib/org";
@@ -64,6 +65,7 @@ export function MeetingDetailRoute({
 }) {
   const navigate = useNavigate();
   const context = useAppContext();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const { accessContext, workspaces, startSession } = context;
   const { client: recordings } = useRecordingsClient({ workspaceId });
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
@@ -75,6 +77,7 @@ export function MeetingDetailRoute({
   // A transcript refused for credits, or for a model that isn't connected,
   // links to the fix for those who can make it.
   const canBuyCredits =
+    showPurchasePrompts &&
     context.clientConfig.billingMode === "stripe" &&
     hasAccountPermission(accessContext, workspace?.accountId ?? "", "billing:manage");
   const canConnectModels = hasWorkspacePermission(accessContext, workspaceId, "connections:write");

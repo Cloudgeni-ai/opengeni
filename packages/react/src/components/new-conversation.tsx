@@ -26,6 +26,7 @@ import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-sco
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
 import { LazyPart } from "./lazy-part";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 
 const LazyNewVoice = lazy(() => import("../realtime/embedded-new-voice"));
 
@@ -247,6 +248,7 @@ export function NewConversationStatus({
   labels?: Partial<NewConversationLabels> | undefined;
 }) {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const labels = { ...DEFAULT_LABELS(t), ...overrides };
   const formatError = useErrorMessage();
   const { available, error, pending, composer } = creation;
@@ -262,7 +264,7 @@ export function NewConversationStatus({
             error.cause,
             error.cause instanceof OpenGeniApiError && error.cause.code === "route_not_allowed"
               ? labels.unavailable
-              : newConversationErrorMessage(t, normalizeError(error.cause)),
+              : newConversationErrorMessage(t, normalizeError(error.cause), showPurchasePrompts),
           )}
         </p>
       ) : null}
