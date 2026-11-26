@@ -147,13 +147,14 @@ ALTER TABLE organization_user_retention_object_obligations
 
 DO $patch$
 DECLARE
-  definition text := pg_get_functiondef('opengeni_private.organization_retention_object_candidates(uuid,uuid)'::regprocedure);
+  definition text;
   anchor constant text := $a$  ORDER BY 1, 2$a$;
 BEGIN
+  definition := pg_get_functiondef('opengeni_private.organization_retention_object_candidates(uuid,uuid)'::regprocedure);
   IF length(definition) - length(replace(definition, anchor, '')) <> length(anchor) THEN
     RAISE EXCEPTION 'account deletion retention storage anchor drift';
   END IF;
-  EXECUTE replace(definition, anchor, $body$
+  definition := replace(definition, anchor, $body$
   UNION ALL
   SELECT 'site_file', f.id::text, NULL::text, f.object_key
   FROM site_data_files f CROSS JOIN member WHERE f.account_id = p_account_id AND f.workspace_id = member.personal_workspace_id
@@ -167,6 +168,7 @@ BEGIN
   SELECT 'app_package_export', x.object_key, NULL::text, x.object_key
   FROM app_package_exports x CROSS JOIN member WHERE x.account_id = p_account_id AND x.workspace_id = member.personal_workspace_id
 $body$ || anchor);
+  EXECUTE definition;
 END $patch$;
 
 DO $patch$
@@ -228,11 +230,12 @@ END $patch$;
 -- closure check; previous binaries reject any new callable trigger definer.
 DO $patch$
 DECLARE
-  definition text := pg_get_functiondef('opengeni_private.enforce_organization_plan_seats()'::regprocedure);
+  definition text;
   anchor constant text := $a$  PERFORM set_config('opengeni.account_id', NEW.account_id::text, true);$a$;
   begin_anchor constant text := $a$BEGIN
 $a$;
 BEGIN
+  definition := pg_get_functiondef('opengeni_private.enforce_organization_plan_seats()'::regprocedure);
   IF length(definition) - length(replace(definition, anchor, '')) <> length(anchor)
     OR length(definition) - length(replace(definition, begin_anchor, '')) <> length(begin_anchor) THEN
     RAISE EXCEPTION 'account deletion seat fence anchor drift';
@@ -247,7 +250,7 @@ BEGIN
     RETURN NEW;
   END IF;
 $body$);
-  EXECUTE replace(definition, anchor, anchor || $body$
+  definition := replace(definition, anchor, anchor || $body$
   IF NEW.status IN ('active','suspended','pending','provisioning') THEN
   IF coalesce(to_jsonb(NEW)->>'subject_id', to_jsonb(NEW)->>'target_subject_id') LIKE 'user:%'
     AND NOT pg_try_advisory_xact_lock_shared(hashtextextended('canonical-human-user:' ||
@@ -261,6 +264,7 @@ $body$);
     RAISE EXCEPTION 'organization or account is being deleted' USING ERRCODE = '42501';
   END IF;
   END IF;$body$);
+  EXECUTE definition;
 END
 $patch$;
 CREATE TRIGGER ignore_closed_organization_billing_customer

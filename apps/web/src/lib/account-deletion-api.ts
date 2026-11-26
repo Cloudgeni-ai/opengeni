@@ -1,16 +1,7 @@
-import {
-  AccountDeletionPreview,
-  OPENGENI_API_CONTRACT_HEADER,
-  OPENGENI_API_CONTRACT_REVISION,
-  StartAccountDeletionResponse,
-} from "@opengeni/contracts";
+import { AccountDeletionPreview, StartAccountDeletionResponse } from "@opengeni/contracts";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
-import {
-  apiBaseUrl,
-  apiErrorFromResponseBody,
-  currentManagedActorEpoch,
-  managedActorFetch,
-} from "@/api";
+import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { apiBaseUrl, currentManagedActorEpoch, managedActorFetch } from "@/api";
 
 export const ACCOUNT_DELETION_RECEIPT = "opengeni:account-deletion-requested";
 
@@ -21,25 +12,24 @@ export function createAccountDeletionApi(mode: "legacy" | "dual" | "broker") {
       throw new DOMException("The browser account changed", "AbortError");
     }
   }
-  async function request(init?: RequestInit) {
-    assertActor();
-    const response = await managedActorFetch(`${apiBaseUrl}/v1/me/account-deletion`, {
-      credentials: "include",
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        ...init?.headers,
+  function client(headers?: Record<string, string>) {
+    return new OpenGeniBrowserClient({
+      baseUrl: apiBaseUrl,
+      ...(headers ? { headers } : {}),
+      readRetry: false,
+      fetch: (input, init) => {
+        assertActor();
+        return managedActorFetch(input, { ...init, credentials: "include" });
       },
     });
-    const body = await response.text();
-    assertActor();
-    if (!response.ok) throw apiErrorFromResponseBody(response.status, body);
-    return JSON.parse(body) as unknown;
   }
   return {
-    preview: async (signal?: AbortSignal) =>
-      AccountDeletionPreview.parse(await request({ signal })),
+    async preview(signal?: AbortSignal) {
+      assertActor();
+      const body = await client().getAccountDeletion({ signal });
+      assertActor();
+      return AccountDeletionPreview.parse(body);
+    },
     async start(operationId: string) {
       assertActor();
       const headers: Record<string, string> = {};
@@ -55,13 +45,9 @@ export function createAccountDeletionApi(mode: "legacy" | "dual" | "broker") {
         headers["x-opengeni-session-csrf"] = projection.csrfToken;
         headers["x-opengeni-actor-epoch"] = projection.actorEpoch;
       }
-      return StartAccountDeletionResponse.parse(
-        await request({
-          method: "POST",
-          headers,
-          body: JSON.stringify({ confirm: "DELETE", operationId }),
-        }),
-      );
+      const body = await client(headers).requestAccountDeletion({ confirm: "DELETE", operationId });
+      assertActor();
+      return StartAccountDeletionResponse.parse(body);
     },
   };
 }

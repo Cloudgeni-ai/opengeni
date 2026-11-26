@@ -19,12 +19,12 @@ import { Label } from "@opengeni/react/ui/label";
 import { Notice } from "@opengeni/react/ui/notice";
 import { Section } from "@opengeni/react/ui/section";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { ApiError } from "@/api";
 import { ACCOUNT_DELETION_RECEIPT, createAccountDeletionApi } from "@/lib/account-deletion-api";
 
 function deletionError(error: unknown, submitted: boolean) {
-  if (error instanceof ApiError) {
+  if (error instanceof OpenGeniApiError) {
     if (error.status === 401 || error.status === 403) {
       return submitted
         ? "We couldn’t verify the result. If your request was accepted, you’ll be signed out."
@@ -68,7 +68,10 @@ export function AccountDeletionSection({
       },
       (caught: unknown) => {
         if (abort.signal.aborted) return;
-        if (caught instanceof ApiError && caught.details?.code === "ACCOUNT_DELETION_UNAVAILABLE") {
+        if (
+          caught instanceof OpenGeniApiError &&
+          caught.details?.code === "ACCOUNT_DELETION_UNAVAILABLE"
+        ) {
           setUnavailable(true);
         } else {
           setError(deletionError(caught, false));
@@ -105,7 +108,10 @@ export function AccountDeletionSection({
       await api.start(operation.current);
       redirect();
     } catch (caught) {
-      if (caught instanceof ApiError && caught.details?.code === ACCOUNT_DELETION_LAST_OWNER) {
+      if (
+        caught instanceof OpenGeniApiError &&
+        caught.details?.code === ACCOUNT_DELETION_LAST_OWNER
+      ) {
         const blockers = AccountDeletionBlocker.array().safeParse(caught.details.blockers);
         if (blockers.success && blockers.data.length > 0) {
           setPreview({ ...preview, blockers: blockers.data });

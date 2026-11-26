@@ -1709,8 +1709,8 @@ export class OpenGeniClient {
   }
 
   /** Preview deletion for the signed-in person. API keys cannot call this. */
-  async getAccountDeletion(): Promise<AccountDeletionPreview> {
-    return this.requestJson("GET", "/v1/me/account-deletion");
+  async getAccountDeletion(options?: OpenGeniRequestOptions): Promise<AccountDeletionPreview> {
+    return this.requestJson("GET", "/v1/me/account-deletion", undefined, {}, options);
   }
 
   /** Request erasure and immediately revoke the signed-in person's sessions. */

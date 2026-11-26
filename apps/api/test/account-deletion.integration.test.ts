@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { ApiRouteDeps, ManagedEmailMessage } from "@opengeni/core";
-import type Stripe from "stripe";
 import { dbSearchPath } from "@opengeni/config";
 import { AccountDeletionPreview, StartAccountDeletionResponse } from "@opengeni/contracts";
 import {
@@ -627,7 +626,7 @@ test("provisioning cannot create a seat during or after deletion, and a closed o
         throw new Error("unexpected Stripe call");
       },
     },
-  } as unknown as Stripe;
+  } as unknown as Parameters<typeof getOrCreateStripeCustomer>[1];
   const access = { subjectLabel: person.email } as Parameters<typeof getOrCreateStripeCustomer>[2];
   await expect(
     getOrCreateStripeCustomer(billingDeps, stripe, access, person.organizationId),
