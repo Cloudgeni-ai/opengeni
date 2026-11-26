@@ -2240,12 +2240,35 @@ test("a ready-made agent's preview says what it does, when and what it needs; on
     templates: [
       {
         ...TRIAGE_TEMPLATE,
-        requiredConnections: [{ key: "github", name: "GitHub" }],
-        optionalConnections: [{ key: "linear", name: "Linear" }],
-        wontDoWithoutAsking: ["Close an issue"],
-        worksWellWith: ["Bug fixer"],
+        setup: {
+          connections: [
+            { provider: "github.com", name: "GitHub", required: true, why: "Reads issues." },
+            { provider: "linear.app", name: "Linear", required: false, why: "Reads issues." },
+          ],
+          repository: null,
+          worksWellWith: "bug-fixer",
+          wontDoWithoutAsking: ["Close an issue"],
+          firstMessage: null,
+          firstJob: null,
+        },
       },
+      { ...TRIAGE_TEMPLATE, key: "bug-fixer", name: "Bug fixer", suggestedTriggers: [] },
     ],
+    readiness: {
+      triage: {
+        ...POSTHOG_MISSING,
+        connections: [
+          {
+            ...POSTHOG_MISSING.connections[0],
+            provider: "github.com",
+            name: "GitHub",
+            connected: true,
+          },
+        ],
+        missing: [],
+        ready: true,
+      },
+    },
   });
   let added: { id: string } | null = null;
   const container = await render(
@@ -2267,6 +2290,9 @@ test("a ready-made agent's preview says what it does, when and what it needs; on
     expect.stringContaining("Required"),
     expect.stringContaining("Optional"),
   ]);
+  // The readiness check says GitHub is already connected for this person.
+  expect(needs[0]!.textContent).toContain("Connected");
+  expect(needs[1]!.textContent).not.toContain("Connected");
   expect(container.querySelector("[data-ready-made-wont]")?.textContent).toContain(
     "Close an issue",
   );
@@ -2573,4 +2599,68 @@ test("the readiness check shows as its status and what's missing, with Finish se
     </AgentsTestHost>,
   );
   expect(list.querySelector("[data-agent-row-status]")?.textContent).toBe("Needs PostHog");
+});
+
+const POSTHOG_MISSING = {
+  ready: false,
+  reason: "Connect PostHog to turn this on.",
+  connections: [
+    {
+      provider: "posthog.com",
+      name: "PostHog",
+      mcpUrl: null,
+      required: true,
+      why: "Reads your product analytics.",
+      connected: false,
+      canConnect: true,
+      catalogItemId: null,
+    },
+  ],
+  missing: [
+    {
+      kind: "connection",
+      provider: "posthog.com",
+      name: "PostHog",
+      reason: "Connect PostHog to turn this on.",
+    },
+  ],
+  requiredConnected: 0,
+  requiredTotal: 1,
+};
+
+test("the server's readiness check shows on the list row and the agent's page", async () => {
+  const agent = makeAgent({ name: "Product analyst", templateKey: "product-analyst" });
+  const client = fakeAgentsClient([agent], { readiness: { [agent.id]: POSTHOG_MISSING } });
+  const list = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  expect(client.calls).toContainEqual(["getAgentReadiness", WORKSPACE_ID, agent.id]);
+  expect(list.querySelector("[data-agent-row-status]")?.textContent).toBe("Needs PostHog");
+  await act(async () => mounted!.unmount());
+  mounted = null;
+
+  const page = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  expect(page.querySelector("[data-agent-status]")?.textContent).toBe("Needs PostHog");
+  expect(page.querySelector("[data-agent-readiness-item='posthog.com']")?.textContent).toContain(
+    "Connect PostHog to turn this on.",
+  );
+});
+
+test("an agent with no ready-made setup isn't checked, and is never blocked by another agent", async () => {
+  const agent = makeAgent({ name: "Helper" });
+  const client = fakeAgentsClient([agent]);
+  const page = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  expect(client.calls.some((call) => call[0] === "getAgentReadiness")).toBe(false);
+  expect(page.querySelector("[data-agent-readiness]")).toBeNull();
+  expect(page.querySelector("[data-agent-status]")?.textContent).toBe("On call");
 });

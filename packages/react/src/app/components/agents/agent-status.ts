@@ -18,6 +18,16 @@ export interface AgentReadinessSummary {
   stepsLeft: number;
 }
 
+/** One need the readiness check reads: a connection, connected or not. */
+export interface AgentReadinessItem {
+  key: string;
+  label: string;
+  ready: boolean;
+  required: boolean;
+  /** Why it keeps the agent off, in words: "Connect PostHog to turn this on." */
+  reason?: string | null | undefined;
+}
+
 export type AgentStatusKey = "working" | "needs" | "steps_left" | "ready" | "off" | "on_call";
 
 export interface AgentStatus {

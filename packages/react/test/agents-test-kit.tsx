@@ -125,6 +125,8 @@ export function fakeAgentsClient(
     lastRuns?: Record<string, string>;
     /** The catalog's event types, for every source. */
     eventTypes?: { type: string; description: string }[];
+    /** The server's readiness check, per agent id or template key. */
+    readiness?: Record<string, unknown>;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
@@ -268,6 +270,18 @@ export function fakeAgentsClient(
     async listEventSourceTypes(workspaceId: string, sourceId: string) {
       calls.push(["listEventSourceTypes", workspaceId, sourceId]);
       return options.eventTypes ?? [];
+    },
+    async getAgentReadiness(workspaceId: string, id: string) {
+      calls.push(["getAgentReadiness", workspaceId, id]);
+      const found = options.readiness?.[id];
+      if (!found) throw Object.assign(new Error("Not found"), { status: 404 });
+      return found;
+    },
+    async getAgentTemplateReadiness(workspaceId: string, key: string) {
+      calls.push(["getAgentTemplateReadiness", workspaceId, key]);
+      const found = options.readiness?.[key];
+      if (!found) throw Object.assign(new Error("Not found"), { status: 404 });
+      return found;
     },
     async listWorkspaceMembers(workspaceId: string) {
       calls.push(["listWorkspaceMembers", workspaceId]);

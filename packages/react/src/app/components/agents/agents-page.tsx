@@ -56,6 +56,12 @@ import { agentTriggers } from "./agent-setup-sections";
 import { agentStartsWords, agentStatus, type AgentReadinessSummary } from "./agent-status";
 import { agentTriggerSentence, agentTriggerShapeOfTask } from "./agent-trigger-words";
 import { readyMadeAgentSetup } from "./ready-made-agent-setup";
+import {
+  agentReadinessSummary,
+  useAgentsActivity,
+  useAgentsReadiness,
+  type AgentActivity,
+} from "./agent-readiness";
 import { inAppClick } from "../../../ui/in-app-click";
 import "../../../../styles/connect.css";
 
@@ -121,6 +127,13 @@ export function AgentsPage({
     });
   const readyMade = useReadyMadeAgents(workspaceId, agents, filter === "all");
   const facts = useAgentListFacts(workspaceId, agents);
+  const checked = useAgentsReadiness(workspaceId, agents);
+  const readinessFor = (agentId: string) => {
+    const given = readinessOf?.(agentId);
+    if (given !== undefined) return given;
+    const read = checked.get(agentId);
+    return read ? agentReadinessSummary(read) : null;
+  };
   const canAdd = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
   // Ready-made agents show in one place: their own section when it's there,
   // otherwise the Add agent menu.
@@ -276,7 +289,7 @@ export function AgentsPage({
           ) : (
             <RowList label="Agents" variant="resource">
               {agents.map((agent) => {
-                const row = agentRowFacts(agent, facts, readinessOf?.(agent.id));
+                const row = agentRowFacts(agent, facts, readinessFor(agent.id));
                 return (
                   <ListRow
                     key={agent.id}
@@ -408,13 +421,11 @@ interface AgentListFacts {
   /** Triggers by agent id; null while they load. */
   triggers: ReadonlyMap<string, ScheduledTask[]> | null;
   sources: readonly Pick<EventSource, "id" | "name" | "kind">[];
-  lastRuns: ReadonlyMap<string, string>;
+  /** Last run and whether it works now, by agent id. */
+  activity: ReadonlyMap<string, AgentActivity>;
   /** Automations here that run without an agent. */
   withoutAgent: number;
 }
-
-/** How many agents' last runs are read for the list, at most. */
-const LAST_RUN_READS_MAX = 30;
 
 function useAgentListFacts(
   workspaceId: string,
@@ -423,7 +434,6 @@ function useAgentListFacts(
   const { client } = useAppContext();
   const [tasks, setTasks] = useState<ScheduledTask[] | null>(null);
   const [sources, setSources] = useState<EventSource[]>([]);
-  const [lastRuns, setLastRuns] = useState<ReadonlyMap<string, string>>(() => new Map());
   useEffect(() => {
     let live = true;
     client.listScheduledTasks(workspaceId, { limit: 200 }).then(
@@ -438,26 +448,10 @@ function useAgentListFacts(
       live = false;
     };
   }, [client, workspaceId]);
-  const ids = (agents ?? [])
-    .slice(0, LAST_RUN_READS_MAX)
-    .map((agent) => agent.id)
-    .join(",");
-  useEffect(() => {
-    if (!ids) return;
-    let live = true;
-    for (const agentId of ids.split(",")) {
-      client.listAgentChats(workspaceId, agentId, { filter: "everyone", limit: 1 }).then(
-        (page) => {
-          const latest = page.chats[0]?.updatedAt;
-          if (live && latest) setLastRuns((current) => new Map(current).set(agentId, latest));
-        },
-        () => undefined,
-      );
-    }
-    return () => {
-      live = false;
-    };
-  }, [client, ids, workspaceId]);
+  const activity = useAgentsActivity(
+    workspaceId,
+    (agents ?? []).map((agent) => agent.id),
+  );
   const triggers =
     tasks === null
       ? null
@@ -465,7 +459,7 @@ function useAgentListFacts(
   const withoutAgent = (tasks ?? []).filter(
     (task) => !task.agentConfig.agentId && (task.action?.kind ?? "agent_turn") === "agent_turn",
   ).length;
-  return { triggers, sources, lastRuns, withoutAgent };
+  return { triggers, sources, activity, withoutAgent };
 }
 
 /** One agent's row: its status, what starts it and when it last ran. */
@@ -484,7 +478,12 @@ function agentRowFacts(
     }),
   );
   return {
-    status: agentStatus({ triggers, inSlack, readiness }),
+    status: agentStatus({
+      triggers,
+      inSlack,
+      readiness,
+      working: facts.activity.get(agent.id)?.working,
+    }),
     starts:
       triggers === null
         ? ""
@@ -492,7 +491,7 @@ function agentRowFacts(
           (triggers.length > 0 && !triggers.some((task) => task.status === "active")
             ? " · Off"
             : ""),
-    lastRun: facts.lastRuns.get(agent.id) ?? null,
+    lastRun: facts.activity.get(agent.id)?.lastRun ?? null,
   };
 }
 

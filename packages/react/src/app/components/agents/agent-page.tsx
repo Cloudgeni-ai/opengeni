@@ -6,7 +6,7 @@
  * one click away. The host renders the Slack rows (`renderSlack`), which need
  * the Slack integration's pieces.
  */
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { DownloadIcon, MessageSquareIcon, PencilIcon, SettingsIcon } from "lucide-react";
 import {
   slackAgentCallText,
@@ -54,7 +54,13 @@ import {
   AgentWhenItWorks,
   useAgentTriggerTasks,
 } from "./agent-setup-sections";
-import { agentStatus, type AgentReadinessSummary } from "./agent-status";
+import { agentStatus, type AgentReadinessItem, type AgentReadinessSummary } from "./agent-status";
+import {
+  agentReadinessItems,
+  agentReadinessSummary,
+  useAgentsActivity,
+  useAgentsReadiness,
+} from "./agent-readiness";
 
 export type AgentSlackSlot = (props: {
   agent: Agent;
@@ -385,13 +391,7 @@ function useAgentOrFallback(
   return { state, agent: agent ?? null, back, fallback };
 }
 
-/** A required need the server's readiness check found missing, and where to fix it. */
-export interface AgentReadinessItem {
-  key: string;
-  label: string;
-  ready: boolean;
-  required: boolean;
-}
+export type { AgentReadinessItem } from "./agent-status";
 
 /**
  * Ready to work: what the server's readiness check says is still missing.
@@ -427,7 +427,9 @@ export function AgentReadinessSection({
           key={item.key}
           data-agent-readiness-item={item.key}
           label={item.label}
-          description={item.required ? "Required" : "Optional"}
+          description={
+            item.ready ? (item.required ? "Required" : "Optional") : (item.reason ?? "Required")
+          }
           control={
             <StatusBadge
               variant="dot"
@@ -440,6 +442,28 @@ export function AgentReadinessSection({
       ))}
     </Section>
   );
+}
+
+/** The one ready-made agent this one works well with, by name; display only. */
+function useWorksWellWith(workspaceId: string, templateKey: string | null): string | null {
+  const { client } = useAppContext();
+  const [name, setName] = useState<string | null>(null);
+  useEffect(() => {
+    setName(null);
+    if (!templateKey) return;
+    let live = true;
+    client.listAgentTemplates(workspaceId).then(
+      (list) => {
+        const partner = list.find((entry) => entry.key === templateKey)?.setup?.worksWellWith;
+        if (live && partner) setName(list.find((entry) => entry.key === partner)?.name ?? null);
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, templateKey, workspaceId]);
+  return name;
 }
 
 export function AgentPage({
@@ -469,13 +493,25 @@ export function AgentPage({
   // What it cost, for people who may see Usage; read before the agent loads.
   const costText = useAgentCostText({ id: agentId }, workspaceId);
   const triggers = useAgentTriggerTasks(workspaceId, agentId);
+  // The server's readiness check, unless the host passed its own.
+  const checked = useAgentsReadiness(workspaceId, agent ? [agent] : undefined).get(agentId);
+  const activity = useAgentsActivity(workspaceId, [agentId]).get(agentId);
+  const partner = useWorksWellWith(workspaceId, agent?.templateKey ?? null);
   if (!agent) return <>{fallback}</>;
+  const summary = readiness ?? (checked ? agentReadinessSummary(checked) : null);
+  const items = readinessItems ?? (checked ? agentReadinessItems(checked) : undefined);
+  const partnerName = worksWellWith ?? partner;
   const workspace = workspaces.find((row) => row.id === agent.workspaceId);
   const organizationName = workspace
     ? orgName(workspace.accountId, accessContext.accountGrants)
     : null;
   const inSlack = agent.visibility !== "private" && agent.slack.length > 0;
-  const status = agentStatus({ triggers: triggers.tasks, inSlack, readiness });
+  const status = agentStatus({
+    triggers: triggers.tasks,
+    inSlack,
+    readiness: summary,
+    working: activity?.working,
+  });
   const chat = () =>
     void navigate({
       to: "/workspaces/$workspaceId/sessions",
@@ -541,9 +577,9 @@ export function AgentPage({
                 </span>
               </DetailAsideItem>
             ) : null}
-            {worksWellWith ? (
+            {partnerName ? (
               <DetailAsideItem label="Works well with">
-                <span data-agent-works-well-with="">{worksWellWith}</span>
+                <span data-agent-works-well-with="">{partnerName}</span>
               </DetailAsideItem>
             ) : null}
             <DetailAsideItem label="Who can use it">
@@ -561,9 +597,7 @@ export function AgentPage({
           </DetailAside>
         }
       >
-        {readinessItems ? (
-          <AgentReadinessSection items={readinessItems} onFinish={onFinishSetup} />
-        ) : null}
+        {items ? <AgentReadinessSection items={items} onFinish={onFinishSetup} /> : null}
         <AgentWhenItWorks
           agent={agent}
           workspaceId={workspaceId}
