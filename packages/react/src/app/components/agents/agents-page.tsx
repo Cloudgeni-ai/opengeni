@@ -535,7 +535,11 @@ function ReadyMadeAgents({
               description={template.description || undefined}
               meta={
                 needs.length > 0
-                  ? [`Needs ${needs.map((need) => need.label).join(" and ")}`]
+                  ? [
+                      `Needs ${needs
+                        .map((need) => (need.key === "repository" ? "a repository" : need.label))
+                        .join(" and ")}`,
+                    ]
                   : undefined
               }
               indicator="open"

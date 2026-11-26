@@ -73,7 +73,7 @@ export function agentStartsWords(
   options: { inSlack?: boolean | undefined } = {},
 ): string {
   if (sentences.length === 1) return sentences[0]!;
-  if (sentences.length > 1) return `${sentences.length} triggers`;
+  if (sentences.length > 1) return `${sentences[0]} and ${sentences.length - 1} more`;
   return options.inSlack
     ? "Answers when asked here or in Slack"
     : "Answers when you ask it in a chat";
