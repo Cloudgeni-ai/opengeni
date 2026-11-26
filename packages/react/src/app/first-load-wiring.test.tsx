@@ -188,7 +188,8 @@ describe("first load wiring", () => {
     const props = { host, ready: false, catalog, chat: false };
     const view = await renderComponent(<Console {...props} />);
     try {
-      for (let i = 0; i < 20 && !current; i++) await flush(10);
+      const ready = () => current !== null;
+      for (let i = 0; i < 20 && !ready(); i++) await flush(10);
       await actRun(() => current!.prepareWorkspaceTransition(WORKSPACE_ID));
       // The workspace page mounts: its tool list and the composer.
       await view.rerender(<Console {...props} ready />);

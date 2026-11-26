@@ -187,7 +187,9 @@ describe("opening a chat", () => {
       );
     }
     const view = await renderComponent(<Console open={false} />);
-    for (let i = 0; i < 20 && !context; i++) await flush(10);
+    // The app state reads access and workspaces before it has a context.
+    const ready = () => context !== null;
+    for (let i = 0; i < 20 && !ready(); i++) await flush(10);
     await actRun(() => context!.prepareWorkspaceTransition(WORKSPACE_ID));
     await view.rerender(<Console open />);
     try {
