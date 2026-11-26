@@ -150,12 +150,13 @@ const paidPartSql = sql.raw(`case
   else 0 end`);
 
 /**
- * The balance and the paid-credit state behind it (see paid-credit.ts). One
- * pass over the account's ledger sums the balance and API spending, exactly
- * as without own-key fees; the paid-credit figures come from the latest
- * receipt's running totals plus the rows that can carry a receipt written
- * after it (normally none), through credit_ledger_receipt_rows_idx. Their
- * cost does not grow with the number of fees, top-ups or grants.
+ * The balance and the paid-credit state behind it (see paid-credit.ts). The
+ * balance and API spending are the ledger's sums, read from the per-account
+ * totals its triggers keep (credit_ledger_account_totals); the paid-credit
+ * figures come from the latest receipt's running totals plus the rows that
+ * can carry a receipt written after it (normally none), through
+ * credit_ledger_receipt_rows_idx. Their cost does not grow with the size of
+ * the ledger.
  */
 export async function readBillingBalance(
   db: Database,
@@ -184,13 +185,14 @@ export async function readBillingBalance(
         where (${policyRevision ?? null}::bigint is null or revision <= ${policyRevision ?? null}::bigint)
         order by revision desc limit 1
       ), totals as (
-        -- One pass over the ledger: the balance, and what API work (other
-        -- than own-key fees) has spent.
-        select coalesce(sum(entry.amount_micros), 0)::text as balance,
-          coalesce(sum(-entry.amount_micros) filter (where entry.usage_origin = 'api'
-            and entry.type <> ${BYOK_PLATFORM_FEE_TYPE}), 0)::text as "apiSpent"
-        from ${schema.creditLedgerEntries} entry
-        where entry.account_id = ${accountId}
+        -- The balance, and what API work (other than own-key fees) has spent:
+        -- the ledger's sums, kept per account by its triggers (migration
+        -- 1576) in the same transaction as every ledger change. No row means
+        -- no ledger rows.
+        select coalesce(max(total.balance_micros), 0)::text as balance,
+          coalesce(max(total.api_spent_micros), 0)::text as "apiSpent"
+        from credit_ledger_account_totals total
+        where total.account_id = ${accountId}
       ), fee_month as (
         -- This calendar month (UTC) at the read's settlement time.
         select date_trunc('month', coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp()) at time zone 'UTC') as utc
