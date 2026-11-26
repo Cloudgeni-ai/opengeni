@@ -1723,8 +1723,11 @@ test("packages carry Skills and automations; updates show them, and go back", as
 
   // Customized here: forked for good. No update or going back is offered,
   // and the server refuses package updates (dry run included).
+  const current = await f.call(manager, "GET", `${base}/current`);
+  expect(current.status, current.text).toBe(200);
   const edited = await f.call(manager, "POST", `${base}/versions`, {
     html: "<!doctype html><h1>Our own board</h1>",
+    expectedCurrentVersionId: String(current.json.artifact.currentVersion.id),
     idempotencyKey: crypto.randomUUID(),
   });
   expect(edited.status, edited.text).toBeLessThan(300);
