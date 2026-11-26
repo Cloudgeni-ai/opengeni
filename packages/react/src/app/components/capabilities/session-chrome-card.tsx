@@ -104,16 +104,18 @@ export function SessionChromeCapabilityCard({
   // The machines are known once a read finished (or failed); until then the
   // last computer seen in this workspace stands in.
   const machinesKnown = !(fleet.loading && fleet.machines.length === 0 && !fleet.error);
-  const remembered = machinesKnown ? null : (lastComputers.get(workspaceId) ?? null);
+  const subjectId = context.accessContext?.subjectId ?? "";
+  const computerKey = `${subjectId}\u0000${workspaceId}`;
+  const remembered = machinesKnown ? null : (lastComputers.get(computerKey) ?? null);
   useEffect(() => {
     if (!machinesKnown) return;
     if (computer?.sandboxId)
-      lastComputers.set(workspaceId, {
+      lastComputers.set(computerKey, {
         sandboxId: computer.sandboxId,
         name: machineDisplayName(t, computer),
       });
-    else lastComputers.delete(workspaceId);
-  }, [computer, machinesKnown, workspaceId]);
+    else lastComputers.delete(computerKey);
+  }, [computer, computerKey, machinesKnown]);
   // Read again when a computer comes online: its Chrome may already have the
   // extension, so the card can skip straight to Continue.
   const chrome = useAttachedChrome(
@@ -126,10 +128,12 @@ export function SessionChromeCapabilityCard({
   const ready =
     chrome.connected !== null || (chrome.checked && (machinesKnown || remembered !== null));
   // A card that sees Chrome linked no longer waits on the person, in this chat
-  // or in the sub-session bar above it, whatever the agent does next.
-  const linked = chrome.connected !== null;
+  // or in the sub-session bar above it, whatever the agent does next. Only a
+  // live reading counts, and only a finished request is remembered, so a
+  // failed one is tried again.
+  const linked = chrome.fresh && chrome.connected !== null;
   useEffect(() => {
-    const key = `${workspaceId}\u0000${sessionId}`;
+    const key = `${subjectId}\u0000${workspaceId}\u0000${sessionId}`;
     if (!linked || clearedWaits.has(key)) return;
     if (typeof context.client.continueAfterCapabilitySetup !== "function") return;
     clearedWaits.add(key);
@@ -137,14 +141,15 @@ export function SessionChromeCapabilityCard({
       .continueAfterCapabilitySetup(workspaceId, sessionId, {
         capabilityId: item.capability?.id ?? "api:connected-machine",
       })
-      .catch(() => undefined);
-  }, [context.client, item.capability?.id, linked, sessionId, workspaceId]);
-  // Continue is offered only after this card saw Chrome missing, so an old card,
-  // or one reloaded after Chrome connected, never sends a stray message.
+      .catch(() => clearedWaits.delete(key));
+  }, [context.client, item.capability?.id, linked, sessionId, subjectId, workspaceId]);
+  // Continue is offered only after this card itself saw Chrome missing, so an
+  // old card, or one reloaded after Chrome connected, never sends a stray
+  // message, even when an earlier card remembered Chrome as missing.
   const [sawMissing, setSawMissing] = useState(false);
   useEffect(() => {
-    if (chrome.checked && chrome.connected === null) setSawMissing(true);
-  }, [chrome.checked, chrome.connected]);
+    if (chrome.fresh && chrome.checked && chrome.connected === null) setSawMissing(true);
+  }, [chrome.checked, chrome.connected, chrome.fresh]);
   const desktop = useDesktopThisComputer();
   const offerThisComputer =
     computer === null &&

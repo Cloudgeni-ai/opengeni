@@ -84,8 +84,10 @@ let browsers: { devices: unknown[]; bridges: unknown[]; revision: number } = {
   revision: 1,
 };
 let browsersGate: Promise<void> | null = null;
+let browsersFailure: Error | null = null;
 const listAttachedBrowsers = mock(async () => {
   if (browsersGate) await browsersGate;
+  if (browsersFailure) throw browsersFailure;
   return browsers;
 });
 const continueAfterCapabilitySetup = mock(
@@ -174,6 +176,7 @@ beforeEach(() => {
   resetChromeCardCache();
   resetAttachedChromeCache();
   browsersGate = null;
+  browsersFailure = null;
   browsers = { devices: [], bridges: [], revision: 1 };
   fleet.machines = [sessionBox];
   fleet.canRead = true;
@@ -487,6 +490,56 @@ describe("Chrome setup card", () => {
     await linked.close();
     const again = await render();
     expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(1);
+    await again.close();
+  });
+
+  test("a failed first Chrome read still offers the step instead of checking forever", async () => {
+    browsersFailure = new Error("network down");
+    const view = await render();
+    expect(view.text()).not.toContain("Checking for Chrome");
+    expect(view.button("Connect a computer")).not.toBeNull();
+    await view.close();
+  });
+
+  test("Chrome remembered as missing by another card offers no Continue once linked", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    const earlier = await render();
+    expect(earlier.button("Add to Chrome")).not.toBeNull();
+    await earlier.close();
+
+    // Chrome links while no card is open; an old card in another chat then
+    // starts from the remembered "missing" and reads it as linked.
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    const old = await render(chromeNotice, () => ({
+      blocked: null,
+      awaitingHuman: false,
+      extras: {},
+    }));
+    expect(old.text()).toContain("Connected (Work).");
+    expect(old.button("Continue")).toBeNull();
+    await old.close();
+  });
+
+  test("a remembered link alone clears nothing, and a failed clear is tried again", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    continueAfterCapabilitySetup.mockImplementationOnce(async () => {
+      throw new Error("server down");
+    });
+    const first = await render();
+    expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(1);
+    await first.close();
+
+    // Re-entering with a slow read: the remembered link shows, but only the
+    // live read sends the clear again.
+    let release = () => {};
+    browsersGate = new Promise<void>((resolve) => (release = resolve));
+    const again = await render();
+    expect(again.text()).toContain("Connected (Work).");
+    expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(1);
+    release();
+    await again.rerender();
+    expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(2);
     await again.close();
   });
 

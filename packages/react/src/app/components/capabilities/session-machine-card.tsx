@@ -621,6 +621,8 @@ export type ChromeState = {
   connected: { name: string; multiple: boolean } | null;
   /** A read completed, so a null `connected` means Chrome is not linked yet. */
   checked: boolean;
+  /** This mount read the inventory itself, not only a remembered reading. */
+  fresh: boolean;
   /** Start checking for the extension (after the person opens the store). */
   watch: () => void;
   /** Checking for the extension after the person opened the store. */
@@ -633,17 +635,26 @@ export type AttachedChromeScope = { enrollmentId: string } | "any" | null;
 type ChromeReading = { connected: ChromeState["connected"]; checked: boolean };
 
 /**
- * The last reading per workspace and scope, kept across mounts so a card shown
- * again starts from what was last known and refreshes in the background.
+ * The last reading per person, workspace and scope, kept across mounts so a
+ * card shown again starts from what was last known and refreshes in the
+ * background.
  */
 const chromeReadings = new Map<string, ChromeReading>();
 
-function chromeReadingKey(workspaceId: string, enrollmentId: string | null): string | null {
-  return enrollmentId === null ? null : `${workspaceId}\u0000${enrollmentId}`;
+function chromeReadingKey(
+  subjectId: string,
+  workspaceId: string,
+  enrollmentId: string | null,
+): string | null {
+  return enrollmentId === null ? null : `${subjectId}\u0000${workspaceId}\u0000${enrollmentId}`;
 }
 
-function cachedChromeReading(workspaceId: string, enrollmentId: string | null): ChromeReading {
-  const key = chromeReadingKey(workspaceId, enrollmentId);
+function cachedChromeReading(
+  subjectId: string,
+  workspaceId: string,
+  enrollmentId: string | null,
+): ChromeReading {
+  const key = chromeReadingKey(subjectId, workspaceId, enrollmentId);
   return (key && chromeReadings.get(key)) || { connected: null, checked: false };
 }
 
@@ -665,17 +676,19 @@ export function useAttachedChrome(
   scope: AttachedChromeScope,
   refreshKey: string | null = null,
 ): ChromeState {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
+  const subjectId = accessContext?.subjectId ?? "";
   // Poll on its own timer; a new client identity on re-render must not refetch.
   const clientRef = useRef(client);
   clientRef.current = client;
   const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
   const [connected, setConnected] = useState<ChromeState["connected"]>(
-    () => cachedChromeReading(workspaceId, enrollmentId).connected,
+    () => cachedChromeReading(subjectId, workspaceId, enrollmentId).connected,
   );
   const [checked, setChecked] = useState(
-    () => cachedChromeReading(workspaceId, enrollmentId).checked,
+    () => cachedChromeReading(subjectId, workspaceId, enrollmentId).checked,
   );
+  const [fresh, setFresh] = useState(false);
   const [watchSince, setWatchSince] = useState<number | null>(null);
   const [refreshSince, setRefreshSince] = useState<number | null>(null);
   const [expired, setExpired] = useState(false);
@@ -683,11 +696,12 @@ export function useAttachedChrome(
   const linked = connected !== null;
 
   useEffect(() => {
-    const cached = cachedChromeReading(workspaceId, enrollmentId);
+    const cached = cachedChromeReading(subjectId, workspaceId, enrollmentId);
     setConnected(cached.connected);
     setChecked(cached.checked);
+    setFresh(false);
     setDenied(false);
-  }, [enrollmentId, workspaceId]);
+  }, [enrollmentId, subjectId, workspaceId]);
 
   useEffect(() => {
     setRefreshSince(refreshKey === null ? null : Date.now());
@@ -713,7 +727,7 @@ export function useAttachedChrome(
             : null,
           checked: true,
         };
-        const key = chromeReadingKey(workspaceId, enrollmentId);
+        const key = chromeReadingKey(subjectId, workspaceId, enrollmentId);
         if (key) chromeReadings.set(key, reading);
         setConnected((current) =>
           current?.name === reading.connected?.name &&
@@ -722,18 +736,17 @@ export function useAttachedChrome(
             : reading.connected,
         );
         setChecked(true);
+        setFresh(true);
       } catch (failure) {
+        if (cancelled) return;
         // Without inventory access the step still offers the install link.
-        if (
-          !cancelled &&
-          failure instanceof OpenGeniApiError &&
-          failure.status >= 400 &&
-          failure.status < 500
-        ) {
+        if (failure instanceof OpenGeniApiError && failure.status >= 400 && failure.status < 500) {
           setDenied(true);
-          // Nothing more to learn: show the step instead of waiting.
-          setChecked(true);
+          setFresh(true);
         }
+        // Nothing more to learn now: show the step instead of waiting. A
+        // failed read is not a reading, so it stays out of `fresh`.
+        setChecked(true);
       }
     };
     void read();
@@ -756,7 +769,7 @@ export function useAttachedChrome(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [denied, enrollmentId, linked, refreshSince, watchSince, workspaceId]);
+  }, [denied, enrollmentId, linked, refreshSince, subjectId, watchSince, workspaceId]);
 
   const watch = useCallback(() => {
     setExpired(false);
@@ -765,6 +778,7 @@ export function useAttachedChrome(
   return {
     connected,
     checked,
+    fresh,
     watch,
     watching: watchSince !== null && !linked && !expired && !denied,
   };

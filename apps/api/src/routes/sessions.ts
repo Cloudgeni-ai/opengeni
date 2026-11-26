@@ -38,6 +38,8 @@ import {
   getConnectionMetadata,
   getProviderConnectionHomeWorkspace,
   latestConnectionAuthNotice,
+  latestCapabilityAuthNotice,
+  listAttachedBrowserDevices,
   listInboxItems,
 } from "@opengeni/db";
 import {
@@ -45,7 +47,6 @@ import {
   CONNECTED_MACHINE_CAPABILITY_ID,
   integrationDefinitionIdFromCapabilityId,
 } from "@opengeni/core";
-import { listAttachedBrowserDevices } from "@opengeni/db";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
@@ -3515,7 +3516,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // person's Chrome is linked, this chat no longer waits on them for it,
         // whatever the agent does next. Only this chat: a machine card
         // elsewhere has the same key and may still need a computer.
-        if (await personHasLinkedChrome(grant, workspaceId)) {
+        // Chrome and computer requests share that key, so clear it only while
+        // the chat's latest machine request is the Chrome one; a newer
+        // computer request keeps waiting until a computer is allowed.
+        const latest = await latestCapabilityAuthNotice(db, {
+          workspaceId,
+          sessionId,
+          capabilityId: CONNECTED_MACHINE_CAPABILITY_ID,
+        }).catch(() => null);
+        // Only the person whose turn asked for their Chrome (the chat's
+        // creator when no person started that turn) can clear it, and only
+        // while the chat still waits on someone.
+        if (
+          latest?.payload.purpose === "chrome" &&
+          latest.sessionAwaitingConnection &&
+          latest.askedBySubjectId === grant.subjectId &&
+          (await personHasLinkedChrome(grant, workspaceId))
+        ) {
           await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
             {
               type: "session.notification.withdrawn" as const,
@@ -3526,7 +3543,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 }),
               },
             },
-          ]).catch(() => undefined);
+          ]);
         }
         return c.json({
           outcome: "not_needed",

@@ -697,30 +697,50 @@ describe("capability continuation API", () => {
       reason: "missing_connection",
       capability: chromeCard,
     })!;
-    const created = await f.app.request(sessionsPath(f), {
-      method: "POST",
-      headers: f.host,
-      body: JSON.stringify({ initialMessage: "use my Chrome", model: "scripted-model" }),
+    const machineCard = (purpose?: "chrome") => ({
+      type: "tool.auth_needed" as const,
+      payload: {
+        serverId: "opengeni",
+        toolName: "browser_open",
+        providerDomain: "",
+        reason: "missing_connection",
+        capability: { ...chromeCard, kind: "api", action: "connect", rationale: "Connect." },
+        ...(purpose ? { purpose } : {}),
+      },
     });
-    expect(created.status, await created.clone().text()).toBe(202);
-    const session = (await created.json()) as Session;
-    const wait = await claim(f, session.id);
-    await settle(f, session.id, wait, true);
-    await appendSessionEventsForTurnAttempt(
-      client.db,
-      f.workspaceId,
-      session.id,
-      wait.turn.id,
-      wait.turn.executionGeneration,
-      wait.attemptId,
-      [{ type: "session.notification.posted", payload: notice }],
-    );
-    await settle(f, session.id, wait, false);
-    const waiting = async () => {
+    // A chat whose agent posted these machine cards, in order, and the notice.
+    const waitingChat = async (cards: Array<ReturnType<typeof machineCard>>) => {
+      const created = await f.app.request(sessionsPath(f), {
+        method: "POST",
+        headers: f.host,
+        body: JSON.stringify({ initialMessage: "use my Chrome", model: "scripted-model" }),
+      });
+      expect(created.status, await created.clone().text()).toBe(202);
+      const session = (await created.json()) as Session;
+      const wait = await claim(f, session.id);
+      await settle(f, session.id, wait, true);
+      await appendSessionEventsForTurnAttempt(
+        client.db,
+        f.workspaceId,
+        session.id,
+        wait.turn.id,
+        wait.turn.executionGeneration,
+        wait.attemptId,
+        [...cards, { type: "session.notification.posted", payload: notice }],
+      );
+      await settle(f, session.id, wait, false);
+      return session;
+    };
+    const waitingIn = async (sessionId: string) => {
       const [row] = await shared.admin<Array<{ since: Date | null }>>`
-        select awaiting_connection_since as since from sessions where id = ${session.id}`;
+        select awaiting_connection_since as since from sessions where id = ${sessionId}`;
       return row!.since !== null;
     };
+    const session = await waitingChat([machineCard("chrome")]);
+    // A Chrome card followed by a newer request for a computer: that one
+    // still needs the person after Chrome links.
+    const computerAfter = await waitingChat([machineCard("chrome"), machineCard()]);
+    const waiting = () => waitingIn(session.id);
     expect(await waiting()).toBe(true);
     const wakesBefore = f.workflow.calls.filter((call) => call === "wakeSessionWorkflow").length;
 
@@ -789,5 +809,9 @@ describe("capability continuation API", () => {
     expect(f.workflow.calls.filter((call) => call === "wakeSessionWorkflow")).toHaveLength(
       wakesBefore,
     );
+    expect(await waitingIn(computerAfter.id)).toBe(true);
+    const computer = await continueAfterSetup(f, computerAfter.id, chromeCard.id);
+    expect(await computer.json()).toEqual({ outcome: "not_needed", reason: "not_applicable" });
+    expect(await waitingIn(computerAfter.id)).toBe(true);
   });
 });
