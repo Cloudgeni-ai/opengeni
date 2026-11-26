@@ -102,6 +102,7 @@ variable "aks" {
       var.aks.node_os_maintenance_window.duration_hours >= 4 &&
       var.aks.node_os_maintenance_window.duration_hours <= 24 &&
       var.aks.node_os_maintenance_window.interval_weeks >= 1 &&
+      floor(var.aks.node_os_maintenance_window.interval_weeks) == var.aks.node_os_maintenance_window.interval_weeks &&
       var.aks.node_os_maintenance_window.interval_weeks <= 4 &&
       can(regex("^[+-][0-9]{2}:[0-9]{2}$", var.aks.node_os_maintenance_window.utc_offset))
     )

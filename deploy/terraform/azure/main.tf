@@ -162,8 +162,8 @@ resource "azurerm_kubernetes_cluster" "this" {
     }
   }
 
-  # Unset leaves the node OS upgrade schedule unmanaged by this module. Set it
-  # to pin a weekly window for node image upgrades in Terraform.
+  # Unset means no node OS window: Terraform removes one created outside it.
+  # Set it to keep a weekly window for node image upgrades.
   dynamic "maintenance_window_node_os" {
     for_each = var.aks.node_os_maintenance_window == null ? [] : [var.aks.node_os_maintenance_window]
 

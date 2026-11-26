@@ -1078,12 +1078,12 @@ run "autoscaler_threshold_rejects_out_of_range" {
   ]
 }
 
-run "node_os_maintenance_window_is_unmanaged_by_default" {
+run "node_os_maintenance_window_is_absent_by_default" {
   command = plan
 
   assert {
     condition     = length(azurerm_kubernetes_cluster.this.maintenance_window_node_os) == 0
-    error_message = "Without a configured window the module must not manage the node OS schedule."
+    error_message = "Without a configured window the module must not set a node OS window."
   }
 }
 
@@ -1140,8 +1140,45 @@ run "node_os_maintenance_window_rejects_bad_day" {
     aks = {
       node_os_maintenance_window = {
         day_of_week    = "Tue"
+        start_time     = "02:00"
+        duration_hours = 4
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_bad_start_time" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
         start_time     = "2:00"
         duration_hours = 4
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_fractional_interval" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "02:00"
+        duration_hours = 4
+        interval_weeks = 1.5
       }
     }
   }
