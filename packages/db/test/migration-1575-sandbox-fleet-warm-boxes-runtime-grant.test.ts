@@ -5,7 +5,7 @@ import { migrate } from "../src/migrate";
 
 const signature = "sandbox_fleet_warm_boxes_v1()";
 
-test("1573 grants the managed warm box count to every configured role without PUBLIC", async () => {
+test("1575 grants the managed warm box count to every configured role without PUBLIC", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("sandbox-fleet-warm-boxes-grant");
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL is required");
@@ -22,7 +22,7 @@ test("1573 grants the managed warm box count to every configured role without PU
       await recordTestRoleOwner(owned.admin, role);
     }
     const source = await Bun.file(
-      new URL("../drizzle/1573_sandbox_fleet_warm_boxes_runtime_grant.sql", import.meta.url),
+      new URL("../drizzle/1575_sandbox_fleet_warm_boxes_runtime_grant.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).not.toMatch(/\b(DROP|REVOKE)\b/i);

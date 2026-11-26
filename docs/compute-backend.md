@@ -303,7 +303,7 @@ skips sandbox enrollments, and machine routes list machines only.
   Its lease stays warm while it sleeps, so every box count that bounds new
   boxes (the organization and person running-box limits, viewer-only limits,
   the unpaid fleet cap and fleet pressure) leaves out a compute lease with
-  `compute_asleep_since` set that no turn holds (migration 1572); it counts
+  `compute_asleep_since` set that no turn holds (migration 1574); it counts
   again once the gateway records it awake. A box a turn holds always counts,
   napping or not. Waking a sleeping box no turn holds is admitted like
   starting a new box: while the organization is at its running-box limit, a

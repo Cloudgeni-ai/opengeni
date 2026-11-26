@@ -85,7 +85,7 @@ BEGIN
         FROM sandbox_leases lease
         WHERE lease.account_id = p_account AND lease.workspace_id = member.id
           AND lease.id IS DISTINCT FROM p_exclude_lease
-          -- A sleeping compute sandbox no turn holds runs nothing (1572).
+          -- A sleeping compute sandbox no turn holds runs nothing (1574).
           AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL
             AND lease.turn_holders = 0);
         viewer_only := viewer_only + part_viewer_only;
@@ -130,7 +130,7 @@ BEGIN
       WHERE lease.liveness IN ('warming', 'warm')
         AND lease.compute_unpaid
         AND lease.backend <> 'selfhosted'
-        -- A sleeping compute sandbox no turn holds runs nothing (1572).
+        -- A sleeping compute sandbox no turn holds runs nothing (1574).
         AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL
           AND lease.turn_holders = 0)
         AND lease.id IS DISTINCT FROM p_exclude_lease;
@@ -196,7 +196,7 @@ BEGIN
       FROM sandbox_leases lease
       WHERE lease.liveness IN ('warming', 'warm')
         AND lease.backend <> 'selfhosted'
-        -- A sleeping compute sandbox no turn holds runs nothing (1572).
+        -- A sleeping compute sandbox no turn holds runs nothing (1574).
         AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL
           AND lease.turn_holders = 0);
 

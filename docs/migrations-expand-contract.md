@@ -292,7 +292,7 @@ sandbox counts withheld, with the same caller check, and 1479 granted them and
 removed the check; 1479 ships in the release after the one that contains 1475.
 1486 created the unpaid sandbox fleet counts withheld and 1490 grants them; 1490
 ships in the release after the one that contains 1486.
-1492 created the managed warm box count withheld and 1573 grants it; both
+1492 created the managed warm box count withheld and 1575 grants it; both
 the pinned previous release and production already contain 1492.
 1482 and 1487 created the Nango in-use check and live owner listing withheld
 and 1499 grants them; 1499 ships in the release after the one that contains 1487.

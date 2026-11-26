@@ -53527,7 +53527,7 @@ async function acquireLeaseOnce(
         // closed) for unpaid boxes only.
         // Attaching to, or re-arming, a box that already runs adds none and
         // is not checked. A sleeping compute box is not counted as running
-        // (migration 1572), so waking one is checked like a new box
+        // (migration 1574), so waking one is checked like a new box
         // (wakesSleepingComputeBox).
         // At a limit a turn parks (organization_sandbox_capacity) and every
         // other holder is refused.
@@ -53626,7 +53626,7 @@ async function acquireLeaseOnce(
         // stays warm (or draining, until its group ends). Waking it with no
         // turn on it adds a running box. Replaying a holder it already has
         // does not wake it any more than it already is.
-        // A turn's wake counts at once (its turn holder, migration 1572); a
+        // A turn's wake counts at once (its turn holder, migration 1574); a
         // woken box no turn holds counts once the gateway records it awake.
         const wakesSleepingComputeBox = async () =>
           backend !== "selfhosted" &&
@@ -53681,7 +53681,7 @@ async function acquireLeaseOnce(
                   and other.id <> ${row.id}
                   and other.liveness in ('warming', 'warm')
                   and other.turn_holders = 0
-                  -- A sleeping compute box runs nothing (migration 1572).
+                  -- A sleeping compute box runs nothing (migration 1574).
                   and not (other.backend = 'compute' and other.compute_asleep_since is not null)
                   and exists (select 1 from sandbox_lease_holders h
                     where h.lease_id = other.id and h.kind = 'viewer')
