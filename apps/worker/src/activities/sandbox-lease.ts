@@ -67,6 +67,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  checkCreditLedgerAccountTotals,
   summarizeTurnHolds,
   countActiveUsers,
   readCreditGrantTotals,
@@ -248,6 +249,8 @@ import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
   recordCreditBalanceGauges,
+  recordCreditLedgerTotalsCheck,
+  sampleAccountIds,
   recordCreditGrantGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
@@ -4398,10 +4401,26 @@ async function refreshQueueLeaseAndCreditGauges(
         ]
       : []),
     (async () => {
+      let accountIds: string[] = [];
       try {
-        recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
+        const balances = await listCreditBalancesByAccount(db);
+        recordCreditBalanceGauges(observability, balances);
+        accountIds = balances.map((balance) => balance.accountId);
       } catch (error) {
         observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+          error: errorMessage(error),
+        });
+      }
+      if (accountIds.length === 0) return;
+      try {
+        // A few random accounts per refresh: their kept ledger totals against
+        // a recount, so drift shows up without reading the whole ledger.
+        recordCreditLedgerTotalsCheck(
+          observability,
+          await checkCreditLedgerAccountTotals(db, sampleAccountIds(accountIds, 8)),
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: credit ledger totals check failed", {
           error: errorMessage(error),
         });
       }

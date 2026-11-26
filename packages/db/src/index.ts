@@ -175,6 +175,8 @@ export {
   apiSpendableCreditMicros,
   byokFeeSpendableMicros,
   chargeBillingOrigin,
+  checkCreditLedgerAccountTotals,
+  type CreditLedgerTotalsCheck,
   getBillingBalance,
   getByokFeeSpendableBalance,
   getSpendableCreditBalance,

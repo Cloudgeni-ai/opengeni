@@ -3203,7 +3203,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "capability_skill_facets",
   "capability_skill_files",
   "computer_sessions",
-  // 1576_credit_ledger_account_totals: ledger writers' invoker trigger upserts them.
+  // 1576_credit_ledger_account_totals: written only by the ledger's invoker
+  // triggers (RLS admits runtime writes at pg_trigger_depth() > 0).
   "credit_ledger_account_totals",
   "editable_artifact_session_links",
   "editable_artifacts",

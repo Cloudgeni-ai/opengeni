@@ -11,8 +11,16 @@
 --   expired_at IS NULL, and period_end is NOT NULL), a point lookup.
 -- - The account branch is filtered once in a MATERIALIZED CTE, then ordered and
 --   limited, so the limit no longer drives a per-account nested loop.
+--   It evaluates every account on each call (as 1494 did whenever fewer than
+--   p_limit accounts were due, the usual case): cost grows with the number of
+--   accounts, with point lookups per account and no join between accounts
+--   and periods.
+-- - The Free anniversary is one row per account (LIMIT 1; the function always
+--   returns exactly one), not the planner's default 1000-row estimate for a
+--   set-returning function, which inflated the plan's cost past JIT's
+--   threshold.
 -- - The verified signup trial check uses credit_ledger_verified_signup_trial_idx
---   (1578) once it exists; it is correct without it.
+--   (1579) once it exists; it is correct without it.
 --
 -- Everything else (signature, SECURITY DEFINER, search_path, owner fence,
 -- bounds, filters, ordering) is unchanged from 1494.
@@ -38,7 +46,9 @@ BEGIN
         WITH eligible AS MATERIALIZED (
           SELECT account.id AS account_id FROM %1$I.managed_accounts account
             LEFT JOIN %1$I.organization_plans state ON state.account_id = account.id
-            CROSS JOIN LATERAL opengeni_private.subscription_plan_free_anniversary(account.created_at, greatest(account.created_at, sweep_time)) anniversary
+            CROSS JOIN LATERAL (SELECT boundary.period_start
+              FROM opengeni_private.subscription_plan_free_anniversary(account.created_at, greatest(account.created_at, sweep_time)) boundary
+              LIMIT 1) anniversary
             WHERE account.created_at <= sweep_time
               AND (state.account_id IS NULL
                 OR (state.plan_key IN ('pro', 'max') AND state.status IN ('canceled', 'unpaid', 'incomplete_expired') AND state.current_period_end <= sweep_time)
