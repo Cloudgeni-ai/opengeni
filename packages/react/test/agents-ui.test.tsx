@@ -2402,6 +2402,9 @@ test("a schedule trigger keeps the repository its runs open, and its row reads i
   });
   await chooseOutcome(dialog, "On a schedule");
   expect(dialog.querySelector("[data-agent-trigger-schedule-repository]")).not.toBeNull();
+  // An outcome shows only what it needs: no note, no chat choice.
+  expect(dialog.querySelector("textarea")).toBeNull();
+  expect(dialog.textContent).not.toContain("Existing chat");
   await chooseFrom(dialog, "None", "acme/web");
   await act(async () => button(dialog, "Add trigger").click());
   await flush();
@@ -2433,6 +2436,7 @@ test("an issue-label outcome asks only for the label and confirms who can start 
     githubStatus: "bound",
   });
   await chooseOutcome(dialog, "An issue gets a label");
+  expect(dialog.querySelector("textarea")).toBeNull();
   const label = dialog.querySelector<HTMLInputElement>("input[data-agent-trigger-label]")!;
   await act(async () => setValue(label, "p1"));
   await flush();

@@ -17,7 +17,6 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { installReadyMadeApp } from "@opengeni/react/app/lib/ready-made-apps";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import type { ReadyMadeKind } from "./capabilities-section";
-import { enableHref } from "../enable/enable-subject";
 
 function isForbidden(error: unknown): boolean {
   return (error as { status?: unknown } | null)?.status === 403;
@@ -72,9 +71,10 @@ export function readyMadeGroups(
     .map(([team, grouped]) => ({ key: team ?? "", team: team ?? NO_TEAM, entries: grouped }));
 }
 
-/** What Enable opens for a ready-made agent row ("agent:<template key>"). */
-function readyMadeSubject(entry: ReadyMadeEntry) {
-  return { kind: "agent" as const, templateKey: entry.key.slice("agent:".length) };
+/** A ready-made agent row's preview ("agent:<template key>"); Add there leads to Enable. */
+function readyMadePreviewHref(workspaceId: string, entry: ReadyMadeEntry): string {
+  const templateKey = entry.key.slice("agent:".length);
+  return `/workspaces/${encodeURIComponent(workspaceId)}/agents/ready-made/${encodeURIComponent(templateKey)}`;
 }
 
 function metadataString(value: unknown): string | null {
@@ -385,8 +385,8 @@ export function ReadyMadeSection({
                     void (entry.added
                       ? open(entry)
                       : entry.kind === "agent"
-                        ? // A ready-made agent is added and turned on through Enable.
-                          navigate({ href: enableHref(workspaceId, readyMadeSubject(entry)) })
+                        ? // Like Agents: its preview first, then Add, then Enable.
+                          navigate({ href: readyMadePreviewHref(workspaceId, entry) })
                         : add(entry))
                   }
                 />

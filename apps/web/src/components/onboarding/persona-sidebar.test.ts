@@ -42,8 +42,8 @@ describe("persona first run", () => {
     const items = group && group.type === "group" ? (group.items ?? []) : [];
     expect(items.map((item) => (item.type === "link" ? item.url : null))).toEqual([
       "https://app.example/workspaces/w/get-started?setup=pr-reviews",
-      "https://app.example/workspaces/w/enable?agent=bug-fixer",
-      "https://app.example/workspaces/w/enable?agent=dependency-updater",
+      "https://app.example/workspaces/w/agents/ready-made/bug-fixer",
+      "https://app.example/workspaces/w/agents/ready-made/dependency-updater",
       "https://app.example/workspaces/w/plugins",
     ]);
     expect(items.at(-1)).toMatchObject({ label: "Connect GitHub, Slack and Linear" });

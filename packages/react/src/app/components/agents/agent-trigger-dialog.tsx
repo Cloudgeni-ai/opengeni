@@ -554,6 +554,9 @@ function AgentTriggerDialogBody({
     });
   })();
   const outcomeCards = agentTriggerOutcomeCards(agent.name);
+  // An outcome shows only what it needs (a repository for GitHub and a schedule);
+  // the note and chat choice stay on Other events and the full form.
+  const advanced = outcome === null || outcome === "other";
 
   return (
     <FormDialog
@@ -751,7 +754,7 @@ function AgentTriggerDialogBody({
             newChatPerRun={chat.mode === "new_session_per_run"}
           />
         ) : null}
-        {picked && ready ? (
+        {picked && ready && advanced ? (
           <Field
             label="Note"
             optional
@@ -772,7 +775,7 @@ function AgentTriggerDialogBody({
             />
           </Field>
         ) : null}
-        {picked && ready ? (
+        {picked && ready && advanced ? (
           <AgentTriggerChatField
             agent={agent}
             workspaceId={workspaceId}

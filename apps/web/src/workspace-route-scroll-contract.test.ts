@@ -33,6 +33,7 @@ const workspaceRouteContracts = {
   workspaceLegacyReadOnlyChatsRoute: { kind: "redirect" },
   workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceGetStartedRoute: { kind: "page", source: "routes/get-started.tsx" },
+  workspaceEnableRoute: { kind: "page", source: "routes/enable.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",

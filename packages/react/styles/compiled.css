@@ -15553,7 +15553,7 @@
   min-height: 76px;
   padding: 14px 12px;
   border: 0;
-  border-radius: var(--og-radius-lg,14px);
+  border-radius: var(--og-radius-md,10px);
   background: transparent;
   color: var(--og-color-fg,inherit);
   text-align: left;
@@ -16035,9 +16035,6 @@
   border: 1px solid var(--og-color-border,#e4e4e4);
   border-radius: var(--og-radius-lg,14px);
   background: var(--og-color-surface-1,#fff);
-}
-:where(.og-root).og-connection-catalog[data-columns="2"] .og-capability-catalog-row,:where(.og-root) .og-connection-catalog[data-columns="2"] .og-capability-catalog-row {
-  border-radius: var(--og-radius-md,10px);
 }
 @media (min-width: 720px) {
   :where(.og-root).og-connection-catalog[data-columns="2"],:where(.og-root) .og-connection-catalog[data-columns="2"] {

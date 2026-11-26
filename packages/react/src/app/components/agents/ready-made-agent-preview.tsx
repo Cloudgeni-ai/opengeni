@@ -196,9 +196,6 @@ export function ReadyMadeAgentPreview({
       <DetailPageBody
         aside={
           <DetailAside>
-            <DetailAsideItem label="Cost">
-              <span data-ready-made-cost="">Model usage per run, shown in Usage</span>
-            </DetailAsideItem>
             <DetailAsideItem label="Nothing runs until">
               You turn it on after adding
             </DetailAsideItem>

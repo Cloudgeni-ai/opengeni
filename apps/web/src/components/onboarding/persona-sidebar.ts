@@ -5,9 +5,9 @@
  * everyone else's sidebar is unchanged, and the person can edit or reset
  * theirs as usual.
  *
- * The links open Enable (components/enable) for a ready-made agent or app,
- * Get started for a setup, or Connections, so nothing is added until the
- * person turns it on.
+ * The links open a ready-made agent's preview (Add leads to Enable), Enable
+ * (components/enable) for a ready-made app, Get started for a setup, or
+ * Connections, so nothing is added until the person turns it on.
  */
 import type {
   NewSidebarItem,
@@ -57,7 +57,7 @@ export function presetSuggestions(preset: PersonaPreset): Suggestion[] {
       : []),
     ...preset.agents.map((agent) => ({
       label: agent.label,
-      path: `enable?agent=${encodeURIComponent(agent.key)}`,
+      path: `agents/ready-made/${encodeURIComponent(agent.key)}`,
       icon: agent.icon,
     })),
     ...preset.apps.map((app) => ({
