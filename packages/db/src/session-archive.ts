@@ -15,6 +15,7 @@ import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./los
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import * as schema from "./schema";
 import { lockSessionEventWriteRows } from "./session-control";
+import { copySubscriptionAuthorityCompatInTransaction } from "./subscription-core-acceptance-authority";
 
 /**
  * Idle-session archive (see docs/session-storage-lifecycle.md).
@@ -1722,8 +1723,38 @@ export async function restoreArchivedSessionContent(
         for (const table of SESSION_ARCHIVE_RESTORE_TABLES) {
           counts[table] = await restoreTableRows(tx, scope, table, input.rows(table));
         }
+        await copyRestoredUpdateAuthority(tx, scope);
         return { status: "restored" as const, rows: counts };
       }),
+  );
+}
+
+/**
+ * A restored inbox update is inserted again, so it carries accepted
+ * subscription authority like a new one: the purge deleted its compatibility
+ * record with it (the record cascades), and the deferred check refuses the
+ * commit until the record is copied again from the update's source, as when
+ * the update was first accepted. Only rows this transaction inserted; rows
+ * still in the database kept theirs.
+ */
+async function copyRestoredUpdateAuthority(
+  tx: Database,
+  scope: SessionArchiveScope,
+): Promise<void> {
+  const inserted = await rawRows<{ id: string }>(
+    tx,
+    sql`select id::text as id from session_system_updates
+      where workspace_id = ${scope.workspaceId}::uuid and session_id = ${scope.sessionId}::uuid
+        and authority_inserted_at = pg_catalog.transaction_timestamp()
+      order by id`,
+  );
+  await copySubscriptionAuthorityCompatInTransaction(
+    tx,
+    inserted.map(({ id }) => ({
+      kind: "session_system_update" as const,
+      workspaceId: scope.workspaceId,
+      id,
+    })),
   );
 }
 

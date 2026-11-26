@@ -16,6 +16,7 @@ import {
   completeSessionArchiveObjectDeletion,
   listSessionArchiveCandidates,
   listUnfinishedSessionArchives,
+  nestedPostgresSqlState,
   purgeArchivedSessionContent,
   readSessionArchiveTablePages,
   readSessionArchiveTree,
@@ -63,6 +64,14 @@ export function sessionArchiveFailureCode(error: unknown): string {
     }
   }
   return "session_archive_failed";
+}
+
+/**
+ * The SQLSTATE of a failed database step, if any: a five-character protocol
+ * code, never the message, which can echo row values.
+ */
+export function sessionArchiveFailureSqlState(error: unknown): string | undefined {
+  return nestedPostgresSqlState(error) ?? undefined;
 }
 
 export const SESSION_ARCHIVE_CANDIDATES_PER_PASS = 25;
@@ -441,6 +450,7 @@ export function createSessionArchiveActivities(
           sessionId: unfinished.sessionId,
           errorClass: "SessionArchiveOperationError",
           errorCode: sessionArchiveFailureCode(error),
+          sqlState: sessionArchiveFailureSqlState(error),
         });
       }
     }
@@ -484,6 +494,7 @@ export function createSessionArchiveActivities(
             // Content-free classification only: database errors can echo row values.
             errorClass: "SessionArchiveOperationError",
             errorCode: sessionArchiveFailureCode(error),
+            sqlState: sessionArchiveFailureSqlState(error),
           });
         }
       }
@@ -645,6 +656,7 @@ export function createSessionArchiveActivities(
           sessionId: row.id,
           errorClass: "SessionArchiveOperationError",
           errorCode: sessionArchiveFailureCode(error),
+          sqlState: sessionArchiveFailureSqlState(error),
         });
       }
     }
