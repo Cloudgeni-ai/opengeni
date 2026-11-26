@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -564,6 +565,46 @@ describe("Modal workspace tar streams", () => {
         // One extraction process reading stdin; no archive file in the box.
         expect(calls).toHaveLength(1);
         expect(calls[0]![2]).toContain("-xf -");
+      } finally {
+        await spool.dispose();
+      }
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("hardlinked files save as separate files and restore with their content", async () => {
+    const scratch = await mkdtemp(join(tmpdir(), "opengeni-modal-tar-hardlink-"));
+    try {
+      const source = join(scratch, "source");
+      const target = join(scratch, "target");
+      // A package manager's cache hardlinked into a project's node_modules.
+      await mkdir(join(source, ".cache/pkg"), { recursive: true });
+      await mkdir(join(source, "app/node_modules/pkg"), { recursive: true });
+      await mkdir(target);
+      await writeFile(join(source, "app/node_modules/pkg/index.js"), "module.exports = 1;\n");
+      await link(
+        join(source, "app/node_modules/pkg/index.js"),
+        join(source, ".cache/pkg/index.js"),
+      );
+
+      const spool = await captureWorkspaceTarStreamToSpool(modalLikeSession(source));
+      try {
+        await hydrateWorkspaceTarStreamFromSpool(
+          modalLikeSession(target),
+          spool,
+          { archiveBytes: spool.byteSize, archiveSha256: spool.sha256 },
+          { rejectRelPaths: [] },
+        );
+        expect(await tree(target)).toEqual({
+          ".cache/": "dir",
+          ".cache/pkg/": "dir",
+          ".cache/pkg/index.js": "module.exports = 1;\n",
+          "app/": "dir",
+          "app/node_modules/": "dir",
+          "app/node_modules/pkg/": "dir",
+          "app/node_modules/pkg/index.js": "module.exports = 1;\n",
+        });
       } finally {
         await spool.dispose();
       }

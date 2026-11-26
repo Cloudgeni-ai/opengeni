@@ -81,6 +81,12 @@ async function persistModalWorkspaceTar(
     [
       "tar",
       ...workspaceTarExcludeArgs(protectedPaths),
+      // Files sharing an inode (a package manager's cache hardlinked into
+      // node_modules) become separate regular members, as in every other
+      // backend's archive and the workspace fingerprint. Without it GNU tar
+      // writes hardlink members, which the archive check refuses, so such a
+      // workspace could never be saved.
+      "--hard-dereference",
       "-C",
       shellQuoteTarArg(root),
       "-cf",

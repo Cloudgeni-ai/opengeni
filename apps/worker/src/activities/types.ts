@@ -567,6 +567,7 @@ export type DispatchScheduledTaskRunResult =
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
         | "session_usage_limit"
+        | "owner_only_event"
         | "malformed_manual_trigger"
         | "scheduled_task_paused"
         | "scheduled_authority_exhausted"

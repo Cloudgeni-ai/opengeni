@@ -569,6 +569,8 @@ export const englishMessages = {
   "automations.run.error.chatGone": "The chat it runs in no longer exists.",
   "automations.run.error.duplicateAgentRun":
     "Skipped because another automation of the same agent took this event.",
+  "automations.run.error.ownerOnlyEvent":
+    "Skipped the owner's private events because this automation's chat is shared. Run it in a new chat each time to include later ones.",
   "automations.run.error.chatPaused":
     "Skipped because the chat was paused. Resume the chat to let later runs start; skipped runs aren't replayed.",
   "automations.run.error.machineUnavailable":

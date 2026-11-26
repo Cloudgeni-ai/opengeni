@@ -165,8 +165,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * stands for and 1487 the listing of live Nango rows' owners; 1499 granted
  * both.
  * 1486 withheld the unpaid sandbox fleet counts and 1490 granted them.
- * 1492 withholds the managed warm box count; until it is granted, fleet
- * pressure reads the warm count of every lease, self-hosted ones included.
+ * 1492 withheld the managed warm box count and 1575 granted it.
  * 1501 withholds the discard of a refused keyed session create; until it is
  * granted, such a shell stays (as before).
  * 1503 withholds the subscription needs-sign-in notice sync; until it is
@@ -185,7 +184,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
-  "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
