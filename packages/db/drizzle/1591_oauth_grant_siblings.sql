@@ -21,15 +21,15 @@
 --   other live (not revoked) OAuth connection, anywhere, possibly hold the
 --   same grant? Same family, the same client or an unknown one, and not
 --   provably another account. Unknown identity counts as the same account.
--- - oauth_grant_reauth_siblings_v1 lists the other active connections that
---   provably hold the grant of a connection whose refresh was just refused
---   (that connection must already be needs_reauth): same family, the same
---   known client, the same stable account id (or email when either lacks
---   one), and saved no later than the broken connection last proved the
---   grant alive (its creation or last refresh), so a connection reconnected
---   after the grant ended is never listed. It returns only ids, the owner
---   subject, the version for the caller's compare-and-set, and the provider
---   domain: no metadata, credentials or names.
+-- - oauth_grant_reauth_siblings_v1 lists (at most 100) other active
+--   connections that may hold the grant of a connection whose refresh was
+--   just refused (that connection must already be needs_reauth, and a client
+--   its row records must be the one named): same family, the same known
+--   client and the same stable account id (or email when either lacks one).
+--   The caller refreshes each with its own token before marking it, since
+--   one token's refusal doesn't prove the grant ended. It returns only ids,
+--   the owner subject, the version for the caller's compare-and-set, and the
+--   provider domain: no metadata, credentials or names.
 --
 -- connections forces row-level security on its owner too, and the definers
 -- run as that owner with no workspace context. Each opens the existing
@@ -39,7 +39,7 @@
 -- As 1482 and 1552 explain, the previous release rejects a runtime EXECUTE
 -- grant on a definer it doesn't know, so this migration grants nothing.
 -- Until a later migration grants them, a disconnect never revokes at the
--- provider (it only destroys the stored tokens), and a refused refresh marks
+-- provider (it only destroys the stored tokens), and a refused refresh checks
 -- only its own connection.
 --
 -- Rolling: two read-only definers the previous release never calls.
@@ -208,7 +208,6 @@ BEGIN
       source record;
       source_subjects text[];
       source_emails text[];
-      alive_at timestamptz;
     BEGIN
       IF p_connection IS NULL OR p_client_id IS NULL OR p_client_id = ''
         OR p_token_endpoint_origins IS NULL
@@ -226,9 +225,12 @@ BEGIN
       END IF;
 
       -- Only a connection whose own refresh was just refused names siblings.
-      SELECT c.metadata, c.created_at, c.last_refresh_at INTO source
+      -- A client the row itself records must be the one named.
+      SELECT c.metadata INTO source
         FROM connections c
-        WHERE c.id = p_connection AND c.kind = 'oauth2' AND c.status = 'needs_reauth';
+        WHERE c.id = p_connection AND c.kind = 'oauth2' AND c.status = 'needs_reauth'
+          AND (pg_catalog.jsonb_typeof(c.metadata -> 'clientId') IS DISTINCT FROM 'string'
+            OR c.metadata ->> 'clientId' = p_client_id);
       IF FOUND THEN
         SELECT coalesce(pg_catalog.array_agg(DISTINCT v) FILTER (WHERE v IS NOT NULL), '{}')
           INTO source_subjects
@@ -248,10 +250,6 @@ BEGIN
               THEN nullif(pg_catalog.lower(pg_catalog.btrim(source.metadata ->> k)), '') END AS v
             FROM pg_catalog.unnest(p_email_keys) k
           ) email_values;
-        -- The grant was alive when this connection was saved and when it
-        -- last refreshed; whatever ended it came later.
-        alive_at := GREATEST(source.created_at, source.last_refresh_at);
-
         IF pg_catalog.cardinality(source_subjects) > 0 OR pg_catalog.cardinality(source_emails) > 0
         THEN
           RETURN QUERY
@@ -280,9 +278,6 @@ BEGIN
             WHERE c.id <> p_connection
               AND c.kind = 'oauth2'
               AND c.status = 'active'
-              -- Saved before the grant was last known alive, so it belongs to
-              -- the grant that ended (a reconnect after that is newer).
-              AND c.updated_at <= alive_at
               -- The same provider, by its saved token endpoint.
               AND pg_catalog.jsonb_typeof(c.metadata -> 'tokenEndpoint') = 'string'
               AND pg_catalog.lower(pg_catalog.substring(c.metadata ->> 'tokenEndpoint',
@@ -301,7 +296,7 @@ BEGIN
                 ELSE false
               END
             ORDER BY c.id
-            LIMIT 1000;
+            LIMIT 100;
         END IF;
       END IF;
 

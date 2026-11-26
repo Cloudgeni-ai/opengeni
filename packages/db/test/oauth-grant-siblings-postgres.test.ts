@@ -100,6 +100,8 @@ async function oauthConnection(
     identity?: Record<string, unknown>;
     /** Save the endpoint and client only in the credential (older rows). */
     credentialOnly?: boolean;
+    /** A refresh token the test provider keeps accepting. */
+    alive?: boolean;
   } = {},
 ) {
   const tokenEndpoint = input.tokenEndpoint ?? GOOGLE_TOKEN_ENDPOINT;
@@ -113,7 +115,7 @@ async function oauthConnection(
       key,
       JSON.stringify({
         access_token: "access-secret",
-        refresh_token: `refresh-secret-${randomUUID()}`,
+        refresh_token: `${input.alive ? "alive" : "dead"}-refresh-secret-${randomUUID()}`,
         token_type: "Bearer",
         token_endpoint: tokenEndpoint,
         client_id: clientId,
@@ -280,10 +282,19 @@ describe("migration 1591 shared OAuth grant checks", () => {
     }
   });
 
-  function refusingGoogle(calls: { count: number }) {
+  // Google, refusing every refresh token except the ones still alive.
+  function google(calls: { tokens: string[] }) {
     return {
-      fetchImpl: (async () => {
-        calls.count += 1;
+      fetchImpl: (async (_url: unknown, init?: RequestInit) => {
+        const token = new URLSearchParams(String(init?.body ?? "")).get("refresh_token") ?? "";
+        calls.tokens.push(token);
+        if (token.startsWith("alive-")) {
+          return Response.json({
+            access_token: "fresh-access-secret",
+            token_type: "Bearer",
+            expires_in: 3600,
+          });
+        }
         return Response.json(
           { error: "invalid_grant", error_description: "Token has been expired or revoked." },
           { status: 400 },
@@ -297,12 +308,16 @@ describe("migration 1591 shared OAuth grant checks", () => {
     scope: Scope,
     connectionId: string,
     events: ConnectionNeedsReauth[],
-    calls = { count: 0 },
+    calls: { tokens: string[] } = { tokens: [] },
+    checks: Promise<void>[] = [],
   ) {
     return await buildConnectionTokenResolver(db, settings, undefined, {
-      refreshTransport: refusingGoogle(calls),
+      refreshTransport: google(calls),
       onConnectionNeedsReauth: (event) => {
         events.push(event);
+      },
+      scheduleGrantSiblingCheck: (check) => {
+        checks.push(check);
       },
     })({
       workspaceId: scope.workspaceId,
@@ -317,13 +332,13 @@ describe("migration 1591 shared OAuth grant checks", () => {
     });
   }
 
-  test("invalid_grant marks every provable sibling needs_reauth, deployment-wide", async () => {
+  test("invalid_grant marks every sibling the provider refuses too, deployment-wide", async () => {
     await grantChecks(true);
     try {
       const home = await organizationWorkspace();
       const otherWorkspace = await organizationWorkspace(home.accountId);
       const otherOrganization = await organizationWorkspace();
-      // Saved before the grant was last known alive.
+      // Dead siblings: same account and client, their own tokens refused.
       const sameWorkspace = await oauthConnection(home, {
         providerDomain: "drivemcp.googleapis.com",
         identity: { googleSubject: "google-sub-ada" },
@@ -335,7 +350,7 @@ describe("migration 1591 shared OAuth grant checks", () => {
       const crossOrganization = await oauthConnection(otherOrganization, {
         identity: { gmailEmail: "ADA@example.test" },
       });
-      // Never marked: another account, another client, unknown identity or
+      // Never touched: another account, another client, unknown identity or
       // client, another provider, or a row that is not active.
       const otherAccount = await oauthConnection(otherOrganization, {
         identity: { googleSubject: "google-sub-bob", gmailEmail: "ada@example.test" },
@@ -356,25 +371,33 @@ describe("migration 1591 shared OAuth grant checks", () => {
       });
       const alreadyRevoked = await oauthConnection(otherOrganization, { identity: ada });
       await revoke(alreadyRevoked.id);
-      await new Promise((resolve) => setTimeout(resolve, 20));
       const source = await oauthConnection(home, { identity: ada });
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      // Reconnected after the grant was last known alive: a new grant.
-      const reconnected = await oauthConnection(otherOrganization, { identity: ada });
+      // Same account and client, but its own token still works (only the
+      // source's token ended, as after a password change or the token cap):
+      // it stays connected.
+      const stillWorking = await oauthConnection(otherOrganization, {
+        identity: ada,
+        alive: true,
+      });
+      // Used after the source last refreshed: still checked.
+      await admin`update connections set updated_at = now() + interval '1 minute'
+        where id = ${crossOrganization.id}`;
 
       const events: ConnectionNeedsReauth[] = [];
-      const calls = { count: 0 };
+      const calls = { tokens: [] as string[] };
+      const checks: Promise<void>[] = [];
       // Two resolves at once mark each sibling exactly once.
       const results = await Promise.all([
-        refuse(home, source.id, events, calls),
-        refuse(home, source.id, events, calls),
+        refuse(home, source.id, events, calls, checks),
+        refuse(home, source.id, events, calls, checks),
       ]);
       // The later one may already find the connection needs reconnecting.
       expect(results.map((result) => result.status)).toEqual(["auth_needed", "auth_needed"]);
       expect(
         results.some((result) => "reason" in result && result.reason === "refresh_failed"),
       ).toBe(true);
-      expect(calls.count).toBeGreaterThanOrEqual(1);
+      expect(checks.length).toBeGreaterThanOrEqual(1);
+      await Promise.all(checks);
       expect((await row(source.id)).status).toBe("needs_reauth");
 
       for (const sibling of [sameWorkspace, crossWorkspace, crossOrganization]) {
@@ -389,11 +412,15 @@ describe("migration 1591 shared OAuth grant checks", () => {
         unknownIdentity,
         unknownClient,
         otherProvider,
-        reconnected,
+        stillWorking,
       ]) {
         expect((await row(untouched.id)).status).toBe("active");
       }
       expect((await row(alreadyRevoked.id)).status).toBe("revoked");
+      // Only the source and its candidates reached the provider, each with
+      // its own token; the working one was refreshed, not marked.
+      expect(calls.tokens.some((token) => token.startsWith("alive-"))).toBe(true);
+      expect(new Set(calls.tokens).size).toBe(5);
 
       // The owner of each moved connection hears once, without another
       // chat's turn (that chat may belong to someone else).
@@ -410,18 +437,29 @@ describe("migration 1591 shared OAuth grant checks", () => {
         httpStatus: 400,
       });
 
-      // Idempotent: nothing is left to mark.
+      // Idempotent: only the working one is left, and checking it again
+      // still leaves it connected.
+      expect(
+        (
+          await oauthGrantReauthSiblings(db, {
+            connectionId: source.id,
+            clientId: CLIENT_ID,
+            family: GOOGLE_OAUTH_GRANT_FAMILY,
+          })
+        )?.map((sibling) => sibling.connectionId),
+      ).toEqual([stillWorking.id]);
+      // The client must be the one the refused row records.
       expect(
         await oauthGrantReauthSiblings(db, {
           connectionId: source.id,
-          clientId: CLIENT_ID,
+          clientId: OTHER_CLIENT_ID,
           family: GOOGLE_OAUTH_GRANT_FAMILY,
         }),
       ).toEqual([]);
       // Only a connection whose own refresh was refused names siblings.
       expect(
         await oauthGrantReauthSiblings(db, {
-          connectionId: reconnected.id,
+          connectionId: stillWorking.id,
           clientId: CLIENT_ID,
           family: GOOGLE_OAUTH_GRANT_FAMILY,
         }),
@@ -434,10 +472,13 @@ describe("migration 1591 shared OAuth grant checks", () => {
   test("until the checks are granted, a refused refresh marks only its own connection", async () => {
     const home = await organizationWorkspace();
     const sibling = await oauthConnection(home, { identity: ada });
-    await new Promise((resolve) => setTimeout(resolve, 20));
     const source = await oauthConnection(home, { identity: ada });
     const events: ConnectionNeedsReauth[] = [];
-    await refuse(home, source.id, events);
+    const calls = { tokens: [] as string[] };
+    const checks: Promise<void>[] = [];
+    await refuse(home, source.id, events, calls, checks);
+    await Promise.all(checks);
+    expect(calls.tokens).toHaveLength(1);
     expect((await row(source.id)).status).toBe("needs_reauth");
     expect((await row(sibling.id)).status).toBe("active");
     expect(events.map((event) => event.connectionId)).toEqual([source.id]);

@@ -526,9 +526,10 @@ export type ConnectionBrokerDeps = {
   /** Test/adapter seam; standalone defaults to the database-backed refresh lock. */
   withRefreshLock?: typeof withConnectionRefreshLock;
   /**
-   * Deployment-wide lookup of the other active connections that provably
-   * share a grant the provider just refused (migration 1591). Null while it is
-   * not granted; absent means siblings are never marked.
+   * Deployment-wide lookup of the other active connections that may share a
+   * grant the provider just refused (migration 1591), each then confirmed with
+   * its own refresh. Null while it is not granted; absent means siblings are
+   * never checked.
    */
   findGrantReauthSiblings?: (
     db: Database,
@@ -588,6 +589,12 @@ export type ConnectionTokenResolverOptions = {
    */
   onConnectionNeedsReauth?: (broken: ConnectionNeedsReauth) => void | Promise<void>;
   /**
+   * Receives the started check of the other connections that may share a
+   * grant the provider just refused (it never rejects). Defaults to leaving
+   * it running detached; tests await it.
+   */
+  scheduleGrantSiblingCheck?: (check: Promise<void>) => void;
+  /**
    * Swaps the vault values into a shared service connection's stored headers
    * (its credential holds `{{secret:…}}` references, see docs/secrets.md)
    * for one request. Runs with the connection's own vault reach, records the
@@ -643,9 +650,13 @@ export type RefreshTransportOptions = {
 const inflight = new Map<string, Promise<ConnectionCredentialForBroker>>();
 const REFRESH_WINDOW_MS = 60_000;
 const CONNECTION_REFRESH_TIMEOUT_MS = 10_000;
-/** last_error of a connection whose shared grant was refused on another connection. */
+/** last_error of a connection refused along with another one of the same grant. */
 export const SHARED_GRANT_REFUSED_ERROR =
   "The provider ended the sign-in this connection shares with another connection of the same account (invalid_grant). Reconnect to restore access.";
+
+function detachGrantSiblingCheck(check: Promise<void>): void {
+  void check;
+}
 
 export function buildConnectionTokenResolver(
   db: Database,
@@ -653,58 +664,6 @@ export function buildConnectionTokenResolver(
   deps: ConnectionBrokerDeps,
   options: ConnectionTokenResolverOptions = {},
 ): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
-  /**
-   * A provider that ends a whole grant (see OAuthGrantFamily) refused this
-   * connection's grant: every other active connection that provably holds the
-   * same grant is dead too, wherever it is, so it stops showing as connected.
-   * Each is moved with its own compare-and-set, so a sibling that changed
-   * meanwhile (refreshed, reconnected, disconnected) is left alone and a
-   * repeat finds nothing more to do. Best effort: never changes the result.
-   */
-  const markGrantSiblingsNeedsReauth = async (
-    cred: ConnectionCredentialForBroker,
-    httpStatus: number,
-  ): Promise<void> => {
-    if (!deps.findGrantReauthSiblings) return;
-    // The endpoint and client the refresh itself used.
-    const family = oauthGrantFamilyForTokenEndpoint(
-      stringValue(cred.credential.token_endpoint) ?? stringValue(cred.metadata.tokenEndpoint),
-    );
-    const clientId = stringValue(cred.credential.client_id) ?? stringValue(cred.metadata.clientId);
-    if (!family || !clientId) return;
-    let siblings: OAuthGrantSibling[] | null;
-    try {
-      siblings = await deps.findGrantReauthSiblings(db, {
-        connectionId: cred.id,
-        clientId,
-        family,
-      });
-    } catch {
-      return;
-    }
-    for (const sibling of siblings ?? []) {
-      const moved = await deps
-        .setStatus(db, sibling.workspaceId, "needs_reauth", SHARED_GRANT_REFUSED_ERROR, {
-          id: sibling.connectionId,
-          version: sibling.version,
-          subjectId: sibling.subjectId,
-        })
-        .catch(() => false);
-      if (!moved || !options.onConnectionNeedsReauth) continue;
-      try {
-        // No chat found this one broken, so no turn's chat carries its notice.
-        await options.onConnectionNeedsReauth({
-          workspaceId: sibling.workspaceId,
-          connectionId: sibling.connectionId,
-          subjectId: sibling.subjectId,
-          providerDomain: sibling.providerDomain,
-          httpStatus,
-        });
-      } catch {
-        // Telling the owner never changes the credential result.
-      }
-    }
-  };
   type CredentialLookupInput = Pick<
     ResolveConnectionCredentialInput,
     "workspaceId" | "connectionRef" | "subjectId"
@@ -985,6 +944,124 @@ export function buildConnectionTokenResolver(
     return promise;
   };
 
+  /**
+   * Moves a connection whose provider refused its grant to needs_reauth (or
+   * lets the provider adapter own that) and tells the owner once.
+   */
+  const recordPermanentRefreshFailure = async (
+    cred: ConnectionCredentialForBroker,
+    error: ConnectionRefreshHttpError,
+    use?: AcceptedConnectionUseContext,
+    lastError: string = error.message,
+  ): Promise<void> => {
+    if (options.transitionPermanentRefreshFailure) {
+      try {
+        const handled = await options.transitionPermanentRefreshFailure({
+          workspaceId: cred.workspaceId,
+          connectionId: cred.id,
+          connectionVersion: cred.version,
+          subjectId: cred.subjectId,
+          providerDomain: cred.providerDomain,
+          httpStatus: error.httpStatus,
+          oauthErrorCode: error.oauthErrorCode,
+        });
+        if (handled) return;
+      } catch {
+        // Falls back to the generic transition.
+      }
+    }
+    const transitioned = await deps
+      // A personal credential may originate outside the workspace
+      // consuming it. Apply the CAS to the same row we refreshed.
+      .setStatus(db, cred.workspaceId, "needs_reauth", lastError, {
+        id: cred.id,
+        version: cred.version,
+        subjectId: cred.subjectId,
+      })
+      .catch(() => false);
+    if (!transitioned || !options.onConnectionNeedsReauth) return;
+    try {
+      await options.onConnectionNeedsReauth({
+        workspaceId: cred.workspaceId,
+        connectionId: cred.id,
+        subjectId: cred.subjectId,
+        providerDomain: cred.providerDomain,
+        httpStatus: error.httpStatus,
+        ...(use
+          ? {
+              use: {
+                workspaceId: use.workspaceId,
+                sessionId: use.sessionId,
+                turnId: use.turnId,
+                attemptId: use.attemptId,
+                executionGeneration: use.executionGeneration,
+              },
+            }
+          : {}),
+      });
+    } catch {
+      // Telling the owner never changes the credential result.
+    }
+  };
+
+  /**
+   * A provider that ends a whole grant (see OAuthGrantFamily) refused this
+   * connection's grant with invalid_grant. Every other active connection that
+   * may hold the same grant, wherever it is, is refreshed with its own token
+   * under its own lock: only one the provider refuses too moves to
+   * needs_reauth, through the normal path. One token's invalid_grant doesn't
+   * prove the grant ended (a password change, the per-client token cap or an
+   * unused token's expiry ends only that token), so a sibling that still
+   * works stays connected. Runs detached from the failing resolve; best
+   * effort, never changes its result.
+   */
+  const checkGrantSiblings = async (cred: ConnectionCredentialForBroker): Promise<void> => {
+    if (!deps.findGrantReauthSiblings) return;
+    // The endpoint and client the refresh itself used.
+    const family = oauthGrantFamilyForTokenEndpoint(
+      stringValue(cred.credential.token_endpoint) ?? stringValue(cred.metadata.tokenEndpoint),
+    );
+    const clientId = stringValue(cred.credential.client_id) ?? stringValue(cred.metadata.clientId);
+    if (!family || !clientId) return;
+    const siblings = await deps.findGrantReauthSiblings(db, {
+      connectionId: cred.id,
+      clientId,
+      family,
+    });
+    for (const sibling of siblings ?? []) {
+      const ref: McpServerConnectionRef = {
+        providerDomain: sibling.providerDomain,
+        connectionId: sibling.connectionId,
+        kind: "oauth2",
+        subjectScope: sibling.subjectId ? "subject" : "workspace",
+      };
+      try {
+        const current = await load({
+          workspaceId: sibling.workspaceId,
+          connectionRef: ref,
+          ...(sibling.subjectId ? { subjectId: sibling.subjectId } : {}),
+        });
+        if (!current || current.status !== "active" || current.version !== sibling.version) {
+          continue;
+        }
+        try {
+          await refreshSingleFlight(current, ref);
+        } catch (error) {
+          if (isPermanentRefreshError(error)) {
+            await recordPermanentRefreshFailure(
+              current,
+              error,
+              undefined,
+              error.oauthErrorCode === "invalid_grant" ? SHARED_GRANT_REFUSED_ERROR : error.message,
+            );
+          }
+        }
+      } catch {
+        // One sibling never stops the others.
+      }
+    }
+  };
+
   return async (input) => {
     const credentialResolutionMode = input.credentialResolutionMode ?? "execution";
     let ref = input.connectionRef;
@@ -1109,60 +1186,11 @@ export function buildConnectionTokenResolver(
         // Only a rejected grant may poison the connection; transient failures
         // (network errors, AS 5xx) leave it active so the next resolve retries.
         if (isPermanentRefreshError(error)) {
-          let handled = false;
-          if (options.transitionPermanentRefreshFailure) {
-            try {
-              handled = await options.transitionPermanentRefreshFailure({
-                workspaceId: cred.workspaceId,
-                connectionId: cred.id,
-                connectionVersion: cred.version,
-                subjectId: cred.subjectId,
-                providerDomain: cred.providerDomain,
-                httpStatus: error.httpStatus,
-                oauthErrorCode: error.oauthErrorCode,
-              });
-            } catch {
-              handled = false;
-            }
-          }
-          if (!handled) {
-            const transitioned = await deps
-              // A personal credential may originate outside the workspace
-              // consuming it. Apply the CAS to the same row we refreshed.
-              .setStatus(db, cred.workspaceId, "needs_reauth", error.message, {
-                id: cred.id,
-                version: cred.version,
-                subjectId: cred.subjectId,
-              })
-              .catch(() => false);
-            if (transitioned && options.onConnectionNeedsReauth) {
-              const use = input.connectionUseContext;
-              try {
-                await options.onConnectionNeedsReauth({
-                  workspaceId: cred.workspaceId,
-                  connectionId: cred.id,
-                  subjectId: cred.subjectId,
-                  providerDomain: cred.providerDomain,
-                  httpStatus: error.httpStatus,
-                  ...(use
-                    ? {
-                        use: {
-                          workspaceId: use.workspaceId,
-                          sessionId: use.sessionId,
-                          turnId: use.turnId,
-                          attemptId: use.attemptId,
-                          executionGeneration: use.executionGeneration,
-                        },
-                      }
-                    : {}),
-                });
-              } catch {
-                // Telling the owner never changes the credential result.
-              }
-            }
-          }
-          if (error.oauthErrorCode === "invalid_grant") {
-            await markGrantSiblingsNeedsReauth(cred, error.httpStatus);
+          await recordPermanentRefreshFailure(cred, error, input.connectionUseContext);
+          if (error.oauthErrorCode === "invalid_grant" && deps.findGrantReauthSiblings) {
+            (options.scheduleGrantSiblingCheck ?? detachGrantSiblingCheck)(
+              checkGrantSiblings(cred).catch(() => undefined),
+            );
           }
         } else if (!(error instanceof ConnectionNotRefreshableError)) {
           options.onTransientRefreshFailure?.({ connectionId: cred.id });

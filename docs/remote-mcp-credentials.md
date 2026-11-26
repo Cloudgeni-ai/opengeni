@@ -350,15 +350,18 @@ integration).
   RFC 7009 revocation endpoint. The check returns only yes or no, and the
   decision is logged without tokens. While the check is not granted, or when it
   fails, the grant is kept.
-- **A refused refresh** (`invalid_grant`) of such a provider moves every other
-  active connection that provably held the same grant to `needs_reauth` with
-  `SHARED_GRANT_REFUSED_ERROR`: the same token endpoint, the same known client
-  and the same account (Google's account ID when both have one, else the
-  email), saved no later than the refused connection's creation or last
-  refresh, so a connection reconnected after the grant ended is left alone.
-  Each moves with its own version compare-and-set, and the owner hook runs once
-  per moved connection without a turn (no chat of the refused connection
-  carries another owner's notice).
+- **A refused refresh** (`invalid_grant`) of such a provider looks up every
+  other active connection that may hold the same grant: the same token
+  endpoint, the same known client and the same account (Google's account ID
+  when both have one, else the email), at most 100. One token's refusal
+  doesn't prove the grant ended (a password change, the per-client token cap
+  or an unused token's expiry ends only that token), so the broker then
+  refreshes each one with its own token under its own refresh lock and
+  version check, detached from the failing request. Only a connection whose
+  own refresh is refused moves to `needs_reauth`, through the normal path
+  (provider adapter, or the generic transition with
+  `SHARED_GRANT_REFUSED_ERROR`), and its owner is told once without a turn,
+  since no chat of the refused connection carries another owner's notice. A sibling that still works stays connected with fresh tokens.
 
 Both definers are created withheld from the runtime role; a later migration
 grants them once the release that knows them is the previous release.

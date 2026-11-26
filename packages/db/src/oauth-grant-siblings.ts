@@ -132,10 +132,10 @@ export type OAuthGrantSibling = {
 
 /**
  * The other active connections, in any workspace or organization, that
- * provably hold the grant of `connectionId`, which must already be
- * needs_reauth because its provider refused that grant: same family, same
- * known client, same account, and saved no later than the grant was last
- * known alive. Null while the check is not granted.
+ * may hold the grant of `connectionId`, which must already be needs_reauth
+ * because its provider refused that grant: same family, same known client and
+ * provably the same account (at most 100). The caller confirms each with its
+ * own refresh before marking it. Null while the check is not granted.
  */
 export async function oauthGrantReauthSiblings(
   db: Database,
