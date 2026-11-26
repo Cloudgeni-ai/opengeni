@@ -25,6 +25,8 @@ export type CodexCapacityRecovery = {
   falseResumptions: number;
   resumeGeneration: number | null;
   retryNotBefore: string | null;
+  /** An API-key wait resumes to try the blocked request, not a balance probe. */
+  apiKeyRecheck?: true;
 };
 
 export function readCodexCapacityRecovery(
@@ -37,6 +39,7 @@ export function readCodexCapacityRecovery(
   const state = value as CodexCapacityRecovery | null;
   if (
     !state ||
+    (state.apiKeyRecheck !== undefined && state.apiKeyRecheck !== true) ||
     !Number.isSafeInteger(state.falseResumptions) ||
     state.falseResumptions < 0 ||
     (state.resumeGeneration !== null &&

@@ -22,6 +22,7 @@ import {
   SubscriptionCoreCodexLeaseLostError,
   readSessionTurnToolProgressRecoveryState,
   isSessionCompactionRequested,
+  getSession,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -129,6 +130,8 @@ import {
   turnRecoveryCauseForCode,
 } from "./provider-recovery-metrics";
 import { errorMessage } from "@opengeni/contracts/values";
+import { API_KEY_CAPACITY_WAIT_BINDING } from "../subscription-core-codex-waits";
+import { parkProviderCapacityTurn } from "./subscription-core-capacity";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -1444,6 +1447,41 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // for every core provider: a lane's answered request is complete regardless
   // of who serves it.
   const placedCore = coreClaude ?? coreCodex ?? coreXai;
+  if (
+    !placedCore &&
+    !billingState.isCodexTurn &&
+    !billingState.isClaudeTurn &&
+    !billingState.isXaiTurn &&
+    !coreRequestOutcomeUnknown &&
+    failure.code === "provider_quota_exhausted" &&
+    failure.quotaScope === "credits" &&
+    attempt.turnId &&
+    eventing.publish &&
+    eventing.settle &&
+    eventing.turnStartedPublished &&
+    attempt.triggerType !== "session.context.compaction.requested"
+  ) {
+    // A definitive refusal did not run this model step. Save the already
+    // completed prefix; the capacity waiter retries the same accepted turn,
+    // never a new turn synthesized from the pending inbox.
+    await flushRuntimeBatcher();
+    await historySink.reconcileConversationTruth({ requireDurable: true });
+    const session = await getSession(db, input.workspaceId, input.sessionId);
+    if (session) {
+      const parked = await parkProviderCapacityTurn(
+        {
+          ...deps,
+          eventing: { settle: eventing.settle },
+          session,
+          signalCodexCapacityWorkflow: deps.signalCodexCapacityWorkflow,
+        },
+        { reason: "api_key_credits_exhausted", earliestResetAt: null, healthRetryAt: null },
+        API_KEY_CAPACITY_WAIT_BINDING,
+        failure,
+      );
+      return parked.exit;
+    }
+  }
   if (
     placedCore &&
     attempt.turnId &&

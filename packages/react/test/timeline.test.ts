@@ -411,6 +411,21 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("an API-key credit wait names why the chat cannot run", () => {
+    reset();
+    const error =
+      "The model provider is out of API credits. This chat will continue automatically when credits are available again or when you change its model.";
+    const [item] = buildTimeline(englishText, [
+      event("turn.capacity_waiting", { waitReason: "api_key_credits_exhausted", error }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: error,
+      capacityWait: { label: "Waiting", detail: error },
+    });
+  });
+
   test("a disabled explicit pin is actionable rather than a healthy quota wait", () => {
     reset();
     const error =

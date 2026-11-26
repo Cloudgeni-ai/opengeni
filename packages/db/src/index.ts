@@ -680,6 +680,7 @@ import {
   clearCodexCapacityRecovery,
   SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES,
 } from "./codex-capacity-recovery";
+export { readCodexCapacityRecovery } from "./codex-capacity-recovery";
 import {
   projectSessionAdmissionBlock,
   type SessionAdmissionFence,
@@ -27616,6 +27617,7 @@ export function codexCapacityRefreshBackoffMs(attempt: number): number {
  * vocabulary) without the terminal code that human Retry replenishes.
  */
 export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES;
+type CapacityWaiterProvider = SubscriptionCoreWaiterProvider | "api_key";
 
 /**
  * The session-event vocabulary of one provider's core waiter. Codex keeps
@@ -27653,7 +27655,7 @@ type SubscriptionCoreWaitVocabulary = {
 };
 
 const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
-  [P in SubscriptionCoreWaiterProvider]: SubscriptionCoreWaitVocabulary;
+  [P in CapacityWaiterProvider]: SubscriptionCoreWaitVocabulary;
 } = {
   codex: {
     label: "Codex",
@@ -27749,6 +27751,28 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     // cooldowns then, so its waiter rechecks on the bounded backoff.
     recheckBeforeReset: true,
   },
+  api_key: {
+    label: "API key",
+    waitingEventType: "turn.capacity_waiting",
+    waitingPayload: { recovery: "provider_capacity", retryable: true },
+    statusReason: "api_key_credits_exhausted",
+    closeToolsReason: "provider_capacity_wait",
+    resumedEvent: (waiter) => ({
+      type: "turn.recovery.requested",
+      payload: {
+        reason: "api_key_credits_recheck",
+        waiterId: waiter.waiterId,
+        generation: waiter.generation,
+        wakeRevision: waiter.wakeRevision,
+      },
+    }),
+    supersededEvent: (waiter, reason) => ({
+      type: "turn.superseded",
+      payload: { waiterId: waiter.waiterId, generation: waiter.generation, reason },
+    }),
+    cancelledBy: "api_key_capacity_reconcile",
+    recheckBeforeReset: false,
+  },
 };
 
 /** Whether a provider's core waiter rechecks before its stored reset (see the vocabulary). */
@@ -27759,7 +27783,7 @@ export function subscriptionCoreWaiterRechecksBeforeReset(
 }
 
 function subscriptionCoreWaitVocabulary(provider: string): SubscriptionCoreWaitVocabulary {
-  const vocabulary = SUBSCRIPTION_CORE_WAIT_VOCABULARY[provider as SubscriptionCoreWaiterProvider];
+  const vocabulary = SUBSCRIPTION_CORE_WAIT_VOCABULARY[provider as CapacityWaiterProvider];
   if (!vocabulary) throw new Error("Core capacity waiter has an unsupported provider");
   return vocabulary;
 }
@@ -27767,7 +27791,7 @@ function subscriptionCoreWaitVocabulary(provider: string): SubscriptionCoreWaitV
 export type SubscriptionCoreCodexCapacityWait = {
   waiterId: string;
   /** The provider whose turn waits (the Codex-named readers return only Codex rows). */
-  provider: SubscriptionCoreWaiterProvider;
+  provider: CapacityWaiterProvider;
   /** Fresh evaluation hints only; null denotes a legacy home-only waiter. */
   candidateProviders: string[] | null;
   accountId: string;
@@ -27833,12 +27857,12 @@ const SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS = sql.raw(`waiter_id::text as waite
  */
 const SUBSCRIPTION_CORE_WAITER_PROVIDERS = Object.keys(
   SUBSCRIPTION_CORE_WAIT_VOCABULARY,
-) as SubscriptionCoreWaiterProvider[];
+) as CapacityWaiterProvider[];
 
-function subscriptionCoreWaiterProvider(provider: string): SubscriptionCoreWaiterProvider {
+function subscriptionCoreWaiterProvider(provider: string): CapacityWaiterProvider {
   if (!(SUBSCRIPTION_CORE_WAITER_PROVIDERS as string[]).includes(provider))
     throw new Error("Core capacity waiter has an unsupported provider");
-  return provider as SubscriptionCoreWaiterProvider;
+  return provider as CapacityWaiterProvider;
 }
 
 function mapSubscriptionCoreCodexWaiter(
@@ -27881,7 +27905,7 @@ function mapSubscriptionCoreCodexWaiter(
  */
 export function subscriptionCoreCodexCapacityWaitRef(wait: SubscriptionCoreCodexCapacityWait): {
   /** Absent for Codex (the legacy peek's "absent means Codex"); every other provider names itself. */
-  provider?: Exclude<SubscriptionCoreWaiterProvider, "codex">;
+  provider?: Exclude<CapacityWaiterProvider, "codex">;
   waiterId: string;
   generation: number;
   nextCheckAt: string;
@@ -27913,7 +27937,7 @@ async function readSubscriptionCoreWaiterInTransaction(
     sessionId: string;
     waiterId?: string;
     forUpdate?: boolean;
-    provider?: SubscriptionCoreWaiterProvider;
+    provider?: CapacityWaiterProvider;
   },
 ): Promise<SubscriptionCoreCodexCapacityWait | null> {
   const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
@@ -28077,7 +28101,7 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
  */
 export async function armSubscriptionCoreCapacityWait(
   db: Database,
-  provider: SubscriptionCoreWaiterProvider,
+  provider: CapacityWaiterProvider,
   input: ArmSubscriptionCoreCapacityWaitInput,
 ): Promise<ArmSubscriptionCoreCodexCapacityWaitResult> {
   const vocabulary = subscriptionCoreWaitVocabulary(provider);
@@ -28221,6 +28245,7 @@ export async function armSubscriptionCoreCapacityWait(
             falseResumptions,
             resumeGeneration: null,
             retryNotBefore,
+            ...(provider === "api_key" ? { apiKeyRecheck: true } : {}),
           },
         };
         // A long wait is announced once, as it starts: a worker's parent gets
@@ -28235,8 +28260,14 @@ export async function armSubscriptionCoreCapacityWait(
           healthRetryAt: input.healthRetryAt ?? null,
           now,
         });
+        const priorPersonNotice =
+          provider === "api_key" ? readCapacityWaitNotice(turn.metadata) : null;
+        const priorParentNotice =
+          provider === "api_key"
+            ? readCapacityWaitNotice(turn.metadata, CAPACITY_WAIT_PARENT_NOTICE_KEY)
+            : null;
         const personNotice =
-          attention && !session.parentSessionId
+          attention && !session.parentSessionId && !priorPersonNotice
             ? SessionNotificationPostedPayload.parse(
                 capacityWaitNotificationPayload({
                   turnId: input.turnId,
@@ -28438,10 +28469,11 @@ export async function armSubscriptionCoreCapacityWait(
                 ? {
                     ...waitingMetadata,
                     [CAPACITY_WAIT_PARENT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                      childWaitingCapacityDedupeKey({
-                        childSessionId: input.sessionId,
-                        waiterId: waiter.waiterId,
-                      }),
+                      priorParentNotice?.key ??
+                        childWaitingCapacityDedupeKey({
+                          childSessionId: input.sessionId,
+                          waiterId: waiter.waiterId,
+                        }),
                       attention.resetsAt,
                       explanation,
                     ),
@@ -28479,7 +28511,7 @@ export async function armSubscriptionCoreCapacityWait(
           )
           .returning({ id: schema.sessions.id });
         if (!waitingSession) throw new Error(`Core ${label} capacity session changed during arm`);
-        if (attention) {
+        if (attention && !priorParentNotice) {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
             waiterId: waiter.waiterId,
@@ -28602,7 +28634,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
     /** The waiter's wake revision when the evaluation started. */
     evaluatedWakeRevision: number;
     evaluation: SubscriptionCoreCodexWaitEvaluation;
-    provider?: SubscriptionCoreWaiterProvider;
+    provider?: CapacityWaiterProvider;
     now?: Date;
   },
 ): Promise<ReconcileSubscriptionCoreCodexCapacityWaitResult> {
@@ -28995,7 +29027,10 @@ export async function reconcileSubscriptionCoreCapacityWait(
           } as const;
         }
 
-        const noticeWithdrawal = capacityWaitNoticeWithdrawal(blockedTurn.metadata);
+        // An API-key recheck runs the blocked request itself. Terminal
+        // settlement or an explicit release ends its notice, not a trial.
+        const noticeWithdrawal =
+          waiter.provider === "api_key" ? null : capacityWaitNoticeWithdrawal(blockedTurn.metadata);
         const events = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -29061,9 +29096,11 @@ export async function reconcileSubscriptionCoreCapacityWait(
             status: "recovering",
             activeAttemptId: null,
             metadata: {
-              ...withoutCapacityWaitNotice(
-                metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
-              ),
+              ...(waiter.provider === "api_key"
+                ? metadataWithoutTurnDispatchAttempt(blockedTurn.metadata)
+                : withoutCapacityWaitNotice(
+                    metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+                  )),
               [CODEX_CAPACITY_RECOVERY_KEY]: {
                 ...recovery,
                 resumeGeneration: blockedTurn.executionGeneration + 1,
@@ -63623,8 +63660,7 @@ export async function summarizeQueuedTurnsByHold(
 
 /**
  * The providers whose turns park on the shared subscription core's capacity
- * waiter, in the order {@link summarizeTurnHolds} reports them. The same set
- * as `subscription_capacity_waiters`' provider check.
+ * waiter, in the order {@link summarizeTurnHolds} reports subscription waits.
  */
 export const CAPACITY_WAITING_TURN_PROVIDERS = [
   "claude",
@@ -85028,6 +85064,9 @@ export async function claimSessionWorkForAttempt(
             const now = new Date();
             const dispatchGeneration = parsedDispatch.generation + 1;
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
+            if (readCodexCapacityRecovery(activeTurn.metadata).apiKeyRecheck) {
+              await tx.execute(sql`set local opengeni.api_key_capacity_claim_v1 = '1'`);
+            }
             const [resumed] = await tx
               .update(schema.sessionTurns)
               .set({
@@ -93077,6 +93116,9 @@ export async function applySessionTurnSettlement(
         ...inputEvents,
         ...(interactionRefusalEvent ? [interactionRefusalEvent] : []),
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
+        ...(["completed", "failed", "cancelled", "superseded"].includes(input.turnStatus)
+          ? [capacityWaitNoticeWithdrawal(turn.metadata)].filter((event) => event !== null)
+          : []),
       ];
       const values = settlementEvents.map((event) => {
         const payload =

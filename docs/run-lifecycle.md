@@ -1585,7 +1585,8 @@ hints remain a lower bound. Subscription capacity waits retain their separate
 workflow jitter. Worker-owned main, compaction and title clients disable hidden
 OpenAI SDK retries before client resolution; the durable worker recovery budget
 owns retries. Standalone runtime clients retain `openaiMaxRetries`.
-An exhausted API-key provider quota is not a rate limit and is never retried:
+An exhausted API-key provider quota is not a rate limit and never spends the
+ordinary provider-recovery retry budget:
 a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
 tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
 quota", a reached usage limit), an account out of credits (HTTP 402,
@@ -1593,7 +1594,18 @@ quota", a reached usage limit), an account out of credits (HTTP 402,
 provider retry hint exceeds 15 minutes fails the turn at once with
 `provider_quota_exhausted`, `retryable: false`, a `quotaScope` of `daily`,
 `monthly`, `credits` or `quota`, plain-language copy, and the provider text as
-`detail`. Ordinary short limits stay `provider_rate_limited` and retryable: an
+`detail`. An ordinary chat's definitive `credits` refusal instead parks its
+exact accepted turn on the same durable, named capacity waiter as a pinned
+subscription. It notifies the owner (or the parent of a worker) once, holds new
+inputs in the queue and keeps the input the turn already owns attached to that
+nonterminal turn. Changing the chat's model releases the waiter. An API-key
+route with no common balance probe uses the waiter's existing timer and
+false-resumption backoff to try the blocked request itself, without making a
+separate paid probe, changing models or purchasing credit. Daily and monthly
+quotas and ambiguous transport failures do not enter this wait.
+During a rolling deploy an older worker cannot claim a parked API-credit turn
+or its exact recheck; the claim transaction rolls back before it can take input.
+Ordinary short limits stay `provider_rate_limited` and retryable: an
 explicit per-minute window (including snake_case metric ids such as Vertex
 `requests_per_minute_per_project`), quota wording whose provider retry hint is at
 most 60 s (Gemini reports per-minute limits with the same "exceeded your current

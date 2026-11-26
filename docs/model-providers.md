@@ -2915,12 +2915,13 @@ When Anthropic refuses a key because its organization can't pay (HTTP 402, a
 `billing_error`, a spend-limit error, or HTTP 400 "credit balance is too low"),
 the same request goes to the session's next key, and the worker records the
 refusal (`api_key_credit_refusals`), so later turns leave that key out. A
-refused key stays out until an admin chooses **Serve again** (after adding
-credits) or adds it again; there is no timed recheck, because promotional and
-prepaid credits don't come back by themselves. Rate limits and overload are
-not refusals and keep their ordinary handling on the same key. When every key
-is refused the request fails without being sent, with
-`anthropic_api_keys_out_of_credits`. Nothing buys credits, enables top-ups or
+refused key stays out of ordinary allocation until an admin chooses **Serve
+again**, or a parked turn proves it can serve by completing a real request.
+When every key is refused, the first request is not sent and the resulting
+`anthropic_api_keys_out_of_credits` refusal parks the turn. On the existing
+capacity recheck timer it reads current keys; if they are all still marked
+refused, that exact turn may try them in its usual key order. Rate limits and
+overload keep their ordinary handling. Nothing buys credits, enables top-ups or
 extra usage: each key's spending is governed by its own Anthropic
 organization's billing settings.
 

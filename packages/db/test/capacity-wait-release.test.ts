@@ -11,6 +11,7 @@ import {
   createSession,
   getSession,
   getSessionTurn,
+  getSubscriptionCoreCapacityWaitForSession,
   initializeSessionStartAtomically,
   listSessionEvents,
   mutateSessionControlInTransaction,
@@ -76,7 +77,7 @@ async function claim(grant: Grant, sessionId: string) {
 }
 
 /** A top-level chat whose first turn is parked on Codex capacity four days out. */
-async function waitingChat(grant: Grant) {
+async function waitingChat(grant: Grant, provider: "codex" | "api_key" = "codex") {
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -102,14 +103,14 @@ async function waitingChat(grant: Grant) {
   const { claimed, attemptId } = await claim(grant, session.id);
   if (claimed.action !== "claimed") throw new Error("turn was not claimed");
   const resetsAt = new Date(Date.now() + FOUR_DAYS_MS);
-  const armed = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+  const armed = await armSubscriptionCoreCapacityWait(client.db, provider, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId: session.id,
     turnId: claimed.turn.id,
     attemptId,
-    waitReason: "no_eligible_capacity",
-    earliestResetAt: resetsAt,
+    waitReason: provider === "api_key" ? "api_key_credits_exhausted" : "no_eligible_capacity",
+    earliestResetAt: provider === "api_key" ? null : resetsAt,
     failurePayload: { error: "No Codex subscription has capacity for this turn right now." },
   });
   if (armed.action !== "waiting") throw new Error(`wait not armed: ${armed.action}`);
@@ -284,6 +285,24 @@ describe("long subscription capacity waits", () => {
         (await getSessionTurn(client.db, grant.workspaceId, chat.turn.id))?.metadata,
       ),
     ).toMatchObject({ kind: "valid", policy: { productModelId: "other-model" } });
+  });
+
+  test("switching an exhausted API-key route releases its exact turn before the timer", async () => {
+    const grant = await workspace();
+    const chat = await waitingChat(grant, "api_key");
+    const switched = await switchModel(grant, chat.session.id, chat.turn.id);
+    expect(switched.releasedCapacityWaitTurnId).toBe(chat.turn.id);
+    expect(
+      await getSubscriptionCoreCapacityWaitForSession(
+        client.db,
+        grant.workspaceId,
+        chat.session.id,
+      ),
+    ).toBeNull();
+    expect(await notices(grant, chat)).toEqual(["posted", "withdrawn"]);
+    const { claimed } = await claim(grant, chat.session.id);
+    if (claimed.action !== "claimed") throw new Error(`not claimed: ${claimed.action}`);
+    expect(claimed.turn).toMatchObject({ id: chat.turn.id, model: "other-model" });
   });
 
   test("Pause stops the waiting turn; Resume continues it, on a model switched meanwhile", async () => {

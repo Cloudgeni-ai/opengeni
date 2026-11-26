@@ -3951,7 +3951,7 @@ export async function sendAgentMessageInTransaction(
     ? "starts_next_turn"
     : effective.state === "paused"
       ? "after_resume"
-      : session.activeTurnId !== null
+      : session.activeTurnId !== null && session.status !== "waiting_capacity"
         ? "after_current_turn"
         : "when_next_turn_starts";
   const wake = runnable

@@ -519,6 +519,7 @@ export async function settingsWithModelProviderCredentials(
     settings: Settings;
     productModelId: string | null | undefined;
     codexSubscriptionActive: boolean;
+    recheckExhaustedAnthropicKeys?: boolean;
   },
 ): Promise<Settings> {
   const { accountId, workspaceId, productModelId } = input;
@@ -536,6 +537,7 @@ export async function settingsWithModelProviderCredentials(
     workspaceId,
     claudeSubscriptionEnabled: xaiSettings.claudeSubscriptionEnabled,
     loadOrganizationCredentials: environmentsEncryptionKeyBytes(xaiSettings) !== null,
+    ...(input.recheckExhaustedAnthropicKeys ? { recheckExhaustedAnthropicKeys: true } : {}),
   });
   // EU-only inference (`settingsWithInferenceResidency`, read in the same
   // transaction as the rest): set before any overlay that resolves a route.

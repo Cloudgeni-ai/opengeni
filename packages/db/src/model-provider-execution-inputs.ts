@@ -65,6 +65,7 @@ export async function loadModelProviderExecutionInputs(
     workspaceId: string;
     claudeSubscriptionEnabled: boolean;
     loadOrganizationCredentials: boolean;
+    recheckExhaustedAnthropicKeys?: boolean;
   },
 ): Promise<ModelProviderExecutionInputs> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -151,7 +152,10 @@ export async function loadModelProviderExecutionInputs(
           organizationAuthMethods.azure_openai = row.authMethod;
         }
         if (row.providerKind === "anthropic") {
-          organizationAnthropicApiKeys = organizationAnthropicApiKeyPool(row);
+          organizationAnthropicApiKeys = organizationAnthropicApiKeyPool(
+            row,
+            input.recheckExhaustedAnthropicKeys,
+          );
         }
       }
     }

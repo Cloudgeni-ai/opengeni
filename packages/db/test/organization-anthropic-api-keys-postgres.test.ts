@@ -16,6 +16,7 @@ import {
   OrganizationModelProviderConflictError,
   relabelOrganizationAnthropicApiKey,
   removeOrganizationAnthropicApiKey,
+  restoreOrganizationAnthropicApiKeyAfterCreditRecheck,
   upsertOrganizationModelProviderConnection,
   type DbClient,
 } from "../src";
@@ -24,7 +25,7 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 // An organization's Anthropic API connection can hold several API keys. Its
 // own key is the first member; the others sit beside it on the same row. A
 // workspace's turn records a key Anthropic refused for lack of credits, and
-// later turns leave it out until an administrator lets it serve again.
+// ordinary turns leave it out until it is restored.
 // Everything runs under FORCE RLS as the opengeni_app role.
 
 const settings = testSettings({
@@ -192,13 +193,46 @@ test("MP-KEYS-05: a key out of credits stays out until an administrator lets it 
   expect(cleared?.creditRefusedAt).toBeNull();
   expect(await served(one)).toEqual(["key-one", "key-two", "key-three"]);
 
-  // Every key refused: an empty pool, so requests fail without sending.
+  // Every key refused: ordinary requests have no key; the parked turn's
+  // timed recheck can take the currently configured keys for a real retry.
+  const refusedAt = new Date("2026-01-01T00:00:00Z");
+  const recheckStartedAt = new Date("2026-01-01T00:00:01Z");
   for (const member of listed.keys)
     await markOrganizationAnthropicApiKeyCreditRefused(client.db, {
       ...scope(one),
       keyId: member.id,
+      at: refusedAt,
     });
   expect(await served(one)).toEqual([]);
+  const recheckKeys = async () =>
+    (
+      await loadModelProviderExecutionInputs(client.db, {
+        ...scope(one),
+        claudeSubscriptionEnabled: false,
+        loadOrganizationCredentials: true,
+        recheckExhaustedAnthropicKeys: true,
+      })
+    ).organizationAnthropicApiKeys?.map((member) => member.id);
+  expect(await recheckKeys()).toEqual(listed.keys.map((member) => member.id));
+  await markOrganizationAnthropicApiKeyCreditRefused(client.db, {
+    ...scope(one),
+    keyId: second,
+    at: new Date("2026-01-01T00:00:02Z"),
+    recheck: true,
+  });
+  await restoreOrganizationAnthropicApiKeyAfterCreditRecheck(client.db, {
+    ...scope(one),
+    keyId: second,
+    checkedAfter: recheckStartedAt,
+  });
+  expect(await served(one)).toEqual([]);
+  await restoreOrganizationAnthropicApiKeyAfterCreditRecheck(client.db, {
+    ...scope(one),
+    keyId: "primary-v1",
+    checkedAfter: recheckStartedAt,
+  });
+  expect(await served(one)).toEqual(["key-one"]);
+  expect(await recheckKeys()).toEqual(["primary-v1"]);
   for (const member of listed.keys)
     await clearOrganizationAnthropicApiKeyCreditRefusal(client.db, {
       ...actor(one),

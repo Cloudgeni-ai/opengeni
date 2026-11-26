@@ -153,7 +153,10 @@ export function isAnthropicApiKeyCreditRefusal(error: unknown): boolean {
 export const ANTHROPIC_API_KEYS_OUT_OF_CREDITS = "anthropic_api_keys_out_of_credits";
 
 type AnthropicApiKeyRefusalReporter = (providerId: string, keyId: string) => void;
-const apiKeyRefusalReporters = new AsyncLocalStorage<AnthropicApiKeyRefusalReporter>();
+const apiKeyObservers = new AsyncLocalStorage<{
+  refused: AnthropicApiKeyRefusalReporter;
+  accepted?: AnthropicApiKeyRefusalReporter;
+}>();
 
 /**
  * Runs `run` with `report` told of each pooled Anthropic API key that runs
@@ -162,8 +165,9 @@ const apiKeyRefusalReporters = new AsyncLocalStorage<AnthropicApiKeyRefusalRepor
 export function withAnthropicApiKeyRefusals<T>(
   report: AnthropicApiKeyRefusalReporter,
   run: () => Promise<T>,
+  accepted?: AnthropicApiKeyRefusalReporter,
 ): Promise<T> {
-  return apiKeyRefusalReporters.run(report, run);
+  return apiKeyObservers.run({ refused: report, ...(accepted ? { accepted } : {}) }, run);
 }
 
 /** Preserve documented spend proof, without retaining an arbitrary error body. */
@@ -1529,8 +1533,13 @@ export class AnthropicMessagesModel implements Model {
   private refusedForCredits(apiKeyId: string | undefined, error: unknown): boolean {
     if (apiKeyId === undefined || !isAnthropicApiKeyCreditRefusal(error)) return false;
     this.refusedApiKeys.add(apiKeyId);
-    apiKeyRefusalReporters.getStore()?.(this.provider.id, apiKeyId);
+    apiKeyObservers.getStore()?.refused(this.provider.id, apiKeyId);
     return true;
+  }
+
+  private acceptedApiKey(response: Response): void {
+    const keyId = this.responseApiKeys.get(response);
+    if (keyId !== undefined) apiKeyObservers.getStore()?.accepted?.(this.provider.id, keyId);
   }
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
@@ -1887,6 +1896,7 @@ export class AnthropicMessagesModel implements Model {
       const message = withReplayTransformations(object(await response.json()), response);
       if (message.stop_reason === "refusal")
         throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
+      this.acceptedApiKey(response);
       merged = mergePausedMessage(merged, message);
       if (message.stop_reason !== "pause_turn") break;
       assertPauseContinuationAllowed(continuation);
@@ -2207,6 +2217,7 @@ export class AnthropicMessagesModel implements Model {
           message.content = [...blocks.entries()]
             .sort(([a], [b]) => a - b)
             .map(([, state]) => state.block);
+          this.acceptedApiKey(response);
           return {
             message: withReplayTransformations(message, response),
             requestId: response.headers.get("request-id") ?? undefined,
