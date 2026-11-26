@@ -1,5 +1,7 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
+import { newConversationErrorMessage } from "@opengeni/react/session";
 import { homeSessionSections } from "@opengeni/react/session-list-model";
 import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { useNativeFileAttachments } from "@opengeni/react-native";
@@ -104,6 +106,15 @@ function Gate() {
    and the quiet Recent sessions list under it. The rail lives behind the menu. */
 function Home() {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
+  // A refused first message says why in the stock new chat's words; in the iOS
+  // app without a way to buy what's missing.
+  const createFailure = (caught: unknown) =>
+    newConversationErrorMessage(
+      t,
+      caught instanceof Error ? caught : new Error(String(caught)),
+      showPurchasePrompts,
+    );
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const {
@@ -301,7 +312,7 @@ function Home() {
     } catch (caught) {
       // Permission withdrawn elsewhere: ask again, and send once more only if allowed.
       if (!retried && isAiConsentRequired(caught)) again = await consent.refused();
-      else setListError(caught instanceof Error ? caught.message : String(caught));
+      else setListError(createFailure(caught));
     } finally {
       setCreating(false);
     }
@@ -337,7 +348,7 @@ function Home() {
       router.push(`/session/${created.id}`);
       agentCall.callSession(created.id);
     } catch (caught) {
-      setListError(caught instanceof Error ? caught.message : String(caught));
+      setListError(createFailure(caught));
     } finally {
       setCalling(false);
     }

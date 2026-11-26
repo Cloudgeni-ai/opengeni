@@ -1,8 +1,9 @@
 // Lab (development builds only): the AI-provider permission and Delete account
 // screens with example data, for checking how they look without a signed-in
 // account or a server. Deep link: opengeni://lab-app-review?state=delete-blocked
-import { OpenGeniApiError } from "@opengeni/sdk";
-import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
+import { OpenGeniApiError, type SessionEvent } from "@opengeni/sdk";
+import { MessageTimeline, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
+import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useEffect, useMemo, useRef } from "react";
 import { View } from "react-native";
@@ -29,6 +30,7 @@ const STATES = [
   ["delete-preview", "Delete account"],
   ["delete-blocked", "Delete account: only owner"],
   ["delete-unavailable", "Delete account: unavailable"],
+  ["credit-stop", "Chat: out of credits"],
 ] as const;
 type LabState = (typeof STATES)[number][0];
 
@@ -204,12 +206,49 @@ export default function AppReviewLab() {
       </AccountLabOverride>
     );
   }
+  if (state === "credit-stop") return <CreditStop />;
   return (
     <AccountLabOverride patch={accountPatch}>
       <AppThemeProvider>
         <DeleteAccount lab={deletion} />
       </AppThemeProvider>
     </AccountLabOverride>
+  );
+}
+
+/** A turn the server stopped because the organization ran out of credits. */
+function creditStopEvents(): SessionEvent[] {
+  const at = (seconds: number) => new Date(Date.UTC(2026, 10, 26, 12, 0, seconds)).toISOString();
+  const event = (sequence: number, type: string, payload: unknown): SessionEvent =>
+    ({
+      id: `lab-credit-${sequence}`,
+      workspaceId: "lab-workspace",
+      sessionId: "lab-credit",
+      sequence,
+      type,
+      payload,
+      turnId: "lab-credit-turn",
+      occurredAt: at(sequence * 2),
+    }) as SessionEvent;
+  return [
+    event(1, "user.message", { text: "Summarize this week's support tickets." }),
+    event(2, "turn.started", {}),
+    event(3, "turn.failed", {
+      error: "Insufficient Opengeni credits. Add credits to continue.",
+      segmentLimit: "budget_exhausted",
+    }),
+  ];
+}
+
+/** The chat as the app draws it, so its purchase-free copy can be checked. */
+function CreditStop() {
+  const events = useMemo(creditStopEvents, []);
+  const renderMarkdown = useMemo(() => createWebMarkdownRenderer({}), []);
+  return (
+    <AppThemeProvider>
+      <Stack.Screen options={{ title: "Support tickets" }} />
+      <MessageTimeline events={events} status="idle" renderMarkdown={renderMarkdown} />
+    </AppThemeProvider>
   );
 }
 

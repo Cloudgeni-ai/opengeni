@@ -24,6 +24,7 @@ export type {
 } from "./session-context";
 export { createEmbeddedSessionClient } from "./embedded-session-client";
 export { conversationTimeline } from "./conversation-timeline";
+export { newConversationErrorMessage } from "./lib/format";
 export type {
   ComposerDraftMapContext,
   CreateEmbeddedSessionClientOptions,
