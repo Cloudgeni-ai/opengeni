@@ -1,7 +1,6 @@
 ---
 "@opengeni/db": patch
 "@opengeni/react": minor
-"opengeni-web": patch
 ---
 
 Apps in the sidebar follow one rule: a pinned app sits in the person's own sidebar links, never in both places.

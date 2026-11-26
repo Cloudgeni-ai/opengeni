@@ -64,6 +64,9 @@ function useSessionsSidebarOptions(workspaceId: string) {
         for (const child of item.items)
           if (child.type === "app") linked.add(child.appId.toLowerCase());
     }
+    // A link shown again means the app was restored: it no longer needs the
+    // stand-in, so unpinning it later returns it to the Apps section.
+    for (const appId of linked) appsArchivedFromSidebar.delete(appId);
     return {
       has: (appId: string) =>
         linked.has(appId.toLowerCase()) || appsArchivedFromSidebar.has(appId.toLowerCase()),

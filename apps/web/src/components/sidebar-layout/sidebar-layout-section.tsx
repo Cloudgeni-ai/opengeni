@@ -761,11 +761,13 @@ export function CustomizeRow() {
 }
 
 /**
- * Apps archived from the sidebar on this page. Their links leave the layout
- * the server returns, so the Sessions list's Apps section counts them as still
- * in the sidebar until its own read shows them archived (never both places).
+ * Apps just archived from the sidebar on this page. Their links leave the
+ * layout the server returns, so the Sessions list's Apps section counts them as
+ * still in the sidebar until its own read shows them archived (never both
+ * places). Each entry lasts only that long, or until the app's link is back.
  */
 export const appsArchivedFromSidebar = new Set<string>();
+const ARCHIVED_BRIDGE_MS = 30_000;
 
 /**
  * Archive for app rows: the same personal sidebar archive as the app's row in
@@ -779,7 +781,11 @@ export function useSidebarAppArchive(
   const { client } = useAppContext();
   if (typeof client.updateSiteSidebarState !== "function") return undefined;
   const run = (appId: string, label: string, archived: boolean): void => {
-    if (archived) appsArchivedFromSidebar.add(appId.toLowerCase());
+    if (archived) {
+      const key = appId.toLowerCase();
+      appsArchivedFromSidebar.add(key);
+      setTimeout(() => appsArchivedFromSidebar.delete(key), ARCHIVED_BRIDGE_MS);
+    }
     void client
       .updateSiteSidebarState(workspaceId, appId, { archived })
       .then(() => {

@@ -97295,7 +97295,8 @@ export async function latestCapabilityAuthNotice(
   payload: Record<string, unknown>;
   /** The person whose turn posted it, or the chat's creator for a service turn. */
   askedBySubjectId: string;
-  sessionAwaitingConnection: boolean;
+  /** The notice keys the chat still waits on the person for. */
+  awaitingConnectionKeys: string[];
 } | null> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
     const tx = scoped as unknown as Database;
@@ -97320,7 +97321,7 @@ export async function latestCapabilityAuthNotice(
     if (!card) return null;
     const [session] = await tx
       .select({
-        awaiting: schema.sessions.awaitingConnectionSince,
+        awaitingKeys: schema.sessions.awaitingConnectionKeys,
         createdBySubjectId: schema.sessions.createdBySubjectId,
       })
       .from(schema.sessions)
@@ -97339,7 +97340,7 @@ export async function latestCapabilityAuthNotice(
       id: card.id,
       payload,
       askedBySubjectId: card.initiatingHumanSubjectId ?? session?.createdBySubjectId ?? "",
-      sessionAwaitingConnection: (session?.awaiting ?? null) !== null,
+      awaitingConnectionKeys: session?.awaitingKeys ?? [],
     };
   });
 }

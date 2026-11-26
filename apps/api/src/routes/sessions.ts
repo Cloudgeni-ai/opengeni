@@ -3526,22 +3526,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         }).catch(() => null);
         // Only the person whose turn asked for their Chrome (the chat's
         // creator when no person started that turn) can clear it, and only
-        // while the chat still waits on someone.
+        // while the chat still waits on the person for a machine.
+        const machineKey = connectionCardNoticeKey({
+          providerDomain: "",
+          capability: { id: CONNECTED_MACHINE_CAPABILITY_ID },
+        });
         if (
           latest?.payload.purpose === "chrome" &&
-          latest.sessionAwaitingConnection &&
+          latest.awaitingConnectionKeys.includes(machineKey) &&
           latest.askedBySubjectId === grant.subjectId &&
           (await personHasLinkedChrome(grant, workspaceId))
         ) {
           await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
             {
               type: "session.notification.withdrawn" as const,
-              payload: {
-                key: connectionCardNoticeKey({
-                  providerDomain: "",
-                  capability: { id: CONNECTED_MACHINE_CAPABILITY_ID },
-                }),
-              },
+              payload: { key: machineKey },
             },
           ]);
         }
