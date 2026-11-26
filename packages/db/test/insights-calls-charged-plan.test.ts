@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { InsightsCallsQuery } from "@opengeni/contracts/insights-usage";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { sql } from "drizzle-orm";
 import { bootstrapWorkspace, createDb, createSession, readInsightsCalls } from "../src";
 
 let shared: SharedTestDatabase;
@@ -90,7 +91,9 @@ test("pricing a page of calls reads only each call's own debits", async () => {
     return Number(row!.scans);
   };
   const scansBefore = await indexScans();
-  const page = await readInsightsCalls(client.db, {
+  // One connection, so it can flush its index statistics right after the read.
+  const reader = createDb(shared.appUrl, { max: 1 });
+  const page = await readInsightsCalls(reader.db, {
     accountId: grant.accountId,
     workspaceId,
     detailsWorkspaceIds: [workspaceId],
@@ -103,6 +106,9 @@ test("pricing a page of calls reads only each call's own debits", async () => {
     expect(call.chargedMicros).toBe(n % 3 === 0 ? 2 * n : n);
   }
   // Index statistics reach other sessions when the reading backend flushes them.
+  await reader.db.execute(sql`select pg_stat_force_next_flush()`);
+  await reader.db.execute(sql`select 1`);
+  await reader.close();
   let scans = scansBefore;
   for (let attempt = 0; attempt < 50 && scans - scansBefore < page.calls.length; attempt += 1) {
     await Bun.sleep(100);

@@ -640,7 +640,7 @@ test("the bounded read picks the same turn as the full walk for any history", as
   }
 }, 180_000);
 
-test("a long API-driven chat after a settings write costs no more than walking its starts", async () => {
+test("a long API-driven chat after a settings write is not read turn by turn", async () => {
   const grant = await policyWorkspace("Policy API chat");
   const session = await policySession(grant);
   // Thousands of API turns, then a settings write, one person turn and a
@@ -681,13 +681,40 @@ test("a long API-driven chat after a settings write costs no more than walking i
   for (const mode of ["force_generic_plan", "force_custom_plan"] as const) {
     const measured = await explainEffectivePolicy(grant, session.id, mode);
     expect(measured.row?.model).toBe("person-model");
-    // Reading all 5,000 API turns took about 50,000 buffers; the walk of the
-    // 300 runs since the write about 2,000.
-    expect(measured.blocks).toBeLessThan(5_000);
+    // Reading all 5,000 API turns took about 50,000 buffers on every read.
+    // Now the read counts at most 1,001 person/API turns (each checked by
+    // row security), then walks the 300 runs as the old statement did.
+    const previousBlocks = await explainPreviousPolicyBlocks(grant, session.id, mode);
+    expect(measured.blocks).toBeLessThan(previousBlocks + 3_500);
+    console.info(
+      "effective-policy-api-chat",
+      JSON.stringify({ mode, blocks: measured.blocks, previousBlocks }),
+    );
     const { current, previous } = await currentAndPreviousPolicies(grant, [session.id], mode);
     expect(current).toEqual(previous);
   }
 }, 180_000);
+
+async function explainPreviousPolicyBlocks(
+  grant: { workspaceId: string; subjectId: string },
+  sessionId: string,
+  mode: "force_generic_plan" | "force_custom_plan",
+) {
+  return await withWorkspaceSubjectRls(
+    client.db,
+    grant.workspaceId,
+    grant.subjectId,
+    async (tx) => {
+      await tx.execute(sql.raw(`set local plan_cache_mode = ${mode}`));
+      const explained = await tx.execute(
+        sql`explain (analyze, buffers, format json) ${previousPolicyStatement(grant.workspaceId, [sessionId])}`,
+      );
+      const root = (explained[0]?.["QUERY PLAN"] as Array<{ Plan: Record<string, unknown> }>)[0]!
+        .Plan;
+      return Number(root["Shared Hit Blocks"] ?? 0) + Number(root["Shared Read Blocks"] ?? 0);
+    },
+  );
+}
 
 type PolicyColumns = { model: string; reasoningEffort: string; latencyMode: string };
 
@@ -717,55 +744,61 @@ async function currentAndPreviousPolicies(
           ]),
         );
       const current = byId(await effectiveSessionPolicyQuery(tx, grant.workspaceId, sessionIds));
-      const boundary = sql`(
-        select coalesce(max(boundary.sequence), -1) from session_events boundary
-        where boundary.workspace_id = ${grant.workspaceId}
-          and boundary.session_id = sessions.id
-          and boundary.type = 'session.model_settings.updated'
-      )`;
-      const previousRows = await tx.execute(sql`
-        select sessions.id::text as id,
-          coalesce(latest.model, sessions.model) as model,
-          coalesce(latest.reasoning_effort, sessions.reasoning_effort) as "reasoningEffort",
-          coalesce(latest.latency_mode, sessions.latency_mode) as "latencyMode"
-        from sessions
-        left join lateral (
-          select session_turns.model, session_turns.reasoning_effort, session_turns.latency_mode
-          from session_turns
-          where session_turns.workspace_id = ${grant.workspaceId}
-            and session_turns.session_id = sessions.id
-            and session_turns.id = (
-              select started.turn_id from session_events started
-              where started.workspace_id = ${grant.workspaceId}
-                and started.session_id = sessions.id
-                and started.type = 'turn.started'
-                and started.sequence > ${boundary}
-                and (
-                  select true from session_turns candidate
-                  where candidate.workspace_id = started.workspace_id
-                    and candidate.session_id = started.session_id
-                    and candidate.id = started.turn_id
-                    and coalesce(case when candidate.source in ('user', 'api') then (
-                      select min(accepted.sequence) from session_events accepted
-                      where accepted.workspace_id = ${grant.workspaceId}
-                        and accepted.session_id = sessions.id
-                        and accepted.turn_id = candidate.id
-                        and accepted.type = 'turn.queued'
-                    ) end, 0) > ${boundary}
-                  limit 1
-                )
-              order by started.sequence desc
-              limit 1
-            )
-          limit 1
-        ) latest on true
-        where sessions.workspace_id = ${grant.workspaceId}
-          and sessions.id in (${sql.join(
-            sessionIds.map((id) => sql`${id}::uuid`),
-            sql`, `,
-          )})`);
+      const previousRows = await tx.execute(previousPolicyStatement(grant.workspaceId, sessionIds));
       const previous = byId(previousRows as unknown as Array<PolicyColumns & { id: string }>);
       return { current, previous };
     },
   );
+}
+
+/** The statement {@link effectiveSessionPolicyQuery} replaced: an unbounded walk
+ * of every start since the last settings write. */
+function previousPolicyStatement(workspaceId: string, sessionIds: string[]) {
+  const boundary = sql`(
+    select coalesce(max(boundary.sequence), -1) from session_events boundary
+    where boundary.workspace_id = ${workspaceId}
+      and boundary.session_id = sessions.id
+      and boundary.type = 'session.model_settings.updated'
+  )`;
+  return sql`
+    select sessions.id::text as id,
+      coalesce(latest.model, sessions.model) as model,
+      coalesce(latest.reasoning_effort, sessions.reasoning_effort) as "reasoningEffort",
+      coalesce(latest.latency_mode, sessions.latency_mode) as "latencyMode"
+    from sessions
+    left join lateral (
+      select session_turns.model, session_turns.reasoning_effort, session_turns.latency_mode
+      from session_turns
+      where session_turns.workspace_id = ${workspaceId}
+        and session_turns.session_id = sessions.id
+        and session_turns.id = (
+          select started.turn_id from session_events started
+          where started.workspace_id = ${workspaceId}
+            and started.session_id = sessions.id
+            and started.type = 'turn.started'
+            and started.sequence > ${boundary}
+            and (
+              select true from session_turns candidate
+              where candidate.workspace_id = started.workspace_id
+                and candidate.session_id = started.session_id
+                and candidate.id = started.turn_id
+                and coalesce(case when candidate.source in ('user', 'api') then (
+                  select min(accepted.sequence) from session_events accepted
+                  where accepted.workspace_id = ${workspaceId}
+                    and accepted.session_id = sessions.id
+                    and accepted.turn_id = candidate.id
+                    and accepted.type = 'turn.queued'
+                ) end, 0) > ${boundary}
+              limit 1
+            )
+          order by started.sequence desc
+          limit 1
+        )
+      limit 1
+    ) latest on true
+    where sessions.workspace_id = ${workspaceId}
+      and sessions.id in (${sql.join(
+        sessionIds.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )})`;
 }
