@@ -21,7 +21,11 @@ import {
 } from "../components/capabilities/own-logins-shared-heads-up";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
-import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
+import {
+  finishDriveConnectReturnInChat,
+  finishMcpCapabilityOAuthReturn,
+} from "./session-capability-oauth-return";
+import { DRIVE_CONNECT_RETURN_PARAM } from "../lib/drive-connect-return";
 import { loadSessionFeedback } from "../../session-feedback-model";
 import {
   browserInteractiveAnswerStore,
@@ -1131,6 +1135,47 @@ export function SessionRoute({
   ]);
 
   const nativeReturnHandled = useRef(false);
+  // A Google Drive connect from this chat's card returns here with only its
+  // nonce. On failure the nonce stays, so a reload checks again.
+  const driveReturnHandled = useRef(false);
+  useEffect(() => {
+    if (driveReturnHandled.current || !capabilityCatalogReady) return;
+    const nonce = page.readQuery().get(DRIVE_CONNECT_RETURN_PARAM);
+    if (!nonce) return;
+    driveReturnHandled.current = true;
+    void finishDriveConnectReturnInChat({
+      client: capabilityClient,
+      workspaceId,
+      sessionId,
+      nonce,
+      storage: window.sessionStorage,
+      refreshCatalog: refreshCapabilityCatalog,
+    })
+      .then((finished) => {
+        const query = page.readQuery();
+        query.delete(DRIVE_CONNECT_RETURN_PARAM);
+        query.delete("capability_auth");
+        page.replaceQuery(query);
+        toast.success(`${finished.name} connected`, {
+          description: finished.needsPersonalReview
+            ? "Review its connection card to allow your personal account in this conversation."
+            : "It is available to new tool calls in this session.",
+        });
+      })
+      .catch((error: unknown) => {
+        toast.error("Google Drive setup needs attention", {
+          description: userErrorText(error),
+        });
+      });
+  }, [
+    page,
+    capabilityCatalogReady,
+    capabilityClient,
+    refreshCapabilityCatalog,
+    workspaceId,
+    sessionId,
+  ]);
+
   useEffect(() => {
     if (nativeReturnHandled.current || !capabilityCatalogReady) return;
     const params = page.readQuery();
