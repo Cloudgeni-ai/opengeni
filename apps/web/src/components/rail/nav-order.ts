@@ -149,3 +149,34 @@ function sameArrangement(a: NavArrangement, b: NavArrangement): boolean {
     a.group.every((entry, index) => entry === b.group[index])
   );
 }
+
+/**
+ * `next` with the saved entries it lacks put back, each after the entry
+ * before it in the saved order: entries one interface (the simplified one,
+ * say) doesn't show keep their place for the other.
+ */
+export function keepSavedElsewhere(
+  next: NavArrangement,
+  savedTop: readonly string[] | null | undefined,
+  savedGroup: readonly string[] | null | undefined,
+): NavArrangement {
+  const present = new Set([...next.top, ...next.group]);
+  const restore = (list: readonly string[], saved: readonly string[] | null | undefined) => {
+    const out = [...list];
+    (saved ?? []).forEach((key, index) => {
+      if (present.has(key)) return;
+      let at = 0;
+      for (let before = index - 1; before >= 0; before--) {
+        const found = out.indexOf(saved![before]!);
+        if (found >= 0) {
+          at = found + 1;
+          break;
+        }
+      }
+      out.splice(at, 0, key);
+      present.add(key);
+    });
+    return out;
+  };
+  return { top: restore(next.top, savedTop), group: restore(next.group, savedGroup) };
+}

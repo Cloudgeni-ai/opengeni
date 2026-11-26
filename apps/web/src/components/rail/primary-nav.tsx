@@ -1,11 +1,12 @@
 import { useRouterState } from "@tanstack/react-router";
 import { ChevronDownIcon, SlidersHorizontalIcon } from "lucide-react";
-import { Fragment, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { navEntryKey, useHiddenNavEntries } from "./hidden-nav-entries";
 import {
   arrangeNav,
+  keepSavedElsewhere,
   moveNavEntry,
   NAV_GROUP_KEY,
   stepNavEntry,
@@ -160,7 +161,7 @@ export function WorkspaceShortcutLinks({
   // something you can see.
   const onScreen = (key: string) =>
     key === NAV_GROUP_KEY
-      ? grouped.length > 0
+      ? grouped.length > 0 || canMove
       : arrangement.group.includes(key)
         ? groupOpen
           ? visible(key)
@@ -196,7 +197,8 @@ export function WorkspaceShortcutLinks({
     );
   };
   const groupBlock =
-    grouped.length === 0 ? null : rail.collapsed ? (
+    // While entries can move, an empty group keeps its name, to drop them back into.
+    grouped.length === 0 && !canMove ? null : rail.collapsed ? (
       // The icon rail has no room for a group: its pages keep their icons.
       <Fragment key={NAV_GROUP_KEY}>{grouped.map(entry)}</Fragment>
     ) : (
@@ -300,7 +302,10 @@ function NavDragRow({
         event.stopPropagation();
         setOver(zone(event));
       }}
-      onDragLeave={() => setOver(null)}
+      onDragLeave={(event) => {
+        // Moving onto the row's own link or icon isn't leaving it.
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOver(null);
+      }}
       onDrop={(event) => {
         if (!accepts(event)) return;
         event.preventDefault();
@@ -353,19 +358,33 @@ function NavDragRow({
 function useNavOrder(workspaceId: string) {
   const { layout, options, update } = useSidebarLayout(workspaceId);
   const [pending, setPending] = useState<NavArrangement | null>(null);
+  // One save at a time, so quick moves land in the order they were made.
+  const saving = useRef<Promise<unknown>>(Promise.resolve());
   const savedOrder = options?.navOrder ?? null;
   const savedGroup = options?.navSetup ?? null;
   return {
     canChange: layout?.personal.available === true,
     arrange: (defaults: NavArrangement) =>
       arrangeNav(defaults, pending?.top ?? savedOrder, pending?.group ?? savedGroup),
-    save: (next: NavArrangement | null) => {
-      if (!next) return;
+    save: (moved: NavArrangement | null) => {
+      if (!moved) return;
+      // Entries this interface doesn't show keep their saved places.
+      const next = keepSavedElsewhere(
+        moved,
+        pending?.top ?? savedOrder,
+        pending?.group ?? savedGroup,
+      );
       setPending(next);
-      void update({
-        scope: "personal",
-        changes: [{ op: "options", navOrder: next.top, navSetup: next.group }],
-      })
+      const request = saving.current
+        .catch(() => undefined)
+        .then(() =>
+          update({
+            scope: "personal",
+            changes: [{ op: "options", navOrder: next.top, navSetup: next.group }],
+          }),
+        );
+      saving.current = request;
+      void request
         .catch((error: unknown) =>
           toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
         )

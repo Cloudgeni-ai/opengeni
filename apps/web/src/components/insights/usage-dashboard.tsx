@@ -1121,10 +1121,15 @@ function BreakdownPanel(props: {
     byAgent && row.kind === "item" && row.filter?.field === "agentId"
       ? row.filter.values[0]
       : undefined;
+  // Across an organization the agent rows carry no workspace: read the
+  // workspaces the usage covers, those with rows first.
   const agentWorkspaceIds =
     props.scope.kind === "workspace"
       ? [props.scope.workspaceId]
-      : rows.flatMap((row) => (row.workspaceId ? [row.workspaceId] : []));
+      : [
+          ...rows.flatMap((row) => (row.workspaceId ? [row.workspaceId] : [])),
+          ...usage.facets.workspaces.map((workspace) => workspace.id),
+        ];
   const agentAvatars = useUsageAgentAvatars(agentWorkspaceIds, byAgent);
 
   return (
@@ -1202,14 +1207,21 @@ function BreakdownPanel(props: {
               return (
                 <ListRow
                   key={row.id}
-                  {...(agentOf(row) && (row.workspaceId ?? props.scope.workspaceId)
+                  {...(agentOf(row) &&
+                  (row.workspaceId ??
+                    props.scope.workspaceId ??
+                    agentAvatars.get(agentOf(row)!.toLowerCase())?.workspaceId)
                     ? {
                         leading: (
                           <UsageAgentAvatar
                             agentId={agentOf(row)!}
                             name={row.label}
                             known={agentAvatars.get(agentOf(row)!.toLowerCase())}
-                            workspaceId={(row.workspaceId ?? props.scope.workspaceId)!}
+                            workspaceId={
+                              (row.workspaceId ??
+                                props.scope.workspaceId ??
+                                agentAvatars.get(agentOf(row)!.toLowerCase())?.workspaceId)!
+                            }
                           />
                         ),
                       }

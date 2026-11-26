@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { arrangeNav, moveNavEntry, NAV_GROUP_KEY, stepNavEntry } from "./nav-order";
+import {
+  arrangeNav,
+  keepSavedElsewhere,
+  moveNavEntry,
+  NAV_GROUP_KEY,
+  stepNavEntry,
+} from "./nav-order";
 
 const defaults = {
   top: ["new_session", "inbox", "agents", "apps", NAV_GROUP_KEY],
@@ -120,5 +126,19 @@ describe("rail entry order", () => {
     ).toEqual(["capabilities", "automations", "get_started"]);
     // Nothing shown beyond it: no move.
     expect(stepNavEntry(defaults, "apps", 1, false, (key) => key !== NAV_GROUP_KEY)).toBeNull();
+  });
+
+  test("a move in one interface keeps the saved places of entries only the other shows", () => {
+    // Saved in the full interface: meetings at the top after agents, rigs in the group.
+    const savedTop = ["new_session", "agents", "meetings", "inbox", "apps", NAV_GROUP_KEY];
+    const savedGroup = ["get_started", "rigs", "capabilities", "automations"];
+    // The simplified interface has neither; it moves apps up.
+    const shown = arrangeNav(defaults, savedTop, savedGroup);
+    const moved = moveNavEntry(shown, "apps", "new_session", "before")!;
+    expect(keepSavedElsewhere(moved, savedTop, savedGroup)).toEqual({
+      top: ["apps", "new_session", "agents", "meetings", "inbox", NAV_GROUP_KEY],
+      group: ["get_started", "rigs", "capabilities", "automations"],
+    });
+    expect(keepSavedElsewhere(moved, null, null)).toEqual(moved);
   });
 });
