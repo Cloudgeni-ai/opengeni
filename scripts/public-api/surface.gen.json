@@ -44530,6 +44530,7 @@
       "labelReasoningEffort": "value",
       "LatencyModeId": "type",
       "modelDisplayName": "value",
+      "modelFundingHint": "value",
       "modelOffersEffortChoice": "value",
       "modelUsesCredits": "value",
       "modelVendor": "value",

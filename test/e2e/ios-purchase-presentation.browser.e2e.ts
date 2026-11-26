@@ -55,6 +55,7 @@ const composer = "/test/credit-billing-preview.html?plans&composer";
 const inbox = "/test/credit-billing-preview.html?inbox";
 const refusal = "/test/credit-billing-preview.html?refusal";
 const organizationFixture = "/test/organization-workspace-administration.html";
+const modelPicker = "/dev/own-subscription-plan?view=picker";
 const peoplePath = "#/workspaces/22222222-2222-4222-8222-222222222222/organization?section=people";
 const purchaseCopy =
   /get pro|get max|start with pro|\$20\s*\/\s*month|have a code|open stripe|promo code|manage billing|add (a card|credits)|set up card|update card|(turn on|save) automatic top-up|talk to us|upgrade (the|your|to)|ask .* to (add|buy|upgrade)/i;
@@ -67,6 +68,28 @@ async function capture(page: Page, name: string): Promise<void> {
     });
   }
 }
+
+test("the iOS model picker keeps the choice without naming the paid plan", async () => {
+  const context = await phone();
+  try {
+    const page = await context.newPage();
+    await page.goto(origin + modelPicker);
+    const row = page.getByTestId("model-picker-choice-codex/gpt-6.2-astra");
+    await row.getByText("Needs Pro", { exact: true }).waitFor();
+    expect(await page.getByText("ChatGPT / Codex plan", { exact: true }).count()).toBe(1);
+    expect(await row.isEnabled()).toBe(true);
+    await capture(page, "model-picker-unmarked");
+
+    await page.goto(`${origin}${modelPicker}&client=ios`);
+    await row.getByText("Not available on your current plan", { exact: true }).waitFor();
+    expect(await row.isEnabled()).toBe(true);
+    expect(await page.getByText("Needs Pro", { exact: true }).count()).toBe(0);
+    expect(await page.getByText("ChatGPT / Codex plan", { exact: true }).count()).toBe(0);
+    await capture(page, "model-picker-ios");
+  } finally {
+    await context.close();
+  }
+}, 60_000);
 
 test("hosted iOS entry removes offers, keeps setup and balance, and lasts across reloads in only that tab", async () => {
   const context = await phone();

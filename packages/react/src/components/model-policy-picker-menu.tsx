@@ -4,6 +4,7 @@ import { useRef, useState, type RefObject, type CSSProperties } from "react";
 import { Popover, RadioGroup } from "radix-ui";
 import { containedPortal } from "../ui/portal-container";
 import { cn } from "../lib/cn";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import {
   MENU_CHECK_CLASS,
   MENU_LABEL_CLASS,
@@ -27,7 +28,6 @@ import { ModelMark } from "./model-mark";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const PopoverContainedPortal = containedPortal(Popover.Portal);
-import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
@@ -36,7 +36,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   const t = useOpenGeniText();
   const showPurchasePrompts = useShowPurchasePrompts();
   const [query, setQuery] = useState("");
-  const view = modelPickerMenuView(t, props, query);
+  const view = modelPickerMenuView(t, { ...props, showPurchasePrompts }, query);
   const { messages, rows, groups } = view;
   const selected = view.selected;
   const choose = (row: ClientPickerModelRow) => {
@@ -49,7 +49,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     if (choice.latencyMode !== null) props.onLatencyModeChange(choice.latencyMode);
   };
   const modelRow = (row: ClientPickerModelRow) => {
-    const hint = row.unavailableReason ?? (showPurchasePrompts ? row.fundingHint : undefined);
+    const hint = row.unavailableReason ?? row.fundingHint;
     return (
       <PickerNavRow
         key={row.id}
