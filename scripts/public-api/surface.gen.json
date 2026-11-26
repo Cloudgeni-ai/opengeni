@@ -45618,6 +45618,7 @@
     "@opengeni/react/ui/logo-tile": {
       "logoMonogram": "value",
       "LogoTile": "value",
+      "logoTileHue": "value",
       "LogoTileProps": "type",
       "LogoTileSize": "type",
       "LogoTileSizeProvider": "value",

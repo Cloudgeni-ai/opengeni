@@ -46,6 +46,13 @@ const SETUP_ICONS: Record<GuidedSetup["icon"], ReactNode> = {
   "chart-line": <ChartLineIcon />,
 };
 
+/** Each setup's tile hue, so the three read apart at a glance. */
+const SETUP_HUES: Record<GuidedSetup["icon"], number> = {
+  "git-pull-request": 275,
+  "list-checks": 185,
+  "chart-line": 45,
+};
+
 /** One setup's trigger: on, paused (with its task), none, or unknown when it can't be read. */
 type TriggerState =
   | { kind: "on" }
@@ -140,7 +147,7 @@ export function GetStartedPage({
   return (
     <DetailPage>
       <DetailPageHeader
-        leading={<LogoTile name="Get started" icon={<RocketIcon />} />}
+        leading={<LogoTile name="Get started" icon={<RocketIcon />} hue={160} />}
         title="Get started"
         meta={["Pick a setup. Each ends with an agent at work."]}
       />
@@ -152,7 +159,13 @@ export function GetStartedPage({
             GUIDED_SETUPS.map((entry) => (
               <ListRow
                 key={entry.key}
-                leading={<LogoTile name={entry.title} icon={SETUP_ICONS[entry.icon]} />}
+                leading={
+                  <LogoTile
+                    name={entry.title}
+                    icon={SETUP_ICONS[entry.icon]}
+                    hue={SETUP_HUES[entry.icon]}
+                  />
+                }
                 title={entry.title}
                 description={entry.description}
                 status={
@@ -341,7 +354,13 @@ function GuidedSetupSteps({
   return (
     <DetailPage back={{ label: "Get started", onClick: onBack }}>
       <DetailPageHeader
-        leading={<LogoTile name={setup.title} icon={SETUP_ICONS[setup.icon]} />}
+        leading={
+          <LogoTile
+            name={setup.title}
+            icon={SETUP_ICONS[setup.icon]}
+            hue={SETUP_HUES[setup.icon]}
+          />
+        }
         title={setup.title}
         meta={[setup.description]}
       />

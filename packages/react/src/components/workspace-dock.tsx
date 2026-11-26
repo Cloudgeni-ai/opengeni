@@ -1112,7 +1112,7 @@ function DockChrome({
       <div
         ref={headerRef}
         className={cn(
-          "relative min-h-11 shrink-0 items-center gap-1 bg-[radial-gradient(120%_180%_at_100%_0%,color-mix(in_oklch,var(--og-color-accent)_8%,transparent),transparent_70%)] px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
+          "relative min-h-11 shrink-0 items-center gap-1 px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
           // The empty view needs no header unless it carries controls.
           landing && !leading && !controls && !hasMenu ? "hidden" : "flex",
         )}

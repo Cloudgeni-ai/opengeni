@@ -12,6 +12,10 @@ code disagree, this file wins; bring the code in line when you touch it.
   extract it into the shared primitives before shipping the second copy.
 - Decided 27 Sep 2026 by Bendik. The kit keeps the retired alternatives visible for the history,
   marked with the "Decided" tag on the chosen one.
+- Sharp look, decided 26 Nov 2026 by Bendik: polished black, higher contrast, a solid primary
+  button and no decorative gradients anywhere. Section 2 holds the values;
+  `packages/react/test/design-token-contrast.test.ts` checks them and
+  `packages/react/test/no-decorative-gradients.test.ts` keeps gradients out.
 
 ## 1. Principles
 
@@ -50,7 +54,7 @@ the shared primitives, no `text-[10px]` / `text-[11px]` literals.
 
 | Token | Use |
 | --- | --- |
-| `bg` | Rail and page chrome (behind the rail glow). Inside the content pane `bg` resolves to `canvas` |
+| `bg` | Rail and page chrome. Inside the content pane `bg` resolves to `canvas` |
 | `canvas` | The main content pane beside the rail or settings rail (`data-canvas`) |
 | `surface` | Inputs, dialogs, menus, outline buttons |
 | `surface-2` | Chips, segmented track, the detail page aside card |
@@ -64,7 +68,7 @@ the shared primitives, no `text-[10px]` / `text-[11px]` literals.
 | `fg-muted` | Descriptions, meta lines, secondary button text, section labels in a rail |
 | `fg-subtle` | Quiet meta, placeholders, separators |
 | `brand` | Neutral grey: icon, focus, active tab bar, selected ring. Never blue. Text links use `og-link`, not `text-brand` |
-| `primary` | The filled primary button only ("teal wash": `primary` fill, `primary-foreground` ink, `primary-border` edge, `primary-hover`) |
+| `primary` | The filled primary button only (solid: `primary` fill, `primary-foreground` ink, `primary-border` edge, `primary-hover`) |
 | `switch-track` / `switch-thumb` | A switch that is off |
 | `status-idle` | Green: Connected, Active, Succeeded, Installed |
 | `status-waiting` | Peach: Needs you, Needs reconnect, Pending review |
@@ -84,45 +88,52 @@ keyboard focus (plus the focus outline). Never a hover-only underline. A meta li
 `text-fg-muted` next to `og-link` and the underline follows it. Row titles that open a page,
 nav items, menu rows, tabs and ghost buttons are not text links and stay un-underlined.
 
-The palette is neutral grey everywhere (no blue or slate tint). Color appears only in the
-primary button's teal wash, the soft teal/peach glow, the status hues, and the
+The palette is neutral grey everywhere (no blue or slate tint): sharp, high-contrast, polished
+black in dark. Color appears only in hued icon tiles, the status hues, text links and the
 unread-chat / Following up markers (`session-update`: light `#0f766e`, dark `#5ad4c5`).
 
-| | Light | Dark ("graphite") |
-| --- | --- | --- |
-| `bg` (rail, chrome) | `#f6f6f6` | `#303030` |
-| `canvas` (content pane) | `#ffffff` | `#202020` (darker than the rail) |
-| `surface` / `surface-2` / `surface-3` | `#ffffff` / `#eeeeee` / `#e5e5e5` | `#333333` / `#383838` / `#404040` |
-| `hover` | `fg` at 6% (`rgb(36 36 36 / 0.06)`) | `fg` at 8% (`rgb(230 230 230 / 0.08)`) |
-| `selection` | `#e2e2e2` | `#484848` |
-| `text-selection` (selected text, not rows) | `#3884ff52` | `#488ceb70` |
-| `border` / `border-strong` | `#dedede` / `#bdbdbd` | `#454545` / `#555555` |
-| `fg` / `fg-label` / `fg-muted` / `fg-subtle` | `#242424` / `#3a3a3a` / `#5f5f5f` / `#696969` | `#e6e6e6` / `#d4d4d4` / `#b8b8b8` / `#a3a3a3` |
-| `brand` (accent) / accent-deep / accent-fg | `#545454` / `#383838` / `#ffffff` | `#c4c4c4` / `#d5d5d5` / `#242424` |
-| `primary` fill / ink / edge | `#ebf2f0` / `#292929` / `#c4d5d0` | `#2b3432` / `#eeeeee` / `#4e5e59` |
-| `status-waiting` / `running` / `idle` | `#8c5524` / `#716122` / `#237058` | `#e9ab77` / `#d5bd72` / `#83cbb0` |
-| Glow teal / peach | `#9fe3d359` / `#ffb78752` | `#79d9c125` / `#ffb78724` |
+**No decorative gradients.** No gradient, glow or wash on the rail, cards, headers, empty states,
+banners or buttons; every surface is a solid token. The only gradients left are functional and
+listed in `packages/react/test/no-decorative-gradients.test.ts` (fade masks that hide overflowing
+text, chart area fills, loading shimmers, the hover-layer utility and brand marks). Adding a new
+one fails that test until it is on the list with its reason.
 
-Light `fg-muted`, `fg-subtle` and the light status hues are a step darker than the studio values
-(`#686868`, `#767676`, `#a3652f`, `#8b782c`, `#287d64`), and dark `fg-muted` and `fg-subtle` a step
-lighter than `#b0b0b0` and `#949494`, so every text token keeps 4.5:1 as 11-12px text on the rail,
-`surface-2` and the hover wash, and `fg`, `fg-label`, `fg-muted` and the status hues keep it on the
-selected row too (`fg-subtle` there is for icons only).
+| | Light | Dark ("polished black") |
+| --- | --- | --- |
+| `bg` (rail, chrome) | `#f7f7f7` | `#141414` |
+| `canvas` (content pane) | `#ffffff` | `#0d0d0d` (darker than the rail) |
+| `surface` / `surface-2` / `surface-3` | `#ffffff` / `#f2f2f2` / `#e9e9e9` | `#1a1a1a` / `#232323` / `#2c2c2c` |
+| `hover` | `fg` at 6% (`rgb(23 23 23 / 0.06)`) | `fg` at 8% |
+| `selection` | `#e6e6e6` | `#303030` |
+| `text-selection` (selected text, not rows) | `#3884ff52` | `#488ceb70` |
+| `border` / `border-strong` | `#e4e4e4` / `#c9c9c9` | `#363636` / `#4a4a4a` |
+| `fg` / `fg-label` / `fg-muted` / `fg-subtle` | `#171717` / `#2e2e2e` / `#525252` / `#6b6b6b` | `#f5f5f5` / `#e3e3e3` / `#a6a6a6` / `#8c8c8c` |
+| `brand` (accent) / accent-deep / accent-fg | `#545454` / `#383838` / `#ffffff` | `#c4c4c4` / `#d5d5d5` / `#171717` |
+| `primary` fill / ink / edge | `#171717` / `#ffffff` / `#171717` | `#f2f2f2` / `#171717` / `#f2f2f2` |
+| `status-waiting` / `running` / `idle` | `#8c5524` / `#716122` / `#237058` | `#e9ab77` / `#d5bd72` / `#83cbb0` |
+| Hued tile glyph (oklch L / C) | `0.52` / `0.15` | `0.8` / `0.13` |
+
+Dark surfaces step up clearly: canvas (page) `#0d0d0d`, rail `#141414`, cards and inputs
+`#1a1a1a`, raised fills `#232323` and `#2c2c2c`, all solid. Every text token keeps 4.5:1 as 11-12px
+text on the canvas, the rail, `surface` and `surface-2`, and `fg`, `fg-label`, `fg-muted` and the
+status hues keep it on the selected row too (`fg-subtle` there is for icons only). Titles stand
+well apart from body text: `fg` is at least 2.5:1 against `fg-muted` in luminance terms in both
+themes. `design-token-contrast.test.ts` checks all of this from `tokens.css`.
 
 **Hover and selected.** There is one hover, the `hover` token: `fg` mixed into transparent (6% in
 light, 8% in dark). Because it is translucent it darkens (light) or lightens (dark) whatever sits
-under it by the same step - the rail glow, the canvas, a card, a menu panel - so it never blends
-into the glow the way a solid grey does. Use `hover:bg-hover` on transparent rows and items; on
+under it by the same step - the rail, the canvas, a card, a menu panel. Use `hover:bg-hover` on transparent rows and items; on
 something with its own fill (a suggestion card) keep the fill and add the wash as a layer with
 `hover:hover-layer`. Selected and active is a separate, stronger, opaque state: `selection` fill,
 `fg` text, plus the brand bar (nav) or the `brand/20` edge (session row). A selected item keeps its
 fill on hover. A roving keyboard tab stop shows the hover wash only while it holds focus.
 
-**Buttons.** Primary: the teal wash, no shadow, hover mixes 15% ink into the fill. Secondary:
+**Buttons.** Primary: a solid button (light: `#171717` fill, white text; dark: `#f2f2f2` fill, ink
+text), no shadow, hover mixes 15% ink into the fill. Secondary:
 `selection` fill, `fg-muted` text. Outline: `surface` fill, `border`, `fg` text. Disabled: 50%
 opacity for every variant, and only with a visible reason nearby (section 6).
 
-**One primary per region.** The single most important action in a region is the teal-wash
+**One primary per region.** The single most important action in a region is the solid
 primary; everything else there is the white outline, and tertiary actions are ghost or links. A
 region is a page header, a section, an empty state, a dialog footer, a banner or notice, a form
 page footer, or a menu.
@@ -136,12 +147,19 @@ page footer, or a menu.
 - Outline: row actions (Rename, Make primary, Replace value), a second action
   next to a primary, Cancel and Back. Destructive confirms use the destructive variant; a delete
   entry point is outline with danger text.
-- Never two teal buttons in one region, and never an inverted (`fg`-filled) or near-black button.
-  Selected chips and filters use `selection` with `fg` text, not an inverted fill.
+- Never two primary buttons in one region, and no other inverted (`fg`-filled) buttons: the solid
+  fill means "the one primary here". Selected chips and filters use `selection` with `fg` text,
+  not an inverted fill.
 
-**Rail glow.** The main rail and the settings rail use `.og-rail-glow`: a teal wash from the
-top-left and a peach wash from the bottom-right over `bg`. The signed-out pages use
-`.og-page-glow`, the same two washes down the left edge of the canvas.
+**Rail and signed-out pages.** The main rail and the settings rail use `.og-rail-glow`, a solid
+`bg`; the signed-out pages use `.og-page-glow`, a solid `canvas`. The class names are historical:
+neither paints a glow.
+
+**Icon tiles.** A thing with a real logo shows it (`LogoTile` `src`; event sources fall back to
+bundled GitHub and Gmail marks). Things without one get a hued tile (`LogoTile` `hue`): the glyph
+in the hue, the fill at 16% of it and the edge at 30%. Agents keep their avatars; apps get their
+own hue from their id or template key (`logoTileHue`), like agents; each Get started setup has
+its own. Plain grey tiles stay for generic objects (keys, variables, page headers of settings).
 
 Grey (`fg-subtle`) is Paused, Disabled, Not connected, Revoked, Off. Always a dot plus a
 sentence-case label; never color alone.
@@ -157,10 +175,11 @@ Inter Variable with `cv11 ss01 ss03`; JetBrains Mono for IDs, code and key prefi
 
 | Role | Size / line | Weight | Notes |
 | --- | --- | --- | --- |
-| Page title, detail page title | 20 / 28 | 600 | -0.5px tracking |
+| Page title, detail page title | 20 / 28 | 600 | -0.012em tracking (every heading) |
 | Dialog title | 18 / 26 | 600 | -0.25px |
 | Section heading | 16 / 24 | 600 | -0.2px; one step above row titles so a section never reads as a setting |
-| Row title, tab, button, label | 14 / 20 | 500 | `fg` |
+| Row title | 14 / 20 | 600 | `fg`; list rows and catalog rows |
+| Tab, button, label | 14 / 20 | 500 | `fg` |
 | Rail and settings-rail items, session titles | 14 / 20 | 400 | `fg-label`; the active item is marked by its fill and bar, not by weight |
 | Body, page subtitle, meta line under a detail title | 14 / 20 | 400 | `fg-muted` |
 | Description, help | 12 / 18 | 400 | `fg-muted`, 2-line clamp in rows |
@@ -211,6 +230,10 @@ opacity-muted text.
   control is the card. A form dialog or sheet opened from a card starts fresh (`FormDialog` and
   `Sheet` wrap their content in `SectionFrameReset`; a plain `Dialog` that shows lists or choices
   does the same itself, so the startup bundle doesn't carry the section context).
+- **Lists sit on one bordered surface card** (1px `border`, radius 14, `surface`). Catalog lists
+  (`RowList variant="catalog"`, `.og-connection-catalog`) are their own card by default with an
+  8px inset, so rows keep their 12px padding and titles sit 20px in, as in settings cards; other
+  lists opt in with `card`. A list inside a card never draws a second one.
 - Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 64px (32px
   tile, one column, hairline dividers, for things you own). **Every row in a list has the same
   height.** A resource row is its title plus ONE secondary line: the description and the meta
@@ -232,7 +255,7 @@ opacity-muted text.
   `shadow-lg`. Menus: `shadow-md` (see "Menus and popovers" below).
 - Focus: 2px ring in brand (neutral grey) at 55%, 2px offset. Motion: 120ms, color and opacity
   only.
-- Rail: 240px in every mode, on the rail glow. Nav item 32px, radius 10, 16px icon, 14/400
+- Rail: 240px in every mode, on solid `bg`. Nav item 32px, radius 10, 16px icon, 14/400
   `fg-label` (icon and text alike); hover = the `hover` wash; active = `selection` + `fg` + a 2x16px
   brand bar. Session
   titles and the "Sessions" heading are `fg-label` too; only true meta (timestamps, counts, "Show
@@ -657,13 +680,13 @@ Colors, fonts and most sizes are tokens, so a restyle happens in two files, not 
 - `packages/react/styles/tokens.css` (`@opengeni/react` tokens) defines the palette and fonts as
   `--og-*` variables for light and dark (`--og-color-bg`, `--og-color-canvas`,
   `--og-color-surface-1`, `--og-color-selection`, `--og-color-hover`, `--og-color-accent`,
-  `--og-color-primary*`, `--og-glow-*`, `--og-color-status-*`, `--og-font-sans`, ...). Change a
+  `--og-color-primary*`, `--og-tile-*`, `--og-color-status-*`, `--og-font-sans`, ...). Change a
   color or font there and every surface follows, in both themes. Run `bun run build:css` in `packages/react` after
   editing it; `compiled.css` is checked in.
 - `apps/web/src/styles.css` maps those onto Tailwind names in `@theme` (`--color-bg`,
   `--color-canvas`, `--color-brand`, `--color-primary`, `--font-sans`, `--radius-md` 10px,
   `--radius-lg` 14px, `--text-2xs`), rebinds `bg` to `canvas` inside `[data-canvas]`, and holds
-  the glow classes. Rename or retune the scale there.
+  the rail and signed-out page surface classes. Rename or retune the scale there.
 
 Components use only the semantic utilities (`bg-surface`, `text-fg-muted`, `border-border`,
 `text-brand`, `rounded-md`), so they pick up the change without edits. Some primitives still

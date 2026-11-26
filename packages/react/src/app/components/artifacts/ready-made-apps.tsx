@@ -71,7 +71,7 @@ export function ReadyMadeApps({ workspaceId }: { workspaceId: string }) {
             name={template.name}
             description={template.description}
             title={template.description}
-            icon={<ArtifactKindTile kind="site" />}
+            icon={<ArtifactKindTile kind="site" seed={template.key} />}
             status={adding === template.key ? "loading" : "available"}
             statusLabel={`Add ${template.name}`}
             disabled={adding !== null}

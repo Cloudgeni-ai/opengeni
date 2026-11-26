@@ -147,7 +147,7 @@ export function SubscriptionPlans({
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-xl font-semibold tracking-[-0.5px] text-fg">
+              <p className="text-xl font-semibold tracking-[-0.012em] text-fg">
                 {plan.label}
                 {current?.monthlyPriceMicros != null ? (
                   <span className="ml-3 text-sm font-normal text-fg-muted">
@@ -223,7 +223,7 @@ export function SubscriptionPlans({
                   {selected ? <MetaChip>Current</MetaChip> : null}
                 </div>
                 <div>
-                  <p className="text-xl font-semibold tracking-[-0.5px] text-fg">
+                  <p className="text-xl font-semibold tracking-[-0.012em] text-fg">
                     {item.monthlyPriceMicros === null
                       ? "Let's talk"
                       : formatMoneyMicros(item.monthlyPriceMicros, "usd")}

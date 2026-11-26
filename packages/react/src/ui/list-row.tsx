@@ -154,6 +154,12 @@ export interface RowListProps {
    * corners, and the hairlines stay inside the content edge.
    */
   flush?: boolean | undefined;
+  /**
+   * Draw the list as one bordered surface card (radius 14) with an 8px inset,
+   * so row titles sit 20px in, like settings cards. Default: on for catalog
+   * lists outside a card; a list already inside a card never draws another.
+   */
+  card?: boolean | undefined;
   className?: string | undefined;
   children: ReactNode;
 }
@@ -174,6 +180,7 @@ export function RowList({
   onSortChange,
   busy = false,
   flush = false,
+  card,
   className,
   children,
 }: RowListProps) {
@@ -184,6 +191,8 @@ export function RowList({
   // card adds 8px so titles sit 20px in, like setting rows.
   const frame = useSectionListFrame();
   const flushCard = flush && frame === "card";
+  // Any other list may be its own card (catalogs by default), never inside one.
+  const ownCard = !flushCard && frame !== "inside" && (card ?? variant === "catalog");
   const templateStyle = {
     "--row-list-template": gridTemplate(columns, variant),
   } as CSSProperties;
@@ -241,7 +250,10 @@ export function RowList({
       <ul
         aria-label={label}
         aria-busy={busy || undefined}
-        className="m-0 grid min-w-0 list-none grid-cols-1 gap-x-6 gap-y-1 p-0 @[720px]/list:grid-cols-2"
+        className={cn(
+          "m-0 grid min-w-0 list-none grid-cols-1 gap-y-1 p-0 @[720px]/list:grid-cols-2",
+          ownCard ? "gap-x-2 [&>li>div]:rounded-[10px]" : "gap-x-6",
+        )}
       >
         {children}
       </ul>
@@ -270,10 +282,17 @@ export function RowList({
           data-slot="row-list"
           data-variant={variant}
           data-flush={flush || undefined}
-          data-frame={flushCard ? "card" : undefined}
+          data-frame={flushCard || ownCard ? "card" : undefined}
           className={cn(
             "@container/list min-w-0",
-            flushCard ? "rounded-lg border border-border bg-surface px-2 py-1" : flush && "-mx-3",
+            flushCard
+              ? "rounded-lg border border-border bg-surface px-2 py-1"
+              : ownCard
+                ? cn(
+                    "rounded-lg border border-border bg-surface",
+                    variant === "catalog" ? "p-2" : "px-2 py-1",
+                  )
+                : flush && "-mx-3",
             className,
           )}
         >
@@ -679,7 +698,7 @@ export function ListRow({
     // only an inline style keeps it off the title.
     style: { outline: "none" },
     className: cn(
-      "min-w-0 cursor-pointer truncate text-left text-sm leading-5 font-medium text-fg",
+      "min-w-0 cursor-pointer truncate text-left text-sm leading-5 font-semibold text-fg",
       "after:absolute after:inset-0 after:z-0 after:content-['']",
     ),
   };
@@ -714,7 +733,7 @@ export function ListRow({
     <span
       id={titleId}
       className={cn(
-        "min-w-0 truncate text-sm leading-5 font-medium",
+        "min-w-0 truncate text-sm leading-5 font-semibold",
         disabled ? "text-fg-muted" : "text-fg",
       )}
     >
