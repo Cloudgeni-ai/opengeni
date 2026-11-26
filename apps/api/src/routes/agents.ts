@@ -29,6 +29,8 @@ import {
   ListAgentsResponse,
   PutAgentSlackAvailabilityRequest,
   SessionAvatar,
+  AgentReadinessListResponse,
+  SetupReadinessResponse,
   UpdateAgentRequest,
   AGENTS_PER_WORKSPACE_MAX,
   slackAgentNameKey,
@@ -81,6 +83,10 @@ import {
   type AgentViewContext,
   type AgentViewer,
   type ApiRouteDeps,
+  agentsReadinessPurposes,
+  setupReadinessFor,
+  setupReadinessForMany,
+  templateTriggerUsesGitHubEvents,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -323,6 +329,38 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  /**
+   * Readiness of every agent the viewer can see, reading the catalog once
+   * (the Agents list). Registered before `/:agentId`.
+   */
+  app.get(`${base}/readiness`, async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    c.header("cache-control", "private, no-store");
+    const agents = await listAgents(db, context.home, {
+      viewerSubjectId: context.viewer.subjectId,
+      filter: "all",
+    });
+    const readiness = await setupReadinessForMany(
+      deps,
+      context.grant,
+      agents.map((agent) =>
+        agent.templateKey ? agentTemplateByKey(agent.templateKey)?.setup : undefined,
+      ),
+      // GitHub events only for agents whose own triggers run on them.
+      await agentsReadinessPurposes(
+        db,
+        context.grant.workspaceId,
+        context.grant.subjectId ?? null,
+        agents,
+      ),
+    );
+    return c.json(
+      AgentReadinessListResponse.parse({
+        agents: agents.map((agent, index) => ({ agentId: agent.id, readiness: readiness[index] })),
+      }),
+    );
+  });
+
   app.get(`${base}/:agentId`, async (c) => {
     const context = await requestContext(c, "sessions:read");
     c.header("cache-control", "private, no-store");
@@ -374,6 +412,60 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       await agentBody(context, await createAgentFor(context, request, template.key)),
       201,
+    );
+  });
+
+  /**
+   * Readiness of a ready-made agent before it is added (the Enable page): its
+   * connections, which the viewer already has, and what keeps it off.
+   */
+  app.get(`${templatesBase}/:templateKey/readiness`, async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    const template = agentTemplateByKey(c.req.param("templateKey") ?? "");
+    if (!template) {
+      throw agentError(
+        404,
+        "agent_template_not_found",
+        "There is no ready-made agent with that key.",
+      );
+    }
+    return c.json(
+      SetupReadinessResponse.parse({
+        readiness: await setupReadinessFor(deps, context.grant, template.setup, {
+          githubEvents: templateTriggerUsesGitHubEvents(template, c.req.query("trigger")),
+        }),
+      }),
+    );
+  });
+
+  /**
+   * Readiness of an agent for the viewer: an agent added from a ready-made
+   * one needs that template's required connections; any other is ready.
+   * Its triggers can't be turned on until it is (routes/scheduled-tasks.ts).
+   */
+  app.get(`${base}/:agentId/readiness`, async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    const agent = await requireVisibleAgent(c, context);
+    const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
+    return c.json(
+      SetupReadinessResponse.parse({
+        readiness: await setupReadinessFor(
+          deps,
+          context.grant,
+          template?.setup,
+          // A named trigger (Enable), else the agent's own triggers.
+          template && c.req.query("trigger")
+            ? { githubEvents: templateTriggerUsesGitHubEvents(template, c.req.query("trigger")) }
+            : ((
+                await agentsReadinessPurposes(
+                  db,
+                  context.grant.workspaceId,
+                  context.grant.subjectId ?? null,
+                  [agent],
+                )
+              )[0] ?? {}),
+        ),
+      }),
     );
   });
 

@@ -20,6 +20,7 @@ use compute_control::images::Images;
 use compute_control::leader::Scaling;
 use compute_control::link::Links;
 use compute_control::service::Settings;
+use compute_control::shrink::Shrinking;
 use compute_control::store::{MemoryStore, PostgresStore, Store};
 use compute_control::tls::{Tls, database_client};
 use compute_control::{Config, start};
@@ -296,6 +297,22 @@ struct Serve {
     /// grows around it.
     #[arg(long, default_value_t = 600)]
     scale_boot_within_s: u64,
+    /// Seconds the group must keep more spare than it needs, and since it
+    /// last grew or lost a host, before the leader drains a host to remove
+    /// it; 0 never shrinks the group.
+    #[arg(long, default_value_t = 1800)]
+    scale_shrink_after_s: u64,
+    /// Seconds a host the leader drains may take to empty before it is
+    /// taken back.
+    #[arg(long, default_value_t = 21_600)]
+    scale_drain_within_s: u64,
+    /// Seconds a host of the group someone else (an operator) drains is
+    /// left to them before the leader drains and removes it, as long as the
+    /// group keeps at least --scale-min hosts that take sandboxes; 0, the
+    /// default, never. A host the leader drained is always its own, whichever
+    /// replica led then.
+    #[arg(long, default_value_t = 0)]
+    scale_adopt_drained_after_s: u64,
     /// Where the E2B front door listens; without it there is none.
     #[arg(long)]
     e2b_listen: Option<SocketAddr>,
@@ -553,6 +570,13 @@ impl Serve {
             },
             every: Duration::from_secs(self.scale_every_s),
             boot_within: Duration::from_secs(self.scale_boot_within_s),
+            shrinking: (self.scale_shrink_after_s > 0).then(|| Shrinking {
+                after: Duration::from_secs(self.scale_shrink_after_s),
+                drain_within: Duration::from_secs(self.scale_drain_within_s),
+                adopt_after: (self.scale_adopt_drained_after_s > 0)
+                    .then(|| Duration::from_secs(self.scale_adopt_drained_after_s)),
+                ..Shrinking::RECOMMENDED
+            }),
         }))
     }
 

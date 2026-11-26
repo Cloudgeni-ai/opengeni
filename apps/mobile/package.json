@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "expo start --dev-client",
     "prebuild:ios": "expo prebuild --platform ios --clean",
+    "prebuild:ios:store": "OPENGENI_IOS_APP_STORE=1 NODE_PATH=\"$PWD/node_modules\" expo prebuild --platform ios --no-install --clean",
     "prebuild:android": "expo prebuild --platform android --clean",
     "typecheck": "tsrs --noEmit"
   },

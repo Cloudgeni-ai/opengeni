@@ -6462,7 +6462,7 @@ export type ClientAuthConfig =
       /** Defaults to true when omitted by an older deployment. */
       emailVerificationRequired?: boolean;
       /** Configured managed sign-in providers; omitted by older deployments. */
-      socialProviders?: ("google" | "github")[];
+      socialProviders?: ("google" | "github" | "apple")[];
       /**
        * False while the deployment has paused new account creation; existing
        * accounts can still sign in. Omitted (treat as true) by older deployments.

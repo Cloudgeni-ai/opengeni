@@ -6,13 +6,13 @@
    `[data-og-theme="light"]` (or the `.og-light` class) on any ancestor, so
    themes can be nested and rebranded per subtree.
 
-   The palette is deliberately calm: pure neutral greys (no hue tint), a
-   neutral grey "accent" for icons, focus and selected marks, and color only
-   where it carries meaning - text links, the primary button's teal wash, the
-   soft teal/peach glow behind the rail and sign-in page, and the status hues.
-   Information density comes from typography and spacing, not from color
-   shouting. Neutral and brand values are exact studio hex values; status and
-   danger values are tuned for WCAG AA as 11-12 px text on every surface.
+   The palette is sharp and high-contrast: pure neutral greys (no hue tint),
+   polished near-black surfaces in dark, a neutral grey "accent" for icons,
+   focus and selected marks, a solid ink primary button, and color only where
+   it carries meaning - text links, hued icon tiles and the status hues. No
+   decorative gradients anywhere. Text tokens are tuned for WCAG AA as
+   11-12 px text on every surface they sit on (see the contrast test in
+   test/design-token-contrast.test.ts).
    -------------------------------------------------------------------------- */
 
 :root {
@@ -82,15 +82,16 @@
   --og-ease-stream: cubic-bezier(0.16, 1, 0.3, 1);
   --og-ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
 
-  /* Neutrals (dark, "graphite") -------------------------------------------
-     The rail and page chrome (`bg`) sit lighter than the main content pane
-     (`canvas`); surfaces step up from the rail. */
-  --og-color-bg: #303030;
-  --og-color-canvas: #202020;
-  --og-color-surface-1: #333333;
-  --og-color-surface-2: #383838;
-  --og-color-surface-3: #404040;
-  --og-color-selection: #484848;
+  /* Neutrals (dark, "polished black") -------------------------------------
+     Solid near-black with clear steps: the content pane (`canvas`) is the
+     darkest, the rail and page chrome (`bg`) a step up, then cards and
+     inputs (`surface-1`) and raised fills (`surface-2`, `surface-3`). */
+  --og-color-bg: #141414;
+  --og-color-canvas: #0d0d0d;
+  --og-color-surface-1: #1a1a1a;
+  --og-color-surface-2: #232323;
+  --og-color-surface-3: #2c2c2c;
+  --og-color-selection: #303030;
   /* Hover: one treatment for every navigation item, list row and menu row
      (menu highlight and keyboard focus included). A translucent fg wash, so
      it darkens or lightens whatever sits under it - the rail glow, the
@@ -100,29 +101,29 @@
   /* Selected text (::selection, the code editor, the terminal and the native
      composer); `selection` above is the selected-row fill. A translucent calm
      blue, the hue people read as "selected" - a neutral grey here would look
-     like one more surface step. Composites to about #3b5882 on #303030,
+     like one more surface step. Composites to about #2e4a73 on #141414,
      keeping fg text above 4.5:1 on every surface. */
   --og-color-text-selection: #488ceb70;
-  --og-color-border: #454545;
-  --og-color-border-strong: #555555;
-  --og-color-fg: #e6e6e6;
+  --og-color-border: #363636;
+  --og-color-border-strong: #4a4a4a;
+  /* Titles are near-white and body text a clear step down, so names,
+     descriptions and meta never blur together. */
+  --og-color-fg: #f5f5f5;
   /* Labels you act on: rail and settings navigation, session titles, menu
      rows. A hair under fg so the active item (fg) still stands out, never
      muted like meta text. */
-  --og-color-fg-label: #d4d4d4;
-  /* A step over the studio's #b0b0b0 so muted text (secondary buttons, list
-     meta) keeps 4.5:1 on the selected-row fill too. */
-  --og-color-fg-muted: #b8b8b8;
-  /* Lifted from the studio's #949494 so quiet meta keeps 4.5:1 on the rail,
-     Surface 1-2 and the canvas. */
-  --og-color-fg-subtle: #a3a3a3;
+  --og-color-fg-label: #e3e3e3;
+  /* Keeps 4.5:1 on every surface, the selected-row fill included. */
+  --og-color-fg-muted: #a6a6a6;
+  /* Quiet meta: 4.5:1 on the canvas, rail and Surface 1-2. */
+  --og-color-fg-subtle: #8c8c8c;
 
   /* Accent - a neutral grey for icons, focus rings, the active tab bar and
-     selected rings. Color lives in links, the primary wash and the glow. */
+     selected rings. Color lives in links, icon tiles and status hues. */
   --og-color-accent: #c4c4c4;
   --og-color-accent-strong: #dcdcdc;
   --og-color-accent-deep: #d5d5d5;
-  --og-color-accent-fg: #242424;
+  --og-color-accent-fg: #171717;
   /* Text links (chat Markdown and every og-link): a calm blue, the hue people
      read as "you can open this". A grey link sat within a shade of body text
      and read as plain prose. Keeps 4.9:1 or more on the canvas, bg and
@@ -132,26 +133,32 @@
      grouped below so processors do not repeat this selector for every token. */
   --og-color-accent-soft: var(--og-color-accent);
 
-  /* Primary action - the "teal wash" button: a quiet tinted fill, ink text,
-     a 1px tinted edge and no shadow. Hover mixes 15% ink into the fill. */
-  --og-color-primary: #2b3432;
-  --og-color-primary-fg: #eeeeee;
-  --og-color-primary-border: #4e5e59;
+  /* Primary action - a solid button: a near-white fill with ink text in
+     dark, solid ink with white text in light. No shadow. Hover mixes 15% ink
+     into the fill. */
+  --og-color-primary: #f2f2f2;
+  --og-color-primary-fg: #171717;
+  --og-color-primary-border: #f2f2f2;
   --og-color-primary-hover: var(--og-color-primary);
   /* Switch off state. On, a switch takes the primary fill and edge with a
-     primary-ink thumb, so the thumb brightens when it turns on. */
-  --og-color-switch-track: #454545;
-  --og-color-switch-thumb: #a3a3a3;
+     primary-ink thumb. */
+  --og-color-switch-track: #3a3a3a;
+  --og-color-switch-thumb: #a6a6a6;
 
-  /* Glow - the soft teal (top-left) and peach (bottom-right) wash behind the
-     rail and the sign-in page. Quiet variants for dense surfaces. */
+  /* Hued icon tiles (LogoTile `hue`): the glyph's lightness and chroma; the
+     fill is the glyph color at 16% and the edge at 30%. */
+  --og-tile-lightness: 0.8;
+  --og-tile-chroma: 0.13;
+
+  /* Retired glow tokens. Nothing in Opengeni paints them any more (no
+     decorative gradients); kept so hosts that read them keep working. */
   --og-glow-teal: #79d9c125;
   --og-glow-peach: #ffb78724;
   --og-glow-teal-quiet: #79d9c115;
   --og-glow-peach-quiet: #ffb78714;
 
   /* Status - muted so they inform without alarming --------------------------- */
-  --og-color-status-queued: #a3a3a3;
+  --og-color-status-queued: #8c8c8c;
   --og-color-status-running: #d5bd72;
   /* Charge - the one warm colour for a costly speed (Ultrafast) while it is on
      or being engaged. Hosts may retint it. */
@@ -159,7 +166,7 @@
   --og-color-status-idle: #83cbb0;
   --og-color-status-waiting: #e9ab77;
   --og-color-status-failed: oklch(0.77 0.12 22);
-  --og-color-status-cancelled: #a3a3a3;
+  --og-color-status-cancelled: #8c8c8c;
   /* Readable as 14 px menu text on Surface 3. Filled destructive controls use
      the darker danger fill with the danger foreground. */
   --og-color-danger: oklch(0.76 0.13 22);
@@ -259,24 +266,24 @@
 /* Light theme — explicit opt-in, themable per subtree ----------------------- */
 [data-og-theme="light"],
 .og-light {
-  --og-color-bg: #f6f6f6;
+  --og-color-bg: #f7f7f7;
   --og-color-canvas: #ffffff;
   --og-color-surface-1: #ffffff;
-  --og-color-surface-2: #eeeeee;
-  --og-color-surface-3: #e5e5e5;
-  --og-color-selection: #e2e2e2;
-  --og-color-hover: rgb(36 36 36 / 0.06);
+  --og-color-surface-2: #f2f2f2;
+  --og-color-surface-3: #e9e9e9;
+  --og-color-selection: #e6e6e6;
+  --og-color-hover: rgb(23 23 23 / 0.06);
   /* Composites to about #bfd6ff on white. */
   --og-color-text-selection: #3884ff52;
-  --og-color-border: #dedede;
-  --og-color-border-strong: #bdbdbd;
-  --og-color-fg: #242424;
-  --og-color-fg-label: #3a3a3a;
-  /* Muted and subtle are a step darker than the studio's #686868 / #767676
-     so both keep 4.5:1 as small text on the rail, Surface 2 (row hover) and
-     the selected-row fill, with a visible step between them. */
-  --og-color-fg-muted: #5f5f5f;
-  --og-color-fg-subtle: #696969;
+  --og-color-border: #e4e4e4;
+  --og-color-border-strong: #c9c9c9;
+  --og-color-fg: #171717;
+  --og-color-fg-label: #2e2e2e;
+  /* Muted keeps 4.5:1 as small text everywhere, the selected-row fill
+     included; subtle keeps it on the canvas, rail and Surface 1-2, with a
+     visible step between them. */
+  --og-color-fg-muted: #525252;
+  --og-color-fg-subtle: #6b6b6b;
 
   --og-color-accent: #545454;
   --og-color-accent-strong: #383838;
@@ -287,12 +294,15 @@
   /* Match the dark-token fallback strategy without duplicating support rules. */
   --og-color-accent-soft: var(--og-color-accent);
 
-  --og-color-primary: #ebf2f0;
-  --og-color-primary-fg: #292929;
-  --og-color-primary-border: #c4d5d0;
+  --og-color-primary: #171717;
+  --og-color-primary-fg: #ffffff;
+  --og-color-primary-border: #171717;
   --og-color-primary-hover: var(--og-color-primary);
-  --og-color-switch-track: #bdbdbd;
+  --og-color-switch-track: #c9c9c9;
   --og-color-switch-thumb: #ffffff;
+
+  --og-tile-lightness: 0.52;
+  --og-tile-chroma: 0.15;
 
   --og-glow-teal: #9fe3d359;
   --og-glow-peach: #ffb78752;
@@ -303,13 +313,13 @@
      selected rows, and on the pale diff tints. The studio hues (#a3652f,
      #8b782c, #287d64) are darkened just enough for 4.5:1 on Surface 2 and
      on the selected-row fill. */
-  --og-color-status-queued: #696969;
+  --og-color-status-queued: #6b6b6b;
   --og-color-status-running: #716122;
   --og-color-charge: #b45f00;
   --og-color-status-idle: #237058;
   --og-color-status-waiting: #8c5524;
   --og-color-status-failed: oklch(0.5 0.19 22);
-  --og-color-status-cancelled: #696969;
+  --og-color-status-cancelled: #6b6b6b;
   /* Ordinary 14 px destructive menu text also appears on Surface 3. Keep
      enough AA contrast headroom there, including browser color rounding. */
   --og-color-danger: oklch(0.52 0.2 22);

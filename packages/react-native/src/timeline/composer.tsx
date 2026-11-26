@@ -4,17 +4,30 @@ import {
 } from "@opengeni/react/composer-messages";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
-import { useEffect, useState, type ComponentRef, type ReactNode, type Ref } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ComponentRef,
+  type ReactNode,
+  type Ref,
+} from "react";
 import {
   AccessibilityInfo,
   ActivityIndicator,
   Keyboard,
   Platform,
   Pressable,
+  StatusBar,
   Text,
   TextInput,
+  TurboModuleRegistry,
   useWindowDimensions,
   View,
+  type ViewProps,
   type ViewStyle,
 } from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
@@ -208,10 +221,7 @@ export function SessionComposer(props: SessionComposerProps) {
   // One line of the field at the person's text size (the line height scales with it).
   const { fontScale, height: windowHeight } = useWindowDimensions();
   const line = Math.ceil(22 * fontScale);
-  // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
-  // inside modals and overlays; the animated keyboard height does not.
-  const keyboard = useAnimatedKeyboard();
-  const keyboardHeight = useKeyboardHeight();
+  const keyboard = useKeyboardMetrics();
   const floating = props.floating ?? false;
   // Only Liquid Glass lets the conversation scroll beneath the composer, and
   // then under a scroll-edge fade like the system bars: the glass picks up the
@@ -226,13 +236,7 @@ export function SessionComposer(props: SessionComposerProps) {
       ? Math.max(10, (props.bottomInset ?? 0) - 4)
       : (props.bottomInset ?? 0) + 8
     : Math.max(16, (props.bottomInset ?? 0) + 4);
-  const offset = props.keyboardBottomOffset ?? 0;
-  const liftWithKeyboard = props.liftWithKeyboard ?? true;
-  const lift = useAnimatedStyle(() => {
-    if (!liftWithKeyboard) return { paddingBottom: restingBottom };
-    const lifted = keyboard.height.value - offset;
-    return { paddingBottom: lifted > 0 ? lifted + 8 : restingBottom };
-  });
+  const Dock = Platform.OS === "android" ? AndroidComposerDock : AnimatedComposerDock;
   const t = useOpenGeniText();
   const messages = { ...defaultChatComposerMessages(t), ...props.messages };
   const fieldSize = ios ? 17 : 16;
@@ -264,7 +268,7 @@ export function SessionComposer(props: SessionComposerProps) {
       minHeight: inline ? 36 : 40,
       hasText: Boolean(props.value),
       windowHeight,
-      keyboardHeight,
+      keyboardHeight: keyboard?.height ?? 0,
     });
     return { minHeight, maxHeight, ...(ios && height !== undefined ? { height } : {}) };
   };
@@ -298,7 +302,12 @@ export function SessionComposer(props: SessionComposerProps) {
     />
   );
   return (
-    <Animated.View
+    <Dock
+      restingBottom={restingBottom}
+      keyboardBottomOffset={props.keyboardBottomOffset ?? 0}
+      liftWithKeyboard={props.liftWithKeyboard ?? true}
+      keyboardTop={keyboard?.screenY}
+      windowHeight={windowHeight}
       pointerEvents={floating ? "box-none" : "auto"}
       onLayout={(event) => props.onHeightChange?.(event.nativeEvent.layout.height)}
       style={[
@@ -309,7 +318,6 @@ export function SessionComposer(props: SessionComposerProps) {
           backgroundColor: seeThrough ? "transparent" : c.bg,
         },
         floating ? { position: "absolute", left: 0, right: 0, bottom: 0 } : null,
-        lift,
       ]}
     >
       {seeThrough ? <ScrollEdgeFade color={c.bg} /> : null}
@@ -391,8 +399,88 @@ export function SessionComposer(props: SessionComposerProps) {
           </>
         )}
       </ComposerSurface>
-    </Animated.View>
+    </Dock>
   );
+}
+
+type ComposerDockProps = ViewProps & {
+  restingBottom: number;
+  keyboardBottomOffset: number;
+  liftWithKeyboard: boolean;
+  keyboardTop: number | undefined;
+  windowHeight: number;
+};
+
+function AnimatedComposerDock({
+  restingBottom,
+  keyboardBottomOffset,
+  liftWithKeyboard,
+  keyboardTop: _keyboardTop,
+  windowHeight: _windowHeight,
+  style,
+  ...viewProps
+}: ComposerDockProps) {
+  const keyboard = useAnimatedKeyboard();
+  const lift = useAnimatedStyle(() => {
+    if (!liftWithKeyboard) return { paddingBottom: restingBottom };
+    const overlap = keyboard.height.value - keyboardBottomOffset;
+    return { paddingBottom: overlap > 0 ? overlap + 8 : restingBottom };
+  });
+  return <Animated.View {...viewProps} style={[style, lift]} />;
+}
+
+function AndroidComposerDock({
+  restingBottom,
+  keyboardBottomOffset,
+  liftWithKeyboard,
+  keyboardTop,
+  windowHeight,
+  style,
+  onLayout,
+  ...viewProps
+}: ComposerDockProps) {
+  // The activity's Reanimated observer can keep an OPEN height after its last
+  // subscriber unmounts. React Native's Keyboard keeps observing the root view.
+  const visible = liftWithKeyboard && keyboardTop !== undefined;
+  const view = useRef<ComponentRef<typeof View>>(null);
+  const [measuredBottom, setMeasuredBottom] = useState<number>();
+  const measure = useCallback(() => {
+    view.current?.measureInWindow((_x, y, width, height) => {
+      if (width > 0 && height > 0) setMeasuredBottom(y + height);
+    });
+  }, []);
+  useLayoutEffect(() => {
+    if (visible) measure();
+  }, [measure, visible, keyboardTop, windowHeight]);
+  // If the host has already resized its container above the keyboard, there
+  // is no overlap to pad. A host can also reserve space below the composer.
+  const expectedBottom = windowHeight - keyboardBottomOffset;
+  const bottom = Math.min(expectedBottom, measuredBottom ?? expectedBottom);
+  const overlap = visible ? bottom - (keyboardTop - androidKeyboardCoordinateOffset()) : 0;
+  return (
+    <View
+      {...viewProps}
+      ref={view}
+      onLayout={(event) => {
+        if (liftWithKeyboard) measure();
+        onLayout?.(event);
+      }}
+      style={[style, { paddingBottom: overlap > 0 ? overlap + 8 : restingBottom }]}
+    />
+  );
+}
+
+function androidKeyboardCoordinateOffset(): number {
+  // Keyboard.screenY is screen-relative. On RN 0.86+ measureInWindow uses
+  // the same origin in edge-to-edge activities; earlier RN versions and
+  // non-edge-to-edge activities subtract the top system inset.
+  const version = Platform.constants.reactNativeVersion;
+  const deviceInfo = TurboModuleRegistry.get("DeviceInfo");
+  const constants = deviceInfo?.getConstants?.() as { readonly isEdgeToEdge?: boolean } | undefined;
+  if ((version.major > 0 || version.minor >= 86) && constants?.isEdgeToEdge) {
+    return 0;
+  }
+  return StatusBar.currentHeight ?? 0;
 }
 
 /** How far the scroll-edge fade reaches above the floating composer. */
@@ -902,21 +990,19 @@ function CallAction({ call, messages }: { call: ComposerCall; messages: NativeTi
   );
 }
 
-/**
- * The keyboard's height once it has settled, for layout that only needs to
- * know how much room is left (the animated lift tracks it frame by frame).
- */
-function useKeyboardHeight(): number {
-  const [height, setHeight] = useState(() => Keyboard.metrics()?.height ?? 0);
-  useEffect(() => {
-    const shown = Keyboard.addListener("keyboardDidShow", (event) =>
-      setHeight(event.endCoordinates.height),
-    );
-    const hidden = Keyboard.addListener("keyboardDidHide", () => setHeight(0));
-    return () => {
-      shown.remove();
-      hidden.remove();
-    };
-  }, []);
-  return height;
+function subscribeToKeyboardMetrics(onChange: () => void) {
+  const shown = Keyboard.addListener("keyboardDidShow", onChange);
+  const hidden = Keyboard.addListener("keyboardDidHide", onChange);
+  return () => {
+    shown.remove();
+    hidden.remove();
+  };
+}
+
+const getKeyboardMetrics = () => Keyboard.metrics();
+
+function useKeyboardMetrics() {
+  // Read the same snapshot before and after subscribing so a keyboard hide
+  // between rendering and subscription cannot leave the composer lifted.
+  return useSyncExternalStore(subscribeToKeyboardMetrics, getKeyboardMetrics);
 }

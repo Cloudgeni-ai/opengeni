@@ -1,26 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentSummary, CapabilityCatalogItem, ScheduledTask } from "@opengeni/sdk";
+import type { AgentSummary, AgentTemplate, ScheduledTask } from "@opengeni/sdk";
 
 import {
   GUIDED_SETUPS,
   agentForSetup,
   catalogConnectHref,
-  catalogItemConnected,
-  catalogItemFor,
   guidedSetupByKey,
+  needsLine,
+  setupNeeds,
   setupTriggerTask,
 } from "./guided-setups";
-
-function item(overrides: Record<string, unknown>): CapabilityCatalogItem {
-  return {
-    id: "linear",
-    kind: "mcp",
-    enabled: false,
-    mcpUrl: "https://mcp.linear.app/mcp",
-    lifecycle: { readiness: "needs_setup" },
-    ...overrides,
-  } as unknown as CapabilityCatalogItem;
-}
 
 function agent(id: string, templateKey: string | null, canEdit: boolean): AgentSummary {
   return { id, name: id, templateKey, viewer: { canEdit } } as unknown as AgentSummary;
@@ -35,21 +24,34 @@ describe("guided setups", () => {
     expect(guidedSetupByKey(undefined)).toBeNull();
   });
 
-  test("finds a catalog connector by its address, preferring one already on", () => {
-    const off = item({ id: "off" });
-    const on = item({ id: "on", enabled: true, mcpUrl: "HTTPS://mcp.linear.app/mcp/" });
-    const other = item({ id: "other", mcpUrl: "https://example.com/mcp" });
-    expect(catalogItemFor([off, on, other], "https://mcp.linear.app/mcp")?.id).toBe("on");
-    expect(catalogItemFor([off, other], "https://mcp.linear.app/mcp")?.id).toBe("off");
-    expect(catalogItemFor([other], "https://mcp.linear.app/mcp")).toBeNull();
+  test("each setup has an example of what it produces, with three lines", () => {
+    for (const setup of GUIDED_SETUPS) {
+      expect(setup.example.subject.length).toBeGreaterThan(0);
+      expect(setup.example.lines).toHaveLength(3);
+    }
   });
 
-  test("a connector counts as connected only when on and ready", () => {
-    expect(catalogItemConnected(null)).toBe(false);
-    expect(catalogItemConnected(item({ enabled: true }))).toBe(false);
-    expect(catalogItemConnected(item({ enabled: true, lifecycle: { readiness: "ready" } }))).toBe(
-      true,
-    );
+  test("what a setup needs comes from its agent's connections, plus its own", () => {
+    const template = {
+      setup: {
+        connections: [
+          { provider: "github.com", name: "GitHub", required: false, why: "x" },
+          { provider: "linear.app", name: "Linear", required: false, why: "x" },
+        ],
+      },
+    } as unknown as AgentTemplate;
+    expect(setupNeeds({ requireProviders: [] }, template)).toEqual([]);
+    expect(setupNeeds({ requireProviders: ["linear.app"] }, template)).toEqual(["Linear"]);
+    expect(setupNeeds({ requireProviders: [] }, null)).toEqual([]);
+    expect(needsLine([])).toBeNull();
+    expect(needsLine(["GitHub"])).toBe("Needs GitHub");
+    expect(needsLine(["GitHub", "Linear", "Slack"])).toBe("Needs GitHub, Linear and Slack");
+  });
+
+  test("a setup never requires another agent, only its own agent's connections", () => {
+    for (const setup of GUIDED_SETUPS) {
+      expect(setup.requireProviders.every((provider) => provider.includes("."))).toBe(true);
+    }
   });
 
   test("picks the agent from the template, one the reader can edit first", () => {
@@ -84,5 +86,10 @@ describe("guided setups", () => {
       "/workspaces/w%201/plugins?open=item%3Aitem-1",
     );
     expect(catalogConnectHref("w", null)).toBe("/workspaces/w/plugins");
+    expect(
+      catalogConnectHref("w", "item-1", { path: "/workspaces/w/enable?agent=x", label: "X" }),
+    ).toBe(
+      "/workspaces/w/plugins?open=item%3Aitem-1&from=%2Fworkspaces%2Fw%2Fenable%3Fagent%3Dx&fromLabel=X",
+    );
   });
 });

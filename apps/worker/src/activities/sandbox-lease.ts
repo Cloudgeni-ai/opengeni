@@ -67,6 +67,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  checkCreditLedgerAccountTotals,
   summarizeTurnHolds,
   countActiveUsers,
   readCreditGrantTotals,
@@ -248,6 +249,8 @@ import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
   recordCreditBalanceGauges,
+  recordCreditLedgerTotalsCheck,
+  sampleAccountIds,
   recordCreditGrantGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
@@ -272,6 +275,7 @@ import {
   recordSandboxCommandContainment,
   recordSandboxIdleInteractionRelease,
   recordSandboxProviderMissingBeforeCapture,
+  recordSandboxProviderGoneAfterSave,
   recordSandboxDockerWorkspaceRelease,
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
@@ -353,6 +357,15 @@ export type PersistArchiveFn = (
   archiveRevision?: string | null;
 }>;
 
+/** An earlier drain attempt already stamped the durable warm-billing stop
+ * cutoff (immediately before its provider stop request). */
+function leaseHasWarmBillingStopCutoff(lease: { resumeState?: unknown }): boolean {
+  const billing = (lease.resumeState as { opengeniWarmBilling?: { stopChargeAt?: unknown } } | null)
+    ?.opengeniWarmBilling;
+  const cutoff = billing?.stopChargeAt;
+  return typeof cutoff === "string" && Number.isFinite(Date.parse(cutoff));
+}
+
 export type ProviderTerminationOutcome = {
   /** false means an epoch/refcount CAS proved the box was re-armed, so it was
    *  deliberately left running and the cold commit must not execute. */
@@ -360,6 +373,12 @@ export type ProviderTerminationOutcome = {
   /** True only when a definitive provider NotFound proved the cloud box had
    *  already vanished before this drain could capture its workspace. */
   providerMissingBeforeCapture: boolean;
+  /** A definitive provider NotFound proved the box was already gone before
+   *  this drain stopped it, after its workspace was published (or discarded)
+   *  by an earlier attempt. Not a workspace loss. Nothing is stopped and no
+   *  new stop cutoff is stamped: an earlier attempt's cutoff still bounds the
+   *  final charge, and without one nothing after the last meter tick is charged. */
+  providerGoneBeforeStop?: boolean;
   /** The drain stopped the box itself after its snapshots kept failing, so
    *  the box's changes since its last save are lost (reported, with
    *  `providerMissingBeforeCapture`, as a loss before capture). */
@@ -4398,10 +4417,26 @@ async function refreshQueueLeaseAndCreditGauges(
         ]
       : []),
     (async () => {
+      let accountIds: string[] = [];
       try {
-        recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
+        const balances = await listCreditBalancesByAccount(db);
+        recordCreditBalanceGauges(observability, balances);
+        accountIds = balances.map((balance) => balance.accountId);
       } catch (error) {
         observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+          error: errorMessage(error),
+        });
+      }
+      if (accountIds.length === 0) return;
+      try {
+        // A few random accounts per refresh: their kept ledger totals against
+        // a recount, so drift shows up without reading the whole ledger.
+        recordCreditLedgerTotalsCheck(
+          observability,
+          await checkCreditLedgerAccountTotals(db, sampleAccountIds(accountIds, 8)),
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: credit ledger totals check failed", {
           error: errorMessage(error),
         });
       }
@@ -5509,12 +5544,21 @@ async function terminateDrainableBox(
   // finish their usage at logical detach without touching customer compute.
   // A managed instance that was stopped without its callback must fail closed.
   // A box the drain stopped itself after failed saves ran until that stop.
+  // A box already gone before an attempt resuming a published (or discarded)
+  // teardown was never stopped by it. An earlier attempt usually stamped the
+  // stop cutoff right before its unconfirmed stop: charge up to that cutoff,
+  // like any stop. Without one, like a loss before capture, its unknown end is
+  // not charged. Requiring this attempt's own cutoff threw on every reaper
+  // tick and kept the lease draining for good.
+  const providerGoneBeforeStop =
+    typeof termination !== "boolean" && termination.providerGoneBeforeStop === true;
+  const goneWithRecordedCutoff = providerGoneBeforeStop && leaseHasWarmBillingStopCutoff(lease);
   const providerMissingDuringStop =
     providerMissingBeforeCapture ||
     (typeof termination !== "boolean" &&
-      termination.providerMissingBeforeCapture &&
-      !captureAbandoned);
-  if (!stopCutoffMarked && !providerMissingDuringStop) {
+      ((termination.providerMissingBeforeCapture && !captureAbandoned) ||
+        (providerGoneBeforeStop && !goneWithRecordedCutoff)));
+  if (!stopCutoffMarked && !providerMissingDuringStop && !goneWithRecordedCutoff) {
     if (managedProvider && lease.instanceId) {
       throw new Error("managed sandbox stopped without a warm usage cutoff");
     }
@@ -5631,6 +5675,9 @@ async function terminateDrainableBox(
     { onError: wakeSignalWarning(observability, "contained command") },
   );
   if (wentCold) {
+    if (providerGoneBeforeStop) {
+      recordSandboxProviderGoneAfterSave(observability, backend);
+    }
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another
     // observed loss. Keep this outside the best-effort session event writer.
@@ -6071,12 +6118,21 @@ export async function terminateProviderBox(
     }
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
-      observability.info("sandbox reaper: drainable box already gone before workspace capture", {
+      if (captureDisposition === "capture_required") {
+        observability.info("sandbox reaper: drainable box already gone before workspace capture", {
+          ...logIdentity,
+        });
+        return { terminated: true, providerMissingBeforeCapture: true };
+      }
+      // A published (or discarded) workspace is not lost with its box.
+      observability.info("sandbox reaper: drainable box already gone after its workspace save", {
         ...logIdentity,
+        captureDisposition,
       });
       return {
         terminated: true,
-        providerMissingBeforeCapture: captureDisposition === "capture_required",
+        providerMissingBeforeCapture: false,
+        providerGoneBeforeStop: true,
       };
     }
     // Re-throw a non-NotFound resume failure so the caller SKIPS (the lease stays

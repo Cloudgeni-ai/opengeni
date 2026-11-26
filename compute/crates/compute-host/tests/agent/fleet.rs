@@ -71,6 +71,7 @@ async fn hand_off(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
             id,
             owner_epoch,
             awake: false,
+            keep_memory: false,
         })
         .await
         .unwrap()
@@ -82,6 +83,19 @@ async fn hand_off_awake(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
             id,
             owner_epoch,
             awake: true,
+            keep_memory: false,
+        })
+        .await
+        .unwrap()
+}
+
+async fn hand_off_keeping_memory(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
+    lab.client
+        .call(&Request::HandOff {
+            id,
+            owner_epoch,
+            awake: false,
+            keep_memory: true,
         })
         .await
         .unwrap()
@@ -261,6 +275,36 @@ async fn an_idle_sandbox_whose_memory_is_not_kept_is_handed_off_with_its_files_a
     );
     assert_eq!(two.world.boots.load(Ordering::Relaxed), 1);
     assert_eq!(two.world.restores.load(Ordering::Relaxed), 0);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An idle sandbox whose memory is not kept, handed off asked to keep its
+/// memory, as the leader's drain asks, leaves with its programs: it is
+/// saved where it stands, as an explicit sleep saves it, and they carry
+/// on on the host that adopts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_sandbox_handed_off_keeping_its_memory_wakes_elsewhere_with_its_programs() {
+    let (one, two, shelf) = hosts().await;
+    let sandbox = id(44);
+    one.create(sandbox, ENDS_WHEN_ASKED).await;
+    one.run(sandbox, &["set kept", "write on-disk"]).await;
+    one.wait_level(sandbox, LevelName::Paused).await;
+
+    assert_eq!(hand_off_keeping_memory(&one, sandbox, 1).await, Reply::Done);
+    assert!(shelf.join(sandbox.to_string()).exists());
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert!(
+        two.current(sandbox).await.memory_saved,
+        "it was saved with its memory"
+    );
+    assert_eq!(
+        two.run(sandbox, &["get", "disk"]).await,
+        ["kept", "on-disk"],
+        "programs and files moved with it"
+    );
+    assert_eq!(two.world.boots.load(Ordering::Relaxed), 0);
     one.assert_clean();
     two.assert_clean();
 }

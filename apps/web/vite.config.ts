@@ -458,6 +458,16 @@ export default defineConfig({
               priority: 3,
             },
             {
+              // The question glyph a direct session load shows (questions and
+              // MCP requests in the timeline) is also used by the command menu.
+              // Left to entry-aware grouping it lands beside the lazy command
+              // actions, which a direct session load then downloads for nothing.
+              name: "question-glyph",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/]message-circle-question-mark\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
               // A direct session load reads these small session helpers, and so
               // do the settings pages. Left to entry-aware grouping they can
               // share a chunk with the recordings model, the command-menu
@@ -501,7 +511,7 @@ export default defineConfig({
               // reads the rail context, so those leaves (and the icons both
               // sides draw) stay here rather than in the lazy action chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:use-workspace-rigs|dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-(?:machines|rigs)|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|circle-user-round|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|mic|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|square|text-search|zap|zap-off)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:use-workspace-rigs|dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-(?:machines|rigs)|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive|archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|circle-user-round|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-circle-question-mark|message-square-text|mic|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-ccw-clock|rotate-cw|save|server|square|text-search|zap|zap-off)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },

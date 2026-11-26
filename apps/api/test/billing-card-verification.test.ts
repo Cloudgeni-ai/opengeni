@@ -3,13 +3,16 @@ import type Stripe from "stripe";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SandboxOrganizationBoxLimitError } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
-import { ApiHttpError } from "../src/http/api-error";
+import { ApiHttpError, apiErrorRetryAfterSeconds } from "../src/http/api-error";
 import {
   CardVerificationRejectedError,
   completeCardVerificationSession,
   handleCardVerificationWebhookSession,
 } from "../src/routes/billing-card-verification";
-import { sandboxComputeRefusal } from "../src/sandbox/compute-bounds";
+import {
+  sandboxComputeRefusal,
+  sandboxComputeRetryAfterSeconds,
+} from "../src/sandbox/compute-bounds";
 
 const accountId = "6f0b3f0e-2b9a-4c1e-9d3f-1a2b3c4d5e6f";
 
@@ -80,6 +83,56 @@ describe("card verification", () => {
     expect(
       sandboxComputeRefusal(new SandboxOrganizationBoxLimitError("w", "g", 0, "closed"))!.status,
     ).toBe(403);
+  });
+
+  test("a running-box or daily limit is a retryable 429 that says when to retry", () => {
+    const running = sandboxComputeRefusal(
+      new SandboxOrganizationBoxLimitError("w", "g", 1, "running"),
+    );
+    expect(running).toBeInstanceOf(ApiHttpError);
+    expect(running!.status).toBe(429);
+    expect((running as ApiHttpError).retryable).toBe(true);
+    expect((running as ApiHttpError).details).toEqual({
+      code: "sandbox_compute_unavailable",
+      retryAfterSeconds: 60,
+    });
+    expect(apiErrorRetryAfterSeconds(running)).toBe(60);
+    expect(running!.message).toContain("already runs 1 sandboxes");
+    // A daily allowance resets at midnight UTC: retry no sooner than that.
+    expect(sandboxComputeRetryAfterSeconds("daily_budget", new Date("2026-11-26T23:00:00Z"))).toBe(
+      3600,
+    );
+    expect(
+      sandboxComputeRetryAfterSeconds("fleet_daily_budget", new Date("2026-11-26T23:59:30Z")),
+    ).toBe(60);
+    expect(sandboxComputeRetryAfterSeconds("fleet_busy")).toBe(60);
+    expect(apiErrorRetryAfterSeconds(new Error("plain"))).toBeNull();
+  });
+
+  test("a young organization's spent box time lifts when it is a day old; a turnless one cannot wait", () => {
+    const now = new Date("2026-11-26T10:00:00Z");
+    // A day old at 15:30 UTC, not at midnight.
+    expect(
+      sandboxComputeRetryAfterSeconds("young_box_time", now, new Date("2026-11-26T15:30:00Z")),
+    ).toBe(5.5 * 3600);
+    // Unknown age falls back to midnight UTC.
+    expect(sandboxComputeRetryAfterSeconds("young_box_time", now)).toBe(14 * 3600);
+    const liftsAt = new Date(Date.now() + 2 * 3600_000);
+    const young = sandboxComputeRefusal(
+      new SandboxOrganizationBoxLimitError("w", "g", 7200, "young_box_time", liftsAt),
+    ) as ApiHttpError;
+    expect(young.retryable).toBe(true);
+    const retryAfter = apiErrorRetryAfterSeconds(young)!;
+    expect(retryAfter).toBeGreaterThan(2 * 3600 - 5);
+    expect(retryAfter).toBeLessThanOrEqual(2 * 3600);
+    // Waiting never lifts the turnless bound: start a chat or add credit.
+    const turnless = sandboxComputeRefusal(
+      new SandboxOrganizationBoxLimitError("w", "g", 600, "young_turnless"),
+    ) as ApiHttpError;
+    expect(turnless.status).toBe(429);
+    expect(turnless.retryable).toBe(false);
+    expect(turnless.details).toEqual({ code: "sandbox_compute_unavailable" });
+    expect(apiErrorRetryAfterSeconds(turnless)).toBeNull();
   });
 
   test("other checkout sessions are left to the other handlers", async () => {

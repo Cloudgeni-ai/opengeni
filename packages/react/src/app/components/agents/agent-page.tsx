@@ -1,11 +1,13 @@
 /**
- * One agent, set up from one page: Instructions, Starts when (its triggers),
- * Can use (Allow, Ask first or Block per tool), Learns (Memory), who can use
- * it with how to ask it in Slack, its Skills, and its chats. The host renders
- * the Slack rows (`renderSlack`), which need the Slack integration's pieces.
+ * One agent as a job card (docs/agents.md): what it does in one line, its
+ * status, When it works (each trigger as a sentence, with whose access it
+ * runs and when it last ran) and its recent work. Its setup (Instructions,
+ * Can use, Learns, who can use and edit it, Skills) is on its Settings page,
+ * one click away. The host renders the Slack rows (`renderSlack`), which need
+ * the Slack integration's pieces.
  */
-import { useState, type ReactNode } from "react";
-import { DownloadIcon, MessageSquareIcon, PencilIcon } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { DownloadIcon, MessageSquareIcon, PencilIcon, SettingsIcon } from "lucide-react";
 import {
   slackAgentCallText,
   type Agent,
@@ -15,7 +17,15 @@ import {
 
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "../../../ui/detail-page";
+import {
+  DetailAside,
+  DetailAsideItem,
+  DetailPage,
+  DetailPageBody,
+  DetailPageHeader,
+} from "../../../ui/detail-page";
+import { Section } from "../../../ui/section";
+import { StatusBadge } from "../../../ui/status-badge";
 import { DetailSection, DetailSkeleton } from "../../../ui/detail-sheet";
 import { ErrorMessage } from "../../../ui/error-message";
 import { inAppClick } from "../../../ui/in-app-click";
@@ -41,8 +51,16 @@ import {
   AgentCanUse,
   AgentMemoryEntries,
   AgentSkills,
-  AgentStartsWhen,
+  AgentWhenItWorks,
+  useAgentTriggerTasks,
 } from "./agent-setup-sections";
+import { agentStatus, type AgentReadinessItem, type AgentReadinessSummary } from "./agent-status";
+import {
+  agentReadinessItems,
+  agentReadinessSummary,
+  useAgentsActivity,
+  useAgentsReadiness,
+} from "./agent-readiness";
 
 export type AgentSlackSlot = (props: {
   agent: Agent;
@@ -171,15 +189,26 @@ function Prose({ text, empty }: { text: string; empty: string }) {
   );
 }
 
-function AgentChats({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
+function AgentChats({
+  agent,
+  workspaceId,
+  title = "Chats",
+}: {
+  agent: Agent;
+  workspaceId: string;
+  title?: string | undefined;
+}) {
   const navigate = useNavigate();
-  const [filter, setFilter] = useState<AgentChatsFilter>("yours");
+  // Recent work shows everyone's runs of a shared agent; its triggers run as their owners.
+  const [filter, setFilter] = useState<AgentChatsFilter>(
+    title === "Chats" || agent.visibility === "private" ? "yours" : "everyone",
+  );
   const chats = useAgentChats(workspaceId, agent.id, filter);
   // An Only me agent's chats are all its owner's.
   const shared = agent.visibility !== "private";
   return (
     <DetailSection
-      title="Chats"
+      title={title}
       action={
         shared ? (
           <SegmentedControl
@@ -319,37 +348,25 @@ function MemoryRow({
   );
 }
 
-export function AgentPage({
-  workspaceId,
-  agentId,
-  renderSlack,
-}: {
-  workspaceId: string;
-  agentId: string;
-  /** Where it is available in Slack, rendered under the app row. */
-  renderSlack?: AgentSlackSlot | undefined;
-}) {
-  const { client, workspaces, accessContext } = useAppContext();
-  const navigate = useNavigate();
+/** The page's frame while the agent loads or can't be read. */
+function useAgentOrFallback(
+  workspaceId: string,
+  agentId: string,
+  backLabel: string,
+  onBack: () => void,
+) {
   const state = useAgent(workspaceId, agentId);
-  const [deleting, setDeleting] = useState(false);
-  const back = {
-    label: "Agents",
-    onClick: () =>
-      void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } }),
-  };
-  // What it cost, for people who may see Usage; read before the agent loads.
-  const costText = useAgentCostText({ id: agentId }, workspaceId);
+  const back = { label: backLabel, onClick: onBack };
   const agent = state.agent;
+  let fallback: ReactNode = null;
   if (agent === undefined) {
-    return (
+    fallback = (
       <DetailPage back={back}>
         <DetailSkeleton sections={3} />
       </DetailPage>
     );
-  }
-  if (agent === null) {
-    return (
+  } else if (agent === null) {
+    fallback = (
       <DetailPage back={back}>
         {state.error ? (
           <ErrorMessage
@@ -371,34 +388,139 @@ export function AgentPage({
       </DetailPage>
     );
   }
+  return { state, agent: agent ?? null, back, fallback };
+}
+
+export type { AgentReadinessItem } from "./agent-status";
+
+/**
+ * Ready to work: what the server's readiness check says is still missing.
+ * Shown only while something required is; the setup page finishes it.
+ */
+export function AgentReadinessSection({
+  items,
+  onFinish,
+}: {
+  items: readonly AgentReadinessItem[];
+  onFinish?: (() => void) | undefined;
+}) {
+  const missing = items.filter((item) => item.required && !item.ready);
+  if (missing.length === 0) return null;
+  const done = items.filter((item) => item.required && item.ready).length;
+  const required = items.filter((item) => item.required).length;
+  return (
+    <Section
+      title="Ready to work"
+      description={`${done} of ${required} required ready. Its triggers stay off until all are.`}
+      variant="group"
+      data-agent-readiness=""
+      action={
+        onFinish ? (
+          <Button type="button" size="sm" onClick={onFinish}>
+            Finish setup
+          </Button>
+        ) : undefined
+      }
+    >
+      {items.map((item) => (
+        <SettingRow
+          key={item.key}
+          data-agent-readiness-item={item.key}
+          label={item.label}
+          description={
+            item.ready ? (item.required ? "Required" : "Optional") : (item.reason ?? "Required")
+          }
+          control={
+            <StatusBadge
+              variant="dot"
+              status={item.ready ? "ready" : item.required ? "incomplete" : "not_connected"}
+            >
+              {item.ready ? "Ready" : item.required ? "Missing" : "Not set up"}
+            </StatusBadge>
+          }
+        />
+      ))}
+    </Section>
+  );
+}
+
+/** The one ready-made agent this one works well with, by name; display only. */
+function useWorksWellWith(workspaceId: string, templateKey: string | null): string | null {
+  const { client } = useAppContext();
+  const [name, setName] = useState<string | null>(null);
+  useEffect(() => {
+    setName(null);
+    if (!templateKey) return;
+    let live = true;
+    client.listAgentTemplates(workspaceId).then(
+      (list) => {
+        const partner = list.find((entry) => entry.key === templateKey)?.setup?.worksWellWith;
+        if (live && partner) setName(list.find((entry) => entry.key === partner)?.name ?? null);
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, templateKey, workspaceId]);
+  return name;
+}
+
+export function AgentPage({
+  workspaceId,
+  agentId,
+  readiness,
+  readinessItems,
+  worksWellWith,
+  onFinishSetup,
+}: {
+  workspaceId: string;
+  agentId: string;
+  /** The server's readiness check, summarised; absent when unknown. */
+  readiness?: AgentReadinessSummary | null | undefined;
+  /** Its readiness check, item by item. */
+  readinessItems?: readonly AgentReadinessItem[] | undefined;
+  /** At most one agent it works well with ("PR reviewer"); never required. */
+  worksWellWith?: string | null | undefined;
+  /** Opens its setup page (Enable) to finish what is missing. */
+  onFinishSetup?: ((agent: Agent) => void) | undefined;
+}) {
+  const { workspaces, accessContext } = useAppContext();
+  const navigate = useNavigate();
+  const toList = () =>
+    void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } });
+  const { agent, back, fallback } = useAgentOrFallback(workspaceId, agentId, "Agents", toList);
+  // What it cost, for people who may see Usage; read before the agent loads.
+  const costText = useAgentCostText({ id: agentId }, workspaceId);
+  const triggers = useAgentTriggerTasks(workspaceId, agentId);
+  // The server's readiness check, unless the host passed its own.
+  const checked = useAgentsReadiness(workspaceId, agent ? [agent] : undefined).get(agentId);
+  const activity = useAgentsActivity(workspaceId, [agentId]).get(agentId);
+  const partner = useWorksWellWith(workspaceId, agent?.templateKey ?? null);
+  if (!agent) return <>{fallback}</>;
+  const summary = readiness ?? (checked ? agentReadinessSummary(checked) : null);
+  const items = readinessItems ?? (checked ? agentReadinessItems(checked) : undefined);
+  const partnerName = worksWellWith ?? partner;
   const workspace = workspaces.find((row) => row.id === agent.workspaceId);
-  const workspaceName = workspace?.name ?? null;
   const organizationName = workspace
     ? orgName(workspace.accountId, accessContext.accountGrants)
     : null;
-  const meta = [
-    ...(agent.description ? [agent.description] : []),
-    ...(costText
-      ? [
-          <span key="cost" className="tabular-nums" data-agent-cost="">
-            {costText}
-          </span>,
-        ]
-      : []),
-  ];
-  const saved = (next: Agent) => {
-    state.set(next);
-    forgetSessionAgent(workspaceId, next.id);
-  };
+  const inSlack = agent.visibility !== "private" && agent.slack.length > 0;
+  const status = agentStatus({
+    triggers: triggers.tasks,
+    inSlack,
+    readiness: summary,
+    working: activity?.working,
+  });
   const chat = () =>
     void navigate({
       to: "/workspaces/$workspaceId/sessions",
       params: { workspaceId },
       search: { agent: agent.id },
     });
-  const edit = () =>
+  const settings = () =>
     void navigate({
-      to: "/workspaces/$workspaceId/agents/$agentId/edit",
+      to: "/workspaces/$workspaceId/agents/$agentId/settings",
       params: { workspaceId, agentId: agent.id },
     });
   return (
@@ -415,9 +537,133 @@ export function AgentPage({
         }
         title={agent.name}
         chips={
-          agent.visibility === "private" ? <MetaChip variant="soft">Only me</MetaChip> : undefined
+          <>
+            {status ? (
+              <span data-agent-status={status.key} className="inline-flex">
+                <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+              </span>
+            ) : null}
+            {agent.visibility === "private" ? <MetaChip variant="soft">Only me</MetaChip> : null}
+          </>
         }
-        meta={meta.length > 0 ? meta : undefined}
+        meta={agent.description ? [agent.description] : undefined}
+        actions={
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="pointer-coarse:h-11"
+              onClick={settings}
+              data-agent-settings=""
+            >
+              <SettingsIcon />
+              Settings
+            </Button>
+            <Button type="button" size="sm" className="pointer-coarse:h-11" onClick={chat}>
+              <MessageSquareIcon />
+              Chat
+            </Button>
+          </>
+        }
+      />
+      <DetailPageBody
+        aside={
+          <DetailAside>
+            {costText ? (
+              <DetailAsideItem label="Cost">
+                <span className="tabular-nums" data-agent-cost="">
+                  {costText}
+                </span>
+              </DetailAsideItem>
+            ) : null}
+            {partnerName ? (
+              <DetailAsideItem label="Works well with">
+                <span data-agent-works-well-with="">{partnerName}</span>
+              </DetailAsideItem>
+            ) : null}
+            <DetailAsideItem label="Who can use it">
+              {agentAudienceLabel(agent.visibility, {
+                workspaceName: workspace?.name ?? null,
+                organizationName,
+              })}
+            </DetailAsideItem>
+            {agent.visibility !== "private" ? (
+              <DetailAsideItem label="Who can edit">
+                {AGENT_EDIT_ACCESS_OPTIONS.find((option) => option.value === agent.editAccess)
+                  ?.label ?? "Creator and admins"}
+              </DetailAsideItem>
+            ) : null}
+          </DetailAside>
+        }
+      >
+        {items ? (
+          <AgentReadinessSection
+            items={items}
+            onFinish={onFinishSetup ? () => onFinishSetup(agent) : undefined}
+          />
+        ) : null}
+        <AgentWhenItWorks
+          agent={agent}
+          workspaceId={workspaceId}
+          tasks={triggers.tasks}
+          setTasks={triggers.setTasks}
+        />
+        <AgentChats agent={agent} workspaceId={workspaceId} title="Recent work" />
+      </DetailPageBody>
+    </DetailPage>
+  );
+}
+
+/**
+ * An agent's Settings: Instructions, Can use, Learns, who can use and edit
+ * it (with Slack), Skills, export and delete. Each part saves on its own;
+ * Edit opens the form for its name, description and Instructions.
+ */
+export function AgentSettingsPage({
+  workspaceId,
+  agentId,
+  renderSlack,
+}: {
+  workspaceId: string;
+  agentId: string;
+  /** Where it is available in Slack, rendered under the app row. */
+  renderSlack?: AgentSlackSlot | undefined;
+}) {
+  const { client, workspaces, accessContext } = useAppContext();
+  const navigate = useNavigate();
+  const [deleting, setDeleting] = useState(false);
+  const toAgent = () =>
+    void navigate({
+      to: "/workspaces/$workspaceId/agents/$agentId",
+      params: { workspaceId, agentId },
+    });
+  const { state, agent, back, fallback } = useAgentOrFallback(
+    workspaceId,
+    agentId,
+    "Agent",
+    toAgent,
+  );
+  if (!agent) return <>{fallback}</>;
+  const workspace = workspaces.find((row) => row.id === agent.workspaceId);
+  const workspaceName = workspace?.name ?? null;
+  const organizationName = workspace
+    ? orgName(workspace.accountId, accessContext.accountGrants)
+    : null;
+  const saved = (next: Agent) => {
+    state.set(next);
+    forgetSessionAgent(workspaceId, next.id);
+  };
+  const edit = () =>
+    void navigate({
+      to: "/workspaces/$workspaceId/agents/$agentId/edit",
+      params: { workspaceId, agentId: agent.id },
+    });
+  return (
+    <DetailPage back={{ ...back, label: agent.name }}>
+      <DetailPageHeader
+        title="Settings"
+        meta={[agent.name]}
         actions={
           <>
             <Button
@@ -443,10 +689,6 @@ export function AgentPage({
                 Edit
               </Button>
             ) : null}
-            <Button type="button" size="sm" className="pointer-coarse:h-11" onClick={chat}>
-              <MessageSquareIcon />
-              Chat
-            </Button>
           </>
         }
       />
@@ -454,7 +696,6 @@ export function AgentPage({
         <DetailSection title="Instructions">
           <Prose text={agent.instructions} empty="None. It works like an ordinary chat." />
         </DetailSection>
-        <AgentStartsWhen agent={agent} workspaceId={workspaceId} />
         <AgentCanUse agent={agent} workspaceId={workspaceId} onSaved={saved} />
         <DetailSection title="Learns">
           <MemoryRow agent={agent} workspaceId={workspaceId} onSaved={saved} />
@@ -482,7 +723,6 @@ export function AgentPage({
           {renderSlack ? renderSlack({ agent, onAgentChange: saved }) : null}
         </DetailSection>
         <AgentSkills agent={agent} workspaceId={workspaceId} onSaved={saved} />
-        <AgentChats agent={agent} workspaceId={workspaceId} />
         {agentViewerCanManage(agent) ? (
           <SettingDangerRow
             label="Delete agent"

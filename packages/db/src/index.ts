@@ -176,6 +176,8 @@ export {
   apiSpendableCreditMicros,
   byokFeeSpendableMicros,
   chargeBillingOrigin,
+  checkCreditLedgerAccountTotals,
+  type CreditLedgerTotalsCheck,
   getBillingBalance,
   getByokFeeSpendableBalance,
   getSpendableCreditBalance,
@@ -1523,6 +1525,7 @@ export * from "./inbox";
 export * from "./vaults";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./ai-processing-consent";
 export * from "./capability-integrations";
 export * from "./integration-bindings";
 import { IntegrationChangeRequiresAdminError } from "./integration-bindings";
@@ -22523,8 +22526,8 @@ export async function listScheduledTasks(
    * null reads shared schedules only.
    */
   viewerSubjectId?: string | null,
-  /** Only automations whose runs are chats with this agent (`agentConfig.agentId`). */
-  filters: { agentId?: string } = {},
+  /** Only automations whose runs are chats with this agent, or one of these (`agentConfig.agentId`). */
+  filters: { agentId?: string; agentIds?: readonly string[] } = {},
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -22536,6 +22539,15 @@ export async function listScheduledTasks(
           isNull(schema.scheduledTasks.deletedAt),
           ...(filters.agentId
             ? [sql`${schema.scheduledTasks.agentConfig} ->> 'agentId' = ${filters.agentId}`]
+            : []),
+          ...(filters.agentIds
+            ? [
+                filters.agentIds.length > 0
+                  ? inArray(sql`${schema.scheduledTasks.agentConfig} ->> 'agentId'`, [
+                      ...filters.agentIds,
+                    ])
+                  : sql`false`,
+              ]
             : []),
           ...(viewerSubjectId === undefined
             ? []
@@ -34904,6 +34916,43 @@ export async function getSession(
   sessionId: string,
 ): Promise<Session | null> {
   return readSession(db, workspaceId, sessionId, "full");
+}
+
+/** The tool configuration of sessions a schedule runs in, read in one
+ * workspace-scoped pass: the same row visibility as {@link getSession}, without
+ * its control, event-cursor and effective-model reads. Missing ids are absent. */
+export async function getSessionToolConfigs(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, Pick<Session, "id" | "tools" | "toolPolicy" | "mcpServers">>> {
+  const configs = new Map<string, Pick<Session, "id" | "tools" | "toolPolicy" | "mcpServers">>();
+  const ids = [...new Set(sessionIds)];
+  if (ids.length === 0) return configs;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        tools: schema.sessions.tools,
+        toolPolicy: schema.sessions.toolPolicy,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
+    const servers = await sessionMcpServerMetadataForSessions(
+      scopedDb,
+      workspaceId,
+      rows.map((row) => row.id),
+    );
+    for (const row of rows) {
+      configs.set(row.id, {
+        id: row.id,
+        tools: row.tools as ToolRef[],
+        toolPolicy: row.toolPolicy as SessionToolPolicy,
+        mcpServers: servers.get(row.id) ?? [],
+      });
+    }
+    return configs;
+  });
 }
 
 /** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
@@ -51054,6 +51103,9 @@ export class SandboxOrganizationBoxLimitError extends Error {
     public readonly sandboxGroupId: string,
     public readonly limit: number,
     public readonly reason: SandboxOrganizationBoxLimitReason = "running",
+    /** When the refusal lifts on its own, when known (a young organization's
+     * first day ending). */
+    public readonly liftsAt?: Date,
   ) {
     super(sandboxOrganizationBoxLimitMessage(reason, limit));
     this.code = SANDBOX_FLEET_REFUSAL_REASONS.includes(reason)
@@ -53526,6 +53578,7 @@ async function acquireLeaseOnce(
                       ? (fleet?.limits.youngTurnlessBoxSeconds ?? 0)
                       : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
                 refusal,
+                refusal === "young_box_time" ? (fleet?.youngUntil ?? undefined) : undefined,
               );
             }
           }
@@ -54174,6 +54227,8 @@ type SandboxFleetAdmission = {
   boxSecondsFailed: boolean;
   /** The organization is younger than `youngOrganizationAgeMs`. */
   young: boolean;
+  /** When a young organization stops being young (its first-day bounds lift). */
+  youngUntil: Date | null;
   /** A young organization's metered box seconds since it was created; null
    * when unbounded or unreadable (fails open, like its other own bounds). */
   youngBoxSeconds: number | null;
@@ -54323,7 +54378,20 @@ async function readSandboxFleetAdmission(
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
     }
   }
-  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds, turnless };
+  const youngUntil =
+    young && createdAt !== null && limits.youngOrganizationAgeMs !== undefined
+      ? new Date(createdAt.getTime() + limits.youngOrganizationAgeMs)
+      : null;
+  return {
+    limits,
+    pressure,
+    boxSecondsToday,
+    boxSecondsFailed,
+    young,
+    youngUntil,
+    youngBoxSeconds,
+    turnless,
+  };
 }
 
 export async function acquireLease(
@@ -74794,6 +74862,133 @@ export async function renewSandboxAgentLink(
     return result?.renewed
       ? { renewed: true }
       : { renewed: false, code: result?.code ?? "revoked" };
+  });
+}
+
+/** The most claims one batched renewal statement takes. */
+export const SANDBOX_AGENT_LINK_RENEW_BATCH_MAX = 500;
+
+/** One claim's answer from a batched renewal: renewed, refused for good, or
+ * `busy` when another transaction held its row, which counts as one missed
+ * renewal; the next tick renews it again. */
+export type SandboxAgentLinkRenewal =
+  | { renewed: true }
+  | { renewed: false; code: SandboxAgentLinkEnd }
+  | { renewed: false; busy: true };
+
+/**
+ * RENEW many open link sessions' claims in one workspace with one statement,
+ * the batched form of {@link renewSandboxAgentLink} with the same decision per
+ * claim. The gateway renews every open session every few seconds; one
+ * transaction per session made a fleet of sleeping sandboxes the largest
+ * write load on the database. Rows are locked in id order and a row another
+ * transaction holds (an open, release, power write or revoke) is skipped and
+ * answered `busy`, so a batch never waits on one contended row while it holds
+ * the others, and two overlapping batches cannot deadlock. Results come back
+ * in the order of `claims`.
+ */
+export async function renewSandboxAgentLinks(
+  db: Database,
+  input: {
+    workspaceId: string;
+    leaseMs: number;
+    claims: ReadonlyArray<Omit<SandboxAgentLinkInput, "workspaceId">>;
+  },
+): Promise<SandboxAgentLinkRenewal[]> {
+  if (input.claims.length === 0) return [];
+  if (input.claims.length > SANDBOX_AGENT_LINK_RENEW_BATCH_MAX) {
+    throw new Error(`at most ${SANDBOX_AGENT_LINK_RENEW_BATCH_MAX} claims per renewal batch`);
+  }
+  const seen = new Set<string>();
+  for (const claim of input.claims) {
+    assertSandboxAgentLinkInput({ ...claim, workspaceId: input.workspaceId }, input.leaseMs);
+    const agentId = claim.agentId.toLowerCase();
+    if (seen.has(agentId)) throw new Error("a renewal batch names an agent twice");
+    seen.add(agentId);
+  }
+  const agentIds = input.claims.map((claim) => claim.agentId);
+  const epochs = input.claims.map((claim) => claim.epoch);
+  const instances = input.claims.map((claim) => claim.connectionInstanceId);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // As in renewSandboxAgentLink: lock first, then sample time per row, so a
+    // contended lock never shortens the lease it grants.
+    const rows = await rawRows<{
+      ordinal: string | number;
+      renewed: boolean;
+      busy: boolean;
+      code: SandboxAgentLinkEnd;
+    }>(
+      scopedDb,
+      sql`
+        with claim as materialized (
+          select agent_id, epoch, connection_instance_id, ordinal
+          from unnest(
+            ${new Param(agentIds)}::uuid[],
+            ${new Param(epochs)}::bigint[],
+            ${new Param(instances)}::text[]
+          ) with ordinality as claim(agent_id, epoch, connection_instance_id, ordinal)
+        ), locked as materialized (
+          select e.id, e.kind, e.status, e.link_epoch, e.connection_instance_id,
+            e.connection_lease_expires_at
+          from enrollments e
+          join claim on claim.agent_id = e.id
+          where e.workspace_id = ${input.workspaceId}
+          order by e.id
+          for no key update of e skip locked
+        ), present as materialized (
+          -- Rows this statement's snapshot sees; one present but not locked
+          -- was held by another transaction and is answered busy.
+          select e.id from enrollments e
+          join claim on claim.agent_id = e.id
+          where e.workspace_id = ${input.workspaceId}
+        ), checked as materialized (
+          select claim.agent_id, claim.ordinal, locked.id as locked_id,
+            locked.connection_lease_expires_at,
+            (locked.id is null and present.id is not null) as busy,
+            case
+              when locked.id is null then 'revoked'
+              when locked.kind <> 'sandbox' or locked.status <> 'active' then 'revoked'
+              when locked.link_epoch > claim.epoch then 'superseded'
+              when locked.connection_instance_id is distinct from claim.connection_instance_id
+                then 'lost'
+              else null
+            end as refusal,
+            date_trunc('milliseconds', clock_timestamp()) as renewed_at
+          from claim
+          left join locked on locked.id = claim.agent_id
+          left join present on present.id = claim.agent_id
+        ), updated as (
+          update enrollments e set
+            connection_lease_expires_at = greatest(
+              case when isfinite(checked.connection_lease_expires_at)
+                -- Match Date's upper bound after its millisecond truncation.
+                and date_trunc('milliseconds', checked.connection_lease_expires_at)
+                  <= '275760-09-13 00:00:00+00'::timestamptz
+                then date_trunc('milliseconds', checked.connection_lease_expires_at)
+                else null end,
+              checked.renewed_at + ${input.leaseMs} * interval '1 millisecond'
+            ),
+            updated_at = checked.renewed_at
+          from checked
+          where e.id = checked.locked_id and e.workspace_id = ${input.workspaceId}
+            and checked.refusal is null
+          returning e.id
+        )
+        select checked.ordinal,
+          (updated.id is not null) as renewed,
+          checked.busy,
+          coalesce(checked.refusal, 'revoked') as code
+        from checked
+        left join updated on updated.id = checked.agent_id
+      `,
+    );
+    const byOrdinal = new Map(rows.map((row) => [Number(row.ordinal), row]));
+    return input.claims.map((_claim, index): SandboxAgentLinkRenewal => {
+      const row = byOrdinal.get(index + 1);
+      if (row?.renewed) return { renewed: true };
+      if (row?.busy) return { renewed: false, busy: true };
+      return { renewed: false, code: row?.code ?? "revoked" };
+    });
   });
 }
 

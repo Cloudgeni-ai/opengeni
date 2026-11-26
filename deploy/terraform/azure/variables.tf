@@ -83,8 +83,40 @@ variable "aks" {
     node_pool_upgrade_drain_timeout_minutes       = optional(number, 0)
     node_pool_upgrade_node_soak_minutes           = optional(number, 0)
     microsoft_defender_log_analytics_workspace_id = optional(string)
+    scale_down_utilization_threshold              = optional(number)
+    node_os_maintenance_window = optional(object({
+      day_of_week    = string
+      start_time     = string
+      duration_hours = number
+      interval_weeks = optional(number, 1)
+      utc_offset     = optional(string, "+00:00")
+      start_date     = optional(string)
+    }))
   })
   default = {}
+
+  validation {
+    condition = var.aks.node_os_maintenance_window == null ? true : (
+      contains(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], var.aks.node_os_maintenance_window.day_of_week) &&
+      can(regex("^([01][0-9]|2[0-3]):[0-5][0-9]$", var.aks.node_os_maintenance_window.start_time)) &&
+      var.aks.node_os_maintenance_window.duration_hours >= 4 &&
+      var.aks.node_os_maintenance_window.duration_hours <= 24 &&
+      var.aks.node_os_maintenance_window.interval_weeks >= 1 &&
+      floor(var.aks.node_os_maintenance_window.interval_weeks) == var.aks.node_os_maintenance_window.interval_weeks &&
+      var.aks.node_os_maintenance_window.interval_weeks <= 4 &&
+      can(regex("^[+-][0-9]{2}:[0-9]{2}$", var.aks.node_os_maintenance_window.utc_offset))
+    )
+    error_message = "aks.node_os_maintenance_window needs a weekday name, start_time as HH:MM, duration_hours from 4 to 24, interval_weeks from 1 to 4 and utc_offset like +00:00."
+  }
+
+  validation {
+    condition = var.aks.scale_down_utilization_threshold == null ? true : (
+      var.aks.auto_scaling_enabled &&
+      var.aks.scale_down_utilization_threshold > 0 &&
+      var.aks.scale_down_utilization_threshold <= 1
+    )
+    error_message = "aks.scale_down_utilization_threshold must be greater than 0 and at most 1, and needs auto_scaling_enabled."
+  }
 
   validation {
     condition = (

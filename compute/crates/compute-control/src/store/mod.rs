@@ -97,6 +97,11 @@ pub struct HostRow {
     /// When the row last changed, by the store's change counter: replicas
     /// read the rows changed since they last looked.
     pub changed: u64,
+    /// While the leader drains it to remove it ([`Store::drain_to_remove`]):
+    /// when it began, by the service's clock in milliseconds, so that a
+    /// leader after the one that drained it goes on with that drain as its
+    /// own. `None` while it is not draining, or someone else drained it.
+    pub leader_drained_ms: Option<u64>,
 }
 
 impl HostRow {
@@ -429,12 +434,25 @@ pub trait Store: Send + Sync + 'static {
     /// live. A host already in `to` whose mark says otherwise (a build from
     /// before the mark drained or undrained it, or registered it again
     /// live, during a rollout) has its mark set as for `to`, so repeating
-    /// a drain or undrain repairs it.
+    /// a drain or undrain repairs it. Either way it is no longer the
+    /// leader's drain ([`HostRow::leader_drained_ms`]): a host the leader
+    /// drains that is drained again this way is the drainer's from then on.
     fn set_state(
         &self,
         host: HostId,
         from: HostState,
         to: HostState,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Drains a live host for the leader to remove it, noting that the
+    /// leader drained it at `at_ms` ([`HostRow::leader_drained_ms`]); one the
+    /// leader drains already keeps when that began. True if the host is the
+    /// leader's drain now: false if it is not known, given up on, or drained
+    /// by someone else.
+    fn drain_to_remove(
+        &self,
+        host: HostId,
+        at_ms: u64,
     ) -> impl Future<Output = Result<bool>> + Send;
 
     /// Becomes the leader if no other replica is, without waiting.
@@ -445,11 +463,11 @@ pub trait Store: Send + Sync + 'static {
 
     /// Inserts a new sandbox, at the version it carries. False if one with
     /// its id exists. Refused if it names an owner the service has given
-    /// up on; see [`Write::OwnerLost`]. One created from a team's template
-    /// (its spec's image [`TEMPLATE_PREFIX`] then the template's id) is
-    /// inserted only while the template is there, ordered with its delete,
-    /// so the image it starts from is never forgotten under it; see
-    /// [`Write::TemplateGone`].
+    /// up on, or one that drains; see [`Write::OwnerLost`]. One created
+    /// from a team's template (its spec's image [`TEMPLATE_PREFIX`] then
+    /// the template's id) is inserted only while the template is there,
+    /// ordered with its delete, so the image it starts from is never
+    /// forgotten under it; see [`Write::TemplateGone`].
     fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
     /// As [`Store::insert`], for `row.team`'s create request `request_id`,
@@ -471,7 +489,8 @@ pub trait Store: Send + Sync + 'static {
 
     /// Replaces a sandbox's row with `row`, raising its version by one, on
     /// condition that it is still at `row.version` and does not name an
-    /// owner the service has given up on.
+    /// owner the service has given up on, nor a draining host other than
+    /// its owner as stored.
     fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
     /// Writes `row`'s spec and ownership over a sandbox's row, raising its
@@ -724,6 +743,10 @@ pub enum Write {
     /// does not have, such as a host given up on and since forgotten. A
     /// sandbox a host owned as it was given up on stays its own, waiting
     /// for it, but nothing may give it one while it is given up on.
+    /// Likewise a draining host keeps the sandboxes it owns, but is given
+    /// none: one whose drain landed after it was picked for a sandbox
+    /// (whose hand-off to it can take minutes) could be removed under it,
+    /// so the sandbox goes elsewhere.
     OwnerLost,
     /// For an insert of a sandbox created from a team's template: the
     /// template was deleted since the create found it. Never for a

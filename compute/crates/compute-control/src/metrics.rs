@@ -33,6 +33,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use compute_fleet::{GroupView, HostId, HostState};
 
+use crate::shrink::{Back, ShrinkSeen};
 use crate::view::{Known, View};
 
 /// The text format's content type.
@@ -108,6 +109,8 @@ pub struct GroupSeen {
     pub size: u32,
     /// The most hosts it may have.
     pub max: u32,
+    /// How the leader's shrinking of it stands, if it shrinks it.
+    pub shrink: Option<ShrinkSeen>,
 }
 
 #[derive(Debug, Default)]
@@ -656,6 +659,84 @@ fn render_group(out: &mut Text, group: &GroupSeen) {
     ] {
         out.family(name, "gauge", help);
         out.sample(name, &[], u64::from(value));
+    }
+    if let Some(shrink) = &group.shrink {
+        render_shrink(out, shrink);
+    }
+}
+
+/// The leader's shrinking of the host group, as it last sized it.
+fn render_shrink(out: &mut Text, shrink: &ShrinkSeen) {
+    let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+    out.family(
+        "compute_fleet_shrink_outgoing",
+        "gauge",
+        "1 for the host the leader is draining to remove it, by host; none while no host is on its way out.",
+    );
+    if let Some(host) = &shrink.outgoing {
+        out.sample("compute_fleet_shrink_outgoing", &[("host", host)], 1);
+    }
+    out.family(
+        "compute_fleet_shrink_draining_seconds",
+        "gauge",
+        "How long the host on its way out has been, since its drain began (whichever leader began it); 0 while none is.",
+    );
+    out.sample(
+        "compute_fleet_shrink_draining_seconds",
+        &[],
+        shrink.draining_for.as_secs(),
+    );
+    if let Some(left) = shrink.left {
+        out.family(
+            "compute_fleet_shrink_sandboxes_left",
+            "gauge",
+            "Sandboxes the host on its way out still owned at its last drain pass.",
+        );
+        out.sample("compute_fleet_shrink_sandboxes_left", &[], count(left));
+    }
+    out.family(
+        "compute_fleet_shrink_skipped_hosts",
+        "gauge",
+        "Hosts the leader will not drain for now, or leaves draining, as their sandboxes did not leave in time.",
+    );
+    out.sample(
+        "compute_fleet_shrink_skipped_hosts",
+        &[],
+        count(shrink.skipped),
+    );
+    out.family(
+        "compute_fleet_shrink_held_back",
+        "gauge",
+        "1 while the leader does not shrink the group because a host of it does not keep an idle sandbox's memory in a hand-off (an earlier release).",
+    );
+    out.sample(
+        "compute_fleet_shrink_held_back",
+        &[],
+        u64::from(shrink.held_back),
+    );
+    out.family(
+        "compute_fleet_shrink_removals_total",
+        "counter",
+        "Deletions of a drained host's instance the leader asked of the group in this leadership, by outcome: ok or failed (asked again).",
+    );
+    for (outcome, value) in [("ok", shrink.removals), ("failed", shrink.removal_failures)] {
+        out.sample(
+            "compute_fleet_shrink_removals_total",
+            &[("outcome", outcome)],
+            value,
+        );
+    }
+    out.family(
+        "compute_fleet_shrink_taken_back_total",
+        "counter",
+        "Hosts on their way out the leader took back in this leadership, by reason: grow (the group would grow) or slow (its sandboxes did not leave in time).",
+    );
+    for why in Back::ALL {
+        out.sample(
+            "compute_fleet_shrink_taken_back_total",
+            &[("reason", why.label())],
+            shrink.taken_back[why as usize],
+        );
     }
 }
 

@@ -13,6 +13,7 @@ import {
   warnRetainedProcessProofFailure,
   warnRetainedProcessObservationFailure,
   warnRetainedProcessSettlementFailure,
+  sandboxDrainErrorClass,
   warnSandboxDrainFailure,
 } from "../src/retained-process-diagnostics";
 
@@ -245,6 +246,7 @@ test("drain failures keep a fingerprint of an interpolated message, never its id
       sandboxLeaseKey: sandboxLeaseTelemetryKey(boxProcess.workspaceId, boxProcess.sandboxGroupId),
       leaseEpoch: 7,
       backend: "modal",
+      causeClass: "Error",
       causeName: "Error",
       causeFingerprint: messageFingerprint(
         "sandbox backend modal declares no workspace capture policy for <id>",
@@ -253,6 +255,30 @@ test("drain failures keep a fingerprint of an interpolated message, never its id
     },
   });
   expect(JSON.stringify(warnings)).not.toContain(boxProcess.sandboxGroupId);
+});
+
+test("drain failures name the thrown error's class even when it is not a public cause name", () => {
+  class DrainCommitRefusedError extends Error {}
+  class NamedDrainError extends Error {
+    override readonly name = "NamedDrainError";
+  }
+  const { warnings, sink } = recordingSink();
+  const lease = {
+    workspaceId: boxProcess.workspaceId,
+    sandboxGroupId: boxProcess.sandboxGroupId,
+    leaseEpoch: 7,
+    backend: "modal",
+  };
+  warnSandboxDrainFailure(sink, new DrainCommitRefusedError("private detail"), lease);
+  warnSandboxDrainFailure(sink, new NamedDrainError("private detail"), lease);
+  warnSandboxDrainFailure(sink, "a thrown string", lease);
+  expect(warnings.map((warning) => warning.fields.causeClass)).toEqual([
+    "DrainCommitRefusedError",
+    "NamedDrainError",
+    undefined,
+  ]);
+  expect(JSON.stringify(warnings)).not.toContain("private detail");
+  expect(sandboxDrainErrorClass({ name: "has spaces in it" })).toBeUndefined();
 });
 
 test("reaper failure diagnostics cannot change settlement or drain behavior", () => {

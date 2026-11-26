@@ -332,6 +332,49 @@ const managedCookieSessions = new WeakMap<
   { authUserId: string; authSessionId: string }
 >();
 
+type ManagedHumanClient = {
+  authUserId: string;
+  platform: import("@opengeni/contracts").AiProcessingConsentPlatform;
+  authMethod: "cookie" | "native_bearer";
+};
+const managedHumanClients = new WeakMap<AccessContext, ManagedHumanClient>();
+
+/** Client provenance from the authenticated Better Auth session, not request headers or grants. */
+export function managedHumanClientForAccessContext(
+  context: AccessContext,
+): ManagedHumanClient | null {
+  const client = managedHumanClients.get(context);
+  return client ? { ...client } : null;
+}
+
+function stampManagedHumanClient(
+  context: AccessContext,
+  authUserId: string,
+  session: Record<string, unknown> | undefined,
+  authMethod: ManagedHumanClient["authMethod"],
+): void {
+  if (context.subjectId !== `user:${authUserId}`) return;
+  const labels = {
+    ios: "iOS",
+    android: "Android",
+    macos: "macOS",
+    windows: "Windows",
+    linux: "Linux",
+    office: "Office add-in",
+  } as const;
+  const platform = (Object.keys(labels) as (keyof typeof labels)[]).find((key) => {
+    if (session?.nativeAppPlatform != null) return session.nativeAppPlatform === key;
+    // During rollout, old API replicas still mint device sessions without a
+    // platform field. Read their stored device label, not the incoming UA.
+    const prefix = `Opengeni app (${labels[key]}`;
+    return (
+      typeof session?.userAgent === "string" &&
+      (session.userAgent === `${prefix})` || session.userAgent.startsWith(`${prefix}; `))
+    );
+  });
+  managedHumanClients.set(context, { authUserId, platform: platform ?? "web", authMethod });
+}
+
 /**
  * The person signed in in this browser session, with the session's id, from
  * how access resolution actually authenticated the request (never from
@@ -2424,6 +2467,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      stampManagedHumanClient(context, session.user.id, session.session, "native_bearer");
       markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
@@ -2458,6 +2502,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      stampManagedHumanClient(context, session.user.id, session.session, "cookie");
       const authSessionId = (session as { session?: { id?: unknown } }).session?.id;
       const authUserId = (session as { user?: { id?: unknown } }).user?.id;
       if (typeof authSessionId === "string" && typeof authUserId === "string")

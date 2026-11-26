@@ -131,6 +131,11 @@ import {
 import { lockActiveCustomModelForAdmission, workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
+  agentTriggerTurnsOn,
+  eventTriggersUseGitHub,
+  requireAgentTriggerReady,
+} from "./ready-made-setup-readiness";
+import {
   resolveSessionToolPolicy,
   workspaceSessionToolPolicyDefaultServerIds,
 } from "./session-tool-policy";
@@ -258,7 +263,7 @@ export async function scheduledConnectionTools(
   db: Database,
   workspaceId: string,
   settings: Settings,
-  target: Session | null,
+  target: Pick<Session, "tools" | "toolPolicy" | "mcpServers"> | null,
   taskTools: ToolRef[],
   subjectId?: string,
 ): Promise<ToolRef[]> {
@@ -669,6 +674,18 @@ export async function createValidatedScheduledTask(input: {
     ownerSubjectId: ownerSubjectId ?? input.grant.subjectId ?? null,
     privateTask: visibility === "user_private" || (visibility as string) === "private",
   });
+  // A ready-made agent's trigger stays off until its required connections
+  // are on. Checked once the agent is known to be the caller's to use, so a
+  // private agent's id never earns a readiness message.
+  if (input.payload.status !== "paused")
+    await requireAgentTriggerReady(input, input.grant, agentConfig.agentId, {
+      githubEvents: () =>
+        eventTriggersUseGitHub(
+          input.db,
+          input.grant.workspaceId,
+          "events" in input.payload ? input.payload.events?.triggers : undefined,
+        ),
+    });
   // Every run is billed as whoever set the task up: in the app, plan credit
   // first; over the API, credits only.
   const billingOrigin = await resolveTurnBillingOrigin(input.db, {
@@ -1147,10 +1164,23 @@ export async function resumeScheduledTaskAsAdmin(
   db: Database,
   grant: AccessGrant,
   existing: ScheduledTask,
+  settings: Settings,
 ): Promise<ScheduledTask> {
   // An active one is already on, unless it ran once and needs re-arming.
   if (existing.status === "active" && !(await scheduledTaskFinishedOnce(db, existing)))
     return existing;
+  // Turning it back on (or re-arming one that finished its one run) needs
+  // its ready-made agent's required connections, the owner's: runs use the
+  // owner's access, not the admin's.
+  await requireAgentTriggerReady(
+    { db, settings },
+    existing.ownerSubjectId ? { ...grant, subjectId: existing.ownerSubjectId } : grant,
+    existing.agentConfig.agentId,
+    {
+      githubEvents: () => eventTriggersUseGitHub(db, grant.workspaceId, existing.events?.triggers),
+      forOwner: Boolean(existing.ownerSubjectId && existing.ownerSubjectId !== grant.subjectId),
+    },
+  );
   return await withScheduledTaskAuthorityWriteErrors(() =>
     updateScheduledTask(db, existing.workspaceId, existing.id, {
       status: "active",
@@ -1616,6 +1646,28 @@ export async function validatedScheduledTaskUpdate(
       privateTask: visibility === "user_private",
     });
   }
+  // Turning a trigger on, re-arming one that finished its one run, or
+  // pointing an active one at another agent, needs that ready-made agent's
+  // required connections (after the agent check).
+  if (
+    agentTriggerTurnsOn({
+      previousStatus: input.existing.status,
+      previousAgentId: input.existing.agentConfig.agentId,
+      nextStatus: update.status ?? input.existing.status,
+      nextAgentId,
+    }) ||
+    (update.status === "active" &&
+      input.existing.status === "active" &&
+      (await scheduledTaskFinishedOnce(input.db, input.existing)))
+  )
+    await requireAgentTriggerReady(input, input.grant, nextAgentId, {
+      githubEvents: () =>
+        eventTriggersUseGitHub(
+          input.db,
+          input.grant.workspaceId,
+          input.payload.events?.triggers ?? input.existing.events?.triggers,
+        ),
+    });
   const audited = withScheduledTaskAgentChatChangeAudit(
     input.grant,
     input.existing,

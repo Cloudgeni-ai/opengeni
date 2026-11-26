@@ -3,6 +3,14 @@
   "name": "Work summary",
   "description": "What got done, kept current by your agents. Comes with a Skill that tells agents what to add.",
   "team": "Everyone",
+  "setup": {
+    "connections": [],
+    "repository": null,
+    "worksWellWith": null,
+    "wontDoWithoutAsking": [],
+    "firstMessage": null,
+    "firstJob": "Ask an agent to add what got done today."
+  },
   "package": {
     "format": "opengeni.app-package",
     "version": 1,

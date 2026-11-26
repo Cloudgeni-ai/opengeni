@@ -58,4 +58,19 @@ describe("ready-made apps", () => {
       expect(JSON.stringify(template.package)).not.toContain("{{today");
     }
   });
+
+  test("keep setup simple: no app requires an agent, a setup or a connection", () => {
+    const agentKeys = agentTemplates().map((template) => template.key);
+    for (const template of appTemplates()) {
+      // These use only Site Data, so nothing is required before they work.
+      expect(
+        (template.setup?.connections ?? []).filter((connection) => connection.required),
+      ).toEqual([]);
+      for (const connection of template.setup?.connections ?? []) {
+        expect(agentKeys).not.toContain(connection.provider);
+      }
+      // Enable ends with one small first job.
+      expect(template.setup?.firstJob).toBeTruthy();
+    }
+  });
 });

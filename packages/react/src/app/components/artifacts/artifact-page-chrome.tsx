@@ -14,7 +14,7 @@ import {
 import type { MouseEvent } from "react";
 
 import type { DetailBackLink } from "../../../ui/detail-page";
-import { LogoTile } from "../../../ui/logo-tile";
+import { LogoTile, logoTileHue } from "../../../ui/logo-tile";
 import { artifactKindLabel, type ArtifactKind } from "../../lib/artifact-catalog";
 import {
   artifactLibraryFilters,
@@ -54,8 +54,31 @@ export function ArtifactTypeIcon({
 }
 
 /** The artifact's leading tile on its own page: its type glyph on the neutral tile. */
-export function ArtifactKindTile({ kind }: { kind: ArtifactKind }) {
-  return <LogoTile icon={<ArtifactTypeIcon kind={kind} />} name={artifactKindLabel[kind]} />;
+/** Each kind's tile hue; an app (site) with a `seed` gets its own, like agents. */
+const ARTIFACT_KIND_HUE: Record<ArtifactKind, number> = {
+  document: 255,
+  spreadsheet: 150,
+  presentation: 45,
+  site: 190,
+  image: 330,
+  file: 280,
+};
+
+export function ArtifactKindTile({
+  kind,
+  seed,
+}: {
+  kind: ArtifactKind;
+  /** An app's id or template key: gives each app its own hue. */
+  seed?: string | undefined;
+}) {
+  return (
+    <LogoTile
+      icon={<ArtifactTypeIcon kind={kind} />}
+      name={artifactKindLabel[kind]}
+      hue={kind === "site" && seed ? logoTileHue(seed) : ARTIFACT_KIND_HUE[kind]}
+    />
+  );
 }
 
 /** Detail pages fill the content column; `DetailPage` draws the 960px frame. */

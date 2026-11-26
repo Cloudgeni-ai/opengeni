@@ -28,7 +28,7 @@ import {
 } from "../../../packages/react/test/agents-test-kit";
 import { getNewSessionSendBlocker } from "@opengeni/react/app/lib/composer-send-blocking";
 import { emptyAttachments, idleComposer } from "../src/dev/composer-chrome-fixtures";
-import { AgentRoute, AgentsRoute, NewAgentRoute } from "../src/routes/agents";
+import { AgentRoute, AgentSettingsRoute, AgentsRoute, NewAgentRoute } from "../src/routes/agents";
 import triageTemplate from "../../../packages/core/src/agent-templates/triage.agent.json";
 import bugFixerTemplate from "../../../packages/core/src/agent-templates/bug-fixer.agent.json";
 import prReviewerTemplate from "../../../packages/core/src/agent-templates/pr-reviewer.agent.json";
@@ -458,6 +458,11 @@ function Screen() {
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={added.id} />;
     case "agent-private":
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={notes.id} />;
+    // Slack lives in an agent's Settings.
+    case "agent-settings":
+      return <AgentSettingsRoute workspaceId={WORKSPACE_ID} agentId={releases.id} />;
+    case "agent-private-settings":
+      return <AgentSettingsRoute workspaceId={WORKSPACE_ID} agentId={notes.id} />;
     case "make-agent":
       return <NewAgentRoute workspaceId={WORKSPACE_ID} sourceSessionId={SESSION_ID} />;
     case "new-agent":

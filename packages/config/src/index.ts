@@ -2648,6 +2648,11 @@ const SettingsSchema = z.object({
   managedAuthGoogleClientSecret: z.string().optional(),
   managedAuthGithubClientId: z.string().optional(),
   managedAuthGithubClientSecret: z.string().optional(),
+  managedAuthAppleClientId: z.string().optional(),
+  managedAuthAppleTeamId: z.string().optional(),
+  managedAuthAppleKeyId: z.string().optional(),
+  managedAuthApplePrivateKey: z.string().optional(),
+  managedAuthAppleAppBundleIdentifier: z.string().optional(),
   // Rolling browser login-slot compatibility. Repository/deployment default is
   // deliberately legacy; changing to broker is an operator-authorized rollout.
   allowedUserEmails: z
@@ -2659,6 +2664,8 @@ const SettingsSchema = z.object({
   // with a passkey (CASA 3.3.1). Off by default; production sets required.
   // Applies only where passkey sign-in is offered.
   adminPasskeyStepUp: z.enum(["off", "required"]).default("off"),
+  aiProcessingConsentProviders: z.array(z.string().trim().min(1)).default([]),
+  aiProcessingConsentPrivacyUrl: z.url({ protocol: /^https$/u }).optional(),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app
   // adds its scheme here.
@@ -7180,12 +7187,24 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthGoogleClientSecret: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET"),
     managedAuthGithubClientId: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID"),
     managedAuthGithubClientSecret: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET"),
+    managedAuthAppleClientId: optional("OPENGENI_MANAGED_AUTH_APPLE_CLIENT_ID"),
+    managedAuthAppleTeamId: optional("OPENGENI_MANAGED_AUTH_APPLE_TEAM_ID"),
+    managedAuthAppleKeyId: optional("OPENGENI_MANAGED_AUTH_APPLE_KEY_ID"),
+    managedAuthApplePrivateKey: optional("OPENGENI_MANAGED_AUTH_APPLE_PRIVATE_KEY"),
+    managedAuthAppleAppBundleIdentifier: optional(
+      "OPENGENI_MANAGED_AUTH_APPLE_APP_BUNDLE_IDENTIFIER",
+    ),
     allowedUserEmails:
       source.OPENGENI_ALLOWED_USER_EMAILS === undefined
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     adminPasskeyStepUp: optional("OPENGENI_ADMIN_PASSKEY_STEP_UP"),
+    aiProcessingConsentProviders: optional("OPENGENI_AI_PROCESSING_CONSENT_PROVIDERS")
+      ?.split(",")
+      .map((provider) => provider.trim())
+      .filter(Boolean),
+    aiProcessingConsentPrivacyUrl: optional("OPENGENI_AI_PROCESSING_CONSENT_PRIVACY_URL"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
         ? undefined
@@ -14180,13 +14199,28 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID and OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET must be configured together",
     );
   }
+  const appleRequired = [
+    settings.managedAuthAppleClientId,
+    settings.managedAuthAppleTeamId,
+    settings.managedAuthAppleKeyId,
+    settings.managedAuthApplePrivateKey,
+  ];
+  const appleConfigured = appleRequired.every(Boolean);
+  if (
+    !appleConfigured &&
+    (appleRequired.some(Boolean) || settings.managedAuthAppleAppBundleIdentifier)
+  ) {
+    throw new Error(
+      "OPENGENI_MANAGED_AUTH_APPLE_CLIENT_ID, OPENGENI_MANAGED_AUTH_APPLE_TEAM_ID, OPENGENI_MANAGED_AUTH_APPLE_KEY_ID, and OPENGENI_MANAGED_AUTH_APPLE_PRIVATE_KEY must be configured together",
+    );
+  }
   const managedSocialAuthConfigured = Boolean(
-    settings.managedAuthGoogleClientId || settings.managedAuthGithubClientId,
+    settings.managedAuthGoogleClientId || settings.managedAuthGithubClientId || appleConfigured,
   );
   if (managedSocialAuthConfigured) {
     if (settings.productAccessMode !== "managed") {
       throw new Error(
-        "Managed Google/GitHub authentication requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
+        "Managed social authentication requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
       );
     }
     const publicOrigin = canonicalPublicOrigin(settings.publicBaseUrl);

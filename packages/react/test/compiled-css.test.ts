@@ -286,7 +286,7 @@ describe("compiled CSS contract", () => {
   test("registers independent defaults and keeps derived defaults live", () => {
     expect(tokenRegistration("--og-color-bg")).toEqual({
       inherits: "true",
-      initialValue: "#303030",
+      initialValue: "#141414",
     });
     expect(tokenRegistration("--og-color-accent-soft")).toBeNull();
     expect(effectiveTokens).toContain("--_og-color-accent-soft: var(--og-color-accent-soft);");

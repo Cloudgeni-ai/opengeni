@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ReadyMadeTeam } from "./agents";
 import { defineSchema } from "./define-schema";
+import { ReadyMadeSetup } from "./ready-made-setup";
 
 /**
  * Sample records the Apps page's preview shows before anything is installed,
@@ -31,6 +32,8 @@ export const AppTemplate = /* @__PURE__ */ defineSchema(() =>
     team: ReadyMadeTeam.nullable().default(null),
     /** The package file's JSON, installed as is. */
     package: z.record(z.string(), z.unknown()),
+    /** What it needs and says about itself on the Enable page; null when it needs nothing. */
+    setup: ReadyMadeSetup.nullable().default(null),
     preview: AppTemplatePreview.nullable().default(null),
   }),
 );

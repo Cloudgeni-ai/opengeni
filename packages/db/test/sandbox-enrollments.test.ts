@@ -14,6 +14,7 @@ import {
   releaseSandboxAgentLink,
   renewEnrollmentConnection,
   renewSandboxAgentLink,
+  renewSandboxAgentLinks,
   revokeSandboxEnrollment,
   SandboxEnrollmentConflictError,
   type Database,
@@ -361,6 +362,266 @@ describe("sandbox enrollments", () => {
       renewed: false,
       code: "revoked",
     });
+  });
+
+  test("a batched renewal answers each claim as a single renewal would", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const other = await freshWorkspace();
+    const boxes = await Promise.all(Array.from({ length: 6 }, () => sandboxEnrollment(ws)));
+    const foreign = await sandboxEnrollment(other);
+    const instances = boxes.map(() => crypto.randomUUID());
+    for (const [index, box] of boxes.entries()) {
+      await openSandboxAgentLink(db, {
+        workspaceId: ws.workspaceId,
+        agentId: box.id,
+        epoch: 2,
+        connectionInstanceId: instances[index]!,
+        leaseMs: LEASE_MS,
+      });
+    }
+    await openSandboxAgentLink(db, {
+      workspaceId: other.workspaceId,
+      agentId: foreign.id,
+      epoch: 1,
+      connectionInstanceId: crypto.randomUUID(),
+      leaseMs: LEASE_MS,
+    });
+    // 0 renews; 1 was superseded; 2 lost its claim; 3 was revoked; 4 keeps a
+    // longer lease; 5 has no recorded epoch.
+    await admin`update enrollments set link_epoch=3 where id=${boxes[1]!.id}`;
+    await admin`update enrollments set connection_instance_id=${crypto.randomUUID()} where id=${boxes[2]!.id}`;
+    await admin`update enrollments set status='revoked' where id=${boxes[3]!.id}`;
+    const [long] = await admin`update enrollments set
+      connection_lease_expires_at = date_trunc('milliseconds',clock_timestamp()) + interval '1 hour'
+      where id=${boxes[4]!.id} returning connection_lease_expires_at`;
+    await admin`update enrollments set link_epoch=null where id=${boxes[5]!.id}`;
+    const before = await admin<{ id: string; expires: Date }[]>`
+      select id, connection_lease_expires_at as expires from enrollments
+      where id in ${admin(boxes.map((box) => box.id))}`;
+    const claims = [
+      ...boxes.map((box, index) => ({
+        agentId: box.id,
+        epoch: 2,
+        connectionInstanceId: instances[index]!,
+      })),
+      // Unknown, and another workspace's agent (hidden by RLS): both revoked.
+      { agentId: crypto.randomUUID(), epoch: 2, connectionInstanceId: crypto.randomUUID() },
+      { agentId: foreign.id, epoch: 1, connectionInstanceId: crypto.randomUUID() },
+    ];
+    // Results follow the order of the claims, not of the locks.
+    const reversed = [...claims].reverse();
+    const results = await renewSandboxAgentLinks(db, {
+      workspaceId: ws.workspaceId,
+      leaseMs: LEASE_MS,
+      claims: reversed,
+    });
+    expect(results.reverse()).toEqual([
+      { renewed: true },
+      { renewed: false, code: "superseded" },
+      { renewed: false, code: "lost" },
+      { renewed: false, code: "revoked" },
+      { renewed: true },
+      { renewed: true },
+      { renewed: false, code: "revoked" },
+      { renewed: false, code: "revoked" },
+    ]);
+    const after = new Map(
+      (
+        await admin<{ id: string; expires: Date; duration_ms: string }[]>`
+          select id, connection_lease_expires_at as expires,
+            extract(epoch from connection_lease_expires_at - updated_at) * 1000 as duration_ms
+          from enrollments where id in ${admin(boxes.map((box) => box.id))}`
+      ).map((row) => [row.id, row]),
+    );
+    const beforeById = new Map(before.map((row) => [row.id, row.expires]));
+    expect(Number(after.get(boxes[0]!.id)!.duration_ms)).toBe(LEASE_MS);
+    expect(Number(after.get(boxes[5]!.id)!.duration_ms)).toBe(LEASE_MS);
+    expect(after.get(boxes[4]!.id)!.expires).toEqual(long!.connection_lease_expires_at);
+    for (const refused of [1, 2, 3]) {
+      expect(after.get(boxes[refused]!.id)!.expires).toEqual(beforeById.get(boxes[refused]!.id)!);
+    }
+    // The foreign workspace's claim was not touched.
+    const [foreignRow] =
+      await admin`select connection_instance_id from enrollments where id=${foreign.id}`;
+    expect(foreignRow!.connection_instance_id).not.toBeNull();
+    expect(
+      await renewSandboxAgentLinks(db, {
+        workspaceId: ws.workspaceId,
+        leaseMs: LEASE_MS,
+        claims: [],
+      }),
+    ).toEqual([]);
+    await expect(
+      renewSandboxAgentLinks(db, {
+        workspaceId: ws.workspaceId,
+        leaseMs: LEASE_MS,
+        claims: [claims[0]!, claims[0]!],
+      }),
+    ).rejects.toThrow("names an agent twice");
+  });
+
+  test("a batched renewal is one statement, and overlapping batches never deadlock", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const count = 120;
+    const boxes = await Promise.all(Array.from({ length: count }, () => sandboxEnrollment(ws)));
+    const claims = boxes.map((box) => ({
+      agentId: box.id,
+      epoch: 1,
+      connectionInstanceId: crypto.randomUUID(),
+    }));
+    for (const claim of claims) {
+      await openSandboxAgentLink(db, { ...claim, workspaceId: ws.workspaceId, leaseMs: LEASE_MS });
+    }
+    const statements: string[] = [];
+    const measured = createDb(shared!.appUrl, { max: 1 });
+    const driver = (measured.db as unknown as { $client: postgres.Sql }).$client;
+    driver.options.debug = (_connection, query) => {
+      statements.push(query);
+    };
+    try {
+      const results = await renewSandboxAgentLinks(measured.db, {
+        workspaceId: ws.workspaceId,
+        leaseMs: LEASE_MS,
+        claims,
+      });
+      expect(results.every((result) => result.renewed)).toBe(true);
+      expect(statements.filter((query) => /from enrollments/i.test(query))).toHaveLength(1);
+      statements.length = 0;
+      for (const claim of claims) {
+        await renewSandboxAgentLink(measured.db, {
+          ...claim,
+          workspaceId: ws.workspaceId,
+          leaseMs: LEASE_MS,
+        });
+      }
+      expect(statements.filter((query) => /from enrollments/i.test(query))).toHaveLength(count);
+    } finally {
+      await measured.close();
+    }
+    // Two replicas renewing overlapping sets in opposite orders both finish;
+    // a row the other batch holds at that moment is only busy, never refused.
+    const forward = renewSandboxAgentLinks(db, {
+      workspaceId: ws.workspaceId,
+      leaseMs: LEASE_MS,
+      claims,
+    });
+    const backward = renewSandboxAgentLinks(db, {
+      workspaceId: ws.workspaceId,
+      leaseMs: LEASE_MS,
+      claims: [...claims].reverse(),
+    });
+    const [a, b] = await Promise.all([forward, backward]);
+    for (const result of [...a, ...b]) {
+      expect(result.renewed || "busy" in result).toBe(true);
+    }
+  });
+
+  test("a batched renewal skips a held row as busy, renews the rest at once, and samples the clock after locking", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const boxes = await Promise.all(Array.from({ length: 5 }, () => sandboxEnrollment(ws)));
+    const claims = boxes.map((box) => ({
+      agentId: box.id,
+      epoch: 1,
+      connectionInstanceId: crypto.randomUUID(),
+    }));
+    for (const claim of claims) {
+      await openSandboxAgentLink(db, { ...claim, workspaceId: ws.workspaceId, leaseMs: LEASE_MS });
+    }
+    const held = boxes[2]!.id;
+    const [heldBefore] =
+      await admin`select connection_lease_expires_at from enrollments where id=${held}`;
+    let unlock!: () => void;
+    let signalLocked!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    const holder = admin.begin(async (tx) => {
+      await tx`select id from enrollments where id=${held} for update`;
+      signalLocked();
+      await gate;
+    });
+    await locked;
+    let results: Awaited<ReturnType<typeof renewSandboxAgentLinks>>;
+    try {
+      // Before skip-locked, the batch waited here for the holder and held the
+      // rows it had already locked; now it answers while the lock is held.
+      results = await Promise.race([
+        renewSandboxAgentLinks(db, { workspaceId: ws.workspaceId, leaseMs: LEASE_MS, claims }),
+        Bun.sleep(3_000).then(() => {
+          throw new Error("the batch waited on a held row");
+        }),
+      ]);
+      const [lockTime] = await admin`select clock_timestamp() as now`;
+      const rows = await admin`select id, updated_at from enrollments where id in ${admin(
+        boxes.map((box) => box.id),
+      )}`;
+      for (const row of rows) {
+        if (row.id === held) continue;
+        expect(row.updated_at.getTime()).toBeLessThanOrEqual(lockTime!.now.getTime());
+      }
+    } finally {
+      unlock();
+      await holder;
+    }
+    expect(results).toEqual([
+      { renewed: true },
+      { renewed: true },
+      { renewed: false, busy: true },
+      { renewed: true },
+      { renewed: true },
+    ]);
+    const [heldAfter] =
+      await admin`select connection_lease_expires_at from enrollments where id=${held}`;
+    expect(heldAfter!.connection_lease_expires_at).toEqual(heldBefore!.connection_lease_expires_at);
+    // Once the holder is gone the next batch renews it, answered by position
+    // even when the caller spells the id in capitals.
+    const again = await renewSandboxAgentLinks(db, {
+      workspaceId: ws.workspaceId,
+      leaseMs: LEASE_MS,
+      claims: [{ ...claims[2]!, agentId: held.toUpperCase() }, claims[0]!],
+    });
+    expect(again).toEqual([{ renewed: true }, { renewed: true }]);
+    // A foreign-key check's share lock on the row (metrics ingestion inserting
+    // a row that references the enrollment) does not make it busy.
+    let unlockShare!: () => void;
+    let signalShared!: () => void;
+    const shareGate = new Promise<void>((resolve) => {
+      unlockShare = resolve;
+    });
+    const shared_ = new Promise<void>((resolve) => {
+      signalShared = resolve;
+    });
+    const sharer = admin.begin(async (tx) => {
+      await tx`select id from enrollments where id=${held} for key share`;
+      signalShared();
+      await shareGate;
+    });
+    await shared_;
+    try {
+      expect(
+        await renewSandboxAgentLinks(db, {
+          workspaceId: ws.workspaceId,
+          leaseMs: LEASE_MS,
+          claims: [claims[2]!],
+        }),
+      ).toEqual([{ renewed: true }]);
+    } finally {
+      unlockShare();
+      await sharer;
+    }
+    await expect(
+      renewSandboxAgentLinks(db, {
+        workspaceId: ws.workspaceId,
+        leaseMs: LEASE_MS,
+        claims: [claims[0]!, { ...claims[0]!, agentId: claims[0]!.agentId.toUpperCase() }],
+      }),
+    ).rejects.toThrow("names an agent twice");
   });
 
   test("renewal samples the clock after locking and sees committed ownership changes", async () => {

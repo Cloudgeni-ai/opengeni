@@ -2,6 +2,6 @@ import type { RuntimePostureMigration } from "../runtime-posture-migrations";
 
 /** Installed app packages and their saved earlier states: two full-DML FORCE-RLS tables. */
 export default {
-  migration: "1576_app_package_installs",
+  migration: "1591_app_package_installs",
   forceRls: { fullDml: 2 },
 } satisfies RuntimePostureMigration;

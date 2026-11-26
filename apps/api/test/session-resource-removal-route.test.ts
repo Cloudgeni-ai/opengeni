@@ -13,6 +13,7 @@ import {
   getSession,
   initializeSessionStartAtomically,
   listSessionEvents,
+  recordSessionRemovedRepositoriesForSessions,
   settleSessionRepositoryCleanup,
   type DbClient,
 } from "@opengeni/db";
@@ -271,6 +272,99 @@ describe("removing repositories from a session (real PostgreSQL)", () => {
     ] as const) {
       const invalid = await removeResources(target, bearer, grant, root.id, body);
       expect(invalid.status).toBe(status);
+    }
+  });
+
+  test("a chat with many sub-sessions: holders lose it, the rest get a record", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const root = await sessionWith(grant, [grocery, docs]);
+    const plain = [];
+    // More than one batch of 200.
+    for (let index = 0; index < 250; index += 1) plain.push(await sessionWith(grant, [], root.id));
+    const holder = await sessionWith(grant, [grocery], root.id);
+    const deepHolder = await sessionWith(grant, [grocery, docs], plain[7]!.id);
+
+    const removed = await removeResources(target, bearer, grant, root.id, {
+      resources: [{ kind: "repository", uri: grocery.uri }],
+    });
+    expect(removed.status).toBe(200);
+    expect(uris(removed.json.resources)).toEqual([docs.uri]);
+    for (const session of [holder, deepHolder]) {
+      const stored = await getSession(client.db, grant.workspaceId, session.id);
+      expect(uris(stored?.resources)).toEqual(session === holder ? [] : [docs.uri]);
+      expect(stored?.removedRepositories?.map((entry) => entry.sandboxCleanupPending)).toEqual([
+        true,
+      ]);
+      expect(await removedEvents(grant, session.id)).toHaveLength(1);
+    }
+    const ids = new Set<string>();
+    for (const session of [plain[0]!, plain[7]!, plain[249]!]) {
+      const stored = await getSession(client.db, grant.workspaceId, session.id);
+      const [record] = stored?.removedRepositories ?? [];
+      expect([record?.resource.uri, record?.sandboxCleanupPending]).toEqual([grocery.uri, false]);
+      ids.add(record!.id);
+      expect(await removedEvents(grant, session.id)).toEqual([]);
+    }
+    // Each session's record has its own id.
+    expect(ids.size).toBe(3);
+  });
+
+  test("a sub-session that attaches the repository before its record is written gets none", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await sessionWith(grant, [docs]);
+    const plain = await sessionWith(grant, [], root.id);
+    // Listed as not holding it, then attached before the batch write.
+    const attachedMeanwhile = await sessionWith(grant, [grocery], root.id);
+    const attaching = await recordSessionRemovedRepositoriesForSessions(
+      client.db,
+      grant.workspaceId,
+      [plain.id, attachedMeanwhile.id],
+      [
+        {
+          id: crypto.randomUUID(),
+          resource: { kind: "repository", uri: grocery.uri, ref: "main" },
+          removedAt: new Date().toISOString(),
+          sandboxCleanupPending: false,
+        },
+      ],
+    );
+    // The caller removes it there through the locked path instead.
+    expect(attaching).toEqual([attachedMeanwhile.id]);
+    const stored = await getSession(client.db, grant.workspaceId, attachedMeanwhile.id);
+    expect(stored?.removedRepositories ?? []).toEqual([]);
+    const recorded = await getSession(client.db, grant.workspaceId, plain.id);
+    expect(recorded?.removedRepositories?.map((entry) => entry.resource.uri)).toEqual([
+      grocery.uri,
+    ]);
+  });
+
+  test("a chat whose sub-sessions all inherited the repository: each loses it, with one event", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const root = await sessionWith(grant, [grocery, docs]);
+    const children = [];
+    // Children inherit their parent's repositories, so most hold it.
+    for (let index = 0; index < 60; index += 1)
+      children.push(await sessionWith(grant, [grocery, docs], root.id));
+    const grandchild = await sessionWith(grant, [grocery], children[3]!.id);
+
+    const removed = await removeResources(target, bearer, grant, root.id, {
+      resources: [{ kind: "repository", uri: grocery.uri }],
+    });
+    expect(removed.status).toBe(200);
+    for (const session of [...children, grandchild]) {
+      const stored = await getSession(client.db, grant.workspaceId, session.id);
+      expect(uris(stored?.resources)).toEqual(session === grandchild ? [] : [docs.uri]);
+      expect(stored?.removedRepositories?.map((entry) => entry.sandboxCleanupPending)).toEqual([
+        true,
+      ]);
+      expect(await removedEvents(grant, session.id)).toHaveLength(1);
     }
   });
 

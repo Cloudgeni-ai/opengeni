@@ -2085,6 +2085,7 @@ export const FORCE_RLS_TABLES = [
   "agent_slack_installs",
   "agent_workspace_access",
   "agents",
+  "ai_processing_consents",
   "api_keys",
   "app_notifications",
   "app_package_exports",
@@ -2179,6 +2180,8 @@ export const FORCE_RLS_TABLES = [
   "connector_action_requests",
   "credential_profiles",
   "credit_debit_allocations",
+  // 1576_credit_ledger_account_totals: per-account ledger sums its triggers keep.
+  "credit_ledger_account_totals",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_authority_reclassifications",
@@ -2707,7 +2710,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   // 1542_app_package_exports: stored app package files and their sweep.
   "app_package_exports",
-  // 1576_app_package_installs: installed app packages and their saved earlier states.
+  // 1591_app_package_installs: installed app packages and their saved earlier states.
   "app_package_installs",
   "app_package_snapshots",
   // 1554_app_server_code: runs of an app's server code (inserts, prune deletes).
@@ -3186,6 +3189,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "agent_calls",
   "agent_publish_operations",
+  "ai_processing_consents",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
@@ -3206,6 +3210,9 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "capability_skill_facets",
   "capability_skill_files",
   "computer_sessions",
+  // 1576_credit_ledger_account_totals: written only by the ledger's invoker
+  // triggers (RLS admits runtime writes at pg_trigger_depth() > 0).
+  "credit_ledger_account_totals",
   "editable_artifact_session_links",
   "editable_artifacts",
   "external_identity_links",

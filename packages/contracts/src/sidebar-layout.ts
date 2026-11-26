@@ -192,7 +192,7 @@ export const SidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
       appsPlacement: SidebarAppsPlacement.optional(),
       /** Built-in rail entries left out (default none). */
       hiddenNavEntries: z.array(SidebarNavEntry).max(SIDEBAR_NAV_ENTRIES.length).optional(),
-      /** Settings entries moved under More in the settings rail; the rest stay at the top (default none). */
+      /** Ignored: the settings rail has a fixed Advanced section now. Kept so older clients still save. */
       settingsMore: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_MORE_MAX).optional(),
       /** Built-in rail entries in the order shown at the top, `setup` being the folded group (default the rail's own order). */
       navOrder: z.array(NavOrderKey).max(SIDEBAR_NAV_ORDER_MAX).optional(),

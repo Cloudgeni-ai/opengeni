@@ -3564,6 +3564,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Agent",
+      "AgentReadinessListResponse",
       "AgentResponse"
     ]
   },
@@ -3597,6 +3598,32 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningSettingsRecord"
+    ]
+  },
+  {
+    "id": "getAgentReadiness",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/readiness",
+    "request": [],
+    "query": [
+      "trigger"
+    ],
+    "response": [
+      "SetupReadiness",
+      "SetupReadinessResponse"
+    ]
+  },
+  {
+    "id": "getAgentTemplateReadiness",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/readiness",
+    "request": [],
+    "query": [
+      "trigger"
+    ],
+    "response": [
+      "SetupReadiness",
+      "SetupReadinessResponse"
     ]
   },
   {
@@ -5587,6 +5614,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningOverrideRecord"
+    ]
+  },
+  {
+    "id": "listAgentReadiness",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/readiness",
+    "request": [],
+    "response": [
+      "AgentReadinessListResponse"
     ]
   },
   {

@@ -173,7 +173,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
       };
     });
 
-    expect(styles.defaultToken.trim()).toBe("#303030");
+    expect(styles.defaultToken.trim()).toBe("#141414");
     expect(styles.defaultBackground).not.toBe("rgba(0, 0, 0, 0)");
     expect(styles.defaultFontSize).toBe("14px");
     expect(styles.themedBackground).toBe("rgb(1, 2, 3)");

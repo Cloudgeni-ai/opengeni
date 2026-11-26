@@ -79,6 +79,7 @@ async fn a_host_registers_only_under_a_name_its_certificate_carries() {
             disk_mib: 1024,
             offers: Vec::new(),
             boot: None,
+            keeps_memory: false,
         },
         capacity: roomy(),
         held: Vec::new(),

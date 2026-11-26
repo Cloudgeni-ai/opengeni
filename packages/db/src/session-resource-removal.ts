@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   ResourceRef,
   boundSessionRemovedRepositories,
@@ -7,8 +8,9 @@ import {
   resourcesIncludeRepository,
   type SessionRemovedRepository,
 } from "@opengeni/contracts";
-import { and, eq, ne, sql } from "drizzle-orm";
-import { withWorkspaceRls, type Database } from "./database";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
+import { isTransactionHandle, withWorkspaceRls, type Database } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
 /**
@@ -289,14 +291,183 @@ export async function recordSessionRemovedRepositories(
   entries: readonly SessionRemovedRepository[],
 ): Promise<void> {
   if (entries.length === 0) return;
-  await updateSessionRemovedRepositories(db, workspaceId, sessionId, (current, attached) => {
-    const missing = entries.filter(
-      (entry) =>
-        findSessionRemovedRepository(current, entry.resource.uri) === undefined &&
-        repositoryMembershipKey(entry.resource.uri) !== null &&
-        !resourcesIncludeRepository(attached, entry.resource.uri),
+  await updateSessionRemovedRepositories(db, workspaceId, sessionId, (current, attached) =>
+    withMissingRemovalRecords(current, attached, entries),
+  );
+}
+
+/** `current` plus the records of `entries` it lacks and doesn't attach; null when none. */
+function withMissingRemovalRecords(
+  current: SessionRemovedRepository[],
+  attached: readonly ResourceRef[],
+  entries: readonly SessionRemovedRepository[],
+): SessionRemovedRepository[] | null {
+  const missing = entries.filter(
+    (entry) =>
+      findSessionRemovedRepository(current, entry.resource.uri) === undefined &&
+      repositoryMembershipKey(entry.resource.uri) !== null &&
+      !resourcesIncludeRepository(attached, entry.resource.uri),
+  );
+  if (missing.length === 0) return null;
+  return [...current, ...missing.map((entry) => ({ ...entry, sandboxCleanupPending: false }))];
+}
+
+/** Sessions one removal batch reads or locks at a time. */
+const REMOVAL_BATCH_SIZE = 200;
+
+function attachedRepositories(value: unknown): ResourceRef[] {
+  const parsed = ResourceRef.array().safeParse(value);
+  return parsed.success ? parsed.data : [];
+}
+
+/**
+ * Of these sessions, those that attach any of the repositories (by
+ * `repositoryMembershipKey`), read in a few queries rather than one per
+ * session: a chat can have a thousand descendants, and only those holding the
+ * repository need their own locked removal.
+ */
+export async function listSessionIdsAttachingRepositories(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+  keys: ReadonlySet<string>,
+): Promise<string[]> {
+  const holding: string[] = [];
+  for (let start = 0; start < sessionIds.length; start += REMOVAL_BATCH_SIZE) {
+    const chunk = sessionIds.slice(start, start + REMOVAL_BATCH_SIZE);
+    const rows = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+      scopedDb
+        .select({ id: schema.sessions.id, resources: schema.sessions.resources })
+        .from(schema.sessions)
+        .where(
+          and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, chunk)),
+        ),
     );
-    if (missing.length === 0) return null;
-    return [...current, ...missing.map((entry) => ({ ...entry, sandboxCleanupPending: false }))];
+    for (const row of rows) {
+      if (
+        attachedRepositories(row.resources).some(
+          (resource) =>
+            resource.kind === "repository" && keys.has(repositoryMembershipKey(resource.uri) ?? ""),
+        )
+      ) {
+        holding.push(row.id);
+      }
+    }
+  }
+  return holding;
+}
+
+/**
+ * `recordSessionRemovedRepositories` for many sessions, a batch of rows per
+ * transaction (locked in id order, retried on a deadlock or lock timeout, then
+ * one session at a time). Sessions that already have the record are left as
+ * they are. Returns the sessions that attach one of the repositories by now
+ * and so got no record: during a cascade the caller removes it from them too,
+ * even when a person attached it again while the cascade ran.
+ */
+export async function recordSessionRemovedRepositoriesForSessions(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+  entries: readonly SessionRemovedRepository[],
+): Promise<string[]> {
+  if (entries.length === 0) return [];
+  const attaching: string[] = [];
+  for (let start = 0; start < sessionIds.length; start += REMOVAL_BATCH_SIZE) {
+    const chunk = sessionIds.slice(start, start + REMOVAL_BATCH_SIZE);
+    try {
+      attaching.push(...(await recordRemovalBatchWithRetry(db, workspaceId, chunk, entries)));
+    } catch (error) {
+      // A batch that keeps colliding with other writers (deadlock, lock wait)
+      // falls back to one session per transaction, like the per-session path,
+      // so the cascade still finishes.
+      if (chunk.length === 1 || !retryableRemovalBatchError(error)) throw error;
+      for (const id of chunk) {
+        attaching.push(...(await recordRemovalBatchWithRetry(db, workspaceId, [id], entries)));
+      }
+    }
+  }
+  return attaching;
+}
+
+// Deadlock, serialization failure, and this batch's own lock_timeout.
+const RETRYABLE_REMOVAL_SQLSTATES = new Set(["40P01", "40001", "55P03"]);
+const REMOVAL_BATCH_ATTEMPTS = 3;
+
+function retryableRemovalBatchError(error: unknown): boolean {
+  return RETRYABLE_REMOVAL_SQLSTATES.has(nestedPostgresSqlState(error) ?? "");
+}
+
+async function recordRemovalBatchWithRetry(
+  db: Database,
+  workspaceId: string,
+  chunk: readonly string[],
+  entries: readonly SessionRemovedRepository[],
+): Promise<string[]> {
+  // Inside a caller's transaction the caller's own retry handles a conflict.
+  const attempts = isTransactionHandle(db) ? 1 : REMOVAL_BATCH_ATTEMPTS;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await recordRemovalBatch(db, workspaceId, chunk, entries);
+    } catch (error) {
+      if (attempt >= attempts || !retryableRemovalBatchError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10 * attempt + Math.random() * 20));
+    }
+  }
+}
+
+async function recordRemovalBatch(
+  db: Database,
+  workspaceId: string,
+  chunk: readonly string[],
+  entries: readonly SessionRemovedRepository[],
+): Promise<string[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const attaching: string[] = [];
+    // Don't wait long behind a turn holding one of a batch's rows: give up
+    // and retry, then go one session at a time. A single session waits as
+    // long as it needs, as before; a caller's own transaction keeps its own.
+    if (chunk.length > 1 && !isTransactionHandle(db)) {
+      await scopedDb.execute(sql`select set_config('lock_timeout', '5s', true)`);
+    }
+    const rows = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        removedRepositories: schema.sessions.removedRepositories,
+        resources: schema.sessions.resources,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, chunk)))
+      .orderBy(asc(schema.sessions.id))
+      .for("update");
+    const changed: Array<{ id: string; records: SessionRemovedRepository[] }> = [];
+    for (const row of rows) {
+      const attached = attachedRepositories(row.resources);
+      if (entries.some((entry) => resourcesIncludeRepository(attached, entry.resource.uri))) {
+        attaching.push(row.id);
+      }
+      const next = withMissingRemovalRecords(
+        parseSessionRemovedRepositories(row.removedRepositories),
+        attached,
+        // Each session's record gets its own id, as one recorded alone would.
+        entries.map((entry) => ({ ...entry, id: randomUUID() })),
+      );
+      if (next !== null)
+        changed.push({ id: row.id, records: boundSessionRemovedRepositories(next) });
+    }
+    if (changed.length === 0) return attaching;
+    // One statement for the batch: the rows stay locked until it commits.
+    const values = sql.join(
+      changed.map(({ id, records }) => sql`(${id}::uuid, ${JSON.stringify(records)}::jsonb)`),
+      sql`, `,
+    );
+    await scopedDb.execute(sql`
+        update ${schema.sessions}
+        set removed_repositories = changed.records
+        from (values ${values}) as changed(id, records)
+        where ${schema.sessions.workspaceId} = ${workspaceId}
+          and ${schema.sessions.id} = changed.id
+      `);
+    return attaching;
   });
 }

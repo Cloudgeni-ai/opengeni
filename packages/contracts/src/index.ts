@@ -1,4 +1,5 @@
 export * from "./model-inference";
+export * from "./ai-processing-consent";
 export type * from "./decision-types";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
@@ -86,6 +87,7 @@ export * from "./app-server";
 export * from "./site-sql";
 export * from "./app-package";
 export * from "./app-templates";
+export * from "./ready-made-setup";
 export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
@@ -22612,8 +22614,8 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       session: z.literal("cookie"),
       emailVerificationRequired: primitives.boolean.default(true),
       socialProviders: z
-        .array(z.enum(["google", "github"]))
-        .max(2)
+        .array(z.enum(["google", "github", "apple"]))
+        .max(3)
         .default([]),
       // False while the deployment has paused new account creation (launch-load
       // safety switch). Sign-in for existing accounts stays available.

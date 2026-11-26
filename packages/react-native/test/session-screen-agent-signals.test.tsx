@@ -51,6 +51,8 @@ mock.module("react-native", () => {
     Modal: host("div"),
     KeyboardAvoidingView: host("div"),
     Keyboard: { metrics: () => undefined, addListener: () => ({ remove: () => {} }) },
+    StatusBar: {},
+    TurboModuleRegistry: { get: () => null },
     Animated: {
       View: host("div"),
       Value: function AnimatedValue() {},

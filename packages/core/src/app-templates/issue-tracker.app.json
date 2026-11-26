@@ -3,6 +3,14 @@
   "name": "Issue tracker",
   "description": "Track bugs and tasks by status, priority and owner.",
   "team": "Engineering",
+  "setup": {
+    "connections": [],
+    "repository": null,
+    "worksWellWith": null,
+    "wontDoWithoutAsking": [],
+    "firstMessage": null,
+    "firstJob": "Add the bug you'd fix first."
+  },
   "package": {
     "format": "opengeni.app-package",
     "version": 1,
