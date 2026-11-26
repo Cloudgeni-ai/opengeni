@@ -125,6 +125,20 @@ export const SIDEBAR_NAV_ENTRIES = [
 export const SidebarNavEntry = /* @__PURE__ */ defineSchema(() => z.enum(SIDEBAR_NAV_ENTRIES));
 export type SidebarNavEntry = (typeof SIDEBAR_NAV_ENTRIES)[number];
 
+/**
+ * The rail's built-in entries a person can reorder (`navOrder`, `navSetup`):
+ * the hideable ones, "New session", and the folded group itself (`setup`,
+ * "Setup" or "Advanced"). A newer version may add more.
+ */
+export const SIDEBAR_NAV_ORDER_MAX = 40;
+const NavOrderKey = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(40)
+    .regex(/^[a-z_]+$/, "Use a rail entry id such as inbox or new_session"),
+);
+
 /** Settings pages a person moves under More in the settings rail, at most. */
 export const SIDEBAR_SETTINGS_MORE_MAX = 100;
 
@@ -180,6 +194,10 @@ export const SidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
       hiddenNavEntries: z.array(SidebarNavEntry).max(SIDEBAR_NAV_ENTRIES.length).optional(),
       /** Settings entries moved under More in the settings rail; the rest stay at the top (default none). */
       settingsMore: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_MORE_MAX).optional(),
+      /** Built-in rail entries in the order shown at the top, `setup` being the folded group (default the rail's own order). */
+      navOrder: z.array(NavOrderKey).max(SIDEBAR_NAV_ORDER_MAX).optional(),
+      /** Built-in rail entries inside the folded group, in order (default the rail's own). */
+      navSetup: z.array(NavOrderKey).max(SIDEBAR_NAV_ORDER_MAX).optional(),
     })
     .strict(),
 );
@@ -194,6 +212,9 @@ export const ResolvedSidebarLayoutOptions = /* @__PURE__ */ defineSchema(() =>
     hiddenNavEntries: z.array(z.string()),
     /** Null: no settings entry is under More. */
     settingsMore: z.array(z.string()).nullable(),
+    /** Null: the rail's own order. Absent from servers from before it. */
+    navOrder: z.array(z.string()).nullable().optional(),
+    navSetup: z.array(z.string()).nullable().optional(),
   }),
 );
 export type ResolvedSidebarLayoutOptions = z.infer<typeof ResolvedSidebarLayoutOptions>;
@@ -203,6 +224,8 @@ export const DEFAULT_SIDEBAR_LAYOUT_OPTIONS: ResolvedSidebarLayoutOptions = {
   appsPlacement: "sessions",
   hiddenNavEntries: [],
   settingsMore: null,
+  navOrder: null,
+  navSetup: null,
 };
 
 /** The option keys this version knows, from its schema. */
@@ -231,10 +254,14 @@ export function readStoredSidebarOptions(value: unknown): SidebarLayoutOptions {
       : undefined;
   const hidden = strings(value.hiddenNavEntries, 32);
   const more = strings(value.settingsMore, SIDEBAR_SETTINGS_MORE_MAX);
+  const navOrder = strings(value.navOrder, SIDEBAR_NAV_ORDER_MAX);
+  const navSetup = strings(value.navSetup, SIDEBAR_NAV_ORDER_MAX);
   return {
     ...value,
     ...(hidden ? { hiddenNavEntries: hidden as SidebarNavEntry[] } : {}),
     ...(more ? { settingsMore: more } : {}),
+    ...(navOrder ? { navOrder } : {}),
+    ...(navSetup ? { navSetup } : {}),
     // A preview gave apps a tab beside Sessions; a tab it saved is a section.
     ...(value.appsPlacement === "tab" ? { appsPlacement: "section" } : {}),
   } as SidebarLayoutOptions;
@@ -256,6 +283,10 @@ export function mergeSidebarOptions(
     appsPlacement,
     hiddenNavEntries: [...(own?.hiddenNavEntries ?? shared?.hiddenNavEntries ?? [])],
     settingsMore: own?.settingsMore ?? shared?.settingsMore ?? null,
+    // The two move together: a person's own order replaces the default's whole.
+    ...(own?.navOrder || own?.navSetup
+      ? { navOrder: own.navOrder ?? null, navSetup: own.navSetup ?? null }
+      : { navOrder: shared?.navOrder ?? null, navSetup: shared?.navSetup ?? null }),
   };
 }
 
@@ -291,10 +322,8 @@ export function knownSidebarOptions(
 ): SidebarLayoutOptions | undefined {
   if (!options) return undefined;
   const known: SidebarLayoutOptions = {};
-  const { sessionsShowApps, appsPlacement, hiddenNavEntries, settingsMore } = options as Record<
-    string,
-    unknown
-  >;
+  const { sessionsShowApps, appsPlacement, hiddenNavEntries, settingsMore, navOrder, navSetup } =
+    options as Record<string, unknown>;
   if (typeof sessionsShowApps === "boolean") known.sessionsShowApps = sessionsShowApps;
   const placement = readSidebarAppsPlacement(appsPlacement);
   if (placement) known.appsPlacement = placement;
@@ -304,6 +333,10 @@ export function knownSidebarOptions(
     );
   if (Array.isArray(settingsMore))
     known.settingsMore = settingsMore.filter((entry): entry is string => typeof entry === "string");
+  if (Array.isArray(navOrder))
+    known.navOrder = navOrder.filter((entry): entry is string => typeof entry === "string");
+  if (Array.isArray(navSetup))
+    known.navSetup = navSetup.filter((entry): entry is string => typeof entry === "string");
   // Every option the schema has is read above.
   return known;
 }
@@ -900,6 +933,9 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
           .nullable()
           .optional(),
         settingsMore: z.array(SettingsEntryId).max(SIDEBAR_SETTINGS_MORE_MAX).nullable().optional(),
+        /** The rail's built-in entries in order at the top, and inside the folded group. */
+        navOrder: z.array(NavOrderKey).max(SIDEBAR_NAV_ORDER_MAX).nullable().optional(),
+        navSetup: z.array(NavOrderKey).max(SIDEBAR_NAV_ORDER_MAX).nullable().optional(),
       })
       .strict(),
   ]),

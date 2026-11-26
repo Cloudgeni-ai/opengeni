@@ -764,6 +764,8 @@ describe("options", () => {
       appsPlacement: "sessions",
       hiddenNavEntries: [],
       settingsMore: null,
+      navOrder: null,
+      navSetup: null,
     });
   });
 
@@ -790,6 +792,8 @@ describe("options", () => {
       appsPlacement: "hidden",
       hiddenNavEntries: [],
       settingsMore: ["workspace:general"],
+      navOrder: null,
+      navSetup: null,
     });
     const cleared = applyPersonalSidebarChanges(
       workspace,
@@ -836,6 +840,38 @@ describe("options", () => {
         options: { sessionsShowApps: false },
       }).options,
     ).toEqual({ sessionsShowApps: false });
+  });
+});
+
+describe("rail entry order", () => {
+  test("a person's own order replaces the default's whole, and null clears it", () => {
+    const workspace = applyWorkspaceSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      parseChanges([{ op: "options", navOrder: ["inbox", "setup"], navSetup: ["agents"] }]),
+      ids(),
+    );
+    expect(mergeSidebarOptions(workspace.options, undefined)).toMatchObject({
+      navOrder: ["inbox", "setup"],
+      navSetup: ["agents"],
+    });
+    const member = applyPersonalSidebarChanges(
+      workspace,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "options", navOrder: ["new_session", "agents", "setup"] }]),
+      ids(),
+    );
+    expect(mergeSidebarOptions(workspace.options, member.options)).toMatchObject({
+      navOrder: ["new_session", "agents", "setup"],
+      navSetup: null,
+    });
+    const cleared = applyPersonalSidebarChanges(
+      workspace,
+      member,
+      parseChanges([{ op: "options", navOrder: null }]),
+      ids(),
+    );
+    expect(cleared.options).toBeUndefined();
+    expect(() => parseChanges([{ op: "options", navOrder: ["Not valid"] }])).toThrow();
   });
 });
 
@@ -1148,6 +1184,8 @@ describe("rolling deploy: this version writing what a newer one stored", () => {
       appsPlacement: "hidden",
       hiddenNavEntries: ["meetings"],
       settingsMore: ["workspace:usage"],
+      navOrder: ["inbox", "new_session", "setup"],
+      navSetup: ["knowledge"],
     } satisfies Required<SidebarLayoutOptions>;
     expect(Object.keys(every).sort()).toEqual(Object.keys(SidebarLayoutOptions.shape).sort());
     expect(knownSidebarOptions(every)).toEqual(every);

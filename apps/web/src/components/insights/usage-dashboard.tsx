@@ -79,6 +79,7 @@ import {
 import { loadUsage, loadUsageCalls, type UsageLoad } from "./usage-source";
 import { SitesUsageSection } from "./sites-usage-section";
 import { PartlyUnpricedMark, Quiet, Unpriced } from "./usage-values";
+import { UsageAgentAvatar, useUsageAgentAvatars } from "./usage-agent-avatars";
 import {
   activeFilterCount,
   CUSTOM_MAX_MS,
@@ -1114,6 +1115,17 @@ function BreakdownPanel(props: {
   const filterAllowed = usage.capabilities.filters.includes(FILTER_FIELD_OF[groupBy]);
   const legacyLimit =
     props.scope.kind === "workspace" && !usage.capabilities.filters.includes("payer");
+  // Agents show their own avatars, as on the Agents page.
+  const byAgent = groupBy === "agent";
+  const agentOf = (row: BreakdownRow) =>
+    byAgent && row.kind === "item" && row.filter?.field === "agentId"
+      ? row.filter.values[0]
+      : undefined;
+  const agentWorkspaceIds =
+    props.scope.kind === "workspace"
+      ? [props.scope.workspaceId]
+      : rows.flatMap((row) => (row.workspaceId ? [row.workspaceId] : []));
+  const agentAvatars = useUsageAgentAvatars(agentWorkspaceIds, byAgent);
 
   return (
     <section aria-label="Breakdown" className="flex min-w-0 flex-col gap-3">
@@ -1190,6 +1202,18 @@ function BreakdownPanel(props: {
               return (
                 <ListRow
                   key={row.id}
+                  {...(agentOf(row) && (row.workspaceId ?? props.scope.workspaceId)
+                    ? {
+                        leading: (
+                          <UsageAgentAvatar
+                            agentId={agentOf(row)!}
+                            name={row.label}
+                            known={agentAvatars.get(agentOf(row)!.toLowerCase())}
+                            workspaceId={(row.workspaceId ?? props.scope.workspaceId)!}
+                          />
+                        ),
+                      }
+                    : {})}
                   title={row.label}
                   titleAddon={
                     row.you ? <span className="text-xs text-fg-subtle">You</span> : undefined

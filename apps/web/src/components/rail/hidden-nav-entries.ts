@@ -16,6 +16,12 @@ const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = 
   get_started: "/workspaces/$workspaceId/get-started",
 };
 
+/** A rail destination's entry id (`navItemKey` to `inbox`, `agents`, ...), for ordering. */
+export function navEntryKey(target: string): string {
+  for (const [entry, key] of Object.entries(ENTRY_TARGETS)) if (key === target) return entry;
+  return target.replace(/[^a-z]+/g, "_");
+}
+
 /**
  * The entries this person hides: the inbox, and the rail destinations by
  * `navItemKey`. Hiding Artifacts hides Apps too, its tab, so a rail trimmed

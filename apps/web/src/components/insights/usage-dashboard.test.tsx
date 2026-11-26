@@ -264,6 +264,48 @@ describe("Insights usage dashboard", () => {
     }
   });
 
+  test("agent rows show each agent's own avatar, and initials only without one", async () => {
+    nextUsage = fixtureUsage({ groupBy: "agent" });
+    const listAgents = mock(async (workspaceId: string) => [
+      {
+        id: "66666666-0000-4000-8000-000000000001",
+        workspaceId,
+        name: "PR reviewer",
+        avatar: { kind: "icon", icon: "bot", hue: 210 },
+      },
+      {
+        id: "66666666-0000-4000-8000-000000000002",
+        workspaceId,
+        name: "Release notes",
+        avatar: null,
+      },
+    ]);
+    (context.client as Record<string, unknown>).listAgents = listAgents;
+    const view = await render({ group: "agent" });
+    try {
+      expect(listAgents).toHaveBeenCalledWith(WORKSPACE.workspaceId);
+      const kinds = [
+        ...view.container.querySelectorAll('[role="table"] [role="row"] [data-session-avatar]'),
+      ].map((tile) => tile.getAttribute("data-session-avatar"));
+      expect(kinds.sort()).toEqual(["icon", "letters"]);
+    } finally {
+      delete (context.client as Record<string, unknown>).listAgents;
+      await view.unmount();
+    }
+  });
+
+  test("other groupings read no agents", async () => {
+    const listAgents = mock(async () => []);
+    (context.client as Record<string, unknown>).listAgents = listAgents;
+    const view = await render({ group: "model" });
+    try {
+      expect(listAgents).not.toHaveBeenCalled();
+    } finally {
+      delete (context.client as Record<string, unknown>).listAgents;
+      await view.unmount();
+    }
+  });
+
   test("switching the group-by keeps the filters", async () => {
     nextUsage = fixtureUsage({ groupBy: "payer" });
     const view = await render({ group: "payer", prov: "anthropic" });

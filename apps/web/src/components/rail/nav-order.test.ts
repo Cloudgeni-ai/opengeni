@@ -1,0 +1,88 @@
+import { describe, expect, test } from "bun:test";
+
+import { arrangeNav, moveNavEntry, NAV_GROUP_KEY, stepNavEntry } from "./nav-order";
+
+const defaults = {
+  top: ["new_session", "inbox", "agents", "apps", NAV_GROUP_KEY],
+  group: ["get_started", "capabilities", "automations"],
+};
+
+describe("rail entry order", () => {
+  test("without a saved order the rail keeps its own", () => {
+    expect(arrangeNav(defaults, null, null)).toEqual(defaults);
+  });
+
+  test("a saved order wins, and entries it doesn't name keep their place", () => {
+    expect(
+      arrangeNav(defaults, ["agents", "new_session", NAV_GROUP_KEY, "gone"], ["automations"]),
+    ).toEqual({
+      // inbox and apps follow the entry before them in the rail's own order.
+      top: ["agents", "apps", "new_session", "inbox", NAV_GROUP_KEY],
+      group: ["get_started", "capabilities", "automations"],
+    });
+  });
+
+  test("an entry moved out of the group stays out", () => {
+    expect(arrangeNav(defaults, ["capabilities", ...defaults.top], [])).toEqual({
+      top: ["capabilities", ...defaults.top],
+      group: ["get_started", "automations"],
+    });
+  });
+
+  test("a drop moves an entry before or after another, or into the group", () => {
+    expect(moveNavEntry(defaults, "apps", "new_session", "before")?.top).toEqual([
+      "apps",
+      "new_session",
+      "inbox",
+      "agents",
+      NAV_GROUP_KEY,
+    ]);
+    expect(moveNavEntry(defaults, "inbox", NAV_GROUP_KEY, "into")).toEqual({
+      top: ["new_session", "agents", "apps", NAV_GROUP_KEY],
+      group: ["get_started", "capabilities", "automations", "inbox"],
+    });
+    expect(moveNavEntry(defaults, "automations", "inbox", "after")).toEqual({
+      top: ["new_session", "inbox", "automations", "agents", "apps", NAV_GROUP_KEY],
+      group: ["get_started", "capabilities"],
+    });
+    // The group never goes inside itself: next to one of its entries is where it already is.
+    expect(moveNavEntry(defaults, NAV_GROUP_KEY, "capabilities", "before")).toBeNull();
+    expect(moveNavEntry(defaults, NAV_GROUP_KEY, "inbox", "before")?.top).toEqual([
+      "new_session",
+      NAV_GROUP_KEY,
+      "inbox",
+      "agents",
+      "apps",
+    ]);
+    expect(moveNavEntry(defaults, "apps", "apps", "before")).toBeNull();
+  });
+
+  test("Alt+Arrow steps one place, into and out of an open group", () => {
+    expect(stepNavEntry(defaults, "inbox", -1, false)?.top).toEqual([
+      "inbox",
+      "new_session",
+      "agents",
+      "apps",
+      NAV_GROUP_KEY,
+    ]);
+    expect(stepNavEntry(defaults, "new_session", -1, false)).toBeNull();
+    // Down past the open group's name goes inside it, first.
+    expect(stepNavEntry(defaults, "apps", 1, true)).toEqual({
+      top: ["new_session", "inbox", "agents", NAV_GROUP_KEY],
+      group: ["apps", "get_started", "capabilities", "automations"],
+    });
+    // Closed, it passes the group.
+    expect(stepNavEntry(defaults, "apps", 1, false)?.top).toEqual([
+      "new_session",
+      "inbox",
+      "agents",
+      NAV_GROUP_KEY,
+      "apps",
+    ]);
+    // Up from the group's first entry leaves the group, above its name.
+    expect(stepNavEntry(defaults, "get_started", -1, true)).toEqual({
+      top: ["new_session", "inbox", "agents", "apps", "get_started", NAV_GROUP_KEY],
+      group: ["capabilities", "automations"],
+    });
+  });
+});
