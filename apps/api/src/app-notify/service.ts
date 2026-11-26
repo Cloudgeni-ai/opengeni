@@ -103,20 +103,9 @@ function canOpen(site: SiteDataSite, subjectId: string): boolean {
   return site.visibility === "workspace_shared" || site.ownerSubjectId === subjectId;
 }
 
-/** The app's own page, at its `path` (`/releases?tab=2`) when given. */
-export function appLink(scope: Sender["scope"], siteId: string, path: string | undefined): string {
-  const base = `/workspaces/${scope.workspaceId}/apps/${siteId}`;
-  if (!path || path === "/" || !path.startsWith("/")) return base;
-  const cut = path.search(/[?#]/u);
-  // Only the app's own pages: no way out of it with `..`.
-  const pathname = (cut < 0 ? path : path.slice(0, cut))
-    .split("/")
-    .map(safeDecode)
-    .filter((segment) => segment && segment !== "." && segment !== "..")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  const rest = cut < 0 ? "" : path.slice(cut);
-  return `${base}${pathname ? `/${pathname}` : ""}${rest ? `?at=${encodeURIComponent(rest)}` : ""}`;
+function appLink(scope: Sender["scope"], siteId: string, path: string | undefined): string {
+  const base = `/workspaces/${scope.workspaceId}/sites/${siteId}`;
+  return path && path !== "/" ? `${base}?page=${encodeURIComponent(path)}` : base;
 }
 
 export async function notifyFromApp(
@@ -234,12 +223,4 @@ export async function notifyFromApp(
       { retryable: true },
     );
   return { key, delivered: recipients.length, skipped, overLimit };
-}
-
-function safeDecode(segment: string): string {
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return segment;
-  }
 }

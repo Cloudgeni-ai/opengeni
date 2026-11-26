@@ -847,6 +847,8 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
       return json({ items: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/app-packages/status`)
+      return json({ apps: [] });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });

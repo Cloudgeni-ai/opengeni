@@ -184,6 +184,9 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
       requestSessionWorkflowWakeDispatch: noop,
       signalApprovalDecision: noop,
       signalSessionControl: noop,
+      syncScheduledTask: noop,
+      deleteScheduledTaskSchedule: noop,
+      triggerScheduledTask: noop,
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
   } as unknown as AppDependencies;

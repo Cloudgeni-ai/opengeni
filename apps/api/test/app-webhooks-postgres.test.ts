@@ -495,7 +495,7 @@ async function notifyCases() {
   const mine = await inbox(f, f.alice.subjectId);
   expect(mine).toHaveLength(1);
   expect(mine[0]!).toMatchObject({ title: "Saved again", subtitle: "Orders", session_id: null });
-  expect(mine[0]!.link.url).toBe(`/workspaces/${f.workspace.id}/apps/${f.siteId}`);
+  expect(mine[0]!.link.url).toBe(`/workspaces/${f.workspace.id}/sites/${f.siteId}`);
 
   // An earlier send is never delivered again by calling delivery directly.
   const [earlier] = await shared.admin<{ id: string }[]>`
