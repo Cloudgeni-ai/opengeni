@@ -274,6 +274,46 @@ describe("removing repositories from a session (real PostgreSQL)", () => {
     }
   });
 
+  test("a chat with many sub-sessions: holders lose it, the rest get a record", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const root = await sessionWith(grant, [grocery, docs]);
+    const plain = [];
+    for (let index = 0; index < 120; index += 1) plain.push(await sessionWith(grant, [], root.id));
+    const holder = await sessionWith(grant, [grocery], root.id);
+    const deepHolder = await sessionWith(grant, [grocery, docs], plain[7]!.id);
+
+    const started = Date.now();
+    const removed = await removeResources(target, bearer, grant, root.id, {
+      resources: [{ kind: "repository", uri: grocery.uri }],
+    });
+    const elapsed = Date.now() - started;
+    expect(removed.status).toBe(200);
+    expect(uris(removed.json.resources)).toEqual([docs.uri]);
+    for (const session of [holder, deepHolder]) {
+      const stored = await getSession(client.db, grant.workspaceId, session.id);
+      expect(uris(stored?.resources)).toEqual(session === holder ? [] : [docs.uri]);
+      expect(stored?.removedRepositories?.map((entry) => entry.sandboxCleanupPending)).toEqual([
+        true,
+      ]);
+      expect(await removedEvents(grant, session.id)).toHaveLength(1);
+    }
+    const ids = new Set<string>();
+    for (const session of [plain[0]!, plain[7]!, plain[119]!]) {
+      const stored = await getSession(client.db, grant.workspaceId, session.id);
+      const [record] = stored?.removedRepositories ?? [];
+      expect([record?.resource.uri, record?.sandboxCleanupPending]).toEqual([grocery.uri, false]);
+      ids.add(record!.id);
+      expect(await removedEvents(grant, session.id)).toEqual([]);
+    }
+    // Each session's record has its own id.
+    expect(ids.size).toBe(3);
+    // Batched: no per-sub-session round trips (one each took tens of seconds for a thousand).
+    expect(elapsed).toBeLessThan(10_000);
+  });
+
   test("an agent cannot remove repositories or attach a removed one to a child", async () => {
     if (!available) return;
     const grant = await fixture();

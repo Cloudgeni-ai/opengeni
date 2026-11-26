@@ -15,7 +15,8 @@ import {
   appendSessionEventsWithLockedSessionUpdate,
   assertSessionIsNotImported,
   listSessionDescendantIdsForResourceRemoval,
-  recordSessionRemovedRepositories,
+  listSessionIdsAttachingRepositories,
+  recordSessionRemovedRepositoriesForSessions,
   requireSession,
   type Database,
 } from "@opengeni/db";
@@ -108,18 +109,27 @@ export async function removeSessionResources(
       await listSessionDescendantIdsForResourceRemoval(deps.db, grant.workspaceId, sessionId)
     ).filter((id) => !visited.has(id));
     if (pending.length === 0) break;
-    for (const descendantId of pending) {
-      visited.add(descendantId);
-      remember(
-        await removeRepositoriesFromSession(deps, grant.workspaceId, descendantId, keys, sessionId),
-      );
-      await recordSessionRemovedRepositories(
+    for (const descendantId of pending) visited.add(descendantId);
+    // Only the descendants that hold a repository need their own locked
+    // removal (and event); the rest get the record in batches, so a chat with
+    // a thousand sub-sessions answers at once.
+    const removeFrom = async (ids: readonly string[]) => {
+      for (const id of ids) {
+        remember(await removeRepositoriesFromSession(deps, grant.workspaceId, id, keys, sessionId));
+      }
+    };
+    await removeFrom(
+      await listSessionIdsAttachingRepositories(deps.db, grant.workspaceId, pending, keys),
+    );
+    // One attached meanwhile gets no record: remove it there too.
+    await removeFrom(
+      await recordSessionRemovedRepositoriesForSessions(
         deps.db,
         grant.workspaceId,
-        descendantId,
+        pending,
         [...known.values()].map((resource) => removalRecord(resource, false)),
-      );
-    }
+      ),
+    );
   }
   return await requireSession(deps.db, grant.workspaceId, sessionId);
 }
