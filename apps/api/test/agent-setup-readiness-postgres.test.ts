@@ -206,7 +206,10 @@ test("a ready-made agent's trigger stays off until GitHub is connected, on every
   );
   expectSetupIncomplete(await f.call(f.owner.headers, "POST", `/scheduled-tasks/${taskId}/resume`));
   // So is an admin turning someone else's back on.
-  expectSetupIncomplete(await f.call(f.service, "POST", `/scheduled-tasks/${taskId}/resume`));
+  const adminResume = await f.call(f.service, "POST", `/scheduled-tasks/${taskId}/resume`);
+  expectSetupIncomplete(adminResume);
+  // Checked against the owner's connections, and says so.
+  expect(adminResume.json.error.message).toBe("Its owner needs to connect GitHub.");
 
   // Opengeni's own tools go through the same check.
   const tools = await f.mcp();

@@ -1178,6 +1178,7 @@ export async function resumeScheduledTaskAsAdmin(
     existing.agentConfig.agentId,
     {
       githubEvents: () => eventTriggersUseGitHub(db, grant.workspaceId, existing.events?.triggers),
+      forOwner: Boolean(existing.ownerSubjectId && existing.ownerSubjectId !== grant.subjectId),
     },
   );
   return await withScheduledTaskAuthorityWriteErrors(() =>

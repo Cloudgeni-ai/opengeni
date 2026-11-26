@@ -425,19 +425,21 @@ export async function agentsReadinessPurposes(
 ): Promise<SetupCheckPurpose[]> {
   const templated = agents.filter((agent) => agent.templateKey);
   if (templated.length === 0) return agents.map(() => ({ githubEvents: false }));
-  const wanted = new Set(templated.map((agent) => agent.id));
-  const tasks =
-    templated.length === 1
-      ? await listScheduledTasks(db, workspaceId, 100, 0, undefined, viewerSubjectId, {
-          agentId: templated[0]!.id,
-        })
-      : await listScheduledTasks(db, workspaceId, 500, 0, undefined, viewerSubjectId);
-  const triggersByAgent = new Map<string, ScheduledTask[]>();
-  for (const task of tasks) {
-    const agentId = task.agentConfig.agentId;
-    if (!agentId || !wanted.has(agentId)) continue;
-    triggersByAgent.set(agentId, [...(triggersByAgent.get(agentId) ?? []), task]);
-  }
+  // Each ready-made agent's own triggers, read by agent (few agents come
+  // from a ready-made one), so a busy workspace's other triggers don't count.
+  const triggersByAgent = new Map<string, ScheduledTask[]>(
+    await Promise.all(
+      templated.map(
+        async (agent) =>
+          [
+            agent.id,
+            await listScheduledTasks(db, workspaceId, 100, 0, undefined, viewerSubjectId, {
+              agentId: agent.id,
+            }),
+          ] as const,
+      ),
+    ),
+  );
   return await Promise.all(
     agents.map(async (agent) => {
       const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
@@ -487,7 +489,11 @@ export async function requireAgentTriggerReady(
   deps: ReadinessDeps,
   grant: AccessGrant,
   agentId: string | null | undefined,
-  options: { githubEvents?: () => Promise<boolean> } = {},
+  options: {
+    githubEvents?: () => Promise<boolean>;
+    /** Checked as the trigger's owner for someone else (an admin's resume). */
+    forOwner?: boolean;
+  } = {},
 ): Promise<void> {
   if (!agentId) return;
   let readiness: SetupReadiness;
@@ -513,8 +519,12 @@ export async function requireAgentTriggerReady(
     code: "agent_setup_incomplete",
     missing: readiness.missing,
   };
+  const first = readiness.missing[0];
   throw new HTTPException(409, {
-    message: readiness.reason ?? "This agent isn't ready to turn on yet.",
+    message:
+      options.forOwner && first
+        ? `Its owner needs to connect ${first.name}.`
+        : (readiness.reason ?? "This agent isn't ready to turn on yet."),
     cause,
   });
 }
