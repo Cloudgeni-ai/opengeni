@@ -20,6 +20,7 @@ import { AgentSlackIntroPage } from "@/components/agents/agent-slack-intro-page"
 import { AgentSlackSection } from "@/components/agents/agent-slack-section";
 import { ManagedInConsoleAgents } from "@/components/agents/managed-in-console-agents";
 import { useStartChatDialog } from "@/components/start-chat-dialog";
+import { enableHref } from "@/components/enable/enable-subject";
 import { agentChatOpeningMessage } from "@opengeni/react/app/lib/agents";
 
 /** Detail pages draw their own 960px frame, back link and padding. */
@@ -48,9 +49,21 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
 }
 
 export function AgentRoute({ workspaceId, agentId }: { workspaceId: string; agentId: string }) {
+  const navigate = useNavigate();
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
-      <AgentPage key={agentId} workspaceId={workspaceId} agentId={agentId} />
+      <AgentPage
+        key={agentId}
+        workspaceId={workspaceId}
+        agentId={agentId}
+        // A ready-made agent finishes its setup on Enable.
+        onFinishSetup={(agent) => {
+          if (!agent.templateKey) return;
+          void navigate({
+            href: enableHref(workspaceId, { kind: "agent", templateKey: agent.templateKey }),
+          });
+        }}
+      />
     </ContentPage>
   );
 }
@@ -112,12 +125,9 @@ export function ReadyMadeAgentRoute({
         onBack={() =>
           void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } })
         }
-        // Added with its triggers off: its page says what is left to set up.
-        onAdded={(agent) =>
-          void navigate({
-            to: "/workspaces/$workspaceId/agents/$agentId",
-            params: { workspaceId, agentId: agent.id },
-          })
+        // Added with its triggers off; Enable finds it by its template and finishes setup.
+        onAdded={() =>
+          void navigate({ href: enableHref(workspaceId, { kind: "agent", templateKey }) })
         }
       />
     </ContentPage>

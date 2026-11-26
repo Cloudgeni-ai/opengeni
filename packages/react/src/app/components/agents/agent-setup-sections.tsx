@@ -34,6 +34,7 @@ import {
   addAgentSuggestedTrigger,
   agentTriggerOffers,
   agentTriggerSaveError,
+  agentTriggerOnError,
   agentUsesGitHub,
   mentionHint,
   type AgentTriggerOffer,
@@ -239,7 +240,7 @@ export function AgentWhenItWorks({
       setTasks((list) => list?.map((row) => (row.id === next.id ? next : row)) ?? null);
     } catch (error) {
       toast.error("Couldn't change the trigger", {
-        description: userErrorText(error),
+        description: agentTriggerOnError(error),
       });
     } finally {
       setBusy(null);
