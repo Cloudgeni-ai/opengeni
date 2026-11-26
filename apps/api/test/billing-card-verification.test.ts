@@ -109,6 +109,32 @@ describe("card verification", () => {
     expect(apiErrorRetryAfterSeconds(new Error("plain"))).toBeNull();
   });
 
+  test("a young organization's spent box time lifts when it is a day old; a turnless one cannot wait", () => {
+    const now = new Date("2026-11-26T10:00:00Z");
+    // A day old at 15:30 UTC, not at midnight.
+    expect(
+      sandboxComputeRetryAfterSeconds("young_box_time", now, new Date("2026-11-26T15:30:00Z")),
+    ).toBe(5.5 * 3600);
+    // Unknown age falls back to midnight UTC.
+    expect(sandboxComputeRetryAfterSeconds("young_box_time", now)).toBe(14 * 3600);
+    const liftsAt = new Date(Date.now() + 2 * 3600_000);
+    const young = sandboxComputeRefusal(
+      new SandboxOrganizationBoxLimitError("w", "g", 7200, "young_box_time", liftsAt),
+    ) as ApiHttpError;
+    expect(young.retryable).toBe(true);
+    const retryAfter = apiErrorRetryAfterSeconds(young)!;
+    expect(retryAfter).toBeGreaterThan(2 * 3600 - 5);
+    expect(retryAfter).toBeLessThanOrEqual(2 * 3600);
+    // Waiting never lifts the turnless bound: start a chat or add credit.
+    const turnless = sandboxComputeRefusal(
+      new SandboxOrganizationBoxLimitError("w", "g", 600, "young_turnless"),
+    ) as ApiHttpError;
+    expect(turnless.status).toBe(429);
+    expect(turnless.retryable).toBe(false);
+    expect(turnless.details).toEqual({ code: "sandbox_compute_unavailable" });
+    expect(apiErrorRetryAfterSeconds(turnless)).toBeNull();
+  });
+
   test("other checkout sessions are left to the other handlers", async () => {
     expect(
       await completeCardVerificationSession(deps(), stripe({}, {}), session({ metadata: {} })),

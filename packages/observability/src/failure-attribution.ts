@@ -48,10 +48,11 @@ export function isProviderAccountRefusal(value: unknown): value is ProviderAccou
 }
 const PROVIDER_QUOTA_SCOPES = new Set(["daily", "monthly", "credits", "quota"]);
 /**
- * Client-error answers that can be our own malformed request (a serialization
- * or request-shape bug); they stay platform even from a customer's endpoint.
+ * Client-error answers that can be our own request: a serialization or
+ * request-shape bug (400, 422), a wire path or method change (404, 405) or
+ * our context size (413). They stay platform even from a customer's endpoint.
  */
-const REQUEST_SHAPE_STATUSES = new Set([400, 422]);
+const REQUEST_SHAPE_STATUSES = new Set([400, 404, 405, 413, 422]);
 
 /** Unknown errors, malformed requests and internal lease failures remain platform failures. */
 export function failureOrigin(input: {
@@ -104,8 +105,8 @@ export function failureOrigin(input: {
   )
     return "customer_provider";
   // A customer's own endpoint that cannot be reached, or that answers any
-  // other client error than a request-shape refusal (unknown model or path,
-  // payload limits, its own policies), is the customer's endpoint failing.
+  // other client error than one our own request could cause (its timeouts,
+  // conflicts or own policies), is the customer's endpoint failing.
   if (
     input.customerEndpoint === true &&
     (input.transportFailure === true ||

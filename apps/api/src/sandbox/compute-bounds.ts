@@ -7,11 +7,18 @@ import type { Observability } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
 
-/** Refusals that last until the daily allowance resets at midnight UTC. */
+/** Refusals that last until the daily allowance resets at midnight UTC. A
+ * young organization's spent box time lifts when it is a day old instead
+ * (from the refusal's `liftsAt`, midnight UTC only when that is unknown). */
 const DAILY_REFUSAL_REASONS: ReadonlySet<SandboxOrganizationBoxLimitReason> = new Set([
   "daily_budget",
   "young_box_time",
   "fleet_daily_budget",
+]);
+
+/** Refusals no wait can lift: the person must start a chat or add credit. */
+const NON_RETRYABLE_REFUSAL_REASONS: ReadonlySet<SandboxOrganizationBoxLimitReason> = new Set([
+  "young_turnless",
 ]);
 
 /** A box slot frees when a task finishes or an idle box drains. */
@@ -24,13 +31,14 @@ const RUNNING_LIMIT_RETRY_AFTER_SECONDS = 60;
 export function sandboxComputeRetryAfterSeconds(
   reason: SandboxOrganizationBoxLimitReason,
   now: Date = new Date(),
+  liftsAt?: Date,
 ): number {
   if (!DAILY_REFUSAL_REASONS.has(reason)) return RUNNING_LIMIT_RETRY_AFTER_SECONDS;
-  const nextUtcMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
-  return Math.max(
-    RUNNING_LIMIT_RETRY_AFTER_SECONDS,
-    Math.ceil((nextUtcMidnight - now.getTime()) / 1000),
-  );
+  const liftsAtMs =
+    reason === "young_box_time" && liftsAt && Number.isFinite(liftsAt.getTime())
+      ? liftsAt.getTime()
+      : Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return Math.max(RUNNING_LIMIT_RETRY_AFTER_SECONDS, Math.ceil((liftsAtMs - now.getTime()) / 1000));
 }
 
 /**
@@ -54,13 +62,21 @@ export function sandboxComputeRefusal(error: unknown): HTTPException | null {
   if (error.reason === "closed") {
     return new HTTPException(403, { message: error.message, cause: error });
   }
+  if (NON_RETRYABLE_REFUSAL_REASONS.has(error.reason)) {
+    return new ApiHttpError(429, {
+      code: "limit_exceeded",
+      message: error.message,
+      retryable: false,
+      details: { code: error.code },
+    });
+  }
   return new ApiHttpError(429, {
     code: "limit_exceeded",
     message: error.message,
     retryable: true,
     details: {
       code: error.code,
-      retryAfterSeconds: sandboxComputeRetryAfterSeconds(error.reason),
+      retryAfterSeconds: sandboxComputeRetryAfterSeconds(error.reason, new Date(), error.liftsAt),
     },
   });
 }

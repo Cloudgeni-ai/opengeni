@@ -846,6 +846,21 @@ export function instrumentedModelFetch(
     const capture = captureProviderRequestBody(provider, input, init);
     observePromptCacheRequestBody(init?.body);
     const started = performance.now();
+    // Errors thrown by the physical fetch itself. Only these can be the
+    // endpoint being unreachable; a failed dispatch checkpoint (our own
+    // database), custody admission or cancellation never is. A socket
+    // transport runs the continuation checkpoint from inside the fetch, so
+    // the checkpoint's own failures are excluded separately.
+    const endpointFailures = new Set<unknown>();
+    const checkpointFailures = new Set<unknown>();
+    const physicalFetch = async (requestInit: RequestInit | undefined): Promise<Response> => {
+      try {
+        return await inner(input, requestInit);
+      } catch (error) {
+        endpointFailures.add(error);
+        throw error;
+      }
+    };
     // A request whose bearer a subscription core leased is admitted by its
     // custody as the last awaited step before the fetch, then settled from
     // its outcome; any other request passes straight through.
@@ -856,14 +871,19 @@ export function instrumentedModelFetch(
       try {
         response = await withResponsesContinuationAdmission(
           async (replacementSignal) => {
-            replacementSignal.throwIfAborted();
-            requestInit?.signal?.throwIfAborted();
-            // OpenAI/Azure have no subscription custody lane, but every physical
-            // continuation retry still crosses the ordinary dispatch checkpoint.
-            await recordModelTransportStarted();
-            replacementSignal.throwIfAborted();
-            requestInit?.signal?.throwIfAborted();
-            if (!transportReportsDispatch) recordModelTransportDispatched(performance.now());
+            try {
+              replacementSignal.throwIfAborted();
+              requestInit?.signal?.throwIfAborted();
+              // OpenAI/Azure have no subscription custody lane, but every physical
+              // continuation retry still crosses the ordinary dispatch checkpoint.
+              await recordModelTransportStarted();
+              replacementSignal.throwIfAborted();
+              requestInit?.signal?.throwIfAborted();
+              if (!transportReportsDispatch) recordModelTransportDispatched(performance.now());
+            } catch (error) {
+              checkpointFailures.add(error);
+              throw error;
+            }
           },
           () => {
             // No awaited admission remains between this notification and fetch
@@ -872,11 +892,11 @@ export function instrumentedModelFetch(
             if (transportReportsDispatch) {
               return withModelTransportObservation(
                 () => recordModelTransportDispatched(performance.now()),
-                () => inner(input, requestInit),
+                () => physicalFetch(requestInit),
               );
             }
             recordModelTransportDispatched(performance.now());
-            return inner(input, requestInit);
+            return physicalFetch(requestInit);
           },
         );
       } catch (error) {
@@ -935,20 +955,49 @@ export function instrumentedModelFetch(
         started,
         undefined,
         undefined,
-        isModelEndpointTransportFailure(error),
+        modelEndpointTransportFailureOf(error, endpointFailures, checkpointFailures),
       );
       throw error;
     }
   }) as typeof fetch;
 }
 
-/** Connection, DNS, TLS and socket failures (Node, undici and Bun spellings). */
+/**
+ * The endpoint-transport mark of a failed model call: only for an error the
+ * physical fetch threw (or wraps one) that is not our own dispatch
+ * checkpoint's failure, and that names an unreachable endpoint.
+ */
+export function modelEndpointTransportFailureOf(
+  error: unknown,
+  physicalFetchFailures: ReadonlySet<unknown>,
+  checkpointFailures: ReadonlySet<unknown>,
+): true | undefined {
+  return errorChainIncludes(error, physicalFetchFailures) &&
+    !errorChainIncludes(error, checkpointFailures)
+    ? isModelEndpointTransportFailure(error)
+    : undefined;
+}
+
+/** Whether `error`, or an error it wraps, is one of `errors`. */
+function errorChainIncludes(error: unknown, errors: ReadonlySet<unknown>): boolean {
+  if (errors.size === 0) return false;
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth += 1) {
+    if (errors.has(current)) return true;
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+/**
+ * Connection, name-not-found, TLS and socket failures (Node, undici and Bun
+ * spellings). A temporary resolver failure (`EAI_AGAIN`) is our own DNS.
+ */
 const ENDPOINT_TRANSPORT_ERROR_CODES = new Set([
   "ECONNREFUSED",
   "ECONNRESET",
   "ECONNABORTED",
   "ENOTFOUND",
-  "EAI_AGAIN",
   "ETIMEDOUT",
   "EHOSTUNREACH",
   "EHOSTDOWN",
@@ -963,8 +1012,13 @@ const ENDPOINT_TRANSPORT_ERROR_CODES = new Set([
   "SELF_SIGNED_CERT_IN_CHAIN",
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
   "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CLOSED",
 ]);
-const ENDPOINT_TRANSPORT_ERROR_CODE_PREFIXES = ["UND_ERR_", "ERR_TLS_", "ERR_SSL_", "CERT_"];
+const ENDPOINT_TRANSPORT_ERROR_CODE_PREFIXES = ["ERR_TLS_", "ERR_SSL_", "CERT_"];
 const ENDPOINT_TRANSPORT_ERROR_NAMES = new Set([
   "TimeoutError",
   "RequestDeadlineError",
@@ -973,10 +1027,10 @@ const ENDPOINT_TRANSPORT_ERROR_NAMES = new Set([
   "BodyTimeoutError",
   "SocketError",
 ]);
-/** The endpoint's own hostname does not resolve to a usable public address. */
+/** The endpoint's own hostname does not resolve to a usable public address.
+ * A failed lookup (`dns_failed`) can be our resolver, so it stays platform. */
 const ENDPOINT_DESTINATION_REASONS = new Set([
   "dns_not_found",
-  "dns_failed",
   "dns_empty",
   "invalid_dns_answer",
   "private_or_special_use",

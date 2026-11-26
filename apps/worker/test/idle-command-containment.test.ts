@@ -1304,6 +1304,11 @@ describe("idle command containment", () => {
     const fixture = await idleFixture({ outcome: "settlement_failed", reconcileAttempts: 300 });
     await idleFor(fixture, 31);
     expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    // Metered up to ten minutes ago.
+    await admin`update sandbox_leases set last_meter_at = now() - interval '10 minutes'
+      where id = ${fixture.leaseId}`;
+    const [{ meteredUntil }] = await admin<{ meteredUntil: Date }[]>`
+      select last_meter_at as "meteredUntil" from sandbox_leases where id = ${fixture.leaseId}`;
     const target = {
       workspaceId: fixture.workspaceId,
       sandboxGroupId: fixture.sandboxGroupId,
@@ -1331,6 +1336,10 @@ describe("idle command containment", () => {
     const stuck = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
     expect(stuck?.liveness).toBe("draining");
     expect(stuck?.refcount).toBe(1);
+    const [{ stopChargeAt }] = await admin<{ stopChargeAt: string | null }[]>`
+      select resume_state #>> '{opengeniWarmBilling,stopChargeAt}' as "stopChargeAt"
+      from sandbox_leases where id = ${fixture.leaseId}`;
+    expect(stopChargeAt).not.toBeNull();
 
     // Next tick: the real provider seam, whose box is gone.
     const goneClient = {
@@ -1352,6 +1361,17 @@ describe("idle command containment", () => {
       createClientForBackend: (() => goneClient) as never,
     }).drainSandboxLease({ ...drainInput, operationId: crypto.randomUUID() });
     expect(second.status).toBe("terminated");
+    // The earlier attempt's recorded stop cutoff bounds the final charge,
+    // exactly as for a box the drain stopped itself.
+    const warm = await admin<{ event_type: string; quantity: string }[]>`
+      select event_type, quantity::text as quantity from usage_events
+      where workspace_id = ${fixture.workspaceId}
+        and source_resource_id = ${`${fixture.sandboxGroupId}:${EPOCH}`}
+        and event_type in ('sandbox.warm_seconds', 'sandbox.warm_cost')`;
+    expect(warm.map((event) => event.event_type)).toEqual(["sandbox.warm_seconds"]);
+    expect(Number(warm[0]!.quantity)).toBe(
+      Math.floor((Date.parse(stopChargeAt!) - meteredUntil.getTime()) / 1000),
+    );
 
     const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
     expect(lease?.liveness).toBe("cold");

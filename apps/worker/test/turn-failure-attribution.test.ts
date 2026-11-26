@@ -66,7 +66,7 @@ test("a customer's compatible endpoint that cannot be reached is not a platform 
   const hooks = runtimeMetricsHooksForObservability(obs);
   const provider = "organization-compatible-6e55ba3e-4945-4edc-8a39-cb0bb9e1a624";
   hooks.onModelCall!({ provider, outcome: "failed", transportFailure: true, durationSeconds: 1 });
-  hooks.onModelCall!({ provider, outcome: "failed", httpStatus: 404, durationSeconds: 1 });
+  hooks.onModelCall!({ provider, outcome: "failed", httpStatus: 408, durationSeconds: 1 });
   hooks.onModelCall!({ provider, outcome: "failed", httpStatus: 400, durationSeconds: 1 });
   hooks.onModelCall!({
     provider: "organization-openrouter",

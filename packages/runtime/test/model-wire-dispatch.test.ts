@@ -4,6 +4,7 @@ import {
   configureRuntimeMetricsHooks,
   instrumentedModelFetch,
   isModelEndpointTransportFailure,
+  modelEndpointTransportFailureOf,
 } from "../src/model-provider-client";
 import { withModelCallLifecycle } from "../src/model-request-capture";
 import { withClaudeUsageObserver } from "../src/claude-subscription-usage";
@@ -313,6 +314,39 @@ test("a model request that never reaches its endpoint is reported as a transport
       { outcome: "failed", transportFailure: true },
       { outcome: "failed" },
     ]);
+    // The dispatch checkpoint is our own database: its connection failure
+    // happens before the request leaves and is never the endpoint's.
+    observed.length = 0;
+    const checkpointDown = Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432"), {
+      code: "ECONNREFUSED",
+    });
+    let fetched = false;
+    const fetcher = instrumentedModelFetch("organization-compatible-x", (async () => {
+      fetched = true;
+      return new Response("{}");
+    }) as unknown as typeof fetch);
+    await expect(
+      withModelTransportStartedObserver(
+        () => {
+          throw checkpointDown;
+        },
+        () =>
+          fetcher("https://models.example.com/v1/chat/completions", {
+            method: "POST",
+            body: "{}",
+          }),
+      ),
+    ).rejects.toBe(checkpointDown);
+    expect(fetched).toBe(false);
+    expect(observed.filter((value) => value.transportFailure)).toEqual([]);
+    // A socket transport runs the continuation checkpoint inside the fetch:
+    // that checkpoint's failure is excluded even though the fetch threw it.
+    const wrapped = new TypeError("fetch failed", { cause: checkpointDown });
+    expect(
+      modelEndpointTransportFailureOf(wrapped, new Set([wrapped]), new Set([checkpointDown])),
+    ).toBeUndefined();
+    expect(modelEndpointTransportFailureOf(wrapped, new Set([wrapped]), new Set())).toBe(true);
+    expect(modelEndpointTransportFailureOf(checkpointDown, new Set(), new Set())).toBeUndefined();
   } finally {
     configureRuntimeMetricsHooks(null);
   }
@@ -331,6 +365,14 @@ test("a model request that never reaches its endpoint is reported as a transport
   ).toBe(true);
   for (const notTransport of [
     badUrl,
+    // Our own resolver failing, and undici errors that are not the endpoint.
+    Object.assign(new Error("Model endpoint hostname could not be resolved"), {
+      name: "DestinationPolicyError",
+      reason: "dns_failed",
+    }),
+    Object.assign(new Error("getaddrinfo EAI_AGAIN"), { code: "EAI_AGAIN" }),
+    Object.assign(new Error("aborted"), { code: "UND_ERR_ABORTED" }),
+    Object.assign(new Error("bad arg"), { code: "UND_ERR_INVALID_ARG" }),
     new DOMException("cancelled", "AbortError"),
     new Error("plain"),
     "ECONNREFUSED",

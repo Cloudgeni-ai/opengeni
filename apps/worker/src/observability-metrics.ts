@@ -1922,6 +1922,20 @@ export function recordSandboxProviderMissingBeforeCapture(
   });
 }
 
+/** Only call after the exact draining->cold commit reports wentCold: the box
+ * was already gone when a drain resumed its saved (or discarded) teardown. */
+export function recordSandboxProviderGoneAfterSave(
+  observability: Observability,
+  backend: string,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_provider_gone_after_save_total",
+    help: "Exact sandbox cold commits whose provider box was already gone after its workspace save, before the drain stopped it.",
+    labels: { backend: safeBackend },
+  });
+}
+
 /** Host workspace directory outcome after a Docker drain's exact-container
  * teardown (`retained` means the directory stays on disk). */
 export function recordSandboxDockerWorkspaceRelease(

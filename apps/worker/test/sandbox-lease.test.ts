@@ -1507,6 +1507,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         },
       },
     });
+    await admin`update sandbox_leases set last_meter_at = now() - interval '10 minutes'
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
     const claimed = await claimWorkspaceArchiveCapture(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
@@ -1586,6 +1588,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(await observability.prometheusMetrics()).not.toContain(
       "opengeni_sandbox_provider_missing_before_capture_total",
     );
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_provider_gone_after_save_total\{backend="modal"[^}]*\} 1\n/,
+    );
+    // No attempt recorded a stop cutoff: the box's unknown end after its last
+    // meter tick is not charged.
+    const warm = await admin<{ n: number }[]>`select count(*)::int as n from usage_events
+      where workspace_id = ${ids.workspaceId}
+        and source_resource_id = ${`${ids.groupId}:${epoch}`}
+        and event_type in ('sandbox.warm_seconds', 'sandbox.warm_cost')`;
+    expect(warm[0]?.n).toBe(0);
   }, 60_000);
 
   test("(1b-recovery-replay) a replay-safe Modal capture replaces a dead unexpired activity immediately", async () => {

@@ -119,7 +119,7 @@ describe("failure ownership", () => {
         transportFailure: true,
       }),
     ).toBe("customer_provider");
-    for (const httpStatus of [404, 405, 408, 409, 410, 413, 415]) {
+    for (const httpStatus of [408, 409, 410, 415, 451]) {
       expect(
         failureOrigin({
           customerManaged: true,
@@ -131,7 +131,8 @@ describe("failure ownership", () => {
     }
     // Request-shape refusals can be our own serialization bug, and an
     // unexplained failure stays ours.
-    for (const httpStatus of [undefined, 400, 422]) {
+    // Request-shape, path/method and size refusals can be our own request.
+    for (const httpStatus of [undefined, 400, 404, 405, 413, 422]) {
       expect(
         failureOrigin({
           customerManaged: true,
