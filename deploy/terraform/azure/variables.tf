@@ -83,8 +83,18 @@ variable "aks" {
     node_pool_upgrade_drain_timeout_minutes       = optional(number, 0)
     node_pool_upgrade_node_soak_minutes           = optional(number, 0)
     microsoft_defender_log_analytics_workspace_id = optional(string)
+    scale_down_utilization_threshold              = optional(number)
   })
   default = {}
+
+  validation {
+    condition = var.aks.scale_down_utilization_threshold == null ? true : (
+      var.aks.auto_scaling_enabled &&
+      var.aks.scale_down_utilization_threshold > 0 &&
+      var.aks.scale_down_utilization_threshold <= 1
+    )
+    error_message = "aks.scale_down_utilization_threshold must be greater than 0 and at most 1, and needs auto_scaling_enabled."
+  }
 
   validation {
     condition = (
