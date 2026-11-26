@@ -129,7 +129,7 @@ describe("workspace subscription administration", () => {
     // administrators share its own accounts and remove them where they work.
     // The seventh routine is 1503's sync_subscription_relogin_notice_v1: a
     // re-login notice reaches the workspace's administrators.
-    // The eighth is 1591's request_setup_connection_v1: "Ask an admin" asks
+    // The eighth is 1599's request_setup_connection_v1: "Ask an admin" asks
     // the workspace's administrators.
     expect(rewritten).toEqual({ routines: 8, policies: 8 });
   });
