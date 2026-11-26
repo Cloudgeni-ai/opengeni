@@ -322,6 +322,10 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
         6 * 3600,
       ]);
       expect(spent.message).toContain("6 sandbox hours");
+      // It lifts when the organization is a day old: 22 hours from now.
+      const liftsInMs = spent.liftsAt!.getTime() - Date.now();
+      expect(liftsInMs).toBeGreaterThan(22 * 3600_000 - 120_000);
+      expect(liftsInMs).toBeLessThanOrEqual(22 * 3600_000);
     }
     // The same use by an older or a paid young organization is within its plan.
     const older = await organization({ plan: "free", ageMs: 2 * DAY_MS });

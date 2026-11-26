@@ -1,5 +1,6 @@
 import {
   failureOrigin,
+  isCustomerEndpointMetricProvider,
   isCustomerManagedMetricProvider,
   type FailureOrigin,
 } from "@opengeni/observability";
@@ -239,7 +240,14 @@ export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
   return {
-    onModelCall: ({ provider, outcome, durationSeconds, httpStatus, providerAccountRefusal }) => {
+    onModelCall: ({
+      provider,
+      outcome,
+      durationSeconds,
+      httpStatus,
+      providerAccountRefusal,
+      transportFailure,
+    }) => {
       completedOperationSpan(observability, "worker.model.call", durationSeconds, {
         provider,
         outcome,
@@ -252,9 +260,11 @@ export function runtimeMetricsHooksForObservability(
           outcome,
           failure_origin: failureOrigin({
             customerManaged: isCustomerManagedMetricProvider(provider),
+            customerEndpoint: isCustomerEndpointMetricProvider(provider),
             outcome,
             ...(httpStatus !== undefined ? { httpStatus } : {}),
             ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+            ...(transportFailure ? { transportFailure } : {}),
           }),
         },
       });
@@ -1945,6 +1955,20 @@ export function recordSandboxProviderMissingBeforeCapture(
   observability.incrementCounter({
     name: "opengeni_sandbox_provider_missing_before_capture_total",
     help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
+    labels: { backend: safeBackend },
+  });
+}
+
+/** Only call after the exact draining->cold commit reports wentCold: the box
+ * was already gone when a drain resumed its saved (or discarded) teardown. */
+export function recordSandboxProviderGoneAfterSave(
+  observability: Observability,
+  backend: string,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_provider_gone_after_save_total",
+    help: "Exact sandbox cold commits whose provider box was already gone after its workspace save, before the drain stopped it.",
     labels: { backend: safeBackend },
   });
 }

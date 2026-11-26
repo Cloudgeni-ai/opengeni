@@ -119,6 +119,29 @@ function sandboxReaperFailureFacts(error: unknown): {
   return facts;
 }
 
+/** A class name says which step failed without carrying data. */
+const ERROR_CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
+
+/** The thrown error's class (its own `name`, or its constructor's when it
+ * only inherits `Error`), so a drain failure is diagnosable from the public
+ * log even when its cause is not a reviewed public cause name. */
+export function sandboxDrainErrorClass(error: unknown): string | undefined {
+  try {
+    if (typeof error !== "object" || error === null) return undefined;
+    const own = (error as { name?: unknown }).name;
+    const constructorName = (error as { constructor?: { name?: unknown } }).constructor?.name;
+    const name =
+      typeof own === "string" && own !== "Error"
+        ? own
+        : typeof constructorName === "string" && constructorName !== "Object"
+          ? constructorName
+          : own;
+    return typeof name === "string" && ERROR_CLASS_NAME.test(name) ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A proved retained process that could not be settled keeps holding its box.
  * The protected diagnostic keeps the throw site and process correlation; the
  * public warning names the lease (hashed) and the reviewed cause facts. */
@@ -200,6 +223,7 @@ export function warnSandboxDrainFailure(
     // A diagnostic/export failure must not change the drain outcome.
   }
   try {
+    const causeClass = sandboxDrainErrorClass(error);
     observability.warn("sandbox reaper: per-sandbox drain failed", {
       errorClass: "SandboxReaperOperationError",
       errorCode: "sandbox_reaper_drain_failed",
@@ -207,6 +231,7 @@ export function warnSandboxDrainFailure(
       sandboxLeaseKey: sandboxLeaseTelemetryKey(lease.workspaceId, lease.sandboxGroupId),
       leaseEpoch: lease.leaseEpoch,
       backend: lease.backend,
+      ...(causeClass ? { causeClass } : {}),
       ...sandboxReaperFailureFacts(error),
       ...(correlationId ? { correlationId } : {}),
     });

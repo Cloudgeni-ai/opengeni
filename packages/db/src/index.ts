@@ -51102,6 +51102,9 @@ export class SandboxOrganizationBoxLimitError extends Error {
     public readonly sandboxGroupId: string,
     public readonly limit: number,
     public readonly reason: SandboxOrganizationBoxLimitReason = "running",
+    /** When the refusal lifts on its own, when known (a young organization's
+     * first day ending). */
+    public readonly liftsAt?: Date,
   ) {
     super(sandboxOrganizationBoxLimitMessage(reason, limit));
     this.code = SANDBOX_FLEET_REFUSAL_REASONS.includes(reason)
@@ -53574,6 +53577,7 @@ async function acquireLeaseOnce(
                       ? (fleet?.limits.youngTurnlessBoxSeconds ?? 0)
                       : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
                 refusal,
+                refusal === "young_box_time" ? (fleet?.youngUntil ?? undefined) : undefined,
               );
             }
           }
@@ -54222,6 +54226,8 @@ type SandboxFleetAdmission = {
   boxSecondsFailed: boolean;
   /** The organization is younger than `youngOrganizationAgeMs`. */
   young: boolean;
+  /** When a young organization stops being young (its first-day bounds lift). */
+  youngUntil: Date | null;
   /** A young organization's metered box seconds since it was created; null
    * when unbounded or unreadable (fails open, like its other own bounds). */
   youngBoxSeconds: number | null;
@@ -54371,7 +54377,20 @@ async function readSandboxFleetAdmission(
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
     }
   }
-  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds, turnless };
+  const youngUntil =
+    young && createdAt !== null && limits.youngOrganizationAgeMs !== undefined
+      ? new Date(createdAt.getTime() + limits.youngOrganizationAgeMs)
+      : null;
+  return {
+    limits,
+    pressure,
+    boxSecondsToday,
+    boxSecondsFailed,
+    young,
+    youngUntil,
+    youngBoxSeconds,
+    turnless,
+  };
 }
 
 export async function acquireLease(

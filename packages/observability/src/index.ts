@@ -1,5 +1,6 @@
 export {
   failureOrigin,
+  isCustomerEndpointMetricProvider,
   isCustomerManagedMetricProvider,
   isProviderAccountRefusal,
   PROVIDER_ACCOUNT_REFUSALS,
@@ -2356,6 +2357,8 @@ function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes
   return projected;
 }
 
+const SANDBOX_REAPER_CAUSE_CLASS_PATTERN = /^[A-Z][A-Za-z0-9]{0,63}$/;
+
 /**
  * A sandbox reaper drain or retained-process settlement that failed
  * (worker retained-process-diagnostics.ts): the hashed lease key, backend and
@@ -2365,7 +2368,7 @@ function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes
  */
 function projectSandboxReaperDiagnosticAttributes(attributes: Attributes): Attributes {
   if (attributes.errorClass !== "SandboxReaperOperationError") return {};
-  const { backend, leaseEpoch, sandboxLeaseKey, causeFingerprint } = attributes;
+  const { backend, leaseEpoch, sandboxLeaseKey, causeFingerprint, causeClass } = attributes;
   return {
     ...(typeof backend === "string" && SANDBOX_OPERATION_BACKENDS.has(backend) ? { backend } : {}),
     ...(typeof leaseEpoch === "number" && Number.isSafeInteger(leaseEpoch) && leaseEpoch >= 0
@@ -2377,6 +2380,10 @@ function projectSandboxReaperDiagnosticAttributes(attributes: Attributes): Attri
       : {}),
     ...(typeof causeFingerprint === "string" && MESSAGE_FINGERPRINT_PATTERN.test(causeFingerprint)
       ? { causeFingerprint }
+      : {}),
+    // The thrown error's class name (a code identifier, never message text).
+    ...(typeof causeClass === "string" && SANDBOX_REAPER_CAUSE_CLASS_PATTERN.test(causeClass)
+      ? { causeClass }
       : {}),
     ...projectErrorCauseAttributes(attributes),
   };
