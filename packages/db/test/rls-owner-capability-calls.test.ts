@@ -142,16 +142,19 @@ test("the runtime role filters other tenants' rows without calling the owner def
   expect(calls.session_tenancy_fence_owner_policy_active).toBe(1);
   expect(calls.scoped_compute_policy_capability_active ?? 0).toBe(0);
 
-  const owner = createDb(shared.appUrl, { max: 1 });
+  const otherTenant = createDb(shared.appUrl, { max: 1 });
   try {
-    const rows = await withWorkspaceSubjectRls(owner.db, other.workspaceId, other.subjectId, (tx) =>
-      tx.execute(sql`select count(*)::int as count from sessions`),
+    const rows = await withWorkspaceSubjectRls(
+      otherTenant.db,
+      other.workspaceId,
+      other.subjectId,
+      (tx) => tx.execute(sql`select count(*)::int as count from sessions`),
     );
     expect(Number((rows as unknown as { count: number }[])[0]!.count)).toBe(
       OTHER_TENANT_SESSIONS + 1,
     );
   } finally {
-    await owner.close();
+    await otherTenant.close();
   }
 }, 300_000);
 

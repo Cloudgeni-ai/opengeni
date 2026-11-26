@@ -136,6 +136,47 @@ describe("online-safety SQL recognition", () => {
       "nonconcurrent-index",
     ]);
   });
+  test("dynamic policy changes must target one constant table", () => {
+    // The body of the first owner-guard migration, which rewrote the policies
+    // of every matching table in one transaction.
+    const everyTable = `DO $migration$
+DECLARE
+  replacement constant text := '(((CURRENT_USER)::text = \\2) AND \\1((CURRENT_USER)::text, \\2, \\3))';
+  policy record;
+BEGIN
+  FOR policy IN
+    SELECT DISTINCT pol.polname, pol.polrelid::regclass::text AS relation,
+      pg_get_expr(pol.polqual, pol.polrelid) AS qual
+    FROM pg_policy pol
+    ORDER BY relation, pol.polname
+  LOOP
+    EXECUTE format('ALTER POLICY %I ON %s %s', policy.polname, policy.relation,
+      format('USING (%s)', regexp_replace(policy.qual, 'x', replacement, 'g')));
+  END LOOP;
+END
+$migration$;`;
+    expect(rules(rolling(everyTable))).toEqual(["multi-table-policy"]);
+    const oneTable = everyTable
+      .replace("DECLARE", "DECLARE\n  target constant regclass := 'public.t'::regclass;")
+      .replace("FROM pg_policy pol", "FROM pg_policy pol WHERE pol.polrelid = target");
+    expect(rules(rolling(oneTable))).toEqual([]);
+    expect(
+      rules(
+        rolling(
+          "DO $$ BEGIN EXECUTE 'ALTER POLICY p ON t USING (true)'; EXECUTE 'DROP POLICY q ON u'; END $$;",
+        ),
+      ),
+    ).toEqual(["multi-table-policy"]);
+    expect(
+      rules(
+        rolling(
+          "DO $$ BEGIN EXECUTE 'ALTER POLICY p ON t USING (true)'; EXECUTE 'DROP POLICY q ON t'; END $$;",
+        ),
+      ),
+    ).toEqual([]);
+    expect(rules(maintenance(everyTable))).toEqual([]);
+    expect(analyzeMigrationOnlineSafety("1609_test.sql", rolling(everyTable))).toEqual([]);
+  });
   test("policy changes may span several policies of one existing table or new tables", () => {
     expect(
       rules(

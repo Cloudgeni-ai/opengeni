@@ -176,6 +176,35 @@ function relation(ts: Token[], start: number): Relation | null {
   return { name: JSON.stringify(parts), end: i, qualified };
 }
 
+/** Tables of CREATE/ALTER/DROP POLICY text run as dynamic SQL in a DO block. A
+ * target that isn't written in the text is the block's single constant
+ * regclass, if it declares exactly one; otherwise it is unknown (null).
+ */
+function dynamicPolicyTargets(statement: string, ts: Token[]): (Relation | null)[] {
+  const constants = [
+    ...statement.matchAll(
+      /\b[A-Za-z_]\w*\s+constant\s+regclass\s*:=\s*'((?:''|[^'])*)'\s*::\s*regclass\b/gi,
+    ),
+  ].map((match) => relation(tokens(match[1]!.replaceAll("''", "'")), 0));
+  const targets: (Relation | null)[] = [];
+  for (const literal of ts) {
+    if (literal.kind !== "literal") continue;
+    const text = literal.value.replace(/^[eE]?'|'$/g, "").replaceAll("''", "'");
+    if (!/\b(?:CREATE|ALTER|DROP)\s+POLICY\b/i.test(text)) continue;
+    const inner = tokens(text);
+    for (let k = 0; k < inner.length; k++) {
+      if (!["CREATE", "ALTER", "DROP"].some((w) => word(inner[k], w))) continue;
+      if (!word(inner[k + 1], "POLICY")) continue;
+      let j = k + 2;
+      if (at(inner, j, "IF", "EXISTS")) j += 2;
+      if (isName(inner[j])) j++;
+      const table = word(inner[j], "ON") ? relation(inner, j + 1) : null;
+      targets.push(table ?? (constants.length === 1 ? constants[0]! : null));
+    }
+  }
+  return targets;
+}
+
 function indexName(index: Relation, table: string): string {
   if (index.qualified) return index.name;
   return JSON.stringify([
@@ -393,6 +422,21 @@ function analyze(
     const number = statementIndex + 1;
     const ts = tokens(statement);
     const procedural = /^\s*DO\b/i.test(statement);
+    if (procedural && !maintenance && ordinal >= MULTI_TABLE_POLICY_FROM_ORDINAL)
+      for (const table of dynamicPolicyTargets(statement, ts)) {
+        if (!table) {
+          add(
+            "multi-table-policy",
+            number,
+            "Dynamic row policy change whose table is not one constant regclass",
+          );
+          continue;
+        }
+        if (!existing(table)) continue;
+        policyTables.add(table.name);
+        if (policyTables.size > 1)
+          add("multi-table-policy", number, "Row policy changes on several existing tables");
+      }
     for (let i = 0; i < ts.length; i++) {
       if (!commandStart(ts, i, procedural)) continue;
       if (at(ts, i, "CREATE")) {
