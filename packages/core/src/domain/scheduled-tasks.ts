@@ -1169,18 +1169,17 @@ export async function resumeScheduledTaskAsAdmin(
   // An active one is already on, unless it ran once and needs re-arming.
   if (existing.status === "active" && !(await scheduledTaskFinishedOnce(db, existing)))
     return existing;
-  // Turning it back on needs its ready-made agent's required connections,
-  // the owner's: runs use the owner's access, not the admin's.
-  if (existing.status !== "active")
-    await requireAgentTriggerReady(
-      { db, settings },
-      existing.ownerSubjectId ? { ...grant, subjectId: existing.ownerSubjectId } : grant,
-      existing.agentConfig.agentId,
-      {
-        githubEvents: () =>
-          eventTriggersUseGitHub(db, grant.workspaceId, existing.events?.triggers),
-      },
-    );
+  // Turning it back on (or re-arming one that finished its one run) needs
+  // its ready-made agent's required connections, the owner's: runs use the
+  // owner's access, not the admin's.
+  await requireAgentTriggerReady(
+    { db, settings },
+    existing.ownerSubjectId ? { ...grant, subjectId: existing.ownerSubjectId } : grant,
+    existing.agentConfig.agentId,
+    {
+      githubEvents: () => eventTriggersUseGitHub(db, grant.workspaceId, existing.events?.triggers),
+    },
+  );
   return await withScheduledTaskAuthorityWriteErrors(() =>
     updateScheduledTask(db, existing.workspaceId, existing.id, {
       status: "active",
@@ -1646,15 +1645,19 @@ export async function validatedScheduledTaskUpdate(
       privateTask: visibility === "user_private",
     });
   }
-  // Turning a trigger on, or pointing an active one at another agent, needs
-  // that ready-made agent's required connections (after the agent check).
+  // Turning a trigger on, re-arming one that finished its one run, or
+  // pointing an active one at another agent, needs that ready-made agent's
+  // required connections (after the agent check).
   if (
     agentTriggerTurnsOn({
       previousStatus: input.existing.status,
       previousAgentId: input.existing.agentConfig.agentId,
       nextStatus: update.status ?? input.existing.status,
       nextAgentId,
-    })
+    }) ||
+    (update.status === "active" &&
+      input.existing.status === "active" &&
+      (await scheduledTaskFinishedOnce(input.db, input.existing)))
   )
     await requireAgentTriggerReady(input, input.grant, nextAgentId, {
       githubEvents: () =>

@@ -235,6 +235,31 @@ test("a ready-made agent's trigger stays off until GitHub is connected, on every
   });
 });
 
+test("Opengeni's own create tool can't add an active trigger before GitHub is connected", async () => {
+  const f = await fixture();
+  const added = await f.call(f.owner.headers, "POST", "/agent-templates/pr-reviewer/agents", {
+    editAccess: "everyone",
+  });
+  expect(added.status, JSON.stringify(added.json)).toBe(201);
+  const reviewer = added.json.agent.id as string;
+  const { status: _status, ...request } = f.trigger(reviewer, "active");
+  const tools = await f.mcp();
+  try {
+    const result = (await tools.client.callTool({
+      name: "scheduled_tasks_create",
+      arguments: { ...request, status: "active" },
+    })) as { isError?: boolean; content?: { text?: string }[] };
+    const text = (result.content ?? []).map((entry) => entry.text ?? "").join("\n");
+    expect(result.isError, text).toBe(true);
+    expect(text).toMatch(/connect GitHub/i);
+  } finally {
+    await tools.close();
+  }
+  // Nothing was added.
+  const listed = await f.call(f.owner.headers, "GET", "/scheduled-tasks");
+  expect(JSON.stringify(listed.json)).not.toContain(reviewer);
+});
+
 test("an agent without a template is never held back", async () => {
   const f = await fixture();
   const created = await f.call(f.owner.headers, "POST", "/agents", { name: "Planner" });

@@ -832,8 +832,10 @@ trigger on a schedule or run by hand also accepts the viewer's own GitHub
 it. Each GitHub connection says how this viewer connects it (`connectVia`:
 `github_app`, `github_personal` or null), and Enable's Connect follows it.
 The App counts as connected only when it is fully configured and its
-binding is active, as the GitHub integration page reads it (the API reads
-the installation live; core's trigger gate reads the stored binding). The
+binding is active, as the GitHub integration page reads it: the API
+registers that live reader with core once (`setGitHubAppBindingReader`), so
+Enable and every trigger path agree; without one, core reads the stored
+binding. Re-arming a trigger that finished its one run is checked too. The
 readiness reads say which trigger with `?trigger=<name>` (SDK
 `getAgentTemplateReadiness(..., { trigger })`); without it, an agent's
 reads follow its own triggers (GitHub events only when one runs on them,

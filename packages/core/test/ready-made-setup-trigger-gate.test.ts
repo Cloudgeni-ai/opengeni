@@ -25,6 +25,12 @@ mock.module("../src/domain/ready-made-setup-readiness", () => ({
     });
   },
 }));
+// A trigger that finished its one run and is being re-armed.
+const actualEvents = await import("../src/domain/event-triggers/automation-events");
+mock.module("../src/domain/event-triggers/automation-events", () => ({
+  ...actualEvents,
+  scheduledTaskFinishedOnce: async () => true,
+}));
 const { createValidatedScheduledTask, resumeScheduledTaskAsAdmin } =
   await import("../src/domain/scheduled-tasks");
 const { agentTriggerTurnsOn } = actual;
@@ -127,4 +133,20 @@ test("an admin turning someone's trigger back on is checked against the owner's 
   ).rejects.toMatchObject({ status: 409 });
   // Runs use the owner's access, so their connections count, not the admin's.
   expect(askedAs).toEqual(["user:owner"]);
+});
+
+test("re-arming a trigger that finished its one run is checked too", async () => {
+  asked.length = 0;
+  const finished = {
+    id: "33333333-3333-4333-8333-333333333334",
+    workspaceId: grant.workspaceId,
+    status: "active",
+    ownerSubjectId: "user:owner",
+    agentConfig: { agentId },
+    events: null,
+  } as never;
+  await expect(
+    resumeScheduledTaskAsAdmin({} as never, grant, finished, testSettings()),
+  ).rejects.toMatchObject({ status: 409 });
+  expect(asked).toEqual([agentId]);
 });

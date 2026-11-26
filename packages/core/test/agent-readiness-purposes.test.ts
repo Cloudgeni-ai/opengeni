@@ -8,8 +8,12 @@ mock.module("@opengeni/db", () => ({
   ...actualDb,
   listScheduledTasks: async () => tasks,
   getEventSource: async () => null,
+  // A stored binding that looks fine: its owner's proof and repositories.
+  listGitHubInstallationAccessForWorkspace: async () => [{ installationId: 1 }],
+  hasAuditableGitHubInstallationAuthority: () => true,
 }));
-const { agentsReadinessPurposes } = await import("../src/domain/ready-made-setup-readiness");
+const { agentsReadinessPurposes, githubSetupFacts, setGitHubAppBindingReader } =
+  await import("../src/domain/ready-made-setup-readiness");
 
 const db = {} as never;
 const fixer = { id: "agent-fixer", templateKey: "bug-fixer" };
@@ -43,4 +47,30 @@ test("with no trigger yet, the one Enable turns on by default", async () => {
   expect(await agentsReadinessPurposes(db, "ws", "user:a", [fixer])).toEqual([
     { githubEvents: true },
   ]);
+});
+
+test("the registered live GitHub reader wins over the stored binding", async () => {
+  const settings = {
+    githubAppId: "1",
+    githubClientId: "client",
+    githubClientSecret: "secret",
+    githubAppSlug: "opengeni",
+    githubAppPrivateKey: "key",
+    githubPersonalOauthEnabled: false,
+  } as never;
+  const grant = { accountId: "acc", workspaceId: "ws", subjectId: null } as never;
+  const appDb = {} as never;
+  const otherDb = {} as never;
+  const installed = async (database: never) =>
+    (await githubSetupFacts({ db: database, settings }, grant, { githubManage: true }))
+      .appInstalled;
+  // No reader: the stored binding counts.
+  expect(await installed(appDb)).toBe(true);
+  // The live read says suspended: not connected, on every path using this database.
+  setGitHubAppBindingReader(appDb, async () => false);
+  expect(await installed(appDb)).toBe(false);
+  // Another app's database keeps its own answer.
+  expect(await installed(otherDb)).toBe(true);
+  setGitHubAppBindingReader(appDb, null);
+  expect(await installed(appDb)).toBe(true);
 });

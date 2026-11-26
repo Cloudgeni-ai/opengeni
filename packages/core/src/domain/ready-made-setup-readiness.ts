@@ -54,9 +54,9 @@ type ReadinessDeps = {
   db: Database;
   settings: Settings;
   /**
-   * Whether the workspace's GitHub App binding is active, read live the way
-   * the GitHub integration page reads it (suspended or removed doesn't
-   * count). The API passes it; without it, the stored binding is read.
+   * Whether the workspace's GitHub App binding is active (suspended or
+   * removed doesn't count). Tests pass it; otherwise the reader registered
+   * with `setGitHubAppBindingReader`, else the stored binding.
    */
   githubAppBound?: ((workspaceId: string) => Promise<boolean>) | undefined;
 };
@@ -223,6 +223,23 @@ export function githubAppConfigured(
   ].every((value) => Boolean(value?.trim()));
 }
 
+/**
+ * The live GitHub App reader per database (the API registers one, reading
+ * the installation as the GitHub integration page does), so every trigger
+ * path (the API, Opengeni's own tools, app sync, an admin's resume) and the
+ * readiness reads agree. Keyed by database so apps in one process don't mix.
+ */
+const githubAppBoundReaders = new WeakMap<object, (workspaceId: string) => Promise<boolean>>();
+export function setGitHubAppBindingReader(
+  db: Database,
+  reader: ((workspaceId: string) => Promise<boolean>) | null,
+): void {
+  // Some test apps run without a database.
+  if (typeof db !== "object" || db === null) return;
+  if (reader) githubAppBoundReaders.set(db as object, reader);
+  else githubAppBoundReaders.delete(db as object);
+}
+
 /** Without a live reader: a stored binding with its owner's proof and repositories. */
 async function storedGitHubAppBound(db: Database, workspaceId: string): Promise<boolean> {
   const installations = await listGitHubInstallationAccessForWorkspace(db, workspaceId);
@@ -238,10 +255,16 @@ export async function githubSetupFacts(
   const appConfigured = githubAppConfigured(deps.settings);
   const [appInstalled, personalConnected] = await Promise.all([
     appConfigured
-      ? (deps.githubAppBound
-          ? deps.githubAppBound(grant.workspaceId)
-          : storedGitHubAppBound(deps.db, grant.workspaceId)
-        ).catch(() => false)
+      ? (async () => {
+          const live =
+            deps.githubAppBound ??
+            (typeof deps.db === "object" && deps.db !== null
+              ? githubAppBoundReaders.get(deps.db as object)
+              : undefined);
+          return live
+            ? await live(grant.workspaceId)
+            : await storedGitHubAppBound(deps.db, grant.workspaceId);
+        })().catch(() => false)
       : false,
     grant.subjectId
       ? activePersonalGitHubConnection(deps, {
