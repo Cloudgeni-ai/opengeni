@@ -587,6 +587,34 @@ describe("sandbox enrollments", () => {
       claims: [{ ...claims[2]!, agentId: held.toUpperCase() }, claims[0]!],
     });
     expect(again).toEqual([{ renewed: true }, { renewed: true }]);
+    // A foreign-key check's share lock on the row (metrics ingestion inserting
+    // a row that references the enrollment) does not make it busy.
+    let unlockShare!: () => void;
+    let signalShared!: () => void;
+    const shareGate = new Promise<void>((resolve) => {
+      unlockShare = resolve;
+    });
+    const shared_ = new Promise<void>((resolve) => {
+      signalShared = resolve;
+    });
+    const sharer = admin.begin(async (tx) => {
+      await tx`select id from enrollments where id=${held} for key share`;
+      signalShared();
+      await shareGate;
+    });
+    await shared_;
+    try {
+      expect(
+        await renewSandboxAgentLinks(db, {
+          workspaceId: ws.workspaceId,
+          leaseMs: LEASE_MS,
+          claims: [claims[2]!],
+        }),
+      ).toEqual([{ renewed: true }]);
+    } finally {
+      unlockShare();
+      await sharer;
+    }
     await expect(
       renewSandboxAgentLinks(db, {
         workspaceId: ws.workspaceId,

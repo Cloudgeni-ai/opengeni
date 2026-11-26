@@ -74860,7 +74860,7 @@ export async function renewSandboxAgentLinks(
           join claim on claim.agent_id = e.id
           where e.workspace_id = ${input.workspaceId}
           order by e.id
-          for update of e skip locked
+          for no key update of e skip locked
         ), present as materialized (
           -- Rows this statement's snapshot sees; one present but not locked
           -- was held by another transaction and is answered busy.

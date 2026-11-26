@@ -578,6 +578,23 @@ describe("agent gateway sessions", () => {
     expect(socket.frames.filter((frame) => frame.t === "closed")).toHaveLength(1);
   });
 
+  test("when single renewals fail too, the fallback stops after the first failures", async () => {
+    const { gateway, send, settle, store } = await gatewayWithLink();
+    const instance = (n: number) =>
+      `cccccccc-cccc-4ccc-8ccc-cccccccccc${String(n).padStart(2, "0")}`;
+    for (let n = 1; n <= 8; n++) {
+      send({ t: "open", s: n, sandbox: `sbx-${n}`, ticket: `w1a${n}`, connection: instance(n) });
+    }
+    await settle();
+    store.renewManyThrows = true;
+    store.renewThrows = true;
+    store.calls.length = 0;
+    await gateway.tick();
+    expect(store.renewBatches.at(-1)).toHaveLength(8);
+    // At most one failing single renewal per fallback worker, not one per session.
+    expect(store.calls.filter((call) => call.startsWith("renew:")).length).toBeLessThanOrEqual(4);
+  });
+
   test("a session whose renewals keep failing loses its authority at the lease deadline", async () => {
     let now = 1_000_000;
     const { gateway, socket, send, settle, store, nats } = await gatewayWithLink({

@@ -458,30 +458,37 @@ export class ComputeAgentGateway {
     }
   }
 
-  /** Renew `sessions` one claim at a time, a few at once. */
+  /** Renew `sessions` one claim at a time, a few at once. The first single
+   * renewal that fails stops the rest: then the store itself is failing
+   * (connection loss, failover), not one claim, and the remaining sessions
+   * keep their last confirmed lease until the next tick. */
   private async renewEach(sessions: readonly Session[], startedAtMs: number): Promise<void> {
     let next = 0;
+    let failed = false;
     const worker = async () => {
-      while (next < sessions.length) {
+      while (!failed && next < sessions.length) {
         const session = sessions[next++]!;
         try {
           this.applyRenewal(session, await this.options.store.renew(session.claim), startedAtMs);
         } catch (error) {
-          // The lease outlives several missed renewals and the next tick
-          // retries; once the last confirmed lease runs out the session ends.
-          this.options.logger?.warn("compute gateway: a session renewal failed", {
-            errorCode: "compute_link_renew_failed",
-            error: errorMessage(error),
-            workspaceId: session.claim.workspaceId,
-            agentId: session.claim.agentId,
-          });
-          this.authorized(session);
+          if (!failed) {
+            failed = true;
+            this.options.logger?.warn("compute gateway: a session renewal failed", {
+              errorCode: "compute_link_renew_failed",
+              error: errorMessage(error),
+              workspaceId: session.claim.workspaceId,
+              agentId: session.claim.agentId,
+            });
+          }
         }
       }
     };
     await Promise.all(
       Array.from({ length: Math.min(RENEW_BATCH_CONCURRENCY, sessions.length) }, worker),
     );
+    // The lease outlives several missed renewals and the next tick retries;
+    // once the last confirmed lease runs out the session ends.
+    if (failed) for (const session of sessions) this.authorized(session);
   }
 
   private applyRenewal(
