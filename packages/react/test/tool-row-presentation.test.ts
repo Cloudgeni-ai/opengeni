@@ -32,7 +32,7 @@ describe("shared tool row presentation", () => {
               {
                 path: "SKILL.md",
                 content:
-                  "---\nname: operate-smart-home\ndescription: Use for the house.\n---\n# Home",
+                  "---\nname: prepare-summary\ndescription: Prepare a summary.\n---\n# Drafting a summary",
               },
             ],
           }),
@@ -48,7 +48,7 @@ describe("shared tool row presentation", () => {
       }),
     );
     expect(read.title).toBe("Read skill");
-    expect(read.preview).toEqual({ kind: "text", text: "Operate smart home" });
+    expect(read.preview).toEqual({ kind: "text", text: "Drafting a summary" });
     const running = toolRowPresentation(
       englishText,
       call({ name: "skill_read", status: "running", arguments: { skill: "builtin:documents" } }),
@@ -84,14 +84,61 @@ describe("shared tool row presentation", () => {
         }),
       ).preview;
     const id = "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53";
-    expect(preview(id, '---\r\nname: "quoted-name"\r\n---\r\n# Body')).toMatchObject({
+    expect(preview(id, '---\r\nname: "quoted-name"\r\n---\r\nNo heading.')).toMatchObject({
       text: "Quoted name",
+    });
+    expect(
+      preview(id, '---\nname: sample-skill\ntitle: "Guide: résumé" # title\n---\n# Other heading'),
+    ).toMatchObject({ text: "Guide: résumé" });
+    expect(preview("sample-skill", "```md\n# Not a heading\n```\n\nRésumé\n======")).toMatchObject({
+      text: "Résumé",
+    });
+    expect(preview("sample-skill", "## A section\n\nNo title.")).toMatchObject({
+      text: "Sample skill",
+    });
+    expect(preview("sample-skill", "<!--\n# Hidden\n-->\n\n# A **visible** title")).toMatchObject({
+      text: "A visible title",
     });
     expect(preview(id, "---\ndescription: none\n---\nname: body-line\n")).toEqual({
       kind: "text",
       text: "Done",
     });
     expect(preview(`builtin:${id}`, "no front matter")).toEqual({ kind: "text", text: "Done" });
+  });
+
+  test("a replay preview preserves titles and stable names on ID-addressed skill reads", () => {
+    const withOmission = (text: string) =>
+      `${text.slice(0, 1024)}\n…[${text.length - 1536} characters omitted from this preview]…\n${text.slice(-512)}`;
+    const header = "---\nname: document-review\n";
+    const body = "Text.\n\n".repeat(1000);
+    for (const [content, title] of [
+      [`${header}description: Review documents.\n---\n# Gjennomgang\n\n${body}`, "Gjennomgang"],
+      [
+        `${header}description: ${"x".repeat(1000)}\n---\n# Not in the preview\n\n${body}`,
+        "Document review",
+      ],
+      [
+        `${header}description: ${"x".repeat(930)}\n---\n# ${"Partial heading ".repeat(12)}\n\n${body}`,
+        "Document review",
+      ],
+    ] as const) {
+      const text = withOmission(JSON.stringify({ files: [{ path: "SKILL.md", content }] }));
+      for (const output of [
+        text,
+        { content: [{ type: "text", text }] },
+        { files: [{ path: "SKILL.md", content: withOmission(content) }] },
+      ]) {
+        const row = toolRowPresentation(
+          englishText,
+          call({
+            name: "skill_read",
+            arguments: { skill: "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53" },
+            output,
+          }),
+        );
+        expect(row.preview).toEqual({ kind: "text", text: title });
+      }
+    }
   });
 
   test("tool_search reads as a lookup with the disclosed tools", () => {

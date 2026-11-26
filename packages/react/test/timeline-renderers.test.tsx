@@ -14,7 +14,7 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
-import { createOpenGeniText } from "../src/messages/runtime";
+import { createOpenGeniText, OpenGeniMessagesProvider } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
@@ -50,6 +50,71 @@ const { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } =
   await import("../src/timeline");
 const { MessageTimeline } = await import("../src");
 const { TimelineRow } = await import("../src/components/message-timeline");
+
+test("chat rows use the authored Skill title and only preview provider reasoning in English", async () => {
+  const reasoning = "Checking the document";
+  const skillTitle = "Dokumentgjennomgang";
+  const events = [
+    timelineEvent("user.message", { text: "Review the document" }),
+    timelineEvent("agent.reasoning.delta", { text: `**${reasoning}**` }),
+    timelineEvent("agent.toolCall.created", {
+      id: "read-guide",
+      name: "skill_read",
+      arguments: { skill: "document-review" },
+    }),
+    timelineEvent("agent.toolCall.output", {
+      id: "read-guide",
+      output: {
+        files: [
+          { path: "notes.md", content: "# Reference only" },
+          {
+            path: "SKILL.md",
+            content: `---\nname: document-review\ndescription: Review a document.\n---\n# ${skillTitle}`,
+          },
+        ],
+      },
+    }),
+  ];
+  const render = (locale?: string) => (
+    <OpenGeniMessagesProvider
+      locale={locale}
+      messages={
+        locale === "nb"
+          ? {
+              "timeline.platformActivityRow.thought": "Tenkte",
+              "timeline.toolStep.readGuide.done": "Leste en veiledning",
+            }
+          : undefined
+      }
+    >
+      <MessageTimeline events={events} status="running" />
+    </OpenGeniMessagesProvider>
+  );
+  const view = await renderComponent(render("nb"));
+  try {
+    await flush();
+    expect(view.container.textContent).toContain("Leste en veiledning");
+    expect(view.container.textContent).toContain(skillTitle);
+    expect(view.container.textContent).not.toContain("Document review");
+    expect(view.container.textContent).not.toContain("Reference only");
+    const thought = [...view.container.querySelectorAll<HTMLElement>('[role="button"]')].find(
+      (node) => node.textContent?.includes("Tenkte"),
+    );
+    expect(thought?.textContent?.trim()).toBe("Tenkte");
+    expect(view.container.textContent).not.toContain(reasoning);
+    await act(async () => thought!.click());
+    await flush();
+    expect(view.container.textContent).toContain(reasoning);
+    await act(async () => thought!.click());
+    for (const locale of ["en-GB", undefined]) {
+      await view.rerender(render(locale));
+      await flush();
+      expect(view.container.querySelector(".og-reasoning-preview")?.textContent).toBe(reasoning);
+    }
+  } finally {
+    await view.unmount();
+  }
+});
 
 test("assistant links render and copy with clean destinations and bare labels", async () => {
   const r = await renderComponent(

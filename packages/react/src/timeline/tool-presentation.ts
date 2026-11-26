@@ -1,5 +1,11 @@
 import { withoutProviderTracking } from "@opengeni/contracts/citation-urls";
-import { isConnectedMachineOutcomeUnknownOutput, type GitFileDiff } from "@opengeni/sdk";
+import {
+  isConnectedMachineOutcomeUnknownOutput,
+  normalizeMcpOutput,
+  type GitFileDiff,
+} from "@opengeni/sdk";
+import { humanizeName, skillReadLabels } from "../app/lib/skill-names";
+import { parsePartialJson } from "../interactive-answer-model";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
   applyPatchOpsFromToolItem,
@@ -879,32 +885,42 @@ const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 function readableSkillName(name: string): string | null {
   const bare = name.trim().replace(/^builtin:/, "");
   if (!bare || UUID_LIKE.test(bare)) return null;
-  const plain = bare.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!plain) return null;
-  return plain.charAt(0).toUpperCase() + plain.slice(1);
+  return humanizeName(bare) || null;
 }
 
-/** The `name:` in a returned SKILL.md's front matter, read from raw or JSON-escaped text. */
-function skillNameInOutput(output: unknown): string | null {
-  const { text } = unwrapMcpOutput(output);
-  const head = text
-    .slice(0, 4_000)
-    .replace(/\\r/g, "")
-    .replace(/\r/g, "")
-    .replace(/\\n/g, "\n")
-    .replace(/\\"/g, '"');
-  const start = /(?:^|\n|")---[ \t]*\n/.exec(head);
-  if (!start) return null;
-  const rest = head.slice(start.index + start[0].length);
-  const end = /\n---[ \t]*(?:\n|$)/.exec(rest);
-  const frontMatter = end ? rest.slice(0, end.index + 1) : rest;
-  const match = /(?:^|\n)name:[ \t]*["']?([^"'\n\\]+?)["']?[ \t]*(?:\n|$)/.exec(frontMatter);
-  return match?.[1]?.trim() || null;
+const SKILL_OUTPUT_CUT =
+  /\n…\[\d+ characters omitted from this preview\]…\n|…\[\d+ bytes omitted\]…/u;
+
+function skillMarkdown(value: unknown): string | null {
+  if (typeof value === "string") return /^\uFEFF?---\r?\n/.test(value) ? value : null;
+  const files = value && typeof value === "object" && "files" in value ? value.files : undefined;
+  if (!Array.isArray(files)) return null;
+  const skill = files.find((file) => file?.path === "SKILL.md");
+  return typeof skill?.content === "string" ? skill.content : null;
+}
+
+function skillMarkdownInOutput(output: unknown): string | null {
+  const { value, text, isError } = normalizeMcpOutput(output);
+  if (isError) return null;
+  const markdown = skillMarkdown(value);
+  if (markdown !== null) {
+    const cut = markdown.search(SKILL_OUTPUT_CUT);
+    return cut < 0 ? markdown : completeLines(markdown.slice(0, cut));
+  }
+  // The timeline can receive only the head and tail of the JSON result. Use
+  // the head's complete fields, never infer a heading across omitted text.
+  const cut = text.search(SKILL_OUTPUT_CUT);
+  const head = cut < 0 ? null : skillMarkdown(parsePartialJson(text.slice(0, cut)));
+  return head === null ? null : completeLines(head);
+}
+
+function completeLines(text: string): string {
+  return text.slice(0, text.lastIndexOf("\n") + 1);
 }
 
 /**
- * Which skill a skill step used: the name in the SKILL.md it returned, else the
- * name or query it was called with. A bare id is never shown.
+ * Which skill a skill step used: its authored title, else its stable name or
+ * the name or query it was called with. A bare id is never shown.
  */
 export function skillToolPreview(item: ToolCallItem): string | null {
   const leaf = mcpToolLeaf(item.name);
@@ -915,7 +931,8 @@ export function skillToolPreview(item: ToolCallItem): string | null {
       ? truncatePreview(args.query, 72)
       : null;
   }
-  const returned = item.status === "running" ? null : skillNameInOutput(item.output);
+  const markdown = item.status === "running" ? null : skillMarkdownInOutput(item.output);
+  const returned = markdown === null ? null : skillReadLabels(markdown);
   const requested =
     typeof args.skill === "string"
       ? args.skill
@@ -924,7 +941,7 @@ export function skillToolPreview(item: ToolCallItem): string | null {
         : typeof args.skillId === "string"
           ? args.skillId
           : null;
-  const name = readableSkillName(returned ?? requested ?? "");
+  const name = returned?.title ?? readableSkillName(returned?.name ?? requested ?? "");
   return name ? truncatePreview(name, 72) : null;
 }
 
