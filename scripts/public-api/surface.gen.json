@@ -32580,7 +32580,7 @@
       "shape": {
         "$": "object",
         "$.adminsAsked": "integer!",
-        "$.status": "enum!=[\"\\\"requested\\\"\",\"\\\"unavailable\\\"\"]"
+        "$.status": "enum!=[\"\\\"already_asked\\\"\",\"\\\"requested\\\"\",\"\\\"unavailable\\\"\"]"
       }
     },
     "SetupConnectionState": {

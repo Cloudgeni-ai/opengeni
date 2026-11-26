@@ -31,7 +31,7 @@ import {
 export type EnableFact = { label: string; description?: string | undefined };
 
 /** How an admin was asked: in their inbox, or by a link the person sends. */
-export type AskedVia = "inbox" | "link";
+export type AskedVia = "inbox" | "already" | "link";
 
 export interface EnableViewProps {
   /** "PR reviewer", "Review pull requests". */
@@ -158,7 +158,11 @@ function ConnectionRow({
         ) : control === "ask-admin" && onAskAdmin ? (
           asked ? (
             <StatusBadge tone="neutral" variant="dot">
-              {asked === "inbox" ? "Requested" : "Link copied"}
+              {asked === "inbox"
+                ? "Requested"
+                : asked === "already"
+                  ? "Already asked"
+                  : "Link copied"}
             </StatusBadge>
           ) : (
             <RowButton onClick={onAskAdmin}>Ask an admin</RowButton>
@@ -167,9 +171,9 @@ function ConnectionRow({
       }
       hint={
         control === "ask-admin" && asked
-          ? asked === "inbox"
-            ? "Your admins were asked in their inbox."
-            : "Send the link to an admin to connect it."
+          ? asked === "link"
+            ? "Send the link to an admin to connect it."
+            : "Your admins were asked in their inbox."
           : undefined
       }
     />

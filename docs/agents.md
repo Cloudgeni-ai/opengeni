@@ -789,10 +789,15 @@ a ready-made app (`?app=<key>`) or a Get started setup (`get-started?setup=<key>
    sends a request (`POST /v1/workspaces/:id/setup-connection-requests`,
    SDK `requestSetupConnection`): each organization owner and admin and each
    workspace administrator, never the requester, gets one "Connect X" inbox
-   notice that opens this step, and the row shows **Requested**. Asking
-   again reopens the same notice; a dismissed one stays dismissed. Until the
-   database routine behind it (`request_setup_connection_v1`, migration
-   1580) is granted to the app role in a later release, the route answers
+   notice that opens this step, and the row shows **Requested**. Only a
+   connection some ready-made agent needs, named as its template names it;
+   someone who may connect it themselves is refused (409), and a burst is
+   cut off (429). Asking again while it is open shows **Already asked**; a
+   settled notice reopens only a day later, and a dismissed one stays
+   dismissed. The routine (`request_setup_connection_v1`, migration 1580)
+   trusts only the transaction's own account, workspace and subject. Its
+   runtime EXECUTE is withheld for one release; **a later migration must
+   grant it** (as 1571 did for 1562). Until then the route answers
    `unavailable` and the page copies the link instead. A repository row shows
    when its trigger needs one; it is picked when the trigger is turned on.
    A Get started setup can require a connection its agent template doesn't

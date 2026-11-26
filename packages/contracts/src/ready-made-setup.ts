@@ -177,12 +177,13 @@ export const SetupConnectionRequest = /* @__PURE__ */ defineSchema(() =>
 export type SetupConnectionRequest = z.output<typeof SetupConnectionRequest>;
 
 /**
- * `requested`: the admins were asked (asking again never asks twice).
+ * `requested`: the admins were asked. `already_asked`: they already have an
+ * open request (asking again never asks twice).
  * `unavailable`: no admin could be asked here yet; the page shares a link instead.
  */
 export const SetupConnectionRequestResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    status: z.enum(["requested", "unavailable"]),
+    status: z.enum(["requested", "already_asked", "unavailable"]),
     adminsAsked: z.number().int().min(0),
   }),
 );

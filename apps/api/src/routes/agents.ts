@@ -32,6 +32,7 @@ import {
   AgentReadinessListResponse,
   SetupConnectionRequest,
   SetupConnectionRequestResponse,
+  type SetupConnection,
   SetupReadinessResponse,
   UpdateAgentRequest,
   AGENTS_PER_WORKSPACE_MAX,
@@ -108,6 +109,7 @@ import {
   type AgentSlackNameRefusal,
 } from "../integrations/agent-slack-availability";
 import { slackAgentInstallationFor } from "../integrations/slack-agent-create";
+import { PublicSetupRateLimiter } from "./managed-onboarding";
 import { requireUsableSessionAvatar } from "./session-avatar";
 import { postSlackAgentIntro, slackAgentChannelList } from "./slack-agents";
 
@@ -207,6 +209,13 @@ async function ensureAgentMemory(
 export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;
   const base = "/v1/workspaces/:workspaceId/agents";
+  // Ask an admin: five requests at once per person and workspace, then one a minute.
+  const setupRequestLimiter = new PublicSetupRateLimiter({
+    clientCapacity: 5,
+    clientRefillPerSecond: 1 / 60,
+    globalCapacity: 1_000,
+    globalRefillPerSecond: 50,
+  });
 
   async function requestContext(
     c: Context,
@@ -471,20 +480,54 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "returnPath must be an Enable step in this workspace.",
       });
     }
+    // Only a connection some ready-made item needs, named as that item names it.
+    const connection = readyMadeSetupConnection(request.provider);
+    if (!connection) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "No ready-made setup needs this connection.",
+      });
+    }
+    if (!setupRequestLimiter.take(`${context.grant.accountId}:${workspaceId}:${requester}`)) {
+      throw new ApiHttpError(429, {
+        code: "limit_exceeded",
+        message: "Too many requests. Try again in a minute.",
+        retryable: true,
+      });
+    }
+    // Someone who may connect it (or already has) connects it instead. GitHub
+    // is read for event triggers, the App only an admin installs.
+    const readiness = await setupReadinessFor(
+      deps,
+      context.grant,
+      { connections: [{ ...connection, required: true }] },
+      { githubEvents: true },
+    );
+    const state = readiness.connections[0];
+    if (state?.connected || state?.canConnect) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: state.connected
+          ? `${connection.name} is already connected.`
+          : `You can connect ${connection.name} yourself.`,
+      });
+    }
     const asked = await requestSetupConnection(db, {
       accountId: context.grant.accountId,
       workspaceId,
       requesterSubjectId: requester,
       requesterLabel: await personLabel(deps, workspaceId, requester),
-      provider: request.provider,
-      name: request.name,
+      provider: connection.provider,
+      name: connection.name,
       link: request.returnPath,
     });
     return c.json(
       SetupConnectionRequestResponse.parse(
-        asked
-          ? { status: "requested", adminsAsked: asked }
-          : { status: "unavailable", adminsAsked: 0 },
+        asked === null
+          ? { status: "unavailable", adminsAsked: 0 }
+          : asked > 0
+            ? { status: "requested", adminsAsked: asked }
+            : { status: "already_asked", adminsAsked: 0 },
       ),
     );
   });
@@ -1007,4 +1050,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = await parseRequestJson(c, AgentSlackIntroRequest);
     return c.json(await postSlackAgentIntro(deps, context.grant, projection, payload));
   });
+}
+
+/** The connection some ready-made agent needs with this provider, as it names it. */
+export function readyMadeSetupConnection(provider: string): SetupConnection | undefined {
+  for (const template of agentTemplates()) {
+    const connection = template.setup?.connections.find((entry) => entry.provider === provider);
+    if (connection) return connection;
+  }
+  return undefined;
 }

@@ -280,7 +280,7 @@ test("an agent without a template is never held back", async () => {
 test("Ask an admin asks the workspace's admins once, in their inbox, once the database allows it", async () => {
   const f = await fixture();
   const routine =
-    "opengeni_private.request_setup_connection_v1(uuid, text, text, text, text, text)";
+    "opengeni_private.request_setup_connection_v1(uuid, uuid, text, text, text, text)";
   const returnPath = `/workspaces/${f.workspaceId}/enable?agent=pr-reviewer&step=connect`;
   const ask = (body: Record<string, unknown> = {}) =>
     f.call(f.owner.headers, "POST", "/setup-connection-requests", {
@@ -300,6 +300,17 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
   await shared.admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
     values (${f.accountId}::uuid, ${f.workspaceId}::uuid, ${admin}, 'admin', '[]'::jsonb)`;
+  // An organization admin with no grant in this workspace is asked too.
+  const orgAdmin = `user:${crypto.randomUUID()}`;
+  const [orgAdminPersonal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${f.accountId}::uuid, 'Personal org admin') returning id`;
+  await shared.admin`insert into workspace_inference_controls (workspace_id, account_id)
+    values (${orgAdminPersonal!.id}::uuid, ${f.accountId}::uuid)`;
+  await shared.admin`
+    insert into organization_memberships (account_id, subject_id, status, role, personal_workspace_id)
+    values (${f.accountId}::uuid, ${orgAdmin}, 'active', 'admin', ${orgAdminPersonal!.id}::uuid)`;
+  const recipients = [admin, orgAdmin].sort();
 
   // Withheld for a release (1580): nobody is asked, and the page shares a link.
   const before = await ask();
@@ -310,17 +321,119 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
   const appRole = decodeURIComponent(new URL(shared.appUrl).username);
   await shared.admin.unsafe(`grant execute on function ${routine} to "${appRole}"`);
   try {
-    // The admin is asked, never the person asking; asking again asks no one twice.
-    expect((await ask()).json).toEqual({ status: "requested", adminsAsked: 1 });
-    expect((await ask()).json).toEqual({ status: "requested", adminsAsked: 1 });
-    expect(await notices()).toEqual([
-      { recipient: admin, title: "Connect GitHub", url: returnPath, sender: f.owner.subjectId },
-    ]);
+    // The admins are asked, never the person asking, with the template's name
+    // for it; asking again while it's open asks no one twice.
+    expect((await ask({ name: "Something else" })).json).toEqual({
+      status: "requested",
+      adminsAsked: 2,
+    });
+    expect((await ask()).json).toEqual({ status: "already_asked", adminsAsked: 0 });
+    expect(await notices()).toEqual(
+      recipients.map((recipient) => ({
+        recipient,
+        title: "Connect GitHub",
+        url: returnPath,
+        sender: f.owner.subjectId,
+      })),
+    );
+    // A settled notice reopens only a day after it was settled.
+    await shared.admin`
+      update opengeni_private.inbox_items set status = 'resolved', resolved_at = now()
+      where workspace_id = ${f.workspaceId}::uuid and source_key like 'setup-request:%'`;
+    expect((await ask()).json).toEqual({ status: "already_asked", adminsAsked: 0 });
+    await shared.admin`
+      update opengeni_private.inbox_items set resolved_at = now() - interval '2 days'
+      where workspace_id = ${f.workspaceId}::uuid and source_key like 'setup-request:%'`;
+    expect((await ask()).json).toEqual({ status: "requested", adminsAsked: 2 });
     // Only an Enable step in this workspace.
     const elsewhere = await ask({ returnPath: "/workspaces/other/enable?agent=pr-reviewer" });
     expect(elsewhere.status).toBe(400);
     const external = await ask({ returnPath: "https://example.test/phish" });
     expect(external.status).toBe(400);
+    // Only a connection some ready-made agent needs.
+    const unknown = await ask({ provider: "example.com", name: "Example" });
+    expect(unknown.status).toBe(400);
+
+    // The routine trusts only the transaction's own scope: another account or
+    // workspace than the scope names, or a requester outside the workspace,
+    // asks nobody. The requester is always the scope's subject.
+    const direct = async (
+      settings: { account: string; workspace: string; subject: string },
+      target = { workspace: f.workspaceId, link: returnPath },
+    ) =>
+      await shared.admin.begin(async (tx) => {
+        await tx.unsafe(`set local role "${appRole.replaceAll('"', '""')}"`);
+        await tx`select set_config('opengeni.account_id', ${settings.account}, true),
+          set_config('opengeni.workspace_id', ${settings.workspace}, true),
+          set_config('opengeni.subject_id', ${settings.subject}, true)`;
+        const [row] = await tx<{ asked: number }[]>`
+          select opengeni_private.request_setup_connection_v1(
+            ${f.accountId}::uuid, ${target.workspace}::uuid, 'Someone', 'slack.com', 'Slack',
+            ${target.link}) as asked`;
+        return Number(row!.asked);
+      });
+    const otherWorkspace = await createWorkspace(db.db, {
+      accountId: f.accountId,
+      name: "Other workspace",
+    });
+    expect(
+      await direct({
+        account: f.accountId,
+        workspace: otherWorkspace.id,
+        subject: f.owner.subjectId,
+      }),
+    ).toBe(0);
+    expect(
+      await direct({
+        account: crypto.randomUUID(),
+        workspace: f.workspaceId,
+        subject: f.owner.subjectId,
+      }),
+    ).toBe(0);
+    expect(
+      await direct({
+        account: f.accountId,
+        workspace: f.workspaceId,
+        subject: `user:${crypto.randomUUID()}`,
+      }),
+    ).toBe(0);
+    expect((await notices()).filter((notice) => notice.title === "Connect Slack")).toEqual([]);
+
+    // The same request in another workspace is its own notice; it never
+    // overwrites the first one.
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${f.accountId}::uuid, ${otherWorkspace.id}::uuid, ${f.owner.subjectId})`;
+    const otherLink = `/workspaces/${otherWorkspace.id}/enable?agent=pr-reviewer&step=connect`;
+    const inWorkspace = (workspace: string) => ({
+      account: f.accountId,
+      workspace,
+      subject: f.owner.subjectId,
+    });
+    expect(
+      await direct(inWorkspace(otherWorkspace.id), {
+        workspace: otherWorkspace.id,
+        link: otherLink,
+      }),
+    ).toBe(1);
+    expect(await direct(inWorkspace(f.workspaceId))).toBe(2);
+    const slack = await shared.admin<{ workspace: string; url: string }[]>`
+      select workspace_id::text as workspace, link->>'url' as url
+      from opengeni_private.inbox_items
+      where recipient_subject_id = ${orgAdmin} and title = 'Connect Slack'`;
+    const byUrl = (left: { url: string }, right: { url: string }) =>
+      left.url < right.url ? -1 : left.url > right.url ? 1 : 0;
+    expect([...slack].sort(byUrl)).toEqual(
+      [
+        { workspace: otherWorkspace.id, url: otherLink },
+        { workspace: f.workspaceId, url: returnPath },
+      ].sort(byUrl),
+    );
+
+    // A burst is cut off: five at once per person and workspace, then one a minute.
+    const statuses: number[] = [];
+    for (let index = 0; index < 6; index += 1) statuses.push((await ask()).status);
+    expect(statuses).toContain(429);
   } finally {
     await shared.admin.unsafe(`revoke execute on function ${routine} from "${appRole}"`);
   }

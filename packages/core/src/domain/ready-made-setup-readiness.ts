@@ -501,8 +501,8 @@ export function ownerMissingMessage(
   // For GitHub events the missing piece is the workspace's App, not the owner's GitHub.
   if (githubEvents && isGitHub(first)) return "A GitHub admin needs to install the GitHub App.";
   const state = readiness.connections.find((connection) => connection.provider === first.provider);
-  // The owner can't connect it either: only an admin can.
-  if (state?.canConnect === false) return `An admin needs to connect ${first.name}.`;
+  // The owner can't connect it either: only an admin can, so the admin reading this does.
+  if (state?.canConnect === false) return `Connect ${first.name}; its owner can't.`;
   return `Its owner needs to connect ${first.name}.`;
 }
 

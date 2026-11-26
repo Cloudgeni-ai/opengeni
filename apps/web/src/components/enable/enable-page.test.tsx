@@ -307,6 +307,44 @@ test("can't connect, and admins can't be asked here yet: the link is copied inst
   root.unmount();
 });
 
+test("asked already: the row says Already asked and nothing is copied", async () => {
+  readiness = readinessOf([connection({ canConnect: false })]);
+  client.requestSetupConnection.mockImplementation(async () => ({
+    status: "already_asked",
+    adminsAsked: 0,
+  }));
+  const writeText = mock(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  const { container, root } = await render();
+  await act(async () => {
+    row(container, "github.com").querySelector("button")?.click();
+  });
+  await settle();
+  expect(writeText).not.toHaveBeenCalled();
+  expect(row(container, "github.com").textContent).toContain("Already asked");
+  root.unmount();
+});
+
+test("an older client without the request copies the link straight away", async () => {
+  readiness = readinessOf([connection({ canConnect: false })]);
+  const request = client.requestSetupConnection;
+  (client as { requestSetupConnection?: unknown }).requestSetupConnection = undefined;
+  const writeText = mock(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  try {
+    const { container, root } = await render();
+    await act(async () => {
+      row(container, "github.com").querySelector("button")?.click();
+    });
+    await settle();
+    expect(writeText).toHaveBeenCalled();
+    expect(row(container, "github.com").textContent).toContain("Link copied");
+    root.unmount();
+  } finally {
+    client.requestSetupConnection = request;
+  }
+});
+
 test("ready: Turn on adds it, turns on its trigger, says hello and suggests a first job", async () => {
   readiness = readinessOf([connection({ connected: true })]);
   const { container, root } = await render();

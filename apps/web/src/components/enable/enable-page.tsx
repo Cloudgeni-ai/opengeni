@@ -85,18 +85,29 @@ function useAskAdmin(workspaceId: string, returnPath: string) {
     async (connection: SetupConnectionState) => {
       const done = (via: AskedVia) =>
         setAsked((current) => new Map(current).set(connection.provider, via));
-      const sent = await client
-        .requestSetupConnection(workspaceId, {
-          provider: connection.provider,
-          name: connection.name,
-          returnPath,
-        })
-        .then((response) => response.status === "requested")
-        .catch(() => false);
-      if (sent) {
+      // An older client without the request copies the link straight away.
+      const status =
+        typeof client.requestSetupConnection === "function"
+          ? await client
+              .requestSetupConnection(workspaceId, {
+                provider: connection.provider,
+                name: connection.name,
+                returnPath,
+              })
+              .then((response) => response.status)
+              .catch(() => "unavailable" as const)
+          : "unavailable";
+      if (status === "requested") {
         done("inbox");
         toast.success("Request sent", {
           description: `Your admins were asked to connect ${connection.name}.`,
+        });
+        return;
+      }
+      if (status === "already_asked") {
+        done("already");
+        toast.info("Already asked", {
+          description: `Your admins already have your request to connect ${connection.name}.`,
         });
         return;
       }

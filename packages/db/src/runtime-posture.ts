@@ -123,7 +123,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
   "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
-  "request_setup_connection_v1(uuid, text, text, text, text, text)",
+  "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
 ] as const;
 
 /**
@@ -192,7 +192,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
-  "request_setup_connection_v1(uuid, text, text, text, text, text)",
+  "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -356,7 +356,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "scheduled_task_blocker_reviews",
     "opengeni_private.inbox_items",
   ],
-  "request_setup_connection_v1(uuid, text, text, text, text, text)": [
+  "request_setup_connection_v1(uuid, uuid, text, text, text, text)": [
     "workspaces",
     "organization_memberships",
     "workspace_memberships",

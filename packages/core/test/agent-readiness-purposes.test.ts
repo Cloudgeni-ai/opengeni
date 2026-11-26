@@ -127,7 +127,7 @@ test("an admin resuming someone's trigger is told who must connect what", () => 
   );
   // The owner can't connect it either.
   expect(ownerMissingMessage(readiness(false), github, false)).toBe(
-    "An admin needs to connect GitHub.",
+    "Connect GitHub; its owner can't.",
   );
   expect(ownerMissingMessage(readiness(true), github, true)).toBe(
     "A GitHub admin needs to install the GitHub App.",
