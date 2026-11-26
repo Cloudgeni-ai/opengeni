@@ -2262,10 +2262,18 @@ export function workspaceEventOwnerOnly(sourceKind: string, visibility: unknown)
 
 /** Whether an occurrence's stored events include one only the automation's owner may see. */
 function storedEventsOwnerOnly(events: unknown): boolean {
-  // The same rule as the database fences: an Opengeni-written event marked
-  // ownerOnly. Unreadable stored events reach neither the prompt nor history.
-  const parsed = storedSummaries.safeParse(events);
-  return parsed.success && parsed.data.some((event) => event.ownerOnly === true);
+  // Exactly the database fences' rule (any stored event with ownerOnly
+  // true), read from the raw JSON: the prompt loads events by id, so a
+  // summary this release can't parse must still count.
+  return (
+    Array.isArray(events) &&
+    events.some(
+      (event) =>
+        typeof event === "object" &&
+        event !== null &&
+        (event as { ownerOnly?: unknown }).ownerOnly === true,
+    )
+  );
 }
 
 /**
