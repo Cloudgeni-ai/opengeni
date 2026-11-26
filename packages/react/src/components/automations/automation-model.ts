@@ -343,6 +343,7 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   session_usage_limit: "automations.run.error.usageLimit",
   chain_limit: "automations.run.error.chainLimit",
   duplicate_agent_run: "automations.run.error.duplicateAgentRun",
+  owner_only_event: "automations.run.error.ownerOnlyEvent",
 };
 
 /** Older runs recorded an unavailable model as the API's own sentence. */

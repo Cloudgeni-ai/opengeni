@@ -152,6 +152,16 @@ resource "azurerm_kubernetes_cluster" "this" {
     type = "SystemAssigned"
   }
 
+  # Unset keeps Azure's autoscaler profile untouched. Setting it manages only
+  # the scale-down threshold; every other field keeps Azure's default.
+  dynamic "auto_scaler_profile" {
+    for_each = var.aks.scale_down_utilization_threshold == null ? [] : [var.aks.scale_down_utilization_threshold]
+
+    content {
+      scale_down_utilization_threshold = tostring(auto_scaler_profile.value)
+    }
+  }
+
   network_profile {
     network_plugin    = "azure"
     load_balancer_sku = "standard"

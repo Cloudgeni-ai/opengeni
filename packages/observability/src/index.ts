@@ -2241,17 +2241,83 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
   };
 }
 
+/** Error classes a failed workspace save or restore may log by name. */
+const SNAPSHOT_CAUSE_NAMES = new Set([
+  "SnapshotTimeoutError",
+  "SandboxProviderCaptureTimeoutError",
+  "SandboxProviderError",
+  "SandboxArchiveError",
+  "SandboxSnapshotError",
+  "SandboxRuntimeError",
+  "SandboxLifecycleError",
+  "WorkspaceArchiveIntegrityError",
+]);
+
+/** The Agents SDK's sandbox error codes and the workspace archive integrity
+ * codes (`WorkspaceArchiveIntegrityCode`, packages/runtime). */
+const SNAPSHOT_INTEGRITY_CODES = new Set([
+  "archive_error",
+  "snapshot_error",
+  "runtime_error",
+  "lifecycle_error",
+  "provider_error",
+  "archive_metadata_missing",
+  "archive_metadata_invalid",
+  "archive_base64_invalid",
+  "archive_hash_mismatch",
+  "archive_hydration_failed",
+  "archive_object_missing",
+  "archive_storage_unavailable",
+  "workspace_fingerprint_unavailable",
+  "workspace_changed_during_capture",
+  "workspace_fingerprint_mismatch",
+  "native_snapshot_reference_invalid",
+  "native_snapshot_fallback_unverified",
+  "workspace_capture_timeout",
+]);
+
+/** Why the archive check refused a workspace archive, as a closed class. */
+export const SNAPSHOT_ARCHIVE_REASONS = [
+  "hardlink_member",
+  "symlink_member",
+  "unsupported_member_type",
+  "unsafe_member_path",
+  "duplicate_member",
+  "descends_through_non_directory",
+  "protected_path_overlap",
+  "member_count_limit",
+  "extracted_size_limit",
+  "input_size_limit",
+  "truncated_archive",
+  "invalid_tar_header",
+  "other_archive_check",
+  "tar_exit_nonzero",
+] as const;
+export type SnapshotArchiveReason = (typeof SNAPSHOT_ARCHIVE_REASONS)[number];
+
 function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes {
   if (attributes.errorClass !== "SnapshotOperationError") return {};
   const projected: Attributes = {};
   const causeName = attributes.causeName;
-  if (
-    typeof causeName === "string" &&
-    ["SnapshotTimeoutError", "SandboxProviderCaptureTimeoutError", "SandboxProviderError"].includes(
-      causeName,
-    )
-  )
+  if (typeof causeName === "string" && SNAPSHOT_CAUSE_NAMES.has(causeName))
     projected.causeName = causeName;
+  const integrityCode = attributes.integrityCode;
+  if (typeof integrityCode === "string" && SNAPSHOT_INTEGRITY_CODES.has(integrityCode))
+    projected.integrityCode = integrityCode;
+  const archiveReason = attributes.archiveReason;
+  if (
+    typeof archiveReason === "string" &&
+    (SNAPSHOT_ARCHIVE_REASONS as readonly string[]).includes(archiveReason)
+  )
+    projected.archiveReason = archiveReason;
+  const archiveExitCode = attributes.archiveExitCode;
+  if (
+    typeof archiveExitCode === "number" &&
+    Number.isInteger(archiveExitCode) &&
+    archiveExitCode >= 0 &&
+    archiveExitCode <= 255
+  )
+    projected.archiveExitCode = archiveExitCode;
   const name = attributes.providerErrorName;
   if (
     typeof name === "string" &&

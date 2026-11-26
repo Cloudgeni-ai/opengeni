@@ -36,6 +36,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  eventSummariesForReader,
   getEventRunOccurrence,
   getInboundEvents,
   listEventDeliveries,
@@ -355,9 +356,12 @@ export function registerEventTools(
       }
       const run = await getEventRunOccurrence(deps.db, grant.workspaceId, scheduledTaskRunId!);
       if (!run) throw new ToolArgumentError(`Run ${scheduledTaskRunId} is not an event run`);
-      await requireVisibleTask(run.taskId);
+      const task = await requireVisibleTask(run.taskId);
       const start = offset ?? 0;
-      const events = run.occurrence.events.slice(start, start + RUN_EVENTS_PAGE_SIZE);
+      const events = eventSummariesForReader(
+        run.occurrence.events.slice(start, start + RUN_EVENTS_PAGE_SIZE),
+        { ownerSubjectId: task.ownerSubjectId, readerSubjectId: (await viewer()).subjectId },
+      );
       const next = start + events.length;
       return json({
         scheduledTaskRunId,

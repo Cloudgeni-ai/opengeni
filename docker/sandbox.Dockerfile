@@ -386,7 +386,7 @@ ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG UV_VERSION=0.12.18
 # certifi 2026.10.19 drops the compromised emSign ECC Root CA - G3. It is newer
 # than the shared PyPI cutoff, so it alone gets a later one.
-ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6 openpyxl==3.1.5 python-docx==1.2.0 python-pptx==1.0.2"
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6 openpyxl==3.1.5 python-docx==1.2.0 python-pptx==1.0.2 reportlab==5.0.1 pypdf==6.19.0"
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
@@ -590,7 +590,10 @@ RUN set -eux; \
 # with its matching psycopg-binary wheel (exactly what `psycopg[binary]` resolves
 # to on CPython), which bundles its own libpq, so Postgres access never depends
 # on the distro libpq that postgresql-client pulls in.
-RUN set -eux; \
+# The office smoke writes and reads back a real DOCX, XLSX, PPTX and PDF, so an
+# image that cannot make the files agents are asked for never ships.
+RUN --mount=type=bind,source=docker/office-export-smoke.py,target=/tmp/office-export-smoke.py \
+    set -eux; \
     printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\ncache-dir = /var/cache/pip\n' > /etc/pip.conf; \
     install -d -m 0755 /etc/uv; \
     printf 'cache-dir = "/var/cache/uv"\n\n[pip]\nbreak-system-packages = true\n' > /etc/uv/uv.toml; \
@@ -616,7 +619,8 @@ RUN set -eux; \
       --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" \
       --exclude-newer-package certifi=2026-10-21T00:00:00Z ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
-    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'; \
+    python3 /tmp/office-export-smoke.py; \
     python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'; \
     pytest --version; \
     rm -rf /root/.cache /var/cache/pip /var/cache/uv

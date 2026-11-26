@@ -18,7 +18,9 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
   );
   expect(prose).toContain("the file itself is the deliverable");
   expect(prose).toContain("so do not load artifact tools just to check");
-  expect(prose).toContain("only if an import fails");
+  expect(prose).toContain(
+    "on an import or missing dependency error, run `pip install <package>` and continue",
+  );
   expect(prose).toContain("Do not create a goal only to declare a document.");
   expect(prose).toContain("a short summary and the artifact link, not a restatement");
   expect(prose).not.toContain("create one with the report requirement");
@@ -53,7 +55,7 @@ test("Office file Skills claim preinstalled only the Python packages the managed
     [
       "documents",
       "python-docx",
-      ", Chromium and the `pdftotext`/`pdfinfo` readers, and no LibreOffice, pandoc or PDF editing library",
+      ", pypdf, Chromium and the `pdftotext`/`pdfinfo` readers, and no LibreOffice or pandoc",
     ],
     ["presentations", "python-pptx", " and no slide renderer"],
     ["spreadsheets", "openpyxl", ""],
@@ -69,6 +71,8 @@ test("Office file Skills claim preinstalled only the Python packages the managed
     expect(claims).toEqual([`${expected}${alsoClaimed}`]);
     for (const image of images) expect(image.has(expected)).toBe(true);
   }
+  // The documents Skill also claims pypdf for sent PDFs.
+  for (const image of images) expect(image.has("pypdf")).toBe(true);
   // The documents Skill prints PDFs with the `chromium` command: the sandbox
   // image installs Debian Chromium, the desktop image aliases that name to its
   // browser wrapper.

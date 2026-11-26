@@ -11,9 +11,9 @@ import {
 /**
  * The simplified interface: the same product with the same capabilities,
  * shown under the Geni name with fewer destinations, one model and credits
- * only. It is for people who arrive from gogeni.ai and people who answer
- * "Not an engineer" in onboarding; everyone else gets the full Opengeni
- * console.
+ * only. People who arrive from gogeni.ai and people who answer "Not an
+ * engineer" in onboarding start in it; everyone else starts in the full
+ * Opengeni console and can switch from the account menu.
  *
  * It is presentation only, like the light or dark appearance. The flag is
  * kept in this browser, never sent to the server, and it changes no
@@ -55,15 +55,12 @@ export function readStoredSimplifiedInterface(): boolean | null {
 type SimplifiedInterfaceContextValue = {
   /** Whether the simplified interface is on. */
   simplified: boolean;
-  /** False until this browser arrives with the flag or sets it itself. */
-  chosen: boolean;
   productName: string;
   setSimplified: (value: boolean) => void;
 };
 
 const SimplifiedInterfaceContext = createContext<SimplifiedInterfaceContextValue>({
   simplified: false,
-  chosen: false,
   productName: FULL_PRODUCT_NAME,
   setSimplified: () => {},
 });
@@ -108,11 +105,10 @@ export function SimplifiedInterfaceProvider({ children }: { children: ReactNode 
   const value = useMemo(
     () => ({
       simplified,
-      chosen: stored !== null,
       productName: interfaceProductName(simplified),
       setSimplified,
     }),
-    [simplified, stored, setSimplified],
+    [simplified, setSimplified],
   );
 
   return (

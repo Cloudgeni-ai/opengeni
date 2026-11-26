@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { SandboxArchiveError } from "@openai/agents/sandbox";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { warnDrainSnapshotFailure } from "../src/sandbox-snapshot-diagnostics";
 
@@ -81,4 +82,54 @@ test("drain diagnostics distinguish our capture deadline from wrapped provider t
   expect(calls[0].providerErrorName).toBeUndefined();
   expect(calls[1].causeName).toBe("SandboxProviderError");
   expect(calls[1].providerErrorName).toBe("TimeoutError");
+});
+
+test("archive refusals log a closed reason class, never the member path", () => {
+  const calls: any[] = [];
+  const logger = {
+    warn: (_message: string, fields?: Record<string, unknown>) => {
+      calls.push(fields);
+    },
+  };
+  const refusals = [
+    ["hardlink member not allowed", "hardlink_member"],
+    ["duplicate archive path: private/member/path", "duplicate_member"],
+    ["archive member overlaps protected path: private/member", "protected_path_overlap"],
+    ["invalid PAX record length", "invalid_tar_header"],
+    ["a reason nobody has seen yet", "other_archive_check"],
+  ] as const;
+  for (const [reason] of refusals)
+    warnDrainSnapshotFailure(
+      logger,
+      "refused",
+      new SandboxArchiveError(`Unsafe tar member "private/member/path": ${reason}`, {
+        member: "private/member/path",
+        reason,
+      }),
+      lease,
+    );
+  warnDrainSnapshotFailure(
+    logger,
+    "tar failed",
+    new SandboxArchiveError("tar failed", {
+      provider: "ModalSandboxClient",
+      root: "/private-root",
+      exitCode: 2,
+      stderr: "tar: private/member/path: Cannot open",
+    }),
+    lease,
+  );
+  refusals.forEach(([, expected], index) => {
+    expect(calls[index]).toMatchObject({
+      causeName: "SandboxArchiveError",
+      integrityCode: "archive_error",
+      archiveReason: expected,
+    });
+  });
+  expect(calls[refusals.length]).toMatchObject({
+    causeName: "SandboxArchiveError",
+    archiveReason: "tar_exit_nonzero",
+    archiveExitCode: 2,
+  });
+  expect(JSON.stringify(calls)).not.toContain("private");
 });

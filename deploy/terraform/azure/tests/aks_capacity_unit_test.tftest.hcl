@@ -1017,3 +1017,63 @@ run "rotation_uses_refreshed_count_three_state" {
     error_message = "Phase 2 must bind the rotation evidence to the refreshed live node-pool count."
   }
 }
+
+run "autoscaler_profile_untouched_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(azurerm_kubernetes_cluster.this.auto_scaler_profile) == 0
+    error_message = "Default composition must not manage the autoscaler profile."
+  }
+}
+
+run "autoscaler_scale_down_threshold_is_set_alone" {
+  command = plan
+
+  variables {
+    aks = {
+      node_count                       = 4
+      auto_scaling_enabled             = true
+      min_count                        = 2
+      max_count                        = 10
+      scale_down_utilization_threshold = 0.65
+    }
+  }
+
+  assert {
+    condition     = azurerm_kubernetes_cluster.this.auto_scaler_profile[0].scale_down_utilization_threshold == "0.65"
+    error_message = "The scale-down threshold must reach the autoscaler profile."
+  }
+}
+
+run "autoscaler_threshold_requires_autoscaling" {
+  command = plan
+
+  variables {
+    aks = {
+      scale_down_utilization_threshold = 0.65
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "autoscaler_threshold_rejects_out_of_range" {
+  command = plan
+
+  variables {
+    aks = {
+      node_count                       = 4
+      auto_scaling_enabled             = true
+      min_count                        = 2
+      max_count                        = 10
+      scale_down_utilization_threshold = 1.5
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
