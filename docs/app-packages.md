@@ -384,7 +384,7 @@ adds them.
 - Not packaged anywhere: private files, records and files past the demo
   limits, publication settings, sharing and tool allowances. Upgrades never
   change these.
-- An app installed before migration 1573 has no install record: it is
+- An app installed before migration 1576 has no install record: it is
   listed with no version or Customized, and a ready-made one offers its update.
 - A shared Skill's update saved for review (Review first) is linked as
   pending on every copy that shares it, so approving it customizes none.
