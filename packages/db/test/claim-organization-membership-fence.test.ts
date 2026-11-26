@@ -158,6 +158,9 @@ describe("turn claim organization-membership fence", () => {
     // store takes the membership fence before journal/credit locks; turn claims
     // never write these tables. The live exclusive-holder tests above must
     // continue to pass with these triggers installed.
+    // Billing-customer inserts reuse the seat trigger's owner context, but
+    // that branch returns before the membership lock. Claims never insert a
+    // billing customer.
     if (!available) return;
     const admin = postgres(shared!.adminUrl, { max: 1, onnotice: () => undefined });
     try {
@@ -170,6 +173,7 @@ describe("turn claim organization-membership fence", () => {
       expect(rows.map((row) => row.trigger)).toEqual([
         "billing_auto_top_up_operations.billing_auto_top_up_operations_guard",
         "billing_auto_top_up_settings.billing_auto_top_up_settings_guard",
+        "billing_customers.ignore_closed_organization_billing_customer",
         "host_mcp_task_authorities.host_mcp_task_authority_guard",
         "host_mcp_turn_authorities.host_mcp_child_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_inherited_turn_authority_guard",

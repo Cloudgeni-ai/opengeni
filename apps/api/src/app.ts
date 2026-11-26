@@ -532,6 +532,7 @@ import {
   registerAiProcessingConsentRoutes,
   requireAiProcessingConsent,
 } from "./routes/ai-processing-consent";
+import { registerAccountDeletionRoutes } from "./routes/account-deletion";
 import { registerConsoleSignInRoutes } from "./routes/console-sign-in";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -1437,6 +1438,7 @@ export function createAppComposition(
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   registerAiProcessingConsentRoutes(app, routeDeps);
+  registerAccountDeletionRoutes(app, routeDeps);
   registerConsoleSignInRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {

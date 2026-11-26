@@ -1,5 +1,9 @@
 # Organization tenancy foundation
 
+For self-offboarding during account erasure, sole-member organization closure,
+and the effect of an organization's retention policy, see
+[Self-service account deletion](account-deletion.md).
+
 This document is the current implementation map for the accepted
 [organization-tenancy ADR](design/organization-tenancy-slice-a-2026-08-11.md).
 
