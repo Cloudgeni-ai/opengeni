@@ -92,7 +92,7 @@ export function parseConsoleAgentSearch(search: Record<string, unknown>): Consol
 
 /**
  * The social sign-in buttons a host offers. A GitHub OAuth app has one
- * callback host, the app's, so the Console host offers Google only.
+ * callback host, the app's, so the Console host does not offer GitHub.
  */
 export function socialProvidersForHost<T extends string>(
   hostname: string,

@@ -73,6 +73,8 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { managedAuthRequestBaseUrl } from "../auth/managed-auth";
+import { managedSocialClientId } from "../auth/apple-sign-in";
+import type { ManagedSignInProvider } from "@opengeni/contracts/managed-sign-in-methods";
 import { SIGNUP_ATTRIBUTION_AUTH_FIELD } from "../auth/signup-funnel-metrics";
 import { ApiHttpError } from "../http/api-error";
 import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
@@ -396,7 +398,8 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     const body = await bodyAs(context, StartManagedAuthSocialTransactionRequest);
     const { authority, actorEpoch } = await requireMutation(context, deps, body.expectedGeneration);
     const available = requireAvailable(deps);
-    if (!managedAuthSocialProviderConfigured(deps, body.provider)) {
+    const clientId = managedSocialClientId(deps.settings, body.provider);
+    if (!clientId) {
       throw managedAuthApiError(404, "managed_authentication_unavailable");
     }
     const transactionSecret = requireTransactionSecret(context, body.transactionId);
@@ -508,10 +511,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         const url = validatedManagedAuthSocialAuthorizationUrl({
           provider: body.provider,
           rawUrl: result.response?.url,
-          expectedClientId:
-            body.provider === "google"
-              ? deps.settings.managedAuthGoogleClientId!
-              : deps.settings.managedAuthGithubClientId!,
+          expectedClientId: clientId,
           expectedCallbackUrl: new URL(
             `/v1/auth/callback/${body.provider}`,
             requestBaseUrl,
@@ -694,7 +694,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
 }
 
 export function validatedManagedAuthSocialAuthorizationUrl(input: {
-  provider: "google" | "github";
+  provider: ManagedSignInProvider;
   rawUrl: unknown;
   expectedClientId: string;
   expectedCallbackUrl: string;
@@ -708,10 +708,11 @@ export function validatedManagedAuthSocialAuthorizationUrl(input: {
   } catch (error) {
     throw new ManagedAuthCompletionOutcomeUnknownError({ cause: error });
   }
-  const expectedEndpoint =
-    input.provider === "google"
-      ? { origin: "https://accounts.google.com", pathname: "/o/oauth2/v2/auth" }
-      : { origin: "https://github.com", pathname: "/login/oauth/authorize" };
+  const expectedEndpoint = {
+    google: { origin: "https://accounts.google.com", pathname: "/o/oauth2/v2/auth" },
+    github: { origin: "https://github.com", pathname: "/login/oauth/authorize" },
+    apple: { origin: "https://appleid.apple.com", pathname: "/auth/authorize" },
+  }[input.provider];
   const exactlyOne = (name: string, expected?: string): boolean => {
     const values = url.searchParams.getAll(name);
     return (
@@ -754,22 +755,9 @@ export function requireManagedAuthProviderRouteAllowed(method: string, pathname:
       (pathname === "/v1/auth/verify-email" ||
         pathname === "/v1/auth/error" ||
         pathname === "/v1/auth/ok" ||
-        /^\/v1\/auth\/callback\/(?:google|github)$/.test(pathname) ||
+        /^\/v1\/auth\/callback\/(?:google|github|apple)$/.test(pathname) ||
         /^\/v1\/auth\/reset-password\/[^/]+$/.test(pathname)));
   if (!allowed) throw managedAuthApiError(409, "provider_route_blocked");
-}
-
-function managedAuthSocialProviderConfigured(
-  deps: ApiRouteDeps,
-  provider: "google" | "github",
-): boolean {
-  return provider === "google"
-    ? Boolean(
-        deps.settings.managedAuthGoogleClientId && deps.settings.managedAuthGoogleClientSecret,
-      )
-    : Boolean(
-        deps.settings.managedAuthGithubClientId && deps.settings.managedAuthGithubClientSecret,
-      );
 }
 
 /** Remove provider bearer/session material and enforce browser-auth cache/cookie policy. */

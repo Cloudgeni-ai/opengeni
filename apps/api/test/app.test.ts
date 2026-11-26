@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { describe, expect, spyOn, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
@@ -2374,6 +2374,30 @@ describe("GET /v1/config/client", () => {
       socialProviders: ["google", "github"],
     });
     expect(JSON.stringify(config.auth)).not.toContain("secret");
+    const privateKey = generateKeyPairSync("ec", { namedCurve: "P-256" })
+      .privateKey.export({ type: "pkcs8", format: "pem" })
+      .toString();
+    const appleSettings = testSettings({
+      productAccessMode: "managed",
+      managedAuthAppleClientId: "apple-services-id",
+      managedAuthAppleTeamId: "apple-team-id",
+      managedAuthAppleKeyId: "apple-key-id",
+      managedAuthApplePrivateKey: privateKey,
+    });
+    const apple = (await fetchClientConfig(appleSettings)).auth;
+    expect(apple).toMatchObject({ socialProviders: ["apple"] });
+    expect(JSON.stringify(apple)).not.toContain("PRIVATE KEY");
+    expect(JSON.stringify(apple)).not.toContain("apple-services-id");
+    const partial = await fetchClientConfig({ ...appleSettings, managedAuthAppleKeyId: undefined });
+    expect(partial.auth).toMatchObject({ socialProviders: [] });
+    const all = await fetchClientConfig({
+      ...appleSettings,
+      managedAuthGoogleClientId: "google-login.apps.googleusercontent.com",
+      managedAuthGoogleClientSecret: "google-secret",
+      managedAuthGithubClientId: "github-login",
+      managedAuthGithubClientSecret: "github-secret",
+    });
+    expect(all.auth).toMatchObject({ socialProviders: ["google", "github", "apple"] });
   });
 
   test("projects whether new managed accounts may be created", async () => {

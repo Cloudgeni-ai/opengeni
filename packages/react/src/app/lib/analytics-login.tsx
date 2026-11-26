@@ -1,13 +1,14 @@
 import { storedAnalyticsConsent } from "./analytics-consent";
 import type { AuthSession } from "../types";
+import type { ManagedSignInProvider } from "@opengeni/contracts/managed-sign-in-methods";
 
 const KEY = "opengeni.analyticsLoginAttempt";
-type Method = "email" | "google" | "github" | "passkey";
+type Method = "email" | ManagedSignInProvider | "passkey";
 type Receipt = { userId: string; method: Method; eventId: string };
 let pending: Receipt | null = null;
 
 /** A consented redirect marker: no credentials, email, or auth session identifier. */
-export function beginSocialLoginAnalytics(method: "google" | "github"): void {
+export function beginSocialLoginAnalytics(method: ManagedSignInProvider): void {
   try {
     if (storedAnalyticsConsent() !== "granted") return;
     window.sessionStorage.setItem(KEY, JSON.stringify({ method, startedAt: Date.now() }));
@@ -31,7 +32,7 @@ export function observeSocialLoginResult(session: AuthSession | null): void {
     // An old cookie after failed OAuth must never be counted as a fresh login.
     if (
       session &&
-      ["google", "github"].includes(value.method) &&
+      ["google", "github", "apple"].includes(value.method) &&
       typeof value.startedAt === "number" &&
       Date.now() - value.startedAt < 600_000 &&
       value.startedAt <= Date.now() &&

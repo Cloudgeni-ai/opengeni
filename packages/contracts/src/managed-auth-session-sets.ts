@@ -147,7 +147,7 @@ export const ManagedAuthLoginTransaction = /* @__PURE__ */ defineSchema(() =>
 export type ManagedAuthLoginTransaction = z.infer<typeof ManagedAuthLoginTransaction>;
 
 export const ManagedAuthSocialProvider = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["google", "github"]),
+  z.enum(["google", "github", "apple"]),
 );
 export type ManagedAuthSocialProvider = z.infer<typeof ManagedAuthSocialProvider>;
 

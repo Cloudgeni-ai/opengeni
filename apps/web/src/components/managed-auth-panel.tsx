@@ -11,6 +11,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import {
   ManagedAuthDivider,
   ManagedSocialAuthButtons,
+  SOCIAL_PROVIDER_LABELS,
   type ManagedSocialProvider,
 } from "@/components/managed-social-auth-buttons";
 import {
@@ -408,9 +409,7 @@ export function ManagedAuthPanel(props: {
     try {
       await props.onSocialSubmit(provider, token);
     } catch {
-      setFormError(
-        `Couldn't continue with ${provider === "google" ? "Google" : "GitHub"}. Try again.`,
-      );
+      setFormError(`Couldn't continue with ${SOCIAL_PROVIDER_LABELS[provider]}. Try again.`);
       setFormActionMode(null);
       setSocialBusy(null);
     }

@@ -24821,7 +24821,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"github\\\"\",\"\\\"google\\\"\"]"
+        "$": "enum=[\"\\\"apple\\\"\",\"\\\"github\\\"\",\"\\\"google\\\"\"]"
       }
     },
     "ManagedUserResourceGrantMode": {

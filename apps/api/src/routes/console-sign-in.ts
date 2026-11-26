@@ -58,7 +58,7 @@ const CODE_IDENTIFIER_PREFIX = "opengeni-console-sign-in-code:";
 const CODE = /^[A-Za-z0-9_-]{43}$/u;
 const VERIFIER = /^[A-Za-z0-9_-]{43}$/u;
 const CHALLENGE = /^[A-Za-z0-9_-]{43}$/u;
-const PROVIDERS = ["credential", "google", "github", "passkey"] as const;
+const PROVIDERS = ["credential", "google", "github", "apple", "passkey"] as const;
 
 const AuthorizeBody = z
   .object({

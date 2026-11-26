@@ -8067,6 +8067,11 @@ export const sessionTurns = pgTable(
       table.sessionId,
       table.position,
     ),
+    // A session's person/API turns, for the effective-policy fallback after a
+    // settings write, without visiting every automated turn (migration 1589).
+    sessionPersonApi: index("session_turns_session_person_api_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.source} in ('user','api')`),
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
@@ -13956,6 +13961,11 @@ export const creditLedgerEntries = pgTable(
     ),
     modelDebitPeriod: index("credit_ledger_entries_model_debit_period_idx")
       .on(table.accountId, table.occurredAt, table.workspaceId)
+      .where(
+        sql`${table.type}='model_usage_debit' and ${table.sourceType}='model_response' and ${table.amountMicros}<0`,
+      ),
+    modelDebitSource: index("credit_ledger_entries_model_debit_source_idx")
+      .on(table.accountId, table.sourceId)
       .where(
         sql`${table.type}='model_usage_debit' and ${table.sourceType}='model_response' and ${table.amountMicros}<0`,
       ),

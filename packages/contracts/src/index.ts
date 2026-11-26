@@ -22614,8 +22614,8 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       session: z.literal("cookie"),
       emailVerificationRequired: primitives.boolean.default(true),
       socialProviders: z
-        .array(z.enum(["google", "github"]))
-        .max(2)
+        .array(z.enum(["google", "github", "apple"]))
+        .max(3)
         .default([]),
       // False while the deployment has paused new account creation (launch-load
       // safety switch). Sign-in for existing accounts stays available.

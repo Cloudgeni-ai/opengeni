@@ -864,6 +864,35 @@ describe("organization setup email token transport rollout", () => {
 });
 
 describe("managed auth social providers", () => {
+  test("Apple requires the complete key configuration and managed mode", () => {
+    const apple = {
+      OPENGENI_MANAGED_AUTH_APPLE_CLIENT_ID: "apple-services-id",
+      OPENGENI_MANAGED_AUTH_APPLE_TEAM_ID: "team-id",
+      OPENGENI_MANAGED_AUTH_APPLE_KEY_ID: "key-id",
+      OPENGENI_MANAGED_AUTH_APPLE_PRIVATE_KEY: "fixture-private-key",
+      OPENGENI_MANAGED_AUTH_APPLE_APP_BUNDLE_IDENTIFIER: "ai.example.app",
+    };
+    const managed = {
+      OPENGENI_ENVIRONMENT: "test",
+      OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+      OPENGENI_PUBLIC_BASE_URL: "https://app.example.test",
+      OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret",
+      OPENGENI_DELEGATION_SECRET: "delegation-secret",
+    };
+    expect(withEnv({ ...managed, ...apple }, () => getSettings())).toMatchObject({
+      managedAuthAppleClientId: "apple-services-id",
+      managedAuthAppleTeamId: "team-id",
+      managedAuthAppleKeyId: "key-id",
+      managedAuthApplePrivateKey: "fixture-private-key",
+      managedAuthAppleAppBundleIdentifier: "ai.example.app",
+    });
+    expect(() =>
+      withEnv({ ...managed, ...apple, OPENGENI_MANAGED_AUTH_APPLE_KEY_ID: undefined }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/MANAGED_AUTH_APPLE_.*must be configured together/);
+    expect(() => withEnv(apple, () => getSettings())).toThrow(/PRODUCT_ACCESS_MODE=managed/);
+  });
   test("loads independently configured Google and GitHub login clients", () => {
     expect(
       withEnv(
