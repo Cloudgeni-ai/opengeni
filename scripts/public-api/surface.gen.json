@@ -43696,6 +43696,7 @@
       "automationTemplatesFor": "value",
       "automationTemplateSourceChoice": "value",
       "automationTemplateSourceId": "value",
+      "automationTemplatesWithoutAgent": "value",
       "AutomationTemplateTile": "value",
       "AutomationTemplateTileProps": "type",
       "automationTemplateWhenWords": "value",
