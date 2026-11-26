@@ -9,6 +9,7 @@ import type {
 import { listSkills, readSkill, saveSkill, type ApiRouteDeps } from "@opengeni/core";
 import {
   appPackageSkillIds,
+  appPackageSkillLinks,
   relinkAppPackageSkill,
   type AppPackageInstall,
   type AppPackageInstallSkill,
@@ -84,7 +85,7 @@ async function workspaceSkillNamed(
  */
 export function skillModified(
   record: Pick<SkillRecord, "activeRevisionId"> | null,
-  link: AppPackageInstallSkill,
+  link: Pick<AppPackageInstallSkill, "revisionId" | "pendingRevisionId">,
 ): boolean {
   const live = record?.activeRevisionId;
   if (!live || (!link.revisionId && !link.pendingRevisionId)) return false;
@@ -171,6 +172,20 @@ export async function planPackageSkills(
     } else if (filesKey(current.files) === filesKey(skill.files)) {
       (link ? plan.unchanged : plan.added).push(skill.name);
       plan.steps.push({ skill, current, write: false });
+    } else if (
+      input.mode === "upgrade" &&
+      (await appPackageSkillLinks(deps.db, grant.workspaceId, current.id)).some((other) =>
+        skillModified(current, other),
+      )
+    ) {
+      // Another copy of the app customized this shared Skill: it keeps it.
+      plan.kept.push(skill.name);
+      plan.steps.push({ skill, current, write: false });
+      plan.problems.push({
+        part: "skill",
+        name: skill.name,
+        reason: "Another copy of this app customized this Skill, so it stays as it is",
+      });
     } else {
       plan.changed.push(skill.name);
       plan.steps.push({ skill, current, write: true });
@@ -246,7 +261,13 @@ export async function applyPackageSkills(
           await relinkAppPackageSkill(deps.db, grant.workspaceId, {
             skillId: receipt.skillId,
             pendingRevisionId: receipt.revisionId,
-          }).catch(() => undefined);
+          }).catch((error: unknown) =>
+            problems.push({
+              part: "skill",
+              name: skill.name,
+              reason: `Other copies of this app weren't relinked to it: ${reason(error, "relink Skill")}`,
+            }),
+          );
       } else {
         links.set(skill.name, {
           skillId: receipt.skillId,
@@ -258,7 +279,13 @@ export async function applyPackageSkills(
           await relinkAppPackageSkill(deps.db, grant.workspaceId, {
             skillId: receipt.skillId,
             revisionId: receipt.revisionId,
-          }).catch(() => undefined);
+          }).catch((error: unknown) =>
+            problems.push({
+              part: "skill",
+              name: skill.name,
+              reason: `Other copies of this app weren't relinked to it: ${reason(error, "relink Skill")}`,
+            }),
+          );
       }
       written.push(skill.name);
       if (receipt.outcome === "pending")

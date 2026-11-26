@@ -107,6 +107,29 @@ export async function appPackageSkillIds(
   });
 }
 
+/** The links active apps hold to one Skill (copies of a package share it). */
+export async function appPackageSkillLinks(
+  db: Database,
+  workspaceId: string,
+  skillId: string,
+): Promise<Array<{ revisionId: string | null; pendingRevisionId: string | null }>> {
+  return await withWorkspaceRls(db, workspaceId, async (tx) => {
+    const rows = await rawRows<{ revision_id: string | null; pending_revision_id: string | null }>(
+      tx,
+      sql`select link->>'revisionId' as revision_id, link->>'pendingRevisionId' as pending_revision_id
+        from app_package_installs i
+        join workspace_artifacts a on a.id = i.artifact_id and a.workspace_id = i.workspace_id
+        cross join lateral jsonb_array_elements(i.skills) as link
+        where i.workspace_id = ${workspaceId}::uuid and a.status = 'active'
+          and link->>'skillId' = ${skillId}`,
+    );
+    return rows.map((row) => ({
+      revisionId: row.revision_id,
+      pendingRevisionId: row.pending_revision_id,
+    }));
+  });
+}
+
 /**
  * Point every app linked to this Skill at its new revision (or, saved for
  * review, at the revision waiting for approval), so copies of one package
