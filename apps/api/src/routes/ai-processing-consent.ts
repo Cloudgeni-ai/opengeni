@@ -17,6 +17,9 @@ import { ApiHttpError } from "../http/api-error";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestJson } from "../http/request-body";
 
+// Add a platform when its native client can present and record consent.
+export const AI_PROCESSING_CONSENT_ENFORCED_PLATFORMS = ["ios"] as const;
+
 export function aiProcessingDisclosure(settings: ApiRouteDeps["settings"]): AiProcessingDisclosure {
   const providers = [...new Set(settings.aiProcessingConsentProviders)].sort();
   const recipients = providers.length
@@ -24,7 +27,7 @@ export function aiProcessingDisclosure(settings: ApiRouteDeps["settings"]): AiPr
     : "the AI providers that run your selected features";
   const disclosure = {
     title: "Allow sharing with AI providers?",
-    body: `To run AI features, Opengeni sends your messages, attached files, tool results, and voice to third-party AI providers: ${recipients}. This data can include personal information. You can withdraw permission at any time.`,
+    body: `To run AI features, Opengeni sends your messages, attached files, tool results, and voice to third-party AI providers: ${recipients}. If you or your organization connect your own AI subscription or API key, that provider receives this data too. This data can include personal information. You can withdraw permission at any time in Settings.`,
     providers,
     privacyUrl: settings.aiProcessingConsentPrivacyUrl ?? settings.legalPrivacyPolicyUrl ?? null,
   };
@@ -40,11 +43,22 @@ async function humanClient(c: Context, deps: ApiRouteDeps) {
 
 /** Check before a native request admits new inference or contacts a provider. */
 export async function requireAiProcessingConsent(c: Context, deps: ApiRouteDeps): Promise<void> {
+  const refusal = await aiProcessingConsentRefusal(c, deps);
+  if (refusal) throw refusal;
+}
+
+/** Separate the inference refusal from local capture cleanup that must still finish. */
+export async function aiProcessingConsentRefusal(
+  c: Context,
+  deps: ApiRouteDeps,
+): Promise<ApiHttpError | null> {
   const client = await humanClient(c, deps);
-  if (!client || (client.platform === "web" && client.authMethod !== "native_bearer")) return;
+  if (!client || !AI_PROCESSING_CONSENT_ENFORCED_PLATFORMS.some((p) => p === client.platform)) {
+    return null;
+  }
   const { version } = aiProcessingDisclosure(deps.settings);
-  if (await selfAiProcessingConsent(deps.db, client.authUserId, version)) return;
-  throw new ApiHttpError(403, {
+  if (await selfAiProcessingConsent(deps.db, client.authUserId, version)) return null;
+  return new ApiHttpError(403, {
     code: "forbidden",
     message: "Allow sharing with AI providers before using this feature.",
     retryable: false,

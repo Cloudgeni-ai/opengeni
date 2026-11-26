@@ -434,7 +434,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       status: 400,
       message: "invalid scheduled task update request",
     });
-    if ((payload.action ?? existing.action).kind === "agent_turn") {
+    if (payload.status !== "paused" && (payload.action ?? existing.action).kind === "agent_turn") {
       await requireAiProcessingConsent(c, deps);
     }
     const catalogSettings = (

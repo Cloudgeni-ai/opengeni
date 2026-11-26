@@ -5,9 +5,13 @@ import type { TranscriptionService } from "@opengeni/core";
 import {
   createApiKey,
   createDb,
+  createRecording,
   createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  markRecordingChunksUploaded,
+  reserveRecordingChunks,
   setSubjectRlsContext,
+  upsertSessionGoal,
   withSessionRlsActorContext,
   type Database,
   type DbClient,
@@ -23,6 +27,7 @@ import { sql } from "drizzle-orm";
 import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
 import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
+import { OFFICE_ADDIN_CALLBACK_PATH } from "../src/routes/native-app-auth";
 
 const ORIGIN = "http://opengeni.test";
 const PATH = "/v1/me/ai-processing-consent";
@@ -116,9 +121,14 @@ async function person(rt: Runtime) {
   };
 }
 
-async function nativeSignIn(rt: Runtime, cookie: string, platform: "ios" | "android") {
+async function nativeSignIn(
+  rt: Runtime,
+  cookie: string,
+  platform: "ios" | "android" | "macos" | "office",
+) {
   const codeVerifier = randomBytes(48).toString("base64url");
-  const redirectUri = "opengeni://auth/callback";
+  const redirectUri =
+    platform === "office" ? `${ORIGIN}${OFFICE_ADDIN_CALLBACK_PATH}` : "opengeni://auth/callback";
   const authorize = await rt.app.request("/v1/native-app/authorize", {
     method: "POST",
     headers: {
@@ -196,6 +206,7 @@ test("a human grants, replaces and withdraws current consent; accepted disclosur
     },
   });
   expect(state.disclosure.body).toContain("Example AI, Example Voice");
+  expect(state.disclosure.body).toContain("AI subscription or API key");
   const [marker] =
     await shared.admin`select native_app_platform from auth_sessions where token = ${device.token}`;
   expect(marker?.native_app_platform).toBe("ios");
@@ -255,10 +266,15 @@ test("a human grants, replaces and withdraws current consent; accepted disclosur
   expect(history.every((row) => row.withdrawn_at != null)).toBe(true);
 });
 
-test("native text and voice admissions fail closed while web and API key dictation still works", async () => {
+test("iOS text and voice admissions fail closed while other clients still work without consent", async () => {
   const rt = runtime();
   const p = await person(rt);
-  const device = await nativeSignIn(rt, p.cookie, "android");
+  const device = await nativeSignIn(rt, p.cookie, "ios");
+  const [mac, office, android] = await Promise.all([
+    nativeSignIn(rt, p.cookie, "macos"),
+    nativeSignIn(rt, p.cookie, "office"),
+    nativeSignIn(rt, p.cookie, "android"),
+  ]);
   // The old auth flow stored only the device label. An incoming User-Agent
   // doesn't change the persisted provenance of that credential.
   await shared.admin`update auth_sessions set native_app_platform = null where token = ${device.token}`;
@@ -286,6 +302,7 @@ test("native text and voice admissions fail closed while web and API key dictati
   );
   for (const [path, body] of [
     [`${base}/sessions`, { initialMessage: "Hello" }],
+    [`${base}/sessions`, { goal: { text: "Keep working" } }],
     [`${base}/sessions/${session.id}/events`, { type: "user.message", payload: { text: "Hello" } }],
     [`${base}/sessions/${session.id}/steer`, { text: "Hello" }],
     [`${base}/sessions/${session.id}/realtime`, {}],
@@ -320,6 +337,16 @@ test("native text and voice admissions fail closed while web and API key dictati
   const api = { authorization: `Bearer ${key}` };
   expect((await transcribe({ cookie: p.cookie })).status).toBe(200);
   expect((await transcribe(api)).status).toBe(200);
+  for (const { authorization } of [mac, office, android]) {
+    expect((await transcribe({ authorization })).status).toBe(200);
+    expect(await (await consent(rt, { authorization })).json()).toMatchObject({ required: true });
+  }
+  const desktopCookie = (
+    await rt.adapter.createLegacySelectedSessionCookies({ token: mac.token } as never)
+  )
+    .map((value) => value.split(";", 1)[0])
+    .join("; ");
+  expect((await transcribe({ cookie: desktopCookie })).status).toBe(200);
   for (const method of ["GET", "POST", "DELETE"]) {
     expect((await consent(rt, api, method)).status).toBe(403);
   }
@@ -328,10 +355,88 @@ test("native text and voice admissions fail closed while web and API key dictati
   );
   const granted = await consent(rt, headers, "POST", disclosure.version);
   expect(granted.status).toBe(200);
-  expect(await granted.json()).toMatchObject({ consent: { platform: "android" } });
+  expect(await granted.json()).toMatchObject({ consent: { platform: "ios" } });
   expect((await transcribe(headers)).status).toBe(200);
-  expect(rt.transcribe).toHaveBeenCalledTimes(3);
+  expect(rt.transcribe).toHaveBeenCalledTimes(7);
   expect((await consent(rt, headers, "DELETE")).status).toBe(200);
   await expectRefused(await transcribe(headers));
-  expect(rt.transcribe).toHaveBeenCalledTimes(3);
+  expect(rt.transcribe).toHaveBeenCalledTimes(7);
+});
+
+test("missing iOS consent blocks goal resumption and transcription without blocking cleanup", async () => {
+  const rt = runtime();
+  const p = await person(rt);
+  const device = await nativeSignIn(rt, p.cookie, "ios");
+  const headers = { authorization: device.authorization, "content-type": "application/json" };
+  const subjectId = `user:${p.userId}`;
+  const actor = { accountId: p.accountId, workspaceId: p.workspaceId, subjectId };
+  const base = `/v1/workspaces/${p.workspaceId}`;
+  const session = await withSessionRlsActorContext({ subjectId }, () =>
+    createSession(db.db, {
+      accountId: p.accountId,
+      workspaceId: p.workspaceId,
+      initialMessage: "Existing session",
+      memoryScope: "workspace",
+      resources: [],
+      metadata: {},
+      model: "gpt-6-luna",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      createdByContext: {},
+    }),
+  );
+  await upsertSessionGoal(db.db, {
+    ...actor,
+    sessionId: session.id,
+    text: "Existing goal",
+    createdBy: "api",
+  });
+  const patchGoal = (status: "paused" | "active") =>
+    rt.app.request(`${base}/sessions/${session.id}/goal`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ status }),
+    });
+  expect((await patchGoal("paused")).status).toBe(200);
+  await expectRefused(await patchGoal("active"));
+
+  const recordingId = crypto.randomUUID();
+  const recording = { ...actor, recordingId, trackNumber: 0 };
+  await createRecording(db.db, {
+    ...recording,
+    tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+  });
+  await reserveRecordingChunks(db.db, {
+    ...recording,
+    chunks: [
+      {
+        chunkNumber: 0,
+        byteLength: 5,
+        sha256: "a".repeat(64),
+        startMilliseconds: 0,
+        durationMilliseconds: 1_000,
+      },
+    ],
+  });
+  await markRecordingChunksUploaded(db.db, { ...recording, chunkNumbers: [0] });
+  const finalized = await rt.app.request(`${base}/recordings/${recordingId}/finalize`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ tracks: [{ trackNumber: 0, chunkCount: 1 }] }),
+  });
+  expect(finalized.status).toBe(200);
+  expect(await finalized.json()).toMatchObject({
+    recording: { state: "failed", captureEndedAt: expect.any(String) },
+    transcript: { state: "failed", errorCode: AI_PROCESSING_CONSENT_REQUIRED },
+  });
+  await expectRefused(
+    await rt.app.request(`${base}/recordings/${recordingId}/transcripts`, {
+      method: "POST",
+      headers,
+      body: "{}",
+    }),
+  );
+  expect(rt.transcribe).not.toHaveBeenCalled();
 });

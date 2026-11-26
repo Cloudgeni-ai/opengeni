@@ -906,7 +906,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
     }
     // A realtime shell admits no turn; the realtime entry points gate provider use separately.
-    if (typeof (payload as { initialMessage?: unknown } | null)?.initialMessage === "string") {
+    const intent = payload as { initialMessage?: unknown; goal?: unknown } | null;
+    if (typeof intent?.initialMessage === "string" || intent?.goal != null) {
       await requireAiProcessingConsent(c, deps);
     }
     let session: Session;
@@ -1985,7 +1986,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const sessionId = c.req.param("sessionId");
       const realtimeId = c.req.param("realtimeId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-      await requireAiProcessingConsent(c, deps);
       if (
         !z.string().uuid().safeParse(sessionId).success ||
         !z.string().uuid().safeParse(realtimeId).success
@@ -3845,6 +3845,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
       const payload = await parseRequestJson(c, ApplySessionGoalRevisionRequest);
+      await requireAiProcessingConsent(c, deps);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -3937,6 +3938,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
       const payload = await parseRequestJson(c, RollbackSessionGoalRevisionRequest);
+      await requireAiProcessingConsent(c, deps);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -3989,6 +3991,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = await parseRequestJson(c, UpdateSessionGoalRequest);
+    if (!("status" in payload) || payload.status === "active") {
+      await requireAiProcessingConsent(c, deps);
+    }
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
       throw new HTTPException(404, { message: "session goal not found" });

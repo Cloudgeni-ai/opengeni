@@ -26,19 +26,25 @@ The server keeps the rendered disclosure with each receipt. When `POST` returns
 409 with `error.details.code = "ai_processing_consent_version_mismatch"`,
 reload and show the new disclosure; do not accept it automatically.
 
-Native requests that start new model processing are refused with 403 and
+Requests from an iOS app session that start new model processing are refused with 403 and
 `error.details.code = "ai_processing_consent_required"` until the person grants
 the current version. This includes chat submission, realtime voice and
-dictation. Lists, reading chats and stopping live voice remain available.
-This check does not change ordinary web and API-key processing or recall data
-from a provider or cancel work already admitted.
+dictation. Reading chats, pausing work and settling or stopping an existing
+call remain available. Finalizing already-recorded audio saves the capture,
+but without consent the transcript returns `state: "failed"` with
+`errorCode: "ai_processing_consent_required"` and can be retried after consent.
+Only iOS enforces consent initially. Other native clients, ordinary web, and
+API-key processing are unchanged. Withdrawal does not recall data from a
+provider or cancel work already admitted.
 
 Set `OPENGENI_AI_PROCESSING_CONSENT_PROVIDERS` to the comma-separated display
-names of the providers that actually receive data from native features, and
+names of the deployment's providers that receive data from AI features, and
 `OPENGENI_AI_PROCESSING_CONSENT_PRIVACY_URL` to an HTTPS privacy page (defaults
 to `OPENGENI_LEGAL_PRIVACY_POLICY_URL` if set). Configure the real names before
 distributing a native app; the generic upstream disclosure is not a deployment
-provider list. Keep these settings consistent across API replicas.
+provider list. The disclosure also covers providers people or their organizations
+connect through a subscription or API key. Keep these settings consistent across
+API replicas.
 
 ## Chat client response shape
 
