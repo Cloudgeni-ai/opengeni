@@ -14,6 +14,7 @@
  * Transcribing, not Uploading.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import { regionRestrictedText } from "../inference-region";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -680,6 +681,7 @@ function FailedTranscriptActions({
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const [running, setRunning] = useState(false);
   const code = version?.errorCode ?? null;
   const switchTo = transcriptFixModel(code, version, fixes.models);
@@ -691,7 +693,9 @@ function FailedTranscriptActions({
       : undefined;
   const upgrade = code === "subscription_plan_required";
   const billing =
-    !switchTo && (transcriptNeedsCredits(code) || upgrade) ? fixes.onOpenBilling : undefined;
+    showPurchasePrompts && !switchTo && (transcriptNeedsCredits(code) || upgrade)
+      ? fixes.onOpenBilling
+      : undefined;
   return (
     <span className="flex flex-wrap gap-2">
       {switchTo ? (
@@ -735,9 +739,14 @@ function FailedTranscriptActions({
 function uploadFailureText(
   failure: { code: string; message: string } | null,
   msg: OpenGeniText,
+  showPurchasePrompts: boolean,
 ): string {
   if (!failure) return msg("meetings.detailPage.theAudioCouldnTBeUploaded");
-  if (transcriptNeedsCredits(failure.code)) return transcriptErrorText(failure.code, msg);
+  if (
+    transcriptNeedsCredits(failure.code) ||
+    (!showPurchasePrompts && failure.code === "subscription_plan_required")
+  )
+    return transcriptErrorText(failure.code, msg, null, showPurchasePrompts);
   // The notice's title already says the upload failed; the server's reason
   // reads as the first sentence of its text.
   const reason = failure.message.trim();
@@ -766,6 +775,7 @@ function PhaseNotice({
   onRetry: (() => void) | undefined;
 }) {
   const msg = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const phase = meetingPhase(recording);
   if (phase.kind === "uploading" && recorder && (here === "recording" || here === "paused")) {
     return <RecordingBar recorder={recorder} />;
@@ -802,7 +812,11 @@ function PhaseNotice({
         }
       >
         {msg("meetings.detailPage.uploadFailureKeptHere", {
-          reason: uploadFailureText(meetingUploadFailure(recorder, recording.id), msg),
+          reason: uploadFailureText(
+            meetingUploadFailure(recorder, recording.id),
+            msg,
+            showPurchasePrompts,
+          ),
         })}
       </Notice>
     );
@@ -857,7 +871,7 @@ function PhaseNotice({
           ) : undefined
         }
       >
-        {transcriptErrorText(phase.version?.errorCode ?? null, msg, about)}
+        {transcriptErrorText(phase.version?.errorCode ?? null, msg, about, showPurchasePrompts)}
       </Notice>
     );
   }
@@ -902,6 +916,7 @@ function RerunNotice({
   onRetry: (() => void) | undefined;
 }) {
   const msg = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const newest = versions.reduce<RecordingTranscriptVersion | null>(
     (best, entry) => (!best || entry.versionNumber > best.versionNumber ? entry : best),
     null,
@@ -934,7 +949,12 @@ function RerunNotice({
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
-          transcriptErrorText: transcriptErrorText(newest.errorCode, msg, modelOf(newest)),
+          transcriptErrorText: transcriptErrorText(
+            newest.errorCode,
+            msg,
+            modelOf(newest),
+            showPurchasePrompts,
+          ),
         })}
       </Notice>
     );

@@ -48,10 +48,11 @@ import {
   recordStripeWebhookEvent,
   upsertBillingCustomer,
 } from "@opengeni/db";
+import { managedAccounts } from "@opengeni/db/schema";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import Stripe from "stripe";
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { requireAccessContext, MissingPermissionRefusal } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
@@ -59,7 +60,7 @@ import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { managedAuthPublicBaseUrls } from "../auth/managed-auth";
 import { subscriptionStore } from "../billing-subscription-store";
 import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
-import { serializedStripeCustomer } from "../billing-stripe-customer";
+import { serializedStripeCustomer, stripeProviderForSecretKey } from "../billing-stripe-customer";
 import { listStripeReceipts } from "../billing-receipts";
 import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -1340,6 +1341,18 @@ export async function getOrCreateStripeCustomer(
         // Same account lock as credit writers. All top-up/portal/subscription
         // callers share transactional read/create/persist under this one fence.
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`);
+        // Whole-row projection keeps the billing path compatible before the
+        // rolling migration adds the closure field.
+        const [closed] = await tx
+          .select({ id: managedAccounts.id })
+          .from(managedAccounts)
+          .where(
+            and(
+              eq(managedAccounts.id, accountId),
+              sql`to_jsonb(${sql.identifier("managed_accounts")})->>'closed_by_account_deletion' is not null`,
+            ),
+          );
+        if (closed) throw new HTTPException(404, { message: "account not found" });
         return await run({
           read: async () =>
             (await getBillingCustomer(tx, accountId, provider))?.providerCustomerId ?? null,
@@ -1366,10 +1379,7 @@ export function stripeCustomerProvider(
   if ("livemode" in input) {
     return input.livemode ? "stripe:live" : "stripe:test";
   }
-  return input.settings.stripeSecretKey?.startsWith("sk_live_") ||
-    input.settings.stripeSecretKey?.startsWith("rk_live_")
-    ? "stripe:live"
-    : "stripe:test";
+  return stripeProviderForSecretKey(input.settings.stripeSecretKey);
 }
 
 /** Billing routes do not traverse the workspace actor middleware. Always bind

@@ -10804,6 +10804,12 @@ export const sandboxCheckpointArtifacts = pgTable(
       table.sandboxGroupId,
       table.sourceLeaseId,
     ),
+    // Tombstone prune walk (1585).
+    state: index("sandbox_checkpoint_artifacts_state_idx").on(
+      table.state,
+      table.deletedAt,
+      table.id,
+    ),
     sourceValid: check(
       "sandbox_checkpoint_artifacts_source_check",
       sql`${table.sourceLeaseEpoch} >= 0
@@ -11125,6 +11131,13 @@ export const sandboxLeases = pgTable(
           and ${table.liveness} in ('warming', 'warm')
           and ${table.rotationRequestedAt} is null`,
       ),
+    // Checkpoint GC and the artifact reference validator probe these (1583, 1584).
+    currentCheckpoint: index("sandbox_leases_current_checkpoint_idx")
+      .on(table.currentCheckpointArtifactId)
+      .where(sql`${table.currentCheckpointArtifactId} is not null`),
+    previousCheckpoint: index("sandbox_leases_previous_checkpoint_idx")
+      .on(table.previousCheckpointArtifactId)
+      .where(sql`${table.previousCheckpointArtifactId} is not null`),
     workspaceGenerationValid: check(
       "sandbox_leases_workspace_generation_check",
       sql`${table.workspaceGeneration} >= 0`,

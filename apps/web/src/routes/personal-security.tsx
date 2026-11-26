@@ -19,6 +19,7 @@ import {
 } from "@/lib/sign-in-method-origin";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { PersonalSettingsShell } from "@/components/settings/personal-settings-shell";
+import { AccountDeletionSection } from "@/components/settings/account-deletion";
 import {
   SecurityPageBody,
   SecurityPageHeader,
@@ -428,7 +429,12 @@ export function SecurityController({
       ? "The result of your last change is unknown. Retry the same request, or refresh to check your methods."
       : null);
   return (
-    <PersonalSettingsShell email={shownEmail(inventory?.email ?? email)}>
+    <PersonalSettingsShell
+      email={shownEmail(inventory?.email ?? email)}
+      afterPrivacy={
+        <AccountDeletionSection key={userId} mode={mode} emailAvailable={!passkeyOnly} />
+      }
+    >
       {committed ? (
         <div className="min-w-0">
           <SecurityPageHeader />

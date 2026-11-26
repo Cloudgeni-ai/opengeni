@@ -7,7 +7,12 @@ import {
   PaymentPageActivityProvider,
 } from "../src/timeline/payment-page-activity";
 import { nextPaymentCheckDelay } from "../src/timeline/payment-page-card";
-import { paymentPageOf, TRUSTED_APP_ACTION_CALL_NAMES } from "../src/timeline/payment-page";
+import {
+  isBillingAppAction,
+  paymentPageOf,
+  TRUSTED_APP_ACTION_CALL_NAMES,
+} from "../src/timeline/payment-page";
+import { PurchasePresentationProvider } from "../src/lib/purchase-presentation";
 import { activityPresentsImage } from "../src/timeline/presented-image";
 import { flush, registerDom, renderComponent, withVirtualClock } from "./render-hook";
 
@@ -80,6 +85,29 @@ function status(
 }
 
 describe("payment pages in the chat", () => {
+  test("a host can omit the first-party checkout card and card setup output", async () => {
+    const checkout = checkoutCall();
+    const cardSetup = checkoutCall({
+      arguments: { id: "POST /v1/billing/card-verification/setup" },
+    });
+    const ordinary = checkoutCall({ arguments: { id: "createOrganizationInvitation" } });
+    expect(isBillingAppAction(ordinary)).toBe(false);
+    const Renderer = defaultToolRegistry.resolve(checkout);
+    const rendered = await renderComponent(
+      <PurchasePresentationProvider showPurchasePrompts={false}>
+        <Renderer item={checkout} />
+        <Renderer item={cardSetup} />
+      </PurchasePresentationProvider>,
+    );
+    try {
+      await flush();
+      expect(rendered.container.textContent).toBe("");
+      expect(rendered.container.querySelector("a[href]")).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("only the first-party app action's successful payment page is one", () => {
     const item = checkoutCall();
     expect(paymentPageOf(item)).toEqual({

@@ -8,10 +8,12 @@ import { apiErrorFacts } from "../../../ui/api-error";
 import { modelListSummary } from "../../lib/credit-coverage";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
 import type { PaymentRefusalCode } from "../../lib/model-access";
-import { isUpgradeRefusal } from "../../../lib/format";
+import { creditRefusalStatus, isUpgradeRefusal } from "../../../lib/format";
 import { useAppContext } from "../../app-context";
 import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { useCreditBalance } from "./use-credit-balance";
+import { useShowPurchasePrompts } from "../../lib/purchase-presentation";
+import { useOpenGeniText } from "../../../messages/runtime";
 
 /**
  * The API refused a Send or a new chat because no credit pays for its model.
@@ -29,7 +31,7 @@ export function CreditRefusalNotice({
   refusalCode,
   workspaceId,
   accountId,
-  canBuyCredits,
+  canBuyCredits: hasBillingPermission,
   canReadBilling = false,
   canConnectModel,
   continuing = false,
@@ -56,6 +58,9 @@ export function CreditRefusalNotice({
   onAddCredits?: (() => void) | undefined;
   onDismiss?: (() => void) | undefined;
 }) {
+  const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const canBuyCredits = showPurchasePrompts && hasBillingPermission;
   const switchTo = !gap.selectionUsable && onChooseModel ? gap.covered[0] : undefined;
   const coverage = gap.selectionUsable
     ? "Send again to use the selected model."
@@ -79,6 +84,16 @@ export function CreditRefusalNotice({
   // Wait for the balance rather than show words it would contradict.
   if (uncovered && !settled) return null;
   if (refusalCode) {
+    if (!showPurchasePrompts) {
+      return (
+        <Notice
+          tone="waiting"
+          live="assertive"
+          title={creditRefusalStatus(t, refusalCode)}
+          {...(onDismiss ? { onDismiss } : {})}
+        />
+      );
+    }
     // One action fixes this, whichever model is chosen.
     const upgrade = isUpgradeRefusal(refusalCode);
     const askOwner = canBuyCredits
@@ -122,8 +137,15 @@ export function CreditRefusalNotice({
   }
   const credit = !uncovered ? null : !balance ? "unknown" : balance.someCredit ? "some" : "none";
   // The server's sentence, without the SDK's "API 402:" prefix or the reference.
-  const reason =
-    credit === "none"
+  const reason = !showPurchasePrompts
+    ? credit === "none"
+      ? `This organization is out of ${productName} credits.`
+      : credit === "some"
+        ? `This model can't use the ${productName} credits available right now.`
+        : credit === "unknown"
+          ? creditRefusalStatus(t)
+          : undefined
+    : credit === "none"
       ? canBuyCredits
         ? `Chats here are paid with ${productName} credits, and you don't have any right now.`
         : `Chats here are paid with ${productName} credits, and there are none left. Ask an organization owner to add some.`

@@ -25,6 +25,7 @@ import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
 import { ContinueAtResetSwitch, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
 import { AddCardButton } from "../add-card-button";
+import { useShowPurchasePrompts } from "../../lib/purchase-presentation";
 import { useOptionalAppContext } from "../../app-context";
 import {
   CARD_VERIFIED_EVENT,
@@ -53,7 +54,7 @@ export function FailedSessionBanner({
   freeCreditGap = null,
   onChooseModel,
   workspaceId,
-  canBuyCredits = false,
+  canBuyCredits: hasBillingPermission = false,
   onAddCredits,
   canConnectModel = false,
   modelChanged = false,
@@ -116,6 +117,8 @@ export function FailedSessionBanner({
    */
   allowMachine?: AllowMachineAction | undefined;
 }) {
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const canBuyCredits = showPurchasePrompts && hasBillingPermission;
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
@@ -130,7 +133,15 @@ export function FailedSessionBanner({
     compaction,
     creditRefusal,
     machineAccess,
-  } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap, stopRefusal);
+  } = failedSessionCopy(
+    failure,
+    billingFailure,
+    modelChanged,
+    chooseModel,
+    creditGap,
+    stopRefusal,
+    showPurchasePrompts,
+  );
   const machineAllow = machineAccess && !structuralFailure ? allowMachine : undefined;
   // A Free organization without a verified card: Add a card is the one
   // action, and the chat continues once the card is added.
@@ -141,7 +152,7 @@ export function FailedSessionBanner({
   const cardAccountId = cardRequired
     ? (workspaces.find((workspace) => workspace.id === workspaceId)?.accountId ?? null)
     : null;
-  useContinueAfterCard(cardRequired, actions?.onRetry);
+  useContinueAfterCard(showPurchasePrompts && cardRequired, actions?.onRetry);
   // Offer the switch until the composer selects a model that can run. An
   // own-key or API stop has one fix, never another model.
   const switchTo =
@@ -171,7 +182,7 @@ export function FailedSessionBanner({
             subscriptions,
             canChooseModel: hasModelPicker ?? canChooseModel,
           })
-        : creditRefusal && !offerCredits
+        : showPurchasePrompts && creditRefusal && !offerCredits
           ? // Without billing access the one fix is asking an owner.
             creditRefusalHeadline(t, creditRefusal, false)
           : reason;
@@ -193,7 +204,9 @@ export function FailedSessionBanner({
   const retryActions = machineAllow ? (
     <AllowMachineButton action={machineAllow} />
   ) : cardRequired ? (
-    <AddCardButton client={appContext?.client} accountId={cardAccountId} />
+    showPurchasePrompts ? (
+      <AddCardButton client={appContext?.client} accountId={cardAccountId} />
+    ) : null
   ) : codexUsageFailure ? (
     <>
       <ContinueAtResetSwitch {...codexUsageFailure} />

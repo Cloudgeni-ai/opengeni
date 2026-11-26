@@ -1122,6 +1122,39 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       providerMissingBeforeCapture: true,
     });
     expect(persistCalls).toHaveLength(0);
+
+    // Resuming a published (or discarded) teardown: the box is gone before
+    // this attempt stopped it, which is not a workspace loss.
+    for (const disposition of ["archive_published", "discard"] as const) {
+      const stops: string[] = [];
+      const resumed = await terminateProviderBox(
+        testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+        lease as never,
+        observability,
+        async (...args) => {
+          persistCalls.push(args);
+          return { wrote: true };
+        },
+        (() => notFoundClient) as never,
+        undefined,
+        undefined,
+        disposition,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        async () => {
+          stops.push(disposition);
+        },
+      );
+      expect(resumed).toEqual({
+        terminated: true,
+        providerMissingBeforeCapture: false,
+        providerGoneBeforeStop: true,
+      });
+      expect(stops).toEqual([]);
+    }
+    expect(persistCalls).toHaveLength(0);
   });
 
   test("an SDK-created resume replacement is deleted and never captured as the original", async () => {

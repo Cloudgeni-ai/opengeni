@@ -1480,6 +1480,126 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     );
   }, 60_000);
 
+  test("(1b-recovery-gone) a published drain whose Modal box is already gone commits cold on the next tick", async () => {
+    // Production regression (OpenGeniSandboxDrainExpiredLong): an earlier
+    // attempt published the workspace capture but never stopped the box; by
+    // the next attempt the box was gone. Resume-by-id reported NotFound before
+    // any stop cutoff was stamped, and the drain threw on every tick, keeping
+    // the lease draining (and fenced) forever.
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
+    const epoch = 12;
+    const instanceId = "box-published-gone";
+    const operationId = crypto.randomUUID();
+    await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: epoch,
+      expiresInMs: -1_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: instanceId, workspacePersistence: "snapshot_filesystem" },
+        },
+      },
+    });
+    await admin`update sandbox_leases set last_meter_at = now() - interval '10 minutes'
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
+    const claimed = await claimWorkspaceArchiveCapture(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      captureId: operationId,
+      operationId,
+      attempt: 1,
+      expectedEpoch: epoch,
+      expectedInstanceId: instanceId,
+      liveness: "draining",
+      captureTimeoutMs: 120_000,
+      minIntervalMs: 0,
+      providerReplaySafe: true,
+      takeoverSafe: true,
+    });
+    expect(claimed.status).toBe("claimed");
+    const archive = Buffer.from("PUBLISHED_BEFORE_BOX_VANISHED").toString("base64");
+    expect(
+      (
+        await persistDrainSnapshotRaw(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: epoch,
+          expectedInstanceId: instanceId,
+          expectedWorkspaceGeneration: 0,
+          captureId: operationId,
+          workspaceArchive: archive,
+          workspaceArchiveMeta: archiveDescriptor(archive, Date.now()),
+        })
+      ).wrote,
+    ).toBe(true);
+
+    const goneClient = {
+      backendId: "modal",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async resume(): Promise<never> {
+        const error = new Error(`Sandbox ${instanceId} was not found`);
+        Object.assign(error, { status: 404, code: "NOT_FOUND" });
+        throw error;
+      },
+      async resumeExact(): Promise<never> {
+        return await this.resume();
+      },
+    };
+    // The real terminate seam; only the provider client is replaced. (The
+    // `terminateBox` test seam stamps the stop cutoff itself, which hid this.)
+    const { drainSandboxLease } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      { createClientForBackend: (() => goneClient) as never },
+    );
+    const result = await drainSandboxLease({
+      target: {
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        instanceId,
+        leaseEpoch: epoch,
+      },
+      timeoutClass: "fast",
+      snapshotTimeoutMs: 60_000,
+      captureTimeoutMs: 120_000,
+      operationId: crypto.randomUUID(),
+    });
+
+    expect(result.status).toBe("terminated");
+    const cold = await readLease(db, ids.workspaceId, ids.groupId);
+    expect(cold?.liveness).toBe("cold");
+    expect(cold?.instanceId).toBeNull();
+    expect(cold?.leaseEpoch).toBe(epoch + 1);
+    // The capture was published before the box vanished: the workspace is
+    // restorable, never recorded as lost.
+    expect(cold?.recovery.archive.status).toBe("available");
+    expect(cold?.recovery.restore.status).toBe("pending");
+    expect(cold?.recovery.provider.status).not.toBe("missing");
+    expect(await observability.prometheusMetrics()).not.toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_provider_gone_after_save_total\{backend="modal"[^}]*\} 1\n/,
+    );
+    // No attempt recorded a stop cutoff: the box's unknown end after its last
+    // meter tick is not charged.
+    const warm = await admin<{ n: number }[]>`select count(*)::int as n from usage_events
+      where workspace_id = ${ids.workspaceId}
+        and source_resource_id = ${`${ids.groupId}:${epoch}`}
+        and event_type in ('sandbox.warm_seconds', 'sandbox.warm_cost')`;
+    expect(warm[0]?.n).toBe(0);
+  }, 60_000);
+
   test("(1b-recovery-replay) a replay-safe Modal capture replaces a dead unexpired activity immediately", async () => {
     if (!available) return;
     const ids = await freshWorkspace();

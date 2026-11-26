@@ -204,6 +204,7 @@ import {
   insufficientCreditsHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
+  apiErrorRetryAfterSeconds,
   databaseContentionHttpError,
   databaseUnavailableHttpError,
   modelPolicyRefusedHttpError,
@@ -531,6 +532,7 @@ import {
   registerAiProcessingConsentRoutes,
   requireAiProcessingConsent,
 } from "./routes/ai-processing-consent";
+import { registerAccountDeletionRoutes } from "./routes/account-deletion";
 import { registerConsoleSignInRoutes } from "./routes/console-sign-in";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -1436,6 +1438,7 @@ export function createAppComposition(
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   registerAiProcessingConsentRoutes(app, routeDeps);
+  registerAccountDeletionRoutes(app, routeDeps);
   registerConsoleSignInRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
@@ -3172,6 +3175,10 @@ export function createAppComposition(
     ) {
       c.header("retry-after", "1");
     }
+    // A refusal that names when to retry (a sandbox limit, a rate limit)
+    // says so in the standard header too, for clients that honor it.
+    const retryAfterSeconds = apiErrorRetryAfterSeconds(apiError);
+    if (retryAfterSeconds !== null) c.header("retry-after", String(retryAfterSeconds));
     const envelope = ErrorEnvelope.parse({
       error: {
         status,

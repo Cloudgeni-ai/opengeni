@@ -41,6 +41,7 @@ import {
 import {
   creditExhaustionText,
   creditRefusalKindFromText,
+  creditRefusalStatus,
   presentFailure,
   isCreditExhaustion,
   tryParseJson,
@@ -187,6 +188,7 @@ function timelineAnnotationToolOutputText(output: unknown): string | null {
 
 export type BuildTimelineOptions = {
   partialStart?: boolean;
+  showPurchasePrompts?: boolean;
   /**
    * Turns whose steps are not all loaded, keyed by turn id. Each becomes a
    * `turn-steps` item placed at the turn's start (its `turn.started`, or its
@@ -500,7 +502,7 @@ export function buildTimeline(
   ): void => {
     const item = startupPhases.get(`${startupTurnId}:${phase}`)?.[0];
     if (item?.status !== "failed") return;
-    const detail = failureMessage(t, payload)?.trim();
+    const detail = presentFailure(t, payload, options.showPurchasePrompts).reason?.trim();
     if (detail) item.detail = detail;
   };
 
@@ -1337,7 +1339,7 @@ export function buildTimeline(
         if (existing && status !== "running") {
           existing.status = status;
           if (origin) existing.origin = origin;
-          const message = failureMessage(t, payload);
+          const message = presentFailure(t, payload, options.showPurchasePrompts).reason;
           if (message) {
             existing.output = existing.output ? `${existing.output}\n${message}` : message;
           }
@@ -1351,7 +1353,7 @@ export function buildTimeline(
             turnId,
             name,
             command: typeof payload.command === "string" ? payload.command : null,
-            output: failureMessage(t, payload) ?? "",
+            output: presentFailure(t, payload, options.showPurchasePrompts).reason ?? "",
             origin,
             status,
             occurredAt: event.occurredAt,
@@ -1973,7 +1975,7 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          const creditText = creditExhaustionPayloadText(t, payload);
+          const creditText = creditExhaustionPayloadText(t, payload, options.showPurchasePrompts);
           items.push(turnEndItem(event, "failed", creditText));
           items.push({
             kind: "notice",
@@ -2078,16 +2080,19 @@ export function buildTimeline(
         takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
-        // Credit death can hide behind fields `failureMessage` doesn't read
+        // Credit death can hide behind fields `presentFailure` doesn't read
         // (detail/segmentLimit), so classify the whole payload before falling
         // back to the generic error/message extraction.
         const allowance = parseAllowanceExhaustedRefusal(payload);
         const creditExhausted = !allowance && isCreditExhaustionPayload(payload);
-        const presented = allowance || creditExhausted ? null : presentFailure(t, payload);
+        const presented =
+          allowance || creditExhausted
+            ? null
+            : presentFailure(t, payload, options.showPurchasePrompts);
         const failureText = allowance
           ? ALLOWANCE_TURN_END_TEXT(t)
           : creditExhausted
-            ? creditExhaustionPayloadText(t, payload)
+            ? creditExhaustionPayloadText(t, payload, options.showPurchasePrompts)
             : (presented?.reason ?? null);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
@@ -2941,12 +2946,16 @@ export function stripOpaqueCitationTokens(text: string): string {
 const ALLOWANCE_TURN_END_TEXT = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
 
 /** The credit-stop sentence for a turn-end payload (own key, API use, or none). */
-function creditExhaustionPayloadText(t: OpenGeniText, payload: Record<string, unknown>): string {
-  return creditExhaustionText(
-    t,
-    typeof payload.error === "string" ? payload.error : null,
-    typeof payload.detail === "string" ? payload.detail : null,
-  );
+function creditExhaustionPayloadText(
+  t: OpenGeniText,
+  payload: Record<string, unknown>,
+  showPurchasePrompts = true,
+): string {
+  const error = typeof payload.error === "string" ? payload.error : null;
+  const detail = typeof payload.detail === "string" ? payload.detail : null;
+  return showPurchasePrompts
+    ? creditExhaustionText(t, error, detail)
+    : creditRefusalStatus(t, creditRefusalKindFromText(error, detail));
 }
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
@@ -4987,10 +4996,6 @@ function elapsedDurationMs(startedAt: string, completedAt: string): number | nul
 function failedAt(item: StartupPhaseItem): number {
   const at = item.completedAt === null ? Number.NaN : Date.parse(item.completedAt);
   return Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
-}
-
-function failureMessage(t: OpenGeniText, payload: Record<string, unknown>): string | null {
-  return presentFailure(t, payload).reason;
 }
 
 function goalText(payload: Record<string, unknown>): string | null {

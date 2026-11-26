@@ -123,6 +123,9 @@ export type RuntimeMetricsHooks = {
     httpStatus?: number;
     /** Closed provider-account refusal read from the response body; attribution only. */
     providerAccountRefusal?: ProviderAccountRefusal;
+    /** The request never got an HTTP answer from the endpoint: connection,
+     * DNS, TLS or timeout failure reaching its URL. Attribution only. */
+    transportFailure?: true;
   }) => void;
   /**
    * A provider's 400 invalid-request answer to a model call, by the request
