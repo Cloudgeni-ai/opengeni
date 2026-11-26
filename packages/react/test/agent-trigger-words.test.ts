@@ -204,6 +204,18 @@ test("one status per agent: working, what it needs, steps left, ready, off or on
   expect(agentStatus({ triggers: [] })?.label).toBe("On call");
   expect(agentStatus({ triggers: null })).toBeNull();
   expect(agentStartsWords(["When a pull request opens"])).toBe("When a pull request opens");
-  expect(agentStartsWords(["a", "b"])).toBe("2 triggers");
+  expect(agentStartsWords(["When a pull request opens", "Every Monday"])).toBe(
+    "When a pull request opens and 1 more",
+  );
   expect(agentStartsWords([], { inSlack: true })).toBe("Answers when asked here or in Slack");
+});
+
+test("a ready-made agent's schedule, with no time zone yet, reads in the viewer's", () => {
+  const shape = agentTriggerShapeOfSuggestion({
+    name: "Every Monday morning",
+    instructions: "Report.",
+    schedule: { type: "calendar", hour: 9, minute: 0, daysOfWeek: ["MONDAY"] },
+    triggers: [],
+  } as never);
+  expect(agentTriggerSentence(t, shape, context)).toStartWith("Every Monday");
 });

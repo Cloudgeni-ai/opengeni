@@ -225,9 +225,8 @@ export function ReadyMadeAgentPreview({
               }
             />
           ))}
-          {setup.wontDoWithoutAsking.map((line) => (
+          {setup.wontDoWithoutAsking.length > 0 ? (
             <SettingRow
-              key={`wont:${line}`}
               data-ready-made-wont=""
               label={
                 <span className="flex items-start gap-2">
@@ -235,11 +234,12 @@ export function ReadyMadeAgentPreview({
                     aria-hidden="true"
                     className="mt-0.5 size-4 shrink-0 text-fg-subtle"
                   />
-                  {line}
+                  Asks you first
                 </span>
               }
+              description={setup.wontDoWithoutAsking.join(" · ")}
             />
-          ))}
+          ) : null}
         </Section>
         {template.suggestedTriggers.length > 0 ? (
           <Section title="When it works" variant="group" data-ready-made-when="">

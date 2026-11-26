@@ -182,7 +182,13 @@ export function agentTriggerScheduleWords(
   now: Date,
 ): string | null {
   if (!schedule || schedule.type === "manual") return null;
-  const words = automationScheduleWords(t, schedule as ScheduledTaskScheduleSpec, now).sentence;
+  // A ready-made agent's schedule has no time zone until it is added: say it in the viewer's.
+  const spec = (
+    schedule.type === "calendar" && !("timeZone" in schedule && schedule.timeZone)
+      ? { ...schedule, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" }
+      : schedule
+  ) as ScheduledTaskScheduleSpec;
+  const words = automationScheduleWords(t, spec, now).sentence;
   const bare = words.replace(/^Runs /u, "").replace(/\.$/u, "");
   return bare.charAt(0).toUpperCase() + bare.slice(1);
 }
