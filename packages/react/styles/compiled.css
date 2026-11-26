@@ -13436,6 +13436,10 @@
 :where(.og-root).og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child {
   padding-bottom: 16px;
 }
+:where(.og-root).og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child {
+  padding-bottom: 16px;
+  color: var(--og-color-fg-muted);
+}
 :where(.og-root).og-session-capability-copy[data-clamp],:where(.og-root) .og-session-capability-copy[data-clamp] {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -14972,6 +14976,10 @@
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child {
   padding-bottom: 16px;
+}
+:where(.og-root).og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child {
+  padding-bottom: 16px;
+  color: var(--og-color-fg-muted);
 }
 :where(.og-root).og-session-capability-copy[data-clamp],:where(.og-root) .og-session-capability-copy[data-clamp] {
   display: -webkit-box;

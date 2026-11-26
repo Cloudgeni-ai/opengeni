@@ -617,7 +617,8 @@ function MachineRow({
 }
 
 export type ChromeState = {
-  connected: { name: string } | null;
+  /** The linked profile; `multiple` when more than one Chrome is linked. */
+  connected: { name: string; multiple: boolean } | null;
   /** A read completed, so a null `connected` means Chrome is not linked yet. */
   checked: boolean;
   /** Start checking for the extension (after the person opens the store). */
@@ -628,6 +629,28 @@ export type ChromeState = {
 
 /** Which Chrome to look for: one on an exact machine, or any the person connected. */
 export type AttachedChromeScope = { enrollmentId: string } | "any" | null;
+
+type ChromeReading = { connected: ChromeState["connected"]; checked: boolean };
+
+/**
+ * The last reading per workspace and scope, kept across mounts so a card shown
+ * again starts from what was last known and refreshes in the background.
+ */
+const chromeReadings = new Map<string, ChromeReading>();
+
+function chromeReadingKey(workspaceId: string, enrollmentId: string | null): string | null {
+  return enrollmentId === null ? null : `${workspaceId}\u0000${enrollmentId}`;
+}
+
+function cachedChromeReading(workspaceId: string, enrollmentId: string | null): ChromeReading {
+  const key = chromeReadingKey(workspaceId, enrollmentId);
+  return (key && chromeReadings.get(key)) || { connected: null, checked: false };
+}
+
+/** Forget every remembered reading (tests). */
+export function resetAttachedChromeCache(): void {
+  chromeReadings.clear();
+}
 
 /**
  * Whether the Opengeni Browser extension linked a Chrome profile the agent can
@@ -646,20 +669,25 @@ export function useAttachedChrome(
   // Poll on its own timer; a new client identity on re-render must not refetch.
   const clientRef = useRef(client);
   clientRef.current = client;
-  const [connected, setConnected] = useState<{ name: string } | null>(null);
-  const [checked, setChecked] = useState(false);
+  const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
+  const [connected, setConnected] = useState<ChromeState["connected"]>(
+    () => cachedChromeReading(workspaceId, enrollmentId).connected,
+  );
+  const [checked, setChecked] = useState(
+    () => cachedChromeReading(workspaceId, enrollmentId).checked,
+  );
   const [watchSince, setWatchSince] = useState<number | null>(null);
   const [refreshSince, setRefreshSince] = useState<number | null>(null);
   const [expired, setExpired] = useState(false);
   const [denied, setDenied] = useState(false);
   const linked = connected !== null;
-  const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
 
   useEffect(() => {
-    setConnected(null);
-    setChecked(false);
+    const cached = cachedChromeReading(workspaceId, enrollmentId);
+    setConnected(cached.connected);
+    setChecked(cached.checked);
     setDenied(false);
-  }, [enrollmentId]);
+  }, [enrollmentId, workspaceId]);
 
   useEffect(() => {
     setRefreshSince(refreshKey === null ? null : Date.now());
@@ -672,13 +700,27 @@ export function useAttachedChrome(
       try {
         const result = await clientRef.current.listAttachedBrowsers(workspaceId);
         if (cancelled) return;
-        const device = result.devices.find(
+        const devices = result.devices.filter(
           (candidate) =>
             candidate.state === "connected" &&
             candidate.capabilities.debuggerAttachment &&
             (enrollmentId === "*" || candidate.enrollmentId === enrollmentId),
         );
-        setConnected(device ? { name: device.profileLabel ?? device.browserName } : null);
+        const device = devices[0];
+        const reading: ChromeReading = {
+          connected: device
+            ? { name: device.profileLabel ?? device.browserName, multiple: devices.length > 1 }
+            : null,
+          checked: true,
+        };
+        const key = chromeReadingKey(workspaceId, enrollmentId);
+        if (key) chromeReadings.set(key, reading);
+        setConnected((current) =>
+          current?.name === reading.connected?.name &&
+          current?.multiple === reading.connected?.multiple
+            ? current
+            : reading.connected,
+        );
         setChecked(true);
       } catch (failure) {
         // Without inventory access the step still offers the install link.
@@ -689,6 +731,8 @@ export function useAttachedChrome(
           failure.status < 500
         ) {
           setDenied(true);
+          // Nothing more to learn: show the step instead of waiting.
+          setChecked(true);
         }
       }
     };

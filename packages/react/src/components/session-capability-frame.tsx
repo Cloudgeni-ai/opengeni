@@ -70,6 +70,11 @@ export type SessionCapabilityFrameProps = {
   details?: ReactNode;
   /** Protected setup can stay in the conversation instead of opening a dialog. */
   inlineSetup?: ReactNode;
+  /**
+   * Still finding out whether setup is needed: show the description only, with
+   * no action, so the card never offers a step it may not need.
+   */
+  pending?: boolean | undefined;
 };
 
 const MARK_ICONS: Readonly<Record<IntegrationExperienceIcon, LucideIcon>> = {
@@ -150,6 +155,7 @@ export function SessionCapabilityFrame({
   actionUnavailable,
   details,
   inlineSetup,
+  pending = false,
 }: SessionCapabilityFrameProps) {
   const t = useOpenGeniText();
   const localOpener = useRef<HTMLButtonElement>(null);
@@ -177,7 +183,7 @@ export function SessionCapabilityFrame({
         ref={sectionRef}
         tabIndex={-1}
         aria-label={t("sessionCapabilityFrame.nameSetup", { name })}
-        data-state={complete ? "complete" : expanded ? "setup" : "suggested"}
+        data-state={complete ? "complete" : pending ? "pending" : expanded ? "setup" : "suggested"}
         className="og-session-capability-shell"
       >
         <div className="og-session-capability-header">
@@ -201,7 +207,7 @@ export function SessionCapabilityFrame({
             >
               {description}
             </p>
-            {inlineSetup ? (
+            {pending ? null : inlineSetup ? (
               <div className="og-session-capability-setup">{inlineSetup}</div>
             ) : actionUnavailable ? (
               <div className="og-session-capability-actions" data-unavailable="">
@@ -234,11 +240,11 @@ export function SessionCapabilityFrame({
         )}
         {details}
       </section>
-      {!complete && !dialogOnly && note ? (
+      {!complete && !pending && !dialogOnly && note ? (
         <p className="og-session-capability-note">{note}</p>
       ) : null}
       <Dialog.Root
-        open={expanded && !complete}
+        open={expanded && !complete && !pending}
         onOpenChange={(open) => {
           if (!open && !busy) onClose();
         }}

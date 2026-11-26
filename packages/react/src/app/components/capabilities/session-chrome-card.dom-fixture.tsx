@@ -83,7 +83,17 @@ let browsers: { devices: unknown[]; bridges: unknown[]; revision: number } = {
   bridges: [],
   revision: 1,
 };
-const listAttachedBrowsers = mock(async () => browsers);
+let browsersGate: Promise<void> | null = null;
+const listAttachedBrowsers = mock(async () => {
+  if (browsersGate) await browsersGate;
+  return browsers;
+});
+const continueAfterCapabilitySetup = mock(
+  async (_workspaceId: string, _sessionId: string, _input: unknown) => ({
+    outcome: "not_needed" as const,
+    reason: "not_applicable" as const,
+  }),
+);
 const sendMessage = mock(async (_workspaceId: string, _sessionId: string, _input: unknown) => ({
   id: "accepted",
   type: "user.message",
@@ -91,7 +101,12 @@ const sendMessage = mock(async (_workspaceId: string, _sessionId: string, _input
 }));
 const everyone = ["enrollments:read", "enrollments:manage", "sessions:control"];
 const context = {
-  client: { mintEnrollToken, listAttachedBrowsers, sendMessage },
+  client: {
+    mintEnrollToken,
+    listAttachedBrowsers,
+    sendMessage,
+    continueAfterCapabilitySetup,
+  } as Record<string, unknown>,
   accessContext: {
     subjectId: "member",
     workspaceGrants: [{ workspaceId: "workspace", permissions: everyone }],
@@ -109,6 +124,8 @@ window.open = ((...args: unknown[]) => {
 }) as typeof window.open;
 const { createRoot } = await import("react-dom/client");
 const { SessionCapabilityCard } = await import("./session-capability-card");
+const { resetChromeCardCache, chromeConnectedLabel } = await import("./session-chrome-card");
+const { resetAttachedChromeCache } = await import("./session-machine-card");
 const { OpenGeniApiError } = await import("@opengeni/sdk");
 
 const chromeNotice = {
@@ -152,11 +169,17 @@ beforeEach(() => {
   sendMessage.mockClear();
   mintEnrollToken.mockClear();
   listAttachedBrowsers.mockClear();
+  continueAfterCapabilitySetup.mockClear();
+  context.client["continueAfterCapabilitySetup"] = continueAfterCapabilitySetup;
+  resetChromeCardCache();
+  resetAttachedChromeCache();
+  browsersGate = null;
   browsers = { devices: [], bridges: [], revision: 1 };
   fleet.machines = [sessionBox];
   fleet.canRead = true;
   fleet.canManage = true;
   fleet.canConnect = true;
+  fleet.loading = false;
   fleet.error = null;
   context.accessContext.workspaceGrants = [{ workspaceId: "workspace", permissions: everyone }];
 });
@@ -264,7 +287,7 @@ describe("Chrome setup card", () => {
     expect(view.button("Continue")).toBeNull();
     browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
     await click(view.button("Add to Chrome"));
-    expect(view.text()).toContain("Chrome is connected (Work).");
+    expect(view.text()).toContain("Connected (Work).");
     await click(view.button("Continue"));
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const [workspaceId, sessionId, input] = sendMessage.mock.calls[0]!;
@@ -284,7 +307,7 @@ describe("Chrome setup card", () => {
     }));
     browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
     await click(waiting.button("Add to Chrome"));
-    expect(waiting.text()).toContain("Chrome is connected (Work).");
+    expect(waiting.text()).toContain("Connected (Work).");
     expect(waiting.button("Continue")).toBeNull();
     await waiting.close();
 
@@ -310,7 +333,7 @@ describe("Chrome setup card", () => {
       revision: 2,
     };
     const view = await render();
-    expect(view.text()).not.toContain("Chrome is connected");
+    expect(view.text()).not.toContain("Connected");
     expect(view.button("Add to Chrome")).not.toBeNull();
     await view.close();
   });
@@ -322,7 +345,7 @@ describe("Chrome setup card", () => {
     browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
     await view.rerender();
     expect(opened).toEqual([]);
-    expect(view.text()).toContain("Chrome is connected (Work).");
+    expect(view.text()).toContain("Connected (Work).");
     expect(view.button("Continue")).not.toBeNull();
     await view.close();
   });
@@ -335,7 +358,7 @@ describe("Chrome setup card", () => {
     browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
     await act(async () => new Promise((resolve) => setTimeout(resolve, 5_300)));
     expect(opened).toEqual([]);
-    expect(view.text()).toContain("Chrome is connected (Work).");
+    expect(view.text()).toContain("Connected (Work).");
     expect(view.note()).toBe("");
     await view.close();
   }, 10_000);
@@ -348,7 +371,7 @@ describe("Chrome setup card", () => {
       awaitingHuman: false,
       extras: {},
     }));
-    expect(view.text()).toContain("Chrome is connected (Work).");
+    expect(view.text()).toContain("Connected (Work).");
     expect(view.button("Continue")).toBeNull();
     await view.close();
   });
@@ -365,6 +388,116 @@ describe("Chrome setup card", () => {
     const off = await render();
     expect(off.text()).toContain("Connected Machines aren't available on this deployment.");
     await off.close();
+  });
+
+  test("before the first check finishes it offers no step, only a quiet checking line", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    let release = () => {};
+    browsersGate = new Promise<void>((resolve) => (release = resolve));
+    const view = await render();
+    expect(view.text()).toContain("Checking for Chrome…");
+    expect(view.text()).not.toContain("Add the extension");
+    expect(view.button("Add to Chrome")).toBeNull();
+    expect(view.button("Connect a computer")).toBeNull();
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    release();
+    await view.rerender();
+    expect(view.text()).toContain("Connected (Work).");
+    await view.close();
+  });
+
+  test("while the machines are still loading it offers no step either", async () => {
+    fleet.machines = [];
+    fleet.loading = true;
+    const view = await render();
+    expect(view.text()).toContain("Checking for Chrome…");
+    expect(view.button("Connect a computer")).toBeNull();
+    fleet.loading = false;
+    fleet.machines = [sessionBox];
+    await view.rerender();
+    expect(view.button("Connect a computer")).not.toBeNull();
+    await view.close();
+  });
+
+  test("a card shown again starts from the last known state and refreshes behind it", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    const first = await render();
+    expect(first.text()).toContain("Connected (Work).");
+    await first.close();
+
+    // Re-entering the chat: the machines and Chrome are read again, slowly.
+    fleet.machines = [];
+    fleet.loading = true;
+    let release = () => {};
+    browsersGate = new Promise<void>((resolve) => (release = resolve));
+    const again = await render();
+    expect(again.text()).toContain("Connected (Work).");
+    expect(again.text()).not.toContain("Checking for Chrome");
+    expect(again.button("Add to Chrome")).toBeNull();
+    release();
+    await again.close();
+  });
+
+  test("a computer remembered from an earlier card shows its step while machines load", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    const first = await render();
+    expect(first.button("Add to Chrome")).not.toBeNull();
+    await first.close();
+
+    fleet.machines = [];
+    fleet.loading = true;
+    const again = await render();
+    expect(again.text()).toContain("Add the extension to Chrome on Ada's MacBook.");
+    await again.close();
+  });
+
+  test("the completed line names the profile only when that says something", () => {
+    expect(chromeConnectedLabel({ name: "Chrome", multiple: false }, false)).toBe("Connected.");
+    expect(chromeConnectedLabel({ name: "chrome", multiple: false }, true)).toBe(
+      "Connected. The agent continues.",
+    );
+    expect(chromeConnectedLabel({ name: "Work", multiple: false }, false)).toBe(
+      "Connected (Work).",
+    );
+    expect(chromeConnectedLabel({ name: "Chrome", multiple: true }, false)).toBe(
+      "Connected (Chrome).",
+    );
+  });
+
+  test("a card that sees Chrome linked clears the chat's wait once, and only then", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    const missing = await render();
+    expect(continueAfterCapabilitySetup).not.toHaveBeenCalled();
+    await missing.close();
+
+    browsers = {
+      devices: [chromeProfile("Chrome"), chromeProfile("Chrome", "enrollment-other")],
+      bridges: [],
+      revision: 2,
+    };
+    const linked = await render();
+    expect(linked.text()).toContain("Connected (Chrome).");
+    expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(1);
+    expect(continueAfterCapabilitySetup.mock.calls[0]).toEqual([
+      "workspace",
+      "session",
+      { capabilityId: "api:connected-machine" },
+    ]);
+    await linked.close();
+    const again = await render();
+    expect(continueAfterCapabilitySetup).toHaveBeenCalledTimes(1);
+    await again.close();
+  });
+
+  test("a client without the continuation method still shows the card", async () => {
+    delete context.client["continueAfterCapabilitySetup"];
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    browsers = { devices: [chromeProfile("Chrome")], bridges: [], revision: 2 };
+    const view = await render();
+    expect(view.text()).toContain("Connected.");
+    expect(view.text()).not.toContain("Connected (");
+    await view.close();
   });
 
   test("an earlier copy is a short note, and the machine card itself is unchanged", async () => {

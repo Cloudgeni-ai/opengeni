@@ -40,7 +40,13 @@ import {
   latestConnectionAuthNotice,
   listInboxItems,
 } from "@opengeni/db";
-import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
+import {
+  buildCapabilityCatalog,
+  CONNECTED_MACHINE_CAPABILITY_ID,
+  integrationDefinitionIdFromCapabilityId,
+} from "@opengeni/core";
+import { listAttachedBrowserDevices } from "@opengeni/db";
+import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
 import {
@@ -3390,6 +3396,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
   }
 
+  /** Whether the person has a Chrome linked to this workspace that the agent can use. */
+  async function personHasLinkedChrome(grant: AccessGrant, workspaceId: string): Promise<boolean> {
+    const devices = await listAttachedBrowserDevices(db, {
+      ...(await attachedBrowserViewer(deps, grant, workspaceId)),
+      includeDisconnected: false,
+    }).catch(() => null);
+    return (
+      devices?.devices.some(
+        (device) => device.state === "connected" && device.capabilities.debuggerAttachment,
+      ) ?? false
+    );
+  }
+
   /**
    * Withdraw a finished card's open notices in this chat and the person's
    * others. A key naming one account reaches the person's chats anywhere; a
@@ -3491,6 +3510,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
+      if ("capabilityId" in payload && payload.capabilityId === CONNECTED_MACHINE_CAPABILITY_ID) {
+        // The Chrome card continues through its own message. Once the
+        // person's Chrome is linked, this chat no longer waits on them for it,
+        // whatever the agent does next. Only this chat: a machine card
+        // elsewhere has the same key and may still need a computer.
+        if (await personHasLinkedChrome(grant, workspaceId)) {
+          await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+            {
+              type: "session.notification.withdrawn" as const,
+              payload: {
+                key: connectionCardNoticeKey({
+                  providerDomain: "",
+                  capability: { id: CONNECTED_MACHINE_CAPABILITY_ID },
+                }),
+              },
+            },
+          ]).catch(() => undefined);
+        }
+        return c.json({
+          outcome: "not_needed",
+          reason: "not_applicable",
+        } satisfies ContinueAfterCapabilitySetupResponse);
+      }
       let askedScopes: string[] = [];
       let target: {
         capabilityId: string;

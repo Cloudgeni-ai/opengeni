@@ -24,6 +24,31 @@ import { useAttachedChrome } from "./session-machine-card";
 /** While the connect dialog is open, look for the new machine every few seconds. */
 const WATCH_POLL_MS = 3_000;
 
+/** The computer last seen for Chrome per workspace, so a card shown again starts there. */
+const lastComputers = new Map<string, { sandboxId: string; name: string }>();
+
+/** Chats whose stale Chrome wait this page already cleared. */
+const clearedWaits = new Set<string>();
+
+/** Forget the remembered computers and cleared chats (tests). */
+export function resetChromeCardCache(): void {
+  lastComputers.clear();
+  clearedWaits.clear();
+}
+
+/**
+ * The completed line: the profile is named only when it says something, when
+ * more than one Chrome is linked or it has its own name.
+ */
+export function chromeConnectedLabel(
+  connected: { name: string; multiple: boolean },
+  sent: boolean,
+): string {
+  const name = connected.name.trim();
+  const named = name && (connected.multiple || name.toLowerCase() !== "chrome");
+  return `${named ? `Connected (${name}).` : "Connected."}${sent ? " The agent continues." : ""}`;
+}
+
 /** What the person's message says when they continue after connecting Chrome. */
 export const CHROME_CONNECTED_MESSAGE = "Chrome is connected. Continue.";
 
@@ -82,9 +107,44 @@ export function SessionChromeCapabilityCard({
         machine.hasDisplay &&
         isMachineComputeSelectable(machine.state),
     ) ?? null;
+  // The machines are known once a read finished (or failed); until then the
+  // last computer seen in this workspace stands in.
+  const machinesKnown = !(fleet.loading && fleet.machines.length === 0 && !fleet.error);
+  const remembered = machinesKnown ? null : (lastComputers.get(workspaceId) ?? null);
+  useEffect(() => {
+    if (!machinesKnown) return;
+    if (computer?.sandboxId)
+      lastComputers.set(workspaceId, {
+        sandboxId: computer.sandboxId,
+        name: machineDisplayName(t, computer),
+      });
+    else lastComputers.delete(workspaceId);
+  }, [computer, machinesKnown, workspaceId]);
   // Read again when a computer comes online: its Chrome may already have the
   // extension, so the card can skip straight to Continue.
-  const chrome = useAttachedChrome(workspaceId, "any", computer?.sandboxId ?? null);
+  const chrome = useAttachedChrome(
+    workspaceId,
+    "any",
+    computer?.sandboxId ?? remembered?.sandboxId ?? null,
+  );
+  // Never offer a step before knowing it is needed: until Chrome and the
+  // machines were read once (here or by an earlier card), say so quietly.
+  const ready =
+    chrome.connected !== null || (chrome.checked && (machinesKnown || remembered !== null));
+  // A card that sees Chrome linked no longer waits on the person, in this chat
+  // or in the sub-session bar above it, whatever the agent does next.
+  const linked = chrome.connected !== null;
+  useEffect(() => {
+    const key = `${workspaceId}\u0000${sessionId}`;
+    if (!linked || clearedWaits.has(key)) return;
+    if (typeof context.client.continueAfterCapabilitySetup !== "function") return;
+    clearedWaits.add(key);
+    void context.client
+      .continueAfterCapabilitySetup(workspaceId, sessionId, {
+        capabilityId: item.capability?.id ?? "api:connected-machine",
+      })
+      .catch(() => undefined);
+  }, [context.client, item.capability?.id, linked, sessionId, workspaceId]);
   // Continue is offered only after this card saw Chrome missing, so an old card,
   // or one reloaded after Chrome connected, never sends a stray message.
   const [sawMissing, setSawMissing] = useState(false);
@@ -100,7 +160,7 @@ export function SessionChromeCapabilityCard({
     !thisComputerReady(desktop.computer.status) &&
     !unavailableOnDeployment;
   const origin = apiBaseUrl || (typeof window !== "undefined" ? window.location.origin : "");
-  const computerName = computer ? machineDisplayName(t, computer) : "";
+  const computerName = computer ? machineDisplayName(t, computer) : (remembered?.name ?? "");
 
   const chat = sendContext?.() ?? { blocked: null, awaitingHuman: false, extras: {} };
   const canContinue = canMessage && sawMissing && !chat.awaitingHuman && !sent;
@@ -128,7 +188,7 @@ export function SessionChromeCapabilityCard({
   };
 
   // One clear next step: connect a computer, then add the extension there.
-  const step: "computer" | "extension" = computer ? "extension" : "computer";
+  const step: "computer" | "extension" = computer || remembered ? "extension" : "computer";
   const actionUnavailable = unavailableOnDeployment
     ? "Connected Machines aren't available on this deployment."
     : step === "computer" && !offerThisComputer && !fleet.canRead
@@ -144,21 +204,18 @@ export function SessionChromeCapabilityCard({
         subtitle="Opengeni Browser extension"
         logo={CHROME_CARD_LOGO}
         typeLabel="Browser"
+        pending={!ready}
         description={
-          step === "extension"
-            ? `Add the extension to Chrome on ${computerName}.`
-            : `${item.capability?.rationale ?? "Connect your Chrome so the agent can use it."} First connect a computer, then add the extension.`
+          !ready
+            ? "Checking for Chrome…"
+            : step === "extension"
+              ? `Add the extension to Chrome on ${computerName}.`
+              : `${item.capability?.rationale ?? "Connect your Chrome so the agent can use it."} First connect a computer, then add the extension.`
         }
         skill={false}
         expanded={false}
         complete={chrome.connected !== null}
-        completeLabel={
-          chrome.connected
-            ? sent
-              ? `Chrome is connected (${chrome.connected.name}). The agent continues.`
-              : `Chrome is connected (${chrome.connected.name}).`
-            : undefined
-        }
+        completeLabel={chrome.connected ? chromeConnectedLabel(chrome.connected, sent) : undefined}
         actionLabel={
           step === "extension"
             ? "Add to Chrome"

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  connectionCardNotice,
   FIKEN_CREDENTIAL_LABEL,
   FIKEN_CREDENTIAL_ROLE,
   FIKEN_PROVIDER_DOMAIN,
@@ -21,6 +22,7 @@ import {
   encryptEnvironmentValue,
   listSessionSystemUpdatesForTurn,
   peekSessionWork,
+  reconcileAttachedBrowserInventory,
 } from "@opengeni/db";
 import {
   acquireRestrictedRuntimeTestDatabase,
@@ -684,5 +686,108 @@ describe("capability continuation API", () => {
       body: JSON.stringify({ capabilityId: "api:fiken", connectionId: other.id }),
     });
     expect(both.status).toBe(400);
+  });
+
+  test("a Chrome card stops waiting on the person once their Chrome is linked", async () => {
+    const f = await fixture();
+    const chromeCard = { id: "api:connected-machine", name: "Connected Machine" };
+    // The notice the Chrome card posted when the agent asked for the person's Chrome.
+    const notice = connectionCardNotice({
+      providerDomain: "opengeni.ai",
+      reason: "missing_connection",
+      capability: chromeCard,
+    })!;
+    const created = await f.app.request(sessionsPath(f), {
+      method: "POST",
+      headers: f.host,
+      body: JSON.stringify({ initialMessage: "use my Chrome", model: "scripted-model" }),
+    });
+    expect(created.status, await created.clone().text()).toBe(202);
+    const session = (await created.json()) as Session;
+    const wait = await claim(f, session.id);
+    await settle(f, session.id, wait, true);
+    await appendSessionEventsForTurnAttempt(
+      client.db,
+      f.workspaceId,
+      session.id,
+      wait.turn.id,
+      wait.turn.executionGeneration,
+      wait.attemptId,
+      [{ type: "session.notification.posted", payload: notice }],
+    );
+    await settle(f, session.id, wait, false);
+    const waiting = async () => {
+      const [row] = await shared.admin<Array<{ since: Date | null }>>`
+        select awaiting_connection_since as since from sessions where id = ${session.id}`;
+      return row!.since !== null;
+    };
+    expect(await waiting()).toBe(true);
+    const wakesBefore = f.workflow.calls.filter((call) => call === "wakeSessionWorkflow").length;
+
+    // No Chrome yet: the card still needs the person.
+    const early = await continueAfterSetup(f, session.id, chromeCard.id);
+    expect(await early.json()).toEqual({ outcome: "not_needed", reason: "not_applicable" });
+    expect(await waiting()).toBe(true);
+
+    // The person's Chrome links up on a workspace computer.
+    const enrollment = (await shared.admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${f.accountId}, true),
+        set_config('opengeni.workspace_id', ${f.workspaceId}, true),
+        set_config('opengeni.subject_id', 'user:chrome-owner', true)`;
+      const [row] = await tx<Array<{ id: string }>>`
+        select enrollment_id as id from finalize_scoped_enrollment(
+          ${f.accountId}::uuid, ${f.workspaceId}::uuid, 'workspace',
+          ${`ed25519:chrome-${crypto.randomUUID()}`}, true, false, 'macos', 'arm64', 'Laptop', false
+        )`;
+      return row!;
+    })) as { id: string };
+    await shared.admin`
+      update enrollments set connection_instance_id = 'connection-1',
+        connection_lease_expires_at = now() + interval '1 hour', workspace_root = '/srv/workspace'
+      where id = ${enrollment.id}`;
+    await reconcileAttachedBrowserInventory(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      enrollmentId: enrollment.id,
+      snapshot: {
+        bridgeGeneration: "bridge-1",
+        revision: 1,
+        devices: [
+          {
+            id: crypto.randomUUID(),
+            name: "Chrome",
+            profileLabel: "Work",
+            browserName: "Google Chrome",
+            browserVersion: "151.0.7922.108",
+            extensionVersion: "1.0.0",
+            platform: "macos",
+            architecture: "arm64",
+            connectionGeneration: "extension-1",
+            inventoryRevision: 1,
+            tabCount: 1,
+            capabilities: {
+              tabInventory: true,
+              debuggerAttachment: true,
+              semanticObservation: true,
+              screenshots: true,
+              liveFrames: true,
+              humanInput: true,
+              diagnostics: true,
+              rawCdp: false,
+              linkedComputer: true,
+            },
+          },
+        ],
+      },
+    });
+    const linked = await continueAfterSetup(f, session.id, chromeCard.id);
+    expect(linked.status, await linked.clone().text()).toBe(200);
+    // Still nothing for the agent: the card continues through its own message.
+    expect(await linked.json()).toEqual({ outcome: "not_needed", reason: "not_applicable" });
+    expect(await waiting()).toBe(false);
+    expect(f.workflow.calls.filter((call) => call === "wakeSessionWorkflow")).toHaveLength(
+      wakesBefore,
+    );
   });
 });
