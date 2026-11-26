@@ -417,6 +417,7 @@ export function registerNativeAppAuthRoutes(
     // list after the web sign-in) is a denial, not a server failure.
     const session = await runManagedAuthProvider(grant.providerId, () =>
       authContext.internalAdapter.createSession(grant.userId, false, {
+        nativeAppPlatform: grant.platform,
         userAgent: nativeAppSessionUserAgent(grant.platform, grant.deviceName),
       }),
     ).catch((error: unknown) => {

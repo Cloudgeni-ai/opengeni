@@ -176,6 +176,7 @@ import { z } from "zod";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { ApiHttpError, approvalForbiddenHttpError } from "../http/api-error";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 import { measureSessionCreatePhase } from "../session-create-observability";
 import {
   CONSOLE_ROLE_REQUIRED,
@@ -1105,6 +1106,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(`${base}/:agentId/test-chats`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const caller = await measureSessionCreatePhase(deps.observability, "authorization", () =>
       orgCaller(c, deps, ["agents:manage"], "editor"),
     );
@@ -1236,6 +1238,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(`${base}/:agentId/test-chats/:sessionId/messages`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const { grant, workspaceId, session } = await ownTestChat(c);
     const request = await parseRequestJson(c, SendOrgAgentTestChatMessageRequest);
     let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;

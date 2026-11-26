@@ -149,13 +149,58 @@ const paidPartSql = sql.raw(`case
   when entry.type = '${BYOK_PLATFORM_FEE_TYPE}' then -coalesce((entry.metadata->>'creditPaidMicros')::bigint, 0)
   else 0 end`);
 
+export type CreditLedgerTotalsCheck = {
+  /** Accounts with a ready totals row that were compared. */
+  checked: number;
+  /** Those whose kept totals differ from a recount of their ledger. */
+  mismatchedAccountIds: string[];
+};
+
 /**
- * The balance and the paid-credit state behind it (see paid-credit.ts). One
- * pass over the account's ledger sums the balance and API spending, exactly
- * as without own-key fees; the paid-credit figures come from the latest
- * receipt's running totals plus the rows that can carry a receipt written
- * after it (normally none), through credit_ledger_receipt_rows_idx. Their
- * cost does not grow with the number of fees, top-ups or grants.
+ * Drift check for the per-account ledger totals (migration 1576): each given
+ * account's ready totals row against a recount of its ledger, read in one
+ * statement (one snapshot) in the account's own RLS context, so concurrent
+ * writes never show as drift. Accounts without a ready row are skipped. Any
+ * mismatch means the triggers missed a change.
+ */
+export async function checkCreditLedgerAccountTotals(
+  db: Database,
+  accountIds: readonly string[],
+): Promise<CreditLedgerTotalsCheck> {
+  const result: CreditLedgerTotalsCheck = { checked: 0, mismatchedAccountIds: [] };
+  for (const accountId of accountIds) {
+    const [row] = await withAccountRls(db, accountId, async (tx) =>
+      rawRows<{ differs: boolean }>(
+        tx,
+        sql`
+        select total.balance_micros <> coalesce(ledger.balance, 0)
+          or total.api_spent_micros <> coalesce(ledger."apiSpent", 0) as differs
+        from credit_ledger_account_totals total
+        cross join lateral (
+          select sum(entry.amount_micros) as balance,
+            sum(-entry.amount_micros) filter (where entry.usage_origin = 'api'
+              and entry.type <> ${BYOK_PLATFORM_FEE_TYPE}) as "apiSpent"
+          from ${schema.creditLedgerEntries} entry
+          where entry.account_id = ${accountId}
+        ) ledger
+        where total.account_id = ${accountId} and total.ready`,
+      ),
+    );
+    if (!row) continue;
+    result.checked += 1;
+    if (row.differs) result.mismatchedAccountIds.push(accountId);
+  }
+  return result;
+}
+
+/**
+ * The balance and the paid-credit state behind it (see paid-credit.ts). The
+ * balance and API spending are the ledger's sums, read from the per-account
+ * totals its triggers keep (credit_ledger_account_totals); the paid-credit
+ * figures come from the latest receipt's running totals plus the rows that
+ * can carry a receipt written after it (normally none), through
+ * credit_ledger_receipt_rows_idx. Their cost does not grow with the size of
+ * the ledger.
  */
 export async function readBillingBalance(
   db: Database,
@@ -184,13 +229,23 @@ export async function readBillingBalance(
         where (${policyRevision ?? null}::bigint is null or revision <= ${policyRevision ?? null}::bigint)
         order by revision desc limit 1
       ), totals as (
-        -- One pass over the ledger: the balance, and what API work (other
-        -- than own-key fees) has spent.
-        select coalesce(sum(entry.amount_micros), 0)::text as balance,
-          coalesce(sum(-entry.amount_micros) filter (where entry.usage_origin = 'api'
-            and entry.type <> ${BYOK_PLATFORM_FEE_TYPE}), 0)::text as "apiSpent"
-        from ${schema.creditLedgerEntries} entry
-        where entry.account_id = ${accountId}
+        -- The balance, and what API work (other than own-key fees) has spent:
+        -- the ledger's sums, kept per account by its triggers (migration
+        -- 1576) in the same transaction as every ledger change. Without a
+        -- ready row (during the 1577 backfill, or no ledger change since the
+        -- triggers) the ledger is summed as before; with one it is not read.
+        select coalesce(kept.balance_micros, recount.balance, 0)::text as balance,
+          coalesce(kept.api_spent_micros, recount."apiSpent", 0)::text as "apiSpent"
+        from (select 1) one
+        left join credit_ledger_account_totals kept
+          on kept.account_id = ${accountId} and kept.ready
+        cross join lateral (
+          select sum(entry.amount_micros) as balance,
+            sum(-entry.amount_micros) filter (where entry.usage_origin = 'api'
+              and entry.type <> ${BYOK_PLATFORM_FEE_TYPE}) as "apiSpent"
+          from ${schema.creditLedgerEntries} entry
+          where entry.account_id = ${accountId} and kept.account_id is null
+        ) recount
       ), fee_month as (
         -- This calendar month (UTC) at the read's settlement time.
         select date_trunc('month', coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp()) at time zone 'UTC') as utc

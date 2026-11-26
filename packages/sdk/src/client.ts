@@ -1,5 +1,7 @@
 import { version as sdkVersion } from "../package.json";
 import type {
+  AiProcessingConsentResponse,
+  GrantAiProcessingConsentRequest,
   DecisionQuestion,
   ModelDecisionRequest,
   ModelDecisionResponse,
@@ -1604,6 +1606,20 @@ export class OpenGeniClient {
   readonly interaction: OpenGeniInteractionClient;
   /** Dynamic typed tool facade backed by the canonical workspace gateway. */
   readonly tools: OpenGeniToolsFacade;
+
+  getAiProcessingConsent(): Promise<AiProcessingConsentResponse> {
+    return this.requestJson("GET", "/v1/me/ai-processing-consent");
+  }
+
+  grantAiProcessingConsent(
+    request: GrantAiProcessingConsentRequest,
+  ): Promise<AiProcessingConsentResponse> {
+    return this.requestJson("POST", "/v1/me/ai-processing-consent", request);
+  }
+
+  withdrawAiProcessingConsent(): Promise<AiProcessingConsentResponse> {
+    return this.requestJson("DELETE", "/v1/me/ai-processing-consent");
+  }
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");

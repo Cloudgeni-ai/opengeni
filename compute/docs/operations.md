@@ -535,9 +535,34 @@ to hosts that offer them; other pools' teams reach none.
   each draining member it lists, and a host left draining never keeps the
   group from growing. Mind cost and quota while several hosts drain at
   once. A stalled member counts against the maximum. Undraining a host
-  while the group is past its maximum leaves it there: shrinking is only
-  suggested, never done. Remove the drained host (below) to come back
-  within it. List hosts with the operator key:
+  while the group is past its maximum leaves it there until the leader
+  shrinks the group (below), or remove the drained host by hand.
+- **Shrinking.** Once the group has had more spare than it needs for
+  `--scale-shrink-after-s` (30 minutes by default, and as long since it
+  last grew or lost a host; 0 turns shrinking off), the leader drains
+  the live host with the most spare memory and removes its instance from
+  the group once it owns nothing and has drained for a quarter of an hour,
+  one host at a time, never below `--scale-min` (ADR 45). It picks the
+  host with the most memory free without ending VM processes, then the
+  fewest sandboxes, and shrinks only while every host reports
+  `keeps_memory`: upgrade hosts before the control service. A draining
+  host is given no new sandbox. Its drain keeps
+  programs: an idle sandbox still in memory is put to sleep with its
+  memory first, then handed off asked to keep its memory; one in use stays
+  until it is idle. The host is undrained if the group would grow, or if
+  its sandboxes have not all left within `--scale-drain-within-s` (six
+  hours; it then leaves that host be as long), but never while a drain
+  pass runs or once its removal was asked for. The store notes the
+  leader's drain, so a new leader goes on with it. A host of the group
+  that you drain yourself (or drain again while the leader drains it)
+  is yours: the leader removes it only with
+  `--scale-adopt-drained-after-s` set (off by default). The leader logs
+  each step (`draining a host to remove it`, when what is left changes;
+  `removed a drained host from the group`, `took back a host on its way
+  out`) and reports `compute_fleet_shrink_*`; alert on
+  `compute_fleet_shrink_removals_total{outcome="failed"}` rising, on
+  `compute_fleet_shrink_skipped_hosts` above 0 for an hour, and on
+  `compute_fleet_shrink_held_back` at 1 for a day. Its service account needs nothing beyond what resizing needs. List hosts with the operator key:
 
   ```sh
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq

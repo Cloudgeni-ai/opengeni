@@ -71,12 +71,20 @@ impl Inner {
     }
 
     /// Whether `row` names as owner a host given up on, or one this store
-    /// does not have.
+    /// does not have, or a draining host that does not own it as stored.
     fn owner_lost(&self, row: &SandboxRow) -> bool {
+        let stored = self
+            .sandboxes
+            .get(&row.id)
+            .and_then(|stored| stored.ownership.owner);
         row.ownership.owner.is_some_and(|owner| {
             self.hosts
                 .get(&owner)
-                .is_none_or(|host| host.row.state == HostState::Lost)
+                .is_none_or(|host| match host.row.state {
+                    HostState::Live => false,
+                    HostState::Draining => stored != Some(owner),
+                    HostState::Lost => true,
+                })
         })
     }
 
@@ -240,6 +248,7 @@ impl MemoryStore {
         let run = known.and_then(|host| host.row.run);
         let restarts = known.map_or(0, |host| host.row.restarts);
         let drained = known.is_some_and(|host| host.drained);
+        let leader_drained_ms = known.and_then(|host| host.row.leader_drained_ms);
         let changed = inner.change();
         inner.by_name.insert(register.info.name.clone(), id);
         let mut row = HostRow {
@@ -257,6 +266,7 @@ impl MemoryStore {
             run,
             restarts,
             changed,
+            leader_drained_ms,
         };
         // A host registering afresh after a reboot runs its agent again.
         row.ran(register.capacity.run, register.capacity.after_asked_stop);
@@ -325,7 +335,15 @@ impl MemoryStore {
             .hosts
             .values()
             .filter(|host| host.row.changed > after)
-            .map(|host| host.row.clone())
+            .map(|host| HostRow {
+                // Kept while given up on, as its drain is; told while it
+                // drains.
+                leader_drained_ms: host
+                    .row
+                    .leader_drained_ms
+                    .filter(|_| host.row.state == HostState::Draining),
+                ..host.row.clone()
+            })
             .collect();
         rows.sort_by_key(|row| row.changed);
         rows
@@ -425,7 +443,9 @@ impl MemoryStore {
             && entry.drained
             && from == HostState::Draining
             && to == HostState::Live;
-        let marked_apart = entry.row.state == to && entry.drained != (to == HostState::Draining);
+        let marked_apart = entry.row.state == to
+            && (entry.drained != (to == HostState::Draining)
+                || entry.row.leader_drained_ms.is_some());
         if entry.row.state != from && !undrained_while_lost && !marked_apart {
             return false;
         }
@@ -433,6 +453,26 @@ impl MemoryStore {
             entry.row.state = to;
         }
         entry.drained = to == HostState::Draining;
+        entry.row.leader_drained_ms = None;
+        entry.row.changed = changed;
+        inner.changes = changed;
+        true
+    }
+
+    fn drain_to_remove_now(&self, host: HostId, at_ms: u64) -> bool {
+        let mut inner = self.lock();
+        let changed = inner.changes + 1;
+        let Some(entry) = inner.hosts.get_mut(&host) else {
+            return false;
+        };
+        match entry.row.state {
+            HostState::Live => {}
+            HostState::Draining => return entry.row.leader_drained_ms.is_some(),
+            HostState::Lost => return false,
+        }
+        entry.row.state = HostState::Draining;
+        entry.drained = true;
+        entry.row.leader_drained_ms = Some(at_ms);
         entry.row.changed = changed;
         inner.changes = changed;
         true
@@ -712,6 +752,14 @@ impl Store for MemoryStore {
         to: HostState,
     ) -> impl Future<Output = Result<bool>> + Send {
         ready(Ok(self.set_state_now(host, from, to)))
+    }
+
+    fn drain_to_remove(
+        &self,
+        host: HostId,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.drain_to_remove_now(host, at_ms)))
     }
 
     fn try_lead(&self) -> impl Future<Output = Result<Option<MemoryLead>>> + Send {

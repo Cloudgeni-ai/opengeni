@@ -631,6 +631,12 @@ export function createManagedAuth(
         updatedAt: "updated_at",
       },
       additionalFields: {
+        nativeAppPlatform: {
+          type: "string",
+          fieldName: "native_app_platform",
+          input: false,
+          required: false,
+        },
         identityId: {
           type: "string",
           fieldName: "identity_id",

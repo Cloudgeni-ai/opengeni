@@ -17,6 +17,7 @@ import {
 } from "../model-calls/chat-completions";
 import { isModelCallAbort } from "../model-calls/service";
 import { asDirectModelApiUse } from "../access-grant-rls";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 
 /**
  * OpenAI-compatible stateless model calls. A stock OpenAI SDK works with its
@@ -79,6 +80,7 @@ export function registerChatCompletionRoutes(
   app.post("/v1/workspaces/:workspaceId/chat/completions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    await requireAiProcessingConsent(c, deps);
     // A browser relayed through a session proxy never sees what the call cost.
     const showCost = !hidesCreditUsage(c, grant);
     const service = deps.modelCalls;

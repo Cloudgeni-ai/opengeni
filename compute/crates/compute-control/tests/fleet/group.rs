@@ -22,7 +22,11 @@ use compute_fleet::{HostId, ScalePolicy};
 use compute_protocol::fleet::{Boot, Capacity, HostInfo, Register, Registered};
 use serde_json::{Value, json};
 
-use super::support::{FakeHost, Fleet, OPERATOR_KEY, roomy, until};
+use compute_control::shrink::Shrinking;
+
+use super::support::{
+    Act, FakeHost, Fleet, OPERATOR_KEY, host_status, roomy, sandbox_status, until,
+};
 
 const GROUP: &str = "projects/p/zones/z/instanceGroupManagers/hosts";
 /// How long a member without a host counts as booting.
@@ -117,6 +121,31 @@ async fn group_action(
     }
 }
 
+/// Deletes the named instances from the group, as the API does: the group
+/// is one smaller for each, and lists each as being deleted.
+async fn delete_instances(
+    State(compute): State<Arc<Compute>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    for instance in body["instances"].as_array().unwrap() {
+        let name = instance
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned();
+        compute.target_size.fetch_sub(1, Ordering::SeqCst);
+        compute
+            .actions
+            .lock()
+            .unwrap()
+            .insert(name.clone(), "DELETING".into());
+        compute.note(format!("remove {name}"));
+    }
+    Json(operation("delete-instances", true))
+}
+
 async fn instance(State(compute): State<Arc<Compute>>, Path(name): Path<String>) -> Response {
     let status = compute.instances.lock().unwrap().get(&name).cloned();
     let slow = compute.slow_reads.lock().unwrap().remove(&name);
@@ -198,6 +227,10 @@ async fn serve(compute: Arc<Compute>) -> String {
         )
         .route(&format!("/compute/v1/{GROUP}"), get(describe))
         .route(
+            &format!("/compute/v1/{GROUP}/deleteInstances"),
+            post(delete_instances),
+        )
+        .route(
             &format!("/compute/v1/{GROUP}/{{action}}"),
             post(group_action),
         )
@@ -234,7 +267,7 @@ async fn fleet_with(
     instances: &[(&str, &str)],
     setup: impl FnOnce(&Compute),
 ) -> (Fleet, Arc<Compute>) {
-    fleet_full(instances, setup, Duration::ZERO).await
+    fleet_full(instances, setup, Duration::ZERO, None).await
 }
 
 /// [`fleet`], whose leader waits up to `give_up_after` for a silent host
@@ -243,13 +276,22 @@ async fn fleet_giving_up_after(
     instances: &[(&str, &str)],
     give_up_after: Duration,
 ) -> (Fleet, Arc<Compute>) {
-    fleet_full(instances, |_| {}, give_up_after).await
+    fleet_full(instances, |_| {}, give_up_after, None).await
+}
+
+/// [`fleet`], whose leader shrinks the group by itself as `shrinking` says.
+async fn fleet_shrinking(
+    instances: &[(&str, &str)],
+    shrinking: Shrinking,
+) -> (Fleet, Arc<Compute>) {
+    fleet_full(instances, |_| {}, Duration::ZERO, Some(shrinking)).await
 }
 
 async fn fleet_full(
     instances: &[(&str, &str)],
     setup: impl FnOnce(&Compute),
     give_up_after: Duration,
+    shrinking: Option<Shrinking>,
 ) -> (Fleet, Arc<Compute>) {
     let compute = Arc::new(Compute::default());
     compute
@@ -274,6 +316,7 @@ async fn fleet_full(
         },
         every: Duration::from_millis(200),
         boot_within: BOOT_WITHIN,
+        shrinking,
     };
     let fleet = Fleet::start_with(Some(scaling), |settings| {
         settings.give_up_after = give_up_after;
@@ -920,6 +963,7 @@ fn registration(name: &str, attempt: u64, boot: Boot) -> Register {
             disk_mib: 4096,
             offers: Vec::new(),
             boot: Some(boot),
+            keeps_memory: true,
         },
         capacity: roomy(),
         held: Vec::new(),
@@ -1271,4 +1315,160 @@ fn other_credential_files_are_refused() {
     file["private_key"] = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".into();
     assert!(ServiceAccountKey::from_json(&serde_json::to_vec(&file).unwrap()).is_err());
     assert!(ServiceAccountKey::from_json(b"{}").is_err());
+}
+
+/// Shrinking quickly enough for a test.
+const SHRINKING: Shrinking = Shrinking {
+    after: Duration::from_secs(1),
+    drain_every: Duration::from_millis(300),
+    drain_within: Duration::from_secs(60),
+    adopt_after: None,
+    quiet: Duration::from_secs(1),
+};
+
+/// A group with more spare than it needs, for long enough, loses its
+/// roomiest host: the leader drains it, putting its idle sandbox to sleep
+/// with its programs before handing it off (an idle hand-off alone would
+/// keep only its files), and removes its instance from the group once it
+/// owns nothing. Before, the leader only logged that a host could go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_with_plenty_drains_and_removes_a_host_keeping_programs() {
+    let (fleet, compute) = fleet_shrinking(
+        &[
+            ("hosts-a1b2", "RUNNING"),
+            ("hosts-c3d4", "RUNNING"),
+            ("hosts-e5f6", "RUNNING"),
+        ],
+        SHRINKING,
+    )
+    .await;
+    let outgoing = fleet.host("hosts-a1b2").await;
+    let sandbox = fleet.create(json!({})).await;
+    let id = super::support::id(&sandbox);
+    let epoch = outgoing.holds(id).expect("created on the only host");
+    // Idle in its host's memory, until it is put to sleep with it.
+    let slept = Arc::new(AtomicBool::new(false));
+    let saw = Arc::clone(&slept);
+    let kept = Arc::new(AtomicBool::new(false));
+    let asked_to_keep = Arc::clone(&kept);
+    outgoing.behave(move |envelope| match &envelope.request {
+        compute_protocol::host::Request::Sleep { id: asked, .. } if *asked == id => {
+            saw.store(true, Ordering::SeqCst);
+            Act::Ordinary
+        }
+        compute_protocol::host::Request::HandOff {
+            id: asked,
+            keep_memory,
+            ..
+        } if *asked == id => {
+            asked_to_keep.store(*keep_memory, Ordering::SeqCst);
+            Act::Ordinary
+        }
+        compute_protocol::host::Request::Status => {
+            let (level, durability, memory_saved) = if saw.load(Ordering::SeqCst) {
+                ("archived", "remote", true)
+            } else {
+                ("paused", "volatile", false)
+            };
+            let mut status = sandbox_status(id, epoch, level, durability, 0);
+            status["memory_saved"] = memory_saved.into();
+            Act::Reply(host_status(&[status]))
+        }
+        _ => Act::Ordinary,
+    });
+    // The others have a little less spare than it.
+    let fuller = Capacity {
+        memory_free_mib: 60 * 1024,
+        ..roomy()
+    };
+    let others = [
+        FakeHost::start(&fleet, "hosts-c3d4", fuller.clone()).await,
+        FakeHost::start(&fleet, "hosts-e5f6", fuller).await,
+    ];
+    until(Duration::from_secs(20), "the host is removed", async || {
+        compute.asked().contains(&"remove hosts-a1b2".to_owned())
+    })
+    .await;
+    assert!(slept.load(Ordering::SeqCst));
+    assert!(
+        kept.load(Ordering::SeqCst),
+        "handed off asked to keep its memory, so a wake since the status read loses nothing"
+    );
+    let ops = outgoing.ops();
+    let slept_at = ops.iter().position(|op| *op == "sleep").expect("slept");
+    let handed_at = ops
+        .iter()
+        .position(|op| *op == "hand_off")
+        .expect("handed off");
+    assert!(slept_at < handed_at, "{ops:?}");
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    assert!(row["host"].is_null(), "{row}");
+    let asked = compute.asked();
+    assert_eq!(
+        asked
+            .iter()
+            .filter(|asked| asked.starts_with("remove"))
+            .count(),
+        1,
+        "{asked:?}"
+    );
+    assert!(
+        !asked.iter().any(|asked| asked.starts_with("resize")),
+        "{asked:?}"
+    );
+    for other in &others {
+        assert!(
+            !other.ops().contains(&"hand_off"),
+            "only the roomiest host goes"
+        );
+    }
+}
+
+/// A sandbox in use keeps its host: it is never forced off, and the host
+/// is never removed while it owns one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_whose_sandbox_stays_in_use_is_not_removed() {
+    let (fleet, compute) = fleet_shrinking(
+        &[
+            ("hosts-a1b2", "RUNNING"),
+            ("hosts-c3d4", "RUNNING"),
+            ("hosts-e5f6", "RUNNING"),
+        ],
+        SHRINKING,
+    )
+    .await;
+    let outgoing = fleet.host("hosts-a1b2").await;
+    let sandbox = fleet.create(json!({})).await;
+    assert!(outgoing.holds(super::support::id(&sandbox)).is_some());
+    let fuller = Capacity {
+        memory_free_mib: 60 * 1024,
+        ..roomy()
+    };
+    let _others = [
+        FakeHost::start(&fleet, "hosts-c3d4", fuller.clone()).await,
+        FakeHost::start(&fleet, "hosts-e5f6", fuller).await,
+    ];
+    // An ordinary host reports its sandbox running.
+    until(Duration::from_secs(10), "the host drains", async || {
+        let (_, hosts) = fleet
+            .call(reqwest::Method::GET, "/v1/hosts", Some(OPERATOR_KEY), None)
+            .await;
+        hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["name"] == "hosts-a1b2" && host["state"] == "draining")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let ops = outgoing.ops();
+    assert!(
+        !ops.contains(&"hand_off") && !ops.contains(&"sleep"),
+        "{ops:?}"
+    );
+    let asked = compute.asked();
+    assert!(
+        !asked.iter().any(|asked| asked.starts_with("remove")),
+        "{asked:?}"
+    );
 }

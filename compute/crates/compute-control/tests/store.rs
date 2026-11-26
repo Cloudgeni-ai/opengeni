@@ -72,6 +72,7 @@ fn register(name: &str, attempt: u64, held: Vec<Held>) -> Register {
             disk_mib: 4096,
             offers: Vec::new(),
             boot: None,
+            keeps_memory: false,
         },
         capacity: capacity(),
         held,
@@ -802,6 +803,157 @@ async fn drained<S: Store>(store: S) {
 #[tokio::test]
 async fn a_drained_host_given_up_on_registers_again_drained_until_undrained() {
     each(drained, drained).await;
+}
+
+async fn draining_owner<S: Store>(store: S) {
+    let (draining, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let (live, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let mut kept = sandbox(draining);
+    assert_eq!(store.insert(&kept).await.unwrap(), Write::Done);
+    let mut moving = sandbox(live);
+    assert_eq!(store.insert(&moving).await.unwrap(), Write::Done);
+    assert!(store.drain_to_remove(draining, now_ms()).await.unwrap());
+
+    // Nothing new goes to it: not a new sandbox, not one another host
+    // owned, not one nobody owns.
+    assert_eq!(
+        store.insert(&sandbox(draining)).await.unwrap(),
+        Write::OwnerLost
+    );
+    let mut taken = moving.clone();
+    taken.ownership = moving.ownership.give(draining).set;
+    assert_eq!(store.replace(&taken).await.unwrap(), Write::OwnerLost);
+    let mut released = moving.clone();
+    released.ownership = moving.ownership.release().set;
+    assert_eq!(store.replace(&released).await.unwrap(), Write::Done);
+    moving = store.sandbox(moving.id).await.unwrap().unwrap();
+    let mut adopted = moving.clone();
+    adopted.ownership = moving.ownership.give(draining).set;
+    assert_eq!(
+        store.replace(&adopted).await.unwrap(),
+        Write::OwnerLost,
+        "an adoption whose hand-off began before the drain goes elsewhere"
+    );
+    let mut elsewhere = moving.clone();
+    elsewhere.ownership = moving.ownership.give(live).set;
+    assert_eq!(store.replace(&elsewhere).await.unwrap(), Write::Done);
+
+    // What it owns stays its own, written as ever, until handed off.
+    let mut again = kept.clone();
+    again.ownership = kept.ownership.give(draining).set;
+    assert_eq!(store.replace(&again).await.unwrap(), Write::Done);
+    kept = store.sandbox(kept.id).await.unwrap().unwrap();
+    let mut handed_off = kept.clone();
+    handed_off.ownership = kept.ownership.release().set;
+    assert_eq!(store.replace(&handed_off).await.unwrap(), Write::Done);
+    assert_eq!(store.owned_by(draining).await.unwrap().len(), 0);
+
+    // An operator's drain is the same; undrained, it takes sandboxes again.
+    assert!(
+        store
+            .set_state(draining, HostState::Live, HostState::Draining)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store.insert(&sandbox(draining)).await.unwrap(),
+        Write::OwnerLost
+    );
+    assert!(
+        store
+            .set_state(draining, HostState::Draining, HostState::Live)
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.insert(&sandbox(draining)).await.unwrap(), Write::Done);
+}
+
+/// A draining host is given no sandbox it does not own already: a move
+/// whose hand-off (minutes, at worst) began before the drain landed used to
+/// adopt onto it anyway, and the leader could remove it under the sandbox,
+/// which then went back to its last stored copy. Refused, the sandbox is
+/// placed elsewhere.
+#[tokio::test]
+async fn a_draining_host_keeps_its_sandboxes_but_is_given_none() {
+    each(draining_owner, draining_owner).await;
+}
+
+async fn leader_drained<S: Store>(store: S) {
+    let name = name();
+    let (host, _) = registered(&store, &register(&name, random(), Vec::new())).await;
+    let began = now_ms() - 3_600_000;
+    assert!(store.drain_to_remove(host, began).await.unwrap());
+    let row = row_of(&store, host).await;
+    assert_eq!(
+        (row.state, row.leader_drained_ms),
+        (HostState::Draining, Some(began))
+    );
+    assert!(
+        store.drain_to_remove(host, now_ms()).await.unwrap(),
+        "again, keeping when it began"
+    );
+    assert_eq!(row_of(&store, host).await.leader_drained_ms, Some(began));
+    back_after_a_fence(&store, &name, host).await;
+    let row = row_of(&store, host).await;
+    assert_eq!(
+        (row.state, row.leader_drained_ms),
+        (HostState::Draining, Some(began)),
+        "outlasting its host going away and coming back"
+    );
+
+    // An operator draining it again makes it theirs.
+    assert!(
+        store
+            .set_state(host, HostState::Live, HostState::Draining)
+            .await
+            .unwrap()
+    );
+    let row = row_of(&store, host).await;
+    assert_eq!(
+        (row.state, row.leader_drained_ms),
+        (HostState::Draining, None)
+    );
+    assert!(
+        !store.drain_to_remove(host, now_ms()).await.unwrap(),
+        "someone else's drain"
+    );
+    assert_eq!(row_of(&store, host).await.leader_drained_ms, None);
+
+    // Undrained, it is the leader's to drain again, and taken back it is
+    // nobody's drain.
+    assert!(
+        store
+            .set_state(host, HostState::Draining, HostState::Live)
+            .await
+            .unwrap()
+    );
+    let later = now_ms();
+    assert!(store.drain_to_remove(host, later).await.unwrap());
+    assert_eq!(row_of(&store, host).await.leader_drained_ms, Some(later));
+    assert!(
+        store
+            .set_state(host, HostState::Draining, HostState::Live)
+            .await
+            .unwrap()
+    );
+    let row = row_of(&store, host).await;
+    assert_eq!((row.state, row.leader_drained_ms), (HostState::Live, None));
+
+    // Given up on, or unknown, it is not drained.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    assert!(!store.drain_to_remove(host, now_ms()).await.unwrap());
+    assert_eq!(state(&store, host).await, HostState::Lost);
+    let unknown = HostId((1 << 62) + random() % 1000);
+    assert!(!store.drain_to_remove(unknown, now_ms()).await.unwrap());
+}
+
+/// The store notes that the leader drained a host to remove it, and when,
+/// so the next leader goes on with that drain as its own; anyone else's
+/// drain or undrain ends that.
+#[tokio::test]
+async fn the_leaders_drain_is_noted_with_when_it_began() {
+    each(leader_drained, leader_drained).await;
 }
 
 /// Moves `host` from `from` to `to` as a build from before the drain mark
@@ -1706,7 +1858,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))

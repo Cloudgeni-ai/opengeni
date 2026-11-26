@@ -25,6 +25,7 @@ use super::{
 };
 
 mod connect;
+mod drains;
 mod images;
 mod lifecycles;
 mod lost;
@@ -47,20 +48,32 @@ const SANDBOX_READ: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
      class, created_ms, version, whole_epoch, lost";
 
-const HOST_COLUMNS: &str =
-    "id, info, epoch, state, renewals, seq, capacity, run, restarts, changed";
+/// A host's row as read, with when the leader drained it while it does
+/// ([`HostRow::leader_drained_ms`]).
+const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, run, restarts, \
+     changed, case when state = 'draining' and drained_by = 'leader' then drained_at end \
+     as leader_drained";
 
 /// Whether the owner a sandbox write names, its parameter `param`, is
 /// lost: given up on, or not a host the store has (one given up on and
 /// since forgotten). The live row is locked against giving up on it: a
 /// write waits for a give-up under way and then sees the host lost, and a
 /// give-up waits for the write and then clears the owner it wrote. A write
-/// naming no owner is never refused.
-fn owner_lost(param: u8) -> String {
+/// naming no owner is never refused. A draining host counts as lost to a
+/// write that would give it a sandbox: to an insert, and to a replace of
+/// sandbox `sandbox` (its id's parameter) that it does not own as stored.
+/// The lock orders the write with the drain, as with a give-up.
+fn owner_lost(param: u8, sandbox: Option<u8>) -> String {
+    let kept = sandbox.map_or_else(String::new, |sandbox| {
+        format!(
+            " or (state = 'draining' and exists (select 1 from compute_sandboxes \
+             where id = ${sandbox}::text and owner = ${param}::bigint))"
+        )
+    });
     format!(
         "owner as (select true as lost where ${param}::bigint is not null \
          and not exists (select 1 from compute_hosts \
-         where id = ${param}::bigint and state <> 'lost' for share))"
+         where id = ${param}::bigint and (state = 'live'{kept}) for share))"
     )
 }
 
@@ -201,6 +214,7 @@ fn host_row(row: &Row) -> Result<HostRow> {
         run: optional(row, "run")?,
         restarts: small(row.try_get("restarts").map_err(corrupt)?)?,
         changed: small(row.try_get("changed").map_err(corrupt)?)?,
+        leader_drained_ms: optional(row, "leader_drained")?,
     })
 }
 
@@ -439,7 +453,7 @@ impl PostgresStore {
                      and not exists (select 1 from gone){live} \
                      on conflict (id) do nothing returning 1) {WRITTEN}, \
                      exists (select 1 from gone) as gone{}",
-                    owner_lost(5),
+                    owner_lost(5, None),
                     if request_id.is_some() {
                         ", exists (select 1 from request) as live"
                     } else {
@@ -696,21 +710,11 @@ impl Store for PostgresStore {
     }
 
     async fn set_state(&self, host: HostId, from: HostState, to: HostState) -> Result<bool> {
-        let updated = self
-            .client()
-            .await?
-            .execute(
-                "update compute_hosts \
-                 set state = case when state = 'lost' then state else $3 end, \
-                 drained = $3 = 'draining', changed = nextval('compute_changes') \
-                 where id = $1 and (state = $2 \
-                 or (state = $3 and drained <> ($3 = 'draining')) \
-                 or (state = 'lost' and drained and $2 = 'draining' and $3 = 'live'))",
-                &[&big(host.0)?, &state_name(from), &state_name(to)],
-            )
-            .await
-            .map_err(database)?;
-        Ok(updated == 1)
+        self.set_state_now(host, from, to).await
+    }
+
+    async fn drain_to_remove(&self, host: HostId, at_ms: u64) -> Result<bool> {
+        self.drain_to_remove_now(host, at_ms).await
     }
 
     async fn try_lead(&self) -> Result<Option<PostgresLead>> {
@@ -791,7 +795,7 @@ impl Store for PostgresStore {
                      landed_epoch = $8, landed_host_epoch = $9, landed_seq = $10, class = $11, \
                      whole_epoch = $13, version = version + 1 where id = $1 and version = $12 \
                      and not exists (select 1 from owner where lost) returning 1) {WRITTEN}",
-                    owner_lost(3)
+                    owner_lost(3, Some(1))
                 ),
                 &[
                     &fields.id,

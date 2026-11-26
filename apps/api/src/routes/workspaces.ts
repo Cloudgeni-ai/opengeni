@@ -215,6 +215,7 @@ import {
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 import { liveStreamSignal } from "../http/server-drain";
 import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
@@ -1688,6 +1689,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       await c.req.json().catch(() => null),
       { status: 400, message: "invalid workspace inference-control request" },
     );
+    if (parsed.action === "resume") await requireAiProcessingConsent(c, deps);
     return c.json(
       await controlHumanWorkspace(
         {

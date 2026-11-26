@@ -1,10 +1,11 @@
 //! A Google Cloud managed instance group of hosts, which the leader grows
-//! before spare memory runs out, and whose instances it fences before it
-//! gives up on one.
+//! before spare memory runs out and shrinks by removing a drained host,
+//! and whose instances it fences before it gives up on one.
 //!
 //! The service reads the group's target size and base instance name, sets
-//! its size, and resets, reads and starts its instances, through the
-//! Compute Engine API. Its tokens come from the metadata server (the
+//! its size, removes an instance from it, and resets, reads and starts its
+//! instances, through the Compute Engine API. Its tokens come from the
+//! metadata server (the
 //! instance's own service account, or a GKE workload's), or, for a service
 //! that runs off Google Cloud, from a service account key file, with
 //! which it signs its own token requests ([`Credentials`]). Hosts belong to
@@ -257,6 +258,8 @@ pub struct Member {
 
 /// How often a fence looks again at an instance or operation.
 const POLL_EVERY: Duration = Duration::from_secs(1);
+/// How long removing an instance from the group may take to be accepted.
+const REMOVE_WITHIN: Duration = Duration::from_secs(120);
 
 impl GcpGroup {
     /// The group at resource `path`, reached through `api` ([`COMPUTE_API`]
@@ -358,6 +361,32 @@ impl GcpGroup {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// Deletes instance `name` from the group, which leaves the group one
+    /// smaller: the group does not replace it. Returns once the group has
+    /// accepted it, within [`REMOVE_WITHIN`]; the machine itself goes
+    /// after that. An instance the group no longer lists is skipped, so
+    /// asking again is safe. Needs only what resizing the group needs
+    /// (`compute.instanceGroupManagers.update`).
+    pub async fn remove(&self, name: &str) -> anyhow::Result<()> {
+        let token = self.token().await?;
+        let url = format!("{}/compute/v1/{}/deleteInstances", self.api, self.path);
+        let body = serde_json::json!({
+            "instances": [format!("{}/instances/{name}", self.zone())],
+            "skipInstancesOnValidationError": true,
+        });
+        let operation: Operation = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        self.finish(operation, Instant::now() + REMOVE_WITHIN).await
     }
 
     /// The zone's resource path, such as `projects/p/zones/z`.

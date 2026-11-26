@@ -4,6 +4,8 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   initializeWorkerOutcomeMetrics,
   recordCreditBalanceGauges,
+  recordCreditLedgerTotalsCheck,
+  sampleAccountIds,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
   recordVerifiedSignupTrialSwitchGauge,
@@ -120,6 +122,28 @@ describe("turn lifecycle metrics", () => {
     expect(metrics).toMatch(
       new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} 0`),
     );
+  });
+
+  test("records sampled credit ledger totals drift as a gauge", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordCreditLedgerTotalsCheck(observability, {
+      checked: 8,
+      mismatchedAccountIds: ["11111111-1111-4111-8111-111111111111"],
+    });
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_credit_ledger_totals_mismatched_accounts\{[^}]*\} 1/);
+
+    recordCreditLedgerTotalsCheck(observability, { checked: 8, mismatchedAccountIds: [] });
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_credit_ledger_totals_mismatched_accounts\{[^}]*\} 0/);
+
+    const ids = Array.from({ length: 20 }, (_, index) => `account-${index}`);
+    const sample = sampleAccountIds(ids, 8);
+    expect(sample).toHaveLength(8);
+    expect(new Set(sample).size).toBe(8);
+    expect(sample.every((id) => ids.includes(id))).toBe(true);
+    expect(sampleAccountIds(ids.slice(0, 3), 8).sort()).toEqual(ids.slice(0, 3).sort());
   });
 
   test("records the verified signup trial runtime switch as a 0/1 gauge", async () => {

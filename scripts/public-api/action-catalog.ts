@@ -57,6 +57,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     pattern: /^\/v1\/native-app\//,
     reason: "signing the native app in and out, and its push device: the app's own credential",
   },
+  {
+    pattern: /^\/v1\/me\/ai-processing-consent$/,
+    reason: "the person's own cross-organization disclosure and explicit AI processing permission",
+  },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
     pattern: /^\/v1\/organizations\/:organizationId\/identity\//,

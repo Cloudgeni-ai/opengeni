@@ -81,6 +81,7 @@ import {
 } from "../integrations/slack-bot";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { parseRequestBody, readRequestJson } from "../http/request-body";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient, objectStorage } = deps;
@@ -246,6 +247,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       status: 400,
       message: "invalid scheduled task create request",
     });
+    if (payload.action.kind === "agent_turn") await requireAiProcessingConsent(c, deps);
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -432,6 +434,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       status: 400,
       message: "invalid scheduled task update request",
     });
+    if (payload.status !== "paused" && (payload.action ?? existing.action).kind === "agent_turn") {
+      await requireAiProcessingConsent(c, deps);
+    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -496,6 +501,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = authorization.grant;
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
+    if (existing.action.kind === "agent_turn") await requireAiProcessingConsent(c, deps);
     const previous: ScheduledTaskRestoreState = { task: existing };
     // An admin turns someone else's schedule back on with the permission
     // that turned it off; editing and running it stay with its owner.
@@ -536,6 +542,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // recognised as codex-billed and skip the credit/cost gates at the edge.
     const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
     if (task.action.kind === "agent_turn") {
+      await requireAiProcessingConsent(c, deps);
       const catalogSettings = (
         await resolveWorkspaceCatalogSettings(db, deps.settings, {
           accountId: grant.accountId,
