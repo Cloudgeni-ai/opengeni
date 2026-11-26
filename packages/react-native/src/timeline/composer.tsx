@@ -442,7 +442,7 @@ function AndroidComposerDock({
   // The activity's Reanimated observer can keep an OPEN height after its last
   // subscriber unmounts. React Native's Keyboard keeps observing the root view.
   const visible = liftWithKeyboard && keyboardTop !== undefined;
-  const view = useRef<View>(null);
+  const view = useRef<ComponentRef<typeof View>>(null);
   const [measuredBottom, setMeasuredBottom] = useState<number>();
   const measure = useCallback(() => {
     view.current?.measureInWindow((_x, y, width, height) => {
@@ -475,16 +475,13 @@ function androidKeyboardCoordinateOffset(): number {
   // the same origin in edge-to-edge activities; earlier RN versions and
   // non-edge-to-edge activities subtract the top system inset.
   const version = Platform.constants.reactNativeVersion;
-  const deviceInfo = TurboModuleRegistry.get<AndroidDeviceInfo>("DeviceInfo");
-  if ((version.major > 0 || version.minor >= 86) && deviceInfo?.getConstants().isEdgeToEdge) {
+  const deviceInfo = TurboModuleRegistry.get("DeviceInfo");
+  const constants = deviceInfo?.getConstants() as { readonly isEdgeToEdge?: boolean } | undefined;
+  if ((version.major > 0 || version.minor >= 86) && constants?.isEdgeToEdge) {
     return 0;
   }
   return StatusBar.currentHeight ?? 0;
 }
-
-type AndroidDeviceInfo = import("react-native").TurboModule & {
-  getConstants(): { readonly isEdgeToEdge?: boolean };
-};
 
 /** How far the scroll-edge fade reaches above the floating composer. */
 const SCROLL_EDGE_PX = 24;
