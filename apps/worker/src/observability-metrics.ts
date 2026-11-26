@@ -1549,6 +1549,43 @@ export function recordCreditBalanceGauges(
 }
 
 /**
+ * The latest sampled consistency check of the per-account ledger totals that
+ * balance reads use: how many sampled accounts differ from a recount of their
+ * ledger. Anything above zero is drift and is also logged with the accounts.
+ */
+export function recordCreditLedgerTotalsCheck(
+  observability: Observability,
+  check: { checked: number; mismatchedAccountIds: string[] },
+): void {
+  observability.setGauge({
+    name: "opengeni_credit_ledger_totals_mismatched_accounts",
+    help: "Sampled accounts whose kept credit ledger totals differ from a ledger recount.",
+    value: check.mismatchedAccountIds.length,
+  });
+  if (check.mismatchedAccountIds.length > 0) {
+    observability.warn("credit ledger totals differ from the ledger", {
+      checked: check.checked,
+      accountIds: check.mismatchedAccountIds.join(","),
+    });
+  }
+}
+
+/** Up to `count` distinct ids chosen uniformly at random (partial Fisher-Yates). */
+export function sampleAccountIds(
+  accountIds: readonly string[],
+  count: number,
+  random: () => number = Math.random,
+): string[] {
+  const pool = [...accountIds];
+  const size = Math.min(count, pool.length);
+  for (let index = 0; index < size; index += 1) {
+    const pick = index + Math.floor(random() * (pool.length - index));
+    [pool[index], pool[pick]] = [pool[pick]!, pool[index]!];
+  }
+  return pool.slice(0, size);
+}
+
+/**
  * Distinct managed people with authenticated browser activity in each fixed
  * window (migration 0565 presence). Every control worker publishes the same
  * global value, so dashboards must aggregate with `max()` across pods, never

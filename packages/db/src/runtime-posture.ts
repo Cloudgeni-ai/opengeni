@@ -2177,6 +2177,8 @@ export const FORCE_RLS_TABLES = [
   "connector_action_requests",
   "credential_profiles",
   "credit_debit_allocations",
+  // 1576_credit_ledger_account_totals: per-account ledger sums its triggers keep.
+  "credit_ledger_account_totals",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_authority_reclassifications",
@@ -3201,6 +3203,9 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "capability_skill_facets",
   "capability_skill_files",
   "computer_sessions",
+  // 1576_credit_ledger_account_totals: written only by the ledger's invoker
+  // triggers (RLS admits runtime writes at pg_trigger_depth() > 0).
+  "credit_ledger_account_totals",
   "editable_artifact_session_links",
   "editable_artifacts",
   "external_identity_links",

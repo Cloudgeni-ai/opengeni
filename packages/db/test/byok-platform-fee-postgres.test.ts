@@ -668,9 +668,9 @@ test("paid credit and fee debt are read from the latest receipt, not from every 
   // An own-key-only account: every response writes just a fee row.
   const fees = 200;
   for (let i = 0; i < fees; i += 1) await fee(accountId, 1_000, i % 2 ? "app" : "api");
-  // One pass over the ledger for the balance; the paid-credit figures come
-  // from the latest receipt alone, whatever the number of fees before it.
-  const rows = fees + 3;
+  // The balance comes from the per-account ledger totals (1576) and the
+  // paid-credit figures from the latest receipt alone, so the read is the
+  // same few rows whatever the number of fees before it.
   // Fresh statistics: the planner can't estimate the receipt filter, and
   // with them it used to read and sort every receipt to find the latest.
   await shared.admin`analyze credit_ledger_entries`;
@@ -679,8 +679,7 @@ test("paid credit and fee debt are read from the latest receipt, not from every 
     (db: DbClient["db"]) => getBillingBalance(db, accountId),
   ]) {
     const tuples = await ledgerRowsRead(read, true);
-    expect(tuples).toBeGreaterThanOrEqual(rows);
-    expect(tuples).toBeLessThan(rows + 10);
+    expect(tuples).toBeLessThan(20);
   }
   const balance = await balanceOf(accountId);
   expect(balance.paidCreditsMicros).toBe(98 * M - fees * 1_000);
@@ -782,7 +781,7 @@ test("a database clock that steps back never hides a receipt from the running to
   expect(order!.ordered).toBe(true);
 }, 180_000);
 
-test("fee reads and settlement read the ledger once, even after an unfunded fee", async () => {
+test("fee reads and settlement never read the whole ledger, even after an unfunded fee", async () => {
   if (!client || !shared) return;
   const accountId = await account("free");
   await credit(accountId, "credit_topup", 10 * M);
@@ -799,8 +798,9 @@ test("fee reads and settlement read the ledger once, even after an unfunded fee"
   const plain = await ledgerRowsRead((db) => getBillingBalance(db, accountId));
   const feeRead = await ledgerRowsRead((db) => getByokFeeSpendableBalance(db, accountId, "api"));
   const settle = await ledgerRowsRead((db) => fee(accountId, M, "api", undefined, db));
-  expect(plain).toBeGreaterThanOrEqual(rows);
-  // No second pass over the ledger for paid credit, and no trailing balance read.
-  expect(feeRead).toBeLessThan(plain + rows / 2);
-  expect(settle).toBeLessThan(plain + rows / 2);
+  // The balance comes from the per-account ledger totals (1576): no pass
+  // over the ledger for the balance, for paid credit or after settling.
+  expect(plain).toBeLessThan(20);
+  expect(feeRead).toBeLessThan(20);
+  expect(settle).toBeLessThan(20);
 }, 180_000);
