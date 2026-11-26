@@ -16,8 +16,12 @@ mock.module("@opengeni/db", () => ({
   listGitHubInstallationAccessForWorkspace: async () => [{ installationId: 1 }],
   hasAuditableGitHubInstallationAuthority: () => true,
 }));
-const { agentsReadinessPurposes, githubSetupFacts, setGitHubAppBindingReader } =
-  await import("../src/domain/ready-made-setup-readiness");
+const {
+  agentsReadinessPurposes,
+  githubSetupFacts,
+  ownerMissingMessage,
+  setGitHubAppBindingReader,
+} = await import("../src/domain/ready-made-setup-readiness");
 
 const db = {} as never;
 const fixer = { id: "agent-fixer", templateKey: "bug-fixer" };
@@ -39,7 +43,7 @@ test("an agent with only a schedule isn't read for GitHub events", async () => {
     { githubEvents: false },
   ]);
   // One read, filtered to the listed ready-made agents.
-  expect(reads).toEqual([{ agentIds: [fixer.id] }]);
+  expect(reads).toEqual([{ agentIds: [fixer.id], activeFirst: true }]);
 });
 
 test("one GitHub-event trigger makes it need the GitHub App", async () => {
@@ -49,7 +53,18 @@ test("one GitHub-event trigger makes it need the GitHub App", async () => {
   ]);
 });
 
-test("a paused GitHub-event trigger doesn't count", async () => {
+test("with only paused triggers, those decide what it needs", async () => {
+  tasks = [task(fixer.id, "github", "paused")];
+  expect(await agentsReadinessPurposes(db, "ws", "user:a", [fixer])).toEqual([
+    { githubEvents: true },
+  ]);
+  tasks = [task(fixer.id, undefined, "paused")];
+  expect(await agentsReadinessPurposes(db, "ws", "user:a", [fixer])).toEqual([
+    { githubEvents: false },
+  ]);
+});
+
+test("a paused GitHub-event trigger doesn't count beside an active one", async () => {
   tasks = [task(fixer.id), task(fixer.id, "github", "paused")];
   expect(await agentsReadinessPurposes(db, "ws", "user:a", [fixer])).toEqual([
     { githubEvents: false },
@@ -96,4 +111,25 @@ test("the registered live GitHub reader wins over the stored binding", async () 
   expect(await installed(appDb)).toBe(true);
   setGitHubAppBindingReader(appDb, null);
   expect(await installed(appDb)).toBe(true);
+});
+
+test("an admin resuming someone's trigger is told who must connect what", () => {
+  const github = {
+    kind: "connection",
+    provider: "github.com",
+    name: "GitHub",
+    reason: "x",
+  } as never;
+  const readiness = (canConnect: boolean) =>
+    ({ connections: [{ provider: "github.com", canConnect }] }) as never;
+  expect(ownerMissingMessage(readiness(true), github, false)).toBe(
+    "Its owner needs to connect GitHub.",
+  );
+  // The owner can't connect it either.
+  expect(ownerMissingMessage(readiness(false), github, false)).toBe(
+    "An admin needs to connect GitHub.",
+  );
+  expect(ownerMissingMessage(readiness(true), github, true)).toBe(
+    "A GitHub admin needs to install the GitHub App.",
+  );
 });
