@@ -2,9 +2,10 @@
 // the shared app package; this route owns the scroll frame and the Slack part
 // of an agent's page, which needs the Slack integration's own pieces.
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { AgentPage } from "@opengeni/react/app/components/agents/agent-page";
+import { AgentPage, AgentSettingsPage } from "@opengeni/react/app/components/agents/agent-page";
 import { AgentsPage } from "@opengeni/react/app/components/agents/agents-page";
 import { EditAgentPage, NewAgentPage } from "@opengeni/react/app/components/agents/agent-form-page";
+import { ReadyMadeAgentPreview } from "@opengeni/react/app/components/agents/ready-made-agent-preview";
 import { useAgent } from "@opengeni/react/app/lib/agents";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import { useNavigate } from "@opengeni/react/app/lib/navigation";
@@ -47,6 +48,21 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
 }
 
 export function AgentRoute({ workspaceId, agentId }: { workspaceId: string; agentId: string }) {
+  return (
+    <ContentPage width="standard" className={PAGE_FRAME}>
+      <AgentPage key={agentId} workspaceId={workspaceId} agentId={agentId} />
+    </ContentPage>
+  );
+}
+
+/** An agent's Settings: its setup, with where it is available in Slack. */
+export function AgentSettingsRoute({
+  workspaceId,
+  agentId,
+}: {
+  workspaceId: string;
+  agentId: string;
+}) {
   const { workspaces, managedSelfContext } = useAppContext();
   const navigate = useNavigate();
   const workspace = workspaces.find((row) => row.id === workspaceId) ?? null;
@@ -54,7 +70,7 @@ export function AgentRoute({ workspaceId, agentId }: { workspaceId: string; agen
   const slackPossible = workspace === null || !isPersonalWorkspace(workspace, managedSelfContext);
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
-      <AgentPage
+      <AgentSettingsPage
         key={agentId}
         workspaceId={workspaceId}
         agentId={agentId}
@@ -78,6 +94,36 @@ export function AgentRoute({ workspaceId, agentId }: { workspaceId: string; agen
   );
 }
 
+/** A ready-made agent before it is added: its preview, with one Add agent. */
+export function ReadyMadeAgentRoute({
+  workspaceId,
+  templateKey,
+}: {
+  workspaceId: string;
+  templateKey: string;
+}) {
+  const navigate = useNavigate();
+  return (
+    <ContentPage width="standard" className={PAGE_FRAME}>
+      <ReadyMadeAgentPreview
+        key={templateKey}
+        workspaceId={workspaceId}
+        templateKey={templateKey}
+        onBack={() =>
+          void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } })
+        }
+        // Added with its triggers off: its page says what is left to set up.
+        onAdded={(agent) =>
+          void navigate({
+            to: "/workspaces/$workspaceId/agents/$agentId",
+            params: { workspaceId, agentId: agent.id },
+          })
+        }
+      />
+    </ContentPage>
+  );
+}
+
 /** Introduce an agent in Slack channels: its own URL, so Back returns to the agent. */
 export function AgentSlackIntroRoute({
   workspaceId,
@@ -92,7 +138,7 @@ export function AgentSlackIntroRoute({
   const state = useAgent(workspaceId, agentId);
   const close = () =>
     void navigate({
-      to: "/workspaces/$workspaceId/agents/$agentId",
+      to: "/workspaces/$workspaceId/agents/$agentId/settings",
       params: { workspaceId, agentId },
     });
   const agent = state.agent;

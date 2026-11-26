@@ -19,6 +19,7 @@ import {
   automationCadence,
   automationDraftFromTemplate,
   automationTemplatesFor,
+  automationTemplatesWithoutAgent,
   automationTemplateWhenWords,
   builtinAutomationTemplates,
   automationCadenceIssue,
@@ -340,6 +341,11 @@ export function scheduleTemplates(
   eventTriggers: boolean,
   simplified = false,
 ): AutomationTemplate[] {
+  // A template a ready-made agent already does is offered once, under Agents.
+  return automationTemplatesWithoutAgent(allScheduleTemplates(eventTriggers, simplified));
+}
+
+function allScheduleTemplates(eventTriggers: boolean, simplified = false): AutomationTemplate[] {
   return automationTemplatesFor(
     simplified ? SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES : builtinAutomationTemplates(t),
     { eventTriggers, workspaceEvents: true },
@@ -354,9 +360,11 @@ export function templateById(
   id: string | undefined,
   eventTriggers = true,
 ): AutomationTemplate | undefined {
-  return [...scheduleTemplates(eventTriggers), ...scheduleTemplates(eventTriggers, true)].find(
-    (template) => template.id === id,
-  );
+  // Links to a template a ready-made agent does (a card, an old bookmark) still open.
+  return [
+    ...allScheduleTemplates(eventTriggers),
+    ...allScheduleTemplates(eventTriggers, true),
+  ].find((template) => template.id === id);
 }
 
 /**

@@ -28,7 +28,9 @@
 //   /workspaces/:id/enable                   → turn on a ready-made agent or app (?agent|?app, ?step)
 //   /workspaces/:id/agents/new               → new agent (?sourceSessionId: Make this an agent)
 //   /workspaces/:id/agents/:agentId          → one agent (chats, instructions, memory, Slack)
+//   /workspaces/:id/agents/:agentId/settings → an agent's setup (Instructions, Can use, Memory, access, Skills)
 //   /workspaces/:id/agents/:agentId/edit     → edit agent
+//   /workspaces/:id/agents/ready-made/:templateKey → a ready-made agent's preview, with one Add agent
 //   /workspaces/:id/agents/:agentId/introduce/:connectionId → introduce it in Slack channels
 //   /workspaces/:id/bot-templates            → old links, redirect to agents
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
@@ -346,6 +348,14 @@ const LazyEnableRoute = lazyRouteComponent(() => import("@/routes/enable"), "Ena
 const LazyAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentRoute");
 const LazyNewAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "NewAgentRoute");
 const LazyEditAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "EditAgentRoute");
+const LazyAgentSettingsRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "AgentSettingsRoute",
+);
+const LazyReadyMadeAgentRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "ReadyMadeAgentRoute",
+);
 const LazyAgentSlackIntroRoute = lazyRouteComponent(
   () => import("@/routes/agents"),
   "AgentSlackIntroRoute",
@@ -1152,6 +1162,16 @@ const workspaceAgentEditRoute = createRoute({
   path: "agents/$agentId/edit",
   component: AgentEdit,
 });
+const workspaceAgentSettingsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId/settings",
+  component: AgentSettings,
+});
+const workspaceReadyMadeAgentRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/ready-made/$templateKey",
+  component: ReadyMadeAgent,
+});
 const workspaceAgentIntroRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agents/$agentId/introduce/$connectionId",
@@ -1518,6 +1538,8 @@ const routeTree = rootRoute.addChildren([
     workspaceAgentNewRoute,
     workspaceAgentDetailRoute,
     workspaceAgentEditRoute,
+    workspaceAgentSettingsRoute,
+    workspaceReadyMadeAgentRoute,
     workspaceAgentIntroRoute,
     workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
@@ -1859,6 +1881,16 @@ function AgentDetail() {
 function AgentEdit() {
   const { workspaceId, agentId } = workspaceAgentEditRoute.useParams();
   return <LazyEditAgentRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function AgentSettings() {
+  const { workspaceId, agentId } = workspaceAgentSettingsRoute.useParams();
+  return <LazyAgentSettingsRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function ReadyMadeAgent() {
+  const { workspaceId, templateKey } = workspaceReadyMadeAgentRoute.useParams();
+  return <LazyReadyMadeAgentRoute workspaceId={workspaceId} templateKey={templateKey} />;
 }
 
 function AgentIntro() {
