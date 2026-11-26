@@ -3029,6 +3029,14 @@ describe("Temporal workflow integration", () => {
         bus,
         settings: testSettings({ databaseUrl: shared.appUrl }),
       });
+      // A real write failure in the existing best-effort inbox trigger must
+      // roll back the occurrence and review, so Temporal can retry all three.
+      await shared.admin`
+        create function fail_scheduled_dispatch_inbox_insert() returns trigger
+        language plpgsql as $$ begin raise exception 'synthetic inbox write failure'; end; $$`;
+      await shared.admin`
+        create trigger fail_scheduled_dispatch_inbox_insert before insert on opengeni_private.inbox_items
+        for each row execute function fail_scheduled_dispatch_inbox_insert()`;
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const worker = await Worker.create({
         connection: nativeConnection,
@@ -3042,8 +3050,19 @@ describe("Temporal workflow integration", () => {
           ) => {
             const attempt = currentActivityContext()!.info.attempt;
             receiptAttempts.push(attempt);
+            if (input.triggerType === "scheduled" && attempt === 1) {
+              try {
+                await recording.recordScheduledTaskDispatchFailure(input);
+              } finally {
+                await shared.admin`
+                  drop trigger fail_scheduled_dispatch_inbox_insert on opengeni_private.inbox_items`;
+              }
+              return;
+            }
             await recording.recordScheduledTaskDispatchFailure(input);
-            if (attempt === 1) throw new Error("synthetic receipt acknowledgement loss");
+            if (attempt === (input.triggerType === "scheduled" ? 2 : 1)) {
+              throw new Error("synthetic receipt acknowledgement loss");
+            }
           },
         },
       });
@@ -3066,7 +3085,7 @@ describe("Temporal workflow integration", () => {
 
           const runs = await listScheduledTaskRuns(db.db, workspaceId, task.id);
           expect(runs).toHaveLength(triggerType === "scheduled" ? 1 : 2);
-          expect(receiptAttempts).toEqual([1, 2]);
+          expect(receiptAttempts).toEqual(triggerType === "scheduled" ? [1, 2, 3] : [1, 2]);
           const failed = await getScheduledTaskRunByProducerKey(db.db, {
             workspaceId,
             taskId: task.id,

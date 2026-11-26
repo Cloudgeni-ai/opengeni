@@ -2552,6 +2552,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     blockedSince: new Date(run.createdAt),
                     reviewedRunId: run.id,
                     notice: null,
+                    requireInboxNotice: true,
                   },
             );
           },
