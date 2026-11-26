@@ -264,6 +264,82 @@ describe("Insights usage dashboard", () => {
     }
   });
 
+  test("agent rows show each agent's own avatar, and initials only without one", async () => {
+    nextUsage = fixtureUsage({ groupBy: "agent" });
+    const listAgents = mock(async (workspaceId: string) => [
+      {
+        id: "66666666-0000-4000-8000-000000000001",
+        workspaceId,
+        name: "PR reviewer",
+        avatar: { kind: "icon", icon: "bot", hue: 210 },
+      },
+      {
+        id: "66666666-0000-4000-8000-000000000002",
+        workspaceId,
+        name: "Release notes",
+        avatar: null,
+      },
+    ]);
+    (context.client as Record<string, unknown>).listAgents = listAgents;
+    const view = await render({ group: "agent" });
+    try {
+      expect(listAgents).toHaveBeenCalledWith(WORKSPACE.workspaceId);
+      const kinds = [
+        ...view.container.querySelectorAll('[role="table"] [role="row"] [data-session-avatar]'),
+      ].map((tile) => tile.getAttribute("data-session-avatar"));
+      expect(kinds.sort()).toEqual(["icon", "letters"]);
+    } finally {
+      delete (context.client as Record<string, unknown>).listAgents;
+      await view.unmount();
+    }
+  });
+
+  test("organization agent rows show avatars from the workspaces the usage covers", async () => {
+    const ORG = {
+      kind: "organization" as const,
+      accountId: "22222222-2222-4222-8222-222222222222",
+      workspaceId: null,
+    };
+    nextUsage = fixtureUsage({ groupBy: "agent", scope: ORG });
+    const orgAgents = mock(async (workspaceId: string) =>
+      workspaceId === "33333333-0000-4000-8000-000000000001"
+        ? [
+            {
+              id: "66666666-0000-4000-8000-000000000001",
+              workspaceId,
+              name: "PR reviewer",
+              avatar: { kind: "icon", icon: "bot", hue: 210 },
+            },
+          ]
+        : [],
+    );
+    (context.client as Record<string, unknown>).listAgents = orgAgents;
+    // Across an organization the rows carry no workspace: the covered workspaces are read.
+    const org = await render({ group: "agent" }, ORG);
+    try {
+      expect(orgAgents).toHaveBeenCalledWith("33333333-0000-4000-8000-000000000001");
+      const kinds = [
+        ...org.container.querySelectorAll('[role="table"] [role="row"] [data-session-avatar]'),
+      ].map((tile) => tile.getAttribute("data-session-avatar"));
+      expect(kinds).toContain("icon");
+    } finally {
+      delete (context.client as Record<string, unknown>).listAgents;
+      await org.unmount();
+    }
+  });
+
+  test("other groupings read no agents", async () => {
+    const listAgents = mock(async () => []);
+    (context.client as Record<string, unknown>).listAgents = listAgents;
+    const view = await render({ group: "model" });
+    try {
+      expect(listAgents).not.toHaveBeenCalled();
+    } finally {
+      delete (context.client as Record<string, unknown>).listAgents;
+      await view.unmount();
+    }
+  });
+
   test("switching the group-by keeps the filters", async () => {
     nextUsage = fixtureUsage({ groupBy: "payer" });
     const view = await render({ group: "payer", prov: "anthropic" });

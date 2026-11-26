@@ -91,6 +91,7 @@ function useWebShellSlots(): SessionShellSlots {
     () => ({
       switcher: <SwitcherBlock />,
       primaryNav: <PrimaryNavExtras />,
+      primaryNavPlacesNewSession: true,
       layout: <SidebarLayoutSection />,
       mobileWorkspacePanel: (
         <>

@@ -55,7 +55,9 @@ const { PrimaryNav: SharedPrimaryNav, SessionShellSlotsProvider } =
 /** The rail's primary navigation as the web shell composes it. */
 function PrimaryNav() {
   return (
-    <SessionShellSlotsProvider slots={{ primaryNav: <PrimaryNavExtras /> }}>
+    <SessionShellSlotsProvider
+      slots={{ primaryNav: <PrimaryNavExtras />, primaryNavPlacesNewSession: true }}
+    >
       <SharedPrimaryNav />
     </SessionShellSlotsProvider>
   );
