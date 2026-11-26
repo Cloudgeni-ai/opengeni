@@ -56,10 +56,13 @@ type ReadinessDeps = {
   /**
    * Whether the workspace's GitHub App binding is active (suspended or
    * removed doesn't count). Tests pass it; otherwise the reader registered
-   * with `setGitHubAppBindingReader`, else the stored binding.
+   * with `setGitHubAppBindingReader`, else the stored binding. `null` (or an
+   * error) means GitHub couldn't be checked: the stored binding answers.
    */
-  githubAppBound?: ((workspaceId: string) => Promise<boolean>) | undefined;
+  githubAppBound?: GitHubAppBindingReader | undefined;
 };
+
+type GitHubAppBindingReader = (workspaceId: string) => Promise<boolean | null>;
 
 /** The provider a template names for GitHub. */
 export const GITHUB_SETUP_PROVIDER = "github.com";
@@ -229,10 +232,10 @@ export function githubAppConfigured(
  * path (the API, Opengeni's own tools, app sync, an admin's resume) and the
  * readiness reads agree. Keyed by database so apps in one process don't mix.
  */
-const githubAppBoundReaders = new WeakMap<object, (workspaceId: string) => Promise<boolean>>();
+const githubAppBoundReaders = new WeakMap<object, GitHubAppBindingReader>();
 export function setGitHubAppBindingReader(
   db: Database,
-  reader: ((workspaceId: string) => Promise<boolean>) | null,
+  reader: GitHubAppBindingReader | null,
 ): void {
   // Some test apps run without a database.
   if (typeof db !== "object" || db === null) return;
@@ -261,9 +264,10 @@ export async function githubSetupFacts(
             (typeof deps.db === "object" && deps.db !== null
               ? githubAppBoundReaders.get(deps.db as object)
               : undefined);
-          return live
-            ? await live(grant.workspaceId)
-            : await storedGitHubAppBound(deps.db, grant.workspaceId);
+          // GitHub unreachable (null or an error): the stored binding answers,
+          // so an outage never blocks an already-connected workspace.
+          const liveAnswer = live ? await live(grant.workspaceId).catch(() => null) : null;
+          return liveAnswer ?? (await storedGitHubAppBound(deps.db, grant.workspaceId));
         })().catch(() => false)
       : false,
     grant.subjectId
@@ -439,6 +443,8 @@ export async function agentsReadinessPurposes(
   );
   const triggersByAgent = new Map<string, ScheduledTask[]>();
   for (const task of tasks) {
+    // Paused triggers don't run, so they don't decide what it needs.
+    if (task.status === "paused") continue;
     const agentId = task.agentConfig.agentId;
     if (agentId && ids.includes(agentId))
       triggersByAgent.set(agentId, [...(triggersByAgent.get(agentId) ?? []), task]);

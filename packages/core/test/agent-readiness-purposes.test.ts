@@ -23,8 +23,9 @@ const db = {} as never;
 const fixer = { id: "agent-fixer", templateKey: "bug-fixer" };
 const custom = { id: "agent-custom", templateKey: null };
 
-function task(agentId: string, sourceKind?: string) {
+function task(agentId: string, sourceKind?: string, status = "active") {
   return {
+    status,
     agentConfig: { agentId },
     events: sourceKind ? { triggers: [{ sourceId: "source-1", sourceKind }] } : null,
   };
@@ -45,6 +46,13 @@ test("one GitHub-event trigger makes it need the GitHub App", async () => {
   tasks = [task(fixer.id), task(fixer.id, "github")];
   expect(await agentsReadinessPurposes(db, "ws", "user:a", [fixer])).toEqual([
     { githubEvents: true },
+  ]);
+});
+
+test("a paused GitHub-event trigger doesn't count", async () => {
+  tasks = [task(fixer.id), task(fixer.id, "github", "paused")];
+  expect(await agentsReadinessPurposes(db, "ws", "user:a", [fixer])).toEqual([
+    { githubEvents: false },
   ]);
 });
 
@@ -78,6 +86,14 @@ test("the registered live GitHub reader wins over the stored binding", async () 
   expect(await installed(appDb)).toBe(false);
   // Another app's database keeps its own answer.
   expect(await installed(otherDb)).toBe(true);
+  // GitHub unreachable (the live reader can't check, or throws): the stored
+  // binding answers, so an outage never blocks.
+  setGitHubAppBindingReader(appDb, async () => null);
+  expect(await installed(appDb)).toBe(true);
+  setGitHubAppBindingReader(appDb, async () => {
+    throw new Error("GitHub 502");
+  });
+  expect(await installed(appDb)).toBe(true);
   setGitHubAppBindingReader(appDb, null);
   expect(await installed(appDb)).toBe(true);
 });
