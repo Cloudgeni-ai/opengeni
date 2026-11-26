@@ -42,6 +42,9 @@ const violations: Record<OnlineSafetyRule, string> = {
   "unbatched-data": rolling("UPDATE t SET x=1;"),
   "unannotated-contract": rolling("ALTER TABLE t DROP COLUMN old;"),
   "explicit-lock": rolling("LOCK TABLE t IN ACCESS EXCLUSIVE MODE;"),
+  "multi-table-policy": rolling(
+    "ALTER POLICY p ON t USING (true);\nCREATE POLICY q ON u USING (true);",
+  ),
   "maintenance-concurrent-index": maintenance("CREATE INDEX CONCURRENTLY idx ON t(id);"),
   "maintenance-batched-backfill": maintenance(boundedBatch, batch),
   "maintenance-unbatched-data": maintenance("DELETE FROM t;"),
@@ -132,6 +135,34 @@ describe("online-safety SQL recognition", () => {
     expect(rules(rolling("CREATE TABLE t(id int); CREATE INDEX idx ON other.t(id);"))).toEqual([
       "nonconcurrent-index",
     ]);
+  });
+  test("policy changes may span several policies of one existing table or new tables", () => {
+    expect(
+      rules(
+        rolling(
+          'ALTER POLICY p ON t USING (true); DROP POLICY IF EXISTS q ON public.t; CREATE POLICY "r" ON "t" USING (true);',
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      rules(
+        rolling(
+          "CREATE TABLE n(id int); CREATE POLICY p ON n USING (true); ALTER POLICY q ON t USING (true);",
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      rules(rolling("DO $$ BEGIN ALTER POLICY p ON t USING (true); DROP POLICY q ON u; END $$;")),
+    ).toEqual(["multi-table-policy"]);
+    expect(
+      rules(maintenance("ALTER POLICY p ON t USING (true); ALTER POLICY p ON u USING (true);")),
+    ).toEqual([]);
+    expect(
+      analyzeMigrationOnlineSafety(
+        "1609_test.sql",
+        rolling("ALTER POLICY p ON t USING (true); ALTER POLICY p ON u USING (true);"),
+      ).map((f) => f.rule),
+    ).toEqual([]);
   });
   test("foreign keys and CHECK require NOT VALID on their own action", () => {
     expect(rules(rolling("ALTER TABLE t ADD CHECK (NOT valid);"))).toEqual([

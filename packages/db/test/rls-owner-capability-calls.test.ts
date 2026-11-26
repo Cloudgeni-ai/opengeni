@@ -103,15 +103,20 @@ test("the runtime role filters other tenants' rows without calling the owner def
     `alter role opengeni_app in database "${database!.name}" set track_functions = 'all'`,
   );
 
+  const [{ visible }] = await shared.admin<{ visible: number }[]>`
+    select count(*)::int as visible from sessions where workspace_id = ${other.workspaceId}::uuid`;
+  expect(visible).toBe(OTHER_TENANT_SESSIONS + 1);
+
+  // A fresh connection after the reset, so no earlier scan's pending
+  // statistics can land in the measurement.
+  await shared.admin`select pg_stat_reset()`;
   const app = createDb(shared.appUrl, { max: 1 });
+  const count = async (scope: { workspaceId: string; subjectId: string }) =>
+    await withWorkspaceSubjectRls(app.db, scope.workspaceId, scope.subjectId, async (tx) => {
+      const rows = await tx.execute(sql`select count(*)::int as count from sessions`);
+      return Number((rows as unknown as { count: number }[])[0]!.count);
+    });
   try {
-    const count = async (scope: { workspaceId: string; subjectId: string }) =>
-      await withWorkspaceSubjectRls(app.db, scope.workspaceId, scope.subjectId, async (tx) => {
-        const rows = await tx.execute(sql`select count(*)::int as count from sessions`);
-        return Number((rows as unknown as { count: number }[])[0]!.count);
-      });
-    expect(await count(other)).toBe(OTHER_TENANT_SESSIONS + 1);
-    await shared.admin`select pg_stat_reset()`;
     expect(await count(reader)).toBe(1);
     // One direct call marks when this connection's statistics have arrived.
     await app.db.execute(
@@ -136,4 +141,46 @@ test("the runtime role filters other tenants' rows without calling the owner def
   // the fence definer several times and the compute definer once or more.
   expect(calls.session_tenancy_fence_owner_policy_active).toBe(1);
   expect(calls.scoped_compute_policy_capability_active ?? 0).toBe(0);
+
+  const owner = createDb(shared.appUrl, { max: 1 });
+  try {
+    const rows = await withWorkspaceSubjectRls(owner.db, other.workspaceId, other.subjectId, (tx) =>
+      tx.execute(sql`select count(*)::int as count from sessions`),
+    );
+    expect(Number((rows as unknown as { count: number }[])[0]!.count)).toBe(
+      OTHER_TENANT_SESSIONS + 1,
+    );
+  } finally {
+    await owner.close();
+  }
 }, 300_000);
+
+// The owner path: for the table owner holding the fence, the guarded policy is
+// true exactly when the unguarded one is.
+test("the guarded fence policy admits the owner exactly when the unguarded one does", async () => {
+  const target = await workspace("owner-path");
+  const [policy] = await shared.admin<{ qual: string }[]>`
+    select pg_get_expr(polqual, polrelid) as qual from pg_policy
+    where polrelid = 'sessions'::regclass and polname = 'session_tenancy_fenced_owner_read'`;
+  const guarded = policy!.qual;
+  const plain = guarded.replace(
+    /\(\(\(CURRENT_USER\)::text = ('(?:[^']|'')*'::text)\) AND (session_tenancy_fence_owner_policy_active\(\(CURRENT_USER\)::text, \1, (?:[^()']|\([0-9]+\))*\))\)/,
+    "$2",
+  );
+  expect(plain).not.toBe(guarded);
+  const evaluate = async (tx: typeof shared.admin) =>
+    await tx.unsafe<{ guarded: boolean; plain: boolean }[]>(
+      `select (${guarded}) as guarded, (${plain}) as plain from sessions where id = $1`,
+      [target.sessionId],
+    );
+  await shared.admin.begin(async (tx) => {
+    expect(await evaluate(tx as unknown as typeof shared.admin)).toEqual([
+      { guarded: false, plain: false },
+    ]);
+    await tx`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${target.workspaceId}`}, 0))`;
+    await tx`select opengeni_private.open_session_tenancy_fenced_access('public'::regnamespace::oid)`;
+    expect(await evaluate(tx as unknown as typeof shared.admin)).toEqual([
+      { guarded: true, plain: true },
+    ]);
+  });
+});

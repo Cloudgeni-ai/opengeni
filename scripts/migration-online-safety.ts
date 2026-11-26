@@ -17,6 +17,8 @@ export { MIGRATIONS_DIR } from "./migration-rls-backfills";
 // database adopts them without running them. Every later migration is checked.
 // Never raise this boundary to admit a new unsafe migration.
 export const ONLINE_SAFETY_FROM_ORDINAL = 978;
+// Earlier files predate the rule; the 0977 parts and older history are not rewritten.
+export const MULTI_TABLE_POLICY_FROM_ORDINAL = 1620;
 export const EXCEPTION_KEY = "online-safety-exception";
 
 export const RULES = {
@@ -32,6 +34,8 @@ export const RULES = {
     "Add -- contract-step: naming the earlier release that stopped using the removed/renamed shape (or why the previous release is unaffected), after deploying the compatible code.",
   "explicit-lock":
     "Remove LOCK TABLE; use short online DDL or a narrowly justified maintenance step instead.",
+  "multi-table-policy":
+    "Change the row policies of one existing table per migration: CREATE/ALTER/DROP POLICY holds ACCESS EXCLUSIVE until commit, so policy changes on several live tables in one transaction queue traffic behind each other and can deadlock application transactions.",
   "maintenance-concurrent-index":
     "Move concurrent index construction to a separate rolling migration before parking or after release; keep the maintenance window short.",
   "maintenance-batched-backfill":
@@ -360,6 +364,7 @@ function analyze(
   const created = new Set<string>();
   const temporaryAliases = new Set<string>();
   const alteredHere = new Set<string>();
+  const policyTables = new Set<string>();
   const priorIndexes = new Map(schema.indexes);
   const findings: OnlineSafetyFinding[] = [];
   const add = (rule: OnlineSafetyRule, statement: number, operation: string) => {
@@ -581,6 +586,17 @@ function analyze(
         } while (ts[j - 1]?.value === ",");
       }
       if (!maintenance && word(ts[i], "LOCK")) add("explicit-lock", number, "Explicit table lock");
+      if (["CREATE", "ALTER", "DROP"].some((w) => word(ts[i], w)) && word(ts[i + 1], "POLICY")) {
+        let j = i + 2;
+        if (at(ts, j, "IF", "EXISTS")) j += 2;
+        if (isName(ts[j])) j++;
+        const table = word(ts[j], "ON") ? relation(ts, j + 1) : null;
+        if (table && existing(table)) {
+          policyTables.add(table.name);
+          if (!maintenance && ordinal >= MULTI_TABLE_POLICY_FROM_ORDINAL && policyTables.size > 1)
+            add("multi-table-policy", number, "Row policy changes on several existing tables");
+        }
+      }
       if (!maintenance && (word(ts[i], "CLUSTER") || word(ts[i], "VACUUM"))) {
         if (word(ts[i], "CLUSTER") && word(ts[i + 1], "ON")) continue;
         const full = word(ts[i], "CLUSTER") || has(ts.slice(i), "FULL");
