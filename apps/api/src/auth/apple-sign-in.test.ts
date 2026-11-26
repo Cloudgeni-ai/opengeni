@@ -10,7 +10,7 @@ import {
   managedAppleProviderOptions,
   redirectAppleFormPost,
   revokeManagedAppleTokens,
-} from "../src/auth/apple-sign-in";
+} from "./apple-sign-in";
 
 const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
 const credentials = {
@@ -81,7 +81,7 @@ test("Apple is gated by all four settings; the web Services ID remains an audien
   )!;
   const auth = betterAuth({ socialProviders: { apple } });
   const provider = (await auth.$context).socialProviders.find((p) => p.id === "apple")!;
-  expect(provider.idToken?.audience).toEqual(["ai.example.signin", "ai.example.app"]);
+  expect(provider.idToken).toMatchObject({ audience: ["ai.example.signin", "ai.example.app"] });
   expect(provider.options?.disableSignUp).toBe(true);
   expect(decodePart(apple.clientSecret, 1).sub).toBe(credentials.clientId);
 });
@@ -144,17 +144,24 @@ test("revocation decrypts Apple tokens, prefers the refresh token, and does not 
     >;
   };
   const requests: URLSearchParams[] = [];
-  const fetcher = (async (url: string, init: RequestInit) => {
-    expect(url).toBe("https://appleid.apple.com/auth/revoke");
-    expect(init.method).toBe("POST");
-    expect(init.redirect).toBe("error");
-    expect(new Headers(init.headers).get("content-type")).toBe("application/x-www-form-urlencoded");
-    const body = init.body as URLSearchParams;
-    requests.push(body);
-    expect(body.get("client_id")).toBe(credentials.clientId);
-    expect(decodePart(body.get("client_secret")!, 1)).toMatchObject({ sub: credentials.clientId });
-    return new Response(null, { status: 200 });
-  }) as typeof fetch;
+  const fetcher = Object.assign(
+    async (url: string, init: RequestInit) => {
+      expect(url).toBe("https://appleid.apple.com/auth/revoke");
+      expect(init.method).toBe("POST");
+      expect(init.redirect).toBe("error");
+      expect(new Headers(init.headers).get("content-type")).toBe(
+        "application/x-www-form-urlencoded",
+      );
+      const body = init.body as URLSearchParams;
+      requests.push(body);
+      expect(body.get("client_id")).toBe(credentials.clientId);
+      expect(decodePart(body.get("client_secret")!, 1)).toMatchObject({
+        sub: credentials.clientId,
+      });
+      return new Response(null, { status: 200 });
+    },
+    { preconnect: fetch.preconnect },
+  ) as typeof fetch;
   expect(await revokeManagedAppleTokens(auth, settings, "test-user", { fetcher })).toBe("revoked");
   apple.refreshToken = "";
   expect(await revokeManagedAppleTokens(auth, settings, "test-user", { fetcher })).toBe("revoked");
@@ -164,7 +171,9 @@ test("revocation decrypts Apple tokens, prefers the refresh token, and does not 
   ]);
   await expect(
     revokeManagedAppleTokens(auth, settings, "test-user", {
-      fetcher: (async () => new Response(null, { status: 503 })) as typeof fetch,
+      fetcher: Object.assign(async () => new Response(null, { status: 503 }), {
+        preconnect: fetch.preconnect,
+      }),
     }),
   ).rejects.toThrow("HTTP 503");
   context.internalAdapter.findAccounts = async () => [];
