@@ -1,4 +1,8 @@
-import { sandboxLeaseTelemetryKey, type Observability } from "@opengeni/observability";
+import {
+  sandboxLeaseTelemetryKey,
+  type Observability,
+  type SnapshotArchiveReason,
+} from "@opengeni/observability";
 
 type SafeSnapshotError = {
   errorClass: "SnapshotOperationError";
@@ -7,11 +11,58 @@ type SafeSnapshotError = {
   origin: "sandbox-resume" | "worker-lifecycle";
   causeName?: string;
   integrityCode?: string;
+  archiveReason?: SnapshotArchiveReason;
+  archiveExitCode?: number;
   providerErrorName?: string;
   providerGrpcCode?: number;
   providerHttpStatus?: number;
   providerRetryable?: boolean;
 };
+
+/** The archive check's fixed reasons (`workspace-tar-stream.ts`, as the
+ * Agents SDK's) as a closed class. Reasons that end in a member path are
+ * matched by their fixed prefix; the path itself is never logged. */
+const ARCHIVE_REASON_PREFIXES: ReadonlyArray<readonly [string, SnapshotArchiveReason]> = [
+  ["hardlink member not allowed", "hardlink_member"],
+  ["archive root hardlink", "hardlink_member"],
+  ["symlink member not allowed", "symlink_member"],
+  ["archive root symlink", "symlink_member"],
+  ["unsupported member type", "unsupported_member_type"],
+  ["archive root member must be directory", "unsupported_member_type"],
+  ["absolute path", "unsafe_member_path"],
+  ["windows drive path", "unsafe_member_path"],
+  ["windows path separator", "unsafe_member_path"],
+  ["parent traversal", "unsafe_member_path"],
+  ["duplicate archive path", "duplicate_member"],
+  ["archive path descends through non-directory", "descends_through_non_directory"],
+  ["archive member overlaps protected path", "protected_path_overlap"],
+  ["archive directory blocks protected path", "protected_path_overlap"],
+  ["archive member count exceeds limit", "member_count_limit"],
+  ["archive extracted size exceeds limit", "extracted_size_limit"],
+  ["archive input size exceeds limit", "input_size_limit"],
+  ["truncated header", "truncated_archive"],
+  ["truncated member payload", "truncated_archive"],
+  ["invalid PAX", "invalid_tar_header"],
+  ["PAX ", "invalid_tar_header"],
+  ["global PAX", "invalid_tar_header"],
+  ["NUL byte in PAX", "invalid_tar_header"],
+  ["base-256 tar sizes", "invalid_tar_header"],
+  ["invalid octal size", "invalid_tar_header"],
+];
+
+function archiveReason(details: unknown, read: (value: unknown, key: string) => unknown) {
+  const reason = read(details, "reason");
+  if (typeof reason === "string") {
+    for (const [prefix, value] of ARCHIVE_REASON_PREFIXES) {
+      if (reason.startsWith(prefix)) return value;
+    }
+    return "other_archive_check" as const;
+  }
+  // A provider's tar in the box exited non-zero (no member was refused).
+  const exitCode = read(details, "exitCode");
+  if (typeof exitCode === "number") return "tar_exit_nonzero" as const;
+  return undefined;
+}
 
 export function safeSnapshotError(
   error: unknown,
@@ -89,6 +140,18 @@ export function safeSnapshotError(
   }
   const retryable = read(error, "retryable");
   if (typeof retryable === "boolean") fields.providerRetryable = retryable;
+  if (fields.causeName === "SandboxArchiveError") {
+    const reason = archiveReason(details, read);
+    if (reason) fields.archiveReason = reason;
+    const exitCode = read(details, "exitCode");
+    if (
+      typeof exitCode === "number" &&
+      Number.isInteger(exitCode) &&
+      exitCode >= 0 &&
+      exitCode <= 255
+    )
+      fields.archiveExitCode = exitCode;
+  }
   return fields;
 }
 
