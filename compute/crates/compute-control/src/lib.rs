@@ -40,6 +40,7 @@ pub mod link;
 pub mod metrics;
 pub mod pointers;
 pub mod service;
+pub mod shrink;
 pub mod store;
 pub mod tls;
 pub mod view;
@@ -143,7 +144,6 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     terms
         .validate()
         .map_err(|error| anyhow::anyhow!("lease terms: {error}"))?;
-    let give_up_after = config.settings.give_up_after;
     let view = Arc::new(View::new(config.seed, terms.silent_after()));
     // The fleet's pointers are kept in the store once they are moved in
     // from the archive, whose own pointers the import reads.
@@ -198,10 +198,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     let mut tasks = vec![
         tokio::spawn(view::follow(Arc::clone(&view), Arc::clone(&store))),
         tokio::spawn(leader::lead(
-            Arc::clone(&store),
-            Arc::clone(&view),
-            terms,
-            give_up_after,
+            Arc::clone(&service),
             config.scaling,
             Arc::clone(&metrics),
         )),

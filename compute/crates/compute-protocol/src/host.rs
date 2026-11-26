@@ -742,6 +742,15 @@ pub enum Request {
         /// this field ignores it and refuses an awake sandbox as busy.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         awake: bool,
+        /// Keep its programs even while it is idle: it is saved with its
+        /// memory where it stands, as an explicit sleep saves it, whatever
+        /// its rules say, so they carry on on the host that adopts it. The
+        /// host decides by the sandbox as it is when the hand-off arrives,
+        /// so one that woke and paused again since the caller last looked
+        /// keeps the programs it ran meanwhile. A host from before this
+        /// field ignores it, and hands an idle sandbox off as its rules say.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_memory: bool,
     },
     /// Boot a sandbox afresh from its disk where it is, keeping its files:
     /// any step under way that would keep its running programs is
@@ -1329,6 +1338,18 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(awake, Request::HandOff { awake: true, .. }));
+        let keep: Request = serde_json::from_str(
+            r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566","owner_epoch":3,"keep_memory":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            keep,
+            Request::HandOff {
+                awake: false,
+                keep_memory: true,
+                ..
+            }
+        ));
         assert!(
             serde_json::from_str::<Request>(
                 r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566"}"#

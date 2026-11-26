@@ -25,6 +25,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             disk_mib: 100_000,
             offers: Vec::new(),
             boot: None,
+            keeps_memory: false,
         },
         state,
         capacity: Reported {
@@ -48,6 +49,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             info: None,
         },
         restarts: 3,
+        leader_drained_ms: None,
         tally: Tally::default(),
     }
 }
@@ -328,6 +330,7 @@ fn every_family_says_what_it_is_once() {
         },
         size: 2,
         max: 4,
+        shrink: Some(ShrinkSeen::default()),
     });
     let text = metrics.render(&[host(1, "hosts-a", HostState::Live)]);
     let mut families = Vec::new();
@@ -351,6 +354,63 @@ fn every_family_says_what_it_is_once() {
         Some(1.0)
     );
     assert_eq!(value(&text, "compute_fleet_group_max_size"), Some(4.0));
+}
+
+/// The leader's shrinking of the group is watched: the host on its way out
+/// and for how long, what it still holds, the removals and take-backs, and
+/// the hosts it skips, so an alert can catch removals failing over and
+/// over or a host left draining.
+#[test]
+fn the_leaders_shrinking_is_reported() {
+    let metrics = Metrics::default();
+    metrics.leads(true);
+    metrics.group(GroupSeen {
+        view: GroupView::default(),
+        size: 3,
+        max: 4,
+        shrink: Some(ShrinkSeen {
+            outgoing: Some("hosts-b".to_owned()),
+            draining_for: Duration::from_secs(1234),
+            left: Some(2),
+            skipped: 1,
+            held_back: false,
+            removals: 4,
+            removal_failures: 3,
+            taken_back: [2, 1],
+        }),
+    });
+    let text = metrics.render(&[]);
+    for (series, expected) in [
+        ("compute_fleet_shrink_outgoing{host=\"hosts-b\"}", 1.0),
+        ("compute_fleet_shrink_draining_seconds", 1234.0),
+        ("compute_fleet_shrink_sandboxes_left", 2.0),
+        ("compute_fleet_shrink_skipped_hosts", 1.0),
+        ("compute_fleet_shrink_held_back", 0.0),
+        ("compute_fleet_shrink_removals_total{outcome=\"ok\"}", 4.0),
+        (
+            "compute_fleet_shrink_removals_total{outcome=\"failed\"}",
+            3.0,
+        ),
+        (
+            "compute_fleet_shrink_taken_back_total{reason=\"grow\"}",
+            2.0,
+        ),
+        (
+            "compute_fleet_shrink_taken_back_total{reason=\"slow\"}",
+            1.0,
+        ),
+    ] {
+        assert_eq!(value(&text, series), Some(expected), "{series}");
+    }
+    metrics.leads(false);
+    assert_eq!(
+        value(
+            &metrics.render(&[]),
+            "compute_fleet_shrink_draining_seconds"
+        ),
+        None,
+        "only the leader reports it"
+    );
 }
 
 #[test]

@@ -183,8 +183,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 owner,
                 awake,
+                keep_memory,
                 reply,
-            } => self.hand_off(id, owner, awake, reply),
+            } => self.hand_off(id, owner, (awake, keep_memory), reply),
             Command::Reconcile { rulings, reply } => self.reconcile(rulings, reply),
             Command::Owned {
                 owner,
@@ -586,7 +587,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// is kept, and otherwise with its files alone. Holds named in its
     /// record stay recorded: one renewed after a hand-off that did not
     /// finish holds it again.
-    pub(super) fn hand_off(&mut self, id: Id, owner: OwnerEpoch, awake: bool, reply: Reply<()>) {
+    ///
+    /// With `keep_memory`, an idle one goes with its programs too, decided
+    /// by how it is now.
+    pub(super) fn hand_off(
+        &mut self,
+        id: Id,
+        owner: OwnerEpoch,
+        (awake, keep_memory): (bool, bool),
+        reply: Reply<()>,
+    ) {
         if self.blocked.contains_key(&id.0) {
             let _ = reply.send(Err(self.blocked_error(id)));
             return;
@@ -668,13 +678,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // One in use goes with its programs, which wake on the host it
         // goes to. An idle one goes as its rules say: one whose memory is
         // not kept has its VM ended, and its files alone go.
-        match self.request_sleep(id, Level::Archived, wanted || view.runs()) {
+        match self.request_sleep(id, Level::Archived, keep_memory || wanted || view.runs()) {
             Ok(Room::Now) => {}
             Ok(Room::AfterReading) => {
                 // Only the next disk reading can tell whether its save
                 // fits: nothing of it has changed, and the hand-off is
                 // asked again then.
-                self.after_reading(AfterReading::HandOff(id, owner, awake, reply));
+                self.after_reading(AfterReading::HandOff(
+                    id,
+                    owner,
+                    (awake, keep_memory),
+                    reply,
+                ));
                 return;
             }
             Err(error) => {

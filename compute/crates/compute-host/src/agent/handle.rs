@@ -182,11 +182,24 @@ impl Handle {
     /// `awake`, and returns once this host no longer has it; see
     /// [`crate::protocol::Request::HandOff`].
     pub async fn hand_off(&self, id: Id, owner: OwnerEpoch, awake: bool) -> Result<(), HostError> {
+        self.hand_off_keeping(id, owner, awake, false).await
+    }
+
+    /// [`Self::hand_off`], keeping its memory even while it is idle with
+    /// `keep_memory`.
+    pub async fn hand_off_keeping(
+        &self,
+        id: Id,
+        owner: OwnerEpoch,
+        awake: bool,
+        keep_memory: bool,
+    ) -> Result<(), HostError> {
         self.fleet_only("hand off")?;
         self.send_naming_owner(|reply| Command::HandOff {
             id,
             owner,
             awake,
+            keep_memory,
             reply,
         })
         .await?
