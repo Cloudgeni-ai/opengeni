@@ -8904,15 +8904,19 @@ export class OpenGeniClient {
   /**
    * Readiness of a ready-made agent before it is added: each connection it
    * uses, whether the caller already has it on, whether they may connect it,
-   * and what keeps it off, in words.
+   * and what keeps it off, in words. `trigger` names the suggested trigger
+   * that will be turned on (default: its first); a trigger on GitHub events
+   * needs the workspace's GitHub App.
    */
   async getAgentTemplateReadiness(
     workspaceId: string,
     templateKey: string,
+    options: { trigger?: string | undefined } = {},
   ): Promise<SetupReadiness> {
+    const query = options.trigger ? `?trigger=${encodeURIComponent(options.trigger)}` : "";
     const response = await this.requestJson<SetupReadinessResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/readiness`,
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/readiness${query}`,
     );
     return response.readiness;
   }

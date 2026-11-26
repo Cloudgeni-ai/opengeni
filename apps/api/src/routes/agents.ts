@@ -85,6 +85,7 @@ import {
   type ApiRouteDeps,
   setupReadinessFor,
   setupReadinessForMany,
+  templateTriggerUsesGitHubEvents,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -344,6 +345,10 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       agents.map((agent) =>
         agent.templateKey ? agentTemplateByKey(agent.templateKey)?.setup : undefined,
       ),
+      agents.map((agent) => {
+        const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
+        return { githubEvents: template ? templateTriggerUsesGitHubEvents(template) : false };
+      }),
     );
     return c.json(
       AgentReadinessListResponse.parse({
@@ -422,7 +427,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(
       SetupReadinessResponse.parse({
-        readiness: await setupReadinessFor(deps, context.grant, template.setup),
+        readiness: await setupReadinessFor(deps, context.grant, template.setup, {
+          githubEvents: templateTriggerUsesGitHubEvents(template, c.req.query("trigger")),
+        }),
       }),
     );
   });
@@ -438,7 +445,11 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
     return c.json(
       SetupReadinessResponse.parse({
-        readiness: await setupReadinessFor(deps, context.grant, template?.setup),
+        readiness: await setupReadinessFor(deps, context.grant, template?.setup, {
+          githubEvents: template
+            ? templateTriggerUsesGitHubEvents(template, c.req.query("trigger"))
+            : false,
+        }),
       }),
     );
   });

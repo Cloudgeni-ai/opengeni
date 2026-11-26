@@ -389,7 +389,7 @@ describe("queue surface browser acceptance", () => {
         if (theme === "light") {
           expect(collapsed.backgroundLightness ?? 0).toBeGreaterThan(0.9);
         } else {
-          // The graphite dark canvas (#303030) sits at OKLab L 0.31.
+          // The polished-black dark canvas (#141414) sits well below OKLab L 0.35.
           expect(collapsed.backgroundLightness ?? 1).toBeLessThan(0.35);
         }
         const collapsedTree = await chromeAccessibilityTree(page);

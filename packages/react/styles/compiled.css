@@ -9220,33 +9220,6 @@
       background-color: var(--color-surface);
     }
   }
-:where(.og-root).aria-checked\:bg-linear-to-b,:where(.og-root) .aria-checked\:bg-linear-to-b {
-    &[aria-checked="true"] {
-      --tw-gradient-position: to bottom;
-      @supports (background-image: linear-gradient(in lab, red, red)) {
-        --tw-gradient-position: to bottom in oklab;
-      }
-      background-image: linear-gradient(var(--tw-gradient-stops));
-    }
-  }
-:where(.og-root).aria-checked\:from-brand-fg\/10,:where(.og-root) .aria-checked\:from-brand-fg\/10 {
-    &[aria-checked="true"] {
-      --tw-gradient-from: var(--color-brand-fg);
-      @supports (color: color-mix(in lab, red, red)) {
-        --tw-gradient-from: color-mix(in oklab, var(--color-brand-fg) 10%, transparent);
-      }
-      --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-    }
-  }
-:where(.og-root).aria-checked\:to-brand-fg\/10,:where(.og-root) .aria-checked\:to-brand-fg\/10 {
-    &[aria-checked="true"] {
-      --tw-gradient-to: var(--color-brand-fg);
-      @supports (color: color-mix(in lab, red, red)) {
-        --tw-gradient-to: color-mix(in oklab, var(--color-brand-fg) 10%, transparent);
-      }
-      --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-    }
-  }
 :where(.og-root).aria-checked\:text-brand,:where(.og-root) .aria-checked\:text-brand {
     &[aria-checked="true"] {
       color: var(--color-brand);
@@ -11809,6 +11782,13 @@
             background-color: color-mix(in oklab, var(--color-input) 50%, transparent);
           }
         }
+      }
+    }
+  }
+:where(.og-root).dark\:aria-checked\:bg-surface-3,:where(.og-root) .dark\:aria-checked\:bg-surface-3 {
+    &:where(.dark, .dark *) {
+      &[aria-checked="true"] {
+        background-color: var(--color-surface-3);
       }
     }
   }

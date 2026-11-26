@@ -130,7 +130,11 @@ import {
 } from "./scheduled-task-audience";
 import { lockActiveCustomModelForAdmission, workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { agentTriggerTurnsOn, requireAgentTriggerReady } from "./ready-made-setup-readiness";
+import {
+  agentTriggerTurnsOn,
+  eventTriggersUseGitHub,
+  requireAgentTriggerReady,
+} from "./ready-made-setup-readiness";
 import {
   resolveSessionToolPolicy,
   workspaceSessionToolPolicyDefaultServerIds,
@@ -377,7 +381,14 @@ export async function createValidatedScheduledTask(input: {
     throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
   // A ready-made agent's trigger stays off until its required connections are on.
   if (input.payload.status !== "paused")
-    await requireAgentTriggerReady(input, input.grant, input.payload.agentConfig.agentId);
+    await requireAgentTriggerReady(input, input.grant, input.payload.agentConfig.agentId, {
+      githubEvents: () =>
+        eventTriggersUseGitHub(
+          input.db,
+          input.grant.workspaceId,
+          "events" in input.payload ? input.payload.events?.triggers : undefined,
+        ),
+    });
   // The requested Opengeni tools and permissions become the task's creator
   // selection below; they are never stored in its agentConfig.
   const {
@@ -1151,10 +1162,16 @@ export async function resumeScheduledTaskAsAdmin(
   db: Database,
   grant: AccessGrant,
   existing: ScheduledTask,
+  settings: Settings,
 ): Promise<ScheduledTask> {
   // An active one is already on, unless it ran once and needs re-arming.
   if (existing.status === "active" && !(await scheduledTaskFinishedOnce(db, existing)))
     return existing;
+  // Turning it back on needs its ready-made agent's required connections.
+  if (existing.status !== "active")
+    await requireAgentTriggerReady({ db, settings }, grant, existing.agentConfig.agentId, {
+      githubEvents: () => eventTriggersUseGitHub(db, grant.workspaceId, existing.events?.triggers),
+    });
   return await withScheduledTaskAuthorityWriteErrors(() =>
     updateScheduledTask(db, existing.workspaceId, existing.id, {
       status: "active",
@@ -1611,7 +1628,14 @@ export async function validatedScheduledTaskUpdate(
       nextAgentId,
     })
   )
-    await requireAgentTriggerReady(input, input.grant, nextAgentId);
+    await requireAgentTriggerReady(input, input.grant, nextAgentId, {
+      githubEvents: () =>
+        eventTriggersUseGitHub(
+          input.db,
+          input.grant.workspaceId,
+          input.payload.events?.triggers ?? input.existing.events?.triggers,
+        ),
+    });
   if (
     nextAgentId !== input.existing.agentConfig.agentId ||
     runMode !== input.existing.runMode ||

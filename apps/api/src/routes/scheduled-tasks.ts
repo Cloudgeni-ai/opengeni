@@ -499,7 +499,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // An admin turns someone else's schedule back on with the permission
     // that turned it off; editing and running it stay with its owner.
     if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
-      const task = await resumeScheduledTaskAsAdmin(db, grant, existing);
+      const task = await resumeScheduledTaskAsAdmin(db, grant, existing, deps.settings);
       await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
       const [resumed] = await withEventsAndBlockers([task]);
       return c.json(scheduledTaskForGrant(resumed ?? task, grant));

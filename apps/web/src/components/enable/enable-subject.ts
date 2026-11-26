@@ -7,6 +7,7 @@
  * readiness check (`GET .../agent-templates/:key/readiness`), so the page,
  * the Agents page and the server agree on when it can be turned on.
  */
+import { setupMissingReason } from "@opengeni/contracts";
 import type { SetupConnectionState, SetupMissing, SetupReadiness } from "@opengeni/sdk";
 
 export type EnableStep = "connect" | "check" | "turn-on";
@@ -70,9 +71,7 @@ function missingFor(connection: SetupConnectionState): SetupMissing {
     kind: "connection",
     provider: connection.provider,
     name: connection.name,
-    reason: connection.canConnect
-      ? `Connect ${connection.name} to turn this on.`
-      : `Ask an admin to connect ${connection.name}.`,
+    reason: setupMissingReason(connection, connection.canConnect),
   };
 }
 

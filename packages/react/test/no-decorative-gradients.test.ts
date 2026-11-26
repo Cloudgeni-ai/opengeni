@@ -65,7 +65,7 @@ const ALLOWED: Record<string, { count: number; reason: string }> = {
 };
 
 const GRADIENT =
-  /(?:linear|radial|conic)-gradient\(|bg-gradient-|<(?:linear|radial)Gradient\b|create(?:Linear|Radial|Conic)Gradient\(/g;
+  /(?:linear|radial|conic)-gradient\(|bg-gradient-|bg-(?:linear|radial|conic)-|<(?:linear|radial)Gradient\b|create(?:Linear|Radial|Conic)Gradient\(/g;
 
 const roots = [
   "packages/react/styles",

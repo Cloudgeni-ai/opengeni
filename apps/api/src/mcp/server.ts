@@ -3036,7 +3036,7 @@ export function buildOpenGeniMcpServer(
         // Admins resume what they may pause; editing and running stay with the owner.
         const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
         if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
-          const task = await resumeScheduledTaskAsAdmin(deps.db, grant, existing);
+          const task = await resumeScheduledTaskAsAdmin(deps.db, grant, existing, deps.settings);
           await syncUpdatedScheduledTask({
             db: deps.db,
             workflowClient: deps.workflowClient,

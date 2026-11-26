@@ -819,17 +819,27 @@ returns every visible agent's in one read (`{ agents: [{ agentId, readiness }] }
 the Agents list):
 `ready`, `reason`, each connection with `connected`, `canConnect` and its
 catalog item, `missing` (each with its reason in words) and the required
-counts. GitHub isn't a capability catalog item: it counts as connected when
-the workspace's GitHub App is installed or the viewer has their own GitHub
-connected, and the viewer can connect it with `github:manage` (when the App
-is configured) or when people may connect their own GitHub. The check lives
-in core (`packages/core/src/domain/ready-made-setup-readiness.ts`):
-`createValidatedScheduledTask` and `validatedScheduledTaskUpdate` run it, so
-every path (the API, Opengeni's own tools, app sync) is covered. Creating an
-active trigger, turning one on, or pointing an active one at another agent,
-when that ready-made agent's required connections aren't on, is a 409 with
+counts. Who may connect a catalog item is the Connect pages' own rule
+(`catalogItemConnectable` in `@opengeni/contracts/personal-integration-setup`,
+which `catalogConnectAccess` matches; a web test checks the two agree).
+GitHub isn't a capability catalog item. A trigger on GitHub events (a pull
+request opened, an issue labelled, a mention) needs the workspace's GitHub
+App, which only `github:manage` connects (when the App is configured). A
+trigger on a schedule or run by hand also accepts the viewer's own GitHub
+(or a GitHub connector), which they may connect when the deployment allows
+it. The readiness reads say which trigger with `?trigger=<name>` (SDK
+`getAgentTemplateReadiness(..., { trigger })`); without it, the one Enable
+turns on by default (the first one-click suggestion, else the first). The
+check lives in core (`packages/core/src/domain/ready-made-setup-readiness.ts`):
+`createValidatedScheduledTask`, `validatedScheduledTaskUpdate` and
+`resumeScheduledTaskAsAdmin` run it, so every path (the API, Opengeni's own
+tools, app sync, an admin's resume) is covered, and a trigger's own event
+sources decide whether it runs on GitHub events. Creating an active trigger,
+turning one on, or pointing an active one at another agent, when that
+ready-made agent's required connections aren't on, is a 409 with
 `details.code` `agent_setup_incomplete` and `details.missing`. An agent
-without a template, or a check that can't run, is never blocked.
+without a template is never blocked. A check that can't run doesn't block
+either; it is logged and counted (`opengeni_agent_setup_readiness_unchecked_total`).
 
 ### Keep setup simple
 

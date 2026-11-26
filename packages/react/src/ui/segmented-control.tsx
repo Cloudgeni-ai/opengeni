@@ -244,9 +244,9 @@ function itemClasses(variant: SegmentedControlVariant, size: SegmentedControlSiz
       // Hover only brightens the text: a hover fill would outshine the active option in dark.
       "enabled:hover:text-fg aria-disabled:hover:text-fg-muted",
       "aria-checked:bg-surface aria-checked:text-fg aria-checked:shadow-og-sm aria-checked:ring-1 aria-checked:ring-border",
-      // In dark, surface sits below surface-2; a faint light layer lifts the active
-      // option above the track there, and disappears on white.
-      "aria-checked:bg-linear-to-b aria-checked:from-brand-fg/10 aria-checked:to-brand-fg/10",
+      // In dark, surface sits below surface-2; the next surface up lifts the
+      // active option above the track there.
+      "dark:aria-checked:bg-surface-3",
     );
   }
   if (variant === "outlined") {

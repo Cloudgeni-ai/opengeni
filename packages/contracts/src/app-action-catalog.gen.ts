@@ -3605,6 +3605,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agents/:agentId/readiness",
     "request": [],
+    "query": [
+      "trigger"
+    ],
     "response": [
       "SetupReadiness",
       "SetupReadinessResponse"
@@ -3615,6 +3618,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/readiness",
     "request": [],
+    "query": [
+      "trigger"
+    ],
     "response": [
       "SetupReadiness",
       "SetupReadinessResponse"

@@ -234,7 +234,11 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { createGitHubSkillSourceClient, readSkillRepository } from "@opengeni/core";
+import {
+  createGitHubSkillSourceClient,
+  readSkillRepository,
+  setSetupReadinessMetricsSink,
+} from "@opengeni/core";
 import {
   eventTriggersEnabled,
   PersonalWorkspacesOffError,
@@ -656,6 +660,8 @@ export function createAppComposition(
   setConnectAttemptTransitionObserver((transition) =>
     observeConnectAttemptTransition(observability, transition),
   );
+  // Readiness checks that couldn't run (and so didn't hold a trigger back).
+  setSetupReadinessMetricsSink(observability);
   const managedAuthNewSignupsGate = createManagedAuthNewSignupsGate({
     db: deps.db,
     settings: deps.settings,
