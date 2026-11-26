@@ -3,7 +3,6 @@ import { generateKeyPairSync, verify } from "node:crypto";
 import { betterAuth } from "better-auth";
 import { symmetricEncrypt } from "better-auth/crypto";
 import type { ManagedAuth } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing/settings";
 import {
   appleCallbackProviderRequest,
   createAppleClientSecret,
@@ -19,12 +18,12 @@ const credentials = {
   keyId: "EXAMPLEKEY",
   privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
 };
-const settings = testSettings({
+const settings = {
   managedAuthAppleClientId: credentials.clientId,
   managedAuthAppleTeamId: credentials.teamId,
   managedAuthAppleKeyId: credentials.keyId,
   managedAuthApplePrivateKey: credentials.privateKey,
-});
+};
 const second = 1_000;
 const day = 86_400;
 
@@ -73,7 +72,7 @@ test("Apple client secret is a P-256 JWT and renews one day before expiry", () =
 });
 
 test("Apple is gated by all four settings; the web Services ID remains an audience", async () => {
-  expect(managedAppleProviderOptions(testSettings())).toBeNull();
+  expect(managedAppleProviderOptions({})).toBeNull();
   expect(managedAppleProviderOptions({ ...settings, managedAuthAppleKeyId: undefined })).toBeNull();
   const apple = managedAppleProviderOptions(
     { ...settings, managedAuthAppleAppBundleIdentifier: "ai.example.app" },
@@ -177,7 +176,5 @@ test("revocation decrypts Apple tokens, prefers the refresh token, and does not 
     }),
   ).rejects.toThrow("HTTP 503");
   context.internalAdapter.findAccounts = async () => [];
-  expect(await revokeManagedAppleTokens(auth, testSettings(), "test-user", { fetcher })).toBe(
-    "not_linked",
-  );
+  expect(await revokeManagedAppleTokens(auth, {}, "test-user", { fetcher })).toBe("not_linked");
 });

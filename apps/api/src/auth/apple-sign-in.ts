@@ -15,7 +15,15 @@ const appleName = z.object({ firstName: namePart, lastName: namePart });
 const appleFormUser = z.object({ name: appleName });
 const appleNameEnvelope = z.object({ state: z.string(), name: appleName });
 
-function appleCredentials(settings: Settings) {
+type AppleCredentialSettings = Pick<
+  Settings,
+  | "managedAuthAppleClientId"
+  | "managedAuthAppleTeamId"
+  | "managedAuthAppleKeyId"
+  | "managedAuthApplePrivateKey"
+>;
+
+function appleCredentials(settings: AppleCredentialSettings) {
   const {
     managedAuthAppleClientId: clientId,
     managedAuthAppleTeamId: teamId,
@@ -77,7 +85,7 @@ export function createAppleClientSecret(
 }
 
 export function managedAppleProviderOptions(
-  settings: Settings,
+  settings: AppleCredentialSettings & Pick<Settings, "managedAuthAppleAppBundleIdentifier">,
   signup: { disableSignUp?: boolean } = {},
 ) {
   const credentials = appleCredentials(settings);
@@ -194,7 +202,7 @@ export async function appleCallbackProviderRequest(
  * caller can record or retry it before the token is erased. */
 export async function revokeManagedAppleTokens(
   auth: ManagedAuth,
-  settings: Settings,
+  settings: AppleCredentialSettings,
   authUserId: string,
   options: { fetcher?: typeof fetch } = {},
 ): Promise<"revoked" | "not_linked"> {
