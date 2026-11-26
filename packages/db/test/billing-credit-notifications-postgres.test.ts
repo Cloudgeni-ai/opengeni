@@ -481,7 +481,7 @@ test("spend floors, baseline history, excluded reversals, recovery and rolling-d
   expect(await evaluateBillingCreditAlerts(client.db, a.accountId)).toHaveLength(1);
 });
 
-test("raised notices name their window's top workspaces, and claims name the organization", async () => {
+test("first claim names the organization and its window's top workspaces without changing stored details", async () => {
   if (!client) return;
   const a = await account();
   const dev = crypto.randomUUID();
@@ -489,7 +489,13 @@ test("raised notices name their window's top workspaces, and claims name the org
   await fixture!.admin`update managed_accounts set name='Pronta' where id=${a.accountId}`;
   await fixture!.admin`insert into workspaces (id, account_id, name)
     values (${dev}, ${a.accountId}, 'Dev <b>'), (${prod}, ${a.accountId}, 'Prod')`;
+  const [recipient] = await fixture!.admin`
+    select personal_workspace_id from billing_credit_notification_recipients
+    where account_id=${a.accountId} and subject_id=${a.subjectId}`;
+  const personal = recipient!.personal_workspace_id as string;
+  expect(personal).toBeTruthy();
   const spend = async (
+    accountId: string,
     workspaceId: string | null,
     amount: number,
     agoHours: number,
@@ -497,67 +503,73 @@ test("raised notices name their window's top workspaces, and claims name the org
   ) => {
     await fixture!
       .admin`insert into credit_ledger_entries(account_id,workspace_id,amount_micros,type,source_type,source_id,idempotency_key,created_at)
-      values(${a.accountId},${workspaceId},${amount},${type},'credit-alert-test',${crypto.randomUUID()},${crypto.randomUUID()},
+      values(${accountId},${workspaceId},${amount},${type},'credit-alert-test',${crypto.randomUUID()},${crypto.randomUUID()},
         clock_timestamp()-${agoHours}*interval '1 hour')`;
   };
+  const claimContext = async (accountId: string) => {
+    let context: BillingCreditMessageContext | undefined;
+    const claimed = await claimBillingCreditNotification(client!.db, {
+      accountId,
+      sender: "test@example.test",
+      providerScope: "test-v1",
+      retentionSeconds: 86400,
+      message: (kind, details, email, _path, received) => {
+        context = received;
+        return message(kind, details, email);
+      },
+    });
+    expect(claimed).not.toBeNull();
+    return context!;
+  };
   await ledger(a.accountId, 100_000_000, "grant", 48);
-  await spend(prod, -40_000_000, 3); // outside the one-hour window
-  await spend(prod, -20_000_000, 0, "credit_refund"); // not spend
-  await spend(dev, -4_000_000, 0);
-  await spend(dev, -5_000_000, 0);
-  await spend(prod, -1_500_000, 0);
-  await spend(null, -500_000, 0);
+  await spend(a.accountId, prod, -40_000_000, 3); // outside the one-hour window
+  await spend(a.accountId, prod, -20_000_000, 0, "credit_refund"); // not spend
+  await spend(a.accountId, dev, -4_000_000, 0);
+  await spend(a.accountId, dev, -5_000_000, 0);
+  await spend(a.accountId, personal, -2_000_000, 0);
+  await spend(a.accountId, prod, -1_500_000, 0);
+  await spend(a.accountId, null, -500_000, 0);
   const [id] = await evaluateBillingCreditAlerts(client.db, a.accountId);
   const [notice] = await fixture!
     .admin`select kind,details from billing_credit_notifications where id=${id!}::uuid`;
   expect(notice!.kind).toBe("unusual_spend");
-  expect(notice!.details).toMatchObject({
-    lastHourSpendMicros: 11_000_000,
-    spendWindowHours: 1,
-    topWorkspaces: [
-      { workspaceId: dev, name: "Dev <b>", spendMicros: 9_000_000 },
-      { workspaceId: prod, name: "Prod", spendMicros: 1_500_000 },
-      { workspaceId: null, name: null, spendMicros: 500_000 },
+  // Older servers parse stored details strictly; the breakdown never enters them.
+  expect(Object.keys(notice!.details).sort()).toEqual([
+    "availableBalanceMicros",
+    "baselineHourlySpendMicros",
+    "lastHourSpendMicros",
+  ]);
+  const context = await claimContext(a.accountId);
+  expect(context.organizationName).toBe("Pronta");
+  expect(context.spend).toEqual({
+    windowHours: 1,
+    workspaces: [
+      { kind: "workspace", workspaceId: dev, name: "Dev <b>", spendMicros: 9_000_000 },
+      // A member's personal workspace is grouped without its name.
+      { kind: "personal", workspaceId: null, name: null, spendMicros: 2_000_000 },
+      { kind: "workspace", workspaceId: prod, name: "Prod", spendMicros: 1_500_000 },
     ],
   });
+  expect(context.workspacePath(dev)).toBe(
+    `/workspaces/${personal}/organization?section=billing&workspace=${dev}`,
+  );
+  expect(billingCreditWorkspacePath(null, dev)).toBeNull();
 
-  // Balance notices look back a day.
+  // Balance notices look back a day; usage without a workspace is "other".
   const b = await account();
   await ledger(b.accountId, 10_000_000, "grant", 48);
-  await fixture!
-    .admin`insert into credit_ledger_entries(account_id,amount_micros,type,source_type,source_id,idempotency_key,created_at)
-    values(${b.accountId},-10000000,'model_usage_debit','credit-alert-test',${crypto.randomUUID()},${crypto.randomUUID()},now()-interval '2 hours')`;
+  await spend(b.accountId, null, -10_000_000, 2);
   const [exhaustedId] = await evaluateBillingCreditAlerts(client.db, b.accountId);
   const [exhausted] = await fixture!
-    .admin`select kind,details from billing_credit_notifications where id=${exhaustedId!}::uuid`;
-  expect(exhausted).toMatchObject({
-    kind: "exhausted",
-    details: {
-      spendWindowHours: 24,
-      topWorkspaces: [{ workspaceId: null, name: null, spendMicros: 10_000_000 }],
-    },
+    .admin`select kind from billing_credit_notifications where id=${exhaustedId!}::uuid`;
+  expect(exhausted!.kind).toBe("exhausted");
+  expect((await claimContext(b.accountId)).spend).toEqual({
+    windowHours: 24,
+    workspaces: [{ kind: "other", workspaceId: null, name: null, spendMicros: 10_000_000 }],
   });
 
-  const [recipient] = await fixture!.admin`
-    select personal_workspace_id from billing_credit_notification_recipients
-    where account_id=${a.accountId} and subject_id=${a.subjectId}`;
-  let context: BillingCreditMessageContext | undefined;
-  const claimed = await claimBillingCreditNotification(client.db, {
-    accountId: a.accountId,
-    sender: "test@example.test",
-    providerScope: "test-v1",
-    retentionSeconds: 86400,
-    message: (kind, details, email, path, received) => {
-      context = received;
-      return message(kind, details, email);
-    },
-  });
-  expect(claimed).not.toBeNull();
-  expect(context!.organizationName).toBe("Pronta");
-  expect(context!.workspacePath(dev)).toBe(
-    billingCreditWorkspacePath(recipient!.personal_workspace_id, dev),
-  );
-  expect(billingCreditWorkspacePath("p", dev)).toBe(
-    `/workspaces/p/organization?section=billing&workspace=${dev}`,
-  );
+  // Top-up outcomes show no breakdown.
+  const c = await account();
+  await enqueue(c.accountId);
+  expect((await claimContext(c.accountId)).spend).toBeNull();
 });

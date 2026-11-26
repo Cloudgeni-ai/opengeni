@@ -28,35 +28,70 @@ const notSpend = () =>
     sql`,`,
   );
 
-/** Top workspaces by spend in the window ending at `now`. Only read while
- * raising a notice, so it never runs on the per-minute sampling path. Per-person
- * attribution would need session rows, which row security keeps out of this
- * organization-level context (private chats included); Insights owns that view. */
+/** Spend window shown with a notice: the detector's hour for unusual spend, a
+ * day for balance notices. Other kinds show no breakdown. */
+export const BILLING_CREDIT_SPEND_WINDOW_HOURS: Partial<
+  Record<BillingCreditNotificationKind, number>
+> = { unusual_spend: 1, low_balance: 24, exhausted: 24 };
+
+export type BillingCreditSpendWorkspace = {
+  /** A shared organization workspace, all members' personal workspaces, or
+   * usage without a (still existing) workspace. */
+  kind: "workspace" | "personal" | "other";
+  workspaceId: string | null;
+  name: string | null;
+  spendMicros: number;
+};
+export type BillingCreditSpend = { windowHours: number; workspaces: BillingCreditSpendWorkspace[] };
+
+/** Top three spend groups in the window ending at `end`. Read once per delivery,
+ * when its message is first built; the frozen message keeps it on retries.
+ * Recipients are organization owners and admins, who already see spend by
+ * workspace in Billing and Insights. Personal workspaces are grouped without
+ * names, and per-person attribution is left out: it would need session rows,
+ * which row security keeps out of this organization-level context. */
 export async function billingCreditSpendBreakdown(
   tx: Database,
-  input: { accountId: string; now: string; windowHours: number },
-): Promise<Pick<BillingCreditNotificationDetails, "spendWindowHours" | "topWorkspaces">> {
-  const rows = await rawRows<{ workspace_id: string | null; name: string | null; spend: string }>(
+  input: { accountId: string; end: string; windowHours: number },
+): Promise<BillingCreditSpend | null> {
+  const rows = await rawRows<{
+    kind: BillingCreditSpendWorkspace["kind"];
+    workspace_id: string | null;
+    name: string | null;
+    spend: string;
+  }>(
     tx,
     sql`
     with spend as (
       select l.workspace_id,sum(-l.amount_micros) as micros from credit_ledger_entries l
       where l.account_id=${input.accountId}::uuid and l.amount_micros<0 and l.type not in (${notSpend()})
-        and l.created_at>=${input.now}::timestamptz-${input.windowHours}*interval '1 hour'
-        and l.created_at<=${input.now}::timestamptz
+        and l.created_at>=${input.end}::timestamptz-${input.windowHours}*interval '1 hour'
+        and l.created_at<=${input.end}::timestamptz
       group by l.workspace_id
+    ), shared as (
+      -- The organization's own inventory: every workspace except members' personal ones.
+      select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)
+    ), grouped as (
+      select case when sh.workspace_id is not null then 'workspace' when w.id is not null then 'personal' else 'other' end as kind,
+        sh.workspace_id,case when sh.workspace_id is not null then left(w.name,80) end as name,sum(s.micros) as micros
+      from spend s left join workspaces w on w.account_id=${input.accountId}::uuid and w.id=s.workspace_id
+      left join shared sh on sh.workspace_id=w.id
+      group by 1,2,3
     )
-    -- A deleted workspace (set null) or one this context cannot see joins as "other".
-    select w.id::text as workspace_id,left(w.name,200) as name,sum(s.micros)::text as spend
-    from spend s left join workspaces w on w.account_id=${input.accountId}::uuid and w.id=s.workspace_id
-    group by w.id,w.name order by sum(s.micros) desc,w.id nulls last limit 3`,
+    select kind,workspace_id::text,name,micros::text as spend from grouped
+    order by micros desc,workspace_id nulls last limit 3`,
   );
-  const topWorkspaces = rows.map((w) => ({
-    workspaceId: w.workspace_id,
-    name: w.name,
-    spendMicros: Number(w.spend),
-  }));
-  return topWorkspaces.length ? { spendWindowHours: input.windowHours, topWorkspaces } : {};
+  return rows.length
+    ? {
+        windowHours: input.windowHours,
+        workspaces: rows.map((row) => ({
+          kind: row.kind,
+          workspaceId: row.workspace_id,
+          name: row.name,
+          spendMicros: Number(row.spend),
+        })),
+      }
+    : null;
 }
 
 export function unusualCreditSpend(input: {
@@ -232,8 +267,6 @@ export async function evaluateBillingCreditAlerts(
       lastHourSpendMicros: recent,
     });
     const ids: string[] = [];
-    const breakdown = (windowHours: number) =>
-      billingCreditSpendBreakdown(tx, { accountId, now: state.now, windowHours });
     const enqueue = async (
       kind: BillingCreditNotificationKind,
       details: BillingCreditNotificationDetails,
@@ -249,16 +282,11 @@ export async function evaluateBillingCreditAlerts(
     };
     // A jump directly to zero sends only the more useful exhausted notice.
     if (exhausted && !state.exhausted_active)
-      await enqueue("exhausted", {
-        availableBalanceMicros,
-        lowBalanceThresholdMicros: threshold,
-        ...(await breakdown(24)),
-      });
+      await enqueue("exhausted", { availableBalanceMicros, lowBalanceThresholdMicros: threshold });
     else if (low && !state.low_active && !exhausted)
       await enqueue("low_balance", {
         availableBalanceMicros,
         lowBalanceThresholdMicros: threshold,
-        ...(await breakdown(24)),
       });
     const unusualSent =
       unusual &&
@@ -270,7 +298,6 @@ export async function evaluateBillingCreditAlerts(
         availableBalanceMicros,
         lastHourSpendMicros: recent,
         baselineHourlySpendMicros: baseline / Math.min(168, historyHours),
-        ...(await breakdown(1)),
       });
     await tx.execute(sql`update billing_credit_alert_settings set low_active=${low},exhausted_active=${exhausted},
       unusual_active=${unusual && (state.unusual_active || unusualSent)},
@@ -351,6 +378,8 @@ export type BillingCreditMessageContext = {
   /** Display name of the organization, null when unavailable. */
   organizationName: string | null;
   workspacePath: (workspaceId: string) => string | null;
+  /** Where the notice's window spend went, for kinds that show it. */
+  spend: BillingCreditSpend | null;
 };
 export type BillingCreditDeliveryClaim = {
   id: string;
@@ -394,11 +423,13 @@ export async function claimBillingCreditNotification(
       live_email: string | null;
       personal_workspace_id: string | null;
       organization_name: string | null;
+      notification_created_at: string;
     }>(
       tx,
       sql`
       select d.*,n.kind,n.details,r.personal_workspace_id,case when u.email_verified and lower(u.email) not like '%@passkey.invalid' then u.email end as live_email,
-        (select a.name from managed_accounts a where a.id=d.account_id) as organization_name
+        (select a.name from managed_accounts a where a.id=d.account_id) as organization_name,
+        n.created_at::text as notification_created_at
       from billing_credit_notification_deliveries d join billing_credit_notifications n on n.id=d.notification_id
       left join billing_credit_notification_recipients r on r.account_id=d.account_id and r.subject_id=d.subject_id
       left join auth_users u on r.subject_id='user:' || u.id
@@ -420,9 +451,10 @@ export async function claimBillingCreditNotification(
       );
       return null;
     }
-    const message =
-      row.message ??
-      input.message(
+    let message = row.message;
+    if (!message) {
+      const windowHours = BILLING_CREDIT_SPEND_WINDOW_HOURS[row.kind];
+      message = input.message(
         row.kind,
         row.details,
         row.live_email,
@@ -431,8 +463,16 @@ export async function claimBillingCreditNotification(
           organizationName: row.organization_name,
           workspacePath: (workspaceId) =>
             billingCreditWorkspacePath(row.personal_workspace_id, workspaceId),
+          spend: windowHours
+            ? await billingCreditSpendBreakdown(tx, {
+                accountId: input.accountId,
+                end: row.notification_created_at,
+                windowHours,
+              })
+            : null,
         },
       );
+    }
     const claimId = crypto.randomUUID();
     await tx.execute(sql`update billing_credit_notification_deliveries set status='sending',claim_id=${claimId}::uuid,
       lease_until=clock_timestamp()+interval '1 minute',email=${row.live_email},message=${JSON.stringify(message)}::jsonb,

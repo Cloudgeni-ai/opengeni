@@ -7,9 +7,13 @@ export function startBillingCreditNotificationDelivery(
   db: Database,
   transport: ManagedEmailTransport,
   appUrl: string,
-  intervalMs = 60_000,
-  environment = "production",
+  options: {
+    intervalMs?: number;
+    /** OPENGENI_ENVIRONMENT; other values label emails with the app host. */
+    environment?: string;
+  } = {},
 ): () => Promise<void> {
+  const { intervalMs = 60_000, environment = "production" } = options;
   const existing = started.get(db);
   if (existing) return existing;
   let stopped = false;

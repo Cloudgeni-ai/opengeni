@@ -5,17 +5,18 @@ import {
 } from "../src/billing-credit-notifications";
 import { generalAvailableCreditMicros } from "../../db/src/credit-balances";
 
-test("unusual spend names the organization, non-production host and top workspaces, escaped", () => {
+test("unusual spend names the organization, non-production host and top spend groups, escaped", () => {
   const dev = crypto.randomUUID();
+  const personal = crypto.randomUUID();
   const result = billingCreditEmail({
     kind: "unusual_spend",
-    details: {
-      availableBalanceMicros: 29_210_986,
-      lastHourSpendMicros: 17_248_466,
-      spendWindowHours: 1,
-      topWorkspaces: [
-        { workspaceId: dev, name: "Dev <script>", spendMicros: 17_202_074 },
-        { workspaceId: null, name: null, spendMicros: 46_392 },
+    details: { availableBalanceMicros: 29_210_986, lastHourSpendMicros: 17_248_466 },
+    spend: {
+      windowHours: 1,
+      workspaces: [
+        { kind: "workspace", workspaceId: dev, name: "Dev <script>", spendMicros: 17_202_074 },
+        { kind: "personal", workspaceId: personal, name: "Ada", spendMicros: 30_000 },
+        { kind: "other", workspaceId: null, name: null, spendMicros: 16_392 },
       ],
     },
     sender: "sender@example.test",
@@ -30,15 +31,38 @@ test("unusual spend names the organization, non-production host and top workspac
     "[staging.app.test] Unusual credit spending in Pronta Bcc: x@evil.test",
   );
   expect(result.subject).not.toMatch(/[\r\n]/);
-  expect(result.text).toContain("Sent from staging.app.test, not production.");
+  expect(result.text).toContain("Sent from staging.app.test.");
   expect(result.text).toContain(
-    "Top workspaces in the last hour:\n- Dev <script>: $17.20\n- Other usage: $0.05",
+    "Top workspaces in the last hour:\n- Dev <script>: $17.20\n- Personal workspaces: $0.03\n- Other usage: $0.02",
   );
   expect(result.html).not.toContain("<script>");
   expect(result.html).toContain(
     `<a href="https://staging.app.test/w/p/organization?section=billing&amp;workspace=${dev}">Dev &lt;script&gt;</a>: $17.20`,
   );
-  expect(result.html).toContain("<li>Other usage: $0.05</li>");
+  // Personal workspaces are neither named nor linked.
+  expect(result.html).not.toContain(personal);
+  expect(result.html).toContain("<li>Personal workspaces: $0.03</li>");
+  expect(result.html).toContain("<li>Other usage: $0.02</li>");
+});
+
+test("names truncate on whole code points and keep joined emoji", () => {
+  const family = "👩‍👩‍👧";
+  const result = billingCreditEmail({
+    kind: "low_balance",
+    details: { availableBalanceMicros: 0 },
+    sender: "sender@example.test",
+    email: "owner@example.test",
+    billingUrl: "https://app.test/billing",
+    organizationName: `${family}\u202E${"😀".repeat(100)}`,
+    spend: {
+      windowHours: 24,
+      workspaces: [{ kind: "workspace", workspaceId: null, name: "x", spendMicros: 1 }],
+    },
+  });
+  expect(result.subject.startsWith(`General credits are low in ${family} 😀`)).toBe(true);
+  expect(result.subject).not.toContain("\u202E");
+  expect(result.subject.endsWith("😀…")).toBe(true);
+  expect(result.text).toContain("Top workspaces in the last 24 hours:\n- x: $0.00");
 });
 
 test.each([
