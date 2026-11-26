@@ -2966,6 +2966,136 @@ describe("Temporal workflow integration", () => {
     temporalWorkflowTestTimeoutMs,
   );
 
+  test("exhausted scheduled and event dispatches record failed runs and notify the owner once", async () => {
+    const { createControlActivities } = await import("../../apps/worker/src/activities-control");
+    const { createScheduledTaskActivities } =
+      await import("../../apps/worker/src/activities/scheduled-tasks");
+    const { reviewScheduledTaskBlockerInventory } =
+      await import("../../apps/api/src/scheduled-task-blockers");
+    const {
+      bootstrapWorkspace,
+      createDb,
+      createScheduledTask,
+      getScheduledTask,
+      getScheduledTaskRunByProducerKey,
+      listScheduledTaskRuns,
+    } = await import("@opengeni/db");
+    const { acquireSharedTestDatabase } = await import("@opengeni/testing/shared-pg");
+    const { MemoryEventBus } = await import("@opengeni/testing/fakes");
+    const { testSettings } = await import("@opengeni/testing/settings");
+    const shared = await acquireSharedTestDatabase("scheduled-dispatch-exhaustion");
+    if (!shared) throw new Error("Real PostgreSQL is required");
+    const db = createDb(shared.appUrl);
+    try {
+      const subjectId = crypto.randomUUID();
+      const access = await bootstrapWorkspace(db.db, {
+        accountExternalSource: "test",
+        accountExternalId: crypto.randomUUID(),
+        accountName: "Schedule dispatch",
+        workspaceExternalSource: "test",
+        workspaceExternalId: crypto.randomUUID(),
+        workspaceName: "Schedule dispatch",
+        subjectId,
+      });
+      const { accountId, workspaceId } = access.workspaceGrants[0]!;
+      const task = await createScheduledTask(db.db, {
+        accountId,
+        workspaceId,
+        name: "Review activity",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `schedule-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: { prompt: "Review activity", resources: [], tools: [], metadata: {} },
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+      });
+      expect(task.ownerSubjectId).toBe(subjectId);
+
+      const bus = new MemoryEventBus();
+      const activityAttempts: number[] = [];
+      const receiptAttempts: number[] = [];
+      const dispatch = createScheduledTaskActivities(async () => {
+        activityAttempts.push(currentActivityContext()!.info.attempt);
+        throw new Error("synthetic private database detail");
+      });
+      const recording = createControlActivities({
+        db: db.db,
+        bus,
+        settings: testSettings({ databaseUrl: shared.appUrl }),
+      });
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const worker = await Worker.create({
+        connection: nativeConnection,
+        taskQueue,
+        workflowsPath: workflowDefinitionsPath,
+        activities: {
+          ...recording,
+          dispatchScheduledTaskRun: dispatch.dispatchScheduledTaskRun,
+          recordScheduledTaskDispatchFailure: async (
+            input: Parameters<typeof recording.recordScheduledTaskDispatchFailure>[0],
+          ) => {
+            const attempt = currentActivityContext()!.info.attempt;
+            receiptAttempts.push(attempt);
+            await recording.recordScheduledTaskDispatchFailure(input);
+            if (attempt === 1) throw new Error("synthetic receipt acknowledgement loss");
+          },
+        },
+      });
+      await worker.runUntil(async () => {
+        const temporal = new Client({ connection });
+        for (const triggerType of ["scheduled", "event"] as const) {
+          const workflowId =
+            triggerType === "event"
+              ? `scheduled-task-event:${crypto.randomUUID()}`
+              : `scheduled-fire-${crypto.randomUUID()}`;
+          activityAttempts.length = 0;
+          receiptAttempts.length = 0;
+          const fire = await temporal.workflow.start("scheduledTaskFireWorkflow", {
+            taskQueue,
+            workflowId,
+            args: [{ accountId, workspaceId, taskId: task.id, triggerType }],
+          });
+          await expect(fire.result()).rejects.toThrow("Workflow execution failed");
+          expect(activityAttempts).toEqual([1, 2, 3, 4, 5]);
+
+          const runs = await listScheduledTaskRuns(db.db, workspaceId, task.id);
+          expect(runs).toHaveLength(triggerType === "scheduled" ? 1 : 2);
+          expect(receiptAttempts).toEqual([1, 2]);
+          const failed = await getScheduledTaskRunByProducerKey(db.db, {
+            workspaceId,
+            taskId: task.id,
+            triggerType,
+            producerKey: workflowId,
+          });
+          expect(failed).toMatchObject({
+            triggerType,
+            status: "failed",
+            error: "scheduled_dispatch_exhausted",
+            sessionId: null,
+            completedAt: expect.any(String),
+          });
+          const notices = await shared.admin`
+              select recipient_subject_id, status, body from opengeni_private.inbox_items
+              where source_key like ${`scheduled-task-blocker:${task.id}:%`}`;
+          expect([...notices]).toEqual([
+            {
+              recipient_subject_id: subjectId,
+              status: "open",
+              body: expect.stringContaining("after several attempts"),
+            },
+          ]);
+          await reviewScheduledTaskBlockerInventory({ db: db.db, bus });
+          expect((await getScheduledTask(db.db, workspaceId, task.id))?.status).toBe("active");
+        }
+      });
+    } finally {
+      await db.close();
+      await shared.release();
+    }
+  }, 180_000);
+
   test(
     "workflow-wake dispatcher delegates one bounded canonical outbox sweep",
     async () => {

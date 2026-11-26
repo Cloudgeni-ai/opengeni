@@ -48,6 +48,13 @@ carries no accepted execution, session, or raw exception text (the worker only
 logs the detail). A paused or deleted task still refuses without a run, since
 no occurrence is due.
 
+If dispatch of a scheduled or event occurrence exhausts Temporal's existing
+retries before a run was recorded, the fire workflow writes an immutable failed
+receipt with `scheduled_dispatch_exhausted` and then fails as before. It never
+copies the exception or retries dispatch again. A receipt already committed for
+that producer wins. Later occurrences can still run; the owner gets an inbox
+notice on the first such failure in an episode, without pausing the automation.
+
 ## Blocked schedules
 
 A schedule never stays stuck without its owner knowing. The API's scheduled-task
