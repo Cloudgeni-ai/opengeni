@@ -37,18 +37,22 @@ export function useAppPackageStatus(client: StatusClient, workspaceId: string, e
       setLoaded(true);
       return;
     }
-    const abort = new AbortController();
-    client.listAppPackageStatus(workspaceId, { signal: abort.signal }).then(
+    // A stale response is ignored rather than aborted: the request is small,
+    // and an aborted fetch shows up as a network error in diagnostics.
+    let live = true;
+    client.listAppPackageStatus(workspaceId).then(
       (list) => {
-        if (abort.signal.aborted) return;
+        if (!live) return;
         setApps(new Map((Array.isArray(list) ? list : []).map((entry) => [entry.appId, entry])));
         setLoaded(true);
       },
       () => {
-        if (!abort.signal.aborted) setLoaded(true);
+        if (live) setLoaded(true);
       },
     );
-    return () => abort.abort();
+    return () => {
+      live = false;
+    };
   }, [client, workspaceId, generation, enabled]);
   return { apps, loaded, refresh };
 }

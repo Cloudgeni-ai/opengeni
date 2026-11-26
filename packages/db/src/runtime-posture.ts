@@ -2709,7 +2709,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   // 1542_app_package_exports: stored app package files and their sweep.
   "app_package_exports",
-  // 1572_app_package_installs: installed app packages and their saved earlier states.
+  // 1573_app_package_installs: installed app packages and their saved earlier states.
   "app_package_installs",
   "app_package_snapshots",
   // 1554_app_server_code: runs of an app's server code (inserts, prune deletes).
