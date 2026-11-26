@@ -161,14 +161,18 @@ export function WorkspaceShortcutLinks({
   // something you can see.
   const onScreen = (key: string) =>
     key === NAV_GROUP_KEY
-      ? grouped.length > 0 || canMove
+      ? grouped.length > 0
       : arrangement.group.includes(key)
         ? groupOpen
           ? visible(key)
           : surfacedKeys.includes(key)
-        : // A hidden Inbox shows only while something waits there; step past it.
-          visible(key) && !(key === "inbox" && hiddenEntries.inbox);
+        : key === "inbox" && hiddenEntries.inbox
+          ? // A hidden Inbox shows only while something waits there.
+            Boolean(document.querySelector('[data-nav-entry="inbox"] a'))
+          : visible(key);
   const [moved, setMoved] = useState("");
+  // An empty group keeps its name while an entry is dragged, to drop it back in.
+  const [dragging, setDragging] = useState(false);
   const labelOf = (key: string) =>
     key === NAV_GROUP_KEY
       ? group.label
@@ -191,14 +195,14 @@ export function WorkspaceShortcutLinks({
         canMove={canMove}
         onDrop={(dragged, at) => order.save(moveNavEntry(arrangement, dragged, key, at))}
         onStep={(direction) => step(key, direction)}
+        onDragging={setDragging}
       >
         {content}
       </NavDragRow>
     );
   };
   const groupBlock =
-    // While entries can move, an empty group keeps its name, to drop them back into.
-    grouped.length === 0 && !canMove ? null : rail.collapsed ? (
+    grouped.length === 0 && !(canMove && dragging) ? null : rail.collapsed ? (
       // The icon rail has no room for a group: its pages keep their icons.
       <Fragment key={NAV_GROUP_KEY}>{grouped.map(entry)}</Fragment>
     ) : (
@@ -211,6 +215,7 @@ export function WorkspaceShortcutLinks({
             order.save(moveNavEntry(arrangement, dragged, NAV_GROUP_KEY, at))
           }
           onStep={(direction) => step(NAV_GROUP_KEY, direction)}
+          onDragging={setDragging}
         >
           <Button
             type="button"
@@ -266,6 +271,7 @@ function NavDragRow({
   group,
   onDrop,
   onStep,
+  onDragging,
   children,
 }: {
   entryKey: string;
@@ -274,6 +280,7 @@ function NavDragRow({
   group?: boolean;
   onDrop: (dragged: string, at: "before" | "after" | "into") => void;
   onStep: (direction: -1 | 1) => void;
+  onDragging: (dragging: boolean) => void;
   children: React.ReactNode;
 }) {
   const [over, setOver] = useState<"before" | "after" | "into" | null>(null);
@@ -295,7 +302,9 @@ function NavDragRow({
         event.stopPropagation();
         event.dataTransfer.setData(NAV_DRAG_TYPE, entryKey);
         event.dataTransfer.effectAllowed = "move";
+        onDragging(true);
       }}
+      onDragEnd={() => onDragging(false)}
       onDragOver={(event) => {
         if (!accepts(event)) return;
         event.preventDefault();
