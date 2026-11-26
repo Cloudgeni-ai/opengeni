@@ -1,8 +1,15 @@
 import * as Application from "expo-application";
 import { Alert, Linking } from "react-native";
 
-export function isPublicIosApp(): boolean {
-  return Application.applicationId === "ai.opengeni.ios";
+export function isPublicIosApp(applicationId = Application.applicationId): boolean {
+  return applicationId === "ai.opengeni.ios";
+}
+
+export function canOpenLabRoutes(
+  development: boolean,
+  applicationId = Application.applicationId,
+): boolean {
+  return development || !isPublicIosApp(applicationId);
 }
 
 export function openOpengeniPrivacyPolicy(): void {

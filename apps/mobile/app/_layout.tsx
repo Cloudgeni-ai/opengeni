@@ -14,7 +14,7 @@ import { AppLinkRouting } from "@/app-link-routing";
 import { FeedbackHost } from "@/feedback/host";
 import { MeetingRecorderProvider } from "@/meetings";
 import { NotificationRouting } from "@/notifications";
-import { isPublicIosApp } from "@/store-review";
+import { canOpenLabRoutes } from "@/store-review";
 
 // A link opened from outside lands on its screen with Home underneath, so Back works.
 export const unstable_settings = { initialRouteName: "index" };
@@ -58,7 +58,7 @@ export default function RootLayout() {
                   <FeedbackHost />
                   <Stack screenOptions={{ headerShown: true }}>
                     <Stack.Screen name="index" options={{ title: "Opengeni" }} />
-                    <Stack.Protected guard={!isPublicIosApp()}>
+                    <Stack.Protected guard={canOpenLabRoutes(__DEV__)}>
                       <Stack.Screen name="lab" />
                       <Stack.Screen name="lab-call" />
                       <Stack.Screen name="lab-meeting" />
