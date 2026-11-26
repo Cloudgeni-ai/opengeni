@@ -197,7 +197,8 @@ describe("settings rail", () => {
       const sections = Array.from(
         view.rail().querySelectorAll<HTMLElement>("[data-settings-section]"),
       ).map((section) => section.getAttribute("data-settings-section"));
-      expect(sections).toEqual(["workspace", "organization", "account"]);
+      // Pages few people open sit under one collapsed Advanced at the end.
+      expect(sections).toEqual(["workspace", "organization", "account", "advanced"]);
 
       // The one picker names the workspace and organization; headers name only the scope.
       const workspaceSection = view.section("workspace");
@@ -207,10 +208,7 @@ describe("settings rail", () => {
         "General",
         "Access",
         "Available here",
-        "Agent learning",
         "Usage",
-        "API keys",
-        "Developer",
         "Insights",
         "Secrets",
         "Sandbox environments",
@@ -224,7 +222,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([8, 3]);
+      ).toEqual([5, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -232,21 +230,16 @@ describe("settings rail", () => {
         "General",
         "People",
         "Workspaces",
-        "Organization identity",
-        // Everything the organization shares, and where each works.
-        "Shared",
         // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Connected tools",
         "Connected agents",
         "Insights",
         "Billing",
-        "Developer",
-        "Security & data",
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 8]);
+      ).toEqual([3, 5]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
@@ -260,12 +253,29 @@ describe("settings rail", () => {
           ?.getAttribute("class")
           ?.split(" ")
           .find((name) => name.startsWith("lucide-") && name !== "lucide");
-      for (const label of ["General", "Developer"]) {
-        const workspaceIcon = iconOf(workspaceSection, label);
-        expect(workspaceIcon).toBeDefined();
-        expect(iconOf(organizationSection, label)).toBe(workspaceIcon);
-      }
-      expect(iconOf(organizationSection, "Security & data")).toBe(
+      const workspaceIcon = iconOf(workspaceSection, "General");
+      expect(workspaceIcon).toBeDefined();
+      expect(iconOf(organizationSection, "General")).toBe(workspaceIcon);
+
+      // Advanced is folded until opened, then lists its pages under their scope.
+      const advanced = view.section("advanced")!;
+      const toggle = advanced.querySelector("button")!;
+      expect(toggle.textContent).toBe("Advanced");
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      expect(linkLabels(advanced)).toEqual([]);
+      await act(async () => toggle.click());
+      expect(linkLabels(advanced)).toEqual([
+        "Agent learning",
+        "API keys",
+        "Developer",
+        "Shared",
+        "Organization identity",
+        "Security & data",
+        "Developer",
+      ]);
+      expect(advanced.textContent).toContain("Workspace");
+      expect(advanced.textContent).toContain("Organization");
+      expect(iconOf(advanced, "Security & data")).toBe(
         iconOf(view.section("account"), "Security"),
       );
 
@@ -294,14 +304,17 @@ describe("settings rail", () => {
       expect(linkLabels(view.section("organization"))).toEqual([
         // People lists everyone by name only.
         "People",
-        "Organization identity",
         "Models",
         // Every member connects their own coding agents.
         "Connected agents",
-        "Security & data",
       ]);
       // The organization and its people, then what it provides and protects.
       expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(2);
+      // Organization identity and Security & data sit under Advanced.
+      await act(async () => view.section("advanced")!.querySelector("button")!.click());
+      expect(linkLabels(view.section("advanced"))).toEqual(
+        expect.arrayContaining(["Organization identity", "Security & data"]),
+      );
       // Insights needs workspace admin.
       expect(linkLabels(view.section("workspace"))).toContain("General");
       expect(linkLabels(view.section("workspace"))).not.toContain("Insights");
@@ -378,9 +391,10 @@ describe("settings rail", () => {
   test("Agent learning is a workspace settings page: current in the rail, with its own header", async () => {
     const view = await renderShell({ kind: "settings", section: "learning" });
     try {
+      // A page under Advanced shows Advanced open, with the page current.
       const current = view.rail().querySelector('a[aria-current="page"]');
       expect(current?.textContent).toBe("Agent learning");
-      expect(view.section("workspace")?.contains(current)).toBe(true);
+      expect(view.section("advanced")?.contains(current)).toBe(true);
       expect(view.container.querySelector("h1")?.textContent).toBe("Agent learning");
       expect(view.container.textContent).toContain(
         "What agents can change on their own, and what waits for your OK.",
@@ -397,7 +411,7 @@ describe("settings rail", () => {
       { workspaceId: personalWorkspaceId },
     );
     try {
-      const labels = linkLabels(view.section("workspace"));
+      const labels = linkLabels(view.section("advanced"));
       expect(labels).toContain("Agent learning");
       expect(labels).not.toContain("API keys");
       expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe(
