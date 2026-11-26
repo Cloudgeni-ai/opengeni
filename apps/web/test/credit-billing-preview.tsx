@@ -1,4 +1,5 @@
 // Real billing page, controller and SDK. Only responses are fixtures: no payments.
+import "./preview-host-setup";
 import { createRoot } from "react-dom/client";
 import { createRootRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
