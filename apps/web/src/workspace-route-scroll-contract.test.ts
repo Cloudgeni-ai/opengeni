@@ -50,6 +50,7 @@ const workspaceRouteContracts = {
   workspaceAgentEditRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceAgentIntroRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceAgentSettingsRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceEnableRoute: { kind: "page", source: "routes/enable.tsx" },
   // Bot templates became agents.
   workspaceBotTemplatesRoute: { kind: "redirect" },
   workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
