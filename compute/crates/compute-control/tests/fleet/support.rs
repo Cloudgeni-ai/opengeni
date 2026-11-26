@@ -308,6 +308,7 @@ pub fn register_of(name: &str, capacity: Capacity) -> Register {
             disk_mib: 1 << 20,
             offers: Vec::new(),
             boot: None,
+            keeps_memory: true,
         },
         capacity,
         held: Vec::new(),
@@ -1132,6 +1133,7 @@ fn described(inner: &HostInner) -> HostInfo {
         disk_mib: 1 << 20,
         offers: inner.offers.clone(),
         boot: Some(inner.boot.lock().unwrap().clone()),
+        keeps_memory: true,
     }
 }
 

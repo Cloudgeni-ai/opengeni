@@ -117,6 +117,13 @@ pub struct HostInfo {
     /// before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot: Option<Boot>,
+    /// Whether it keeps an idle sandbox's memory in a hand-off that asks it
+    /// to ([`crate::host::Request::HandOff`]'s `keep_memory`), so that the
+    /// sandbox wakes elsewhere with its programs. The leader shrinks a host
+    /// group by itself only while every live host of it says so. Missing
+    /// from what a host of an earlier release sends: false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keeps_memory: bool,
 }
 
 impl HostInfo {

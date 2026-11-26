@@ -20,6 +20,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_9,
     MIGRATION_10,
     MIGRATION_11,
+    MIGRATION_12,
 ];
 
 /// Version 1: the tables, made if missing.
@@ -228,6 +229,15 @@ insert into compute_captured_images (image)
 const MIGRATION_11: &str = "
 alter table compute_hosts add column if not exists run bigint;
 alter table compute_hosts add column if not exists restarts bigint not null default 0;
+";
+
+/// Version 12: who drained each draining host, `leader` for the leader's
+/// drain to remove it, and when (`Store::drain_to_remove`), so that a
+/// leader after it goes on with that drain. Nullable and read only by
+/// builds that write it, so a build from before keeps working beside it.
+const MIGRATION_12: &str = "
+alter table compute_hosts add column if not exists drained_by text;
+alter table compute_hosts add column if not exists drained_at bigint;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

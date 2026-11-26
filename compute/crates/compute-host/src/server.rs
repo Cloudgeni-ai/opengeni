@@ -161,11 +161,7 @@ async fn respond(
                 .adopt(id, config, OwnerEpoch(owner_epoch), !whole)
                 .await,
         ),
-        Request::HandOff {
-            id,
-            owner_epoch,
-            awake,
-        } => done(handle.hand_off(id, OwnerEpoch(owner_epoch), awake).await),
+        request @ Request::HandOff { .. } => done(hand_off(handle, request).await),
         Request::Restart { id } => done(handle.restart(id).await),
         Request::Remove { id, generation } => done(handle.remove(id, generation).await),
         Request::Touch {
@@ -542,6 +538,22 @@ async fn answer(
 
 fn done(result: Result<(), HostError>) -> Reply {
     result.map_or_else(|error| error_reply(&error), |()| Reply::Done)
+}
+
+/// Carries out `request`, a [`Request::HandOff`].
+async fn hand_off(handle: &Handle, request: Request) -> Result<(), HostError> {
+    let Request::HandOff {
+        id,
+        owner_epoch,
+        awake,
+        keep_memory,
+    } = request
+    else {
+        return Err(HostError::Invalid("not a hand-off".into()));
+    };
+    handle
+        .hand_off_keeping(id, OwnerEpoch(owner_epoch), awake, keep_memory)
+        .await
 }
 
 /// Runs `work` unless the client hangs up first, so that it could no

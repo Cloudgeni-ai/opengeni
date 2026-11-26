@@ -410,7 +410,10 @@ host whose files share extents (XFS,
 btrfs) takes checkpoints; on any other its status says so, and its
 sandboxes reach the store only as they sleep. With `--gcp-group` the
 leader grows a Google Cloud managed instance group before spare memory runs
-out (`--scale-spare-per-mille`, `--scale-spare-largest`).
+out (`--scale-spare-per-mille`, `--scale-spare-largest`), and shrinks it by
+removing a drained host once it has long had more spare than it needs,
+without costing any sandbox its programs (`--scale-shrink-after-s`,
+[ADR 45](docs/adr/0045-the-leader-removes-a-spare-host-keeping-programs.md)).
 
 ## The E2B front door
 

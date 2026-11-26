@@ -40,6 +40,7 @@ fn register(name: &str) -> Register {
             disk_mib: 1024,
             offers: Vec::new(),
             boot: None,
+            keeps_memory: false,
         },
         capacity: roomy(),
         held: Vec::new(),
