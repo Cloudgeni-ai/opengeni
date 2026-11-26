@@ -314,7 +314,7 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
     values (${f.accountId}::uuid, ${orgAdmin}, 'active', 'admin', ${orgAdminPersonal!.id}::uuid)`;
   const recipients = [admin, orgAdmin].sort();
 
-  // Withheld for a release (1581): nobody is asked, and the page shares a link.
+  // Withheld for a release (1591): nobody is asked, and the page shares a link.
   const before = await ask();
   expect(before.status, JSON.stringify(before.json)).toBe(200);
   expect(before.json).toEqual({ status: "unavailable", adminsAsked: 0 });

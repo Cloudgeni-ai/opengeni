@@ -794,7 +794,7 @@ a ready-made app (`?app=<key>`) or a Get started setup (`get-started?setup=<key>
    someone who may connect it themselves is refused (409), and a burst is
    cut off (429). Asking again while it is open shows **Already asked**; a
    settled notice reopens only a day later, and a dismissed one stays
-   dismissed. The routine (`request_setup_connection_v1`, migration 1581)
+   dismissed. The routine (`request_setup_connection_v1`, migration 1591)
    trusts only the transaction's own account, workspace and subject. Its
    runtime EXECUTE is withheld for one release; **a later migration must
    grant it** (as 1571 did for 1562). Until then the route answers
