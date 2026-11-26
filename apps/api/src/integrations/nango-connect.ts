@@ -342,9 +342,11 @@ function escapeJsonForHtml(value: unknown): string {
  * the iframe posts `{type:"ready"}`, the page answers with
  * `{type:"session_token", sessionToken}`, and the iframe reports `connect`
  * and `close` events (bare or wrapped as `{type:"event", ev}`). On connect the
- * page finishes with a short backoff; meanwhile a slow, bounded backoff poll
- * covers a missed event until the session expires or the window closes. The
- * webhook remains the backup finalizer.
+ * page removes the frame at once (Nango's success screen offers a Finish
+ * button whose click would otherwise land on the app page this one navigates
+ * to), then finishes with a short backoff; meanwhile a slow, bounded backoff
+ * poll covers a missed event until the session expires or the window closes.
+ * The webhook remains the backup finalizer.
  */
 const PAGE_SCRIPT = `(() => {
   const data = JSON.parse(document.getElementById("nango-connect").textContent);
@@ -353,6 +355,9 @@ const PAGE_SCRIPT = `(() => {
   let done = false;
   let closed = false;
   let pollTimer = null;
+  function removeFrame() {
+    if (frame.isConnected) frame.remove();
+  }
   async function complete(retryConflict) {
     if (done) return true;
     try {
@@ -365,6 +370,7 @@ const PAGE_SCRIPT = `(() => {
       const body = await response.json().catch(() => ({}));
       if (body.status === "complete" && typeof body.redirectTo === "string") {
         done = true;
+        removeFrame();
         status.textContent = data.text.done;
         window.location.replace(body.redirectTo);
         return true;
@@ -404,7 +410,7 @@ const PAGE_SCRIPT = `(() => {
     }, delay);
   }
   window.addEventListener("message", (event) => {
-    if (event.origin !== data.connectOrigin || event.source !== frame.contentWindow) return;
+    if (!frame.isConnected || event.origin !== data.connectOrigin || event.source !== frame.contentWindow) return;
     const message = event.data && typeof event.data === "object" ? event.data : null;
     if (!message) return;
     const type = message.type === "event" && message.ev ? message.ev.type : message.type;
@@ -414,6 +420,8 @@ const PAGE_SCRIPT = `(() => {
         data.connectOrigin,
       );
     } else if (type === "connect") {
+      removeFrame();
+      status.textContent = data.text.done;
       void finishAfterConnect();
     } else if (type === "close") {
       closed = true;
@@ -491,7 +499,7 @@ export async function nangoConnectPage(
     sessionToken: session.token,
     expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 30 * 60 * 1000,
     text: {
-      done: "Connected. You can close this window.",
+      done: "Connected. Returning to Opengeni…",
       failed: "The connection could not be completed. Close this window and try again.",
       closed: "Closed without connecting. Close this window and try again.",
     },

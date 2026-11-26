@@ -172,6 +172,7 @@ export type TurnInputOptions = {
   turnId: string;
   /** Frozen initiating-human authority for every model-visible file read. */
   fileAuthority: { accountId: string; subjectId: string | null };
+  /** An earlier execution of this turn was cut off; see turnExecutionInterrupted. */
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
@@ -879,6 +880,19 @@ export function withCurrentUserAttachmentRefs(
     return projected;
   }
   return historyItems;
+}
+
+/**
+ * Whether an earlier execution of this turn may have stopped mid-step, so the
+ * model must check actual state before repeating side effects. Resuming from
+ * an answered approval or question also advances the generation, but that
+ * execution ended cleanly at the pause.
+ */
+export function turnExecutionInterrupted(turn: {
+  executionGeneration: number;
+  resumedFromPause?: boolean | undefined;
+}): boolean {
+  return turn.executionGeneration > 1 && turn.resumedFromPause !== true;
 }
 
 export async function turnInput(
