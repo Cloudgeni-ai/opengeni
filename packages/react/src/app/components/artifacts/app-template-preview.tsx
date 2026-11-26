@@ -25,6 +25,8 @@ export function AppTemplatePreview({
     <div
       className="relative h-52 overflow-hidden rounded-lg border border-border bg-white sm:h-60 dark:brightness-[0.88]"
       data-app-template-preview=""
+      role="img"
+      aria-label={`Preview of ${template.name}`}
       inert
     >
       <PublishedHtmlArtifactFrame

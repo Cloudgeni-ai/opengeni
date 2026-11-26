@@ -116,6 +116,7 @@ export function templatePreviewFetch(
       found = found.slice(0, Math.max(1, Math.min(200, limit)));
       return json(200, {
         records: found,
+        // A sample is a handful of records: one page, no cursor.
         nextCursor: null,
         ...(input.count ? { count } : {}),
       });
