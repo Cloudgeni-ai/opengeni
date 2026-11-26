@@ -187,19 +187,23 @@ function AgentEnable({
     let live = true;
     void (async () => {
       try {
-        const [templates, agents] = await Promise.all([
+        // Readiness for the trigger it turns on (GitHub events need the
+        // GitHub App), read alongside the lists: without a setup's own
+        // trigger the server takes the same default as triggerNameOf.
+        const [templates, agents, readiness] = await Promise.all([
           client.listAgentTemplates(workspaceId),
           client.listAgents(workspaceId).catch(() => null),
+          client
+            .getAgentTemplateReadiness(
+              workspaceId,
+              templateKey,
+              setupTriggerName ? { trigger: setupTriggerName } : undefined,
+            )
+            .catch(() => null),
         ]);
         const template = templates.find((entry) => entry.key === templateKey) ?? null;
         const summary = agents ? agentForSetup(agents, { agentTemplateKey: templateKey }) : null;
         const triggerName = triggerNameOf(setupTriggerName, template);
-        // Readiness for the trigger it turns on: GitHub events need the GitHub App.
-        const readiness = await client
-          .getAgentTemplateReadiness(workspaceId, templateKey, {
-            trigger: triggerName ?? undefined,
-          })
-          .catch(() => null);
         const [agent, tasks] = summary
           ? await Promise.all([
               client.getAgent(workspaceId, summary.id).catch(() => null),

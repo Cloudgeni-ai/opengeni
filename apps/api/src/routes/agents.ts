@@ -83,6 +83,7 @@ import {
   type AgentViewContext,
   type AgentViewer,
   type ApiRouteDeps,
+  agentsReadinessPurposes,
   setupReadinessFor,
   setupReadinessForMany,
   templateTriggerUsesGitHubEvents,
@@ -348,10 +349,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       agents.map((agent) =>
         agent.templateKey ? agentTemplateByKey(agent.templateKey)?.setup : undefined,
       ),
-      agents.map((agent) => {
-        const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
-        return { githubEvents: template ? templateTriggerUsesGitHubEvents(template) : false };
-      }),
+      // GitHub events only for agents whose own triggers run on them.
+      await agentsReadinessPurposes(
+        db,
+        context.grant.workspaceId,
+        context.grant.subjectId ?? null,
+        agents,
+      ),
     );
     return c.json(
       AgentReadinessListResponse.parse({
@@ -448,11 +452,22 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
     return c.json(
       SetupReadinessResponse.parse({
-        readiness: await setupReadinessFor(readinessDeps, context.grant, template?.setup, {
-          githubEvents: template
-            ? templateTriggerUsesGitHubEvents(template, c.req.query("trigger"))
-            : false,
-        }),
+        readiness: await setupReadinessFor(
+          readinessDeps,
+          context.grant,
+          template?.setup,
+          // A named trigger (Enable), else the agent's own triggers.
+          template && c.req.query("trigger")
+            ? { githubEvents: templateTriggerUsesGitHubEvents(template, c.req.query("trigger")) }
+            : ((
+                await agentsReadinessPurposes(
+                  db,
+                  context.grant.workspaceId,
+                  context.grant.subjectId ?? null,
+                  [agent],
+                )
+              )[0] ?? {}),
+        ),
       }),
     );
   });

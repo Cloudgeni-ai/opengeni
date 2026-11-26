@@ -23,6 +23,7 @@ import {
   type AgentTemplate,
   type CapabilityCatalogItem,
   type ReadyMadeSetup,
+  type ScheduledTask,
   type SetupConnection,
   type SetupConnectionFacts,
   type SetupMissing,
@@ -36,6 +37,7 @@ import type { Settings } from "@opengeni/config";
 import {
   getAgent,
   getEventSource,
+  listScheduledTasks,
   hasAuditableGitHubInstallationAuthority,
   listGitHubInstallationAccessForWorkspace,
   type Database,
@@ -384,6 +386,48 @@ export async function eventTriggersUseGitHub(
     if (source?.kind === "github") return true;
   }
   return false;
+}
+
+/**
+ * What each agent's readiness is for: GitHub events when any of its own
+ * triggers here runs on them; with no trigger yet, the one Enable turns on
+ * by default. So a Bug fixer with only a schedule and the person's own
+ * GitHub reads as ready. One read of the workspace's triggers for all.
+ */
+export async function agentsReadinessPurposes(
+  db: Database,
+  workspaceId: string,
+  viewerSubjectId: string | null,
+  agents: readonly { id: string; templateKey?: string | null | undefined }[],
+): Promise<SetupCheckPurpose[]> {
+  const templated = agents.filter((agent) => agent.templateKey);
+  if (templated.length === 0) return agents.map(() => ({ githubEvents: false }));
+  const wanted = new Set(templated.map((agent) => agent.id));
+  const tasks =
+    templated.length === 1
+      ? await listScheduledTasks(db, workspaceId, 100, 0, undefined, viewerSubjectId, {
+          agentId: templated[0]!.id,
+        })
+      : await listScheduledTasks(db, workspaceId, 500, 0, undefined, viewerSubjectId);
+  const triggersByAgent = new Map<string, ScheduledTask[]>();
+  for (const task of tasks) {
+    const agentId = task.agentConfig.agentId;
+    if (!agentId || !wanted.has(agentId)) continue;
+    triggersByAgent.set(agentId, [...(triggersByAgent.get(agentId) ?? []), task]);
+  }
+  return await Promise.all(
+    agents.map(async (agent) => {
+      const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
+      if (!template) return { githubEvents: false };
+      const own = triggersByAgent.get(agent.id);
+      if (!own?.length) return { githubEvents: templateTriggerUsesGitHubEvents(template) };
+      for (const task of own) {
+        if (await eventTriggersUseGitHub(db, workspaceId, task.events?.triggers))
+          return { githubEvents: true };
+      }
+      return { githubEvents: false };
+    }),
+  );
 }
 
 /** Counts readiness checks that couldn't run, so an outage shows (the API wires it). */

@@ -8,18 +8,25 @@ import { testSettings } from "@opengeni/testing/settings";
 // only after the agent is known to be the caller's to use. The refusal itself
 // is covered against a real database (apps/api agent-setup-readiness-postgres).
 const asked: (string | null | undefined)[] = [];
+const askedAs: (string | null | undefined)[] = [];
 const actual = await import("../src/domain/ready-made-setup-readiness");
 mock.module("../src/domain/ready-made-setup-readiness", () => ({
   ...actual,
-  requireAgentTriggerReady: async (_deps: unknown, _grant: unknown, agentId: string | null) => {
+  requireAgentTriggerReady: async (
+    _deps: unknown,
+    checkedAs: { subjectId?: string | null },
+    agentId: string | null,
+  ) => {
     asked.push(agentId);
+    askedAs.push(checkedAs.subjectId);
     throw new HTTPException(409, {
       message: "Connect GitHub to turn this on.",
       cause: { code: "agent_setup_incomplete", missing: [] },
     });
   },
 }));
-const { createValidatedScheduledTask } = await import("../src/domain/scheduled-tasks");
+const { createValidatedScheduledTask, resumeScheduledTaskAsAdmin } =
+  await import("../src/domain/scheduled-tasks");
 const { agentTriggerTurnsOn } = actual;
 
 const grant: AccessGrant = {
@@ -97,4 +104,27 @@ test("an edit is checked when it turns the trigger on or points an active one at
   expect(agentTriggerTurnsOn({ ...base, previousStatus: "active", nextStatus: "paused" })).toBe(
     false,
   );
+});
+
+test("an admin turning someone's trigger back on is checked against the owner's connections", async () => {
+  asked.length = 0;
+  askedAs.length = 0;
+  const existing = {
+    id: "33333333-3333-4333-8333-333333333333",
+    workspaceId: grant.workspaceId,
+    status: "paused",
+    ownerSubjectId: "user:owner",
+    agentConfig: { agentId },
+    events: null,
+  } as never;
+  await expect(
+    resumeScheduledTaskAsAdmin(
+      {} as never,
+      { ...grant, subjectId: "user:admin" },
+      existing,
+      testSettings(),
+    ),
+  ).rejects.toMatchObject({ status: 409 });
+  // Runs use the owner's access, so their connections count, not the admin's.
+  expect(askedAs).toEqual(["user:owner"]);
 });

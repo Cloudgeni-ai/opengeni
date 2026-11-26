@@ -835,12 +835,16 @@ The App counts as connected only when it is fully configured and its
 binding is active, as the GitHub integration page reads it (the API reads
 the installation live; core's trigger gate reads the stored binding). The
 readiness reads say which trigger with `?trigger=<name>` (SDK
-`getAgentTemplateReadiness(..., { trigger })`); without it, the one Enable
-turns on by default (the first one-click suggestion, else the first). The
+`getAgentTemplateReadiness(..., { trigger })`); without it, an agent's
+reads follow its own triggers (GitHub events only when one runs on them,
+`agentsReadinessPurposes`), and a template's, or an agent with no trigger
+yet, the one Enable turns on by default (the first one-click suggestion,
+else the first). The
 check lives in core (`packages/core/src/domain/ready-made-setup-readiness.ts`):
 `createValidatedScheduledTask`, `validatedScheduledTaskUpdate` and
 `resumeScheduledTaskAsAdmin` run it, so every path (the API, Opengeni's own
-tools, app sync, an admin's resume) is covered, and a trigger's own event
+tools, app sync, an admin's resume, checked against the owner's
+connections since runs use the owner's access) is covered, and a trigger's own event
 sources decide whether it runs on GitHub events. Creating an active trigger,
 turning one on, or pointing an active one at another agent, when that
 ready-made agent's required connections aren't on, is a 409 with
