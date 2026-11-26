@@ -33,15 +33,16 @@ const escapeHtml = (value: string) =>
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 /** One display line: user-chosen names must not inject headers, lines or
- * direction overrides. Truncation keeps whole code points. */
+ * direction overrides. Truncation keeps whole visible characters. */
+const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
 const displayName = (value: string | null | undefined, max: number) => {
   const clean = (value ?? "")
     .replace(/[\p{Cc}\p{Zl}\p{Zp}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
-  const points = Array.from(clean);
-  return points.length > max
-    ? `${points
+  const characters = Array.from(graphemes.segment(clean), (part) => part.segment);
+  return characters.length > max
+    ? `${characters
         .slice(0, max - 1)
         .join("")
         .trimEnd()}…`

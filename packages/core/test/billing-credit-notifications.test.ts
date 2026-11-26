@@ -45,7 +45,7 @@ test("unusual spend names the organization, non-production host and top spend gr
   expect(result.html).toContain("<li>Other usage: $0.02</li>");
 });
 
-test("names truncate on whole code points and keep joined emoji", () => {
+test("names truncate on whole visible characters and keep joined emoji", () => {
   const family = "👩‍👩‍👧";
   const result = billingCreditEmail({
     kind: "low_balance",
@@ -53,15 +53,18 @@ test("names truncate on whole code points and keep joined emoji", () => {
     sender: "sender@example.test",
     email: "owner@example.test",
     billingUrl: "https://app.test/billing",
-    organizationName: `${family}\u202E${"😀".repeat(100)}`,
+    organizationName: `${family}\u202E${family.repeat(100)}`,
     spend: {
       windowHours: 24,
       workspaces: [{ kind: "workspace", workspaceId: null, name: "x", spendMicros: 1 }],
     },
   });
-  expect(result.subject.startsWith(`General credits are low in ${family} 😀`)).toBe(true);
+  expect(result.subject.startsWith(`General credits are low in ${family} ${family}`)).toBe(true);
   expect(result.subject).not.toContain("\u202E");
-  expect(result.subject.endsWith("😀…")).toBe(true);
+  // The cut lands between whole family emoji, never inside one.
+  expect(result.subject.endsWith(`${family}…`)).toBe(true);
+  // 79 kept characters (78 whole emoji and a space), then the ellipsis.
+  expect(result.subject.split(family)).toHaveLength(79);
   expect(result.text).toContain("Top workspaces in the last 24 hours:\n- x: $0.00");
 });
 
