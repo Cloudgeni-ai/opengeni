@@ -323,6 +323,60 @@ describe("free compute bounds (real PostgreSQL)", () => {
     expect((await refusal(acquire(modal, "direct"))).reason).toBe("running");
   }, 60_000);
 
+  test("waking a sleeping compute box no turn holds is admitted like a new box", async () => {
+    const org = await organization({ plan: "free" });
+    const [first, second] = [crypto.randomUUID(), crypto.randomUUID()];
+    const holderOf = (group: string) => `direct-${group}`;
+    for (const group of [first, second]) {
+      expect(
+        (await acquire(org, "direct", { group, holderId: holderOf(group), backend: "compute" }))
+          .role,
+      ).toBe("spawner");
+      await warm(org, group);
+    }
+    const asleep = (group: string, value: boolean) =>
+      admin`update sandbox_leases set compute_asleep_since = ${value ? admin`now()` : null}
+        where workspace_id = ${org.workspaceId} and sandbox_group_id = ${group}`;
+    await asleep(first, true);
+    await asleep(second, true);
+    // One new box runs; the budget of two has room for one wake.
+    expect((await acquire(org, "turn")).role).toBe("spawner");
+    const turnHolder = `turn-${crypto.randomUUID()}`;
+    expect(
+      (await acquire(org, "turn", { group: first, holderId: turnHolder, backend: "compute" })).role,
+    ).toBe("attached");
+    await asleep(first, false);
+    // At the limit, a chat that would wake the other sleeping box waits, and
+    // any other new holder is refused.
+    expect(await acquire(org, "turn", { group: second, backend: "compute" })).toMatchObject({
+      role: "fenced",
+      reason: "organization_sandbox_capacity",
+      organizationBoxLimit: 2,
+    });
+    const refused = await refusal(acquire(org, "direct", { group: second, backend: "compute" }));
+    expect([refused.reason, refused.limit]).toEqual(["running", 2]);
+    // A holder the box already has replays without being counted again.
+    expect(
+      (
+        await acquire(org, "direct", {
+          group: second,
+          holderId: holderOf(second),
+          backend: "compute",
+        })
+      ).role,
+    ).not.toBe("fenced");
+    // A box a turn holds is in use even while its sandbox naps: joining it
+    // adds no running box, even at the limit.
+    await asleep(first, true);
+    expect((await acquire(org, "direct")).role).toBe("spawner");
+    expect(
+      (await refusal(acquire(org, "direct", { group: second, backend: "compute" }))).reason,
+    ).toBe("running");
+    expect((await acquire(org, "direct", { group: first, backend: "compute" })).role).toBe(
+      "attached",
+    );
+  }, 60_000);
+
   describe("a plan-less organization", () => {
     // With subscription plans on, a new self-serve organization has no plan
     // row until subscription maintenance enrolls it in Free, so it is bounded

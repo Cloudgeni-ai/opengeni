@@ -22,9 +22,11 @@
 --   sandbox_fleet_warm_boxes_v1          the warm count fleet pressure reads
 --                                        (1492)
 --
--- Waking a sleeping box is not an election (it is already warm), so the
--- limits keep bounding new boxes, as before; a woken box counts again from
--- the moment the gateway records it awake.
+-- A woken box counts again from the moment the gateway records it awake, and
+-- the runtime admits waking one like a new box (acquireLease), so the limits
+-- still bound how many boxes run. A draining compute lease with
+-- compute_asleep_since set is a sleeping box being ended, not a running one,
+-- so the running count leaves it out too.
 --
 -- Rolling: read-only definers keep their signatures and grants; the previous
 -- release calls them unchanged and only gets lower counts.
@@ -78,7 +80,7 @@ BEGIN
         FROM sandbox_leases lease
         WHERE lease.account_id = p_account AND lease.workspace_id = member.id
           AND lease.id IS DISTINCT FROM p_exclude_lease
-          -- A sleeping compute sandbox runs nothing (1566).
+          -- A sleeping compute sandbox runs nothing (1572).
           AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL);
         viewer_only := viewer_only + part_viewer_only;
         subject_viewer_only := subject_viewer_only + part_subject;
@@ -122,7 +124,7 @@ BEGIN
       WHERE lease.liveness IN ('warming', 'warm')
         AND lease.compute_unpaid
         AND lease.backend <> 'selfhosted'
-        -- A sleeping compute sandbox runs nothing (1566).
+        -- A sleeping compute sandbox runs nothing (1572).
         AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL)
         AND lease.id IS DISTINCT FROM p_exclude_lease;
 
@@ -187,7 +189,7 @@ BEGIN
       FROM sandbox_leases lease
       WHERE lease.liveness IN ('warming', 'warm')
         AND lease.backend <> 'selfhosted'
-        -- A sleeping compute sandbox runs nothing (1566).
+        -- A sleeping compute sandbox runs nothing (1572).
         AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL);
 
       IF opened = 1 THEN

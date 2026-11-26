@@ -8,6 +8,7 @@ import {
 } from "@opengeni/config";
 import {
   acquireLease as acquireLeaseUnscoped,
+  commitWarmingToWarm,
   createDb,
   readSandboxFleetPressure,
   readSandboxUnpaidFleet,
@@ -438,6 +439,33 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
     expect(await unpaidRunning()).toBe(runningBefore);
     resetSandboxFleetState();
     expect((await readSandboxFleetPressure(db, fleet)).warmBoxes).toBe(warmBefore);
+    // Waking it adds an unpaid running box again, so the cap is checked.
+    await commitWarmingToWarm(db, {
+      accountId: unpaid.accountId,
+      workspaceId: unpaid.workspaceId,
+      sandboxGroupId: group,
+      expectedEpoch: 0,
+      instanceId: `box-${group}`,
+      leaseTtlMs: 90_000,
+    });
+    await admin`update sandbox_leases set compute_asleep_since = now()
+      where workspace_id = ${unpaid.workspaceId} and sandbox_group_id = ${group}`;
+    const full = { unpaidRunningBoxes: await unpaidRunning() };
+    resetSandboxFleetState();
+    expect(
+      (await refusal(acquire(unpaid, "direct", full, { group, backend: "compute" }))).reason,
+    ).toBe("fleet_busy");
+    resetSandboxFleetState();
+    expect(
+      (
+        await acquire(
+          unpaid,
+          "direct",
+          { unpaidRunningBoxes: full.unpaidRunningBoxes + 1 },
+          { group, backend: "compute" },
+        )
+      ).role,
+    ).toBe("attached");
   }, 120_000);
 
   test("self-hosted boxes never count toward fleet pressure", async () => {
