@@ -74791,6 +74791,108 @@ export async function renewSandboxAgentLink(
   });
 }
 
+/** The most claims one batched renewal statement takes. */
+export const SANDBOX_AGENT_LINK_RENEW_BATCH_MAX = 500;
+
+/**
+ * RENEW many open link sessions' claims in one workspace with one statement,
+ * the batched form of {@link renewSandboxAgentLink} with the same decision per
+ * claim. The gateway renews every open session every few seconds; one
+ * transaction per session made a fleet of sleeping sandboxes the largest
+ * write load on the database. Rows are locked in id order, so two batches
+ * that overlap (a hand-over between replicas) cannot deadlock. Results come
+ * back in the order of `claims`.
+ */
+export async function renewSandboxAgentLinks(
+  db: Database,
+  input: {
+    workspaceId: string;
+    leaseMs: number;
+    claims: ReadonlyArray<Omit<SandboxAgentLinkInput, "workspaceId">>;
+  },
+): Promise<Array<{ renewed: true } | { renewed: false; code: SandboxAgentLinkEnd }>> {
+  if (input.claims.length === 0) return [];
+  if (input.claims.length > SANDBOX_AGENT_LINK_RENEW_BATCH_MAX) {
+    throw new Error(`at most ${SANDBOX_AGENT_LINK_RENEW_BATCH_MAX} claims per renewal batch`);
+  }
+  const seen = new Set<string>();
+  for (const claim of input.claims) {
+    assertSandboxAgentLinkInput({ ...claim, workspaceId: input.workspaceId }, input.leaseMs);
+    if (seen.has(claim.agentId)) throw new Error("a renewal batch names an agent twice");
+    seen.add(claim.agentId);
+  }
+  const agentIds = input.claims.map((claim) => claim.agentId);
+  const epochs = input.claims.map((claim) => claim.epoch);
+  const instances = input.claims.map((claim) => claim.connectionInstanceId);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // As in renewSandboxAgentLink: lock first, then sample time per row, so a
+    // contended lock never shortens the lease it grants.
+    const rows = await rawRows<{ agentId: string; renewed: boolean; code: SandboxAgentLinkEnd }>(
+      scopedDb,
+      sql`
+        with claim as materialized (
+          select agent_id, epoch, connection_instance_id
+          from unnest(
+            ${new Param(agentIds)}::uuid[],
+            ${new Param(epochs)}::bigint[],
+            ${new Param(instances)}::text[]
+          ) as claim(agent_id, epoch, connection_instance_id)
+        ), locked as materialized (
+          select e.id, e.kind, e.status, e.link_epoch, e.connection_instance_id,
+            e.connection_lease_expires_at
+          from enrollments e
+          join claim on claim.agent_id = e.id
+          where e.workspace_id = ${input.workspaceId}
+          order by e.id
+          for update of e
+        ), checked as materialized (
+          select claim.agent_id, locked.id as locked_id,
+            locked.connection_lease_expires_at,
+            case
+              when locked.id is null then 'revoked'
+              when locked.kind <> 'sandbox' or locked.status <> 'active' then 'revoked'
+              when locked.link_epoch > claim.epoch then 'superseded'
+              when locked.connection_instance_id is distinct from claim.connection_instance_id
+                then 'lost'
+              else null
+            end as refusal,
+            date_trunc('milliseconds', clock_timestamp()) as renewed_at
+          from claim
+          left join locked on locked.id = claim.agent_id
+        ), updated as (
+          update enrollments e set
+            connection_lease_expires_at = greatest(
+              case when isfinite(checked.connection_lease_expires_at)
+                -- Match Date's upper bound after its millisecond truncation.
+                and date_trunc('milliseconds', checked.connection_lease_expires_at)
+                  <= '275760-09-13 00:00:00+00'::timestamptz
+                then date_trunc('milliseconds', checked.connection_lease_expires_at)
+                else null end,
+              checked.renewed_at + ${input.leaseMs} * interval '1 millisecond'
+            ),
+            updated_at = checked.renewed_at
+          from checked
+          where e.id = checked.locked_id and e.workspace_id = ${input.workspaceId}
+            and checked.refusal is null
+          returning e.id
+        )
+        select checked.agent_id::text as "agentId",
+          (updated.id is not null) as renewed,
+          coalesce(checked.refusal, 'revoked') as code
+        from checked
+        left join updated on updated.id = checked.agent_id
+      `,
+    );
+    const byAgent = new Map(rows.map((row) => [row.agentId, row]));
+    return input.claims.map((claim) => {
+      const row = byAgent.get(claim.agentId);
+      return row?.renewed
+        ? { renewed: true as const }
+        : { renewed: false as const, code: row?.code ?? "revoked" };
+    });
+  });
+}
+
 /** How long after its host reported a hand-off of a compute sandbox it may
  * still be refusing wakes. A host refuses them for at most two minutes of a
  * hand-off; a wake later than that cancels the hand-off and the sandbox runs

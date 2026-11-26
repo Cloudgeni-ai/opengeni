@@ -55,6 +55,13 @@ export type ComputeAgentLinkStore = {
   renew(
     input: ComputeAgentLinkClaim,
   ): Promise<{ renewed: true } | { renewed: false; code: ClosedCode }>;
+  /** Renew many claims of one workspace at once, with the same answer per
+   * claim as `renew`, in the order given. The gateway renews every open
+   * session each tick through this, so a large fleet costs a few database
+   * statements per tick rather than one transaction per sandbox. */
+  renewMany(
+    input: ReadonlyArray<ComputeAgentLinkClaim>,
+  ): Promise<Array<{ renewed: true } | { renewed: false; code: ClosedCode }>>;
   release(input: ComputeAgentLinkClaim): Promise<void>;
   /** Record that the session's sandbox fell asleep or woke, for metering its
    * awake time, and whether its host is handing it off, which keeps it from
@@ -122,9 +129,14 @@ const RELAY_REFRESH_BEFORE_MS = 10 * 60_000;
 /** The claim's lease runs on the database clock; a session's authority ends
  * this much before the lease would by the gateway's own clock. */
 const LEASE_CLOCK_ALLOWANCE_MS = 2_000;
-/** Renewals run this many at a time, so a large fleet spreads its database
- * load instead of opening every transaction at once. */
+/** Relay and power upkeep runs for this many sessions at a time, so a large
+ * fleet spreads its load instead of starting every call at once. */
 const RENEW_CONCURRENCY = 16;
+/** Claims per batched renewal: one statement renews up to this many of one
+ * workspace's sessions. */
+const RENEW_BATCH_SIZE = 250;
+/** Batched renewals in flight at once. */
+const RENEW_BATCH_CONCURRENCY = 4;
 /** Room for a frame's JSON header inside one WebSocket message. */
 const FRAME_HEADER_ALLOWANCE = 64 * 1024;
 const MAX_SUBSCRIPTIONS_PER_SESSION = 1024;
@@ -364,11 +376,11 @@ export class ComputeAgentGateway {
         link.keepAlive(now);
         sessions.push(...link.openSessions());
       }
+      await this.renewAll(sessions);
       let next = 0;
       const worker = async () => {
         while (next < sessions.length) {
           const session = sessions[next++]!;
-          await this.renew(session);
           await this.refreshRelay(session);
           await this.syncPower(session);
         }
@@ -381,30 +393,64 @@ export class ComputeAgentGateway {
     }
   }
 
-  private async renew(session: Session): Promise<void> {
-    if (session.state !== "open" || session.renewing) return;
-    session.renewing = true;
+  /** Renew the claims of `sessions` in batches of one workspace each. */
+  private async renewAll(sessions: readonly Session[]): Promise<void> {
+    const byWorkspace = new Map<string, Session[]>();
+    for (const session of sessions) {
+      if (session.state !== "open" || session.renewing) continue;
+      const group = byWorkspace.get(session.claim.workspaceId);
+      if (group) group.push(session);
+      else byWorkspace.set(session.claim.workspaceId, [session]);
+    }
+    const batches: Session[][] = [];
+    for (const group of byWorkspace.values()) {
+      for (let start = 0; start < group.length; start += RENEW_BATCH_SIZE) {
+        batches.push(group.slice(start, start + RENEW_BATCH_SIZE));
+      }
+    }
+    let next = 0;
+    const worker = async () => {
+      while (next < batches.length) await this.renewBatch(batches[next++]!);
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(RENEW_BATCH_CONCURRENCY, batches.length) }, worker),
+    );
+  }
+
+  private async renewBatch(batch: readonly Session[]): Promise<void> {
+    const sessions = batch.filter((session) => session.state === "open" && !session.renewing);
+    if (sessions.length === 0) return;
+    for (const session of sessions) session.renewing = true;
     const startedAtMs = this.now();
     try {
-      const result = await this.options.store.renew(session.claim);
-      if (!result.renewed) {
-        if (session.state === "open") {
-          session.link.end(session, result.code, closedMessage(result.code));
-        }
-        return;
+      const results = await this.options.store.renewMany(sessions.map((session) => session.claim));
+      if (results.length !== sessions.length) {
+        throw new Error("renewal answered a different number of claims");
       }
-      session.leaseDeadlineMs = Math.max(session.leaseDeadlineMs, this.leaseDeadline(startedAtMs));
+      sessions.forEach((session, index) => {
+        const result = results[index]!;
+        if (!result.renewed) {
+          if (session.state === "open") {
+            session.link.end(session, result.code, closedMessage(result.code));
+          }
+          return;
+        }
+        session.leaseDeadlineMs = Math.max(
+          session.leaseDeadlineMs,
+          this.leaseDeadline(startedAtMs),
+        );
+      });
     } catch {
       // The lease outlives several missed renewals and the next tick retries;
       // once the last confirmed lease runs out the session ends.
       this.options.logger?.warn("compute gateway: a session renewal failed", {
         errorCode: "compute_link_renew_failed",
-        workspaceId: session.claim.workspaceId,
-        agentId: session.claim.agentId,
+        workspaceId: sessions[0]!.claim.workspaceId,
+        sessions: sessions.length,
       });
-      this.authorized(session);
+      for (const session of sessions) this.authorized(session);
     } finally {
-      session.renewing = false;
+      for (const session of sessions) session.renewing = false;
     }
   }
 
