@@ -360,6 +360,11 @@ export type ProviderTerminationOutcome = {
   /** True only when a definitive provider NotFound proved the cloud box had
    *  already vanished before this drain could capture its workspace. */
   providerMissingBeforeCapture: boolean;
+  /** A definitive provider NotFound proved the box was already gone before
+   *  this drain stopped it, after its workspace was published (or discarded)
+   *  by an earlier attempt. Not a workspace loss. Nothing was stopped, so no
+   *  stop cutoff is stamped and no time after the last meter tick is charged. */
+  providerGoneBeforeStop?: boolean;
   /** The drain stopped the box itself after its snapshots kept failing, so
    *  the box's changes since its last save are lost (reported, with
    *  `providerMissingBeforeCapture`, as a loss before capture). */
@@ -5509,11 +5514,15 @@ async function terminateDrainableBox(
   // finish their usage at logical detach without touching customer compute.
   // A managed instance that was stopped without its callback must fail closed.
   // A box the drain stopped itself after failed saves ran until that stop.
+  // A box already gone before an attempt resuming a published (or discarded)
+  // teardown was never stopped by it: like a loss before capture, it has no
+  // stop cutoff and its unknown end is not charged. Requiring a cutoff there
+  // threw on every reaper tick and kept the lease draining for good.
   const providerMissingDuringStop =
     providerMissingBeforeCapture ||
     (typeof termination !== "boolean" &&
-      termination.providerMissingBeforeCapture &&
-      !captureAbandoned);
+      ((termination.providerMissingBeforeCapture && !captureAbandoned) ||
+        termination.providerGoneBeforeStop === true));
   if (!stopCutoffMarked && !providerMissingDuringStop) {
     if (managedProvider && lease.instanceId) {
       throw new Error("managed sandbox stopped without a warm usage cutoff");
@@ -6074,10 +6083,10 @@ export async function terminateProviderBox(
       observability.info("sandbox reaper: drainable box already gone before workspace capture", {
         ...logIdentity,
       });
-      return {
-        terminated: true,
-        providerMissingBeforeCapture: captureDisposition === "capture_required",
-      };
+      // A published (or discarded) workspace is not lost with its box.
+      return captureDisposition === "capture_required"
+        ? { terminated: true, providerMissingBeforeCapture: true }
+        : { terminated: true, providerMissingBeforeCapture: false, providerGoneBeforeStop: true };
     }
     // Re-throw a non-NotFound resume failure so the caller SKIPS (the lease stays
     // draining for the next sweep) — never cold a box we could not prove is gone.

@@ -801,6 +801,7 @@ describe("observability", () => {
         causeFenceCode: "admission_fenced",
         causeSqlState: "40P01",
         causeFingerprint: "m_0123456789",
+        causeClass: "LostProviderCommandSessionsChangedError",
         correlationId: "00000000-0000-4000-8000-000000000009",
         processId,
         error: sentinel,
@@ -815,6 +816,7 @@ describe("observability", () => {
         causeName: sentinel,
         causeFenceCode: sentinel,
         causeFingerprint: sentinel,
+        causeClass: sentinel,
       });
       obs.warn("unrelated failure", {
         errorClass: "SnapshotOperationError",
@@ -843,6 +845,7 @@ describe("observability", () => {
       causeFenceCode: "admission_fenced",
       causeSqlState: "40P01",
       causeFingerprint: "m_0123456789",
+      causeClass: "LostProviderCommandSessionsChangedError",
       correlationId: "00000000-0000-4000-8000-000000000009",
     });
     const all = observed.join(" ");
@@ -856,6 +859,7 @@ describe("observability", () => {
       "causeName",
       "causeFenceCode",
       "causeFingerprint",
+      "causeClass",
     ])
       expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
     expect(JSON.parse(observed[2]!)).not.toHaveProperty("causeFenceCode");

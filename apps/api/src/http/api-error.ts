@@ -61,6 +61,19 @@ export class ApiHttpError extends HTTPException {
 }
 
 /**
+ * The `Retry-After` seconds an error names in `details.retryAfterSeconds`
+ * (a sandbox limit, a rate limit), or null. Sent as the standard header too,
+ * so clients that honor it back off instead of retrying at once.
+ */
+export function apiErrorRetryAfterSeconds(error: unknown): number | null {
+  if (!(error instanceof ApiHttpError)) return null;
+  const seconds = error.details?.retryAfterSeconds;
+  return typeof seconds === "number" && Number.isSafeInteger(seconds) && seconds > 0
+    ? seconds
+    : null;
+}
+
+/**
  * A session deleted while the request read it. A request that names that
  * session finds it gone (404); any other request, such as a list whose page
  * included it, read a changing workspace (409). Only a read retries blindly:

@@ -204,6 +204,7 @@ import {
   insufficientCreditsHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
+  apiErrorRetryAfterSeconds,
   databaseContentionHttpError,
   databaseUnavailableHttpError,
   modelPolicyRefusedHttpError,
@@ -3137,6 +3138,10 @@ export function createAppComposition(
     ) {
       c.header("retry-after", "1");
     }
+    // A refusal that names when to retry (a sandbox limit, a rate limit)
+    // says so in the standard header too, for clients that honor it.
+    const retryAfterSeconds = apiErrorRetryAfterSeconds(apiError);
+    if (retryAfterSeconds !== null) c.header("retry-after", String(retryAfterSeconds));
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
