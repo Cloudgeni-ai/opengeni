@@ -120,12 +120,12 @@ export function Showcase({
       <section
         data-get-started-showcase=""
         aria-labelledby="get-started-title"
-        className="grid overflow-hidden rounded-xl border border-border bg-surface lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]"
+        className="grid grid-cols-1 overflow-hidden rounded-xl border border-border bg-surface lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]"
       >
-        <div className="order-2 border-border bg-surface-2 p-6 max-lg:border-t lg:order-1 lg:border-r lg:p-8">
+        <div className="order-2 min-w-0 border-border bg-surface-2 p-6 max-lg:border-t lg:order-1 lg:border-r lg:p-8">
           <SetupExampleCard setup={selected} />
         </div>
-        <div className="order-1 flex flex-col p-6 lg:order-2 lg:p-8">
+        <div className="order-1 flex min-w-0 flex-col p-6 lg:order-2 lg:p-8">
           <h1 id="get-started-title" className="text-xl leading-7 font-semibold text-fg">
             Put agents on your engineering work
           </h1>

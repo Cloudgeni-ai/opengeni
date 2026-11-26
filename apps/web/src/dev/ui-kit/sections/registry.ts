@@ -144,6 +144,7 @@ export const SECTION_KEYS = [
   "page-schedules",
   "page-schedule-form",
   "page-agent-trigger",
+  "page-enable",
   "page-meetings",
   "page-meeting-reminders",
   "page-dictation",
@@ -1079,6 +1080,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Production Starts when section and its Add trigger dialog with an in-memory API fixture.",
     usedOn: "Agents > agent > Starts when",
     load: () => import("./page-agent-trigger"),
+  },
+  {
+    key: "page-enable",
+    group: "Pages",
+    title: "Get started and Enable",
+    purpose:
+      "Production Get started showcase, Enable page and first-run question with an in-memory API fixture.",
+    usedOn: "Get started; Agents and Capabilities > Ready-made",
+    load: () => import("./page-enable"),
   },
   {
     key: "page-models-sharing",

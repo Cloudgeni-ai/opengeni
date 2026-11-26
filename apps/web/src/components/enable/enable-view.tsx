@@ -71,7 +71,7 @@ export interface EnableViewProps {
 function Stepper({ stage }: { stage: EnableStage }) {
   const doneUpTo = stage === "on" ? 3 : stage === "turn-on" ? 1 : 0;
   return (
-    <ol aria-label="Steps" className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2">
+    <ol aria-label="Steps" className="mt-6 flex flex-wrap items-center gap-x-2 gap-y-2 sm:gap-x-3">
       {ENABLE_STEPS.map((entry, index) => {
         const done = index < doneUpTo;
         const current = index === doneUpTo;
@@ -81,9 +81,9 @@ function Stepper({ stage }: { stage: EnableStage }) {
             aria-current={current ? "step" : undefined}
             data-enable-step={entry.key}
             data-state={done ? "done" : current ? "current" : "next"}
-            className="flex items-center gap-3"
+            className="flex items-center gap-2 sm:gap-3"
           >
-            {index > 0 ? <span aria-hidden="true" className="h-px w-8 bg-border" /> : null}
+            {index > 0 ? <span aria-hidden="true" className="h-px w-4 bg-border sm:w-8" /> : null}
             <span className="flex items-center gap-2">
               <span
                 aria-hidden="true"
