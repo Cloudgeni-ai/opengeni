@@ -329,6 +329,40 @@ Provider OAuth keys are per workspace (the workspace is part of the key), as
 those connections are. Reconnecting picks the live row of the provider
 principal before any revoked duplicate.
 
+### Shared provider grants
+
+Some providers end a whole grant (one provider account and one OAuth client)
+when any one of its refresh tokens is revoked or refused: Google ends Gmail,
+Drive, Calendar and a Google Integration together when they use the same
+client, in every workspace and organization. `OAUTH_GRANT_FAMILIES`
+(`packages/db/src/oauth-grant-siblings.ts`) lists these providers: their token
+endpoint origins, provider domains, `providerFamily` and the verified metadata
+keys of the account ID and email. Siblings are matched by family, client and
+account, never by provider domain or `account_identity_key` (which is per
+integration).
+
+- **Disconnect** destroys the stored tokens in the revoke write. Only after it
+  commits, and only when migration 1591's deployment-wide check answers that no
+  other live (not revoked) connection anywhere may hold the grant (the same
+  family, the same or an unknown client, and not provably another account;
+  unknown identity counts as the same account), does
+  `apps/api/src/integrations/oauth-grant-revocation.ts` call the provider's
+  RFC 7009 revocation endpoint. The check returns only yes or no, and the
+  decision is logged without tokens. While the check is not granted, or when it
+  fails, the grant is kept.
+- **A refused refresh** (`invalid_grant`) of such a provider moves every other
+  active connection that provably held the same grant to `needs_reauth` with
+  `SHARED_GRANT_REFUSED_ERROR`: the same token endpoint, the same known client
+  and the same account (Google's account ID when both have one, else the
+  email), saved no later than the refused connection's creation or last
+  refresh, so a connection reconnected after the grant ended is left alone.
+  Each moves with its own version compare-and-set, and the owner hook runs once
+  per moved connection without a turn (no chat of the refused connection
+  carries another owner's notice).
+
+Both definers are created withheld from the runtime role; a later migration
+grants them once the release that knows them is the previous release.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,
