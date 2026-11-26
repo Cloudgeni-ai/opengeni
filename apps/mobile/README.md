@@ -206,3 +206,48 @@ The app signs in to `https://app.opengeni.ai` by default. Point a development
 build at another deployment with `EXPO_PUBLIC_OPENGENI_URL`, or choose
 **Change server** on the sign-in screen. A deployment must allow its web
 origin to reach `/v1` on the same origin, as it does in production.
+
+## Build for the iOS App Store
+
+Build on a Mac with a version of Xcode and the iOS SDK accepted by App Store
+Connect, Node, CocoaPods, and the Bun version in `.bun-version`. Use a clean
+checkout of the exact source revision to release. The native project is
+generated; there is no EAS or Fastlane dependency.
+
+```sh
+# From the repository root:
+bun install --frozen-lockfile --filter '@opengeni/react-native'
+cd apps/mobile
+bun install --frozen-lockfile
+
+# Set in the build shell (no signing secrets in the Expo config):
+export OPENGENI_IOS_APP_STORE=1
+export OPENGENI_IOS_APPLE_TEAM_ID='<distribution-team-id>'
+export OPENGENI_IOS_BUILD_NUMBER='<unused-positive-build-number>'
+export EXPO_PUBLIC_OPENGENI_URL=https://app.opengeni.ai
+CI=1 bun run prebuild:ios:store
+(cd ios && pod install)
+
+# Archive, without uploading. Use a fresh path for each archive.
+xcodebuild -workspace ios/Opengeni.xcworkspace -scheme Opengeni \
+  -configuration Release -destination 'generic/platform=iOS' \
+  -archivePath "$PWD/Opengeni.xcarchive" archive
+```
+
+The marketing version is `expo.version` in `app.json`. Choose a fresh build
+number for every App Store upload; prebuild applies it to both the app and
+the embedded control. Provision `ai.opengeni.app` with Push Notifications
+and Time Sensitive Notifications and `ai.opengeni.app.CallControl` as a
+separate App ID without those capabilities. Use the same team for both
+targets. Export the archive locally using Xcode's App Store Connect distribution
+option, or `xcodebuild -exportArchive` with an `app-store-connect` export
+options plist and the appropriate signing assets for both IDs.
+
+Before upload, verify both signed bundle IDs, team IDs, matching versions, and
+production `aps-environment` on the main app in the exported binary. Inspect
+the generated Xcode privacy report from the archive (including SDK manifests);
+the required-reason declarations do not substitute for App Store Connect's
+data collection and tracking answers. Run the Release app in the simulator
+without Metro, then on a physical device verify real sign-in, notifications,
+and locked-device incoming calls. For production APNs delivery, the public
+server needs APNs credentials for the distribution team (see Notifications).
