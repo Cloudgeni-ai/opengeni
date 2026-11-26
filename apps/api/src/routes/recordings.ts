@@ -99,6 +99,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import {
   createSpeechToTextDeployment,
@@ -1354,6 +1355,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(`${base}/:recordingId/finalize`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
@@ -1500,6 +1502,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(`${base}/:recordingId/transcripts`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingTranscriptRequest);
@@ -1898,6 +1901,7 @@ export function registerRecordingRoutes(
    * single-use credential, never the workspace's key.
    */
   app.post(`${base}/:recordingId/live-session`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);

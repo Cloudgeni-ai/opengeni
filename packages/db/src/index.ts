@@ -1522,6 +1522,7 @@ export * from "./inbox";
 export * from "./vaults";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./ai-processing-consent";
 export * from "./capability-integrations";
 export * from "./integration-bindings";
 import { IntegrationChangeRequiresAdminError } from "./integration-bindings";

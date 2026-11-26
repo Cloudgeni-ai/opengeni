@@ -375,6 +375,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Context, Hono, MiddlewareHandler } from "hono";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
@@ -903,6 +904,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         422,
       );
+    }
+    // A realtime shell admits no turn; the realtime entry points gate provider use separately.
+    if (typeof (payload as { initialMessage?: unknown } | null)?.initialMessage === "string") {
+      await requireAiProcessingConsent(c, deps);
     }
     let session: Session;
     try {
@@ -1926,6 +1931,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "invalid session id" });
     }
@@ -1979,6 +1985,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const sessionId = c.req.param("sessionId");
       const realtimeId = c.req.param("realtimeId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      await requireAiProcessingConsent(c, deps);
       if (
         !z.string().uuid().safeParse(sessionId).success ||
         !z.string().uuid().safeParse(realtimeId).success
@@ -2076,6 +2083,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -2326,6 +2334,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const sessionId = c.req.param("sessionId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -2503,6 +2512,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const realtimeId = c.req.param("realtimeId");
       const connectionId = c.req.param("connectionId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      await requireAiProcessingConsent(c, deps);
       if (
         !z.string().uuid().safeParse(sessionId).success ||
         !z.string().uuid().safeParse(realtimeId).success ||
@@ -2551,6 +2561,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         "sessions:control",
       );
       const grant = authorization.grant;
+      await requireAiProcessingConsent(c, deps);
       const beforeCommit = externalContinuationCommitAuthorizer(authorization);
       const captureLinked = prepareExternalLinkTurnAdmission(authorization);
       if (
@@ -4165,6 +4176,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/context/compact", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
@@ -4612,6 +4624,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/edit", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
@@ -4639,6 +4652,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/steer", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
@@ -4825,6 +4839,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     const parsed = parseRequestBody(SessionRetryRequest, await c.req.json().catch(() => null), {
       status: 400,
       message: "invalid session retry request",
@@ -4853,6 +4868,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       status: 400,
       message: "invalid session control request",
     });
+    if (parsed.action === "resume") await requireAiProcessingConsent(c, deps);
     try {
       const response = await controlHumanSessionWorkstream(
         deps,
@@ -4878,6 +4894,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/steer", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -4930,6 +4947,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft/submit", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -4959,6 +4977,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,

@@ -332,6 +332,19 @@ test("a Free-only person's own sign-in is refused on the direct model API until 
   const credential = await nativeAppCredential(rt, person);
   const asCookie = { cookie: person.cookie };
   const asApp = { authorization: `Bearer ${credential}` };
+  const consentPath = "/v1/me/ai-processing-consent";
+  const state = await rt.app.request(consentPath, { headers: asApp });
+  expect(state.status).toBe(200);
+  const { disclosure } = await state.json();
+  expect(
+    (
+      await rt.app.request(consentPath, {
+        method: "POST",
+        headers: { ...asApp, "content-type": "application/json" },
+        body: JSON.stringify({ version: disclosure.version }),
+      })
+    ).status,
+  ).toBe(200);
 
   // Neither the browser session nor the native app credential spends the
   // Free plan credit; nothing reaches the model.
