@@ -33,7 +33,7 @@ test("unusual spend names the organization, non-production host and top spend gr
   expect(result.subject).not.toMatch(/[\r\n]/);
   expect(result.text).toContain("Sent from staging.app.test.");
   expect(result.text).toContain(
-    "Top workspaces in the last hour:\n- Dev <script>: $17.20\n- Personal workspaces: $0.03\n- Other usage: $0.02",
+    "Top spending in the last hour:\n- Dev <script>: $17.20\n- Personal workspaces: $0.03\n- Other usage: $0.02",
   );
   expect(result.html).not.toContain("<script>");
   expect(result.html).toContain(
@@ -65,7 +65,7 @@ test("names truncate on whole visible characters and keep joined emoji", () => {
   expect(result.subject.endsWith(`${family}…`)).toBe(true);
   // 79 kept characters (78 whole emoji and a space), then the ellipsis.
   expect(result.subject.split(family)).toHaveLength(79);
-  expect(result.text).toContain("Top workspaces in the last 24 hours:\n- x: $0.00");
+  expect(result.text).toContain("Top spending in the last 24 hours:\n- x: $0.00");
 });
 
 test.each([
@@ -88,7 +88,7 @@ test.each([
   expect(result.subject).toBe(subject);
   expect(result.text.startsWith(`${subject}.\n`)).toBe(true);
   expect(result.text).not.toContain("Sent from");
-  expect(result.text).not.toContain("Top workspaces");
+  expect(result.text).not.toContain("Top spending");
 });
 
 test("a missing organization name falls back to generic copy", () => {

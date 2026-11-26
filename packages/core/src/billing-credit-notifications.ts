@@ -37,7 +37,10 @@ const escapeHtml = (value: string) =>
 const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
 const displayName = (value: string | null | undefined, max: number) => {
   const clean = (value ?? "")
-    .replace(/[\p{Cc}\p{Zl}\p{Zp}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]+/gu, " ")
+    .replace(
+      /[\p{Cc}\p{Zl}\p{Zp}\u061C\u200B\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]+/gu,
+      " ",
+    )
     .replace(/\s+/g, " ")
     .trim();
   const characters = Array.from(graphemes.segment(clean), (part) => part.segment);
@@ -109,7 +112,7 @@ export function billingCreditEmail(input: {
     notes.push(
       "Model-scoped promotional and Free-plan credits are separate and may still be available for eligible use.",
     );
-  const heading = `Top workspaces in ${window}:`;
+  const heading = `Top spending in ${window}:`;
   const textBreakdown = workspaces.length
     ? [heading, ...workspaces.map((w) => `- ${workspaceLabel(w)}: ${dollars(w.spendMicros)}`)]
     : [];

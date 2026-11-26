@@ -73,7 +73,8 @@ export async function billingCreditSpendBreakdown(
       select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)
     ), grouped as (
       select case when sh.workspace_id is not null then 'workspace' when w.id is not null then 'personal' else 'other' end as kind,
-        sh.workspace_id,case when sh.workspace_id is not null then left(w.name,81) end as name,sum(s.micros) as micros
+        -- Generous bound only: the email cuts names on whole visible characters.
+        sh.workspace_id,case when sh.workspace_id is not null then left(w.name,1000) end as name,sum(s.micros) as micros
       from spend s left join workspaces w on w.account_id=${input.accountId}::uuid and w.id=s.workspace_id
       left join shared sh on sh.workspace_id=w.id
       group by 1,2,3
