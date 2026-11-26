@@ -354,6 +354,20 @@ are the facts workspace webhooks already send, by the same type names.
   Facts are stamped when written, not when committed, so each read looks
   back 10 minutes and skips events the source already stored; the first read
   only learns where "now" is.
+- **Private events stay with the owner.** Each event's `data.visibility` says
+  whether everyone in the workspace may see it (`workspace`) or only the
+  owner (`private`: their Only me meeting or chat, an Only me App, a member's
+  usage). A run caused by a private event is an Only me chat of the
+  automation's owner, whatever the automation's visibility, like the
+  meeting's own summary chat. An automation that continues one shared chat
+  leaves such events out when it claims them, before batching or the hourly
+  limit, with one skipped run (reason `owner_only_event`) per streak. Others
+  reading the run history see only which event it was, not its title or
+  summary; history stored before this applies counts as private. The
+  owner's own agent still reads their events, as it reads their meetings.
+  The database fences
+  (`guard_session_authority_write`, the generated-session fence) accept that
+  Only me chat only for an occurrence Opengeni marked `ownerOnly`.
 - **Types** are the outbound workspace webhook types
   (`WORKSPACE_WEBHOOK_EVENT_TYPES`) less an explicit exclusion list
   (`session.status.changed`, `session.notification.withdrawn`), so a new
