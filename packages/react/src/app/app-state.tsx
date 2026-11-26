@@ -28,6 +28,7 @@ import {
 } from "./lib/permissions";
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
+import { loadWorkspaceCapabilities } from "./lib/shared-catalog-reads";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
 import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
 import { createWithOpeningContext } from "./lib/message-context";
@@ -44,6 +45,7 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
+import { rememberClientConfigRead } from "../lib/client-config-read";
 import { isTransientServiceFailure } from "../lib/transient-retry";
 import { createQuietRetry } from "./lib/quiet-retry";
 import { claimHumanInputDraftOwner } from "../human-input-draft-store";
@@ -439,6 +441,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
+  // When the bootstrap read `clientConfig` (epoch ms).
+  const clientConfigReadAt = useRef(0);
   const [workspaceConfig, setWorkspaceConfig] = useState<WorkspaceClientConfig | undefined>(
     undefined,
   );
@@ -669,6 +673,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   // navigation and are cleared with it when an identity change replaces it;
   // "Available in" changes re-read them.
   useConsoleSharedQueries(client);
+  // The bootstrap's config read also serves the API client's first contract
+  // check and capability flags, which would otherwise read it again moments later.
+  useEffect(() => {
+    if (clientConfig) rememberClientConfigRead(client, clientConfig, clientConfigReadAt.current);
+  }, [client, clientConfig]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =
@@ -852,6 +861,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         if (cancelled) {
           return;
         }
+        clientConfigReadAt.current = Date.now();
         setClientConfig(config);
         setConfigError(null);
         setModel(config.defaultModel);
@@ -2091,11 +2101,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   const refreshWorkspaceMcpServers = useCallback(
-    async (workspaceId: string, signal?: AbortSignal) => {
+    async (
+      workspaceId: string,
+      signal?: AbortSignal,
+      options?: { reuseRecent?: boolean | undefined },
+    ) => {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
       setWorkspaceMcpCatalogLoadedSuccessfully(false);
-      const requestKey = `${accessKeyVersion}:${workspaceId}`;
+      const reuseRecent = options?.reuseRecent === true;
+      const requestKey = `${accessKeyVersion}:${workspaceId}:${reuseRecent ? "recent" : "fresh"}`;
       try {
         const result = await runCurrentWorkspaceRequest({
           signal,
@@ -2106,7 +2121,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
               runSingleFlight(
                 mcpCatalogRequests.current,
                 requestKey,
-                async () => await client.listCapabilities(workspaceId),
+                // Kept in the client's shared reads, so the composer's
+                // connector list takes this read instead of sending its own.
+                async () => await loadWorkspaceCapabilities(client, workspaceId, { reuseRecent }),
               ),
               client.listApiIntegrations(workspaceId),
             ]),

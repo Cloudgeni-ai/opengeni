@@ -7,10 +7,13 @@ import type {
   OpenGeniClient,
   UpdateChannelRequest,
 } from "@opengeni/sdk";
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useSyncExternalStore } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { channelCacheFor } from "./channel-cache";
 import { useMutationRunner, usePolledValue } from "./internal";
+
+/** A consumer's first read takes a list read this recently by another consumer. */
+const FIRST_READ_REUSE_MS = 10_000;
 
 export type UseChannelsOptions<Client extends ChatClient = OpenGeniClient> =
   ClientOverride<Client> & {
@@ -47,11 +50,21 @@ export function useChannels(
   const { client, workspaceId } = useOpenGeni(options);
   const cache = useMemo(() => channelCacheFor(client, workspaceId), [client, workspaceId]);
   const snapshot = useSyncExternalStore(cache.subscribe, cache.getSnapshot, cache.getSnapshot);
+  // The cache this hook has read once; until then a read may join another's.
+  const readOnce = useRef<object | null>(null);
   const load = useCallback(async () => {
-    const ticket = cache.beginLoad();
-    const channels = await client.listChannels(workspaceId);
-    cache.acceptLoad(ticket, channels);
-    return channels;
+    const first = readOnce.current !== cache;
+    readOnce.current = cache;
+    const shared = first ? cache.recentLoad(FIRST_READ_REUSE_MS) : null;
+    if (shared) return (await shared) as Channel[];
+    const read = (async () => {
+      const ticket = cache.beginLoad();
+      const channels = await client.listChannels(workspaceId);
+      cache.acceptLoad(ticket, channels);
+      return channels;
+    })();
+    cache.trackLoad(read);
+    return await read;
   }, [cache, client, workspaceId]);
   const { loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,

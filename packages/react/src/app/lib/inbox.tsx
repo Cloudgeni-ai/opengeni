@@ -46,6 +46,8 @@ type InboxClient = Pick<ChatClient<OpenGeniClient>, "listInbox"> &
 
 const EMPTY: InboxState = { data: null, error: null, loading: true };
 const NO_INBOX: InboxState = { data: null, error: null, loading: false };
+/** A reader mounting this soon after the last good read shows it without reading again. */
+const INBOX_MOUNT_REUSE_MS = 10_000;
 
 /**
  * Only a person has an inbox: a signed-in person, or a local install's one
@@ -62,6 +64,8 @@ export class InboxStore {
   private inFlight: Promise<void> | null = null;
   private generation = 0;
   private active = true;
+  /** When the shown list was read (epoch ms), or null before the first good read. */
+  private loadedAt: number | null = null;
   private billingReads = new Map<string, Promise<void>>();
   private readBillingIds = new Set<string>();
 
@@ -96,6 +100,7 @@ export class InboxStore {
           return;
         }
         this.set({ data: this.withBillingReads(inboxView(data)), error: null, loading: false });
+        this.loadedAt = Date.now();
       })
       .catch((error: unknown) => {
         // Keep the last good list on a transient failure; the page says so.
@@ -105,6 +110,16 @@ export class InboxStore {
         this.inFlight = null;
       });
     return await this.inFlight;
+  };
+
+  /**
+   * A reader's first read on mount: the rail entry and the Inbox page mount
+   * moments apart, so a list read under `maxAgeMs` ago (or in flight) serves
+   * both. Polls, focus and actions still read anew through `refresh`.
+   */
+  refreshUnlessRecent = async (maxAgeMs: number): Promise<void> => {
+    if (this.loadedAt !== null && this.state.data && Date.now() - this.loadedAt < maxAgeMs) return;
+    return await this.refresh();
   };
 
   /** Retire the old viewer's cache and pending responses before exposing a new viewer. */
@@ -210,7 +225,7 @@ export function useInbox(
       if (document.visibilityState === "hidden") return;
       void store.refresh();
     };
-    refresh();
+    if (document.visibilityState !== "hidden") void store.refreshUnlessRecent(INBOX_MOUNT_REUSE_MS);
     const timer = window.setInterval(refresh, pollMs);
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);

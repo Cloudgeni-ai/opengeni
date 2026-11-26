@@ -12,6 +12,7 @@ import {
   TRANSIENT_RECONNECT_INTERVAL_MS,
   TRANSIENT_RETRY_DELAYS_MS,
 } from "../../lib/transient-retry";
+import { loadConnectionHealthAccounts } from "../../lib/shared-catalog-reads";
 import {
   isLapsedAccount,
   selectedConnectionAccounts,
@@ -110,7 +111,7 @@ export function useConnectionAccounts(
   /** When the last inventory read started, for re-reading a stale one on return. */
   const lastRead = useRef(0);
   const refresh = useCallback(
-    async (quietRetries = true): Promise<ConnectedAccountGroup[] | null> => {
+    async (quietRetries = true, reuseRecent = false): Promise<ConnectedAccountGroup[] | null> => {
       if (scope.current.epoch !== epoch) return null;
       const invocation = scope.current;
       if (invocation.canReadConnections !== true) return null;
@@ -131,6 +132,14 @@ export function useConnectionAccounts(
               invocation.client,
               invocation.session.workspaceId,
               invocation.catalog,
+              undefined,
+              // The client's shared account read, which the composer also uses.
+              async () =>
+                await loadConnectionHealthAccounts(
+                  invocation.client,
+                  invocation.session.workspaceId,
+                  { reuseRecent },
+                ),
             ),
           { shouldContinue: current, delaysMs: quietRetries ? retryDelaysMs : [] },
         );
@@ -169,7 +178,8 @@ export function useConnectionAccounts(
   );
   useEffect(() => {
     const counter = request;
-    void refresh();
+    // The first read may take the composer's, read a moment ago.
+    void refresh(true, true);
     return () => {
       counter.current++;
     };

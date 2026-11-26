@@ -15,6 +15,13 @@ export type ChannelCacheStore = Readonly<{
   beginLoad: () => number;
   acceptLoad: (ticket: number, channels: readonly Channel[]) => void;
   publishCreated: (channel: Channel) => void;
+  /**
+   * The list read in flight, or one accepted under `maxAgeMs` ago, for a
+   * consumer's first read: the rail and the home page mount moments apart and
+   * share it. Polls and refreshes read anew.
+   */
+  recentLoad: (maxAgeMs: number) => Promise<readonly Channel[]> | null;
+  trackLoad: (load: Promise<readonly Channel[]>) => void;
 }>;
 
 const EMPTY_CHANNELS: readonly Channel[] = [];
@@ -55,6 +62,7 @@ export function createChannelCacheStore(): ChannelCacheStore {
   let snapshot = EMPTY_SNAPSHOT;
   let nextLoadTicket = 0;
   let acceptedLoadTicket = 0;
+  let lastLoad: { promise: Promise<readonly Channel[]>; settledAt: number | null } | null = null;
   const pending = new Map<string, PendingChannel>();
   const listeners = new Set<() => void>();
 
@@ -86,6 +94,24 @@ export function createChannelCacheStore(): ChannelCacheStore {
     publishCreated: (channel) => {
       pending.set(channel.id, { channel, committedAfterLoad: nextLoadTicket });
       publish();
+    },
+    recentLoad: (maxAgeMs) => {
+      if (!lastLoad) return null;
+      if (lastLoad.settledAt !== null && Date.now() - lastLoad.settledAt >= maxAgeMs) return null;
+      return lastLoad.promise;
+    },
+    trackLoad: (promise) => {
+      const load = { promise, settledAt: null as number | null };
+      lastLoad = load;
+      promise.then(
+        () => {
+          load.settledAt = Date.now();
+        },
+        () => {
+          // A failure is never shared: the next first read tries again.
+          if (lastLoad === load) lastLoad = null;
+        },
+      );
     },
   };
 }

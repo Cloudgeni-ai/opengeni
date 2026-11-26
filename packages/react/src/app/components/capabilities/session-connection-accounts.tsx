@@ -150,12 +150,13 @@ export async function sessionConnectedAccounts(
   workspaceId: string,
   items: CapabilityCatalogItem[],
   knownConnections?: ConnectionMetadata[],
+  /** How to read the accounts when none are known; a plain read by default. */
+  loadConnections: () => Promise<ConnectionMetadata[]> = async () =>
+    await client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
 ): Promise<ConnectedAccountGroup[]> {
   const native = selectedNativeConnectorRefs(items);
   if (native.length === 0) return [];
-  const connections =
-    knownConnections ??
-    (await client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }));
+  const connections = knownConnections ?? (await loadConnections());
   return connectedAccountGroups(native, connections);
 }
 

@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { useCallback } from "react";
+import { useSharedQuery } from "../../../hooks/shared-query";
+import { billingSummaryQueryKey } from "../../lib/billing-summary-read";
 
 /**
  * What the organization's billing summary says about its credit, so a
@@ -21,38 +23,26 @@ export function useCreditBalance(
   accountId: string | null | undefined,
   canReadBilling: boolean,
 ): { balance: CreditBalance | null; settled: boolean } {
-  const [state, setState] = useState<{
-    key: string | null;
-    balance: CreditBalance | null;
-  }>({ key: null, balance: null });
   const key = accountId && canReadBilling ? accountId : null;
-
-  useEffect(() => {
-    if (!key) return;
-    let active = true;
-    void client
-      .getBilling({ accountId: key })
-      .then((summary) => {
-        if (!active) return;
-        setState({
-          key,
-          balance: {
-            billingEnabled: summary.mode !== "disabled",
-            stripeEnabled: summary.mode === "stripe",
-            someCredit: summary.balance.balanceMicros > 0,
-          },
-        });
-      })
-      .catch(() => {
-        if (active) setState({ key, balance: null });
-      });
-    return () => {
-      active = false;
-    };
-  }, [client, key]);
-
+  // The same read as the rail's credit row, so a page sends one request.
+  const load = useCallback(
+    async () => await client.getBilling({ accountId: key ?? "" }),
+    [client, key],
+  );
+  const summary = useSharedQuery(client, billingSummaryQueryKey(key ?? ""), load, {
+    enabled: key !== null,
+  });
   if (!key) return { balance: null, settled: true };
-  return state.key === key
-    ? { balance: state.balance, settled: true }
-    : { balance: null, settled: false };
+  if (summary.loading) return { balance: null, settled: false };
+  const data = summary.error ? null : summary.data;
+  return {
+    balance: data
+      ? {
+          billingEnabled: data.mode !== "disabled",
+          stripeEnabled: data.mode === "stripe",
+          someCredit: data.balance.balanceMicros > 0,
+        }
+      : null,
+    settled: true,
+  };
 }

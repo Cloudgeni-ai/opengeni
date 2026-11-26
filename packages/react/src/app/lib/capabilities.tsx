@@ -10,6 +10,8 @@ import type {
   SocialConnection,
 } from "../types";
 import { errorMessage } from "@opengeni/contracts/values";
+
+export { loadConnectionHealthAccounts, loadWorkspaceCapabilities } from "./shared-catalog-reads";
 import { sameConnectorProviderDomain } from "@opengeni/contracts/nango";
 
 export type CapabilityFilter = "all" | CapabilityKind;
@@ -687,24 +689,6 @@ function attention(
  * workspace account, or the person's own account turned on in this workspace. */
 function usableHere(connection: ConnectionMetadata): boolean {
   return connection.subjectId === null || connection.turnedOnHere !== false;
-}
-
-/**
- * Read the account inventory `connectionHealth` takes: this workspace's shared
- * accounts and the caller's own accounts from every workspace, inactive ones
- * included for repair. Rejects when the read fails, so callers keep the
- * `loaded` gate.
- */
-export async function loadConnectionHealthAccounts(
-  client: {
-    listOwnConnectionAccounts: (
-      workspaceId: string,
-      options: { includeInactive: boolean },
-    ) => Promise<ConnectionMetadata[]>;
-  },
-  workspaceId: string,
-): Promise<ConnectionMetadata[]> {
-  return await client.listOwnConnectionAccounts(workspaceId, { includeInactive: true });
 }
 
 /**
