@@ -265,6 +265,12 @@ export type WorkspaceRecordingEvent = {
   /** The recording's title and purpose; null once the recording is deleted. */
   title: string | null;
   purpose: string | null;
+  /**
+   * Everyone in the workspace may see the recording: shared with the
+   * workspace when the event happened and still (or since deleted). Anything
+   * else only its owner sees, and a run it causes is an Only me chat.
+   */
+  sharedWithWorkspace: boolean;
 };
 
 export type WorkspaceRecordingEventsRead = {
@@ -300,10 +306,13 @@ export async function listWorkspaceRecordingEventsForSource(
       occurred_at: Date | string;
       title: string | null;
       purpose: string | null;
+      shared: boolean;
     }>(
       tx,
       sql`select event.id, event.recording_id, event.type, event.data, event.occurred_at,
-          recording.title, recording.purpose
+          recording.title, recording.purpose,
+          (event.visibility = 'workspace_shared'
+            and coalesce(recording.visibility, event.visibility) = 'workspace_shared') as shared
         from recording_events event
         left join recordings recording
           on recording.workspace_id = event.workspace_id and recording.id = event.recording_id
@@ -327,6 +336,7 @@ export async function listWorkspaceRecordingEventsForSource(
         occurredAt: asDate(row.occurred_at),
         title: row.title,
         purpose: row.purpose,
+        sharedWithWorkspace: row.shared === true,
       })),
       readAt: asDate(clock!.now),
     };
@@ -355,6 +365,14 @@ export type WorkspaceActivityEvent = {
   /** The App an app.* fact is about (migration 1519), and its title. */
   appId: string | null;
   appTitle: string | null;
+  /**
+   * Everyone in the workspace may see what the fact is about: a chat shared
+   * with the workspace, or a record of an App shared with it that every
+   * member may read. Usage facts are a member's own or for administrators,
+   * so never. Anything else only the reader may see, and a run it causes is
+   * an Only me chat.
+   */
+  sharedWithWorkspace: boolean;
 };
 
 export type WorkspaceActivityEventsRead = {
@@ -399,12 +417,19 @@ export async function listWorkspaceActivityEventsForSource(
       subject_label: string | null;
       site_id: string | null;
       app_title: string | null;
+      shared: boolean;
     }>(
       tx,
       sql`select fact.id, fact.type, fact.occurred_at, fact.created_at, fact.session_id,
           fact.turn_id, fact.subject_id, fact.automation_id, fact.automation_run_id,
           fact.chain_depth, fact.data, chat.title as chat_title, task.name as automation_name,
-          member.subject_label, fact.site_id, app.title as app_title
+          member.subject_label, fact.site_id, app.title as app_title,
+          (case
+            when fact.site_id is not null then coalesce(app.visibility = 'workspace_shared', false)
+              and fact.reader_subject_id is null
+            when fact.session_id is not null then coalesce(chat.visibility = 'workspace_shared', false)
+            else false
+          end) as shared
         from workspace_activity_events fact
         left join sessions chat
           on chat.workspace_id = fact.workspace_id and chat.id = fact.session_id
@@ -443,6 +468,7 @@ export async function listWorkspaceActivityEventsForSource(
         subjectLabel: row.subject_label,
         appId: row.site_id,
         appTitle: row.app_title,
+        sharedWithWorkspace: row.shared === true,
       })),
       readAt: asDate(clock!.now),
     };

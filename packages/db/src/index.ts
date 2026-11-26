@@ -34,7 +34,11 @@ import {
   isActivityXidToken,
   normalizeActivityToken,
 } from "./session-activity-xid";
-import { syncGitHubEventRoutes, wakeScheduledTaskEventSubscriptions } from "./event-triggers";
+import {
+  scheduledTaskRunOwnerOnly,
+  syncGitHubEventRoutes,
+  wakeScheduledTaskEventSubscriptions,
+} from "./event-triggers";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,
@@ -22813,7 +22817,8 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit"
-  | "session_usage_limit";
+  | "session_usage_limit"
+  | "owner_only_event";
 
 /**
  * Record a refused occurrence as an immutable run receipt under its producer
@@ -34139,11 +34144,19 @@ async function createSessionInTransaction(
           // accepted run was admitted for. The capability below re-proves that
           // person may still create Only me chats here.
           const taskOwner = acceptedRun.task.ownerSubjectId;
-          if (
+          // So does a new chat for an event only the owner may see (their
+          // private meeting or chat), whatever the automation's visibility.
+          const onlyMeTask =
             acceptedRun.task.visibility === "private" &&
-            taskOwner &&
             (acceptedRun.task.runMode === "new_session_per_run" ||
-              acceptedRun.task.runMode === "reusable_session") &&
+              acceptedRun.task.runMode === "reusable_session");
+          const ownerOnlyEventRun =
+            !onlyMeTask &&
+            acceptedRun.task.runMode === "new_session_per_run" &&
+            (await scheduledTaskRunOwnerOnly(tx, input.workspaceId, input.scheduledSourceRunId));
+          if (
+            (onlyMeTask || ownerOnlyEventRun) &&
+            taskOwner &&
             acceptedRun.causalHumanSubjectId === taskOwner &&
             acceptedRun.causalHumanAuthority?.subjectId === taskOwner
           )

@@ -16,6 +16,7 @@ import {
   claimEventTriggerDispatch,
   createDb,
   createEventSource,
+  createRecording,
   createScheduledTask,
   createScheduledTaskRun,
   createSession,
@@ -23,6 +24,8 @@ import {
   deleteEventSource,
   enqueueSessionTurn,
   eventOccurrenceProducerKey,
+  eventProducerOwnerOnly,
+  eventSummariesForReader,
   findAppEventSource,
   getEventOccurrenceForRun,
   getEventRunOccurrence,
@@ -39,6 +42,7 @@ import {
   listGitHubEventRoutes,
   listInboundEvents,
   listWorkspaceActivityEventsForSource,
+  listWorkspaceRecordingEventsForSource,
   markEventOccurrenceStarted,
   markScheduledTaskRunFailedIfQueued,
   recordScheduledTaskAdmissionRefusal,
@@ -53,6 +57,7 @@ import {
   getScheduledTaskRevisionAuthority,
   setScheduledTaskEvents,
   updateEventSource,
+  updateRecording,
   updateScheduledTask,
   withWorkspaceRls,
   type DbClient,
@@ -1593,5 +1598,157 @@ describe("Opengeni's own events (migration 1105)", () => {
       eventRetentionSeconds: 2_592_000,
     });
     expect((await facts(space)).map((fact) => fact.type)).toEqual(["turn.failed"]);
+  });
+
+  test("the feed says whether everyone in the workspace may see a chat or usage fact", async () => {
+    const space = await workspace();
+    const bob = await member(space);
+    const bobSource = await listen(space, bob);
+    const privateChat = await chat(space, bob);
+    const sharedChat = await chat(space, bob, "workspace_shared");
+    await append(privateChat, space, "turn.completed", { output: "Private" });
+    await append(sharedChat, space, "turn.completed", { output: "Shared" });
+    await shared!.admin`insert into opengeni_private.workspace_allowance_notifications
+        (account_id, workspace_id, period_key, subject_id, threshold, payload)
+      values (${space.accountId}, ${space.workspaceId}, ${`period-${crypto.randomUUID()}`},
+        ${bob}, 1, ${shared!.admin.json({ used: 10, limit: 10 })})`;
+    const bobSees = await seen(space, bobSource.id, bob);
+    expect(bobSees.map((fact) => [fact.sessionId, fact.sharedWithWorkspace])).toEqual([
+      [privateChat.sessionId, false],
+      [sharedChat.sessionId, true],
+      [null, false],
+      [null, false],
+    ]);
+  });
+
+  test("the feed says whether everyone in the workspace may see a meeting, as it is now", async () => {
+    const space = await workspace();
+    const source = await listen(space);
+    const actor = { workspaceId: space.workspaceId, subjectId: space.subjectId };
+    const meeting = async (title: string, visibility: "private" | "workspace") => {
+      const recordingId = crypto.randomUUID();
+      await createRecording(client.db, {
+        ...actor,
+        accountId: space.accountId,
+        recordingId,
+        title,
+        visibility,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+      });
+      return recordingId;
+    };
+    const privateMeeting = await meeting("Salary talk", "private");
+    const sharedMeeting = await meeting("Standup", "workspace");
+    const madePrivate = await meeting("Hiring plan", "workspace");
+    await updateRecording(client.db, { ...actor, recordingId: madePrivate, visibility: "private" });
+    const read = await listWorkspaceRecordingEventsForSource(client.db, {
+      workspaceId: space.workspaceId,
+      sourceId: source.id,
+      subjectId: space.subjectId,
+      since: new Date(Date.now() - 10 * 60_000),
+      limit: 100,
+    });
+    const sharedOf = new Map(
+      read.events.map((fact) => [fact.recordingId, fact.sharedWithWorkspace] as const),
+    );
+    expect(sharedOf.get(privateMeeting)).toBe(false);
+    expect(sharedOf.get(sharedMeeting)).toBe(true);
+    // Its earlier events were about a shared meeting; it is private now.
+    expect(sharedOf.get(madePrivate)).toBe(false);
+  });
+
+  test("a private event makes its run owner-only; other readers of the history see only which event", async () => {
+    const space = await workspace();
+    const bob = await member(space);
+    const source = await listen(space);
+    // A shared automation of the owner's, listening to their own "This workspace".
+    const automation = await task(space, { owner: space.subjectId });
+    expect(automation.visibility).toBe("workspace");
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: automation.id,
+      triggers: [{ sourceId: source.id, ...everything }],
+    });
+    const transcriptReady = (title: string, visibility: string, secondsAgo: number) =>
+      event("recording.transcript.ready", {
+        occurredAt: new Date(Date.now() - secondsAgo * 1_000),
+        subject: title,
+        summary: `Transcript ready: ${title}`,
+        actor: { kind: "unknown", name: null },
+        data: { visibility, recordingId: crypto.randomUUID(), title },
+      });
+    const occurrenceOf = async (events: StoredEventInput[]) => {
+      await deliver(space, source.id, events);
+      const dispatch = await claimEventTriggerDispatch(client.db, space.workspaceId, automation.id);
+      expect(dispatch.start).toHaveLength(1);
+      const id = dispatch.start[0]!.id;
+      await markEventOccurrenceStarted(client.db, space.workspaceId, id);
+      return (await getEventOccurrenceForRun(client.db, space.workspaceId, id))!;
+    };
+
+    const mixed = await occurrenceOf([
+      transcriptReady("Salary talk", "private", 2),
+      transcriptReady("Standup", "workspace", 1),
+    ]);
+    expect(mixed.summaries.map((summary) => [summary.subject, summary.ownerOnly])).toEqual([
+      ["Salary talk", true],
+      ["Standup", undefined],
+    ]);
+    const mixedKey = eventOccurrenceProducerKey(mixed.id);
+    expect(await eventProducerOwnerOnly(client.db, space.workspaceId, mixedKey)).toBe(true);
+    const history = mixed.summaries;
+    const owner = space.subjectId;
+    expect(
+      eventSummariesForReader(history, { ownerSubjectId: owner, readerSubjectId: bob }),
+    ).toEqual([
+      expect.objectContaining({
+        type: "recording.transcript.ready",
+        ownerOnly: true,
+        subject: null,
+        summary: "",
+        url: null,
+        actor: { kind: "unknown", name: null },
+      }),
+      expect.objectContaining({ subject: "Standup", summary: "Transcript ready: Standup" }),
+    ]);
+    expect(
+      eventSummariesForReader(history, { ownerSubjectId: owner, readerSubjectId: owner }).map(
+        (summary) => summary.subject,
+      ),
+    ).toEqual(["Salary talk", "Standup"]);
+    // A key or service reading the history is not the owner either.
+    expect(
+      eventSummariesForReader(history, { ownerSubjectId: owner, readerSubjectId: null })[0]
+        ?.summary,
+    ).toBe("");
+
+    const sharedOnly = await occurrenceOf([transcriptReady("Retro", "workspace", 1)]);
+    expect(sharedOnly.summaries[0]?.ownerOnly).toBeUndefined();
+    const sharedKey = eventOccurrenceProducerKey(sharedOnly.id);
+    expect(await eventProducerOwnerOnly(client.db, space.workspaceId, sharedKey)).toBe(false);
+    // An event that doesn't say counts as private.
+    const unsaid = await occurrenceOf([
+      event("turn.completed", { actor: { kind: "unknown", name: null }, data: {} }),
+    ]);
+    expect(unsaid.summaries[0]?.ownerOnly).toBe(true);
+  });
+
+  test("only This workspace events can be owner-only", async () => {
+    const space = await workspace();
+    const source = await webhookSource(space, "private");
+    const automation = await task(space, { owner: space.subjectId });
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: automation.id,
+      triggers: [{ sourceId: source.id, ...everything }],
+    });
+    await deliver(space, source.id, [event("deploy", { data: { visibility: "private" } })]);
+    const dispatch = await claimEventTriggerDispatch(client.db, space.workspaceId, automation.id);
+    const occurrence = await getEventOccurrenceForRun(
+      client.db,
+      space.workspaceId,
+      dispatch.start[0]!.id,
+    );
+    expect(occurrence?.summaries[0]?.ownerOnly).toBeUndefined();
   });
 });

@@ -7,6 +7,7 @@ import {
   workspaceDeliveryEvents,
   workspaceEventTypeCatalog,
   workspaceEventTypesNotOffered,
+  workspaceRecordingEvent,
   type WorkspaceActivityFact,
   type WorkspaceRecordingFact,
 } from "../src/domain/event-triggers";
@@ -239,5 +240,67 @@ describe("App data change facts as events", () => {
         "app.sql.changed",
       ]),
     );
+  });
+});
+
+describe("what everyone in the workspace may see", () => {
+  const meeting = (overrides: Partial<WorkspaceRecordingFact> = {}): WorkspaceRecordingFact => ({
+    id: "8b0c7f0e-7777-4c2b-9a51-000000000007",
+    recordingId: "8b0c7f0e-8888-4c2b-9a51-000000000008",
+    type: "recording.transcript.ready",
+    occurredAt: "2026-10-29T12:00:00.000Z",
+    data: { ownerSubjectId: ada, visibility: "workspace" },
+    title: "Salary talk",
+    purpose: "meeting",
+    ...overrides,
+  });
+  const visibilityOf = (recording: WorkspaceRecordingFact) =>
+    workspaceRecordingEvent(recording, ada).data.visibility;
+
+  test("a meeting is workspace only while the workspace may see it", () => {
+    expect(visibilityOf(meeting({ sharedWithWorkspace: true }))).toBe("workspace");
+    // Made private since the event: the feed's current view wins over the event's data.
+    expect(visibilityOf(meeting({ sharedWithWorkspace: false }))).toBe("private");
+    // A body stored before the feed said so falls back to the event's own visibility.
+    expect(visibilityOf(meeting())).toBe("workspace");
+    expect(visibilityOf(meeting({ data: { ownerSubjectId: ada, visibility: "private" } }))).toBe(
+      "private",
+    );
+  });
+
+  test("chats, Apps and usage are private unless the feed says everyone may see them", () => {
+    const visibility = (value: WorkspaceActivityFact) =>
+      workspaceActivityEvent(value, ada).data.visibility;
+    expect(visibility(fact({ sharedWithWorkspace: true }))).toBe("workspace");
+    expect(visibility(fact())).toBe("private");
+    // A fact's own data never claims a wider audience than the feed gave it.
+    expect(visibility(fact({ data: { visibility: "workspace" } }))).toBe("private");
+    const app = fact({ type: "app.record.added", sessionId: null, appId: "app", data: {} });
+    expect(visibility(app)).toBe("private");
+    expect(visibility({ ...app, sharedWithWorkspace: true })).toBe("workspace");
+    const usage = fact({ type: "usage.exhausted", sessionId: null, data: { scope: "workspace" } });
+    expect(visibility(usage)).toBe("private");
+  });
+
+  test("the visibility survives a replay and data cut down to its first scalars", () => {
+    const body = workspaceDeliveryBody(
+      [meeting({ sharedWithWorkspace: false })],
+      [fact({ sharedWithWorkspace: true }), fact()],
+    );
+    expect(workspaceDeliveryEvents(body, ada).map((event) => event.data.visibility)).toEqual([
+      "private",
+      "workspace",
+      "private",
+    ]);
+    const huge = fact({ data: { answerExcerpt: "x".repeat(200_000) } });
+    const bounded = boundEvent(workspaceActivityEvent(huge, ada), new Date());
+    expect(bounded.dataTruncated).toBe(true);
+    expect(bounded.data.visibility).toBe("private");
+  });
+
+  test("every offered type documents data.visibility", () => {
+    for (const entry of workspaceEventTypeCatalog()) {
+      expect(entry.fields.map((field) => field.field)).toContain("data.visibility");
+    }
   });
 });

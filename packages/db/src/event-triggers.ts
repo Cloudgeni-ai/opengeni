@@ -1904,6 +1904,7 @@ export async function claimEventTriggerDispatch(
             actorName: schema.inboundEvents.actorName,
             gapBefore: schema.inboundEvents.gapBefore,
             chainDepth: schema.inboundEvents.chainDepth,
+            visibility: sql<string | null>`${schema.inboundEvents.data} ->> 'visibility'`,
           },
           sourceKind: schema.eventSources.kind,
           sourceVisibility: schema.eventSources.visibility,
@@ -2006,6 +2007,7 @@ export async function claimEventTriggerDispatch(
           entry.sourceOwner !== null &&
           entry.sourceOwner !== facts.task_owner &&
           entry.sourceOwner !== facts.sync_owner;
+        const ownerOnly = workspaceEventOwnerOnly(entry.sourceKind, entry.event.visibility);
         const summary = InboundEventSummary.parse({
           id: entry.event.id,
           sourceId: entry.event.sourceId,
@@ -2013,13 +2015,14 @@ export async function claimEventTriggerDispatch(
           type: entry.event.type,
           occurredAt: entry.event.occurredAt.toISOString(),
           ...(othersPrivate
-            ? { subject: null, summary: "", url: null, actor: { kind: "unknown", name: null } }
+            ? REDACTED_EVENT_SUMMARY
             : {
                 subject: entry.event.subject,
                 summary: entry.event.summary,
                 url: entry.event.url,
                 actor: { kind: entry.event.actorKind, name: entry.event.actorName },
               }),
+          ...(ownerOnly ? { ownerOnly: true } : {}),
         });
         const size = byteLength(summary) + 1;
         if (summaryBytes + size > EVENT_OCCURRENCE_SUMMARIES_MAX_BYTES) break;
@@ -2181,6 +2184,86 @@ export type EventOccurrenceForRun = {
 };
 
 const storedSummaries = z.array(InboundEventSummary);
+
+/** What a run history keeps of an event its reader may not see: which event it was, never its content. */
+const REDACTED_EVENT_SUMMARY = {
+  subject: null,
+  summary: "",
+  url: null,
+  actor: { kind: "unknown", name: null },
+} as const;
+
+/**
+ * A "This workspace" event (one person's view of Opengeni itself) whose
+ * `data.visibility` is not `workspace`: about their private meeting or chat,
+ * an Only me App or a member's usage, so only the automation's owner may see
+ * it. Its run is an Only me chat whatever the automation's visibility, and
+ * other readers of the run history get it redacted. A missing value (data
+ * cut down, or stored before the field existed) counts as private.
+ */
+export function workspaceEventOwnerOnly(sourceKind: string, visibility: unknown): boolean {
+  return sourceKind === "workspace" && visibility !== "workspace";
+}
+
+/** Whether an occurrence's stored events include one only the automation's owner may see. */
+function storedEventsOwnerOnly(events: unknown): boolean {
+  const parsed = storedSummaries.safeParse(events);
+  // Unreadable stored events never widen who may see a run.
+  if (!parsed.success) return true;
+  return parsed.data.some((event) => event.ownerOnly === true);
+}
+
+/**
+ * Whether the event run a producer key names carries an event only the
+ * automation's owner may see. Such a run runs in an Only me chat of the
+ * owner, or not at all (an automation that continues a shared chat).
+ */
+export async function eventProducerOwnerOnly(
+  db: Database,
+  workspaceId: string,
+  producerKey: string | null | undefined,
+): Promise<boolean> {
+  const occurrenceId = eventOccurrenceIdFromProducerKey(producerKey);
+  if (!occurrenceId) return false;
+  const [row] = await withWorkspaceRls(db, workspaceId, (scoped) =>
+    rawRows<{ events: unknown }>(
+      scoped,
+      sql`select events from scheduled_task_event_occurrences
+        where workspace_id = ${workspaceId} and id = ${occurrenceId}::uuid`,
+    ),
+  );
+  return row ? storedEventsOwnerOnly(row.events) : false;
+}
+
+/** Whether an automation run is an event run carrying an event only its owner may see. */
+export async function scheduledTaskRunOwnerOnly(
+  db: Database,
+  workspaceId: string,
+  runId: string,
+): Promise<boolean> {
+  const [run] = await withWorkspaceRls(db, workspaceId, (scoped) =>
+    rawRows<{ producer_key: string | null }>(
+      scoped,
+      sql`select producer_key from scheduled_task_runs
+        where workspace_id = ${workspaceId} and id = ${runId}::uuid and trigger_type = 'event'`,
+    ),
+  );
+  return run ? await eventProducerOwnerOnly(db, workspaceId, run.producer_key) : false;
+}
+
+/**
+ * A run's events as one reader may see them: an event only the automation's
+ * owner may see keeps only which event it was for anyone else.
+ */
+export function eventSummariesForReader(
+  events: readonly InboundEventSummary[],
+  reader: { ownerSubjectId: string | null; readerSubjectId: string | null },
+): InboundEventSummary[] {
+  const owner = reader.ownerSubjectId !== null && reader.readerSubjectId === reader.ownerSubjectId;
+  return events.map((event) =>
+    event.ownerOnly === true && !owner ? { ...event, ...REDACTED_EVENT_SUMMARY } : event,
+  );
+}
 
 export async function getEventOccurrenceForRun(
   db: Database,

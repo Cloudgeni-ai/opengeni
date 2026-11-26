@@ -78,6 +78,8 @@ import {
   appendSessionEvents,
   addSessionSystemUpdateWithSourceMutation,
   getEventOccurrenceForScheduledTaskRun,
+  eventProducerOwnerOnly,
+  scheduledTaskRunOwnerOnly,
   bindScheduledTaskRunSessionInTransaction,
   checkSessionUsageLimitAdmission,
   createScheduledTaskRun,
@@ -701,6 +703,28 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             taskAuthoritySubjectId,
           )
         : null;
+      // An event only the owner may see (their private meeting or chat, from
+      // their "This workspace" source) runs in an Only me chat of the owner,
+      // whatever the automation's visibility, like the meeting's own notes
+      // chat. A new chat is created Only me; an automation that continues a
+      // chat shared with the workspace skips it instead of posting it there.
+      const ownerOnlyRun =
+        input.triggerType === "event" &&
+        (await eventProducerOwnerOnly(db, task.workspaceId, stableProducerKey));
+      const onlyMeRunChat = task.visibility === "private" || ownerOnlyRun;
+      if (
+        ownerOnlyRun &&
+        (acceptedTargetSessionId
+          ? targetSessionExecutionBase !== null &&
+            targetSessionExecutionBase.visibility !== "user_private"
+          : task.runMode !== "new_session_per_run" && task.visibility !== "private")
+      ) {
+        return await refuseAdmission(
+          "owner_only_event",
+          true,
+          "an event only the automation's owner may see cannot run in a chat shared with the workspace",
+        );
+      }
       const settings = await settingsForTask(task, targetSessionExecutionBase?.model);
       // A task that names no model resolves the new-chat default at each fresh
       // occurrence (saved workspace default, then a usable connected
@@ -810,7 +834,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           : null;
         const runMemoryAccess = runAgent?.memoryEnabled
           ? agentMemoryAccess(runAgent, {
-              private: task.visibility === "private",
+              private: onlyMeRunChat,
               ownerSubjectId: task.ownerSubjectId,
               memoryOff: false,
             })
@@ -1831,7 +1855,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     }
                   : {}),
                 ...scheduledGeneratedChatSettings(task.agentConfig, creatorSessionPolicy),
-                ...(task.visibility === "private"
+                ...(onlyMeRunChat
                   ? {
                       visibility: "user_private" as const,
                       scheduledSourceRunId: run.id,
@@ -3178,7 +3202,11 @@ async function recoverBoundScheduledTaskDispatch(input: {
         scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
       ),
       ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
-      ...(task.visibility === "private"
+      // The same Only me rule as admission: a private task, or an event only its owner may see.
+      ...(task.visibility === "private" ||
+      (input.run.triggerType === "event" &&
+        task.runMode === "new_session_per_run" &&
+        (await scheduledTaskRunOwnerOnly(input.db, task.workspaceId, input.run.id)))
         ? {
             visibility: "user_private" as const,
             scheduledSourceRunId: input.run.id,

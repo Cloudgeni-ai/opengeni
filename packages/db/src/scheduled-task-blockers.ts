@@ -182,7 +182,9 @@ export async function reviewScheduledTaskBlockers(
               and trigger_type in ('scheduled', 'event') and action_kind = 'agent_turn'
               -- The chain limit leaving events out is not a blocker; it has its own notice.
               -- Nor is another automation of the same agent taking a delivery.
-              and (error is null or error not in ('chain_limit', 'duplicate_agent_run'))
+              -- Nor is an event only the owner may see skipping a chat shared with the workspace.
+              and (error is null
+                or error not in ('chain_limit', 'duplicate_agent_run', 'owner_only_event'))
             order by created_at desc, id desc
             limit ${SCHEDULED_TASK_BLOCKER_REVIEW_RUNS}`,
       );
