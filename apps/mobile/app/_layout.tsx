@@ -1,8 +1,9 @@
+import { PurchasePresentationProvider } from "@opengeni/react/app/lib/purchase-presentation";
 import { useRetainedReads } from "@opengeni/react/session";
 import { OpenGeniReactNativeProvider } from "@opengeni/react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Platform, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { AccountProvider, useAccount } from "@/account";
@@ -45,6 +46,9 @@ function NativeEnvironment({ children }: { children: React.ReactNode }) {
 
 export default function RootLayout() {
   return (
+    // The iOS app never offers purchases: chats and errors say what is
+    // missing without a way to buy it, as hosted pages opened with client=ios do.
+    <PurchasePresentationProvider showPurchasePrompts={Platform.OS !== "ios"}>
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <AccountProvider>
@@ -147,5 +151,6 @@ export default function RootLayout() {
         </AccountProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
+    </PurchasePresentationProvider>
   );
 }
