@@ -70,6 +70,7 @@ import {
   type SitesClientConfig,
   type SpendPeriod,
 } from "../../lib/site-publishing";
+import { useShowPurchasePrompts } from "../../lib/purchase-presentation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { cn } from "../../lib/utils";
 
@@ -353,6 +354,7 @@ function SitePublishForm({
   layout = "page",
   onSubmitted,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
+  const showPurchasePrompts = useShowPurchasePrompts();
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
     draftFromPublication(saved, suggestedLabel(site.title, labelSuffix), forceNoindex),
@@ -449,7 +451,7 @@ function SitePublishForm({
         else setAgentError("Only a workspace admin can make this change.");
         return false;
       }
-      const platform = platformRefusal(error);
+      const platform = platformRefusal(error, showPurchasePrompts);
       if (platform) {
         setRefusal(platform);
         return false;
@@ -481,7 +483,11 @@ function SitePublishForm({
             .updateSitePublication(workspaceId, site.id, { status: "active" })
             .then(onPublication)
             .catch((error) =>
-              toast.error("Couldn't publish again", { description: userErrorText(error) }),
+              toast.error("Couldn't publish again", {
+                description: !showPurchasePrompts
+                  ? (platformRefusal(error, false)?.body ?? userErrorText(error))
+                  : userErrorText(error),
+              }),
             ),
       });
     } catch (error) {

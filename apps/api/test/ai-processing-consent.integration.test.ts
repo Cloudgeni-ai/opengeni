@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { AiProcessingConsentResponse, AI_PROCESSING_CONSENT_REQUIRED } from "@opengeni/contracts";
+import type { Settings } from "@opengeni/config";
 import type { TranscriptionService } from "@opengeni/core";
 import {
   createApiKey,
@@ -46,7 +47,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-function runtime(providers = ["Example AI", "Example Voice"]) {
+function runtime(providers = ["Example AI", "Example Voice"], overrides?: Partial<Settings>) {
   const settings = testSettings({
     databaseUrl: shared.appUrl,
     productAccessMode: "managed",
@@ -54,6 +55,7 @@ function runtime(providers = ["Example AI", "Example Voice"]) {
     betterAuthSecret: "native-ai-consent-test-secret-at-least-32-bytes",
     aiProcessingConsentProviders: providers,
     aiProcessingConsentPrivacyUrl: "https://example.test/privacy",
+    ...overrides,
   });
   const auth = createManagedAuth(settings, db.db, {
     sender: "auth@example.test",
@@ -265,6 +267,90 @@ test("a human grants, replaces and withdraws current consent; accepted disclosur
   expect(history.map((row) => row.disclosure)).toEqual([state.disclosure, nextState.disclosure]);
   expect(history.every((row) => row.withdrawn_at != null)).toBe(true);
 });
+
+test("live voice catalog and refusal use neutral copy only for the authenticated iOS app", async () => {
+  const rt = runtime(undefined, {
+    billingMode: "stripe",
+    subscriptionPlansEnabled: true,
+    azureLiveEndpoint: "https://voice.example.test",
+    azureLiveApiKey: "synthetic-azure-key",
+    azureLivePricingJson: JSON.stringify({ microsPerMinute: 50_000, marginBps: 500 }),
+  });
+  const p = await person(rt);
+  const ios = await nativeSignIn(rt, p.cookie, "ios");
+  const android = await nativeSignIn(rt, p.cookie, "android");
+  const iosHeaders = { authorization: ios.authorization, "user-agent": "Other browser" };
+  const { disclosure } = AiProcessingConsentResponse.parse(
+    await (await consent(rt, iosHeaders)).json(),
+  );
+  expect((await consent(rt, iosHeaders, "POST", disclosure.version)).status).toBe(200);
+  const subjectId = `user:${p.userId}`;
+  const session = await withSessionRlsActorContext({ subjectId }, () =>
+    createSession(db.db, {
+      accountId: p.accountId,
+      workspaceId: p.workspaceId,
+      initialMessage: "Existing session",
+      memoryScope: "workspace",
+      resources: [],
+      metadata: {},
+      model: "gpt-6-luna",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      createdByContext: {},
+    }),
+  );
+  const base = `/v1/workspaces/${p.workspaceId}`;
+  for (const [headers, reason, quiet] of [
+    [iosHeaders, "Live voice isn't available for this organization.", true],
+    [
+      { authorization: android.authorization, "user-agent": "Opengeni app (iOS)" },
+      "Add credits to use live voice",
+      false,
+    ],
+    [
+      {
+        cookie: p.cookie,
+        origin: ORIGIN,
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Opengeni app (iOS)",
+      },
+      "Add credits to use live voice",
+      false,
+    ],
+  ] as const) {
+    const response = await rt.app.request(`${base}/realtime-model-catalog`, { headers });
+    expect(response.status).toBe(200);
+    const { models } = (await response.json()) as { models: { id: string }[] };
+    expect(models.find((model) => model.id === "opengeni-azure/gpt-live-1")).toMatchObject({
+      available: false,
+      unavailableCode: "insufficient_credits",
+      unavailableReason: reason,
+    });
+    const refused = await rt.app.request(`${base}/sessions/${session.id}/realtime`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        browserInstanceId: `browser-${crypto.randomUUID()}`,
+        ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+        model: "gpt-live-1-boulder-alpha",
+      }),
+    });
+    expect(refused.status).toBe(402);
+    const body = await refused.json();
+    expect(body).toMatchObject({ error: { details: { code: "subscription_plan_required" } } });
+    if (quiet) {
+      expect(body).toMatchObject({
+        error: { message: "Your current plan doesn't include connected subscriptions." },
+      });
+      expect(body.error.details.action).toBeUndefined();
+    } else {
+      expect(body.error.details.action.type).toBe("upgrade_plan");
+    }
+  }
+}, 60_000);
 
 test("iOS text and voice admissions fail closed while other clients still work without consent", async () => {
   const rt = runtime();

@@ -41,6 +41,20 @@ test("no send refusal or chat status says the message is saved", () => {
 });
 
 describe("failure presentation", () => {
+  test("the purchase-free presentation keeps failure reasons but drops billing remedies", () => {
+    const payload = Object.freeze({
+      code: "provider_billing_error",
+      error: "The model provider refused payment. Add a card in your provider account.",
+      detail: "Open the provider's billing page.",
+    });
+    expect(presentFailure(englishText, payload, false)).toEqual({
+      reason: "The model provider couldn’t bill this request.",
+      safetyRefusal: false,
+      diagnostic: false,
+    });
+    expect(presentFailure(englishText, payload).reason).toContain("Add a card");
+  });
+
   test("a refused Claude reasoning replay never shows Claude's signature text", () => {
     // The transport falls back to plain history, so this failure is not
     // expected to reach a person; if it ever does, only the generic line shows.

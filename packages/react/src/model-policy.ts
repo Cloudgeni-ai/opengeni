@@ -395,9 +395,38 @@ function withoutTrailingQualifiers(name: string): string {
  * catalog's `requiredPlan`; null when the model can run or the list has no
  * plan facts (older servers, client-config lists).
  */
-export function requiredPlanHint(t: OpenGeniText, model: ClientModel): string | null {
+export function requiredPlanHint(
+  t: OpenGeniText,
+  model: ClientModel,
+  { showPurchasePrompts = true }: { showPurchasePrompts?: boolean | undefined } = {},
+): string | null {
   const plan = (model as Partial<Pick<WorkspaceModelCatalogModel, "requiredPlan">>).requiredPlan;
-  return plan ? t("modelPolicy.needsPlan", { plan: plan.label }) : null;
+  return plan
+    ? showPurchasePrompts
+      ? t("modelPolicy.needsPlan", { plan: plan.label })
+      : t("modelPolicy.notOnCurrentPlan")
+    : null;
+}
+
+export function modelFundingHint(
+  t: OpenGeniText,
+  model: ClientModel,
+  { showPurchasePrompts = true }: { showPurchasePrompts?: boolean | undefined } = {},
+): string | undefined {
+  const funding = (model as Partial<Pick<WorkspaceModelCatalogModel, "creditFunding">>)
+    .creditFunding;
+  return (
+    requiredPlanHint(t, model, { showPurchasePrompts }) ??
+    (funding === "promotional"
+      ? showPurchasePrompts
+        ? t("modelPolicy.freeCredits")
+        : undefined
+      : funding === "general"
+        ? t("modelPolicy.usesCredits")
+        : funding === "unavailable"
+          ? t(showPurchasePrompts ? "modelPolicy.needsCredits" : "modelPolicy.unavailable")
+          : undefined)
+  );
 }
 
 /**
@@ -407,6 +436,7 @@ export function requiredPlanHint(t: OpenGeniText, model: ClientModel): string | 
 export function projectPickerRows(
   t: OpenGeniText,
   models: WorkspaceModelCatalogModel[],
+  options: { showPurchasePrompts?: boolean | undefined } = {},
 ): PickerModelRow[] {
   const rows = models
     .filter((catalog) => (catalog.credentialReadiness?.status ?? "ready") === "ready")
@@ -422,15 +452,7 @@ export function projectPickerRows(
         selectable,
         // An own subscription the organization's plan doesn't include stays
         // selectable; the row names the plan it needs ("Needs Pro").
-        fundingHint:
-          requiredPlanHint(t, catalog) ??
-          (catalog.creditFunding === "promotional"
-            ? t("modelPolicy.freeCredits")
-            : catalog.creditFunding === "general"
-              ? t("modelPolicy.usesCredits")
-              : catalog.creditFunding === "unavailable"
-                ? t("modelPolicy.needsCredits")
-                : undefined),
+        fundingHint: modelFundingHint(t, catalog, options),
         unavailableReason: selectable
           ? null
           : availabilityReasonLabel(t, catalog.availability?.reason ?? null),

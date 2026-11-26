@@ -39,6 +39,7 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   canInviteOrganizationRole,
@@ -173,6 +174,7 @@ export function OrgSettingsRoute({
   workspace?: string | undefined;
 }) {
   const context = useAppContext();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const navigate = useNavigate();
   const client = context.client;
   const activeWorkspace =
@@ -232,7 +234,7 @@ export function OrgSettingsRoute({
   // funnel event. The Stripe return is a full page load, so the event waits for
   // the analytics module instead of the not-yet-installed observer shim.
   useEffect(() => {
-    if (!checkout) return;
+    if (!checkout || !showPurchasePrompts) return;
     if (takeCheckoutReturn(checkout)) {
       void import("@/lib/analytics")
         .then(({ captureAnalyticsEvent }) =>
@@ -258,9 +260,11 @@ export function OrgSettingsRoute({
       search: requestedSection ? { section: requestedSection } : {},
       replace: true,
     });
-  }, [checkout, checkoutSession, navigate, requestedSection, workspaceId]);
+  }, [checkout, checkoutSession, navigate, requestedSection, showPurchasePrompts, workspaceId]);
   // Kept past the URL cleanup above, which drops the session id right away.
-  const [celebratedCheckout] = useState(() => checkoutSession ?? null);
+  const [celebratedCheckout] = useState(() =>
+    showPurchasePrompts ? (checkoutSession ?? null) : null,
+  );
 
   const createWorkspace = useCallback(
     async (name: string, operationId: string): Promise<string | null> => {
@@ -763,6 +767,7 @@ function OrganizationSettingsFrame({
   children: ReactNode;
 }) {
   const directory = useOptionalOrganizationDirectory();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const nav = useOrganizationNavigation(workspaceId);
   const organizationLabel = directory?.overview.value?.organization.name ?? fallbackLabel;
   let actions: ReactNode = null;
@@ -792,11 +797,13 @@ function OrganizationSettingsFrame({
           description={
             hideDescription
               ? undefined
-              : organizationSettingsDescription(
-                  section,
-                  organizationLabel,
-                  directory?.canAdminister ?? true,
-                )
+              : section === "billing" && !showPurchasePrompts
+                ? "Your plan, credit balance and workspace budgets."
+                : organizationSettingsDescription(
+                    section,
+                    organizationLabel,
+                    directory?.canAdminister ?? true,
+                  )
           }
           actions={actions}
         />

@@ -1,5 +1,6 @@
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { useNavigate } from "@tanstack/react-router";
 import { CreditCardIcon } from "lucide-react";
 
@@ -17,6 +18,7 @@ export function BillingMenuItem({
   className?: string | undefined;
 }) {
   const context = useAppContext();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const navigate = useNavigate();
   const accountId = context.workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
   if (!accountId) return null;
@@ -38,7 +40,7 @@ export function BillingMenuItem({
       }
     >
       <CreditCardIcon className="size-4" />
-      Billing and receipts
+      {showPurchasePrompts ? "Billing and receipts" : "Billing"}
     </DropdownMenuItem>
   );
 }

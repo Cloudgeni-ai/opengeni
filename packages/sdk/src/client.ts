@@ -2,6 +2,9 @@ import { version as sdkVersion } from "../package.json";
 import type {
   AiProcessingConsentResponse,
   GrantAiProcessingConsentRequest,
+  AccountDeletionPreview,
+  StartAccountDeletionRequest,
+  StartAccountDeletionResponse,
   DecisionQuestion,
   ModelDecisionRequest,
   ModelDecisionResponse,
@@ -1703,6 +1706,18 @@ export class OpenGeniClient {
       });
     }
     return body;
+  }
+
+  /** Preview deletion for the signed-in person. API keys cannot call this. */
+  async getAccountDeletion(options?: OpenGeniRequestOptions): Promise<AccountDeletionPreview> {
+    return this.requestJson("GET", "/v1/me/account-deletion", undefined, {}, options);
+  }
+
+  /** Request erasure and immediately revoke the signed-in person's sessions. */
+  async requestAccountDeletion(
+    request: StartAccountDeletionRequest,
+  ): Promise<StartAccountDeletionResponse> {
+    return this.requestJson("POST", "/v1/me/account-deletion", request);
   }
 
   /** Typed stateless judgments using the deployment's configured decision model. */

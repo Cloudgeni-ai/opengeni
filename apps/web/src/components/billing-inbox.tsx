@@ -3,6 +3,7 @@ import { CreditCardIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { billingInboxActionPath, billingInboxCopy } from "@opengeni/react/app/lib/inbox-billing";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
@@ -22,6 +23,7 @@ export function BillingInboxSection({
   markRead: (notice: BillingCreditNotification) => Promise<void>;
   onManageBilling: (path: string) => void;
 }) {
+  const showPurchasePrompts = useShowPurchasePrompts();
   if (notifications.length === 0) return null;
   return (
     <Section title="Billing">
@@ -33,7 +35,7 @@ export function BillingInboxSection({
           <BillingInboxRow
             key={notice.id}
             notice={notice}
-            path={billingInboxActionPath(notice, workspaces)}
+            path={showPurchasePrompts ? billingInboxActionPath(notice, workspaces) : null}
             markRead={markRead}
             onManageBilling={onManageBilling}
           />
@@ -55,7 +57,8 @@ function BillingInboxRow({
   onManageBilling: (path: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const copy = billingInboxCopy(notice);
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const copy = billingInboxCopy(notice, showPurchasePrompts);
   const read = async () => {
     if (busy || notice.read) return;
     setBusy(true);

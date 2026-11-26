@@ -576,6 +576,14 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+const accountDeletionRequestedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "account-deletion-requested",
+  component: lazyRouteComponent(
+    () => import("./routes/account-deletion-requested"),
+    "AccountDeletionRequested",
+  ),
+});
 // A chat someone shared with a link. PUBLIC, like `/reset-password`: the
 // person opening it usually isn't signed in and may have no account.
 const sharedSessionRoute = createRoute({
@@ -1459,6 +1467,7 @@ const routeTree = rootRoute.addChildren([
   connectAgentRoute,
   teamsConnectRoute,
   resetPasswordRoute,
+  accountDeletionRequestedRoute,
   sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,

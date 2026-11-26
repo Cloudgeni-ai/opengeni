@@ -124,6 +124,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
   "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
+  "account_deletion_user_v1(text, jsonb)",
+  "account_deletion_work_v1(text, jsonb)",
   "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
   "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
 ] as const;
@@ -195,6 +197,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+  "account_deletion_user_v1(text, jsonb)",
+  "account_deletion_work_v1(text, jsonb)",
   "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
   "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
@@ -207,6 +211,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
 const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   Record<(typeof RUNTIME_DEFINER_ROUTINES)[number], readonly string[]>
 > = {
+  "account_deletion_user_v1(text, jsonb)": ["account_deletion_requests"],
+  "account_deletion_work_v1(text, jsonb)": ["account_deletion_requests"],
   "list_due_event_trigger_tasks_v1(integer)": ["scheduled_task_event_settings"],
   "prune_event_intake_v1(integer, integer, integer)": ["event_deliveries", "inbound_events"],
   "list_stalled_recording_work_v1(integer)": ["recording_transcript_versions", "recordings"],
@@ -2090,6 +2096,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  * commit as the migration so startup cannot silently accept an unreviewed gap.
  */
 export const FORCE_RLS_TABLES = [
+  "account_deletion_requests",
   "additional_organization_creation_receipts",
   "agent_call_host_phones",
   "agent_calls",
@@ -3256,6 +3263,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "account_deletion_requests",
   "additional_organization_creation_receipts",
   "agent_instruction_operations",
   "agent_learning_revisions",

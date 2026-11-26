@@ -420,6 +420,7 @@ import {
 } from "./organization-api-key-access";
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
 export * from "./personal-api-keys";
+export * from "./account-deletion";
 export * from "./organization-privacy-preferences";
 export * from "./organization-inference-residency";
 export * from "./workspace-content-flow";
@@ -4572,6 +4573,9 @@ export async function deleteWorkspaceIfQuiescent(
     workspaceId: string;
     observer?: WorkspaceDeleteObserver;
     organizationAdministratorSubjectId?: string;
+    /** Internal closure only; checked against the locked account row. */
+    accountDeletionRequestId?: string;
+    beforeClosureCascade?: (tx: Database) => Promise<unknown>;
   },
 ): Promise<DeleteWorkspaceIfQuiescentResult> {
   const transactionStartedAt = performance.now();
@@ -4631,7 +4635,14 @@ export async function deleteWorkspaceIfQuiescent(
           // the same way; FOR UPDATE here deadlocked those writers against the
           // workspace locks below.
           const [account] = await tx
-            .select({ id: schema.managedAccounts.id })
+            .select({
+              id: schema.managedAccounts.id,
+              closedByDeletion: input.accountDeletionRequestId
+                ? sql<
+                    string | null
+                  >`to_jsonb(${schema.managedAccounts}) ->> 'closed_by_account_deletion'`
+                : sql<null>`null`,
+            })
             .from(schema.managedAccounts)
             .where(eq(schema.managedAccounts.id, input.accountId))
             .for("no key update")
@@ -4694,7 +4705,11 @@ export async function deleteWorkspaceIfQuiescent(
             });
             return { status: "not_found" as const };
           }
-          if (accountWorkspaces.length <= 1) {
+          if (
+            accountWorkspaces.length <= 1 &&
+            (!input.accountDeletionRequestId ||
+              account.closedByDeletion !== input.accountDeletionRequestId)
+          ) {
             observeWorkspaceDeletePhase(input.observer, {
               phase: "account_workspace_lock",
               outcome: "only_workspace",
@@ -5053,6 +5068,12 @@ export async function deleteWorkspaceIfQuiescent(
           // cascade, not between rows. Activity and retention constraint
           // triggers stay immediate.
           await tx.execute(sql`select opengeni_private.defer_workspace_cascade_foreign_keys()`);
+          if (
+            input.accountDeletionRequestId &&
+            account.closedByDeletion === input.accountDeletionRequestId
+          ) {
+            await input.beforeClosureCascade?.(tx);
+          }
           const deleted = await tx
             .delete(schema.workspaces)
             .where(

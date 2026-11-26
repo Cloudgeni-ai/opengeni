@@ -30,8 +30,9 @@ describe("credit refusal wiring", () => {
   test("the composer and the plain failure line know who is viewing", async () => {
     const session = await source("routes/session.tsx");
     expect(session).toMatch(/useComposer\(props\.session\.id, \{\s*canBuyCredits,/);
+    expect(session).toContain("const showPurchasePrompts = useShowPurchasePrompts();");
     expect(session).toMatch(
-      /const fallbackCopy = props\.failure\s*\?\s*failedSessionCopy\([\s\S]*?stopRefusal,\s*\)\s*:\s*null;\s*const fallbackReason = fallbackCopy \? failureFallbackReason\(fallbackCopy, canBuyCredits\)/,
+      /const fallbackCopy = props\.failure\s*\?\s*failedSessionCopy\([\s\S]*?stopRefusal,\s*showPurchasePrompts,\s*\)\s*:\s*null;\s*const fallbackReason = fallbackCopy\s*\?\s*failureFallbackReason\(fallbackCopy, canBuyCredits, showPurchasePrompts\)/,
     );
   });
 
@@ -54,7 +55,7 @@ describe("credit refusal wiring", () => {
     expect(session).toMatch(/const creditGap =\s*props\.creditExhausted && !stopRefusal/);
     // chatComposerPlaceholder's own tests cover what each state reads.
     expect(session).toMatch(
-      /placeholder=\{chatComposerPlaceholder\(\{[^}]*stopRefusal,\s*creditGap,\s*canBuyCredits,\s*\}\)\}/,
+      /placeholder=\{chatComposerPlaceholder\(\{[^}]*stopRefusal,\s*creditGap,\s*canBuyCredits,\s*showPurchasePrompts,\s*\}\)\}/,
     );
   });
 });

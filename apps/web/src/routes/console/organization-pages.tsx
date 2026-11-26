@@ -22,6 +22,7 @@ import {
   useOrgAgentsEnabled,
 } from "./console-shared";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import {
   OrganizationPeoplePage,
   type ConsoleRolesView,
@@ -109,6 +110,7 @@ const reportedCheckoutReturns = new Set<string>();
 
 export function ConsoleUsageRoute() {
   const navigate = useNavigate();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const { client, organizationId, search } = useConsole();
   const { workspace, checkout, checkoutSession } = useSearch({
     strict: false,
@@ -120,7 +122,7 @@ export function ConsoleUsageRoute() {
   // Kept past the URL cleanup below, which drops the session id right away.
   const [celebrated] = useState(() => checkoutSession ?? null);
   useEffect(() => {
-    if (!checkout) return;
+    if (!checkout || !showPurchasePrompts) return;
     if (!reportedCheckoutReturns.has(checkout)) {
       reportedCheckoutReturns.add(checkout);
       if (checkout === "cancelled")
@@ -130,11 +132,11 @@ export function ConsoleUsageRoute() {
       }
     }
     void navigate({ to: "/console/usage", search, replace: true });
-  }, [checkout, checkoutSession, navigate, search]);
+  }, [checkout, checkoutSession, navigate, search, showPurchasePrompts]);
 
   const billing = (
     <ConsoleOrganizationProvider>
-      {celebrated && access.canReadBilling ? (
+      {showPurchasePrompts && celebrated && access.canReadBilling ? (
         <Suspense fallback={null}>
           <CheckoutCreditsCelebration
             client={client}

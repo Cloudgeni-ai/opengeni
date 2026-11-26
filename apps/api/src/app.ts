@@ -220,6 +220,10 @@ import {
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
+  isNativeIosRequest,
+  neutralPurchaseRefusalMessage,
+} from "./http/native-purchase-presentation";
+import {
   isRequestBodyValidationError,
   parseRequestBody,
   requestBodyValidationHttpError,
@@ -532,6 +536,7 @@ import {
   registerAiProcessingConsentRoutes,
   requireAiProcessingConsent,
 } from "./routes/ai-processing-consent";
+import { registerAccountDeletionRoutes } from "./routes/account-deletion";
 import { registerConsoleSignInRoutes } from "./routes/console-sign-in";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -1437,6 +1442,7 @@ export function createAppComposition(
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   registerAiProcessingConsentRoutes(app, routeDeps);
+  registerAccountDeletionRoutes(app, routeDeps);
   registerConsoleSignInRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
@@ -3105,7 +3111,7 @@ export function createAppComposition(
     );
   });
 
-  app.onError((rawError, c) => {
+  app.onError(async (rawError, c) => {
     const requestId = correlationIds.get(c) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
@@ -3177,19 +3183,34 @@ export function createAppComposition(
     // says so in the standard header too, for clients that honor it.
     const retryAfterSeconds = apiErrorRetryAfterSeconds(apiError);
     if (retryAfterSeconds !== null) c.header("retry-after", String(retryAfterSeconds));
+    const purchaseCode = apiError?.details?.code;
+    const nativePurchaseMessage =
+      apiError && typeof purchaseCode === "string"
+        ? neutralPurchaseRefusalMessage(
+            purchaseCode,
+            apiError.message,
+            /\/recordings(?:\/|$)/u.test(c.req.path) ? "transcription" : "model",
+          )
+        : null;
+    const hidePurchase = nativePurchaseMessage !== null && (await isNativeIosRequest(c, routeDeps));
+    const details =
+      hidePurchase && apiError?.details
+        ? Object.fromEntries(Object.entries(apiError.details).filter(([key]) => key !== "action"))
+        : apiError?.details;
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
         code,
         message: apiError
-          ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
+          ? (boundedPublicMessage(hidePurchase ? nativePurchaseMessage : apiError.message) ??
+            "Request failed.")
           : publicErrorMessage(error, status),
         retryable: apiError?.retryable ?? retryableHttpStatus(status),
         ...((apiError?.outcomeUnknown ?? mutationOutcomeUnknown(error, c.req.method))
           ? { outcomeUnknown: true }
           : {}),
         requestId,
-        ...(apiError?.details ? { details: apiError.details } : {}),
+        ...(details ? { details } : {}),
       },
     });
     return c.json(envelope, status as ContentfulStatusCode);

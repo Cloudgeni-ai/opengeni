@@ -1,4 +1,11 @@
 export type {
+  AccountDeletionRequest,
+  AccountDeletionBlocker,
+  AccountDeletionPreview,
+  StartAccountDeletionRequest,
+  StartAccountDeletionResponse,
+} from "@opengeni/contracts";
+export type {
   AppPackage,
   AppPackageExportRequest,
   AppPackageExportResponse,

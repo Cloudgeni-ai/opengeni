@@ -357,6 +357,7 @@ function withSearch(link: ReactElement, extra: Record<string, string> | undefine
 /** Every page in the rail and the settings inside them, in rail order. */
 export function settingsSearchEntries(
   sections: readonly SettingsRailSection[],
+  showPurchasePrompts = true,
 ): SettingsSearchEntry[] {
   const entries: SettingsSearchEntry[] = [];
   for (const section of sections) {
@@ -364,15 +365,18 @@ export function settingsSearchEntries(
       // Under Advanced, a page's place is the scope it belongs to.
       const location = section.collapsible && group.label ? group.label : section.label;
       for (const item of group.items) {
+        const limitedBilling = item.id === "organization:billing" && !showPurchasePrompts;
         entries.push({
           id: item.id,
           label: item.label,
           location,
           icon: item.icon,
           link: item.link,
-          keywords: PAGE_KEYWORDS[item.id] ?? [],
+          keywords: limitedBilling
+            ? ["credit balance", "plan", "workspace budgets"]
+            : (PAGE_KEYWORDS[item.id] ?? []),
         });
-        for (const topic of PAGE_TOPICS[item.id] ?? []) {
+        for (const topic of limitedBilling ? [] : (PAGE_TOPICS[item.id] ?? [])) {
           entries.push({
             id: `${item.id}#${topic.label}`,
             label: topic.label,

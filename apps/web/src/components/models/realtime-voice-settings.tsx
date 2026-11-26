@@ -8,6 +8,7 @@ import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import type { OrganizationModelDefaultsState } from "./use-organization-model-defaults";
 import { possessive } from "./possessive";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
@@ -155,6 +156,7 @@ function DefaultVoiceModelRow({
   onSave: (model: VoiceModel | null) => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
+  const showPurchasePrompts = useShowPurchasePrompts();
   const choices = catalog.filter((model) => model.available || model.id === saved?.id);
   if (!choices.some((model) => model.available)) return null;
   const options: SelectOption[] = [
@@ -168,7 +170,11 @@ function DefaultVoiceModelRow({
       label: model.label,
       description: model.available
         ? model.provider
-        : (model.unavailableReason ?? "Not available right now"),
+        : ((!showPurchasePrompts &&
+          (model.unavailableCode === "insufficient_credits" ||
+            model.unavailableCode === "subscription_plan_required")
+            ? null
+            : model.unavailableReason) ?? "Not available right now"),
     })),
   ];
   return (

@@ -2,6 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { act } from "react";
 import { registerDom, renderHook } from "../../react/test/render-hook";
 import {
+  FakeServer,
+  fakePlatform,
+  resumableCapability,
+  waitFor,
+} from "../../react/test/voice-input-fakes";
+import { useNativeDictation } from "../src/recordings/dictation";
+import {
   dictationSegmentSeconds,
   isRetryableTranscriptionError,
   NativeTranscriptionError,
@@ -72,6 +79,42 @@ async function startRecording(options: {
 }
 
 describe("dictation robustness", () => {
+  test("dictation keeps the recording but omits the purchase remedy when requested", async () => {
+    for (const showPurchasePrompts of [true, false]) {
+      const server = new FakeServer();
+      server.failNext = "insufficient_credits";
+      const { platform } = fakePlatform(server);
+      const hook = await renderHook(
+        () =>
+          useNativeDictation({
+            client: { transcribeAudio: async () => ({ text: "", languages: [] }) },
+            recordings: server.client,
+            platform,
+            workspaceId: "ws-1",
+            capability: resumableCapability,
+            value: "",
+            setValue: () => undefined,
+            showPurchasePrompts,
+          }),
+        undefined,
+      );
+      try {
+        await act(async () => hook.result.current.start());
+        await waitFor(() => hook.result.current.status === "recording");
+        await act(async () => hook.result.current.stop());
+        await waitFor(() => hook.result.current.error !== null);
+        expect(hook.result.current.hasSavedRecording).toBe(true);
+        expect(hook.result.current.error).toBe(
+          showPurchasePrompts
+            ? "Voice input needs credits. Recording saved; retry after adding credits."
+            : "No credits are available for voice input. Your recording is saved.",
+        );
+      } finally {
+        await hook.unmount();
+      }
+    }
+  });
+
   test("segments roll over a little under the per-request limit", () => {
     expect(dictationSegmentSeconds(60)).toBe(57);
     expect(dictationSegmentSeconds(10)).toBe(9);

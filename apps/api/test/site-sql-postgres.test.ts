@@ -1822,7 +1822,7 @@ test("a deleted workspace's Site databases are dropped from their Durable Object
     sites,
     { workspaceId: f.workspace.id },
   );
-  expect(refused).toEqual({ dropped: [], failed: [siteId], skipped: [] });
+  expect(refused).toEqual({ status: "configured", dropped: [], failed: [siteId], skipped: [] });
   expect((await s.request(f.owner, "GET", "/inspect")).json.tables).toHaveLength(1);
   const other = crypto.randomUUID();
   const dropped = await dropSiteSqlDatabases({ settings: f.settings }, [...sites, other]);
