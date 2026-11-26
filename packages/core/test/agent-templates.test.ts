@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ReadyMadeSetup } from "@opengeni/contracts";
 import { agentTemplateByKey, agentTemplates } from "../src/index";
 
 describe("ready-made agents", () => {
@@ -177,6 +178,68 @@ describe("ready-made agents", () => {
   test("lookup by key", () => {
     expect(agentTemplateByKey("bug-fixer")?.name).toBe("Bug fixer");
     expect(agentTemplateByKey("missing")).toBeUndefined();
+  });
+
+  test("keep setup simple: no template requires another agent or setup", () => {
+    const keys = agentTemplates().map((template) => template.key);
+    const names = agentTemplates().map((template) => template.name);
+    for (const file of agentTemplates()) {
+      // A strict schema: a template can't declare a required hand-off under another field.
+      expect(ReadyMadeSetup.safeParse({ ...file.setup, requires: ["pr-reviewer"] }).success).toBe(
+        false,
+      );
+      const setup = file.setup;
+      // Required steps are only its own connections, never another agent.
+      for (const connection of setup?.connections ?? []) {
+        expect(keys).not.toContain(connection.provider);
+        expect(names).not.toContain(connection.name);
+      }
+      // At most one other agent, display only, and a real one.
+      if (setup?.worksWellWith) {
+        expect(keys).toContain(setup.worksWellWith);
+        expect(setup.worksWellWith).not.toBe(file.key);
+      }
+      // Every hand-off works without the other agent: it says what to do if it isn't there.
+      for (const line of file.instructions.split("\n")) {
+        if (!/"[^"]+" agent/u.test(line)) continue;
+        expect(line).toMatch(/(If there is|and there is|when one exists)/u);
+        expect(line).toMatch(/(If there isn't|Otherwise)/u);
+      }
+      // Descriptions and trigger messages don't promise a hand-off.
+      for (const other of names.filter((name) => name !== file.name)) {
+        expect(file.description).not.toContain(other);
+        for (const suggestion of file.suggestedTriggers) {
+          expect(suggestion.instructions).not.toContain(other);
+        }
+      }
+    }
+  });
+
+  test("each declares what it needs, what it won't do and a first job", () => {
+    for (const template of agentTemplates()) {
+      expect(template.setup).not.toBeNull();
+      expect(template.setup?.wontDoWithoutAsking.length).toBeGreaterThan(0);
+      expect(template.setup?.firstMessage).toBeTruthy();
+      expect(template.setup?.firstJob).toBeTruthy();
+    }
+    // A hard requirement only where it truly can't work without one.
+    const required = Object.fromEntries(
+      agentTemplates().map((template) => [
+        template.key,
+        (template.setup?.connections ?? [])
+          .filter((connection) => connection.required)
+          .map((connection) => connection.provider),
+      ]),
+    );
+    expect(required).toEqual({
+      triage: [],
+      "bug-fixer": ["github.com"],
+      "pr-reviewer": ["github.com"],
+      "cve-scanner": ["github.com"],
+      "incident-responder": [],
+      "dependency-updater": ["github.com"],
+      "product-analyst": ["posthog.com"],
+    });
   });
 
   test("Triage listens where reports arrive and hands bugs to Bug fixer by name", () => {

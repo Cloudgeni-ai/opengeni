@@ -116,6 +116,8 @@ import type {
   CreateAgentFromTemplateRequest,
   AgentTemplate,
   ListAgentTemplatesResponse,
+  SetupReadiness,
+  SetupReadinessResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -8896,6 +8898,34 @@ export class OpenGeniClient {
       request,
     );
     return response.agent;
+  }
+
+  /**
+   * Readiness of a ready-made agent before it is added: each connection it
+   * uses, whether the caller already has it on, whether they may connect it,
+   * and what keeps it off, in words.
+   */
+  async getAgentTemplateReadiness(
+    workspaceId: string,
+    templateKey: string,
+  ): Promise<SetupReadiness> {
+    const response = await this.requestJson<SetupReadinessResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/readiness`,
+    );
+    return response.readiness;
+  }
+
+  /**
+   * Readiness of an agent for the caller. An agent added from a ready-made one
+   * needs its required connections before a trigger can be turned on.
+   */
+  async getAgentReadiness(workspaceId: string, agentId: string): Promise<SetupReadiness> {
+    const response = await this.requestJson<SetupReadinessResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/readiness`,
+    );
+    return response.readiness;
   }
 
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */

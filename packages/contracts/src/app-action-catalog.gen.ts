@@ -3600,6 +3600,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getAgentReadiness",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/readiness",
+    "request": [],
+    "response": [
+      "SetupReadiness",
+      "SetupReadinessResponse"
+    ]
+  },
+  {
+    "id": "getAgentTemplateReadiness",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/readiness",
+    "request": [],
+    "response": [
+      "SetupReadiness",
+      "SetupReadinessResponse"
+    ]
+  },
+  {
     "id": "getAppServerStatus",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/server/status",

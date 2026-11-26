@@ -29,6 +29,7 @@ import {
   ListAgentsResponse,
   PutAgentSlackAvailabilityRequest,
   SessionAvatar,
+  SetupReadinessResponse,
   UpdateAgentRequest,
   AGENTS_PER_WORKSPACE_MAX,
   slackAgentNameKey,
@@ -86,6 +87,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import { setupReadinessFor } from "../agent-setup-readiness";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
 import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
@@ -374,6 +376,43 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       await agentBody(context, await createAgentFor(context, request, template.key)),
       201,
+    );
+  });
+
+  /**
+   * Readiness of a ready-made agent before it is added (the Enable page): its
+   * connections, which the viewer already has, and what keeps it off.
+   */
+  app.get(`${templatesBase}/:templateKey/readiness`, async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    const template = agentTemplateByKey(c.req.param("templateKey") ?? "");
+    if (!template) {
+      throw agentError(
+        404,
+        "agent_template_not_found",
+        "There is no ready-made agent with that key.",
+      );
+    }
+    return c.json(
+      SetupReadinessResponse.parse({
+        readiness: await setupReadinessFor(deps, context.grant, template.setup),
+      }),
+    );
+  });
+
+  /**
+   * Readiness of an agent for the viewer: an agent added from a ready-made
+   * one needs that template's required connections; any other is ready.
+   * Its triggers can't be turned on until it is (routes/scheduled-tasks.ts).
+   */
+  app.get(`${base}/:agentId/readiness`, async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    const agent = await requireVisibleAgent(c, context);
+    const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
+    return c.json(
+      SetupReadinessResponse.parse({
+        readiness: await setupReadinessFor(deps, context.grant, template?.setup),
+      }),
     );
   });
 
