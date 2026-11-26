@@ -33,5 +33,29 @@
         "label": "Decision log"
       }
     ]
+  },
+  "preview": {
+    "records": {
+      "decisions": [
+        {
+          "title": "Move billing to monthly invoices",
+          "why": "Customers asked for one invoice a month; it also cuts card fees.",
+          "owner": "Ana",
+          "date": "{{today-1}}"
+        },
+        {
+          "title": "Use Postgres for analytics",
+          "why": "One database to run; the volumes fit for now.",
+          "owner": "Jon",
+          "date": "{{today-4}}"
+        },
+        {
+          "title": "Weekly releases on Tuesdays",
+          "why": "Gives a day to fix anything before the weekend.",
+          "owner": "Maya",
+          "date": "{{today-9}}"
+        }
+      ]
+    }
   }
 }

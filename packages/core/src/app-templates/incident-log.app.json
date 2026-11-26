@@ -33,5 +33,27 @@
         "label": "Incident log"
       }
     ]
+  },
+  "preview": {
+    "records": {
+      "incidents": [
+        {
+          "title": "API errors in EU region",
+          "impact": "About 8% of requests failed for 20 minutes.",
+          "lead": "Maya",
+          "severity": "sev2",
+          "status": "mitigated",
+          "started": "{{today}} 09:40 UTC"
+        },
+        {
+          "title": "Delayed email notifications",
+          "impact": "Emails arrived up to an hour late.",
+          "lead": "Jon",
+          "severity": "sev3",
+          "status": "resolved",
+          "started": "{{today-3}} 14:05 UTC"
+        }
+      ]
+    }
   }
 }

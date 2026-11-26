@@ -56,5 +56,39 @@
         }
       }
     ]
+  },
+  "preview": {
+    "records": {
+      "entries": [
+        {
+          "title": "Faster chat loading",
+          "summary": "Opening a chat now loads its history in one request.",
+          "kind": "shipped",
+          "by": "Agent",
+          "date": "{{today}}"
+        },
+        {
+          "title": "Sign-in loop on Safari",
+          "summary": "Expired sessions now go back to the sign-in page instead of reloading.",
+          "kind": "fixed",
+          "by": "Maya",
+          "date": "{{today}}"
+        },
+        {
+          "title": "Keep weekly releases",
+          "summary": "Agreed in planning: one release on Tuesdays, hotfixes as needed.",
+          "kind": "decided",
+          "by": "Agent",
+          "date": "{{today-1}}"
+        },
+        {
+          "title": "CSV export for reports",
+          "summary": "Reports can be downloaded as CSV.",
+          "kind": "shipped",
+          "by": "Jon",
+          "date": "{{today-1}}"
+        }
+      ]
+    }
   }
 }

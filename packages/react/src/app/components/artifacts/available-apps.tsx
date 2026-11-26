@@ -1,7 +1,8 @@
 /**
  * The Apps page's Available list: ready-made apps not added here yet
- * (packages/core/src/app-templates). Each opens the install dialog, which
- * names the Skills it turns on and the automations it adds, then installs
+ * (packages/core/src/app-templates). Choosing one never installs it: it opens
+ * the install dialog with what the app is, a preview of it on sample records,
+ * the Skills it turns on and the automations it adds; Install there installs
  * and opens it.
  */
 import { useEffect, useState } from "react";
@@ -19,6 +20,7 @@ import {
   useOpenInstalledApp,
   type ChosenAppPackage,
 } from "./app-package";
+import { AppTemplatePreview } from "./app-template-preview";
 import { ArtifactKindTile } from "./artifact-page-chrome";
 import "../../../../styles/connect.css";
 
@@ -80,7 +82,7 @@ export function AvailableApps({
             title={template.description}
             icon={<ArtifactKindTile kind="site" />}
             status="available"
-            statusLabel={`Install ${template.name}`}
+            statusLabel={`Preview ${template.name}`}
             onOpen={() => choose(template)}
           />
         ))}
@@ -88,6 +90,10 @@ export function AvailableApps({
       <InstallAppDialog
         workspaceId={workspaceId}
         chosen={chosen?.app ?? null}
+        about={chosen?.template.description}
+        preview={
+          chosen ? <AppTemplatePreview template={chosen.template} html={chosen.app.html} /> : null
+        }
         onOpenChange={(open) => {
           if (!open) setChosen(null);
         }}

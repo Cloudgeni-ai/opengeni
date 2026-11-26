@@ -14,6 +14,7 @@ import workSummary from "../../core/src/app-templates/work-summary.app.json";
 import issueTracker from "../../core/src/app-templates/issue-tracker.app.json";
 import incidentLog from "../../core/src/app-templates/incident-log.app.json";
 import decisionLog from "../../core/src/app-templates/decision-log.app.json";
+import feedbackBoard from "../../core/src/app-templates/feedback-board.app.json";
 import { MockOpenGeniClient } from "./mock";
 import "./agent-settings.css";
 
@@ -103,7 +104,7 @@ class PreviewClient extends MockOpenGeniClient {
     return STATUS;
   }
   async listAppTemplates() {
-    return [workSummary, issueTracker, incidentLog, decisionLog] as never;
+    return [workSummary, issueTracker, incidentLog, feedbackBoard, decisionLog] as never;
   }
   async upgradeAppPackage(_workspaceId: string, appId: string, request: { previous?: boolean }) {
     const plan = request.previous

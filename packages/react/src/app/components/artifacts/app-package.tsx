@@ -26,6 +26,8 @@ export type ChosenAppPackage = {
   /** The file's JSON, sent as is: the server validates it again. */
   json: Record<string, unknown>;
   title: string;
+  /** The app's page, for a preview. */
+  html: string;
   hasDemoData: boolean;
   packageVersion: string | null;
   /** The Skills it turns on, each with its one line of what it lets agents do. */
@@ -47,6 +49,7 @@ export function chosenAppPackage(json: unknown): ChosenAppPackage {
   return {
     json: json as Record<string, unknown>,
     title: pkg.app.title,
+    html: pkg.app.html,
     hasDemoData,
     packageVersion: pkg.packageVersion ?? null,
     skills: (pkg.skills ?? []).map((skill) => ({
@@ -544,6 +547,8 @@ export function InstallAppDialog({
   onOpenChange,
   onInstalled,
   install,
+  about,
+  preview,
 }: {
   workspaceId: string;
   chosen: ChosenAppPackage | null;
@@ -556,6 +561,10 @@ export function InstallAppDialog({
         demoData: boolean | undefined,
       ) => Promise<AppPackageInstallResponse>)
     | undefined;
+  /** What the app is, in a paragraph (a ready-made app's description). */
+  about?: string | undefined;
+  /** How the app looks, shown before anything is installed. */
+  preview?: ReactNode | undefined;
 }) {
   const { client } = useAppContext();
   const [demoData, setDemoData] = useState(true);
@@ -570,18 +579,18 @@ export function InstallAppDialog({
     setDemoData(true);
     setError(null);
   }
+  const adds = chosen
+    ? chosen.skills.length > 0
+      ? "Adds the app and its Skills for agents in this workspace."
+      : "Adds the app to this workspace."
+    : undefined;
   return (
     <FormDialog
       open={chosen !== null}
       onOpenChange={onOpenChange}
-      title={chosen ? `Install ${chosen.title}` : "Install app"}
-      description={
-        chosen
-          ? chosen.skills.length > 0
-            ? "Adds the app and its Skills for agents in this workspace."
-            : "Adds the app to this workspace."
-          : undefined
-      }
+      size={preview ? "lg" : "md"}
+      title={chosen ? (about ? chosen.title : `Install ${chosen.title}`) : "Install app"}
+      description={about ?? adds}
       submitLabel="Install"
       pendingLabel="Installing…"
       error={error}
@@ -604,6 +613,8 @@ export function InstallAppDialog({
       onSubmitted={() => onOpenChange(false)}
     >
       <div className="flex flex-col gap-4">
+        {preview}
+        {about ? <p className="text-sm text-fg-muted">{adds}</p> : null}
         {chosen && chosen.skills.length > 0 ? (
           <PackageContentsList
             label="Skills"

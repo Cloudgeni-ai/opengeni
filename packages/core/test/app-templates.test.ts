@@ -42,4 +42,20 @@ describe("ready-made apps", () => {
       expect(template.team).toBeString();
     }
   });
+
+  test("every ready-made app has sample records for its preview, in its own collections", () => {
+    for (const template of appTemplates()) {
+      const collections = new Set(
+        parseAppPackage(template.package).package.data.collections.map((each) => each.name),
+      );
+      const sample = Object.entries(template.preview?.records ?? {});
+      expect(sample.length).toBeGreaterThan(0);
+      for (const [collection, records] of sample) {
+        expect(collections.has(collection)).toBe(true);
+        expect(records.length).toBeGreaterThan(0);
+      }
+      // The preview is not demo data: installing adds none of it.
+      expect(JSON.stringify(template.package)).not.toContain("{{today");
+    }
+  });
 });

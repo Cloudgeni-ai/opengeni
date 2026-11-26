@@ -13586,7 +13586,20 @@
         "$.name": "string!",
         "$.package": "object!",
         "$.package{}": "unknown",
+        "$.preview": "ref(AppTemplatePreview)! null",
         "$.team": "string! null"
+      }
+    },
+    "AppTemplatePreview": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.records": "object!",
+        "$.records{}": "array",
+        "$.records{}[]": "object",
+        "$.records{}[]{}": "unknown"
       }
     },
     "AppWebhook": {

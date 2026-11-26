@@ -308,10 +308,12 @@ with its `packageVersion`, `archived`, `modified`, its Skills (each with
 The rail's **Apps** page lists the apps here, with their version and
 **Modified** or **Update available**, and below them the ready-made apps not
 added yet. Header actions: **Install from file** (for people who can publish)
-and **New app**. Installing (a ready-made app or a file) opens one dialog:
-it says installing adds the app and its Skills for agents, names each Skill
-with its one line, lists automations (added off), offers demo data when the
-package has some, and has one **Install** button. The new app opens.
+and **New app**. Nothing installs on a click: choosing a ready-made app or a
+file opens one dialog first. For a ready-made app it shows the app's
+description and a [preview](#preview) of the app; then, for either, it says
+installing adds the app and its Skills for agents, names each Skill with its
+one line, lists automations (added off), offers demo data when the package
+has some, and has one **Install** button. The new app opens.
 
 An app's "…" menu on the Apps page has **Update to x** and **Restore previous
 version** when they apply; its settings' More has **Export**, **Upgrade**
@@ -338,7 +340,7 @@ recorded export objects.
 `GET /v1/workspaces/:workspaceId/app-templates` (`artifacts:read`; SDK
 `listAppTemplates`) lists ready-made apps: content files in
 `packages/core/src/app-templates/*.app.json` (schema `AppTemplate`: `key`,
-`name`, `description`, `team` and a `package`). A file that isn't a valid
+`name`, `description`, `team`, a `package` and `preview` sample records). A file that isn't a valid
 package, or whose package has problems, is skipped. Five ship, in this
 order: Work summary, Issue tracker, Incident log, Feedback board and Decision
 log. Each has a fixed `packageId` and a `packageVersion`; raising the version
@@ -354,6 +356,17 @@ adds a separate copy with its own data. Then the app opens, and asks to
 connect any tool it uses.
 Ready-made apps built on a connected tool (a Linear or GitHub board) come
 later, with app server code.
+
+### Preview
+
+Before installing, the dialog shows the ready-made app's own page running on
+its template's `preview.records` (sample records per collection; `{{today}}`
+or `{{today-N}}` in a string is that day's date). It runs in the usual
+sandboxed app frame, drawn scaled down and inert (no clicks or focus), with a
+read-only in-memory Site Data (`packages/react/src/app/lib/app-template-preview.ts`):
+reads list the sample, every write and tool call is refused, and nothing
+reaches the server. The sample records are not demo data: installing never
+adds them.
 
 ## Self-hosting
 

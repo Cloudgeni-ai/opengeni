@@ -38,5 +38,37 @@
         "label": "Feedback board"
       }
     ]
+  },
+  "preview": {
+    "records": {
+      "requests": [
+        {
+          "title": "Dark mode for the mobile app",
+          "details": "Most of us read it at night.",
+          "status": "planned",
+          "votes": 14,
+          "added": "{{today-6}}"
+        },
+        {
+          "title": "Export boards to CSV",
+          "details": "For the monthly review.",
+          "status": "in_progress",
+          "votes": 9,
+          "added": "{{today-3}}"
+        },
+        {
+          "title": "Keyboard shortcut to add a request",
+          "status": "new",
+          "votes": 4,
+          "added": "{{today-1}}"
+        },
+        {
+          "title": "Weekly email digest",
+          "status": "done",
+          "votes": 7,
+          "added": "{{today-12}}"
+        }
+      ]
+    }
   }
 }

@@ -7,8 +7,8 @@ import issueTracker from "./issue-tracker.app.json";
 import workSummary from "./work-summary.app.json";
 
 /**
- * Ready-made apps people add in Capabilities (Ready-made) and on the
- * Apps page. Each is a content file: an app package (docs/app-packages.md)
+ * Ready-made apps people preview and add on the Apps page. Each is a
+ * content file: an app package (docs/app-packages.md)
  * with a name, a line about it and its team, and its own package id and
  * version: raising the version offers the update to every app installed
  * from it. Adding one installs the package as a new app (with any Skills
