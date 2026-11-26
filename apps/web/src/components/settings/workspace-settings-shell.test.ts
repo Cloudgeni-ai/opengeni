@@ -275,9 +275,7 @@ describe("settings rail", () => {
       ]);
       expect(advanced.textContent).toContain("Workspace");
       expect(advanced.textContent).toContain("Organization");
-      expect(iconOf(advanced, "Security & data")).toBe(
-        iconOf(view.section("account"), "Security"),
-      );
+      expect(iconOf(advanced, "Security & data")).toBe(iconOf(view.section("account"), "Security"));
 
       // My things opens through this workspace; Security opens outside it.
       expect(linkLabels(view.section("account"))).toEqual(["My things", "Security"]);

@@ -404,8 +404,7 @@ async function recordRemovalBatchWithRetry(
   chunk: readonly string[],
   entries: readonly SessionRemovedRepository[],
 ): Promise<string[]> {
-  // Inside a caller's transaction a failed statement aborts it, so a retry
-  // here could only repeat the abort; the caller's own retry handles it.
+  // Inside a caller's transaction the caller's own retry handles a conflict.
   const attempts = isTransactionHandle(db) ? 1 : REMOVAL_BATCH_ATTEMPTS;
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -425,9 +424,12 @@ async function recordRemovalBatch(
 ): Promise<string[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const attaching: string[] = [];
-    // Don't wait behind a long turn holding one of these rows: give up and
-    // retry (or fall back to one session at a time) instead.
-    await scopedDb.execute(sql`set local lock_timeout = '5s'`);
+    // Don't wait long behind a turn holding one of a batch's rows: give up
+    // and retry, then go one session at a time. A single session waits as
+    // long as it needs, as before; a caller's own transaction keeps its own.
+    if (chunk.length > 1 && !isTransactionHandle(db)) {
+      await scopedDb.execute(sql`select set_config('lock_timeout', '5s', true)`);
+    }
     const rows = await scopedDb
       .select({
         id: schema.sessions.id,

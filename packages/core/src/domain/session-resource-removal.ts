@@ -149,16 +149,23 @@ export async function removeSessionResources(
       pending,
       records(),
     );
-    const detached = await removeFrom(attachedMeanwhile);
-    if (detached.length > 0) {
-      await removeFrom(
-        await recordSessionRemovedRepositoriesForSessions(
-          deps.db,
-          grant.workspaceId,
-          detached,
-          records(),
-        ),
-      );
+    // Repeat for sessions that keep changing under the cascade (bounded).
+    let unsettled = attachedMeanwhile;
+    for (
+      let round = 0;
+      unsettled.length > 0 && round < SESSION_RESOURCE_REMOVAL_MAX_PASSES;
+      round += 1
+    ) {
+      const detached = await removeFrom(unsettled);
+      unsettled =
+        detached.length > 0
+          ? await recordSessionRemovedRepositoriesForSessions(
+              deps.db,
+              grant.workspaceId,
+              detached,
+              records(),
+            )
+          : [];
     }
   }
   return await requireSession(deps.db, grant.workspaceId, sessionId);
