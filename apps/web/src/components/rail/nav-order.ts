@@ -5,6 +5,12 @@
 /** The folded group ("Setup", or "Advanced" in the simplified interface) as an entry of the top. */
 export const NAV_GROUP_KEY = "setup";
 
+/**
+ * Entries that always stay at the top, never inside the group: a closed
+ * group would hide New session, and the inbox's unread mark with it.
+ */
+export const NAV_TOP_ONLY: ReadonlySet<string> = new Set(["new_session", "inbox"]);
+
 /** The entries at the top, in order (the group among them), and the entries inside the group. */
 export type NavArrangement = { top: string[]; group: string[] };
 
@@ -30,7 +36,7 @@ export function arrangeNav(
       placed.add(key);
     }
   for (const key of group ?? [])
-    if (known.has(key) && !placed.has(key) && key !== NAV_GROUP_KEY) {
+    if (known.has(key) && !placed.has(key) && key !== NAV_GROUP_KEY && !NAV_TOP_ONLY.has(key)) {
       inside.push(key);
       placed.add(key);
     }
@@ -69,11 +75,11 @@ export function moveNavEntry(
   const group = arrangement.group.filter((entry) => entry !== key);
   if (top.length + group.length === arrangement.top.length + arrangement.group.length) return null;
   if (at === "into") {
-    if (target !== NAV_GROUP_KEY || key === NAV_GROUP_KEY) return null;
+    if (target !== NAV_GROUP_KEY || key === NAV_GROUP_KEY || NAV_TOP_ONLY.has(key)) return null;
     group.push(key);
   } else {
     // The group can't go inside itself: next to one of its entries is next to it.
-    const inGroup = group.includes(target) && key !== NAV_GROUP_KEY;
+    const inGroup = group.includes(target) && key !== NAV_GROUP_KEY && !NAV_TOP_ONLY.has(key);
     const list = inGroup ? group : top;
     const anchor = list.indexOf(inGroup || top.includes(target) ? target : NAV_GROUP_KEY);
     if (anchor < 0) return null;
@@ -86,22 +92,35 @@ export function moveNavEntry(
 /**
  * The arrangement after `key` moves one place up (-1) or down (1) in the rail
  * as shown: past the group's name it goes into the group while it's open, and
- * out of it from its first or last entry. Null at the ends.
+ * out of it from its first or last entry. Entries the rail doesn't show
+ * (`visible` false) are stepped over, so every move is one you can see. Null
+ * at the ends.
  */
 export function stepNavEntry(
   arrangement: NavArrangement,
   key: string,
   direction: -1 | 1,
   groupOpen: boolean,
+  visible: (key: string) => boolean = () => true,
 ): NavArrangement | null {
   const top = [...arrangement.top];
   const group = [...arrangement.group];
+  const nextShown = (list: readonly string[], from: number) => {
+    for (let at = from + direction; at >= 0 && at < list.length; at += direction)
+      if (visible(list[at]!)) return list[at]!;
+    return undefined;
+  };
+  // `key` goes just past `neighbour` in `list` (before it going up, after it going down).
+  const pass = (list: string[], neighbour: string) => {
+    list.splice(list.indexOf(key), 1);
+    const at = list.indexOf(neighbour);
+    list.splice(direction < 0 ? at : at + 1, 0, key);
+  };
   const inGroup = group.indexOf(key);
   if (inGroup >= 0) {
-    const next = inGroup + direction;
-    if (next >= 0 && next < group.length) {
-      [group[inGroup], group[next]] = [group[next]!, group[inGroup]!];
-    } else {
+    const neighbour = nextShown(group, inGroup);
+    if (neighbour !== undefined) pass(group, neighbour);
+    else {
       group.splice(inGroup, 1);
       const at = top.indexOf(NAV_GROUP_KEY);
       top.splice(direction < 0 ? at : at + 1, 0, key);
@@ -110,15 +129,15 @@ export function stepNavEntry(
   }
   const index = top.indexOf(key);
   if (index < 0) return null;
-  const neighbour = top[index + direction];
+  const neighbour = nextShown(top, index);
   if (neighbour === undefined) return null;
-  if (neighbour === NAV_GROUP_KEY && key !== NAV_GROUP_KEY && groupOpen) {
+  if (neighbour === NAV_GROUP_KEY && key !== NAV_GROUP_KEY && groupOpen && !NAV_TOP_ONLY.has(key)) {
     top.splice(index, 1);
     if (direction < 0) group.push(key);
     else group.unshift(key);
     return { top, group };
   }
-  [top[index], top[index + direction]] = [neighbour, key];
+  pass(top, neighbour);
   return { top, group };
 }
 

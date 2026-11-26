@@ -156,6 +156,27 @@ export function WorkspaceShortcutLinks({
   // page you are on and anything waiting for you, so nothing is folded away.
   const groupOpen = groupExpanded;
   const canMove = order.canChange && !rail.collapsed;
+  // What the rail shows right now, so a keyboard move always moves past
+  // something you can see.
+  const onScreen = (key: string) =>
+    key === NAV_GROUP_KEY
+      ? grouped.length > 0
+      : arrangement.group.includes(key)
+        ? groupOpen
+          ? visible(key)
+          : surfacedKeys.includes(key)
+        : visible(key);
+  const [moved, setMoved] = useState("");
+  const labelOf = (key: string) =>
+    key === NAV_GROUP_KEY
+      ? group.label
+      : (items.get(key)?.label ?? EXTRA_ENTRY_LABELS[key] ?? key.replace(/_/g, " "));
+  const step = (key: string, direction: -1 | 1) => {
+    const next = stepNavEntry(arrangement, key, direction, groupOpen, onScreen);
+    if (!next) return;
+    order.save(next);
+    setMoved(`Moved ${labelOf(key)} ${direction < 0 ? "up" : "down"}.`);
+  };
   const entry = (key: string) => {
     const content = entries?.[key] ?? (items.has(key) ? link(items.get(key)!) : null);
     if (!content) return null;
@@ -165,7 +186,7 @@ export function WorkspaceShortcutLinks({
         entryKey={key}
         canMove={canMove}
         onDrop={(dragged, at) => order.save(moveNavEntry(arrangement, dragged, key, at))}
-        onStep={(direction) => order.save(stepNavEntry(arrangement, key, direction, groupOpen))}
+        onStep={(direction) => step(key, direction)}
       >
         {content}
       </NavDragRow>
@@ -184,9 +205,7 @@ export function WorkspaceShortcutLinks({
           onDrop={(dragged, at) =>
             order.save(moveNavEntry(arrangement, dragged, NAV_GROUP_KEY, at))
           }
-          onStep={(direction) =>
-            order.save(stepNavEntry(arrangement, NAV_GROUP_KEY, direction, groupOpen))
-          }
+          onStep={(direction) => step(NAV_GROUP_KEY, direction)}
         >
           <Button
             type="button"
@@ -216,9 +235,19 @@ export function WorkspaceShortcutLinks({
         key === NAV_GROUP_KEY ? groupBlock : visible(key) ? entry(key) : null,
       )}
       {unlistedRecording.map(link)}
+      {canMove ? (
+        <span aria-live="polite" className="sr-only">
+          {moved}
+        </span>
+      ) : null}
     </div>
   );
 }
+
+const EXTRA_ENTRY_LABELS: Readonly<Record<string, string>> = {
+  new_session: "New session",
+  inbox: "Inbox",
+};
 
 const NAV_DRAG_TYPE = "application/x-opengeni-rail-entry";
 

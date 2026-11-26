@@ -7,7 +7,7 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { agentAvatar } from "@opengeni/react/session-avatar-model";
 
-/** At most this many workspaces are read for one breakdown. */
+/** At most this many workspaces are read for one breakdown: the first ones in row order. */
 const MAX_WORKSPACES = 20;
 
 type KnownAgent = { avatar: SessionAvatarValue | null; workspaceId: string };
@@ -18,7 +18,7 @@ export function useUsageAgentAvatars(
   enabled: boolean,
 ): ReadonlyMap<string, KnownAgent> {
   const { client } = useAppContext();
-  const key = enabled ? [...new Set(workspaceIds)].sort().slice(0, MAX_WORKSPACES).join(",") : "";
+  const key = enabled ? [...new Set(workspaceIds)].slice(0, MAX_WORKSPACES).join(",") : "";
   const [known, setKnown] = useState<{ key: string; agents: Map<string, KnownAgent> }>({
     key: "",
     agents: new Map(),

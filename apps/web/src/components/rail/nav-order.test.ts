@@ -37,9 +37,9 @@ describe("rail entry order", () => {
       "agents",
       NAV_GROUP_KEY,
     ]);
-    expect(moveNavEntry(defaults, "inbox", NAV_GROUP_KEY, "into")).toEqual({
-      top: ["new_session", "agents", "apps", NAV_GROUP_KEY],
-      group: ["get_started", "capabilities", "automations", "inbox"],
+    expect(moveNavEntry(defaults, "agents", NAV_GROUP_KEY, "into")).toEqual({
+      top: ["new_session", "inbox", "apps", NAV_GROUP_KEY],
+      group: ["get_started", "capabilities", "automations", "agents"],
     });
     expect(moveNavEntry(defaults, "automations", "inbox", "after")).toEqual({
       top: ["new_session", "inbox", "automations", "agents", "apps", NAV_GROUP_KEY],
@@ -84,5 +84,41 @@ describe("rail entry order", () => {
       top: ["new_session", "inbox", "agents", "apps", "get_started", NAV_GROUP_KEY],
       group: ["capabilities", "automations"],
     });
+  });
+
+  test("New session and Inbox never go inside the group", () => {
+    expect(moveNavEntry(defaults, "inbox", NAV_GROUP_KEY, "into")).toBeNull();
+    // Dropped next to one of the group's entries, it stays next to the group instead.
+    expect(moveNavEntry(defaults, "new_session", "capabilities", "after")).toEqual({
+      top: ["inbox", "agents", "apps", NAV_GROUP_KEY, "new_session"],
+      group: defaults.group,
+    });
+    // Stepping down past the open group passes it.
+    const atEnd = { top: ["agents", "apps", "inbox", NAV_GROUP_KEY], group: defaults.group };
+    expect(stepNavEntry(atEnd, "inbox", 1, true)?.top).toEqual([
+      "agents",
+      "apps",
+      NAV_GROUP_KEY,
+      "inbox",
+    ]);
+    // A saved order that put them inside is read with them at the top.
+    expect(arrangeNav(defaults, null, ["inbox", "capabilities"]).group).not.toContain("inbox");
+  });
+
+  test("Alt+Arrow steps over entries the rail doesn't show", () => {
+    const shown = (key: string) => key !== "agents";
+    expect(stepNavEntry(defaults, "inbox", 1, false, shown)?.top).toEqual([
+      "new_session",
+      "agents",
+      "apps",
+      "inbox",
+      NAV_GROUP_KEY,
+    ]);
+    // In a group, too.
+    expect(
+      stepNavEntry(defaults, "get_started", 1, true, (key) => key !== "capabilities")?.group,
+    ).toEqual(["capabilities", "automations", "get_started"]);
+    // Nothing shown beyond it: no move.
+    expect(stepNavEntry(defaults, "apps", 1, false, (key) => key !== NAV_GROUP_KEY)).toBeNull();
   });
 });
