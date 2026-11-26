@@ -1778,6 +1778,8 @@ type DispatchFacts = {
   sync_owner: string | null;
   task_visibility: string;
   task_run_mode: string;
+  /** The visibility of the chat the automation continues, when it has one. */
+  kept_chat_visibility: string | null;
 };
 
 function byteLength(value: unknown): number {
@@ -1821,6 +1823,9 @@ export async function claimEventTriggerDispatch(
             task.authority_revision, task.execution_digest,
             task.owner_subject_id as task_owner, task.action ->> 'ownerSubjectId' as sync_owner,
             task.visibility as task_visibility, task.run_mode as task_run_mode,
+            (select kept.visibility from sessions kept
+              where kept.workspace_id = task.workspace_id
+                and kept.id = task.reusable_session_id) as kept_chat_visibility,
             coalesce((select run.error = 'chain_limit' and run.admission_refusal is not null
               from scheduled_task_runs run
               where run.workspace_id = task.workspace_id and run.task_id = task.id
@@ -1949,12 +1954,15 @@ export async function claimEventTriggerDispatch(
       // events that would take it past the limit, before the storm guard
       // counts anything, so a loop of automations stops here.
       const limited = queued.filter((entry) => entry.event.chainDepth >= maxChainDepth);
-      // An event only the owner may see runs only in a new Only me chat of
-      // the owner. An automation that keeps one chat shared with the
-      // workspace leaves it out here, before it is batched or counted, with
-      // one skipped run receipt per streak.
+      // An event only the owner may see runs only in an Only me chat of the
+      // owner: a new one, or the Only me automation's own chat while that is
+      // still Only me. Any other automation that keeps one chat leaves it out
+      // here, before it is batched or counted, with one skipped run receipt
+      // per streak.
       const ownerOnlyHere =
-        facts.task_visibility === "private" || facts.task_run_mode === "new_session_per_run";
+        facts.task_run_mode === "new_session_per_run" ||
+        (facts.task_visibility === "private" &&
+          (facts.kept_chat_visibility === null || facts.kept_chat_visibility === "user_private"));
       const withheld = ownerOnlyHere
         ? []
         : queued.filter(
