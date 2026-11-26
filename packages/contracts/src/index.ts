@@ -2,6 +2,7 @@ export * from "./model-inference";
 export * from "./ai-processing-consent";
 export type * from "./decision-types";
 export * from "./billing-credit-notifications";
+export * from "./account-deletion";
 import { BillingCreditNotification } from "./billing-credit-notifications";
 import {
   FIRST_PARTY_MCP_TOOL_ALIASES,

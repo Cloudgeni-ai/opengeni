@@ -1247,7 +1247,9 @@ export async function updateOrganizationMember(
   db: Database,
   input: CommandBase & {
     membershipId: string;
-    transition: UpdateOrganizationMemberRequest;
+    transition:
+      | UpdateOrganizationMemberRequest
+      | { kind: "leave"; expectedAuthorizationRevision: number; role?: never; reason?: never };
   },
 ): Promise<OrganizationMemberType> {
   const { transition, ...base } = input;
@@ -1260,7 +1262,8 @@ export async function updateOrganizationMember(
   };
   return await withOrganizationLifecycleDeadlockReplay(async () =>
     db.transaction(async (tx) => {
-      if (transition.kind === "suspend" || transition.kind === "offboard") {
+      const offboard = transition.kind === "offboard" || transition.kind === "leave";
+      if (transition.kind === "suspend" || offboard) {
         const settlements = await prepareOrganizationMembershipProtocolSettlements(
           tx as unknown as Database,
           command,
@@ -1271,7 +1274,7 @@ export async function updateOrganizationMember(
       // A person who leaves loses every key that acts as them here, so
       // rejoining later never revives one. Suspension keeps keys: they stop
       // working while suspended because each request rechecks membership.
-      if (transition.kind === "offboard" && member.status === "revoked")
+      if (offboard && member.status === "revoked")
         await revokePersonalApiKeysForOwner(tx as unknown as Database, {
           accountId: member.organizationId,
           ownerSubjectId: member.subjectId,
@@ -1279,22 +1282,18 @@ export async function updateOrganizationMember(
       // A Console role belongs to a member with their current organization
       // role: a new role or leaving resets it, in this transaction, so it
       // can't outlive the change (docs/opengeni-console.md, "Roles").
-      if (
-        (transition.kind === "change_role" || transition.kind === "offboard") &&
-        member.subjectId.startsWith("user:")
-      ) {
+      if ((transition.kind === "change_role" || offboard) && member.subjectId.startsWith("user:")) {
         await clearConsoleMemberRole(tx as unknown as Database, {
           accountId: member.organizationId,
           subjectId: member.subjectId,
           actorSubjectId: input.actorSubjectId,
           actorLabel: null,
-          reason:
-            transition.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
+          reason: offboard ? "member_offboarded" : "organization_role_changed",
         });
       }
       // An offboarded end user's stored tool logins (every workspace) and
       // display profile are erased with them (Console agents).
-      if (transition.kind === "offboard" && member.status === "revoked")
+      if (offboard && member.status === "revoked")
         await eraseEndUserToolData(tx as unknown as Database, {
           accountId: member.organizationId,
           subjectId: member.subjectId,
@@ -1432,6 +1431,7 @@ export async function recordOrganizationRetentionObjectDeleted(
     sourceId: string;
     objectBucket: string;
     objectKey: string;
+    siteSqlHandled?: boolean;
   },
 ): Promise<boolean> {
   return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
@@ -1442,7 +1442,7 @@ export async function recordOrganizationRetentionObjectDeleted(
         ${input.membershipId}::uuid,
         ${input.operationId}::uuid,
         ${input.objectKind},
-        ${input.sourceId},
+        ${input.objectKind === "site_sql" && input.siteSqlHandled ? `site-sql-confirmed:${input.sourceId}` : input.sourceId},
         ${input.objectBucket},
         ${input.objectKey}
       ) as result`,
