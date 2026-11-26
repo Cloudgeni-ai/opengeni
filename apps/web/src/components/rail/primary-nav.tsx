@@ -320,6 +320,8 @@ function NavDragRow({
         event.preventDefault();
         event.stopPropagation();
         setOver(null);
+        // The dragged row may move to another parent and never see its dragend.
+        onDragging(false);
         const dragged = event.dataTransfer.getData(NAV_DRAG_TYPE);
         if (dragged) onDrop(dragged, zone(event));
       }}
