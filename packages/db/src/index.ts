@@ -53511,6 +53511,137 @@ async function acquireLeaseOnce(
             }
           }
         }
+        // The running-box limits bound how many boxes run at once. A new box
+        // counts against the organization's running-box limit for its plan.
+        // The acting person's limited organizations share a second budget
+        // (runningBoxesPerPerson); their other organizations' boxes were
+        // counted before this transaction.
+        // A young unpaid organization runs fewer boxes (fleet limits).
+        // It counts boxes a turn or a person's own work keeps warm, not
+        // boxes only viewers keep warm (the viewer-only limits bound those),
+        // so an open desktop does not park the organization's next chat.
+        // Every unpaid organization together (fleet limits): a new box past
+        // the fleet's box time, its running cap, or while the fleet is
+        // under pressure is refused for every holder kind; a turn fails with
+        // the reason rather than waiting. Reads that fail refuse (fail
+        // closed) for unpaid boxes only.
+        // Attaching to, or re-arming, a box that already runs adds none and
+        // is not checked. A sleeping compute box is not counted as running
+        // (migration 1574), so waking one is checked like a new box
+        // (wakesSleepingComputeBox).
+        // At a limit a turn parks (organization_sandbox_capacity) and every
+        // other holder is refused.
+        const admitRunningBox = async () => {
+          const youngLimit =
+            backend !== "selfhosted" &&
+            kind !== "viewer" &&
+            fleet !== null &&
+            fleet.young &&
+            fleet.limits.youngOrganizationRunningBoxes !== undefined
+              ? fleet.limits.youngOrganizationRunningBoxes
+              : undefined;
+          const runningBoxLimit =
+            backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
+          const personBoxLimit =
+            backend === "selfhosted" || standing === null || !standing.bounded
+              ? undefined
+              : planLimit.runningBoxesPerPerson;
+          if (
+            runningBoxLimit !== undefined ||
+            personBoxLimit !== undefined ||
+            youngLimit !== undefined ||
+            cardTrialTurn
+          ) {
+            await lockOrganizationSandboxLimit(tx, accountId);
+            const counts =
+              !cardTrialTurn && (runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0)
+                ? null
+                : await organizationWarmSandboxCounts(tx, {
+                    accountId,
+                    subjectId: null,
+                    excludeLeaseId: row.id,
+                  });
+            // A trial box runs alone: while another box runs, the card is
+            // asked for instead of waiting for it.
+            if (cardTrialTurn && (counts === null || counts.runningBoxes > 0)) {
+              throw new SandboxOrganizationBoxLimitError(
+                workspaceId,
+                sandboxGroupId,
+                0,
+                "card_required",
+              );
+            }
+            const organizationFull =
+              runningBoxLimit !== undefined &&
+              (runningBoxLimit === 0 ||
+                (counts !== null && counts.runningBoxes >= runningBoxLimit));
+            const youngFull =
+              !organizationFull &&
+              youngLimit !== undefined &&
+              (youngLimit === 0 ||
+                (counts !== null && counts.runningBoxes - counts.viewerOnlyBoxes >= youngLimit));
+            const personFull =
+              !organizationFull &&
+              !youngFull &&
+              personBoxLimit !== undefined &&
+              (personBoxLimit === 0 ||
+                (counts !== null &&
+                  (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
+                    (standing?.personOtherRunningBoxes ?? 0) >=
+                    personBoxLimit));
+            if (organizationFull || youngFull || personFull) {
+              const limit = organizationFull
+                ? (runningBoxLimit ?? 0)
+                : youngFull
+                  ? (youngLimit ?? 0)
+                  : (personBoxLimit ?? 0);
+              if (kind !== "turn") {
+                throw new SandboxOrganizationBoxLimitError(
+                  workspaceId,
+                  sandboxGroupId,
+                  limit,
+                  organizationFull ? "running" : youngFull ? "young_running" : "person_running",
+                );
+              }
+              return {
+                role: "fenced" as const,
+                reason: "organization_sandbox_capacity" as const,
+                lease: mapLeaseRow(row),
+                organizationBoxLimit: limit,
+              };
+            }
+          }
+          if (backend !== "selfhosted" && sandboxFleetBounded(standing) && fleet !== null) {
+            await enforceSandboxFleetLimits(tx, {
+              fleet,
+              leaseId: row.id,
+              workspaceId,
+              sandboxGroupId,
+              onFallback: input.onComputeStandingFallback,
+            });
+          }
+          return null;
+        };
+        // A compute box sleeps instead of draining when idle, and its lease
+        // stays warm (or draining, until its group ends). Waking it with no
+        // turn on it adds a running box. Replaying a holder it already has
+        // does not wake it any more than it already is.
+        // A turn's wake counts at once (its turn holder, migration 1574); a
+        // woken box no turn holds counts once the gateway records it awake.
+        const wakesSleepingComputeBox = async () =>
+          backend !== "selfhosted" &&
+          row.backend === "compute" &&
+          row.compute_asleep_since != null &&
+          Number(row.turn_holders) === 0 &&
+          !(
+            (
+              await tx.execute<{ held: boolean }>(sql`
+                select exists (select 1 from sandbox_lease_holders
+                  where lease_id = ${row.id} and kind = ${kind}
+                    and holder_id = ${holderId}) as held
+              `)
+            )[0]?.held ?? false
+          );
         const organizationViewerLimit = planLimit.viewerOnlyBoxesPerOrganization;
         const memberViewerLimit = input.viewerSubjectId
           ? planLimit.viewerOnlyBoxesPerMember
@@ -53550,6 +53681,8 @@ async function acquireLeaseOnce(
                   and other.id <> ${row.id}
                   and other.liveness in ('warming', 'warm')
                   and other.turn_holders = 0
+                  -- A sleeping compute box runs nothing (migration 1574).
+                  and not (other.backend = 'compute' and other.compute_asleep_since is not null)
                   and exists (select 1 from sandbox_lease_holders h
                     where h.lease_id = other.id and h.kind = 'viewer')
               `);
@@ -53778,6 +53911,10 @@ async function acquireLeaseOnce(
         // The row lock serializes this holder insertion against the reaper claim:
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
+          if (await wakesSleepingComputeBox()) {
+            const capacity = await admitRunningBox();
+            if (capacity !== null) return capacity;
+          }
           // Capture may have failed after an earlier stop attempt recorded a
           // cutoff. The box is wanted again: a provider that was never stopped
           // keeps running, and a Docker container stopped for a capture is
@@ -53855,110 +53992,10 @@ async function acquireLeaseOnce(
               lease: mapLeaseRow(row),
             };
           }
-          // A new box counts against the organization's running-box limit for
-          // its plan. Attaching to, or re-arming, a box that already runs
-          // adds none and never reaches this election.
-          // The acting person's limited organizations share a second budget
-          // (runningBoxesPerPerson); their other organizations' boxes were
-          // counted before this transaction.
-          // A young unpaid organization runs fewer boxes (fleet limits).
-          // It counts boxes a turn or a person's own work keeps warm, not
-          // boxes only viewers keep warm (the viewer-only limits bound those),
-          // so an open desktop does not park the organization's next chat.
-          const youngLimit =
-            backend !== "selfhosted" &&
-            kind !== "viewer" &&
-            fleet !== null &&
-            fleet.young &&
-            fleet.limits.youngOrganizationRunningBoxes !== undefined
-              ? fleet.limits.youngOrganizationRunningBoxes
-              : undefined;
-          const runningBoxLimit =
-            backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
-          const personBoxLimit =
-            backend === "selfhosted" || standing === null || !standing.bounded
-              ? undefined
-              : planLimit.runningBoxesPerPerson;
-          if (
-            runningBoxLimit !== undefined ||
-            personBoxLimit !== undefined ||
-            youngLimit !== undefined ||
-            cardTrialTurn
-          ) {
-            await lockOrganizationSandboxLimit(tx, accountId);
-            const counts =
-              !cardTrialTurn && (runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0)
-                ? null
-                : await organizationWarmSandboxCounts(tx, {
-                    accountId,
-                    subjectId: null,
-                    excludeLeaseId: row.id,
-                  });
-            // A trial box runs alone: while another box runs, the card is
-            // asked for instead of waiting for it.
-            if (cardTrialTurn && (counts === null || counts.runningBoxes > 0)) {
-              throw new SandboxOrganizationBoxLimitError(
-                workspaceId,
-                sandboxGroupId,
-                0,
-                "card_required",
-              );
-            }
-            const organizationFull =
-              runningBoxLimit !== undefined &&
-              (runningBoxLimit === 0 ||
-                (counts !== null && counts.runningBoxes >= runningBoxLimit));
-            const youngFull =
-              !organizationFull &&
-              youngLimit !== undefined &&
-              (youngLimit === 0 ||
-                (counts !== null && counts.runningBoxes - counts.viewerOnlyBoxes >= youngLimit));
-            const personFull =
-              !organizationFull &&
-              !youngFull &&
-              personBoxLimit !== undefined &&
-              (personBoxLimit === 0 ||
-                (counts !== null &&
-                  (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
-                    (standing?.personOtherRunningBoxes ?? 0) >=
-                    personBoxLimit));
-            if (organizationFull || youngFull || personFull) {
-              const limit = organizationFull
-                ? (runningBoxLimit ?? 0)
-                : youngFull
-                  ? (youngLimit ?? 0)
-                  : (personBoxLimit ?? 0);
-              if (kind !== "turn") {
-                throw new SandboxOrganizationBoxLimitError(
-                  workspaceId,
-                  sandboxGroupId,
-                  limit,
-                  organizationFull ? "running" : youngFull ? "young_running" : "person_running",
-                );
-              }
-              return {
-                role: "fenced" as const,
-                reason: "organization_sandbox_capacity" as const,
-                lease: mapLeaseRow(row),
-                organizationBoxLimit: limit,
-              };
-            }
-          }
-          // Every unpaid organization together (fleet limits): a new box past
-          // the fleet's box time, its running cap, or while the fleet is
-          // under pressure is refused for every holder kind; a turn fails with
-          // the reason rather than waiting. Joining a running box never gets
-          // here. Reads that fail refuse (fail closed) for unpaid boxes only.
+          // A new box counts against the running-box limits (admitRunningBox).
+          const capacity = await admitRunningBox();
+          if (capacity !== null) return capacity;
           const unpaidBox = backend !== "selfhosted" && sandboxFleetBounded(standing);
-          if (unpaidBox && fleet !== null) {
-            await enforceSandboxFleetLimits(tx, {
-              fleet,
-              leaseId: row.id,
-              workspaceId,
-              sandboxGroupId,
-              onFallback: input.onComputeStandingFallback,
-            });
-          }
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
@@ -54020,6 +54057,13 @@ async function acquireLeaseOnce(
             reason: "superseded" as const,
             lease: mapLeaseRow(row),
           };
+        }
+
+        // A sleeping compute box is not a running box: waking it is admitted
+        // like a new one. A warming box is never asleep.
+        if (liveness === "warm" && (await wakesSleepingComputeBox())) {
+          const capacity = await admitRunningBox();
+          if (capacity !== null) return capacity;
         }
 
         // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch

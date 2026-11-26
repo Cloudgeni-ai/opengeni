@@ -4390,7 +4390,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
-      "sandbox_fleet_warm_boxes_v1()",
       "discard_refused_session_create_v1(uuid, uuid)",
       "sync_subscription_relogin_notice_v1(uuid)",
       "deliver_app_notification_v1(uuid)",
