@@ -33,6 +33,7 @@ import { operationalErrorDiagnostic } from "./operational-error";
 export {
   errorCauseAttributes,
   errorCauseMessage,
+  errorCauseSourceMessage,
   ERROR_CAUSE_MESSAGE_MAX_BYTES,
   PUBLIC_ERROR_CAUSE_NAMES,
   PUBLIC_INTERACTION_ERROR_CODES,

@@ -517,7 +517,9 @@ carry the diagnostic UUID as `correlationId`, the hashed `sandboxLeaseKey`, leas
 epoch and backend, the cause's reviewed `causeName`, `causeFenceCode` (the closed
 `SandboxWorkspaceMutationFencedError` code) and `causeSqlState`, and `causeFingerprint`,
 a one-way hash of the cause message that `bun run scripts/resolve-rejection-fingerprint.ts`
-maps back to the source literal. Never message text or raw identifiers.
+maps back to the source literal (a database cause has `causeSqlState` instead). A
+message built from a template literal does not resolve; follow `correlationId` to
+the protected diagnostic instead. Never message text or raw identifiers.
 
 Original causes are inspected before generic public error projection. At most
 four causes and 32 frames per cause are retained. **Raw stack text and messages

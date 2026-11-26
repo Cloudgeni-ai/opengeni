@@ -162,6 +162,21 @@ export const ERROR_CAUSE_MESSAGE_MAX_BYTES = CLIENT_ERROR_DETAIL_MAX_BYTES.messa
  * message is used instead.
  */
 export function errorCauseMessage(error: unknown): string | undefined {
+  const message = errorCauseSourceMessage(error);
+  if (message === undefined) return undefined;
+  const projected = boundClientErrorText(
+    scrubClientErrorText(message.slice(0, 16_384)).trim(),
+    ERROR_CAUSE_MESSAGE_MAX_BYTES,
+  );
+  return projected.length > 0 ? projected : undefined;
+}
+
+/**
+ * The raw message of the same cause `errorCauseAttributes` classifies (the
+ * database cause for a query builder error). Only for one-way fingerprinting;
+ * never log it.
+ */
+export function errorCauseSourceMessage(error: unknown): string | undefined {
   const cause = firstCause(error);
   if (!cause) return undefined;
   let message = ownValue(cause.error, "message");
@@ -169,12 +184,7 @@ export function errorCauseMessage(error: unknown): string | undefined {
     const database = ownValue(cause.error, "cause");
     message = database && typeof database === "object" ? ownValue(database, "message") : undefined;
   }
-  if (typeof message !== "string") return undefined;
-  const projected = boundClientErrorText(
-    scrubClientErrorText(message.slice(0, 16_384)).trim(),
-    ERROR_CAUSE_MESSAGE_MAX_BYTES,
-  );
-  return projected.length > 0 ? projected : undefined;
+  return typeof message === "string" && message.length > 0 ? message : undefined;
 }
 
 function firstCause(error: unknown): { error: object; name: string | null } | null {

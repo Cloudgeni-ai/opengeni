@@ -3,7 +3,11 @@ import {
   SandboxRetainedProcessTerminalError,
   SandboxWorkspaceMutationFencedError,
 } from "@opengeni/db";
-import { messageFingerprint, sandboxLeaseTelemetryKey } from "@opengeni/observability";
+import {
+  messageFingerprint,
+  PUBLIC_SANDBOX_FENCE_CODES,
+  sandboxLeaseTelemetryKey,
+} from "@opengeni/observability";
 import { failureDiagnostic } from "../../../packages/observability/src/failure-diagnostic";
 import {
   warnRetainedProcessProofFailure,
@@ -269,4 +273,24 @@ test("reaper failure diagnostics cannot change settlement or drain behavior", ()
       backend: "modal",
     }),
   ).not.toThrow();
+});
+
+test("every sandbox fence code is publicly loggable", () => {
+  // Exhaustive: a new code in the db union fails typecheck here until it is
+  // listed, and then this test until it is added to PUBLIC_SANDBOX_FENCE_CODES.
+  const codes: Record<SandboxWorkspaceMutationFencedError["code"], true> = {
+    attempt_fenced: true,
+    holder_fenced: true,
+    lease_fenced: true,
+    rotation_in_progress: true,
+    route_fenced: true,
+    process_fenced: true,
+    capture_in_progress: true,
+    admission_fenced: true,
+    operation_invalid: true,
+    generation_exhausted: true,
+    authority_unattributed: true,
+    authority_revoked: true,
+  };
+  for (const code of Object.keys(codes)) expect(PUBLIC_SANDBOX_FENCE_CODES.has(code)).toBe(true);
 });

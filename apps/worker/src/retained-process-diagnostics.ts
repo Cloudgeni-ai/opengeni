@@ -7,6 +7,7 @@ import {
 } from "@opengeni/db";
 import {
   errorCauseAttributes,
+  errorCauseSourceMessage,
   messageFingerprint,
   sandboxLeaseTelemetryKey,
   type Observability,
@@ -94,9 +95,11 @@ export function warnRetainedProcessProofFailure(
 }
 
 /** Public, reviewed facts about a reaper failure: the cause's class, fence
- * code and SQLSTATE, and a one-way fingerprint of its message that
- * `scripts/resolve-rejection-fingerprint.ts` maps back to a source literal.
- * Never message text, identifiers or provider payloads. */
+ * code and SQLSTATE, and a one-way fingerprint of that same cause's message
+ * that `scripts/resolve-rejection-fingerprint.ts` maps back to a source
+ * literal. A database failure is identified by its SQLSTATE, so its (driver
+ * written) message is not fingerprinted. Never message text, identifiers or
+ * provider payloads. */
 function sandboxReaperFailureFacts(error: unknown): {
   causeName?: string;
   causeFenceCode?: string;
@@ -108,14 +111,8 @@ function sandboxReaperFailureFacts(error: unknown): {
     Object.assign(facts, errorCauseAttributes(error));
     const sqlState = nestedPostgresSqlState(error);
     if (sqlState && !facts.causeSqlState) facts.causeSqlState = sqlState;
-    const descriptor =
-      error && typeof error === "object"
-        ? Object.getOwnPropertyDescriptor(error, "message")
-        : undefined;
-    const message = descriptor && "value" in descriptor ? descriptor.value : undefined;
-    if (typeof message === "string" && message.length > 0) {
-      facts.causeFingerprint = messageFingerprint(message.slice(0, 16_384));
-    }
+    const message = facts.causeSqlState ? undefined : errorCauseSourceMessage(error);
+    if (message) facts.causeFingerprint = messageFingerprint(message.slice(0, 16_384));
   } catch {
     // Diagnostics never replace the original failure.
   }
@@ -191,11 +188,13 @@ export function warnSandboxDrainFailure(
   let correlationId: string | undefined;
   try {
     const sqlState = nestedPostgresSqlState(error);
+    const constraint = safeDatabaseErrorFacts(error).constraint;
     correlationId = observability.recordFailureDiagnostic({
       code: sqlState ? databaseFailureCode(sqlState) : "sandbox_drain_failed",
       stage: "sandbox_leases.drain",
       error,
       sqlState,
+      ...(constraint ? { constraint } : {}),
     });
   } catch {
     // A diagnostic/export failure must not change the drain outcome.
