@@ -1,6 +1,80 @@
 import { expect, test } from "bun:test";
-import { billingCreditEmail } from "../src/billing-credit-notifications";
+import {
+  billingCreditEmail,
+  billingCreditEnvironmentLabel,
+} from "../src/billing-credit-notifications";
 import { generalAvailableCreditMicros } from "../../db/src/credit-balances";
+
+test("unusual spend names the organization, non-production host and top workspaces, escaped", () => {
+  const dev = crypto.randomUUID();
+  const result = billingCreditEmail({
+    kind: "unusual_spend",
+    details: {
+      availableBalanceMicros: 29_210_986,
+      lastHourSpendMicros: 17_248_466,
+      spendWindowHours: 1,
+      topWorkspaces: [
+        { workspaceId: dev, name: "Dev <script>", spendMicros: 17_202_074 },
+        { workspaceId: null, name: null, spendMicros: 46_392 },
+      ],
+    },
+    sender: "sender@example.test",
+    email: "owner@example.test",
+    billingUrl: "https://staging.app.test/billing",
+    organizationName: "Pronta\r\nBcc: x@evil.test",
+    environmentLabel: billingCreditEnvironmentLabel("azure-managed", "https://staging.app.test"),
+    workspaceUrl: (id) =>
+      `https://staging.app.test/w/p/organization?section=billing&workspace=${id}`,
+  });
+  expect(result.subject).toBe(
+    "[staging.app.test] Unusual credit spending in Pronta Bcc: x@evil.test",
+  );
+  expect(result.subject).not.toMatch(/[\r\n]/);
+  expect(result.text).toContain("Sent from staging.app.test, not production.");
+  expect(result.text).toContain(
+    "Top workspaces in the last hour:\n- Dev <script>: $17.20\n- Other usage: $0.05",
+  );
+  expect(result.html).not.toContain("<script>");
+  expect(result.html).toContain(
+    `<a href="https://staging.app.test/w/p/organization?section=billing&amp;workspace=${dev}">Dev &lt;script&gt;</a>: $17.20`,
+  );
+  expect(result.html).toContain("<li>Other usage: $0.05</li>");
+});
+
+test.each([
+  ["low_balance", "General credits are low in Cloudgeni"],
+  ["exhausted", "General credits are exhausted in Cloudgeni"],
+  ["unusual_spend", "Unusual credit spending in Cloudgeni"],
+  ["topup_success", "Credits were topped up in Cloudgeni"],
+  ["topup_failed", "Credit top-up failed in Cloudgeni"],
+  ["cap_reached", "Automatic top-up cap reached in Cloudgeni"],
+] as const)("%s names the organization and production adds no label", (kind, subject) => {
+  const result = billingCreditEmail({
+    kind,
+    details: { availableBalanceMicros: 1_000_000 },
+    sender: "sender@example.test",
+    email: "owner@example.test",
+    billingUrl: "https://app.test/billing",
+    organizationName: "Cloudgeni",
+    environmentLabel: billingCreditEnvironmentLabel("production", "https://app.test"),
+  });
+  expect(result.subject).toBe(subject);
+  expect(result.text.startsWith(`${subject}.\n`)).toBe(true);
+  expect(result.text).not.toContain("Sent from");
+  expect(result.text).not.toContain("Top workspaces");
+});
+
+test("a missing organization name falls back to generic copy", () => {
+  const result = billingCreditEmail({
+    kind: "exhausted",
+    details: { availableBalanceMicros: 0 },
+    sender: "sender@example.test",
+    email: "owner@example.test",
+    billingUrl: "https://app.test/billing",
+    organizationName: " \n ",
+  });
+  expect(result.subject).toBe("General credits are exhausted in your organization");
+});
 
 test("one billing action, truthful general/promotion distinction and escaped URL", () => {
   const result = billingCreditEmail({

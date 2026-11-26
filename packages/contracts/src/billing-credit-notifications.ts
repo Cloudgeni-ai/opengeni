@@ -28,6 +28,18 @@ export const BILLING_CREDIT_EVENT_TYPES = [
   "billing.credits.cap_reached",
 ] as const;
 
+/** Where the spend in a notification's window went. Recipients are organization
+ * owners and admins, who already see usage by workspace in Billing and Insights. */
+export const BillingCreditSpendWorkspace = z
+  .object({
+    /** Null groups usage without a (still existing) workspace. */
+    workspaceId: z.uuid().nullable(),
+    name: z.string().max(200).nullable(),
+    spendMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type BillingCreditSpendWorkspace = z.infer<typeof BillingCreditSpendWorkspace>;
+
 export const BillingCreditNotificationDetails = z
   .object({
     availableBalanceMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
@@ -35,6 +47,9 @@ export const BillingCreditNotificationDetails = z
     lowBalanceThresholdMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
     lastHourSpendMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
     baselineHourlySpendMicros: z.number().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+    /** Window of topWorkspaces, ending when the notice was raised. */
+    spendWindowHours: z.number().int().min(1).max(168).optional(),
+    topWorkspaces: z.array(BillingCreditSpendWorkspace).max(3).optional(),
   })
   .strict();
 export type BillingCreditNotificationDetails = z.infer<typeof BillingCreditNotificationDetails>;

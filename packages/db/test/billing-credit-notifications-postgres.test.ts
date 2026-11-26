@@ -16,6 +16,8 @@ import {
 import { rawRows } from "../src/database";
 import {
   claimBillingCreditNotification,
+  billingCreditWorkspacePath,
+  type BillingCreditMessageContext,
   enqueueBillingCreditNotification,
   evaluateBillingCreditAlerts,
   getBillingAlertSettings,
@@ -477,4 +479,85 @@ test("spend floors, baseline history, excluded reversals, recovery and rolling-d
   await fixture!
     .admin`update billing_credit_alert_settings set last_unusual_at=now()-interval '25 hours',checked_at=null where account_id=${a.accountId}`;
   expect(await evaluateBillingCreditAlerts(client.db, a.accountId)).toHaveLength(1);
+});
+
+test("raised notices name their window's top workspaces, and claims name the organization", async () => {
+  if (!client) return;
+  const a = await account();
+  const dev = crypto.randomUUID();
+  const prod = crypto.randomUUID();
+  await fixture!.admin`update managed_accounts set name='Pronta' where id=${a.accountId}`;
+  await fixture!.admin`insert into workspaces (id, account_id, name)
+    values (${dev}, ${a.accountId}, 'Dev <b>'), (${prod}, ${a.accountId}, 'Prod')`;
+  const spend = async (
+    workspaceId: string | null,
+    amount: number,
+    agoHours: number,
+    type = "model_usage_debit",
+  ) => {
+    await fixture!
+      .admin`insert into credit_ledger_entries(account_id,workspace_id,amount_micros,type,source_type,source_id,idempotency_key,created_at)
+      values(${a.accountId},${workspaceId},${amount},${type},'credit-alert-test',${crypto.randomUUID()},${crypto.randomUUID()},
+        clock_timestamp()-${agoHours}*interval '1 hour')`;
+  };
+  await ledger(a.accountId, 100_000_000, "grant", 48);
+  await spend(prod, -40_000_000, 3); // outside the one-hour window
+  await spend(prod, -20_000_000, 0, "credit_refund"); // not spend
+  await spend(dev, -4_000_000, 0);
+  await spend(dev, -5_000_000, 0);
+  await spend(prod, -1_500_000, 0);
+  await spend(null, -500_000, 0);
+  const [id] = await evaluateBillingCreditAlerts(client.db, a.accountId);
+  const [notice] = await fixture!
+    .admin`select kind,details from billing_credit_notifications where id=${id!}::uuid`;
+  expect(notice!.kind).toBe("unusual_spend");
+  expect(notice!.details).toMatchObject({
+    lastHourSpendMicros: 11_000_000,
+    spendWindowHours: 1,
+    topWorkspaces: [
+      { workspaceId: dev, name: "Dev <b>", spendMicros: 9_000_000 },
+      { workspaceId: prod, name: "Prod", spendMicros: 1_500_000 },
+      { workspaceId: null, name: null, spendMicros: 500_000 },
+    ],
+  });
+
+  // Balance notices look back a day.
+  const b = await account();
+  await ledger(b.accountId, 10_000_000, "grant", 48);
+  await fixture!
+    .admin`insert into credit_ledger_entries(account_id,amount_micros,type,source_type,source_id,idempotency_key,created_at)
+    values(${b.accountId},-10000000,'model_usage_debit','credit-alert-test',${crypto.randomUUID()},${crypto.randomUUID()},now()-interval '2 hours')`;
+  const [exhaustedId] = await evaluateBillingCreditAlerts(client.db, b.accountId);
+  const [exhausted] = await fixture!
+    .admin`select kind,details from billing_credit_notifications where id=${exhaustedId!}::uuid`;
+  expect(exhausted).toMatchObject({
+    kind: "exhausted",
+    details: {
+      spendWindowHours: 24,
+      topWorkspaces: [{ workspaceId: null, name: null, spendMicros: 10_000_000 }],
+    },
+  });
+
+  const [recipient] = await fixture!.admin`
+    select personal_workspace_id from billing_credit_notification_recipients
+    where account_id=${a.accountId} and subject_id=${a.subjectId}`;
+  let context: BillingCreditMessageContext | undefined;
+  const claimed = await claimBillingCreditNotification(client.db, {
+    accountId: a.accountId,
+    sender: "test@example.test",
+    providerScope: "test-v1",
+    retentionSeconds: 86400,
+    message: (kind, details, email, path, received) => {
+      context = received;
+      return message(kind, details, email);
+    },
+  });
+  expect(claimed).not.toBeNull();
+  expect(context!.organizationName).toBe("Pronta");
+  expect(context!.workspacePath(dev)).toBe(
+    billingCreditWorkspacePath(recipient!.personal_workspace_id, dev),
+  );
+  expect(billingCreditWorkspacePath("p", dev)).toBe(
+    `/workspaces/p/organization?section=billing&workspace=${dev}`,
+  );
 });

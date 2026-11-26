@@ -805,6 +805,8 @@ export async function startApi(options: StartApiOptions = {}) {
           dbClient.db,
           routeDeps.managedEmailTransport,
           billingAppUrl,
+          60_000,
+          settings.environment,
         )
       : undefined;
   const stopSlackInteractionPump = settings.slackSigningSecret

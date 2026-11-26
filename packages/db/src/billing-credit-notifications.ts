@@ -22,6 +22,43 @@ const NON_SPEND_TYPES = [
   "video_generation_refund",
 ];
 const HOUR_MS = 3_600_000;
+const notSpend = () =>
+  sql.join(
+    NON_SPEND_TYPES.map((t) => sql`${t}`),
+    sql`,`,
+  );
+
+/** Top workspaces by spend in the window ending at `now`. Only read while
+ * raising a notice, so it never runs on the per-minute sampling path. Per-person
+ * attribution would need session rows, which row security keeps out of this
+ * organization-level context (private chats included); Insights owns that view. */
+export async function billingCreditSpendBreakdown(
+  tx: Database,
+  input: { accountId: string; now: string; windowHours: number },
+): Promise<Pick<BillingCreditNotificationDetails, "spendWindowHours" | "topWorkspaces">> {
+  const rows = await rawRows<{ workspace_id: string | null; name: string | null; spend: string }>(
+    tx,
+    sql`
+    with spend as (
+      select l.workspace_id,sum(-l.amount_micros) as micros from credit_ledger_entries l
+      where l.account_id=${input.accountId}::uuid and l.amount_micros<0 and l.type not in (${notSpend()})
+        and l.created_at>=${input.now}::timestamptz-${input.windowHours}*interval '1 hour'
+        and l.created_at<=${input.now}::timestamptz
+      group by l.workspace_id
+    )
+    -- A deleted workspace (set null) or one this context cannot see joins as "other".
+    select w.id::text as workspace_id,left(w.name,200) as name,sum(s.micros)::text as spend
+    from spend s left join workspaces w on w.account_id=${input.accountId}::uuid and w.id=s.workspace_id
+    group by w.id,w.name order by sum(s.micros) desc,w.id nulls last limit 3`,
+  );
+  const topWorkspaces = rows.map((w) => ({
+    workspaceId: w.workspace_id,
+    name: w.name,
+    spendMicros: Number(w.spend),
+  }));
+  return topWorkspaces.length ? { spendWindowHours: input.windowHours, topWorkspaces } : {};
+}
+
 export function unusualCreditSpend(input: {
   historyHours: number;
   baselineSpendMicros: number;
@@ -170,15 +207,9 @@ export async function evaluateBillingCreditAlerts(
       select coalesce(bool_or(amount_micros>0 and eligible_model_ids is null
         and type in ('credit_topup','grant','manual_credit_grant','plan_credit_grant')),false) as funded,
         min(created_at)::text as first_at,
-        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${sql.join(
-          NON_SPEND_TYPES.map((t) => sql`${t}`),
-          sql`,`,
-        )})
+        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${notSpend()})
           and created_at>=${state.now}::timestamptz-interval '169 hours' and created_at<${state.now}::timestamptz-interval '1 hour'),0)::text as baseline,
-        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${sql.join(
-          NON_SPEND_TYPES.map((t) => sql`${t}`),
-          sql`,`,
-        )})
+        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${notSpend()})
           and created_at>=${state.now}::timestamptz-interval '1 hour' and created_at<=${state.now}::timestamptz),0)::text as recent
       from credit_ledger_entries where account_id=${accountId}::uuid`,
     );
@@ -201,6 +232,8 @@ export async function evaluateBillingCreditAlerts(
       lastHourSpendMicros: recent,
     });
     const ids: string[] = [];
+    const breakdown = (windowHours: number) =>
+      billingCreditSpendBreakdown(tx, { accountId, now: state.now, windowHours });
     const enqueue = async (
       kind: BillingCreditNotificationKind,
       details: BillingCreditNotificationDetails,
@@ -216,11 +249,16 @@ export async function evaluateBillingCreditAlerts(
     };
     // A jump directly to zero sends only the more useful exhausted notice.
     if (exhausted && !state.exhausted_active)
-      await enqueue("exhausted", { availableBalanceMicros, lowBalanceThresholdMicros: threshold });
+      await enqueue("exhausted", {
+        availableBalanceMicros,
+        lowBalanceThresholdMicros: threshold,
+        ...(await breakdown(24)),
+      });
     else if (low && !state.low_active && !exhausted)
       await enqueue("low_balance", {
         availableBalanceMicros,
         lowBalanceThresholdMicros: threshold,
+        ...(await breakdown(24)),
       });
     const unusualSent =
       unusual &&
@@ -232,6 +270,7 @@ export async function evaluateBillingCreditAlerts(
         availableBalanceMicros,
         lastHourSpendMicros: recent,
         baselineHourlySpendMicros: baseline / Math.min(168, historyHours),
+        ...(await breakdown(1)),
       });
     await tx.execute(sql`update billing_credit_alert_settings set low_active=${low},exhausted_active=${exhausted},
       unusual_active=${unusual && (state.unusual_active || unusualSent)},
@@ -298,6 +337,21 @@ export function billingCreditActionPath(personalWorkspaceId: string | null): str
     ? `/workspaces/${encodeURIComponent(personalWorkspaceId)}/organization?section=billing`
     : "/billing";
 }
+/** The organization billing page opened on one workspace's budget and usage,
+ * when the recipient has a workspace to anchor the organization page. */
+export function billingCreditWorkspacePath(
+  personalWorkspaceId: string | null,
+  workspaceId: string,
+): string | null {
+  return personalWorkspaceId
+    ? `${billingCreditActionPath(personalWorkspaceId)}&workspace=${encodeURIComponent(workspaceId)}`
+    : null;
+}
+export type BillingCreditMessageContext = {
+  /** Display name of the organization, null when unavailable. */
+  organizationName: string | null;
+  workspacePath: (workspaceId: string) => string | null;
+};
 export type BillingCreditDeliveryClaim = {
   id: string;
   accountId: string;
@@ -321,6 +375,7 @@ export async function claimBillingCreditNotification(
       details: BillingCreditNotificationDetails,
       email: string,
       actionPath: string,
+      context: BillingCreditMessageContext,
     ) => BillingCreditEmailMessage;
   },
 ): Promise<BillingCreditDeliveryClaim | null> {
@@ -338,10 +393,12 @@ export async function claimBillingCreditNotification(
       provider_scope: string | null;
       live_email: string | null;
       personal_workspace_id: string | null;
+      organization_name: string | null;
     }>(
       tx,
       sql`
-      select d.*,n.kind,n.details,r.personal_workspace_id,case when u.email_verified and lower(u.email) not like '%@passkey.invalid' then u.email end as live_email
+      select d.*,n.kind,n.details,r.personal_workspace_id,case when u.email_verified and lower(u.email) not like '%@passkey.invalid' then u.email end as live_email,
+        (select a.name from managed_accounts a where a.id=d.account_id) as organization_name
       from billing_credit_notification_deliveries d join billing_credit_notifications n on n.id=d.notification_id
       left join billing_credit_notification_recipients r on r.account_id=d.account_id and r.subject_id=d.subject_id
       left join auth_users u on r.subject_id='user:' || u.id
@@ -370,6 +427,11 @@ export async function claimBillingCreditNotification(
         row.details,
         row.live_email,
         billingCreditActionPath(row.personal_workspace_id),
+        {
+          organizationName: row.organization_name,
+          workspacePath: (workspaceId) =>
+            billingCreditWorkspacePath(row.personal_workspace_id, workspaceId),
+        },
       );
     const claimId = crypto.randomUUID();
     await tx.execute(sql`update billing_credit_notification_deliveries set status='sending',claim_id=${claimId}::uuid,

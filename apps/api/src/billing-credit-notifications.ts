@@ -8,6 +8,7 @@ export function startBillingCreditNotificationDelivery(
   transport: ManagedEmailTransport,
   appUrl: string,
   intervalMs = 60_000,
+  environment = "production",
 ): () => Promise<void> {
   const existing = started.get(db);
   if (existing) return existing;
@@ -22,7 +23,15 @@ export function startBillingCreditNotificationDelivery(
         try {
           for (let count = 0; count < 4; count++) {
             if (stopped) break;
-            if (!(await deliverBillingCreditNotification({ db, accountId, transport, appUrl })))
+            if (
+              !(await deliverBillingCreditNotification({
+                db,
+                accountId,
+                transport,
+                appUrl,
+                environment,
+              }))
+            )
               break;
           }
         } catch {
