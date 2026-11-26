@@ -80,7 +80,6 @@ describe("Site navigation", () => {
       // The app opens on its own page, the same however it's opened.
       await card.click();
       await page.waitForURL(new RegExp(`/apps/${pricingSiteId}/?$`, "u"));
-      await page.frameLocator("iframe").first().locator("body").waitFor();
 
       // The browser's (and the desktop app's) Back returns to the page with
       // its sort and its scroll.
