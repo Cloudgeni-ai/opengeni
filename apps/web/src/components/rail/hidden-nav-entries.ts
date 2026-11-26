@@ -16,6 +16,21 @@ const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = 
   get_started: "/workspaces/$workspaceId/get-started",
 };
 
+/** A rail destination's entry id (`navItemKey` to `inbox`, `agents`, ...), for ordering. */
+export function navEntryKey(target: string): string {
+  for (const [entry, key] of Object.entries(ENTRY_TARGETS)) if (key === target) return entry;
+  // Any other page by its last path segment (and kind): "insights", "artifacts_skill".
+  const [path = "", query = ""] = target.split("?");
+  const page = path.split("/").pop() ?? "";
+  const kind = new URLSearchParams(query).get("kind");
+  const key = (kind ? `${page}_${kind}` : page)
+    .toLowerCase()
+    .replace(/[^a-z]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+  return key || "entry";
+}
+
 /**
  * The entries this person hides: the inbox, and the rail destinations by
  * `navItemKey`. Hiding Artifacts hides Apps too, as when Apps was its tab,

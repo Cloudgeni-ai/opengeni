@@ -43,6 +43,15 @@ const CALLBACK_KEYS = [
 const MAX_CALLBACK_VALUE_LENGTH = 512;
 
 /**
+ * Where a catalog connect returns: the connected item's own page, not the bare
+ * catalog list, where a stray click on the way back opens whatever row is
+ * under the pointer.
+ */
+export function catalogConnectReturnPath(pathname: string, itemId: string): string {
+  return `${pathname}?${new URLSearchParams({ open: `item:${itemId}`, connect_item: itemId })}`;
+}
+
+/**
  * The workspace Plugins page href for a forwarded callback. Slack's own
  * parameters keep their existing sanitization; every other outcome parameter is
  * copied verbatim (bounded) so readers see exactly what the API sent.

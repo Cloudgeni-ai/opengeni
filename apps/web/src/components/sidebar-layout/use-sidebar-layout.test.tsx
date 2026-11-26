@@ -133,6 +133,8 @@ describe("options before the layout arrives", () => {
         appsPlacement: "hidden",
         hiddenNavEntries: ["meetings"],
         settingsMore: null,
+        navOrder: null,
+        navSetup: null,
       });
     } finally {
       await reload.unmount();
@@ -168,6 +170,8 @@ describe("options before the layout arrives", () => {
         appsPlacement: "sessions",
         hiddenNavEntries: [],
         settingsMore: null,
+        navOrder: null,
+        navSetup: null,
       });
     } finally {
       await hook.unmount();

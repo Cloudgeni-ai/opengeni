@@ -13,6 +13,7 @@ import { createRoot } from "react-dom/client";
 
 import {
   ReplaceLocation,
+  catalogConnectReturnPath,
   workspaceIntegrationsCallbackHref,
 } from "@/lib/integrations-callback-return";
 
@@ -30,6 +31,17 @@ afterAll(() => {
 });
 
 describe("integration callback forwarding", () => {
+  test("a catalog connect returns to the connected item's own page", () => {
+    const itemId = "mcp:integrations-sh:drivemcp-googleapis-com-8fbf1e347a09";
+    const url = new URL(
+      catalogConnectReturnPath(`/workspaces/${workspaceId}/plugins`, itemId),
+      "https://app.test",
+    );
+    expect(url.pathname).toBe(`/workspaces/${workspaceId}/plugins`);
+    expect(url.searchParams.get("open")).toBe(`item:${itemId}`);
+    expect(url.searchParams.get("connect_item")).toBe(itemId);
+  });
+
   test("a workspace-less callback lands on the Plugins page with its outcome", () => {
     expect(
       workspaceIntegrationsCallbackHref(

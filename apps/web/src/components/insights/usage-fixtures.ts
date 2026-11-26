@@ -220,6 +220,21 @@ export function fixtureUsage(
             measures: callMeasures(FIXTURE_MODELS[3]!, 300),
           },
         ];
+      case "agent":
+        return [
+          {
+            key: "66666666-0000-4000-8000-000000000001",
+            kind: "item" as const,
+            label: "PR reviewer",
+            measures: callMeasures(FIXTURE_MODELS[0]!, 900),
+          },
+          {
+            key: "66666666-0000-4000-8000-000000000002",
+            kind: "item" as const,
+            label: "Release notes",
+            measures: callMeasures(FIXTURE_MODELS[1]!, 300),
+          },
+        ];
       case "source":
         return (["web", "agent", "schedule", "slack", "api"] as const).map((source, index) => ({
           key: source,

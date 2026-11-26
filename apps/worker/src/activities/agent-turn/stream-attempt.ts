@@ -98,7 +98,12 @@ import {
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials, type MintedSandboxCodemodeToken } from "../environment";
 import { withFirstPartyTools } from "../goals";
-import { reducedWorkspaceSaveNote, turnInput, unseenSandboxStopNote } from "../run-input";
+import {
+  reducedWorkspaceSaveNote,
+  turnExecutionInterrupted,
+  turnInput,
+  unseenSandboxStopNote,
+} from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -361,6 +366,7 @@ export type TurnStreamAttemptDeps = {
     initiatingHumanSubjectId: string | null;
     id: string;
     executionGeneration: number;
+    resumedFromPause?: true | undefined;
     model: string;
     source?: string;
   };
@@ -746,7 +752,7 @@ export async function runTurnStreamAttempt(
           accountId: input.accountId,
           subjectId: fileAuthoritySubjectId,
         },
-        recovering: turn.executionGeneration > 1,
+        recovering: turnExecutionInterrupted(turn),
         ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
         ...(workspaceSaveNote ? { workspaceSaveNote } : {}),
         ...(sandboxStopNote ? { sandboxStopNote } : {}),
