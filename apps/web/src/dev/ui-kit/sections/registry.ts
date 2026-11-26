@@ -145,6 +145,7 @@ export const SECTION_KEYS = [
   "page-schedule-form",
   "page-agent-trigger",
   "page-enable",
+  "page-agents-job-card",
   "page-meetings",
   "page-meeting-reminders",
   "page-dictation",
@@ -1089,6 +1090,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Production Get started showcase, Enable page and first-run question with an in-memory API fixture.",
     usedOn: "Get started; Agents and Capabilities > Ready-made",
     load: () => import("./page-enable"),
+  },
+  {
+    key: "page-agents-job-card",
+    group: "Pages",
+    title: "Agents: job card",
+    purpose:
+      "Production Agents list, ready-made preview and agent page (with Add trigger) over an in-memory API fixture.",
+    usedOn: "Agents; Agents > ready-made agent; Agents > agent",
+    load: () => import("./page-agents-job-card"),
   },
   {
     key: "page-models-sharing",

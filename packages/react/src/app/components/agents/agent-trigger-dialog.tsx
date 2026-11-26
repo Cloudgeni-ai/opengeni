@@ -1,6 +1,8 @@
 /**
- * "Add trigger" on an agent's page (docs/agents.md, Starts when): pick what
- * starts the agent, its events, save. The picker comes from the source
+ * "Add trigger" on an agent's page (docs/agents.md, When it works): outcomes
+ * first (an issue gets a label, a pull request opens, on a schedule, someone
+ * mentions it), each saved like a suggested trigger; a schedule can open a
+ * repository on each run. "Other events" opens the source picker, which comes from the source
  * catalog (`agentTriggerOptions`): a schedule, the person's sources and every
  * kind they can still add. A kind not added yet shows its setup step right
  * here: Opengeni adds GitHub, Slack or This workspace in place, a webhook is
@@ -28,6 +30,8 @@ import type {
 } from "@opengeni/sdk";
 
 import { AutomationWhenField } from "../../../components/automations/automation-when-field";
+import { automationCadenceWords } from "../../../components/automations/automation-model";
+import { ChoiceCard, ChoiceCards } from "../../../ui/choice-cards";
 import {
   automationTemplateSourceChoice,
   eventSourceFitsTemplate,
@@ -50,7 +54,7 @@ import { eventTypesLabel } from "../../../components/automations/event-trigger-m
 import { PastedWebhookSteps } from "../../../components/automations/pasted-webhook-steps";
 import type { AutomationDraft } from "../../../components/automations/automation-model";
 import { CopyField } from "../../../ui/copy-field";
-import { Field, FieldStack, TextArea } from "../../../ui/field";
+import { Field, FieldStack, TextArea, TextInput } from "../../../ui/field";
 import { FormDialog } from "../../../ui/form-dialog";
 import { Notice } from "../../../ui/notice";
 import { SelectMenu } from "../../../ui/select-menu";
@@ -86,6 +90,15 @@ import { AgentTriggerPicker } from "./agent-trigger-picker";
 import { AgentTriggerRepositories } from "./agent-trigger-repositories";
 import { gitHubRepositoryResource } from "../../lib/session-tools";
 import { AgentTriggerChatField } from "./agent-trigger-chat-field";
+import {
+  AGENT_TRIGGER_DEFAULT_LABEL,
+  agentTriggerConfirmation,
+  agentTriggerOutcomeCards,
+  agentTriggerOutcomeSuggestion,
+  agentTriggerSentence,
+  agentTriggerShapeOfSuggestion,
+  type AgentTriggerOutcome,
+} from "./agent-trigger-words";
 
 // The one-click add beside the dialog, for pages outside this package (Get started).
 export { addAgentSuggestedTrigger, agentTriggerSaveError } from "./agent-trigger-model";
@@ -181,10 +194,23 @@ function AgentTriggerDialogBody({
     [eventTriggers, formSources, githubConnected],
   );
 
-  // Without a suggestion it starts at the picker; only a schedule needs no pick.
+  // Without a suggestion it starts at the outcomes; only a schedule needs no pick.
   const [pick, setPick] = useState<AgentTriggerPick | null>(() =>
     suggestion || eventTriggers ? null : { kind: "schedule" },
   );
+  // What should start it, outcome first; "other" opens the source picker.
+  const [outcome, setOutcome] = useState<AgentTriggerOutcome | "other" | null>(() =>
+    suggestion ? null : eventTriggers ? null : "schedule",
+  );
+  const [label, setLabel] = useState(AGENT_TRIGGER_DEFAULT_LABEL);
+  // The repository a scheduled run opens, `owner/name`; none opens none.
+  const [scheduleRepository, setScheduleRepository] = useState<string | null>(null);
+  const outcomeSuggestion =
+    outcome && outcome !== "schedule" && outcome !== "other"
+      ? (agentTriggerOutcomeSuggestion(outcome, { agentName: agent.name, label }) ?? undefined)
+      : undefined;
+  // The suggestion the dialog was opened at, or the one an outcome stands for.
+  const activeSuggestion = suggestion ?? outcomeSuggestion;
   const [draft, setDraft] = useState<AutomationDraft>(() =>
     suggestion
       ? agentTriggerDraftFromSuggestion(suggestion, { timeZone })
@@ -220,6 +246,41 @@ function AgentTriggerDialogBody({
     setIssues({});
     setError(null);
   };
+  const chooseOutcome = (next: AgentTriggerOutcome | "other") => {
+    setOutcome(next);
+    setIssues({});
+    setError(null);
+    setShowEvents(false);
+    if (next === "schedule") {
+      choose({ kind: "schedule" });
+      return;
+    }
+    setPick(null);
+    const nextSuggestion =
+      next === "other"
+        ? undefined
+        : agentTriggerOutcomeSuggestion(next, { agentName: agent.name, label });
+    if (nextSuggestion) {
+      setDraft((current) => ({
+        ...agentTriggerDraftFromSuggestion(nextSuggestion, { sources: formSources, timeZone }),
+        instructions: current.instructions,
+      }));
+    }
+  };
+  const changeLabel = (next: string) => {
+    setLabel(next);
+    const nextSuggestion = agentTriggerOutcomeSuggestion("issue_labelled", {
+      agentName: agent.name,
+      label: next,
+    });
+    if (nextSuggestion) {
+      const events = agentTriggerDraftFromSuggestion(nextSuggestion, {
+        sources: formSources,
+        timeZone,
+      }).events;
+      setDraft((current) => ({ ...current, events }));
+    }
+  };
   const choose = (next: AgentTriggerPick) => {
     setPick(next);
     setIssues({});
@@ -233,12 +294,12 @@ function AgentTriggerDialogBody({
   const option: AgentTriggerOption | undefined = pick
     ? options.find((entry) => entry.key === agentTriggerPickKey(pick))
     : undefined;
-  const picked = Boolean(suggestion) || pick !== null;
+  const picked = Boolean(activeSuggestion) || pick !== null;
   const isSchedule = picked && pick?.kind !== "new" && draft.events.triggers.length === 0;
 
   // What still stands before saving: a new kind's setup, or a suggestion's missing source.
   const missing =
-    suggestion && !isSchedule ? agentTriggerMissingSource(draft, formSources) : undefined;
+    activeSuggestion && !isSchedule ? agentTriggerMissingSource(draft, formSources) : undefined;
   const missingChoice = missing ? automationTemplateSourceChoice(missing) : undefined;
   const setupChoice: EventSourceChoice | undefined =
     pick?.kind === "new" ? pick.choice : missingChoice;
@@ -249,7 +310,7 @@ function AgentTriggerDialogBody({
         ? agentTriggerSourceStep(missing, { githubConnected })
         : undefined;
   // A suggestion's GitHub, Slack or This workspace source is added when it saves.
-  const setupReady = !setup || (suggestion !== undefined && setup === "create");
+  const setupReady = !setup || (activeSuggestion !== undefined && setup === "create");
   // A picked Linear, Sentry or other app webhook: its secret is pasted here.
   const pickedSource =
     pick?.kind === "source"
@@ -290,6 +351,10 @@ function AgentTriggerDialogBody({
     setError(null);
     if (!picked) {
       setIssues({ when: "Choose what starts it." });
+      return false;
+    }
+    if (outcome === "issue_labelled" && !label.trim()) {
+      setIssues({ when: "Type the label that starts it." });
       return false;
     }
     if (setup === "connect_github") {
@@ -382,7 +447,7 @@ function AgentTriggerDialogBody({
         workspaceId,
         agentTriggerCreateRequest(t, {
           agent,
-          suggestion,
+          suggestion: activeSuggestion,
           draft: saved,
           // A new chat per run opens the repository its event is about; a
           // continued chat keeps the chosen ones open instead.
@@ -391,7 +456,12 @@ function AgentTriggerDialogBody({
               ? repositories
                   .filter((repo) => chosenRepositories.includes(repo.fullName))
                   .map((repo) => gitHubRepositoryResource(repo, ""))
-              : [],
+              : // A schedule has no event to say which repository: each run opens the chosen one.
+                isSchedule && scheduleRepository
+                ? repositories
+                    .filter((repo) => repo.fullName === scheduleRepository)
+                    .map((repo) => gitHubRepositoryResource(repo, ""))
+                : [],
           sources: formSources ?? [],
           now,
           chat,
@@ -439,9 +509,51 @@ function AgentTriggerDialogBody({
     webhook && pick?.kind === "source" && pick.sourceId === webhook.sourceId ? webhook : null;
   // The full form can start at a source the person has (not a stand-in).
   const fullFormSourceId =
-    !suggestion && pick?.kind === "source" && mine?.some((source) => source.id === pick.sourceId)
+    !activeSuggestion &&
+    pick?.kind === "source" &&
+    mine?.some((source) => source.id === pick.sourceId)
       ? pick.sourceId
       : undefined;
+
+  // The sentence that confirms it: what starts the agent, who can, and whose access it uses.
+  const confirmation = (() => {
+    if (!picked || !ready || (suggestion && !outcome)) return null;
+    const now = new Date();
+    if (isSchedule) {
+      if (!draft.cadence) return null;
+      const words = automationCadenceWords(t, draft.cadence, now)
+        .sentence.replace(/^Runs /u, "")
+        .replace(/\.$/u, "");
+      return agentTriggerConfirmation({
+        agentName: agent.name,
+        sentence: `${words}${scheduleRepository ? `, on ${scheduleRepository}` : ""}`,
+        outcome: "schedule",
+      });
+    }
+    if (!outcomeSuggestion || !outcome || outcome === "other" || outcome === "schedule") {
+      return null;
+    }
+    const shape = agentTriggerShapeOfSuggestion(outcomeSuggestion);
+    const withRepositories =
+      chosenRepositories.length > 0
+        ? {
+            ...shape,
+            listens: shape.listens.map((listen) => ({
+              ...listen,
+              conditions: [
+                ...listen.conditions,
+                { field: "data.repository.full_name", op: "in", value: chosenRepositories },
+              ],
+            })),
+          }
+        : shape;
+    return agentTriggerConfirmation({
+      agentName: agent.name,
+      sentence: agentTriggerSentence(t, withRepositories, { agentName: agent.name, now }),
+      outcome,
+    });
+  })();
+  const outcomeCards = agentTriggerOutcomeCards(agent.name);
 
   return (
     <FormDialog
@@ -477,14 +589,47 @@ function AgentTriggerDialogBody({
     >
       <FieldStack>
         {suggestion || !eventTriggers ? null : (
+          <div className="flex min-w-0 flex-col gap-2" data-agent-trigger-outcomes="">
+            <ChoiceCards
+              label="When should it start?"
+              layout="grid"
+              value={outcome && outcome !== "other" ? outcome : undefined}
+              onValueChange={(next) => chooseOutcome(next as AgentTriggerOutcome)}
+              error={!picked && outcome !== "other" ? whenError : undefined}
+            >
+              {outcomeCards.map((card) => (
+                <ChoiceCard
+                  key={card.value}
+                  value={card.value}
+                  title={card.title}
+                  description={card.description}
+                />
+              ))}
+            </ChoiceCards>
+            {outcome === "other" ? null : (
+              <p className="m-0 text-sm text-fg-muted">
+                <button
+                  type="button"
+                  className="og-link"
+                  data-agent-trigger-other=""
+                  onClick={() => chooseOutcome("other")}
+                >
+                  Other events
+                </button>{" "}
+                from any connected app or a webhook.
+              </p>
+            )}
+          </div>
+        )}
+        {outcome === "other" ? (
           <AgentTriggerPicker
-            options={options}
+            options={options.filter((entry) => entry.pick.kind !== "schedule")}
             value={pick ? agentTriggerPickKey(pick) : null}
             onChange={(next) => choose(next.pick)}
             sourceLogo={sourceLogo}
             error={!picked ? whenError : undefined}
           />
-        )}
+        ) : null}
         {!picked ? null : setup && !setupReady ? (
           <SetupStep setup={setup} name={setupName} />
         ) : awaitingSecret && pickedSource && pasted ? (
@@ -523,16 +668,19 @@ function AgentTriggerDialogBody({
             loadEventTypes={standIns.loadEventTypes}
             error={whenError}
           />
-        ) : suggestion && !showEvents ? (
+        ) : activeSuggestion &&
+          !showEvents &&
+          // An outcome asks for its source only while it has none.
+          (!outcomeSuggestion || draft.events.triggers.some((trigger) => !trigger.sourceId)) ? (
           <SuggestionSources
             draft={draft}
             sources={formSources}
             pendingSource={missing && setup === "create" ? setupName : undefined}
             onChange={(events) => update({ events })}
-            onEdit={() => setShowEvents(true)}
+            onEdit={outcomeSuggestion ? undefined : () => setShowEvents(true)}
             sourceIssue={issues.events ? "Choose a source." : undefined}
           />
-        ) : (
+        ) : outcomeSuggestion && !showEvents ? null : (
           <div className="flex min-w-0 flex-col gap-2">
             {shownWebhook ? <WebhookCreated {...shownWebhook} /> : null}
             {pasted && pickedSource ? (
@@ -568,6 +716,33 @@ function AgentTriggerDialogBody({
             ) : null}
           </div>
         )}
+        {picked && ready && outcome === "issue_labelled" ? (
+          <Field label="Label" error={issues.when && !label.trim() ? issues.when : undefined}>
+            <TextInput
+              value={label}
+              data-agent-trigger-label=""
+              onChange={(event) => changeLabel(event.target.value)}
+              placeholder={AGENT_TRIGGER_DEFAULT_LABEL}
+            />
+          </Field>
+        ) : null}
+        {picked && ready && isSchedule && repositories.length > 0 ? (
+          <Field label="Repository" optional hint="Each run opens it.">
+            <div data-agent-trigger-schedule-repository="" className="min-w-0">
+              <SelectMenu
+                options={[
+                  { value: "", label: "None" },
+                  ...repositories.map((repo) => ({ value: repo.fullName, label: repo.fullName })),
+                ]}
+                value={scheduleRepository ?? ""}
+                onValueChange={(next) => setScheduleRepository(next || null)}
+                variant={repositories.length > 8 ? "combobox" : "menu"}
+                searchPlaceholder="Search repositories"
+                className="max-w-full"
+              />
+            </div>
+          </Field>
+        ) : null}
         {picked && ready && listensOnGitHub && repositories.length > 0 ? (
           <AgentTriggerRepositories
             repositories={repositories}
@@ -609,6 +784,15 @@ function AgentTriggerDialogBody({
             }}
             error={chatIssue}
           />
+        ) : null}
+        {confirmation ? (
+          <div
+            data-agent-trigger-confirmation=""
+            className="rounded-[14px] border border-border bg-surface-2 px-4 py-3"
+          >
+            <p className="m-0 text-sm leading-5 font-medium text-fg">{confirmation.headline}</p>
+            <p className="mt-1 mb-0 text-sm leading-5 text-fg-muted">{confirmation.detail}</p>
+          </div>
         ) : null}
       </FieldStack>
     </FormDialog>
@@ -696,7 +880,8 @@ function SuggestionSources({
   /** The kind Opengeni adds when it saves, when the person has none. */
   pendingSource: string | undefined;
   onChange: (events: AutomationDraft["events"]) => void;
-  onEdit: () => void;
+  /** Absent for an outcome: Other events covers changing them. */
+  onEdit?: (() => void) | undefined;
   sourceIssue: string | undefined;
 }) {
   return (
@@ -746,11 +931,13 @@ function SuggestionSources({
           </Field>
         );
       })}
-      <div>
-        <button type="button" className="og-link text-sm" onClick={onEdit}>
-          Change events
-        </button>
-      </div>
+      {onEdit ? (
+        <div>
+          <button type="button" className="og-link text-sm" onClick={onEdit}>
+            Change events
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
