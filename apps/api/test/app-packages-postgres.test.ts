@@ -1678,9 +1678,10 @@ test("packages carry Skills and automations; updates show them, and go back", as
   const skill = await f.call(
     manager,
     "GET",
-    `/v1/workspaces/${f.target.id}/skills/content?skillId=${updated.skills[0].id}`,
+    `/v1/workspaces/${f.target.id}/skills/content/${updated.skills[0].id}`,
   );
-  if (skill.status === 200) expect(skill.text).toContain("Version two.");
+  expect(skill.status, skill.text).toBe(200);
+  expect(skill.text).toContain("Version two.");
 
   // Going back plans and applies the saved 1.0.0 the same way.
   const back = await f.call(manager, "POST", `${base}/package/upgrade`, {
@@ -1747,9 +1748,10 @@ test("packages carry Skills and automations; updates show them, and go back", as
   const kept = await f.call(
     manager,
     "GET",
-    `/v1/workspaces/${f.target.id}/skills/content?skillId=${updated.skills[0].id}`,
+    `/v1/workspaces/${f.target.id}/skills/content/${updated.skills[0].id}`,
   );
-  if (kept.status === 200) expect(kept.text).not.toContain("Version zero.");
+  expect(kept.status, kept.text).toBe(200);
+  expect(kept.text).not.toContain("Version zero.");
 
   // Without permission to change Skills, the app installs and the Skill is reported.
   const plain = await f.install({ package: skilledPackage("1.2.0", "Version three.") });
