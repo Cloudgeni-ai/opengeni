@@ -126,6 +126,7 @@ test("a Google Drive connect started in a chat finishes there with the exact Con
   const calls: unknown[] = [];
   let enabled = false;
   let enabledRef: unknown = null;
+  let mcpUrl = "https://elsewhere.example/mcp";
   const client = {
     beginConnect: async () => ({ id: "attempt", revision: 1, state: "credential_input" }),
     connectTransport: () => ({
@@ -146,6 +147,7 @@ test("a Google Drive connect started in a chat finishes there with the exact Con
       items: [
         {
           ...drive,
+          mcpUrl,
           enabled,
           connectionRef: enabledRef,
         },
@@ -180,6 +182,20 @@ test("a Google Drive connect started in a chat finishes there with the exact Con
     storage,
   });
   const nonce = JSON.parse([...values.values()][0]!).nonce as string;
+
+  // An entry that no longer points at Drive is never enabled.
+  await expect(
+    finishDriveConnectReturnInChat({
+      client,
+      workspaceId: "w",
+      sessionId: "s",
+      nonce,
+      storage,
+      refreshCatalog: async () => {},
+    }),
+  ).rejects.toThrow("connector changed");
+  expect(calls).toEqual([]);
+  mcpUrl = DRIVE_MCP_URL;
 
   // Another attempt's nonce never finishes this one.
   await expect(

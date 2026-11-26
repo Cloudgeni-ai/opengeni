@@ -1143,6 +1143,7 @@ export function SessionRoute({
     const nonce = page.readQuery().get(DRIVE_CONNECT_RETURN_PARAM);
     if (!nonce) return;
     driveReturnHandled.current = true;
+    let active = true;
     void finishDriveConnectReturnInChat({
       client: capabilityClient,
       workspaceId,
@@ -1152,10 +1153,13 @@ export function SessionRoute({
       refreshCatalog: refreshCapabilityCatalog,
     })
       .then((finished) => {
+        if (!active) return;
         const query = page.readQuery();
-        query.delete(DRIVE_CONNECT_RETURN_PARAM);
-        query.delete("capability_auth");
-        page.replaceQuery(query);
+        if (query.get(DRIVE_CONNECT_RETURN_PARAM) === nonce) {
+          query.delete(DRIVE_CONNECT_RETURN_PARAM);
+          query.delete("capability_auth");
+          page.replaceQuery(query);
+        }
         toast.success(`${finished.name} connected`, {
           description: finished.needsPersonalReview
             ? "Review its connection card to allow your personal account in this conversation."
@@ -1163,10 +1167,15 @@ export function SessionRoute({
         });
       })
       .catch((error: unknown) => {
+        if (!active) return;
         toast.error("Google Drive setup needs attention", {
           description: userErrorText(error),
         });
       });
+    return () => {
+      active = false;
+      driveReturnHandled.current = false;
+    };
   }, [
     page,
     capabilityCatalogReady,
