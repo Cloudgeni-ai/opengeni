@@ -21,6 +21,7 @@ import type { SettingsSection } from "@/settings-model";
 import { dismissToHome } from "@/navigation";
 import { startFeedback } from "@/feedback/draft";
 import { setShakeToSendFeedback, useShakeToSendFeedback } from "@/feedback/preference";
+import { isPublicIosApp, openOpengeniPrivacyPolicy } from "@/store-review";
 import { AppThemeProvider } from "@/theme";
 import { useVoiceCommands } from "@/voice-commands";
 import { callAssistantName, voiceCommandRequest } from "@/wake-phrase";
@@ -280,6 +281,22 @@ function Settings() {
           title: "Sign out",
           symbol: "rectangle.portrait.and.arrow.right",
           onPress: confirmSignOut,
+        },
+      ],
+    });
+  }
+
+  if (isPublicIosApp()) {
+    sections.push({
+      id: "about",
+      title: "About Opengeni",
+      rows: [
+        {
+          kind: "external",
+          id: "privacy-policy",
+          title: "Privacy policy",
+          symbol: "hand.raised",
+          onPress: openOpengeniPrivacyPolicy,
         },
       ],
     });
