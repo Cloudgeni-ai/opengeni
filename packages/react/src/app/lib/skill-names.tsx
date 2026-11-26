@@ -1,3 +1,5 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { toString } from "mdast-util-to-string";
 import { parseDocument } from "yaml";
 
 /* ----------------------------------------------------------------------------
@@ -9,6 +11,7 @@ import { parseDocument } from "yaml";
    -------------------------------------------------------------------------- */
 
 const SMALL_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"]);
+const FRONTMATTER_START = /^\uFEFF?---\r?\n/;
 const FRONTMATTER = /^\uFEFF?---\r?\n((?:[^\n]*\n)*?)---[ \t]*(?:\r?\n|$)/;
 
 /** "agent-browser" -> "Agent browser". Names that already read as names are kept. */
@@ -44,38 +47,26 @@ export function skillDisplayName(skill: { title: string | null; stableKey: strin
 /** Display metadata only: a title is distinct from the Skill's stable name. */
 export function skillReadLabels(markdown: string): { title: string | null; name: string | null } {
   const header = FRONTMATTER.exec(markdown);
-  const doc = header ? parseDocument(header[1]!) : null;
+  const start = FRONTMATTER_START.exec(markdown);
+  // A replay preview may end inside YAML. Only inspect complete lines in its
+  // header, and do not look for Markdown headings until the header closes.
+  const yaml =
+    header?.[1] ?? (start && markdown.slice(start[0].length, markdown.lastIndexOf("\n") + 1));
+  const doc = yaml === null ? null : parseDocument(yaml);
   const field = (key: "title" | "name") => {
     const value = doc?.errors.length === 0 ? doc.get(key) : undefined;
     return typeof value === "string" ? value.trim() || null : null;
   };
-  const body = header ? markdown.slice(header[0].length) : markdown.replace(/^\uFEFF/, "");
+  const body = header ? markdown.slice(header[0].length) : start ? "" : markdown;
   return { title: field("title") ?? firstSkillHeading(body), name: field("name") };
 }
 
 function firstSkillHeading(body: string): string | null {
-  let fence = "";
-  let previous = "";
-  for (const line of body.split(/\r?\n/)) {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (fence) {
-      if (marker && marker[1]!.startsWith(fence) && !marker[2]!.trim()) fence = "";
-      continue;
-    }
-    if (marker) {
-      fence = marker[1]!;
-      previous = "";
-      continue;
-    }
-    const atx = /^ {0,3}#[ \t]+(.+)$/
-      .exec(line)?.[1]
-      ?.replace(/[ \t]+#+[ \t]*$/, "")
-      .trim();
-    if (atx) return atx;
-    if (/^ {0,3}=+[ \t]*$/.test(line) && previous) return previous;
-    previous = /^ {0,3}[^\s#>]/.test(line) ? line.trim() : "";
-  }
-  return null;
+  if (!body) return null;
+  const heading = fromMarkdown(body).children.find(
+    (node) => node.type === "heading" && node.depth === 1,
+  );
+  return heading ? toString(heading, { includeHtml: false }).trim() || null : null;
 }
 
 /** The first sentence of a Skill's description, for one line in a list. */

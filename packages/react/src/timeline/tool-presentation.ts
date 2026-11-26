@@ -5,6 +5,7 @@ import {
   type GitFileDiff,
 } from "@opengeni/sdk";
 import { humanizeName, skillReadLabels } from "../app/lib/skill-names";
+import { parsePartialJson } from "../interactive-answer-model";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
   applyPatchOpsFromToolItem,
@@ -887,14 +888,26 @@ function readableSkillName(name: string): string | null {
   return humanizeName(bare) || null;
 }
 
-function skillMarkdownInOutput(output: unknown): string | null {
-  const { value, isError } = normalizeMcpOutput(output);
-  if (isError) return null;
+const SKILL_OUTPUT_CUT =
+  /\n…\[\d+ characters omitted from this preview\]…\n|…\[\d+ bytes omitted\]…/u;
+
+function skillMarkdown(value: unknown): string | null {
   if (typeof value === "string") return /^\uFEFF?---\r?\n/.test(value) ? value : null;
   const files = value && typeof value === "object" && "files" in value ? value.files : undefined;
   if (!Array.isArray(files)) return null;
   const skill = files.find((file) => file?.path === "SKILL.md");
   return typeof skill?.content === "string" ? skill.content : null;
+}
+
+function skillMarkdownInOutput(output: unknown): string | null {
+  const { value, text, isError } = normalizeMcpOutput(output);
+  if (isError) return null;
+  const markdown = skillMarkdown(value);
+  if (markdown !== null) return markdown.split(SKILL_OUTPUT_CUT, 1)[0] ?? null;
+  // The timeline can receive only the head and tail of the JSON result. Use
+  // the head's complete fields, never infer a heading across omitted text.
+  const cut = text.search(SKILL_OUTPUT_CUT);
+  return cut < 0 ? null : skillMarkdown(parsePartialJson(text.slice(0, cut)));
 }
 
 /**
