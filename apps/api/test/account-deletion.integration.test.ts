@@ -675,7 +675,7 @@ test("ordinary Postgres retention records Site SQL only after a confirmed gatewa
   });
   await shared.admin`update organization_memberships set personal_retention_until=now()-interval '2 days' where id=${seat!.id}`;
   async function addDueMember(inviter: typeof owner, person: typeof member) {
-    const invitation = await createOrganizationInvitation(client.db, {
+    const additionalInvitation = await createOrganizationInvitation(client.db, {
       organizationId: inviter.organizationId,
       actorSubjectId: `user:${inviter.userId}`,
       operationId: crypto.randomUUID(),
@@ -686,10 +686,10 @@ test("ordinary Postgres retention records Site SQL only after a confirmed gatewa
     });
     await acceptOrganizationInvitation(client.db, {
       organizationId: inviter.organizationId,
-      invitationId: invitation.id,
+      invitationId: additionalInvitation.id,
       actorSubjectId: `user:${person.userId}`,
       operationId: crypto.randomUUID(),
-      expectedRevision: invitation.revision,
+      expectedRevision: additionalInvitation.revision,
     });
     const [membership] =
       await shared.admin`select id,authorization_revision from organization_memberships
