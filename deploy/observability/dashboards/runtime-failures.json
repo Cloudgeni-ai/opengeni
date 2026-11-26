@@ -428,7 +428,7 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Platform failures, customer provider failures and recoveries",
+      "title": "Platform failures, customer provider or plan failures and recoveries",
       "description": "Platform failure ratio excludes proven customer-managed quota, billing and upstream availability failures from numerator and denominator. Unknown failures still count as platform failures. Customer provider failures remain visible separately; historical unlabeled series remain unclassified.",
       "datasource": {
         "type": "prometheus",
