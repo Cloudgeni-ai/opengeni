@@ -483,7 +483,7 @@ export function AgentPage({
   /** At most one agent it works well with ("PR reviewer"); never required. */
   worksWellWith?: string | null | undefined;
   /** Opens its setup page (Enable) to finish what is missing. */
-  onFinishSetup?: (() => void) | undefined;
+  onFinishSetup?: ((agent: Agent) => void) | undefined;
 }) {
   const { workspaces, accessContext } = useAppContext();
   const navigate = useNavigate();
@@ -597,7 +597,12 @@ export function AgentPage({
           </DetailAside>
         }
       >
-        {items ? <AgentReadinessSection items={items} onFinish={onFinishSetup} /> : null}
+        {items ? (
+          <AgentReadinessSection
+            items={items}
+            onFinish={onFinishSetup ? () => onFinishSetup(agent) : undefined}
+          />
+        ) : null}
         <AgentWhenItWorks
           agent={agent}
           workspaceId={workspaceId}

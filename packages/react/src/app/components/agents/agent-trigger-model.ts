@@ -56,7 +56,7 @@ import {
   type EventTriggersDraft,
 } from "../../../components/automations/event-trigger-model";
 import type { OpenGeniText } from "../../../messages/runtime";
-import { apiErrorFacts, userErrorText } from "../../../ui/api-error";
+import { apiErrorFacts, serverRefusalText, userErrorText } from "../../../ui/api-error";
 
 /**
  * What a run says when the person adds no note: the event (which every event
@@ -632,7 +632,17 @@ export function agentTriggerCreateRequest(
 }
 
 /** Why a save was refused, in words; a shared trigger the person may not add says so. */
+/**
+ * Why turning a trigger on failed: a ready-made agent missing a required
+ * connection gets the server's reason in words ("Connect GitHub to turn this on.").
+ */
+export function agentTriggerOnError(error: unknown): string {
+  return serverRefusalText(error, ["agent_setup_incomplete"]) ?? userErrorText(error);
+}
+
 export function agentTriggerSaveError(error: unknown, visibility: "private" | "workspace"): string {
+  const setup = serverRefusalText(error, ["agent_setup_incomplete"]);
+  if (setup) return setup;
   if (apiErrorFacts(error).status === 403 && visibility !== "private")
     return AGENT_TRIGGER_SHARED_DENIED;
   return userErrorText(error);

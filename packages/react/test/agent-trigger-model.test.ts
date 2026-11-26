@@ -16,6 +16,7 @@ import {
   agentTriggerSecretIssue,
   agentTriggerSourceStep,
   agentTriggerSaveError,
+  agentTriggerOnError,
   agentTriggerWithSources,
   agentTriggerRepositoryEvents,
   addAgentSuggestedTrigger,
@@ -33,7 +34,7 @@ import {
   type EventSourceChoice,
 } from "../src/components/automations/event-source-model";
 import { createOpenGeniText } from "../src/messages";
-import type { AgentTemplateTrigger, EventSource } from "@opengeni/sdk";
+import { OpenGeniApiError, type AgentTemplateTrigger, type EventSource } from "@opengeni/sdk";
 
 const t = createOpenGeniText();
 const NOW = new Date("2026-11-21T10:00:00.000Z");
@@ -446,6 +447,25 @@ test("a refused shared trigger says who can add one", () => {
   });
   expect(agentTriggerSaveError(forbidden, "workspace")).toBe(AGENT_TRIGGER_SHARED_DENIED);
   expect(agentTriggerSaveError(forbidden, "private")).not.toBe(AGENT_TRIGGER_SHARED_DENIED);
+});
+
+test("a ready-made agent missing a connection says what to connect, not a generic error", () => {
+  const incomplete = new OpenGeniApiError(
+    409,
+    JSON.stringify({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: "Connect GitHub to turn this on.",
+        details: {
+          code: "agent_setup_incomplete",
+          missing: [{ kind: "connection", provider: "github.com", name: "GitHub" }],
+        },
+      },
+    }),
+  );
+  expect(agentTriggerOnError(incomplete)).toBe("Connect GitHub to turn this on.");
+  expect(agentTriggerSaveError(incomplete, "workspace")).toBe("Connect GitHub to turn this on.");
 });
 
 test("chosen repositories narrow only GitHub triggers; none chosen covers every repository", () => {
