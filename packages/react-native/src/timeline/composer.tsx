@@ -476,7 +476,7 @@ function androidKeyboardCoordinateOffset(): number {
   // non-edge-to-edge activities subtract the top system inset.
   const version = Platform.constants.reactNativeVersion;
   const deviceInfo = TurboModuleRegistry.get("DeviceInfo");
-  const constants = deviceInfo?.getConstants() as { readonly isEdgeToEdge?: boolean } | undefined;
+  const constants = deviceInfo?.getConstants?.() as { readonly isEdgeToEdge?: boolean } | undefined;
   if ((version.major > 0 || version.minor >= 86) && constants?.isEdgeToEdge) {
     return 0;
   }
