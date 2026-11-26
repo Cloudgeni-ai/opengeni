@@ -4380,6 +4380,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "deliver_app_notification_v1(uuid)",
       "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
       "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
+      "request_setup_connection_v1(uuid, text, text, text, text, text)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4394,6 +4395,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sync_subscription_relogin_notice_v1(uuid)",
       "deliver_app_notification_v1(uuid)",
       "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+      "request_setup_connection_v1(uuid, text, text, text, text, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

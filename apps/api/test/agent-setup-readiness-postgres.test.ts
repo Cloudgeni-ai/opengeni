@@ -164,7 +164,7 @@ async function fixture() {
       },
     };
   };
-  return { owner, service, call, trigger, mcp };
+  return { accountId, workspaceId: workspace.id, owner, service, call, trigger, mcp };
 }
 
 function expectSetupIncomplete(result: { status: number; json: Json }) {
@@ -275,4 +275,53 @@ test("an agent without a template is never held back", async () => {
   );
   expect(on.status, JSON.stringify(on.json)).toBe(201);
   expect(on.json.status).toBe("active");
+});
+
+test("Ask an admin asks the workspace's admins once, in their inbox, once the database allows it", async () => {
+  const f = await fixture();
+  const routine =
+    "opengeni_private.request_setup_connection_v1(uuid, text, text, text, text, text)";
+  const returnPath = `/workspaces/${f.workspaceId}/enable?agent=pr-reviewer&step=connect`;
+  const ask = (body: Record<string, unknown> = {}) =>
+    f.call(f.owner.headers, "POST", "/setup-connection-requests", {
+      provider: "github.com",
+      name: "GitHub",
+      returnPath,
+      ...body,
+    });
+  const notices = async () =>
+    await shared.admin<{ recipient: string; title: string; url: string; sender: string }[]>`
+      select recipient_subject_id as recipient, title, link->>'url' as url,
+        sender_subject_id as sender
+      from opengeni_private.inbox_items
+      where workspace_id = ${f.workspaceId}::uuid and source_key like 'setup-request:%'
+      order by recipient_subject_id`;
+  const admin = `user:${crypto.randomUUID()}`;
+  await shared.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${f.accountId}::uuid, ${f.workspaceId}::uuid, ${admin}, 'admin', '[]'::jsonb)`;
+
+  // Withheld for a release (1580): nobody is asked, and the page shares a link.
+  const before = await ask();
+  expect(before.status, JSON.stringify(before.json)).toBe(200);
+  expect(before.json).toEqual({ status: "unavailable", adminsAsked: 0 });
+  expect(await notices()).toEqual([]);
+
+  const appRole = decodeURIComponent(new URL(shared.appUrl).username);
+  await shared.admin.unsafe(`grant execute on function ${routine} to "${appRole}"`);
+  try {
+    // The admin is asked, never the person asking; asking again asks no one twice.
+    expect((await ask()).json).toEqual({ status: "requested", adminsAsked: 1 });
+    expect((await ask()).json).toEqual({ status: "requested", adminsAsked: 1 });
+    expect(await notices()).toEqual([
+      { recipient: admin, title: "Connect GitHub", url: returnPath, sender: f.owner.subjectId },
+    ]);
+    // Only an Enable step in this workspace.
+    const elsewhere = await ask({ returnPath: "/workspaces/other/enable?agent=pr-reviewer" });
+    expect(elsewhere.status).toBe(400);
+    const external = await ask({ returnPath: "https://example.test/phish" });
+    expect(external.status).toBe(400);
+  } finally {
+    await shared.admin.unsafe(`revoke execute on function ${routine} from "${appRole}"`);
+  }
 });

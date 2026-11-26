@@ -120,6 +120,8 @@ import type {
   ListAgentTemplatesResponse,
   SetupReadiness,
   SetupReadinessResponse,
+  SetupConnectionRequest,
+  SetupConnectionRequestResponse,
   AgentReadinessListResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
@@ -8947,6 +8949,23 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/readiness`,
     );
     return response.readiness;
+  }
+
+  /**
+   * Asks the workspace's admins, in their inbox, to connect something a setup
+   * needs ("Ask an admin" on the Enable page). `returnPath` is the Enable step
+   * they open. Asking again never asks twice; `unavailable` means no admin
+   * could be asked here, so share a link instead.
+   */
+  async requestSetupConnection(
+    workspaceId: string,
+    request: SetupConnectionRequest,
+  ): Promise<SetupConnectionRequestResponse> {
+    return await this.requestJson<SetupConnectionRequestResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/setup-connection-requests`,
+      request,
+    );
   }
 
   /** Readiness of every agent the caller can see, read in one request (the Agents list). */

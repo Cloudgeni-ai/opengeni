@@ -44,7 +44,7 @@ import {
   type EnableStep,
   type EnableSubject,
 } from "./enable-subject";
-import { EnableView, type EnableFact } from "./enable-view";
+import { EnableView, type AskedVia, type EnableFact } from "./enable-view";
 
 type TriggerState =
   | { kind: "on" }
@@ -73,28 +73,52 @@ export function EnablePage(props: EnablePageProps) {
   );
 }
 
-function useAskAdmin(returnPath: string) {
-  const [asked, setAsked] = useState<ReadonlySet<string>>(() => new Set());
+/**
+ * Ask an admin: the workspace's admins are asked in their inbox, with a link
+ * back to this step. Where that isn't possible yet (or it fails), the link is
+ * copied for the person to send instead.
+ */
+function useAskAdmin(workspaceId: string, returnPath: string) {
+  const { client } = useAppContext();
+  const [asked, setAsked] = useState<ReadonlyMap<string, AskedVia>>(() => new Map());
   const ask = useCallback(
-    (connection: SetupConnectionState) => {
+    async (connection: SetupConnectionState) => {
+      const done = (via: AskedVia) =>
+        setAsked((current) => new Map(current).set(connection.provider, via));
+      const sent = await client
+        .requestSetupConnection(workspaceId, {
+          provider: connection.provider,
+          name: connection.name,
+          returnPath,
+        })
+        .then((response) => response.status === "requested")
+        .catch(() => false);
+      if (sent) {
+        done("inbox");
+        toast.success("Request sent", {
+          description: `Your admins were asked to connect ${connection.name}.`,
+        });
+        return;
+      }
       const link = `${window.location.origin}${returnPath}`;
-      const done = () => setAsked((current) => new Set(current).add(connection.provider));
-      void (navigator.clipboard?.writeText(link) ?? Promise.reject(new Error("no clipboard"))).then(
+      await (
+        navigator.clipboard?.writeText(link) ?? Promise.reject(new Error("no clipboard"))
+      ).then(
         () => {
-          done();
+          done("link");
           toast.success("Link copied", {
             description: `Send it to an admin to connect ${connection.name}.`,
           });
         },
         () => {
-          done();
+          done("link");
           toast.info(`Send an admin this link to connect ${connection.name}`, {
             description: link,
           });
         },
       );
     },
-    [returnPath],
+    [client, returnPath, workspaceId],
   );
   return { asked, ask };
 }
@@ -252,7 +276,7 @@ function AgentEnable({
   const pagePath =
     returnPath ??
     enableHref(workspaceId, { kind: "agent", templateKey: subject.templateKey }, "connect");
-  const { asked, ask } = useAskAdmin(pagePath);
+  const { asked, ask } = useAskAdmin(workspaceId, pagePath);
   const canAskAdmin = useCanAskAdmin(workspaceId);
   const connect = useConnect(workspaceId, pagePath, title ?? name, reload);
   const readiness = data?.readiness
@@ -548,7 +572,7 @@ function AppEnable({
   const pagePath =
     returnPath ??
     enableHref(workspaceId, { kind: "app", templateKey: subject.templateKey }, "connect");
-  const { asked, ask } = useAskAdmin(pagePath);
+  const { asked, ask } = useAskAdmin(workspaceId, pagePath);
   const canAskAdmin = useCanAskAdmin(workspaceId);
   const name = template?.name ?? subject.templateKey;
   const connect = useConnect(workspaceId, pagePath, title ?? name, () =>

@@ -30,6 +30,8 @@ import {
   PutAgentSlackAvailabilityRequest,
   SessionAvatar,
   AgentReadinessListResponse,
+  SetupConnectionRequest,
+  SetupConnectionRequestResponse,
   SetupReadinessResponse,
   UpdateAgentRequest,
   AGENTS_PER_WORKSPACE_MAX,
@@ -56,6 +58,7 @@ import {
   listAgentSlackInstalls,
   listSlackInstallationBindings,
   putAgentSlackInstall,
+  requestSetupConnection,
   updateAgent,
   type AgentRecord,
   type AgentSlackInstallRecord,
@@ -93,6 +96,7 @@ import { z } from "zod";
 
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
+import { personLabel } from "../mcp/notification-tools";
 import { parseRequestJson } from "../http/request-body";
 import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
 import {
@@ -435,6 +439,53 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           githubEvents: templateTriggerUsesGitHubEvents(template, c.req.query("trigger")),
         }),
       }),
+    );
+  });
+
+  /**
+   * "Ask an admin" on the Enable page: someone who can't connect what a setup
+   * needs asks the workspace's admins in their inbox, linking back to that
+   * Enable step. Asking again never asks twice. `unavailable` when no admin
+   * could be asked (a Personal workspace, or the database doesn't allow it
+   * yet); the page then shares a link instead.
+   */
+  app.post("/v1/workspaces/:workspaceId/setup-connection-requests", async (c) => {
+    const context = await requestContext(c, "sessions:read");
+    const requester = context.grant.subjectId;
+    if (!requester) {
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: "Only a person can ask an admin.",
+      });
+    }
+    const request = await parseRequestJson(c, SetupConnectionRequest);
+    const workspaceId = context.grant.workspaceId;
+    // The Enable step, on the Enable page or on Get started, in this workspace.
+    if (
+      !["enable", "get-started"].some((page) =>
+        request.returnPath.startsWith(`/workspaces/${workspaceId}/${page}?`),
+      )
+    ) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message: "returnPath must be an Enable step in this workspace.",
+      });
+    }
+    const asked = await requestSetupConnection(db, {
+      accountId: context.grant.accountId,
+      workspaceId,
+      requesterSubjectId: requester,
+      requesterLabel: await personLabel(deps, workspaceId, requester),
+      provider: request.provider,
+      name: request.name,
+      link: request.returnPath,
+    });
+    return c.json(
+      SetupConnectionRequestResponse.parse(
+        asked
+          ? { status: "requested", adminsAsked: asked }
+          : { status: "unavailable", adminsAsked: 0 },
+      ),
     );
   });
 

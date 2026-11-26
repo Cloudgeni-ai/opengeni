@@ -90,6 +90,7 @@ const client = {
   createAgentFromTemplate: mock(async () => agent),
   createSession: mock(async () => ({ id: "session-1" })),
   getGitHubApp: mock(async () => ({ status: "unbound", configured: true, linkUrl: null })),
+  requestSetupConnection: mock(async () => ({ status: "requested", adminsAsked: 2 })),
 };
 const connectPersonalGitHub = mock(async (_workspaceId: string) => undefined);
 const context: Record<string, unknown> = {
@@ -257,8 +258,12 @@ test("partly connected: counts what is connected and shows it Connected", async 
   root.unmount();
 });
 
-test("can't connect: Ask an admin, then it shows the request went out", async () => {
+test("can't connect: Ask an admin asks the admins in their inbox, then says Requested", async () => {
   readiness = readinessOf([connection({ canConnect: false })]);
+  client.requestSetupConnection.mockImplementation(async () => ({
+    status: "requested",
+    adminsAsked: 2,
+  }));
   const writeText = mock(async () => undefined);
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   const { container, root } = await render();
@@ -267,6 +272,32 @@ test("can't connect: Ask an admin, then it shows the request went out", async ()
   expect(ask?.textContent).toBe("Ask an admin");
   await act(async () => {
     ask?.click();
+  });
+  await settle();
+  expect(client.requestSetupConnection).toHaveBeenCalledWith("workspace-a", {
+    provider: "github.com",
+    name: "GitHub",
+    returnPath: "/workspaces/workspace-a/enable?agent=dependency-updater&step=connect",
+  });
+  expect(writeText).not.toHaveBeenCalled();
+  expect(row(container, "github.com").textContent).toContain("Requested");
+  expect(row(container, "github.com").textContent).toContain(
+    "Your admins were asked in their inbox.",
+  );
+  root.unmount();
+});
+
+test("can't connect, and admins can't be asked here yet: the link is copied instead", async () => {
+  readiness = readinessOf([connection({ canConnect: false })]);
+  client.requestSetupConnection.mockImplementation(async () => ({
+    status: "unavailable",
+    adminsAsked: 0,
+  }));
+  const writeText = mock(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  const { container, root } = await render();
+  await act(async () => {
+    row(container, "github.com").querySelector("button")?.click();
   });
   await settle();
   expect(writeText).toHaveBeenCalledWith(

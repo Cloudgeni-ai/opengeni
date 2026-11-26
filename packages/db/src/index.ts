@@ -17,6 +17,7 @@ import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./app-sync";
 export * from "./app-webhooks";
+export * from "./setup-connection-requests";
 export * from "./app-server";
 export * from "./site-tool-data";
 export * from "./app-package-exports";
