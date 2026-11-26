@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 /**
- * Resolve an API log `rejectionFingerprint` (m_<10 hex>) back to the source
- * string literal(s) that produce it. The API logs only the one-way hash of a
- * rejected response's message (see apps/api/src/http/rejection-telemetry.ts),
- * so diagnosing a refusal from logs never needs the message text itself.
+ * Resolve a log message fingerprint (m_<10 hex>) back to the source string
+ * literal(s) that produce it: the API's `rejectionFingerprint` and the sandbox
+ * reaper's `causeFingerprint`. Logs carry only the one-way hash of a message
+ * (packages/observability/src/message-fingerprint.ts), so diagnosing a refusal
+ * or reaper failure from logs never needs the message text itself.
  *
  *   bun run scripts/resolve-rejection-fingerprint.ts m_1a2b3c4d5e [more...]
  *
@@ -13,11 +14,12 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { rejectionFingerprint } from "../apps/api/src/http/rejection-telemetry";
+import { messageFingerprint } from "../packages/observability/src/message-fingerprint";
 
 const ROOT = join(import.meta.dir, "..");
 const SOURCE_ROOTS = [
   "apps/api/src",
+  "apps/worker/src",
   "packages/core/src",
   "packages/db/src",
   "packages/runtime/src",
@@ -43,7 +45,7 @@ for (const root of SOURCE_ROOTS) {
     const text = await readFile(file, "utf8");
     for (const match of text.matchAll(literal)) {
       const value = match[1] ?? match[2] ?? match[3] ?? "";
-      const fingerprint = rejectionFingerprint(value);
+      const fingerprint = messageFingerprint(value);
       if (!wanted.has(fingerprint)) continue;
       const line = text.slice(0, match.index).split("\n").length;
       console.log(`${fingerprint}  ${relative(ROOT, file)}:${line}  ${JSON.stringify(value)}`);
