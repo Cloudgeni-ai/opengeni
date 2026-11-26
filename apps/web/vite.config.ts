@@ -458,6 +458,16 @@ export default defineConfig({
               priority: 3,
             },
             {
+              // The question glyph a direct session load shows (questions and
+              // MCP requests in the timeline) is also used by the command menu.
+              // Left to entry-aware grouping it lands beside the lazy command
+              // actions, which a direct session load then downloads for nothing.
+              name: "question-glyph",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/]message-circle-question-mark\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
               // A direct session load reads these small session helpers, and so
               // do the settings pages. Left to entry-aware grouping they can
               // share a chunk with the recordings model, the command-menu
