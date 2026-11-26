@@ -427,7 +427,14 @@ export async function listWorkspaceActivityEventsForSource(
           (case
             when fact.site_id is not null then coalesce(app.visibility = 'workspace_shared', false)
               and fact.reader_subject_id is null
+            -- A chat of a private Slack thread is its owner's alone, even
+            -- when its row is shared (as getSessionForSubject).
             when fact.session_id is not null then coalesce(chat.visibility = 'workspace_shared', false)
+              and not exists (
+                select 1 from slack_interactions private_slack
+                where private_slack.workspace_id = chat.workspace_id
+                  and private_slack.session_reservation_id = chat.root_session_id
+                  and private_slack.visibility = 'private')
             else false
           end) as shared
         from workspace_activity_events fact
@@ -445,6 +452,13 @@ export async function listWorkspaceActivityEventsForSource(
             select 1 from inbound_events stored
             where stored.source_id = ${input.sourceId}::uuid and stored.stream_key = ''
               and stored.external_id = fact.id::text)
+          -- Someone else's private Slack thread is theirs alone, as in chat history.
+          and not exists (
+            select 1 from slack_interactions private_slack
+            where private_slack.workspace_id = chat.workspace_id
+              and private_slack.session_reservation_id = chat.root_session_id
+              and private_slack.visibility = 'private'
+              and private_slack.owning_subject_id <> ${input.subjectId})
         order by fact.created_at, fact.id
         limit ${Math.max(1, Math.min(input.limit, 500))}`,
     );

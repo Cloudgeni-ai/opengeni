@@ -1603,19 +1603,42 @@ describe("Opengeni's own events (migration 1105)", () => {
   test("the feed says whether everyone in the workspace may see a chat or usage fact", async () => {
     const space = await workspace();
     const bob = await member(space);
+    const adaSource = await listen(space);
     const bobSource = await listen(space, bob);
     const privateChat = await chat(space, bob);
     const sharedChat = await chat(space, bob, "workspace_shared");
+    // A shared chat row started in Bob's private Slack thread is his alone.
+    const slackChat = await chat(space, bob, "workspace_shared");
+    const connectionId = crypto.randomUUID();
+    await shared!.admin`insert into connections
+        (id, account_id, workspace_id, provider_domain, kind, status, credential_encrypted)
+      values (${connectionId}, ${space.accountId}, ${space.workspaceId}, 'slack.com',
+        'app_install', 'active', '\\x00'::bytea)`;
+    await shared!.admin`insert into slack_interactions
+        (account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
+         slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id,
+         visibility, session_reservation_id)
+      values (${space.accountId}, ${space.workspaceId}, ${connectionId}, 'T1', 'D1',
+        '1700000000.0001', ${`route-${crypto.randomUUID()}`}, 'Ev1', ${bob}, 'private',
+        (select root_session_id from sessions where id = ${slackChat.sessionId}))`;
     await append(privateChat, space, "turn.completed", { output: "Private" });
     await append(sharedChat, space, "turn.completed", { output: "Shared" });
+    await append(slackChat, space, "turn.completed", { output: "Slack DM" });
     await shared!.admin`insert into opengeni_private.workspace_allowance_notifications
         (account_id, workspace_id, period_key, subject_id, threshold, payload)
       values (${space.accountId}, ${space.workspaceId}, ${`period-${crypto.randomUUID()}`},
         ${bob}, 1, ${shared!.admin.json({ used: 10, limit: 10 })})`;
+    // Ada never hears Bob's private Slack thread, though its chat row is shared.
+    expect(
+      (await seen(space, adaSource.id, space.subjectId))
+        .filter((fact) => fact.sessionId !== null)
+        .map((fact) => fact.sessionId),
+    ).toEqual([sharedChat.sessionId]);
     const bobSees = await seen(space, bobSource.id, bob);
     expect(bobSees.map((fact) => [fact.sessionId, fact.sharedWithWorkspace])).toEqual([
       [privateChat.sessionId, false],
       [sharedChat.sessionId, true],
+      [slackChat.sessionId, false],
       [null, false],
       [null, false],
     ]);
