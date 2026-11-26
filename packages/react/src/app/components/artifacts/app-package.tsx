@@ -125,19 +125,6 @@ export function upgradePlanLines(plan: AppPackageUpgradePlan): string[] {
   return changes;
 }
 
-/** What the upgrade replaces that was changed here, as one sentence; null when nothing. */
-export function localChangesText(plan: AppPackageUpgradePlan): string | null {
-  const local = plan.localChanges;
-  if (!local || (!local.app && local.skills.length === 0)) return null;
-  const parts = [
-    local.app ? "the app" : null,
-    local.skills.length > 0
-      ? `${local.skills.length === 1 ? "the Skill" : "the Skills"} ${names(local.skills)}`
-      : null,
-  ].filter(Boolean);
-  return `Your changes to ${parts.join(" and ")} are replaced.`;
-}
-
 function problemText(problem: AppPackageProblem): string {
   return problem.name ? `${problem.name}: ${problem.reason}` : problem.reason;
 }
@@ -340,7 +327,6 @@ export function UpgradeAppDialog({
   }
   const plan = state?.phase === "ready" ? state.plan : null;
   const lines = plan ? upgradePlanLines(plan) : [];
-  const localChanges = plan ? localChangesText(plan) : null;
   const destructive = plan?.destructive ?? [];
   // Another app's package is confirmed with the same switch, under its own note.
   const otherApp = destructive.find((entry) => entry.part === "package");
@@ -363,13 +349,6 @@ export function UpgradeAppDialog({
             ))}
           </ul>
         )}
-        {localChanges && !nothing ? (
-          <Notice tone="waiting" title="Replaces your changes" data-upgrade-local-changes="">
-            {state?.source.kind === "previous"
-              ? localChanges
-              : `${localChanges} You can go back with Restore previous version.`}
-          </Notice>
-        ) : null}
         {conflicts.length > 0 ? (
           <Notice tone="failed" title="Can't upgrade">
             <ul className="flex flex-col gap-1">
@@ -530,8 +509,8 @@ export function useOpenInstalledApp(workspaceId: string) {
     if (left) toast.warning(`Installed “${result.app.title}”, with gaps`, { description: left });
     else if (!result.replayed) toast(`Installed “${result.app.title}”`);
     void navigate({
-      to: "/workspaces/$workspaceId/sites/$siteId",
-      params: { workspaceId, siteId: result.app.id },
+      to: "/workspaces/$workspaceId/apps/$appId/$",
+      params: { workspaceId, appId: result.app.id, _splat: "" },
     });
   };
 }

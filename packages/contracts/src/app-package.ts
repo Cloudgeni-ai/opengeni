@@ -412,12 +412,6 @@ export type AppPackageUpgradePlan = {
   skills?: { added: string[]; changed: string[]; unchanged: string[]; kept: string[] };
   /** Automations, by name: `added` switched off; the app's existing ones are `kept` as they are. */
   automations?: { added: string[]; kept: string[] };
-  /**
-   * Local changes the upgrade replaces: the app's own edits since it was
-   * installed or upgraded (`app`), and the names of its Skills edited here.
-   * The app's state before the upgrade is saved, so it can go back.
-   */
-  localChanges?: { app: boolean; skills: string[] };
   /** What stops the upgrade; nothing is applied while there is any. */
   conflicts: AppPackageProblem[];
   /** Parts of the package that are ignored or won't apply, and why. */
@@ -468,8 +462,12 @@ export type AppPackageStatus = {
   packageVersion: string | null;
   /** Archived apps are listed too: their Skills stay, labelled with the app. */
   archived: boolean;
-  /** The app's version was changed here since its install or last upgrade. */
-  modified: boolean;
+  /**
+   * The app or one of its Skills was changed here since its install or last
+   * upgrade. A customized app is forked for good: it gets no package updates
+   * (`update` and `previous` are null, and upgrades are refused).
+   */
+  customized: boolean;
   skills: Array<{
     id: string;
     name: string;

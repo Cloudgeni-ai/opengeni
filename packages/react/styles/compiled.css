@@ -1730,6 +1730,9 @@
 :where(.og-root).h-48,:where(.og-root) .h-48 {
     height: calc(var(--spacing) * 48);
   }
+:where(.og-root).h-52,:where(.og-root) .h-52 {
+    height: calc(var(--spacing) * 52);
+  }
 :where(.og-root).h-56,:where(.og-root) .h-56 {
     height: calc(var(--spacing) * 56);
   }
@@ -1750,6 +1753,9 @@
   }
 :where(.og-root).h-\[72px\],:where(.og-root) .h-\[72px\] {
     height: 72px;
+  }
+:where(.og-root).h-\[166\.667\%\],:where(.og-root) .h-\[166\.667\%\] {
+    height: 166.667%;
   }
 :where(.og-root).h-\[300\%\],:where(.og-root) .h-\[300\%\] {
     height: 300%;
@@ -2161,6 +2167,9 @@
   }
 :where(.og-root).w-\[150px\],:where(.og-root) .w-\[150px\] {
     width: 150px;
+  }
+:where(.og-root).w-\[166\.667\%\],:where(.og-root) .w-\[166\.667\%\] {
+    width: 166.667%;
   }
 :where(.og-root).w-\[174px\],:where(.og-root) .w-\[174px\] {
     width: 174px;
@@ -2687,6 +2696,9 @@
 :where(.og-root).translate-y-\[calc\(-50\%_-_2px\)\],:where(.og-root) .translate-y-\[calc\(-50\%_-_2px\)\] {
     --tw-translate-y: calc(-50% - 2px);
     translate: var(--tw-translate-x) var(--tw-translate-y);
+  }
+:where(.og-root).scale-\[0\.6\],:where(.og-root) .scale-\[0\.6\] {
+    scale: 0.6;
   }
 :where(.og-root).scale-\[0\.3333\],:where(.og-root) .scale-\[0\.3333\] {
     scale: 0.3333;
@@ -10387,6 +10399,11 @@
 :where(.og-root).sm\:h-8,:where(.og-root) .sm\:h-8 {
     @media (width >= 40rem) {
       height: calc(var(--spacing) * 8);
+    }
+  }
+:where(.og-root).sm\:h-60,:where(.og-root) .sm\:h-60 {
+    @media (width >= 40rem) {
+      height: calc(var(--spacing) * 60);
     }
   }
 :where(.og-root).sm\:h-72,:where(.og-root) .sm\:h-72 {

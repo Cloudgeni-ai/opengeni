@@ -17,7 +17,7 @@ export function invalidateAppPackageStatus() {
 }
 
 /**
- * Installed apps' package state by app id: version, Modified, Skills,
+ * Installed apps' package state by app id: version, Customized, Skills,
  * automations, a previous version and any ready-made update. Empty while
  * loading, on failure, or with an embed's older client.
  */

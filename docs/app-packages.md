@@ -279,16 +279,19 @@ on the Automations page if they shouldn't run.
 SDK `listAppPackageStatus`) lists the installed apps the caller can see
 (also ones installed before installs were recorded, which show no version
 until their first update), each
-with its `packageVersion`, `archived`, `modified`, its Skills (each with
+with its `packageVersion`, `archived`, `customized`, its Skills (each with
 `modified`), its automations, `previous` (a saved earlier state) and `update`
 (a ready-made app with the same `packageId` and a later `packageVersion`).
 
-- **Modified**: the app's current version isn't the one the package wrote,
+- **Customized**: the app's current version isn't the one the package wrote,
   or a linked Skill's live revision is neither the one the package wrote nor
-  one it saved for review. Apps
-  stay editable; the mark is a warning, not a lock. An upgrade's
-  `plan.localChanges` (`app`, `skills`) names what it would replace, and the
-  console warns before it.
+  one it saved for review. Apps stay editable (no lock), but a customized app
+  is forked for good: an update could break or drop the fields its changes
+  rely on. It shows **Customized** ("Customized apps don't get updates."),
+  never **Update available** or **Restore previous version** (`update` and
+  `previous` are null), and the API refuses its package upgrades and going
+  back with 409 (`details.reason: "customized"`), for the console, the API
+  and `app_upgrade` alike. To get a newer version, add it as a separate app.
 - **Update**: the Apps page shows **Update available**; it opens the
   ordinary upgrade with the ready-made app's package, dry run first.
 - **Going back**: before applying an upgrade that changes something, the API
@@ -306,7 +309,7 @@ with its `packageVersion`, `archived`, `modified`, its Skills (each with
 ## Console
 
 The rail's **Apps** page lists the apps here, with their version and
-**Modified** or **Update available**, and below them the ready-made apps not
+**Customized** or **Update available**, and below them the ready-made apps not
 added yet. Header actions: **Install from file** (for people who can publish)
 and **New app**. Nothing installs on a click: choosing a ready-made app or a
 file opens one dialog first. For a ready-made app it shows the app's
@@ -379,6 +382,6 @@ adds them.
   limits, publication settings, sharing and tool allowances. Upgrades never
   change these.
 - An app installed before migration 1571 has no install record: it is
-  listed with no version or Modified, and a ready-made one offers its update.
+  listed with no version or Customized, and a ready-made one offers its update.
 - A shared Skill's update saved for review (Review first) relinks only the
-  app that upgraded; other copies show it as Modified once it is approved.
+  app that upgraded; other copies show as Customized once it is approved.

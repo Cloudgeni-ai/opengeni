@@ -43,7 +43,7 @@ import {
 } from "@opengeni/react/ui/dropdown-menu";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { pathHasAppPage } from "@/lib/onboarding-return";
-import { appPageLocation, appPagePathname } from "./app-page-location";
+import { appPageLocation, appPagePathname, appRowActive } from "./app-page-location";
 import { MoveToGroupMenu, type SidebarGroupChoice } from "./group-menu";
 import { inAppLinkPath } from "./in-app-link";
 import { IconMenu, SidebarIcon, useLinkIcon } from "./sidebar-icons";
@@ -473,7 +473,7 @@ function AppRow({
 }) {
   const rail = useRail();
   const location = appPageLocation(path);
-  const active = pathname === appPagePathname(workspaceId, appId, location.splat);
+  const active = appRowActive(pathname, workspaceId, appId, location.splat);
   return (
     <div className="relative">
       <Link

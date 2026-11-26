@@ -36,7 +36,6 @@ const update: AppPackageUpgradePlan = {
   packageVersion: { current: "1.0.0", next: "1.1.0" },
   skills: { added: [], changed: ["work-summary"], unchanged: [], kept: [] },
   automations: { added: [], kept: ["Update the work summary"] },
-  localChanges: { app: true, skills: ["work-summary"] },
 };
 const plans: Record<string, AppPackageUpgradePlan> = {
   safe,

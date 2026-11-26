@@ -10,7 +10,7 @@ const status = (extra: Partial<AppPackageStatus> = {}): AppPackageStatus => ({
   packageId: "6f1d4c2a-8b3e-8d71-9a05-3c2e7b4f1a90",
   packageVersion: "1.0.0",
   archived: false,
-  modified: false,
+  customized: false,
   skills: [{ id: "skill-1", name: "work-summary", modified: false }],
   automations: [],
   previous: null,
@@ -29,15 +29,14 @@ describe("an installed app on the Apps page", () => {
   test("shows its version, and nothing else when unchanged and current", () => {
     const html = badges(status());
     expect(html).toContain("v1.0.0");
-    expect(html).not.toContain("Modified");
+    expect(html).not.toContain("Customized");
     expect(html).not.toContain("Update available");
   });
 
-  test("is Modified when the app or one of its Skills was changed here", () => {
-    expect(badges(status({ modified: true }))).toContain("Modified");
-    expect(
-      badges(status({ skills: [{ id: "skill-1", name: "work-summary", modified: true }] })),
-    ).toContain("Modified");
+  test("is Customized, with why it gets no updates, once changed here", () => {
+    const html = badges(status({ customized: true }));
+    expect(html).toContain("Customized");
+    expect(html).toContain("Customized apps don&#x27;t get updates.");
   });
 
   test("offers an update only to people who can apply it", () => {

@@ -2295,5 +2295,6 @@ test("Installing a ready-made app names its Skills and automations, then opens i
   expect(installer.requests.map((request) => request.idempotencyKey)).toEqual([
     "ready-made:issue-tracker",
   ]);
-  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/sites/app-9`);
+  // The app opens on its own page.
+  expect(path.startsWith(`/workspaces/${WORKSPACE_ID}/apps/app-9`)).toBe(true);
 });

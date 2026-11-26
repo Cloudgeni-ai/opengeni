@@ -241,7 +241,7 @@ export function registerAppPackageTools(
     "app_upgrade",
     {
       description:
-        "Upgrade an existing app from a newer package of it (made by app_export, or a ready-made app's): its version becomes the app's new version, and only what is new runs (new collections, new migrations, query and sync changes, its Skills, new automations). The app's data stays; nothing is deleted. previous: true goes back to the app as it was before its last upgrade instead. Call with dryRun: true first and tell the person the plan. Changes marked destructive need allowDestructive: true and the person's explicit agreement; conflicts stop the upgrade. Give fileId or the package JSON. Retrying with the same idempotencyKey applies it once.",
+        "Upgrade an existing app from a newer package of it (made by app_export, or a ready-made app's): its version becomes the app's new version, and only what is new runs (new collections, new migrations, query and sync changes, its Skills, new automations). The app's data stays; nothing is deleted. previous: true goes back to the app as it was before its last upgrade instead. An app customized here (its app or Skills changed since install) gets no package updates. Call with dryRun: true first and tell the person the plan. Changes marked destructive need allowDestructive: true and the person's explicit agreement; conflicts stop the upgrade. Give fileId or the package JSON. Retrying with the same idempotencyKey applies it once.",
       inputSchema: {
         appId: z4.string().uuid().describe("The app (Site) to upgrade."),
         fileId: z4.string().uuid().optional().describe("The package file's id in this workspace."),

@@ -53,7 +53,7 @@ describe("site records", () => {
   });
 
   test("an app's path is its in-app app view", () => {
-    expect(sitePath("ws 1", "a/b")).toBe("/workspaces/ws%201/sites/a%2Fb");
+    expect(sitePath("ws 1", "a/b")).toBe("/workspaces/ws%201/apps/a%2Fb");
   });
 });
 

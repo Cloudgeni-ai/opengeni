@@ -493,8 +493,8 @@ function OpenSiteView({ workspaceId, artifactId }: { workspaceId: string; artifa
   const navigate = useNavigate();
   useEffect(() => {
     void navigate({
-      to: "/workspaces/$workspaceId/sites/$siteId",
-      params: { workspaceId, siteId: artifactId },
+      to: "/workspaces/$workspaceId/apps/$appId/$",
+      params: { workspaceId, appId: artifactId, _splat: "" },
       replace: true,
     });
   }, [artifactId, navigate, workspaceId]);
@@ -539,7 +539,7 @@ function ArtifactDetailPage({
     ? {
         // Named after the app once it has loaded (below).
         label: "Back",
-        href: `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(artifactId)}`,
+        href: `/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(artifactId)}`,
         onClick: (event?: MouseEvent) => {
           if (
             event &&
@@ -557,12 +557,19 @@ function ArtifactDetailPage({
   // Publish link) and the other tabs can be linked to and survive a reload.
   // The Site itself is the Site view, with its chat beside it.
   const tab: SiteDetailTab = search.view === "publish" ? "settings" : (search.tab ?? "versions");
+  // A new conversation opens in the Site view, with its chat; the app
+  // itself opens on its own page.
   const openSiteView = (startNew = false) =>
-    void navigate({
-      to: "/workspaces/$workspaceId/sites/$siteId",
-      params: { workspaceId, siteId: artifactId },
-      ...(startNew ? { search: { new: true } } : {}),
-    });
+    startNew
+      ? void navigate({
+          to: "/workspaces/$workspaceId/sites/$siteId",
+          params: { workspaceId, siteId: artifactId },
+          search: { new: true },
+        })
+      : void navigate({
+          to: "/workspaces/$workspaceId/apps/$appId/$",
+          params: { workspaceId, appId: artifactId, _splat: "" },
+        });
   const setTab = (next: SiteTab) =>
     next === "site"
       ? openSiteView()

@@ -56,7 +56,7 @@ const status = (
   packageId,
   packageVersion: "1.0.0",
   archived: false,
-  modified: false,
+  customized: false,
   skills: [],
   automations: [],
   previous: null,
@@ -68,7 +68,7 @@ const STATUS: AppPackageStatus[] = noApps
   : [
       status(APPS[0]!.id, "Work summary", workSummary.package.packageId, {
         packageVersion: "0.9.0",
-        skills: [{ id: "s1", name: "work-summary", modified: true }],
+        skills: [{ id: "s1", name: "work-summary", modified: false }],
         automations: [{ id: "t1", name: "Update the work summary" }],
         update: { templateKey: "work-summary", packageVersion: "1.0.0" },
         previous: {
@@ -77,7 +77,7 @@ const STATUS: AppPackageStatus[] = noApps
           savedAt: day(9),
         },
       }),
-      status(APPS[1]!.id, "Issue tracker", issueTracker.package.packageId, { modified: true }),
+      status(APPS[1]!.id, "Issue tracker", issueTracker.package.packageId, { customized: true }),
     ];
 const PLAN: AppPackageUpgradePlan = {
   version: { changed: true, html: true, source: false, tools: false, assets: false },
@@ -90,7 +90,6 @@ const PLAN: AppPackageUpgradePlan = {
   packageVersion: { current: "0.9.0", next: "1.0.0" },
   skills: { added: [], changed: ["work-summary"], unchanged: [], kept: [] },
   automations: { added: [], kept: ["Update the work summary"] },
-  localChanges: { app: false, skills: ["work-summary"] },
   destructive: [],
   conflicts: [],
   problems: [],

@@ -1,11 +1,16 @@
 // The app on screen or kept open behind another page (see app-page.tsx).
 import { MessageSquareIcon } from "lucide-react";
-import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { SiteView } from "../../components/artifacts/site-view";
 import { Button } from "../../ui/button";
 import { useAppContext } from "../app-context";
+import { SiteActionsMenu, SiteTitleMenu } from "../components/artifacts/site-header-controls";
+import {
+  SitePublicationControl,
+  useSitePublicationLink,
+} from "../components/artifacts/site-public-link";
+import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { WindowBarEndControls } from "../components/window-bar";
 import { useAppearance } from "../lib/appearance";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
@@ -49,11 +54,23 @@ export function AppPage({
     [appId, consoleToolBridge, subscribeDataChanges],
   );
   const artifact = live.detail?.artifact;
+  const archived = artifact?.status === "archived";
+  const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
+  const publication = useSitePublicationLink({ client, workspaceId, siteId: appId });
+  const [reloadToken, setReloadToken] = useState(0);
+  const reload = useCallback(() => setReloadToken((value) => value + 1), []);
+  const openPublishing = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sites/$siteId",
+      params: { workspaceId, siteId: appId },
+      search: { publishing: true },
+    });
+  }, [appId, navigate, workspaceId]);
   // The app's chat, for people who can start one with a live app: one icon
   // button opens it beside the app (under it on a narrow screen), where it
   // can be hidden again. The button is never drawn over the app, so it can't
-  // cover the app's own controls: it sits in the macOS window bar, in the
-  // phone's top strip, or else in a slim row above the app.
+  // cover the app's own controls: it sits in the app's header row (in the
+  // macOS app, the window bar).
   const canChat =
     hasWorkspacePermission(accessContext, workspaceId, "sessions:create") &&
     artifact?.status === "active" &&
@@ -97,28 +114,6 @@ export function AppPage({
   const inWindowBar = useWindowBarTitle(active ? (artifact?.title ?? null) : null, !active, {
     copyable: true,
   });
-  // On a phone, the canvas's top strip (menu and brand) has room at its end.
-  // It shows only in the phone layout, so it comes and goes as the window
-  // is resized.
-  const [stripEnd, setStripEnd] = useState<HTMLElement | null>(null);
-  useLayoutEffect(() => {
-    if (!active) {
-      setStripEnd(null);
-      return;
-    }
-    const find = () => setStripEnd(document.querySelector<HTMLElement>("[data-canvas-strip-end]"));
-    find();
-    let frame = 0;
-    const later = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(find);
-    };
-    window.addEventListener("resize", later);
-    return () => {
-      window.removeEventListener("resize", later);
-      cancelAnimationFrame(frame);
-    };
-  }, [active]);
   const activeRef = useRef(active);
   activeRef.current = active;
   const onSiteLocationChange = useCallback(
@@ -151,14 +146,40 @@ export function AppPage({
         <MessageSquareIcon aria-hidden="true" className="size-4" />
       </Button>
     ) : null;
-  // Only the app on screen places its button outside its own column.
-  const placement = !active
-    ? "row"
-    : inWindowBar
-      ? "window-bar"
-      : stripEnd?.isConnected
-        ? "strip"
-        : "row";
+  // The same header wherever the app is opened from: title, version,
+  // publication and "…" (settings, pin, archive), then the chat button.
+  const controls =
+    artifact && !archived ? (
+      <>
+        {live.detail ? (
+          <SiteVersionMenu
+            workspaceId={workspaceId}
+            siteId={appId}
+            detail={live.detail}
+            canPublish={canPublish}
+            onRestored={live.check}
+          />
+        ) : null}
+        <span data-site-publication-slot="" className="contents">
+          <SitePublicationControl
+            load={publication.load}
+            canPublish={canPublish}
+            onOpenPublishing={openPublishing}
+          />
+        </span>
+        <SiteActionsMenu
+          workspaceId={workspaceId}
+          origin={{ siteId: appId, title: artifact.title }}
+          hasVersion={Boolean(artifact.currentVersion)}
+          onReload={reload}
+        />
+        {chatButton}
+      </>
+    ) : (
+      chatButton
+    );
+  // Only the app on screen places its header in the window bar.
+  const inBar = active && inWindowBar;
   return (
     <div
       ref={page}
@@ -172,20 +193,28 @@ export function AppPage({
       {active ? <RecordAppOpened workspaceId={workspaceId} appId={appId} /> : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Kept while the chat is open, so opening it doesn't resize the app. */}
-        {canChat && placement === "row" ? (
+        {!inBar && artifact ? (
           <div
-            data-app-page-chat-row=""
-            className="flex h-10 shrink-0 items-center justify-end bg-canvas px-2"
+            data-app-page-header=""
+            className="flex h-10 shrink-0 items-center gap-1 bg-canvas px-3"
           >
-            {chatButton}
+            <SiteTitleMenu
+              workspaceId={workspaceId}
+              origin={{ siteId: appId, title: artifact.title }}
+            >
+              {/* Focusable, so the menu key or Shift+F10 opens its menu. */}
+              <span
+                tabIndex={0}
+                className="min-w-0 truncate rounded-sm text-sm font-medium text-fg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
+                title={artifact.title}
+              >
+                {artifact.title}
+              </span>
+            </SiteTitleMenu>
+            <span className="ml-auto flex shrink-0 items-center gap-1">{controls}</span>
           </div>
         ) : null}
-        {chatButton && placement === "window-bar" ? (
-          <WindowBarEndControls>{chatButton}</WindowBarEndControls>
-        ) : null}
-        {chatButton && placement === "strip" && stripEnd
-          ? createPortal(chatButton, stripEnd)
-          : null}
+        {inBar && controls ? <WindowBarEndControls>{controls}</WindowBarEndControls> : null}
         <SiteView
           client={client}
           workspaceId={workspaceId}
@@ -196,6 +225,7 @@ export function AppPage({
           onSiteLocationChange={onSiteLocationChange}
           theme={resolvedTheme}
           showToolbar={false}
+          reloadToken={reloadToken}
           versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
           watch={live.watch}
           archivedMessage="This app is archived."

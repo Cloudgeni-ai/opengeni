@@ -64,7 +64,7 @@ test("Copy link copies the artifact's own address and says Link copied, like a c
     "https://console.example.test/workspaces/ws%201/artifacts/editable/art-1",
     "https://console.example.test/workspaces/ws%201/artifacts/files/art-1",
     "https://console.example.test/workspaces/ws%201/artifacts/files/art-1",
-    "https://console.example.test/workspaces/ws%201/sites/art-1",
+    "https://console.example.test/workspaces/ws%201/apps/art-1",
   ]);
   expect(said).toEqual(Array.from({ length: 5 }, () => "success:Link copied"));
 });

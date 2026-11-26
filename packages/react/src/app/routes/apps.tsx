@@ -1,6 +1,6 @@
 /**
  * The Apps page (the rail's Apps): the apps here, each with its version and
- * "Modified" or "Update available", and the ready-made apps available to add.
+ * "Customized" or "Update available", and the ready-made apps available to add.
  * Installing, updating and going back follow docs/app-packages.md.
  */
 import type { AppPackageStatus, ArtifactCatalogItem } from "@opengeni/sdk";
@@ -44,7 +44,9 @@ export function AppsRoute({
   );
 }
 
-/** An installed app's badges and menu entries: version, Modified, Update, Restore. */
+/** An installed app's badges and menu entries: version, Customized, Update, Restore. */
+const CUSTOMIZED_HINT = "Customized apps don't get updates.";
+
 export function appPackageExtras(
   status: AppPackageStatus | undefined,
   actions: {
@@ -53,7 +55,6 @@ export function appPackageExtras(
   } | null,
 ): ArtifactItemExtras | undefined {
   if (!status) return undefined;
-  const modified = status.modified || status.skills.some((skill) => skill.modified);
   const badges = (
     <>
       {status.packageVersion ? (
@@ -61,10 +62,12 @@ export function appPackageExtras(
           v{status.packageVersion}
         </span>
       ) : null}
-      {modified ? (
-        <StatusBadge tone="neutral" data-app-modified="">
-          Modified
-        </StatusBadge>
+      {status.customized ? (
+        <span data-app-customized="">
+          <StatusBadge tone="neutral" reason={CUSTOMIZED_HINT}>
+            Customized
+          </StatusBadge>
+        </span>
       ) : null}
       {status.update && actions ? (
         <button

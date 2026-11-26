@@ -87,7 +87,7 @@ import {
 } from "../../lib/artifact-library-view";
 import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { cn } from "../../lib/utils";
-import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
+import type { ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 import { useCopyArtifactLink } from "./copy-artifact-link";
 
@@ -386,13 +386,10 @@ function useArtifactOpen({
     onSelect
       ? onSelect(item)
       : item.kind === "site"
-        ? // A Site opens in the Site view, with its chat beside it. From the
-          // Artifacts page it carries that page's query, so the Site view's
-          // Back returns to the page as it was.
+        ? // An app opens on its own page, the same however it's opened.
           void navigate({
-            to: "/workspaces/$workspaceId/sites/$siteId",
-            params: { workspaceId, siteId: item.id },
-            ...(browseSearch ? { search: siteViewArtifactsReturn(browseSearch) } : {}),
+            to: "/workspaces/$workspaceId/apps/$appId/$",
+            params: { workspaceId, appId: item.id, _splat: "" },
           })
         : void navigate({
             to: artifactRoute(item.kind),
@@ -478,11 +475,12 @@ function useArtifactOpen({
     link: onSelect
       ? null
       : {
-          href: browseSearch
-            ? `${artifactPath(workspaceId, item)}${stringifySearch(
-                item.kind === "site" ? siteViewArtifactsReturn(browseSearch) : browseSearch,
-              )}`
-            : artifactPath(workspaceId, item, sessionId),
+          href:
+            item.kind === "site"
+              ? artifactPath(workspaceId, item)
+              : browseSearch
+                ? `${artifactPath(workspaceId, item)}${stringifySearch(browseSearch)}`
+                : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();

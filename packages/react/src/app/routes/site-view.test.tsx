@@ -1556,19 +1556,22 @@ async function openAppPageChat(container: HTMLElement) {
   await settle();
 }
 
-test("an app opened as a page offers its chat from one button above it, and hides it again", async () => {
+test("an app opened as a page has the app's header and offers its chat from one button in it", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const container = await renderAppPage();
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-site-view")).toBe(siteId);
-  // Only the app and one icon button; the chat isn't loaded until asked for.
-  expect([...container.querySelectorAll("button")]).toHaveLength(1);
+  // The same header as the Site view: title, version and "…"; the chat
+  // isn't loaded until asked for.
+  const header = container.querySelector("[data-app-page-header]")!;
+  expect(header.textContent).toContain("Opengeni usage");
+  expect(header.querySelector("[data-site-actions-menu]")).not.toBeNull();
   const show = chatButton(container)!;
   expect(show.getAttribute("aria-label")).toBe("Open chat");
   expect(show.getAttribute("aria-expanded")).toBe("false");
   expect(show.textContent).toBe("");
   // In its own slim row above the app, never drawn over the app's frame,
   // so it can't cover the app's own controls.
-  const row = show.closest("[data-app-page-chat-row]")!;
+  const row = show.closest("[data-app-page-header]")!;
   expect(row).not.toBeNull();
   expect(row.contains(container.querySelector("[data-site-view]"))).toBe(false);
   expect(row.nextElementSibling?.hasAttribute("data-site-view")).toBe(true);
@@ -1586,9 +1589,9 @@ test("an app opened as a page offers its chat from one button above it, and hide
   expect(
     [...panel(container).querySelectorAll("a")].map((a) => a.getAttribute("aria-label")),
   ).toEqual(["Open as a full chat"]);
-  // The row stays, empty, while the chat is open, so the app keeps its size.
+  // The header stays while the chat is open, so the app keeps its size.
   expect(chatButton(container)).toBeNull();
-  expect(container.querySelector("[data-app-page-chat-row]")?.childElementCount).toBe(0);
+  expect(container.querySelector("[data-app-page-header]")).not.toBeNull();
   expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide chat");
 
   await act(async () =>
@@ -1603,28 +1606,19 @@ test("an app opened as a page offers its chat from one button above it, and hide
   expect(navigations).toEqual([]);
 });
 
-test("on a phone the app page's chat button sits in the top strip, not over the app", async () => {
+test("on a phone the app page keeps its header and chat button above the app", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  // The shell's top strip on a phone (menu and brand), with room at its end.
+  // The shell's top strip on a phone (menu and brand) is left alone.
   const strip = document.createElement("header");
   const stripEnd = document.createElement("div");
   stripEnd.setAttribute("data-canvas-strip-end", "");
   strip.append(stripEnd);
   document.body.append(strip);
   const container = await renderAppPage();
-  const show = chatButton(document.body)!;
-  expect(show.parentElement).toBe(stripEnd);
-  expect(container.querySelector("[data-app-page-chat-row]")).toBeNull();
-  expect(container.contains(show)).toBe(false);
-  await openAppPageChat(document.body);
-  expect(panel(container).hidden).toBe(false);
+  const show = chatButton(container)!;
+  expect(show.closest("[data-app-page-header]")).not.toBeNull();
   expect(stripEnd.childElementCount).toBe(0);
-  await act(async () =>
-    container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
-  );
-  await settle();
-  expect(document.activeElement).toBe(chatButton(document.body));
-  expect(chatButton(document.body)!.parentElement).toBe(stripEnd);
+  strip.remove();
 });
 
 test("a chat started from an app page opens in its panel, and the address stays the app's", async () => {

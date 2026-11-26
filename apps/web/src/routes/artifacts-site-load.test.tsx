@@ -212,7 +212,7 @@ test("Settings opened from the app goes back to the app, also after switching ta
     const back = [...container.querySelectorAll<HTMLAnchorElement>("a")].find((link) =>
       link.textContent?.includes("Café menu"),
     );
-    expect(back?.getAttribute("href")).toBe(sitePath());
+    expect(back?.getAttribute("href")).toBe(appPath());
     const backBefore = window.history.back;
     let backs = 0;
     window.history.back = () => void (backs += 1);
@@ -241,13 +241,14 @@ test("Settings opened from the app goes back to the app, also after switching ta
 });
 
 const sitePath = (id = siteId) => `/workspaces/${workspaceId}/sites/${id}`;
+const appPath = (id = siteId) => `/workspaces/${workspaceId}/apps/${id}`;
 
 test("a link to the app, or the Artifacts list's old one, opens the app view in its place", async () => {
   loadError = null;
   for (const entry of ["/", "/?browse=true", "/?fromSession=s1"]) {
     const { container, root, router } = await renderDetail(entry);
     try {
-      expect(router.state.location.pathname).toBe(sitePath());
+      expect(router.state.location.pathname).toBe(appPath());
       // Replaced, so Back leaves the Site instead of bouncing into it again.
       expect(router.history.length).toBe(1);
       expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
@@ -269,7 +270,7 @@ test("the app tab and Edit with Opengeni open the app view; Edit starts a new co
       site.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
       site.click();
     });
-    expect(tab.router.state.location.pathname).toBe(sitePath());
+    expect(tab.router.state.location.pathname).toBe(appPath());
     expect(tab.router.state.location.search).toEqual({});
   } finally {
     await act(async () => tab.root.unmount());
@@ -432,7 +433,7 @@ test("Duplicate in Settings copies the app and opens the copy in the app view", 
       .calls[0] as [string, string, { idempotencyKey: string }];
     expect([calledWorkspace, calledSite]).toEqual([workspaceId, siteId]);
     expect(request.idempotencyKey).toBeString();
-    expect(router.state.location.pathname).toBe(sitePath(copyId));
+    expect(router.state.location.pathname).toBe(appPath(copyId));
   } finally {
     await act(async () => root.unmount());
     container.remove();

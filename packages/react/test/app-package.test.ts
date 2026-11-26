@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { APP_PACKAGE_FORMAT } from "@opengeni/contracts";
 import {
   firstSentence,
-  localChangesText,
   notInstalledSummary,
   readAppPackageFile,
   upgradePlanLines,
@@ -128,13 +127,5 @@ describe("an upgrade's plan in the console", () => {
       "Automations: adds Daily summary (switched off)",
       "Keeps old, which the package doesn't have",
     ]);
-  });
-
-  test("warns when it replaces changes made here", () => {
-    expect(localChangesText(empty)).toBeNull();
-    expect(localChangesText({ ...empty, localChanges: { app: false, skills: [] } })).toBeNull();
-    expect(
-      localChangesText({ ...empty, localChanges: { app: true, skills: ["work-summary"] } }),
-    ).toBe("Your changes to the app and the Skill work-summary are replaced.");
   });
 });

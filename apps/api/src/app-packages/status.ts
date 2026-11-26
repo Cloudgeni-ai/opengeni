@@ -67,28 +67,34 @@ export async function listAppPackageStatus(
   const updates = readyMadeVersions();
   const apps: AppPackageStatus[] = installs.map((install) => {
     const ready = install.packageId ? updates.get(install.packageId) : undefined;
+    const linked = install.skills
+      .filter((link) => skills.has(link.skillId))
+      .map((link) => ({
+        id: link.skillId,
+        name: link.name,
+        modified: skillModified(skills.get(link.skillId) ?? null, link),
+      }));
+    // Customized apps are forked: no updates and nothing to go back to.
+    const customized =
+      Boolean(
+        install.versionId &&
+        install.currentVersionId &&
+        install.versionId !== install.currentVersionId,
+      ) || linked.some((skill) => skill.modified);
     return {
       appId: install.appId,
       title: install.title,
       packageId: install.packageId,
       packageVersion: install.packageVersion,
       archived: install.archived,
-      modified: Boolean(
-        install.versionId &&
-        install.currentVersionId &&
-        install.versionId !== install.currentVersionId,
-      ),
-      skills: install.skills
-        .filter((link) => skills.has(link.skillId))
-        .map((link) => ({
-          id: link.skillId,
-          name: link.name,
-          modified: skillModified(skills.get(link.skillId) ?? null, link),
-        })),
+      customized,
+      skills: linked,
       automations: install.automations.map((entry) => ({ id: entry.taskId, name: entry.name })),
-      previous: install.previous,
+      previous: customized ? null : install.previous,
       update:
-        ready && compareAppPackageVersions(ready.packageVersion, install.packageVersion ?? "0") > 0
+        !customized &&
+        ready &&
+        compareAppPackageVersions(ready.packageVersion, install.packageVersion ?? "0") > 0
           ? ready
           : null,
     };

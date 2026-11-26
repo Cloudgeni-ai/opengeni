@@ -25,3 +25,24 @@ export function appPageSiteHref(splat: string | undefined, at: string | undefine
 export function appPagePathname(workspaceId: string, appId: string, splat = ""): string {
   return `/workspaces/${workspaceId}/apps/${appId}${splat ? `/${splat}` : ""}`;
 }
+
+/**
+ * Whether a sidebar row for the app is the open page. A row for the app
+ * itself (no path of its own) stays highlighted wherever in the app the
+ * person is, and on the app's Site view; a row for one of its pages only
+ * on that page.
+ */
+export function appRowActive(
+  pathname: string,
+  workspaceId: string,
+  appId: string,
+  splat = "",
+): boolean {
+  if (splat) return pathname.replace(/\/+$/u, "") === appPagePathname(workspaceId, appId, splat);
+  const page = appPagePathname(workspaceId, appId);
+  return (
+    pathname === page ||
+    pathname.startsWith(`${page}/`) ||
+    pathname.replace(/\/+$/u, "") === `/workspaces/${workspaceId}/sites/${appId}`
+  );
+}

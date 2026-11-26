@@ -57,6 +57,8 @@ import {
 } from "./service";
 import { appSyncHooks, syncName } from "./syncs";
 import {
+  APP_CUSTOMIZED_MESSAGE,
+  appPackageCustomized,
   applyPackageSkills,
   planPackageSkills,
   type PackageSkillPlan,
@@ -206,6 +208,15 @@ async function prepare(
   // Managers only: the same check as reading the app's data definitions.
   const data = await describeSiteData(deps, grant, appId);
   const sql = await describeSiteSql(deps, grant, appId);
+  const install = await getAppPackageInstall(deps.db, grant.workspaceId, appId);
+  // A customized app is forked for good: an update could break or drop the
+  // fields its changes rely on, so it gets no package updates.
+  if (await appPackageCustomized(deps, grant, install, ref.version.id))
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: APP_CUSTOMIZED_MESSAGE,
+      details: { reason: "customized" },
+    });
   const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
   const destructive: AppPackageProblem[] = [];
   const conflicts: AppPackageProblem[] = [];
@@ -435,9 +446,7 @@ async function prepare(
       }
   }
 
-  // What came with the app: its version label, Skills and automations, and
-  // the local changes the upgrade replaces.
-  const install = await getAppPackageInstall(deps.db, grant.workspaceId, appId);
+  // What came with the app: its version label, Skills and automations.
   plan.packageVersion = {
     current: install?.packageVersion ?? null,
     next: pkg.packageVersion ?? null,
@@ -464,12 +473,6 @@ async function prepare(
       .map((automation) => automation.name)
       .filter((name) => !automationNames.has(name)),
     kept: [...automationNames],
-  };
-  plan.localChanges = {
-    app: Boolean(
-      plan.version.changed && install?.versionId && install.versionId !== ref.version.id,
-    ),
-    skills: (skills?.modified ?? []).filter((name) => skills?.changed.includes(name)),
   };
 
   return {

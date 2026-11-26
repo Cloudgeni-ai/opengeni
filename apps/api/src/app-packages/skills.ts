@@ -10,6 +10,7 @@ import { listSkills, readSkill, saveSkill, type ApiRouteDeps } from "@opengeni/c
 import {
   appPackageSkillIds,
   relinkAppPackageSkill,
+  type AppPackageInstall,
   type AppPackageInstallSkill,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
@@ -35,8 +36,6 @@ export type PackageSkillPlan = {
   unchanged: string[];
   /** Skills that came with the app that the package no longer has: they stay. */
   kept: string[];
-  /** Linked Skills edited here since the package wrote them. */
-  modified: string[];
   problems: AppPackageProblem[];
   /** Per package Skill, what applying does. */
   steps: Array<{
@@ -92,6 +91,30 @@ export function skillModified(
   return live !== link.revisionId && live !== link.pendingRevisionId;
 }
 
+export const APP_CUSTOMIZED_MESSAGE =
+  "This app was customized here, so it no longer gets package updates. Customized apps keep their changes; add the new version as a separate app instead.";
+
+/**
+ * Whether an installed app was customized here: its app version is no longer
+ * the one the package installed (or last upgraded to), or one of its linked
+ * Skills was edited. A customized app is forked and gets no package updates.
+ */
+export async function appPackageCustomized(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  install: Pick<AppPackageInstall, "versionId" | "skills"> | null,
+  currentVersionId: string,
+): Promise<boolean> {
+  if (!install) return false;
+  if (install.versionId && install.versionId !== currentVersionId) return true;
+  const context = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  for (const link of install.skills) {
+    const record = await readSkill(deps.db, context, link.skillId).catch(() => null);
+    if (skillModified(record, link)) return true;
+  }
+  return false;
+}
+
 export async function planPackageSkills(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -108,7 +131,6 @@ export async function planPackageSkills(
     changed: [],
     unchanged: [],
     kept: [],
-    modified: [],
     problems: [],
     steps: [],
   };
@@ -117,7 +139,6 @@ export async function planPackageSkills(
   for (const skill of input.skills) {
     const link = input.links.find((entry) => entry.name === skill.name);
     let current = link ? await readSkill(deps.db, context, link.skillId) : null;
-    if (current && link && skillModified(current, link)) plan.modified.push(skill.name);
     if (!current) {
       // Not linked (or its Skill was removed): one with its name may exist.
       const named = await workspaceSkillNamed(deps, grant, skill.name);

@@ -1635,7 +1635,7 @@ test("packages carry Skills and automations; updates show them, and go back", as
   const first = await listed();
   expect(first).toMatchObject({
     packageVersion: "1.0.0",
-    modified: false,
+    customized: false,
     archived: false,
     previous: null,
     update: null,
@@ -1661,7 +1661,6 @@ test("packages carry Skills and automations; updates show them, and go back", as
     packageVersion: { current: "1.0.0", next: "1.1.0" },
     skills: { added: [], changed: ["board-notes"] },
     automations: { added: [], kept: ["Tidy the board"] },
-    localChanges: { app: false, skills: [] },
   });
   const applied = await f.call(manager, "POST", `${base}/package/upgrade`, {
     package: next,
@@ -1671,7 +1670,7 @@ test("packages carry Skills and automations; updates show them, and go back", as
   expect(applied.json.notUpgraded).toEqual([]);
   expect(applied.json.upgraded.skills).toEqual(["board-notes"]);
   const updated = await listed();
-  expect(updated).toMatchObject({ packageVersion: "1.1.0", modified: false });
+  expect(updated).toMatchObject({ packageVersion: "1.1.0", customized: false });
   expect(updated.previous).toMatchObject({ packageVersion: "1.0.0" });
   const skill = await f.call(
     manager,
@@ -1717,6 +1716,25 @@ test("packages carry Skills and automations; updates show them, and go back", as
     dryRun: true,
   });
   expect(both.status).toBe(422);
+
+  // Customized here: forked for good. No update or going back is offered,
+  // and the server refuses package updates (dry run included).
+  const edited = await f.call(manager, "POST", `${base}/versions`, {
+    html: "<!doctype html><h1>Our own board</h1>",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(edited.status, edited.text).toBeLessThan(300);
+  expect(await listed()).toMatchObject({ customized: true, update: null, previous: null });
+  for (const body of [
+    { package: next, dryRun: true },
+    { package: next, idempotencyKey: crypto.randomUUID() },
+  ]) {
+    const refusedUpgrade = await f.call(manager, "POST", `${base}/package/upgrade`, body);
+    expect(refusedUpgrade.status, refusedUpgrade.text).toBe(409);
+    expect(refusedUpgrade.text).toContain("customized");
+  }
+  const after = await f.call(manager, "GET", `${base}/content`);
+  expect(after.json.html).toContain("Our own board");
 
   // Installing another copy from an older file links the shared Skill as it is.
   const copy = await f.install({ package: skilledPackage("0.9.0", "Version zero.") }, manager);
