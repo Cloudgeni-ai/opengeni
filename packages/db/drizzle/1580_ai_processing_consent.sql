@@ -43,6 +43,8 @@ BEGIN
     JOIN pg_roles r ON r.rolname = configured.value
     UNION SELECT 'opengeni_app' WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
   LOOP
+    -- Older databases can still have default DML grants for newly created tables.
+    EXECUTE format('REVOKE ALL ON TABLE ai_processing_consents FROM %I', application_role);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE ai_processing_consents TO %I', application_role);
   END LOOP;
 END $$;

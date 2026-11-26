@@ -52,6 +52,7 @@ export async function aiProcessingConsentRefusal(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<ApiHttpError | null> {
+  if (!deps.managedAuth) return null; // Only Better Auth can mint these sessions.
   const client = await humanClient(c, deps);
   if (!client || !AI_PROCESSING_CONSENT_ENFORCED_PLATFORMS.some((p) => p === client.platform)) {
     return null;
