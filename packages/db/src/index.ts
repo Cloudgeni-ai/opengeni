@@ -8818,6 +8818,11 @@ export type SessionTurnForExecution = SessionTurn & {
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
+  /**
+   * Set when this claim resumed the turn from an approval or question pause:
+   * the execution generation advanced, but nothing was interrupted.
+   */
+  resumedFromPause?: true;
 };
 
 export async function createFileUpload(
@@ -85051,7 +85056,8 @@ export async function claimSessionWorkForAttempt(
             await registerAttempt(resumed);
             return {
               action: "claimed",
-              turn: mapSessionTurnForExecution(resumed),
+              // The previous attempt ended cleanly at the pause; nothing was cut off.
+              turn: { ...mapSessionTurnForExecution(resumed), resumedFromPause: true },
             };
           }
           if (activeTurn?.status === "recovering" || activeTurn?.status === "waiting_capacity") {
