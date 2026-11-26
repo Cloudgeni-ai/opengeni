@@ -683,10 +683,10 @@ way.
 - **How a browser gets it.** A landing URL with `?simplified_interface=1` (`=0` turns it off).
   The inline bootstrap in `index.html` applies it before the first paint and
   `src/lib/simplified-interface-landing.ts` removes the parameter. Someone arriving with the flag
-  and no appearance of their own starts in the light look. After that the account menu shows a
-  "Simplified interface" switch; a browser that never arrived with the flag sees no switch.
-  Onboarding's first question sets it too: **Not an engineer** turns it on (and shows the
-  switch), **Software engineer** turns it off only if it was on, then ends on Get started's
+  and no appearance of their own starts in the light look. The account menu always shows a
+  "Simplified interface" switch, so anyone can turn it on or off in this browser.
+  Onboarding's first question sets it too: **Not an engineer** turns it on,
+  **Software engineer** turns it off only if it was on, then ends on Get started's
   guided setups (`docs/agents.md`). Like the landing URL it sets this browser only; another
   device starts in the full console until the switch is used there. Adding agents to your own
   product is a small link under the two cards, not a third card, left out for people who

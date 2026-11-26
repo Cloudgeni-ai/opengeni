@@ -22816,27 +22816,55 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "monthly_agent_run_limit"
   | "session_usage_limit";
 
+export const SCHEDULED_TASK_DISPATCH_EXHAUSTED = "scheduled_dispatch_exhausted";
+
+type ScheduledTaskRefusalIdentity = {
+  workspaceId: string;
+  taskId: string;
+  producerKey: string;
+  scheduledAt?: Date | null;
+};
+
+type ScheduledTaskAdmissionRefusalInput = ScheduledTaskRefusalIdentity & {
+  taskAuthorityRevision: number;
+  taskExecutionDigest: string;
+  triggerType: ScheduledTaskTriggerType;
+  reason: ScheduledTaskAdmissionRefusalReason;
+  retryable: boolean;
+};
+
+type ScheduledTaskExhaustedDispatchInput = ScheduledTaskRefusalIdentity & {
+  triggerType: "scheduled" | "event";
+  reason: typeof SCHEDULED_TASK_DISPATCH_EXHAUSTED;
+  retryable: true;
+  /** Same-transaction settlement for a new receipt, never a replay. */
+  onRecorded?: (
+    tx: Database,
+    run: ScheduledTaskRun,
+    ownerSubjectId: string | null,
+  ) => Promise<void>;
+};
+
 /**
  * Record a refused occurrence as an immutable run receipt under its producer
- * identity (migration 0539). A transient refusal is `skipped`, a terminal one
- * `failed`; neither carries accepted execution. An existing receipt for the
- * producer wins, so redelivery never duplicates a run: the caller replays it.
+ * identity. An exhausted dispatch can use the same path if nothing has been
+ * accepted: this occurrence failed, but future ones may work. An existing
+ * receipt always wins, including a dispatch whose result was lost in transit.
  */
+export function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: ScheduledTaskAdmissionRefusalInput,
+): Promise<ScheduledTaskRun>;
+export function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: ScheduledTaskExhaustedDispatchInput,
+): Promise<ScheduledTaskRun | null>;
 export async function recordScheduledTaskAdmissionRefusal(
   db: Database,
-  input: {
-    workspaceId: string;
-    taskId: string;
-    taskAuthorityRevision: number;
-    taskExecutionDigest: string;
-    triggerType: ScheduledTaskTriggerType;
-    producerKey: string;
-    scheduledAt?: Date | null;
-    reason: ScheduledTaskAdmissionRefusalReason;
-    retryable: boolean;
-  },
-): Promise<ScheduledTaskRun> {
+  input: ScheduledTaskAdmissionRefusalInput | ScheduledTaskExhaustedDispatchInput,
+): Promise<ScheduledTaskRun | null> {
   if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  const dispatchExhausted = input.reason === SCHEDULED_TASK_DISPATCH_EXHAUSTED;
   const refusal = ScheduledTaskAdmissionRefusal.parse({
     version: 1,
     reason: input.reason,
@@ -22854,7 +22882,10 @@ export async function recordScheduledTaskAdmissionRefusal(
       )
       .for("update")
       .limit(1);
-    if (!task) throw new Error("Scheduled task not found");
+    if (!task) {
+      if (dispatchExhausted) return null;
+      throw new Error("Scheduled task not found");
+    }
     const readPrior = async () => {
       const [prior] = await tx
         .select()
@@ -22873,11 +22904,13 @@ export async function recordScheduledTaskAdmissionRefusal(
     };
     const prior = await readPrior();
     if (prior) return mapScheduledTaskRun(prior);
+    if (dispatchExhausted && (task.status !== "active" || task.deletedAt)) return null;
     if (
-      task.status !== "active" ||
-      task.deletedAt ||
-      task.authorityRevision !== input.taskAuthorityRevision ||
-      task.executionDigest !== input.taskExecutionDigest
+      !dispatchExhausted &&
+      (task.status !== "active" ||
+        task.deletedAt ||
+        task.authorityRevision !== input.taskAuthorityRevision ||
+        task.executionDigest !== input.taskExecutionDigest)
     ) {
       throw new Error("scheduled task changed before refusal recording");
     }
@@ -22888,15 +22921,17 @@ export async function recordScheduledTaskAdmissionRefusal(
         accountId: task.accountId,
         workspaceId: input.workspaceId,
         taskId: task.id,
-        taskAuthorityRevision: input.taskAuthorityRevision,
-        taskExecutionDigest: input.taskExecutionDigest,
+        taskAuthorityRevision: task.authorityRevision,
+        taskExecutionDigest: task.executionDigest,
         triggerType: input.triggerType,
         producerKey: input.producerKey,
         scheduledAt: input.scheduledAt ?? null,
         firedAt: now,
         completedAt: now,
-        actionKind: "agent_turn",
-        status: refusal.retryable ? "skipped" : "failed",
+        actionKind: dispatchExhausted
+          ? ((task.action as ScheduledTaskAction | null)?.kind ?? "agent_turn")
+          : "agent_turn",
+        status: dispatchExhausted || !refusal.retryable ? "failed" : "skipped",
         error: refusal.reason,
         admissionRefusal: refusal,
       })
@@ -22907,7 +22942,9 @@ export async function recordScheduledTaskAdmissionRefusal(
       .returning();
     const result = inserted ?? (await readPrior());
     if (!result) throw new Error("scheduled refusal receipt missing");
-    return mapScheduledTaskRun(result);
+    const run = mapScheduledTaskRun(result);
+    if (dispatchExhausted && inserted) await input.onRecorded?.(tx, run, task.ownerSubjectId);
+    return run;
   });
 }
 
@@ -97279,6 +97316,70 @@ export async function latestConnectionAuthNotice(
         ? (card.payload as Record<string, unknown>)
         : {};
     return { id: card.id, payload };
+  });
+}
+
+/**
+ * The latest auth notice this chat showed for one capability, such as a
+ * Connected Machine, with whom it asked, so the caller can
+ * tell which request is still open, and for whom, before it clears that
+ * request's wait. Null when the chat showed none.
+ */
+export async function latestCapabilityAuthNotice(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; capabilityId: string },
+): Promise<{
+  id: string;
+  payload: Record<string, unknown>;
+  /** The person whose turn posted it, or the chat's creator for a service turn. */
+  askedBySubjectId: string;
+  /** The notice keys the chat still waits on the person for. */
+  awaitingConnectionKeys: string[];
+} | null> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const tx = scoped as unknown as Database;
+    const [card] = await tx
+      .select({
+        id: schema.sessionEvents.id,
+        payload: schema.sessionEvents.payload,
+        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      })
+      .from(schema.sessionEvents)
+      .leftJoin(schema.sessionTurns, eq(schema.sessionTurns.id, schema.sessionEvents.turnId))
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "tool.auth_needed"),
+          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    if (!card) return null;
+    const [session] = await tx
+      .select({
+        awaitingKeys: schema.sessions.awaitingConnectionKeys,
+        createdBySubjectId: schema.sessions.createdBySubjectId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    const payload =
+      card.payload && typeof card.payload === "object" && !Array.isArray(card.payload)
+        ? (card.payload as Record<string, unknown>)
+        : {};
+    return {
+      id: card.id,
+      payload,
+      askedBySubjectId: card.initiatingHumanSubjectId ?? session?.createdBySubjectId ?? "",
+      awaitingConnectionKeys: session?.awaitingKeys ?? [],
+    };
   });
 }
 

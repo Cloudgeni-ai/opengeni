@@ -79,14 +79,12 @@ export function AppearanceSubmenu() {
 }
 
 /**
- * The account menu's "Simplified interface" switch, for a browser that has
- * the flag: on shows the Geni name and its shorter navigation, off shows
- * everything as in Opengeni. A browser that never arrived with the flag has
- * nothing to switch and sees no row.
+ * The account menu's "Simplified interface" switch, shown to everyone: on
+ * shows the Geni name and its shorter navigation, off (the default) shows
+ * everything as in Opengeni.
  */
 export function SimplifiedInterfaceMenuItem() {
-  const { simplified, chosen, setSimplified } = useSimplifiedInterface();
-  if (!chosen) return null;
+  const { simplified, setSimplified } = useSimplifiedInterface();
 
   return (
     <DropdownMenuItem

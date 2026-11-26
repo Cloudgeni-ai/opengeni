@@ -1,7 +1,7 @@
-import { deprecatePatch, workflowInfo } from "@temporalio/workflow";
+import { ActivityFailure, deprecatePatch, patched, workflowInfo } from "@temporalio/workflow";
 import type { TurnInitiator } from "@opengeni/contracts";
 import type { DispatchScheduledTaskRunInput } from "../activities/types";
-import { scheduledTaskActivity } from "./activities";
+import { scheduledTaskActivity, scheduledTaskFailureActivity } from "./activities";
 
 type ScheduledTaskFireWorkflowBase = {
   accountId: string;
@@ -65,8 +65,18 @@ export async function scheduledTaskFireWorkflow(
   // manual histories is retired. Remove this call once no open run carries
   // the non-deprecated marker.
   deprecatePatch("scheduled-task-manual-initiator-v1");
-  // Dispatch settles every outcome itself.
-  await scheduledTaskActivity.dispatchScheduledTaskRun(
-    scheduledTaskDispatchInput(input, workflowInfo().workflowId),
-  );
+  const dispatch = scheduledTaskDispatchInput(input, workflowInfo().workflowId);
+  try {
+    await scheduledTaskActivity.dispatchScheduledTaskRun(dispatch);
+  } catch (error) {
+    if (
+      (dispatch.triggerType === "scheduled" || dispatch.triggerType === "event") &&
+      error instanceof ActivityFailure &&
+      error.retryState === "MAXIMUM_ATTEMPTS_REACHED" &&
+      patched("scheduled-task-dispatch-exhaustion-receipt-v1")
+    ) {
+      await scheduledTaskFailureActivity.recordScheduledTaskDispatchFailure(dispatch);
+    }
+    throw error;
+  }
 }

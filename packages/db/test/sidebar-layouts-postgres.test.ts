@@ -188,6 +188,39 @@ test("recent apps are the ones this person opened or edited last, under their ow
   expect(await recent("user:nobody")).toEqual([]);
 });
 
+test("an app a person archived from their own sidebar drops out for them only", async () => {
+  if (!shared || !client) return;
+  const scope = await workspace("Sidebar archived apps");
+  const kept = await app(scope, "Kept", null);
+  const board = await app(scope, "Feedback board", null);
+  await recordSiteOpened(client.db, {
+    workspaceId: scope.workspaceId,
+    subjectId: "user:ada",
+    viewer: { subjectId: "user:ada" },
+    siteId: board,
+  });
+  await shared.admin`
+    insert into site_sidebar_states (account_id, workspace_id, subject_id, site_id, archived_at)
+    values (${scope.accountId}::uuid, ${scope.workspaceId}::uuid, 'user:ada', ${board}::uuid, now())`;
+  const read = (subjectId: string) =>
+    readSidebarApps(client!.db, scope, {
+      viewer: { subjectId },
+      appIds: [kept, board],
+      pinnedLimit: 0,
+      recentLimit: 5,
+    });
+  const ada = await read("user:ada");
+  expect([...ada.apps.keys()]).toEqual([kept.toLowerCase()]);
+  expect(ada.recent.map((entry) => entry.title)).not.toContain("Feedback board");
+  const bob = await read("user:bob");
+  expect([...bob.apps.keys()].sort()).toEqual([kept, board].map((id) => id.toLowerCase()).sort());
+  // Restored: back in place.
+  await shared.admin`
+    update site_sidebar_states set archived_at = null
+    where subject_id = 'user:ada' and site_id = ${board}::uuid`;
+  expect((await read("user:ada")).apps.has(board.toLowerCase())).toBe(true);
+});
+
 test("a sidebar keeps links to archived apps; a person's own drop other people's private apps", async () => {
   if (!shared || !client) return;
   const scope = await workspace("Sidebar kept apps");

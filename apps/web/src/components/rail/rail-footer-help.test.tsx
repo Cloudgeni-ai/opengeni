@@ -14,7 +14,7 @@ beforeEach(() => {
 const docs = "https://docs.example.test/";
 
 describe("rail footer account menu", () => {
-  test("is identity, Appearance, Customize sidebar, Help & feedback, Desktop app, Excel add-in, then the account action", async () => {
+  test("is identity, Appearance, Simplified interface, Customize sidebar, Help & feedback, Desktop app, Excel add-in, then the account action", async () => {
     const unmount = await renderOpenAccountMenu({
       managed: false,
       analytics: true,
@@ -23,15 +23,16 @@ describe("rail footer account menu", () => {
     try {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
-      expect(sequence).toHaveLength(9);
+      expect(sequence).toHaveLength(10);
       expect(sequence[1]).toBe("|");
       expect(sequence[2]).toContain("Appearance");
-      expect(sequence[3]).toContain("Customize sidebar");
-      expect(sequence[4]).toContain("Help & feedback");
-      expect(sequence[5]).toContain("Desktop app");
-      expect(sequence[6]).toContain("Excel add-in");
-      expect(sequence[7]).toBe("|");
-      expect(sequence[8]).toContain("access");
+      expect(sequence[3]).toContain("Simplified interface");
+      expect(sequence[4]).toContain("Customize sidebar");
+      expect(sequence[5]).toContain("Help & feedback");
+      expect(sequence[6]).toContain("Desktop app");
+      expect(sequence[7]).toContain("Excel add-in");
+      expect(sequence[8]).toBe("|");
+      expect(sequence[9]).toContain("access");
     } finally {
       await unmount();
     }

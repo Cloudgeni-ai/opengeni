@@ -14,6 +14,8 @@ const CODES = [
   "retained_process_fenced",
   "retained_process_proof_failed",
   "retained_process_observation_failed",
+  "retained_process_settlement_failed",
+  "sandbox_drain_failed",
   "mcp_orchestration_failed",
 ] as const;
 const STAGES = [
@@ -28,6 +30,8 @@ const STAGES = [
   "failure_settlement",
   "sandbox_retained_processes.proof",
   "sandbox_retained_processes.observation",
+  "sandbox_retained_processes.settlement",
+  "sandbox_leases.drain",
   "mcp.session_create",
   "mcp.session_queue_message",
   "mcp.session_steer",
@@ -64,6 +68,7 @@ const ERROR_NAMES = new Set([
   "DrizzleQueryError",
   "SessionEventPersistenceError",
   "SandboxWorkspaceMutationFencedError",
+  "SandboxRetainedProcessTerminalError",
   "ProviderCommandObservationUnavailableError",
   "ClientError",
 ]);

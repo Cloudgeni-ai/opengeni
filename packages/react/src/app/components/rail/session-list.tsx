@@ -218,6 +218,7 @@ import {
   compareSessionBrowse,
   projectRailSessions,
   railSectionsFor,
+  withoutSidebarApps,
   groupSessionsForRail,
   mergeSessionForRail,
   parseSiteRowKey,
@@ -1797,23 +1798,27 @@ export function SessionList() {
   const appNodes = useMemo(() => {
     if (!appsSection || browseStatus === "archived") return null;
     const apps = railSectionsFor(railSections, "apps", needsYouOnly ? appNeedsYou : null);
+    const inSidebar = sidebarApps?.has;
     return {
-      pinned: apps.pinned.map((node) => ({
+      pinned: withoutSidebarApps(apps.pinned, inSidebar).map((node) => ({
         ...node,
         children: sortSessionForest({ running: node.children, grouped: [] }, browseSortBy).running,
       })),
       rest: sortSessionForest(
         {
-          running: [
-            ...apps.ordinary.running,
-            ...apps.ordinary.grouped.flatMap((bucket) => bucket.sessions),
-          ],
+          running: withoutSidebarApps(
+            [
+              ...apps.ordinary.running,
+              ...apps.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+            ],
+            inSidebar,
+          ),
           grouped: [],
         },
         browseSortBy,
       ).running,
     };
-  }, [appsSection, browseStatus, browseSortBy, needsYouOnly, railSections]);
+  }, [appsSection, browseStatus, browseSortBy, needsYouOnly, railSections, sidebarApps]);
   // The Apps section shows its first rows and a Show more for the rest; an
   // open app or app chat beyond them shows too.
   // The open app: its own page, or the app one of its chats belongs to.
@@ -2403,7 +2408,17 @@ export function SessionList() {
       // An embed's older client may predate Site sidebar state.
       typeof context.client.updateSiteSidebarState === "function"
         ? {
-            pin: (origin, nextPinned) => void onPinSite(origin, nextPinned),
+            // With apps in a section of their own, pinning puts the app in the
+            // person's sidebar above (Customize does the same), and unpinning
+            // it there brings it back here.
+            pin: (origin, nextPinned) => {
+              if (nextPinned && appsSection && sidebarApps) {
+                sidebarApps.add(origin.siteId);
+                announcePinResult(`Pinned ${origin.title} to the sidebar.`);
+                return;
+              }
+              void onPinSite(origin, nextPinned);
+            },
             archive: (origin) => void onArchiveSite(origin, true),
             ...(typeof context.client.updateSiteProject === "function"
               ? {
@@ -2411,10 +2426,19 @@ export function SessionList() {
                     void onMoveSite(origin, from, to),
                 }
               : {}),
-            ...(sidebarApps ? { sidebar: sidebarApps } : {}),
+            // Pin already does "Add to sidebar" there.
+            ...(sidebarApps && !appsSection ? { sidebar: sidebarApps } : {}),
           }
         : null,
-    [context.client, onArchiveSite, onMoveSite, onPinSite, sidebarApps],
+    [
+      announcePinResult,
+      appsSection,
+      context.client,
+      onArchiveSite,
+      onMoveSite,
+      onPinSite,
+      sidebarApps,
+    ],
   );
   // The open Site's page offers the same Pin and Archive as its row.
   const pinnedSiteIds = useMemo(
