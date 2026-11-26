@@ -62,11 +62,23 @@ export function skillReadLabels(markdown: string): { title: string | null; name:
 }
 
 function firstSkillHeading(body: string): string | null {
-  if (!body) return null;
-  const heading = fromMarkdown(body).children.find(
-    (node) => node.type === "heading" && node.depth === 1,
-  );
-  return heading ? toString(heading, { includeHtml: false }).trim() || null : null;
+  const candidate = /^ {0,3}(?:#[ \t]+.*|=+[ \t]*)$/gm;
+  if (!candidate.test(body)) return null;
+  const firstEnd = candidate.lastIndex;
+  const heading = (end: number) => {
+    const node = fromMarkdown(body.slice(0, end)).children.find(
+      (entry) => entry.type === "heading" && entry.depth === 1,
+    );
+    return node ? toString(node, { includeHtml: false }).trim() || null : null;
+  };
+  // Most Skills open with their title. Parse only that prefix, not the rest
+  // of a potentially long guide. If the candidate was inside code or a
+  // comment, search through the last candidate with the full block context.
+  const first = heading(firstEnd);
+  if (first !== null) return first;
+  let lastEnd = firstEnd;
+  while (candidate.test(body)) lastEnd = candidate.lastIndex;
+  return lastEnd === firstEnd ? null : heading(lastEnd);
 }
 
 /** The first sentence of a Skill's description, for one line in a list. */

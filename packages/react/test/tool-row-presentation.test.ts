@@ -117,9 +117,17 @@ describe("shared tool row presentation", () => {
         `${header}description: ${"x".repeat(1000)}\n---\n# Not in the preview\n\n${body}`,
         "Document review",
       ],
+      [
+        `${header}description: ${"x".repeat(930)}\n---\n# ${"Partial heading ".repeat(12)}\n\n${body}`,
+        "Document review",
+      ],
     ]) {
       const text = withOmission(JSON.stringify({ files: [{ path: "SKILL.md", content }] }));
-      for (const output of [text, { content: [{ type: "text", text }] }]) {
+      for (const output of [
+        text,
+        { content: [{ type: "text", text }] },
+        { files: [{ path: "SKILL.md", content: withOmission(content) }] },
+      ]) {
         const row = toolRowPresentation(
           englishText,
           call({

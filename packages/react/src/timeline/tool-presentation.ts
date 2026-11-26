@@ -903,11 +903,19 @@ function skillMarkdownInOutput(output: unknown): string | null {
   const { value, text, isError } = normalizeMcpOutput(output);
   if (isError) return null;
   const markdown = skillMarkdown(value);
-  if (markdown !== null) return markdown.split(SKILL_OUTPUT_CUT, 1)[0] ?? null;
+  if (markdown !== null) {
+    const cut = markdown.search(SKILL_OUTPUT_CUT);
+    return cut < 0 ? markdown : completeLines(markdown.slice(0, cut));
+  }
   // The timeline can receive only the head and tail of the JSON result. Use
   // the head's complete fields, never infer a heading across omitted text.
   const cut = text.search(SKILL_OUTPUT_CUT);
-  return cut < 0 ? null : skillMarkdown(parsePartialJson(text.slice(0, cut)));
+  const head = cut < 0 ? null : skillMarkdown(parsePartialJson(text.slice(0, cut)));
+  return head === null ? null : completeLines(head);
+}
+
+function completeLines(text: string): string {
+  return text.slice(0, text.lastIndexOf("\n") + 1);
 }
 
 /**
