@@ -67,7 +67,7 @@ export function oauthGrantFamilyForTokenEndpoint(
   return families.find((family) => family.tokenEndpointOrigins.includes(origin));
 }
 
-/** Migration 1591's checks; created withheld until a later migration grants them. */
+/** Migration 1611's checks; created withheld until a later migration grants them. */
 export const OAUTH_GRANT_SHARED_ROUTINE =
   "opengeni_private.oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])";
 export const OAUTH_GRANT_REAUTH_SIBLINGS_ROUTINE =
@@ -102,7 +102,7 @@ export type OAuthGrantLookup = {
  * may hold the same provider grant: same family, the same or an unknown
  * client, and not provably another account. Only a yes/no leaves the
  * database. Null while the check is not granted (a database before the
- * follow-up grant of migration 1591): the caller must then assume yes.
+ * follow-up grant of migration 1611): the caller must then assume yes.
  */
 export async function oauthGrantSharedWithLiveConnection(
   db: Database,

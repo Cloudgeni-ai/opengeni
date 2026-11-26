@@ -21,7 +21,7 @@ import {
   type OAuthGrantFamily,
 } from "../src/index";
 
-/* Migration 1591: deployment-wide checks for connections that share one
+/* Migration 1611: deployment-wide checks for connections that share one
    provider OAuth grant (one account, one client), used before a disconnect
    revokes at the provider and when a refresh is refused with invalid_grant.
    Through the restricted runtime role, so FORCE RLS applies. */
@@ -145,7 +145,7 @@ async function revoke(connectionId: string): Promise<void> {
 
 const ada = { googleSubject: "google-sub-ada", gmailEmail: "ada@example.test" };
 
-describe("migration 1591 shared OAuth grant checks", () => {
+describe("migration 1611 shared OAuth grant checks", () => {
   test("are created withheld: the runtime gets no answer until a later grant", async () => {
     const [posture] = await admin<
       { execute: boolean; definer: boolean; public_execute: boolean; config: string[] }[]

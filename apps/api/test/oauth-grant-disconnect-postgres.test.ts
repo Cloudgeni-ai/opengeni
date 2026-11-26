@@ -22,7 +22,7 @@ import { GOOGLE_SUBJECT_KEY } from "../src/integrations/oauth-profiles";
    no Google tokens in the revoked row, even when Google is unreachable. The
    grant stays at Google while another live connection anywhere in the
    deployment (any workspace, any organization) may share it, and while that
-   deployment-wide check (migration 1591) is not granted. Other providers keep
+   deployment-wide check (migration 1611) is not granted. Other providers keep
    status-only revocation. Through the real app and PostgreSQL. */
 
 const origin = "http://opengeni.test";
@@ -77,7 +77,7 @@ async function grantDeploymentWideCheck(granted: boolean): Promise<void> {
 beforeEach(async () => {
   revokeRequests = [];
   revokeReply = async () => new Response("{}", { status: 200 });
-  // As the follow-up grant of migration 1591 will. The check reads the whole
+  // As the follow-up grant of migration 1611 will. The check reads the whole
   // deployment, so each test starts from no live connections.
   await grantDeploymentWideCheck(true);
   await shared.admin`update connections set status = 'revoked' where status <> 'revoked'`;

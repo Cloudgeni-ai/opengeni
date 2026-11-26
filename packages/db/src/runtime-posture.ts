@@ -77,7 +77,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * lookup of the Slack event sources a shared Slack bot reaches (1552), and
  * the inbox notice sync for a blocked automation with no chat (1562), and
  * the deployment-wide checks for connections sharing one provider OAuth
- * grant (1591).
+ * grant (1611).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -178,7 +178,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * or resolves a notice, and the person dismisses one left after a reconnect.
  * 1552 withholds the shared Slack bot's one-statement source lookup; until it
  * is granted, a Slack callback keeps 1538's per-workspace probe.
- * 1591 withholds the shared OAuth grant checks; until they are granted, a
+ * 1611 withholds the shared OAuth grant checks; until they are granted, a
  * disconnect never revokes at the provider and a refused refresh marks only
  * its own connection.
  */

@@ -342,7 +342,7 @@ account, never by provider domain or `account_identity_key` (which is per
 integration).
 
 - **Disconnect** destroys the stored tokens in the revoke write. Only after it
-  commits, and only when migration 1591's deployment-wide check answers that no
+  commits, and only when migration 1611's deployment-wide check answers that no
   other live (not revoked) connection anywhere may hold the grant (the same
   family, the same or an unknown client, and not provably another account;
   unknown identity counts as the same account), does

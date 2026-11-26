@@ -527,7 +527,7 @@ export type ConnectionBrokerDeps = {
   withRefreshLock?: typeof withConnectionRefreshLock;
   /**
    * Deployment-wide lookup of the other active connections that may share a
-   * grant the provider just refused (migration 1591), each then confirmed with
+   * grant the provider just refused (migration 1611), each then confirmed with
    * its own refresh. Null while it is not granted; absent means siblings are
    * never checked.
    */

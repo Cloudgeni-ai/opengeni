@@ -74,7 +74,7 @@ type RevokeDecision = "revoked" | "kept_shared" | "kept_check_unavailable" | "ke
 
 /**
  * Whether the grant may be ended at the provider: only when the
- * deployment-wide check (every workspace and organization, migration 1591)
+ * deployment-wide check (every workspace and organization, migration 1611)
  * answers that no other live connection may hold it. A check that is not yet
  * granted or fails keeps the grant: ending it could cut off a connection
  * elsewhere, while keeping it only leaves an unused grant at the provider.
