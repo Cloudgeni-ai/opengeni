@@ -824,12 +824,15 @@ a template requires another agent or setup.
 ### First run
 
 Onboarding's answer fills the person's **own** sidebar once with one group
-of suggestions (never the workspace default): **Software engineer** gets
-Engineering (Set up PR reviews, Issue tracker, Incident log), **Not an
-engineer** gets Your work (Weekly product report, Decision log, Feedback
-board). The links open Get started or Enable, so nothing is added until the
-person turns it on. It is written only while their sidebar is unchanged, at
-the revision just read; they edit or reset it as usual
+of suggestions (never the workspace default), from one preset file per
+answer (`apps/web/src/components/onboarding/presets/`): **Software
+engineer** gets Engineering (PR reviewer, Bug fixer, Dependency updater,
+Connect GitHub, Slack and Linear), **Not an engineer** gets Your work
+(Feedback board, Connect Slack, Google Drive, Gmail and Google Calendar).
+Presets list only ready-mades that exist. The links open Get started,
+Enable or Connections, so nothing is added until the person turns it on. It
+is written only while their sidebar is unchanged, at the revision just read;
+they edit or reset it as usual
 (`apps/web/src/components/onboarding/persona-sidebar.ts`).
 
 ### Delegation by name

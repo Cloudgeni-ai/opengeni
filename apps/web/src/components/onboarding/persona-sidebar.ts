@@ -1,18 +1,25 @@
 /**
  * First run: the answer to "What do you do?" fills the person's OWN sidebar
- * once (docs/sidebar-layout.md, personal changes), with suggested apps and
- * one suggested setup. Never the workspace default: everyone else's sidebar
- * is unchanged, and the person can edit or reset theirs as usual.
+ * once (docs/sidebar-layout.md, personal changes) with its preset's
+ * suggestions (./presets, one file per answer). Never the workspace default:
+ * everyone else's sidebar is unchanged, and the person can edit or reset
+ * theirs as usual.
  *
- * The links open Enable (components/enable) for a ready-made app or Get
- * started for a setup, so nothing is added until the person turns it on.
+ * The links open Enable (components/enable) for a ready-made agent or app,
+ * Get started for a setup, or Connections, so nothing is added until the
+ * person turns it on.
  */
 import type {
   NewSidebarItem,
   SidebarLayoutResponse,
+  SidebarItemIcon,
   UpdateSidebarLayoutRequest,
 } from "@opengeni/sdk";
 import type { OnboardingUseCase } from "@opengeni/react/app/lib/onboarding-use-case";
+
+import { NOT_AN_ENGINEER_PRESET } from "./presets/not-an-engineer";
+import { SOFTWARE_ENGINEER_PRESET } from "./presets/software-engineer";
+import type { PersonaPreset } from "./presets/types";
 
 type SidebarClient = {
   getSidebarLayout(workspaceId: string): Promise<SidebarLayoutResponse>;
@@ -22,40 +29,53 @@ type SidebarClient = {
   ): Promise<SidebarLayoutResponse>;
 };
 
-type Suggestion = { label: string; path: string; icon: string };
-
-/** What each answer suggests: two ready-made apps and one setup. */
-export const PERSONA_SUGGESTIONS: Record<
-  "cloud" | "everyday",
-  { group: string; icon: string; items: readonly Suggestion[] }
-> = {
-  cloud: {
-    group: "Engineering",
-    icon: "code",
-    items: [
-      {
-        label: "Set up PR reviews",
-        path: "get-started?setup=pr-reviews",
-        icon: "git-pull-request",
-      },
-      { label: "Issue tracker", path: "enable?app=issue-tracker", icon: "list-checks" },
-      { label: "Incident log", path: "enable?app=incident-log", icon: "shield-check" },
-    ],
-  },
-  everyday: {
-    group: "Your work",
-    icon: "briefcase",
-    items: [
-      {
-        label: "Weekly product report",
-        path: "get-started?setup=product-analytics",
-        icon: "chart-line",
-      },
-      { label: "Decision log", path: "enable?app=decision-log", icon: "notebook-pen" },
-      { label: "Feedback board", path: "enable?app=feedback-board", icon: "megaphone" },
-    ],
-  },
+/** The preset for each answer: "cloud" is Software engineer, "everyday" Not an engineer. */
+export const PERSONA_PRESETS: Record<"cloud" | "everyday", PersonaPreset> = {
+  cloud: SOFTWARE_ENGINEER_PRESET,
+  everyday: NOT_AN_ENGINEER_PRESET,
 };
+
+type Suggestion = { label: string; path: string; icon: SidebarItemIcon };
+
+/** "GitHub, Slack and Linear". */
+function listInWords(names: readonly string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** A preset's links in sidebar order: setup, agents, apps, then one Connect link. */
+export function presetSuggestions(preset: PersonaPreset): Suggestion[] {
+  return [
+    ...(preset.setup
+      ? [
+          {
+            label: preset.setup.label,
+            path: `get-started?setup=${encodeURIComponent(preset.setup.key)}`,
+            icon: "git-pull-request",
+          },
+        ]
+      : []),
+    ...preset.agents.map((agent) => ({
+      label: agent.label,
+      path: `enable?agent=${encodeURIComponent(agent.key)}`,
+      icon: agent.icon,
+    })),
+    ...preset.apps.map((app) => ({
+      label: app.label,
+      path: `enable?app=${encodeURIComponent(app.key)}`,
+      icon: app.icon,
+    })),
+    ...(preset.connections.length > 0
+      ? [
+          {
+            label: `Connect ${listInWords(preset.connections)}`,
+            path: "plugins",
+            icon: "link",
+          },
+        ]
+      : []),
+  ];
+}
 
 /**
  * The one group a first answer adds to the person's own sidebar; null for an
@@ -67,13 +87,13 @@ export function personaSidebarGroup(
 ): NewSidebarItem | null {
   if (useCase !== "cloud" && useCase !== "everyday") return null;
   if (!origin.startsWith("https://")) return null;
-  const preset = PERSONA_SUGGESTIONS[useCase];
+  const preset = PERSONA_PRESETS[useCase];
   const base = `${origin}/workspaces/${encodeURIComponent(workspaceId)}/`;
   return {
     type: "group",
     label: preset.group,
     icon: preset.icon,
-    items: preset.items.map((item) => ({
+    items: presetSuggestions(preset).map((item) => ({
       type: "link" as const,
       label: item.label,
       url: `${base}${item.path}`,

@@ -1,7 +1,16 @@
 import { describe, expect, mock, test } from "bun:test";
+import { readdirSync } from "node:fs";
 import type { SidebarLayoutResponse, UpdateSidebarLayoutRequest } from "@opengeni/sdk";
 
-import { applyPersonaSidebar, personaSidebarGroup } from "./persona-sidebar";
+import { applyPersonaSidebar, PERSONA_PRESETS, personaSidebarGroup } from "./persona-sidebar";
+import { guidedSetupByKey } from "../get-started/guided-setups";
+
+function templateKeys(folder: string, suffix: string): string[] {
+  const dir = new URL(`../../../../../packages/core/src/${folder}/`, import.meta.url);
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(suffix))
+    .map((name) => name.slice(0, -suffix.length));
+}
 
 function layout(personal: Partial<SidebarLayoutResponse["personal"]>): SidebarLayoutResponse {
   return {
@@ -27,15 +36,17 @@ function fakeClient(initial: SidebarLayoutResponse) {
 }
 
 describe("persona first run", () => {
-  test("an engineer gets an Engineering group: one setup and two ready-made apps", () => {
+  test("an engineer gets an Engineering group: PR reviews, two agents and Connect", () => {
     const group = personaSidebarGroup("cloud", { origin: "https://app.example", workspaceId: "w" });
     expect(group).toMatchObject({ type: "group", label: "Engineering" });
     const items = group && group.type === "group" ? (group.items ?? []) : [];
     expect(items.map((item) => (item.type === "link" ? item.url : null))).toEqual([
       "https://app.example/workspaces/w/get-started?setup=pr-reviews",
-      "https://app.example/workspaces/w/enable?app=issue-tracker",
-      "https://app.example/workspaces/w/enable?app=incident-log",
+      "https://app.example/workspaces/w/enable?agent=bug-fixer",
+      "https://app.example/workspaces/w/enable?agent=dependency-updater",
+      "https://app.example/workspaces/w/plugins",
     ]);
+    expect(items.at(-1)).toMatchObject({ label: "Connect GitHub, Slack and Linear" });
     expect(
       personaSidebarGroup("everyday", { origin: "https://a", workspaceId: "w" }),
     ).toMatchObject({ label: "Your work" });
@@ -43,6 +54,16 @@ describe("persona first run", () => {
     expect(
       personaSidebarGroup("cloud", { origin: "http://localhost", workspaceId: "w" }),
     ).toBeNull();
+  });
+
+  test("every suggested ready-made and setup exists", () => {
+    const agents = templateKeys("agent-templates", ".agent.json");
+    const apps = templateKeys("app-templates", ".app.json");
+    for (const preset of Object.values(PERSONA_PRESETS)) {
+      for (const agent of preset.agents) expect(agents).toContain(agent.key);
+      for (const app of preset.apps) expect(apps).toContain(app.key);
+      if (preset.setup) expect(guidedSetupByKey(preset.setup.key)).not.toBeNull();
+    }
   });
 
   test("writes the person's own sidebar once, never the workspace default", async () => {
