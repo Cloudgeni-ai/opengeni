@@ -738,6 +738,46 @@ describe("observability", () => {
       expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
   });
 
+  test("snapshot logs keep a refused archive's closed class and drop anything else", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const sentinel = "private-member-path";
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "worker" },
+      );
+      obs.warn("snapshot failed", {
+        errorClass: "SnapshotOperationError",
+        errorCode: "snapshot_operation_failed",
+        origin: "worker-lifecycle",
+        causeName: "SandboxArchiveError",
+        integrityCode: "archive_error",
+        archiveReason: "hardlink_member",
+        archiveExitCode: 2,
+      });
+      obs.warn("snapshot failed", {
+        errorClass: "SnapshotOperationError",
+        causeName: "PrivateCustomError",
+        integrityCode: sentinel,
+        archiveReason: sentinel,
+        archiveExitCode: 999,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      causeName: "SandboxArchiveError",
+      integrityCode: "archive_error",
+      archiveReason: "hardlink_member",
+      archiveExitCode: 2,
+    });
+    for (const key of ["causeName", "integrityCode", "archiveReason", "archiveExitCode"])
+      expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
+    expect(observed.join(" ")).not.toContain(sentinel);
+  });
+
   test("sandbox reaper failure logs keep lease key, fence code, SQLSTATE and fingerprint only", () => {
     const observed: string[] = [];
     const originalWarn = console.warn;
