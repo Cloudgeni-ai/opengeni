@@ -7,6 +7,7 @@ import {
   RadioButton,
   Switch,
   Text,
+  TextField,
 } from "@expo/ui/jetpack-compose";
 import { clickable, padding } from "@expo/ui/jetpack-compose/modifiers";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
@@ -28,19 +29,42 @@ function FoldedText({ text, lines }: { text: string; lines: number }) {
 
 function Row({ row, danger, muted }: { row: SettingsRow; danger: string; muted: string }) {
   if (row.kind === "text") return <FoldedText text={row.text} lines={row.lines ?? 4} />;
+  if (row.kind === "field") {
+    return (
+      <TextField
+        singleLine
+        onValueChange={row.onChange}
+        keyboardOptions={{
+          autoCorrectEnabled: false,
+          ...(row.capitalization ? { capitalization: row.capitalization } : {}),
+        }}
+        modifiers={[padding(16, 4, 16, 4)]}
+      >
+        <TextField.Placeholder>
+          <Text>{row.placeholder}</Text>
+        </TextField.Placeholder>
+      </TextField>
+    );
+  }
+  // An action that can't be taken yet (Delete account before it's confirmed).
+  const off =
+    (row.kind === "action" || row.kind === "external" || row.kind === "destructive") &&
+    row.disabled === true;
   const onPress =
     row.kind === "toggle"
       ? () => {
           if (!row.disabled) row.onChange(!row.value);
         }
-      : row.kind === "info"
+      : row.kind === "info" || off
         ? undefined
         : row.onPress;
   const subtitle = row.kind === "info" ? row.value : row.subtitle;
   return (
     <ListItem {...(onPress ? { modifiers: [clickable(onPress)] } : {})}>
       <ListItem.HeadlineContent>
-        <Text {...(row.kind === "destructive" ? { color: danger } : {})}>{row.title}</Text>
+        <Text {...(off ? { color: muted } : row.kind === "destructive" ? { color: danger } : {})}>
+          {row.title}
+        </Text>
       </ListItem.HeadlineContent>
       {subtitle ? (
         <ListItem.SupportingContent>

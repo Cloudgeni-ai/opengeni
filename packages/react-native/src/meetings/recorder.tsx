@@ -42,6 +42,7 @@ import {
 } from "react";
 import { AppState } from "react-native";
 import { useNativeRecorderPlatform, type NativeRecorderPlatformOptions } from "../recordings";
+import { AudioImportError } from "./audio-files";
 
 export type MeetingRecorder = UseRecorderResult & {
   /** Recordings whose upload finished while the app was open, newest last. */
@@ -125,6 +126,12 @@ export type MeetingRecorderProviderProps = NativeRecorderPlatformOptions & {
    * omitted; null while the host is still finding it (no recorder until then).
    */
   workspaceId?: string | null;
+  /**
+   * Asked before a recording starts or an audio file is imported (both are
+   * transcribed): false leaves nothing started, and the import fails with an
+   * `AudioImportError` whose reason is `declined`. A rejection counts as false.
+   */
+  beforeCapture?: () => Promise<boolean>;
   children: ReactNode;
 };
 
@@ -136,6 +143,7 @@ export type MeetingRecorderProviderProps = NativeRecorderPlatformOptions & {
 export function MeetingRecorderProvider({
   client,
   workspaceId,
+  beforeCapture,
   children,
   ...platformOptions
 }: MeetingRecorderProviderProps) {
@@ -169,6 +177,7 @@ export function MeetingRecorderProvider({
           store={store}
           {...(client ? { client } : {})}
           {...(hostWorkspaceId ? { workspaceId: hostWorkspaceId } : {})}
+          {...(beforeCapture ? { beforeCapture } : {})}
           {...platformOptions}
         />
       )}
@@ -181,21 +190,46 @@ function RecorderHost({
   store,
   client,
   workspaceId,
+  beforeCapture,
   ...platformOptions
 }: NativeRecorderPlatformOptions & {
   store: RecorderStore;
   client?: object;
   workspaceId?: string;
+  beforeCapture?: () => Promise<boolean>;
 }) {
   const platform = useNativeRecorderPlatform(platformOptions);
   const ownerId = platformOptions.storeScope;
-  const recorder = useRecorder({
+  const ungated = useRecorder({
     ...(client ? { client } : {}),
     ...(workspaceId ? { workspaceId } : {}),
     ...(ownerId ? { ownerId } : {}),
     platform,
     onFinished: (recordingId) => store.markFinished(recordingId),
   });
+  const ask = useRef(beforeCapture);
+  ask.current = beforeCapture;
+  const gated = Boolean(beforeCapture);
+  const recorder = useMemo<UseRecorderResult>(() => {
+    if (!gated) return ungated;
+    const allowed = async () => {
+      try {
+        return (await ask.current?.()) ?? true;
+      } catch {
+        return false;
+      }
+    };
+    return {
+      ...ungated,
+      start: async (...args) => {
+        if (await allowed()) await ungated.start(...args);
+      },
+      importAudio: async (input) => {
+        if (await allowed()) return ungated.importAudio(input);
+        throw new AudioImportError("declined", "The audio wasn't imported.");
+      },
+    };
+  }, [gated, ungated]);
   // Signing this account out while it records discards the capture when the
   // person chooses to, so no audio is written after its files are gone.
   const capturing = recorder.state === "recording" || recorder.state === "paused";

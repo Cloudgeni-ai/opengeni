@@ -6,7 +6,10 @@ mock.module("expo-secure-store", () => ({
   setItemAsync: async () => undefined,
   deleteItemAsync: async () => undefined,
 }));
-mock.module("react-native", () => ({ Linking: { openURL: async () => true } }));
+mock.module("react-native", () => ({
+  Linking: { openURL: async () => true },
+  Platform: { OS: "ios" },
+}));
 
 const { signInWebViews } = await import("./artifact-web-session");
 
