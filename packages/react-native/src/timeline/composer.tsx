@@ -21,8 +21,10 @@ import {
   Keyboard,
   Platform,
   Pressable,
+  StatusBar,
   Text,
   TextInput,
+  TurboModuleRegistry,
   useWindowDimensions,
   View,
   type ViewProps,
@@ -454,7 +456,7 @@ function AndroidComposerDock({
   // is no overlap to pad. A host can also reserve space below the composer.
   const expectedBottom = windowHeight - keyboardBottomOffset;
   const bottom = Math.min(expectedBottom, measuredBottom ?? expectedBottom);
-  const overlap = visible ? bottom - keyboardTop : 0;
+  const overlap = visible ? bottom - (keyboardTop - androidKeyboardCoordinateOffset()) : 0;
   return (
     <View
       {...viewProps}
@@ -467,6 +469,22 @@ function AndroidComposerDock({
     />
   );
 }
+
+function androidKeyboardCoordinateOffset(): number {
+  // Keyboard.screenY is screen-relative. On RN 0.86+ measureInWindow uses
+  // the same origin in edge-to-edge activities; earlier RN versions and
+  // non-edge-to-edge activities subtract the top system inset.
+  const version = Platform.constants.reactNativeVersion;
+  const deviceInfo = TurboModuleRegistry.get<AndroidDeviceInfo>("DeviceInfo");
+  if ((version.major > 0 || version.minor >= 86) && deviceInfo?.getConstants().isEdgeToEdge) {
+    return 0;
+  }
+  return StatusBar.currentHeight ?? 0;
+}
+
+type AndroidDeviceInfo = import("react-native").TurboModule & {
+  getConstants(): { readonly isEdgeToEdge?: boolean };
+};
 
 /** How far the scroll-edge fade reaches above the floating composer. */
 const SCROLL_EDGE_PX = 24;

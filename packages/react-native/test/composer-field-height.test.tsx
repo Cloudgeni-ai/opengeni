@@ -17,6 +17,9 @@ let platform: "ios" | "android" = "ios";
 let keyboardMetrics: { height: number; screenY: number } | undefined;
 let animatedHeight = 0;
 let dockBottom = 844;
+let edgeToEdge = true;
+let reactNativeMinor = 86;
+let windowHeight = 844;
 type KeyboardEventName = "keyboardDidShow" | "keyboardDidHide";
 const keyboardListeners = {
   keyboardDidShow: new Set<() => void>(),
@@ -90,10 +93,15 @@ mock.module("react-native", () => ({
     },
   },
   NativeModules: {},
-  useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
+  StatusBar: { currentHeight: 24 },
+  TurboModuleRegistry: { get: () => ({ getConstants: () => ({ isEdgeToEdge: edgeToEdge }) }) },
+  useWindowDimensions: () => ({ width: 390, height: windowHeight, fontScale: 1 }),
   Platform: {
     get OS() {
       return platform;
+    },
+    get constants() {
+      return { reactNativeVersion: { major: 0, minor: reactNativeMinor } };
     },
     select: (options: Record<string, unknown>) => options[platform] ?? options.default,
   },
@@ -240,6 +248,34 @@ test("Android respects the bottom offset and does not lift above an already resi
   } finally {
     await resized.unmount();
     dockBottom = 844;
+    keyboardMetrics = undefined;
+  }
+});
+
+test("Android compares the keyboard and dock in content coordinates when measurement excludes the status bar", async () => {
+  platform = "android";
+  windowHeight = 820;
+  dockBottom = 820;
+  keyboardMetrics = { height: 310, screenY: 534 };
+  try {
+    for (const [minor, edge] of [
+      [86, false],
+      [85, true],
+    ] as const) {
+      reactNativeMinor = minor;
+      edgeToEdge = edge;
+      const rendered = await renderComponent(dock());
+      try {
+        expect(padding(rendered)).toBe(318);
+      } finally {
+        await rendered.unmount();
+      }
+    }
+  } finally {
+    windowHeight = 844;
+    dockBottom = 844;
+    reactNativeMinor = 86;
+    edgeToEdge = true;
     keyboardMetrics = undefined;
   }
 });
