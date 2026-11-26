@@ -89,6 +89,7 @@ import type {
 import { requireUsableSessionAvatar } from "./session-avatar";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
+import { isNativeIosRequest, purchaseRefusalMessage } from "../http/native-purchase-presentation";
 import {
   resolveSiteSessionOrigin,
   siteViewConversationContext,
@@ -582,9 +583,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });
   /** Credit refusal / unavailable deployment voice as an HTTP response, else null. */
-  const realtimeVoiceRefusalResponse = (c: Context, error: unknown): Response | null => {
+  const realtimeVoiceRefusalResponse = async (
+    c: Context,
+    error: unknown,
+  ): Promise<Response | null> => {
     if (error instanceof TranscriptionBillingRefusedError) {
-      return transcriptionBillingRefusal(c, error);
+      return transcriptionBillingRefusal(c, error, "live voice", await isNativeIosRequest(c, deps));
     }
     if (error instanceof InferenceRegionRestrictedError) {
       return c.json(
@@ -1949,7 +1953,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         attribution: creditDebitAttributionForGrant(grant),
       });
     } catch (error) {
-      const refused = realtimeVoiceRefusalResponse(c, error);
+      const refused = await realtimeVoiceRefusalResponse(c, error);
       if (refused) return refused;
       throw error;
     }
@@ -2026,7 +2030,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           mode: result.mode,
           replay: result.replay,
           ...(stop && result.mode.state === "active"
-            ? { stop: { code: stop.code, message: stop.message } }
+            ? {
+                stop: {
+                  code: stop.code,
+                  message: purchaseRefusalMessage(
+                    stop.code,
+                    stop.message,
+                    "live voice",
+                    await isNativeIosRequest(c, deps),
+                  ),
+                },
+              }
             : {}),
         });
       } catch (error) {
@@ -2185,7 +2199,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           attribution: creditDebitAttributionForGrant(grant),
         });
       } catch (error) {
-        const refused = realtimeVoiceRefusalResponse(c, error);
+        const refused = await realtimeVoiceRefusalResponse(c, error);
         await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
             failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
@@ -2472,7 +2486,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ),
         ).catch(() => undefined);
       }
-      const refused = realtimeVoiceRefusalResponse(c, error);
+      const refused = await realtimeVoiceRefusalResponse(c, error);
       if (refused) return refused;
       if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
       if (!(error instanceof RealtimeWebsocketBrokerError)) throw error;
