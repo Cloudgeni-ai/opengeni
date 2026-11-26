@@ -1006,6 +1006,12 @@ describe("deployment contract", () => {
         OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET: "google-login-secret",
         OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID: "github-login-staging",
         OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET: "github-login-secret",
+        OPENGENI_MANAGED_AUTH_APPLE_CLIENT_ID: "ai.example.signin",
+        OPENGENI_MANAGED_AUTH_APPLE_TEAM_ID: "APPLE-TEAM",
+        OPENGENI_MANAGED_AUTH_APPLE_KEY_ID: "APPLE-KEY",
+        OPENGENI_MANAGED_AUTH_APPLE_PRIVATE_KEY:
+          "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----",
+        OPENGENI_MANAGED_AUTH_APPLE_APP_BUNDLE_IDENTIFIER: "ai.example.app",
         OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
         OPENGENI_INTEGRATIONS_ENABLED: "true",
         OPENGENI_INTEGRATIONS_STATE_SECRET: "integration-state",
@@ -1065,6 +1071,18 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID=github-login-staging",
     );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MANAGED_AUTH_APPLE_CLIENT_ID=ai.example.signin",
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MANAGED_AUTH_APPLE_TEAM_ID=APPLE-TEAM");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MANAGED_AUTH_APPLE_KEY_ID=APPLE-KEY");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MANAGED_AUTH_APPLE_APP_BUNDLE_IDENTIFIER=ai.example.app",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MANAGED_AUTH_APPLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\\nfixture\\n-----END PRIVATE KEY-----",
+    );
+    expect(artifacts.helmValuesYaml).not.toContain("PRIVATE KEY");
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_ACCESS_KEY=");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=managed");
     expect(artifacts.runtimeEnv).toContain(

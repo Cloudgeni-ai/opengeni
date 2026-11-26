@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import postgres from "postgres";
 import { createDb, type DbClient } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -105,7 +106,7 @@ async function session(userId: string, provider = "credential") {
 async function mutate(user: Awaited<ReturnType<typeof fixture>>, request: Record<string, unknown>) {
   return appSql`select mutate_managed_sign_in_method(${user.userId},${user.sessionId},${appSql.json({ operationId: crypto.randomUUID(), requestDigest: managedAuthSha256(JSON.stringify(request)), expectedIdentityId: user.identityId, expectedIdentityRevision: user.revision, usableProviders: ["credential", "google", "github"], ...request } as postgres.JSONValue)}::jsonb) result`;
 }
-function runtime(mode: "legacy" | "dual" | "broker" = "legacy") {
+function runtime(mode: "legacy" | "dual" | "broker" = "legacy", apple = false) {
   const messages: ManagedEmailMessage[] = [];
   const transport: ManagedEmailTransport = {
     sender: "auth@example.test",
@@ -125,6 +126,16 @@ function runtime(mode: "legacy" | "dual" | "broker" = "legacy") {
     managedAuthGoogleClientSecret: "google-secret",
     managedAuthGithubClientId: "github-test",
     managedAuthGithubClientSecret: "github-secret",
+    ...(apple
+      ? {
+          managedAuthAppleClientId: "apple-services-id",
+          managedAuthAppleTeamId: "apple-team-id",
+          managedAuthAppleKeyId: "apple-key-id",
+          managedAuthApplePrivateKey: generateKeyPairSync("ec", { namedCurve: "P-256" })
+            .privateKey.export({ type: "pkcs8", format: "pem" })
+            .toString(),
+        }
+      : {}),
   });
   const auth = createManagedAuth(settings, client.db, transport)!;
   const adapter = createBetterAuthSessionAdapter(auth, client.db);
@@ -196,6 +207,94 @@ async function oauth(
 }
 
 describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => {
+  test("Apple form_post signs up with the first-consent name and returns without replacing it", async () => {
+    const rt = runtime("legacy", true);
+    const accountId = crypto.randomUUID();
+    const email = `${accountId}@privaterelay.appleid.com`;
+    const provider = (await rt.auth.$context).socialProviders.find((p) => p.id === "apple")!;
+    // Stand in only for Apple's successful HTTPS token response; use Better
+    // Auth's real Apple profile mapping and Opengeni's real callback and DB.
+    const jwtPart = (data: object) => Buffer.from(JSON.stringify(data)).toString("base64url");
+    provider.validateAuthorizationCode = async () => ({
+      accessToken: "apple-access-fixture",
+      refreshToken: "apple-refresh-fixture",
+      idToken: `${jwtPart({ alg: "RS256" })}.${jwtPart({ sub: accountId, email, email_verified: "true" })}.fixture`,
+      tokenType: "Bearer",
+    });
+    const signIn = async (firstTime: boolean) => {
+      const start = await rt.app.request("/v1/auth/sign-in/social", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "http://opengeni.test" },
+        body: JSON.stringify({
+          provider: "apple",
+          callbackURL: "http://opengeni.test/native-sign-in",
+          disableRedirect: true,
+        }),
+      });
+      expect(start.status).toBe(200);
+      const apple = new URL((await start.json()).url);
+      expect(apple.origin + apple.pathname).toBe("https://appleid.apple.com/auth/authorize");
+      expect(apple.searchParams.get("response_mode")).toBe("form_post");
+      expect(apple.searchParams.get("scope")).toBe("email name");
+      expect(apple.searchParams.get("redirect_uri")).toBe(
+        "http://opengeni.test/v1/auth/callback/apple",
+      );
+      const form = await rt.app.request("/v1/auth/callback/apple", {
+        method: "POST",
+        headers: { origin: "https://appleid.apple.com", "sec-fetch-site": "cross-site" },
+        body: new URLSearchParams({
+          code: "fixture-code",
+          state: apple.searchParams.get("state")!,
+          ...(firstTime
+            ? {
+                user: JSON.stringify({
+                  name: { firstName: "First", lastName: "Consent" },
+                  email: "untrusted@example.test",
+                }),
+              }
+            : {}),
+        }),
+      });
+      expect(form.status).toBe(303);
+      expect(form.headers.get("location")).not.toContain("Consent");
+      const callback = await rt.app.request(form.headers.get("location")!, {
+        headers: {
+          cookie: start.headers
+            .getSetCookie()
+            .map((item) => item.split(";", 1)[0])
+            .join("; "),
+        },
+      });
+      expect(callback.headers.get("location")).toBe("http://opengeni.test/native-sign-in");
+      return callback.headers
+        .getSetCookie()
+        .map((item) => item.split(";", 1)[0])
+        .join("; ");
+    };
+    await signIn(true);
+    const cookies = await signIn(false);
+    const [stored] =
+      await admin`select u.name,u.email,b.provider_id,a.refresh_token from auth_users u
+      join auth_identities a on a.user_id=u.id
+      join canonical_human_login_bindings b on b.provider_account_id=a.account_id and b.provider_id=a.provider_id
+      where a.account_id=${accountId}`;
+    expect(stored).toMatchObject({ name: "First Consent", email, provider_id: "apple" });
+    expect(stored?.refresh_token).toBeString();
+    expect(stored?.refresh_token).not.toBe("apple-refresh-fixture");
+    const methods = await rt.app.request("/v1/auth/sign-in-methods", {
+      headers: { cookie: cookies },
+    });
+    expect(methods.status).toBe(200);
+    expect((await methods.json()).methods).toContainEqual(
+      expect.objectContaining({
+        provider: "apple",
+        connected: true,
+        available: true,
+        canDisconnect: false,
+      }),
+    );
+  });
+
   test("callback stale age, revoked proof, wrong state cookie and email mismatch never connect", async () => {
     for (const condition of [
       "stale",

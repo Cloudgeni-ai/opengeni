@@ -112,6 +112,7 @@ test("provider configuration and invitation precedence remain owned by the form"
     </SignedOutPage>,
   );
   expect(unconfigured).not.toContain("Continue with Google");
+  expect(unconfigured).not.toContain("Continue with Apple");
   const invited = renderToStaticMarkup(
     <SignedOutPage>
       <ManagedAuthPanel
@@ -127,6 +128,20 @@ test("provider configuration and invitation precedence remain owned by the form"
   expect(invited).toContain("Example team");
   expect(invited).not.toContain("Continue with Google");
   expect(invited).not.toContain("Continue with GitHub");
+});
+
+test("configured Apple is available in both hosted sign-in and sign-up", () => {
+  for (const initialMode of ["signin", "signup"] as const) {
+    const rendered = renderToStaticMarkup(
+      <ManagedAuthPanel
+        initialMode={initialMode}
+        socialProviders={["apple"]}
+        onSocialSubmit={async () => undefined}
+        onSubmit={async () => undefined}
+      />,
+    );
+    expect(rendered).toContain("Continue with Apple");
+  }
 });
 
 test("on Opengeni Console's host, sign-in is Console's own", () => {

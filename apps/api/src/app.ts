@@ -515,6 +515,12 @@ import {
   registerManagedSignInMethodRoutes,
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
+import { ManagedSignInProvider } from "@opengeni/contracts/managed-sign-in-methods";
+import {
+  appleCallbackProviderRequest,
+  managedSocialClientId,
+  redirectAppleFormPost,
+} from "./auth/apple-sign-in";
 import {
   managedPasskeySignInOffered,
   managedPasskeySignUpOffered,
@@ -1430,6 +1436,10 @@ export function createAppComposition(
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (oauthCallbackProvider === "apple" && c.req.method === "POST") {
+        if (!managedSocialClientId(deps.settings, "apple")) return c.notFound();
+        return redirectAppleFormPost(managedAuth, c.req.raw);
+      }
       let signupChallengeVerified = false;
       // The browser's Heedeo token for this attempt (docs/signup-abuse-protection.md,
       // "Heedeo shadow scoring"); only the user-create hook sends it.
@@ -1494,7 +1504,10 @@ export function createAppComposition(
           .catch(() => null);
         await verifyEmailSignInChallenge(deps.settings, input?.signupChallengeToken);
       }
-      let signupProviderRequest = c.req.raw;
+      let signupProviderRequest =
+        oauthCallbackProvider === "apple"
+          ? await appleCallbackProviderRequest(managedAuth, c.req.raw)
+          : c.req.raw;
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
           .clone()
@@ -1502,7 +1515,7 @@ export function createAppComposition(
           .catch(() => null);
         if (
           !body ||
-          !["google", "github"].includes(body.provider) ||
+          !ManagedSignInProvider.safeParse(body.provider).success ||
           Object.prototype.hasOwnProperty.call(body, "idToken")
         ) {
           return c.json(
@@ -1546,6 +1559,7 @@ export function createAppComposition(
           c,
           routeDeps,
           oauthCallbackProvider,
+          signupProviderRequest,
         );
         if (connectResponse) return connectResponse;
       }
@@ -1597,7 +1611,10 @@ export function createAppComposition(
         if (!attempt || !authority || attempt.authorityHash !== managedAuthSha256(authority)) {
           throw new HTTPException(409, { message: "provider_route_blocked" });
         }
-        const isolated = await isolatedManagedAuthOAuthCallbackRequest(managedAuth, c.req.raw);
+        const isolated = await isolatedManagedAuthOAuthCallbackRequest(
+          managedAuth,
+          signupProviderRequest,
+        );
         preserveCookieNames = [isolated.stateCookieName];
         const handled = await runManagedAuthAttempt(
           attempt.transactionId,
@@ -3186,9 +3203,9 @@ function rejectionLogAttributes(rejection: HttpRejectionFacts) {
   };
 }
 
-function managedAuthOAuthCallbackProvider(pathname: string): "google" | "github" | null {
-  const match = pathname.match(/^\/v1\/auth\/callback\/(google|github)$/u);
-  return match?.[1] === "google" || match?.[1] === "github" ? match[1] : null;
+function managedAuthOAuthCallbackProvider(pathname: string): ManagedSignInProvider | null {
+  const match = pathname.match(/^\/v1\/auth\/callback\/([a-z]+)$/u);
+  return ManagedSignInProvider.safeParse(match?.[1]).data ?? null;
 }
 
 function mutationOutcomeUnknown(error: unknown, method: string): boolean {
@@ -3381,14 +3398,9 @@ function clientAuthConfig(
         : {}),
       ...(emailSignInChallengeRequired(settings) ? { signInChallengeRequired: true } : {}),
       ...(heedeo ? { heedeo } : {}),
-      socialProviders: [
-        ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
-          ? (["google"] as const)
-          : []),
-        ...(settings.managedAuthGithubClientId && settings.managedAuthGithubClientSecret
-          ? (["github"] as const)
-          : []),
-      ],
+      socialProviders: ManagedSignInProvider.options.filter((provider) =>
+        managedSocialClientId(settings, provider),
+      ),
     };
   }
   if (settings.productAccessMode === "configured") {

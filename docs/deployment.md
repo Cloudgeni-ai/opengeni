@@ -1477,7 +1477,7 @@ restart an arbitrary old image after broker activation. The complete rollout,
 rollback, self-hosting, header/proxy, and security contract is
 [`browser-login-session-sets.md`](browser-login-session-sets.md).
 
-### Managed Google and GitHub sign-in
+### Managed social sign-in
 
 Managed deployments may enable either provider independently with
 `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` plus
@@ -1496,7 +1496,7 @@ Register these exact callback URLs against the canonical public origin:
 
 The public client config exposes only the enabled provider names. OAuth tokens,
 client secrets, Better Auth state, and provider session identifiers remain
-server-side. Google and GitHub sign-ins may automatically attach a new login
+server-side. Social sign-ins may automatically attach a new login
 method to an existing human only when the email matches and both the existing
 email and the provider's email assertion are verified. This also supports a
 verified email/password user signing in through a social provider. Linking adds
@@ -1507,6 +1507,41 @@ Keep provider email verification and local email verification checks enabled.
 Do not use Better Auth's `trustedProviders` option to bypass the incoming
 email-verification check. An unverified email or conflicting provider identity
 must not silently acquire another human's authority.
+
+#### Sign in with Apple
+
+In [Apple Developer](https://developer.apple.com/account/resources/identifiers/list),
+enable Sign in with Apple on the primary App ID for your app. For the hosted
+Opengeni iOS app use `ai.opengeni.app`, or its existing primary App ID if it is
+already grouped. Register a separate **Services ID**, enable Sign in with
+Apple on it, and associate it with that primary App ID. In its Website URLs,
+enter the public sign-in host (for example `app.opengeni.ai`) and the exact
+Better Auth return URL `<OPENGENI_PUBLIC_BASE_URL>/v1/auth/callback/apple`
+(for example `https://app.opengeni.ai/v1/auth/callback/apple`). Register each
+additional public host where you offer Apple sign-in with its own HTTPS
+return URL; Apple does not accept localhost. Create a **Sign in with Apple**
+key for the same primary App ID, note its Key ID and Team ID, and download its
+`.p8` file.
+
+Set these values in the managed API runtime environment:
+
+| Setting | Value |
+| --- | --- |
+| `OPENGENI_MANAGED_AUTH_APPLE_CLIENT_ID` | Services ID |
+| `OPENGENI_MANAGED_AUTH_APPLE_TEAM_ID` | Apple Developer Team ID |
+| `OPENGENI_MANAGED_AUTH_APPLE_KEY_ID` | Sign in with Apple Key ID |
+| `OPENGENI_MANAGED_AUTH_APPLE_PRIVATE_KEY` | Secret `.p8` PEM text (literal `\n` line breaks also accepted) |
+| `OPENGENI_MANAGED_AUTH_APPLE_APP_BUNDLE_IDENTIFIER` | Optional additional ID token audience (not needed for the hosted/browser sign-in, including `/native-sign-in`) |
+
+The four credentials are all-or-none. Apply the Apple auth migration and
+roll out the API and web change before enabling the provider. Opengeni mints
+and renews its own 30-day ES256 client secret JWT; there is no JWT to rotate
+manually. Keep the key in the runtime Secret, not in public configuration.
+Register the deployment's email sender with Apple's Private Email Relay to
+deliver mail to Hide My Email addresses. An email allowlist still applies to
+relay addresses when configured. To connect Apple to an existing account, the
+email Apple provides must match that account's verified email; a new relay
+address does not link to an account with a different email.
 
 Personal sign-in settings expose connected login methods separately from
 repository, Gmail, and Drive integrations. Sensitive changes require fresh

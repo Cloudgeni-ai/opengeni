@@ -9,7 +9,10 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
-import type { ManagedSocialProvider } from "@/components/managed-social-auth-buttons";
+import {
+  SOCIAL_PROVIDER_LABELS,
+  type ManagedSocialProvider,
+} from "@/components/managed-social-auth-buttons";
 
 export type SignInMethodView = {
   provider: ManagedSocialProvider;
@@ -92,7 +95,7 @@ function passkeyDescription(passkey: PasskeysView["items"][number]): ReactNode {
 }
 
 export function providerLabel(provider: ManagedSocialProvider): string {
-  return provider === "google" ? "Google" : "GitHub";
+  return SOCIAL_PROVIDER_LABELS[provider];
 }
 
 /**
