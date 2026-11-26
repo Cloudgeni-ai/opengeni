@@ -431,7 +431,7 @@ export function FormFrame({
                 <Title
                   tabIndex={-1}
                   className={cn(
-                    "text-xl font-semibold tracking-[-0.5px] text-fg outline-hidden",
+                    "text-xl font-semibold tracking-[-0.012em] text-fg outline-hidden",
                     titleInWindowBar && "sr-only",
                   )}
                 >
@@ -459,7 +459,7 @@ export function FormFrame({
                 <Title
                   className={cn(
                     "min-w-0 font-semibold break-words text-fg",
-                    variant === "inline" ? "text-sm" : "text-lg leading-6.5 tracking-[-0.25px]",
+                    variant === "inline" ? "text-sm" : "text-lg leading-6.5 tracking-[-0.012em]",
                   )}
                 >
                   {title}

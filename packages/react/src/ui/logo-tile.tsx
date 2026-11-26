@@ -1,4 +1,11 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 import { cn } from "../lib/cn";
 import { cachedLogoFit, measureLogoFit, type LogoFit } from "../logo-fit";
@@ -14,7 +21,10 @@ import { displayImageSrc } from "../lib/content-hosting";
      two apart (see ../logo-fit),
    - a monogram on surface-2 when there is no logo or it fails to load,
    - a lucide glyph for things that are not brands (skills, variable sets,
-     API keys), so a fallback never looks like a real logo.
+     API keys), so a fallback never looks like a real logo,
+   - with `hue`, a hued tile for glyphs and monograms: the glyph in the hue,
+     the fill at 16% of it and the edge at 30% (`.og-hued-tile`), so apps,
+     setups and other things without a logo are told apart at a glance.
 
    Sizes: 40 (catalog rows, sheet headers), 32 (resource rows), 24 (tables,
    inline mentions). Radius 10, or 6 at 24px so the small tile stays square.
@@ -69,6 +79,13 @@ export function useLogoTileSize(): LogoTileSize | null {
   return useContext(LogoTileSizeContext);
 }
 
+/** A stable hue (0-359) for a hued tile, from an id, key or name. */
+export function logoTileHue(seed: string): number {
+  let hash = 0;
+  for (const char of seed) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+  return hash % 360;
+}
+
 /** First letter or digit of a name, uppercased. "GitHub automation" becomes "G". */
 export function logoMonogram(name: string | undefined): string {
   const match = name?.match(/[\p{L}\p{N}]/u);
@@ -95,6 +112,12 @@ export interface LogoTileProps {
   /** Glyph color. Neutral by default; brand and danger are for empty states and alerts. */
   tone?: LogoTileTone | undefined;
   /**
+   * An OKLCH hue (0-360) for a hued tile: glyph in the hue on a 16% tint with
+   * a 30% edge. Ignored while a logo image shows. See `logoTileHue` for a
+   * stable hue from an id or name.
+   */
+  hue?: number | undefined;
+  /**
    * Accessible name. Omit when the tile sits next to a visible name (the usual
    * case) so screen readers don't hear it twice.
    */
@@ -110,16 +133,19 @@ export function LogoTile({
   monogram,
   icon,
   tone = "neutral",
+  hue,
   label,
   className,
 }: LogoTileProps) {
   const contextSize = useLogoTileSize();
   const size = sizeProp ?? contextSize ?? "lg";
   const a11y = label ? { role: "img", "aria-label": label } : { "aria-hidden": true as const };
+  const hued = hue !== undefined && Number.isFinite(hue);
+  const glyphTone = hued ? undefined : TONE[tone];
   const fallback = icon ? (
-    <span className={cn("inline-flex", TONE[tone], GLYPH[size])}>{icon}</span>
+    <span className={cn("inline-flex", glyphTone, GLYPH[size])}>{icon}</span>
   ) : (
-    <span className={cn("leading-none font-semibold", TONE[tone])}>
+    <span className={cn("leading-none font-semibold", glyphTone)}>
       {monogram ?? logoMonogram(name)}
     </span>
   );
@@ -128,12 +154,14 @@ export function LogoTile({
     <span
       data-slot="logo-tile"
       data-size={size}
+      data-hued={hued && !src ? "" : undefined}
       {...a11y}
+      style={hued && !src ? ({ "--og-tile-hue": hue } as CSSProperties) : undefined}
       className={cn(
         "relative inline-flex shrink-0 items-center justify-center overflow-hidden select-none",
         // The hairline sits on top of the logo, so full-bleed icons keep a crisp edge.
         "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:border after:border-border after:content-['']",
-        "bg-surface-2",
+        hued && !src ? "og-hued-tile" : "bg-surface-2",
         BOX[size],
         className,
       )}

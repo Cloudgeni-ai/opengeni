@@ -34,6 +34,13 @@ const SETUP_ICONS: Record<GuidedSetup["icon"], ReactNode> = {
   "chart-line": <ChartLineIcon />,
 };
 
+/** Each setup's tile hue, so the three read apart at a glance. */
+const SETUP_HUES: Record<GuidedSetup["icon"], number> = {
+  "git-pull-request": 275,
+  "list-checks": 185,
+  "chart-line": 45,
+};
+
 export function getStartedHref(workspaceId: string, setupKey?: string, step?: EnableStep): string {
   const params = new URLSearchParams();
   if (setupKey) params.set("setup", setupKey);
@@ -148,7 +155,12 @@ export function Showcase({
                     active ? "border-border bg-surface-2" : "border-transparent hover:bg-hover",
                   )}
                 >
-                  <LogoTile size="md" name={entry.title} icon={SETUP_ICONS[entry.icon]} />
+                  <LogoTile
+                    size="md"
+                    name={entry.title}
+                    icon={SETUP_ICONS[entry.icon]}
+                    hue={SETUP_HUES[entry.icon]}
+                  />
                   <span className="min-w-0">
                     <span className="block text-sm font-medium text-fg">{entry.title}</span>
                     <span className="block text-xs leading-4.5 text-fg-muted">
@@ -185,7 +197,12 @@ export function SetupExampleCard({ setup }: { setup: GuidedSetup }) {
       <MetaChip variant="outline">Example</MetaChip>
       <div className="mt-6 flex flex-col gap-3">
         <div className="flex items-center gap-3 rounded-lg border border-border bg-surface px-4 py-3">
-          <LogoTile size="sm" name={example.subject} icon={SETUP_ICONS[setup.icon]} />
+          <LogoTile
+            size="sm"
+            name={example.subject}
+            icon={SETUP_ICONS[setup.icon]}
+            hue={SETUP_HUES[setup.icon]}
+          />
           <div className="min-w-0">
             <p className="truncate text-sm font-medium text-fg">{example.subject}</p>
             <p className="text-xs text-fg-muted">{example.subjectMeta}</p>
