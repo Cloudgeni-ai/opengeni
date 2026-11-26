@@ -1756,8 +1756,23 @@ test("packages carry Skills and automations; updates show them, and go back", as
   expect(kept.status, kept.text).toBe(200);
   expect(kept.text).not.toContain("Version zero.");
 
-  // Without permission to change Skills, the app installs and the Skill is reported.
-  const plain = await f.install({ package: skilledPackage("1.2.0", "Version three.") });
+  // Without permission to change Skills, the app installs and a new Skill is
+  // reported. (An existing shared Skill is only linked, as above.)
+  const fresh = {
+    ...skilledPackage("1.2.0", "Version three."),
+    packageId: "7c1d2e3f-4a5b-8c6d-9e0f-a1b2c3d4e5f6",
+    skills: [
+      {
+        files: [
+          {
+            path: "SKILL.md",
+            content: SKILL_MD("Version three.").replace("board-notes", "board-tidying"),
+          },
+        ],
+      },
+    ],
+  };
+  const plain = await f.install({ package: fresh });
   expect(plain.status, plain.text).toBe(201);
   expect(plain.json.notInstalled).toContainEqual(expect.objectContaining({ part: "skill" }));
 }, 120_000);
