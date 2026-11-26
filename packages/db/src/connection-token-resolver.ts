@@ -946,14 +946,15 @@ export function buildConnectionTokenResolver(
 
   /**
    * Moves a connection whose provider refused its grant to needs_reauth (or
-   * lets the provider adapter own that) and tells the owner once.
+   * lets the provider adapter own that) and tells the owner once. True when
+   * this call made the transition (or the adapter owned it).
    */
   const recordPermanentRefreshFailure = async (
     cred: ConnectionCredentialForBroker,
     error: ConnectionRefreshHttpError,
     use?: AcceptedConnectionUseContext,
     lastError: string = error.message,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     if (options.transitionPermanentRefreshFailure) {
       try {
         const handled = await options.transitionPermanentRefreshFailure({
@@ -965,7 +966,7 @@ export function buildConnectionTokenResolver(
           httpStatus: error.httpStatus,
           oauthErrorCode: error.oauthErrorCode,
         });
-        if (handled) return;
+        if (handled) return true;
       } catch {
         // Falls back to the generic transition.
       }
@@ -979,7 +980,8 @@ export function buildConnectionTokenResolver(
         subjectId: cred.subjectId,
       })
       .catch(() => false);
-    if (!transitioned || !options.onConnectionNeedsReauth) return;
+    if (!transitioned) return false;
+    if (!options.onConnectionNeedsReauth) return true;
     try {
       await options.onConnectionNeedsReauth({
         workspaceId: cred.workspaceId,
@@ -1002,6 +1004,7 @@ export function buildConnectionTokenResolver(
     } catch {
       // Telling the owner never changes the credential result.
     }
+    return true;
   };
 
   /**
@@ -1186,8 +1189,14 @@ export function buildConnectionTokenResolver(
         // Only a rejected grant may poison the connection; transient failures
         // (network errors, AS 5xx) leave it active so the next resolve retries.
         if (isPermanentRefreshError(error)) {
-          await recordPermanentRefreshFailure(cred, error, input.connectionUseContext);
-          if (error.oauthErrorCode === "invalid_grant" && deps.findGrantReauthSiblings) {
+          const moved = await recordPermanentRefreshFailure(
+            cred,
+            error,
+            input.connectionUseContext,
+          );
+          // Only the request that moved it checks the siblings, not every
+          // request that waited on the same refused refresh.
+          if (moved && error.oauthErrorCode === "invalid_grant" && deps.findGrantReauthSiblings) {
             (options.scheduleGrantSiblingCheck ?? detachGrantSiblingCheck)(
               checkGrantSiblings(cred).catch(() => undefined),
             );

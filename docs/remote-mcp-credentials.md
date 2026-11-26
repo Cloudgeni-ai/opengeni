@@ -364,7 +364,9 @@ integration).
   since no chat of the refused connection carries another owner's notice. A sibling that still works stays connected with fresh tokens.
 
 Both definers are created withheld from the runtime role; a later migration
-grants them once the release that knows them is the previous release.
+grants them once the release that knows them is the previous release. A self-hosted install whose runtime role owns the
+functions (it ran the migrations itself) already holds EXECUTE, so both checks
+are active there as soon as the migration runs.
 
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
