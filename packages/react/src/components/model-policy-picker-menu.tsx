@@ -27,11 +27,14 @@ import { ModelMark } from "./model-mark";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const PopoverContainedPortal = containedPortal(Popover.Portal);
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
+
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
 export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const [query, setQuery] = useState("");
   const view = modelPickerMenuView(t, props, query);
   const { messages, rows, groups } = view;
@@ -45,38 +48,41 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     props.onEffortChange(choice.effort);
     if (choice.latencyMode !== null) props.onLatencyModeChange(choice.latencyMode);
   };
-  const modelRow = (row: ClientPickerModelRow) => (
-    <PickerNavRow
-      key={row.id}
-      icon={
-        props.collapseScopes === false ? undefined : (
-          <ModelMark model={row.catalog} className="size-4 text-og-fg-muted" />
-        )
-      }
-      label={row.label}
-      hint={row.unavailableReason ?? row.fundingHint}
-      disabled={props.disabled || !row.selectable}
-      title={[row.label, row.unavailableReason ?? row.fundingHint].filter(Boolean).join(" · ")}
-      active={row.selectable && row.id === props.model}
-      showChevron={false}
-      trailing={
-        row.catalog.cost === "free" || row.id === props.model ? (
-          <span className="flex items-center gap-2">
-            {row.catalog.cost === "free" ? (
-              <span className="rounded-full bg-og-surface-2 px-1.5 py-0.5 text-og-control text-og-fg-muted">
-                {messages.free}
-              </span>
-            ) : null}
-            {row.id === props.model ? (
-              <CheckIcon className={MENU_CHECK_CLASS} aria-label={messages.selected} />
-            ) : null}
-          </span>
-        ) : null
-      }
-      testId={`model-picker-choice-${row.id}`}
-      onClick={() => choose(row)}
-    />
-  );
+  const modelRow = (row: ClientPickerModelRow) => {
+    const hint = row.unavailableReason ?? (showPurchasePrompts ? row.fundingHint : undefined);
+    return (
+      <PickerNavRow
+        key={row.id}
+        icon={
+          props.collapseScopes === false ? undefined : (
+            <ModelMark model={row.catalog} className="size-4 text-og-fg-muted" />
+          )
+        }
+        label={row.label}
+        hint={hint}
+        disabled={props.disabled || !row.selectable}
+        title={[row.label, hint].filter(Boolean).join(" · ")}
+        active={row.selectable && row.id === props.model}
+        showChevron={false}
+        trailing={
+          row.catalog.cost === "free" || row.id === props.model ? (
+            <span className="flex items-center gap-2">
+              {row.catalog.cost === "free" ? (
+                <span className="rounded-full bg-og-surface-2 px-1.5 py-0.5 text-og-control text-og-fg-muted">
+                  {messages.free}
+                </span>
+              ) : null}
+              {row.id === props.model ? (
+                <CheckIcon className={MENU_CHECK_CLASS} aria-label={messages.selected} />
+              ) : null}
+            </span>
+          ) : null
+        }
+        testId={`model-picker-choice-${row.id}`}
+        onClick={() => choose(row)}
+      />
+    );
+  };
   return (
     <div
       data-testid="model-picker-menu"

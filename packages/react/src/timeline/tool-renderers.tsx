@@ -3,7 +3,8 @@ import { ToolActionReviewCard } from "../components/tool-action-review";
 import { SecretRefText } from "../components/secret-ref-chip";
 import type { ToolReviewStatus } from "@opengeni/sdk";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
-import { paymentPageOf } from "./payment-page";
+import { isBillingAppAction, paymentPageOf } from "./payment-page";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
 import { parseSandboxFileArtifactReceipt, type RetainedArtifactReference } from "@opengeni/sdk";
@@ -2059,6 +2060,8 @@ const LazyPaymentPageCard = lazy(() =>
 
 /** An app action that opened a payment page shows it as a button; every other one reads as usual. */
 function AppActionCallRenderer(props: ToolRendererProps) {
+  const showPurchasePrompts = useShowPurchasePrompts();
+  if (!showPurchasePrompts && isBillingAppAction(props.item)) return null;
   const page = paymentPageOf(props.item);
   return page ? (
     <LazyPart>

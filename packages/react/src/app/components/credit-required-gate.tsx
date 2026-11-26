@@ -10,6 +10,7 @@ import {
 } from "../lib/credit-checkout";
 import { usePage } from "../lib/navigation";
 import { hasAccountPermission } from "../lib/permissions";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import type { PaymentRefusalCode } from "../lib/model-access";
 import { CardRequiredGate } from "./add-card";
 
@@ -38,10 +39,10 @@ export function CreditRequiredGate(props: {
   accessContext: AccessContext | null;
 }) {
   const { creditRequired, setCreditRequired, accessContext } = props;
-  useCheckoutPageReturn();
+  const showPurchasePrompts = useShowPurchasePrompts();
   return (
     <>
-      <CardRequiredGate />
+      {showPurchasePrompts ? <CheckoutReturnAndCardGate /> : null}
       {creditRequired ? (
         <Suspense fallback={null}>
           <CreditRequiredPrompt
@@ -61,6 +62,11 @@ export function CreditRequiredGate(props: {
       ) : null}
     </>
   );
+}
+
+function CheckoutReturnAndCardGate() {
+  useCheckoutPageReturn();
+  return <CardRequiredGate />;
 }
 
 /**

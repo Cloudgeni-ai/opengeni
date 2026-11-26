@@ -35,7 +35,10 @@ export function billingInboxActionPath(
 const dollars = (micros: number) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(micros / 1_000_000);
 
-export function billingInboxCopy(notice: BillingCreditNotification): {
+export function billingInboxCopy(
+  notice: BillingCreditNotification,
+  showPurchasePrompts = true,
+): {
   title: string;
   body: string;
 } {
@@ -70,12 +73,16 @@ export function billingInboxCopy(notice: BillingCreditNotification): {
     case "topup_failed":
       return {
         title: "Credit top-up failed",
-        body: "Review your payment method and top-up settings.",
+        body: showPurchasePrompts
+          ? "Review your payment method and top-up settings."
+          : "No credits were added.",
       };
     case "cap_reached":
       return {
         title: "Auto top-up limit reached",
-        body: "Review your top-up limit to keep credits available.",
+        body: showPurchasePrompts
+          ? "Review your top-up limit to keep credits available."
+          : "No more credits will be added automatically this month.",
       };
   }
 }

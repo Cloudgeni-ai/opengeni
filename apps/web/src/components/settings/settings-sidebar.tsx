@@ -51,6 +51,7 @@ import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-inter
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 
 /**
  * The settings shell for workspace, organization and personal settings.
@@ -294,7 +295,11 @@ function SettingsRail({
   const ref = useRef<HTMLElement>(null);
   const { productName } = useSimplifiedInterface();
   const [query, setQuery] = useState("");
-  const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const entries = useMemo(
+    () => settingsSearchEntries(sections, showPurchasePrompts),
+    [sections, showPurchasePrompts],
+  );
   const results = useMemo(() => searchSettings(entries, query), [entries, query]);
   const searching = query.trim().length > 0;
   const resultsId = useId();

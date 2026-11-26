@@ -9,6 +9,7 @@ import {
 import { t } from "./console-text";
 import {
   creditRefusalHeadline,
+  creditRefusalStatus,
   creditRefusalKindFromText,
   isDiagnosticFailureCode,
   type CreditRefusalKind,
@@ -16,6 +17,7 @@ import {
 import { providerRecoverySubject } from "../../lib/provider-recovery";
 import type { SessionFailureSummary } from "./events";
 import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
+import { SANDBOX_CARD_REQUIRED_CODE } from "./card-verification";
 
 /**
  * Known provider failure classes. Presentation only: the stored event keeps the
@@ -249,6 +251,7 @@ export function failedSessionCopy(
    * it named none. Omitted, the recorded failure text decides.
    */
   stopRefusal?: CreditRefusalKind | null,
+  showPurchasePrompts = true,
 ): {
   reason: string;
   unavailableModel: boolean;
@@ -272,6 +275,20 @@ export function failedSessionCopy(
   // Retry stays, because an upgrade or another account clears the condition
   // and admission re-checks the plan without a model request.
   const code = failure.failureCode;
+  if (!showPurchasePrompts) {
+    if (code === SANDBOX_CARD_REQUIRED_CODE) {
+      return {
+        reason: "Sandboxes aren't available for this organization yet.",
+        unavailableModel: false,
+      };
+    }
+    if (code === "codex_plan_entitlement") {
+      return {
+        reason: "The connected Codex account can't use this model.",
+        unavailableModel: false,
+      };
+    }
+  }
   // The worker names the machine; the owner allows it for this chat. Retrying
   // the same message can't, so Allow takes its place where it is offered.
   if (code === MACHINE_ACCESS_REQUIRED_CODE) {
@@ -347,6 +364,12 @@ export function failedSessionCopy(
               failure.quotaScope,
             )));
   if (known) {
+    if (!showPurchasePrompts && known.kind === "provider_billing") {
+      return {
+        reason: `The model provider couldn't bill this request.${canChooseModel && !modelChanged ? " Choose another model below." : ""}`,
+        unavailableModel: false,
+      };
+    }
     const detail = diagnostic;
     const suggest = known.suggestModel && canChooseModel && !modelChanged;
     return {
@@ -408,14 +431,16 @@ export function failedSessionCopy(
     : null;
   if (creditRefusal) {
     return {
-      reason: creditRefusalHeadline(t, creditRefusal),
+      reason: showPurchasePrompts
+        ? creditRefusalHeadline(t, creditRefusal)
+        : creditRefusalStatus(t, creditRefusal),
       unavailableModel: false,
       creditRefusal,
     };
   }
   const reason = creditExhausted
     ? freeCreditGap
-      ? freeCreditGapReason(freeCreditGap)
+      ? freeCreditGapReason(freeCreditGap, showPurchasePrompts)
       : "This workspace is out of Opengeni credits."
     : failure.safetyRefusal
       ? "The model provider declined this request."
@@ -456,10 +481,15 @@ export function chatComposerPlaceholder(input: {
   stopRefusal: CreditRefusalKind | null;
   creditGap: FreeCreditGap | null;
   canBuyCredits: boolean;
+  showPurchasePrompts?: boolean;
 }): string {
   if (input.archived) return "This chat is archived.";
   if (input.cancelled) return "This session was cancelled.";
   if (!input.creditStopped) return "Send a follow-up…";
+  if (input.showPurchasePrompts === false) {
+    if (input.creditGap?.selectionUsable) return "Send a follow-up…";
+    return creditRefusalStatus(t, input.stopRefusal);
+  }
   if (input.stopRefusal) return creditRefusalHeadline(t, input.stopRefusal, input.canBuyCredits);
   if (input.creditGap) {
     return input.creditGap.selectionUsable
@@ -494,8 +524,9 @@ export function detailBeyondHeadline(
 export function failureFallbackReason(
   copy: { reason: string; creditRefusal?: CreditRefusalKind | null | undefined },
   canBuyCredits: boolean,
+  showPurchasePrompts = true,
 ): string {
-  return copy.creditRefusal && !canBuyCredits
+  return showPurchasePrompts && copy.creditRefusal && !canBuyCredits
     ? creditRefusalHeadline(t, copy.creditRefusal, false)
     : copy.reason;
 }

@@ -64,6 +64,7 @@ import {
   MACHINE_ACCESS_REQUIRED_CODE,
 } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import {
   pickerPolicyRunnable,
   ComposerSendBlockerNotice,
@@ -550,6 +551,7 @@ export function SessionRoute({
   onRealtimeAutostartConsumed?: (() => void) | undefined;
 }) {
   const uiEvents = useUiEventTarget("document");
+  const showPurchasePrompts = useShowPurchasePrompts();
   const dockEnabled = useSessionUiFeature("dock");
   useReadSessionInbox(sessionId);
   const context = useAppContext();
@@ -797,6 +799,7 @@ export function SessionRoute({
       visibleEvents,
       pendingCreationHandoff?.clientEventId,
       viewClearedAfter === null ? eventTimeline : undefined,
+      showPurchasePrompts,
     );
     // projectSessionTimeline falls back to the session's initial message when
     // the projection is empty; after a clear-view that fallback would resurrect
@@ -804,6 +807,7 @@ export function SessionRoute({
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
   }, [
     pendingCreationHandoff,
+    showPurchasePrompts,
     session,
     visibleEvents,
     viewClearedAfter,
@@ -3434,7 +3438,9 @@ function SessionChatPane(props: {
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
+  const showPurchasePrompts = useShowPurchasePrompts();
   const canBuyCredits =
+    showPurchasePrompts &&
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspaceAccountId) &&
     hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
@@ -3651,9 +3657,12 @@ function SessionChatPane(props: {
         canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
         creditGap,
         stopRefusal,
+        showPurchasePrompts,
       )
     : null;
-  const fallbackReason = fallbackCopy ? failureFallbackReason(fallbackCopy, canBuyCredits) : "";
+  const fallbackReason = fallbackCopy
+    ? failureFallbackReason(fallbackCopy, canBuyCredits, showPurchasePrompts)
+    : "";
   const fallbackDetail = detailBeyondHeadline(fallbackReason, fallbackCopy?.detail);
   const failureFallback = fallbackCopy ? (
     <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
@@ -5415,6 +5424,7 @@ function SessionChatPane(props: {
                   stopRefusal,
                   creditGap,
                   canBuyCredits,
+                  showPurchasePrompts,
                 })}
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
