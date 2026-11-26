@@ -1,7 +1,7 @@
 import { isDirectModelProviderId } from "@opengeni/contracts";
 
 /** Bounded operational attribution, never an authorization or retry decision. */
-export type FailureOrigin = "none" | "platform" | "customer_provider";
+export type FailureOrigin = "none" | "platform" | "customer_provider" | "customer_plan";
 
 const CUSTOMER_PROVIDER_CODES = new Set([
   "provider_quota_exhausted",
@@ -10,6 +10,13 @@ const CUSTOMER_PROVIDER_CODES = new Set([
   "codex_usage_limit_reached",
   "codex_plan_entitlement",
 ]);
+/**
+ * The organization's own plan refused a sandbox: no paid plan or credit, a
+ * card still to verify, or a Free plan's daily box time spent. The turn fails
+ * with the person-facing reason whoever pays for the model. Shared unpaid
+ * capacity (`sandbox_capacity_unpaid_busy`) stays platform: that is our fleet.
+ */
+const CUSTOMER_PLAN_CODES = new Set(["sandbox_compute_unavailable", "sandbox_card_required"]);
 const CUSTOMER_CAPACITY_REASONS = new Set([
   "no_eligible_capacity",
   "pinned_account_disabled",
@@ -55,6 +62,7 @@ export function failureOrigin(input: {
   httpStatus?: number;
 }): FailureOrigin {
   if (input.outcome !== "failed") return "none";
+  if (typeof input.code === "string" && CUSTOMER_PLAN_CODES.has(input.code)) return "customer_plan";
   if (!input.customerManaged) return "platform";
   if (typeof input.code === "string" && CUSTOMER_PROVIDER_CODES.has(input.code))
     return "customer_provider";

@@ -605,6 +605,12 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
     labels: { outcome: "failed", failure_origin: "customer_provider" },
     amount: 0,
   });
+  observability.incrementCounter({
+    name: "opengeni_turns_total",
+    help: "Total agent turns by terminal outcome.",
+    labels: { outcome: "failed", failure_origin: "customer_plan" },
+    amount: 0,
+  });
   for (const outcome of WORKER_DEATH_RECOVERY_OUTCOMES) {
     for (const timeoutType of WORKER_DEATH_TIMEOUT_TYPES) {
       observability.incrementCounter({
