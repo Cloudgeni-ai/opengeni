@@ -26,7 +26,8 @@ import { useSimplifiedInterface } from "../lib/simplified-interface";
 import { useCreditBalance } from "./credits/use-credit-balance";
 import { userErrorText } from "../../ui/api-error";
 import { validTopupAmount } from "../lib/format";
-import { isUpgradeRefusal } from "../../lib/format";
+import { creditRefusalStatus, isUpgradeRefusal } from "../../lib/format";
+import { useOpenGeniText } from "../../messages/runtime";
 import { analyticsAction } from "../../ui/analytics-actions";
 import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
 import { subscriptionAction } from "../lib/subscription-plans";
@@ -59,7 +60,27 @@ export function CreditRequiredPrompt(props: CreditRequiredPromptProps) {
 export function CreditRequiredPromptView(
   props: CreditRequiredPromptProps & { client: ChatClient<OpenGeniBrowserClient> },
 ) {
-  return useShowPurchasePrompts() ? <PurchasePrompt {...props} /> : null;
+  if (useShowPurchasePrompts()) return <PurchasePrompt {...props} />;
+  return props.open && props.purpose !== "topup" ? <CreditRefusalDialog {...props} /> : null;
+}
+
+function CreditRefusalDialog({ refusalCode, onOpenChange }: CreditRequiredPromptProps) {
+  const t = useOpenGeniText();
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Couldn’t start the request</DialogTitle>
+          <DialogDescription>{creditRefusalStatus(t, refusalCode)}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" onClick={() => onOpenChange(false)}>
+            Done
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function PurchasePrompt({

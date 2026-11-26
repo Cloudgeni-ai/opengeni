@@ -76,7 +76,6 @@ import {
 } from "@opengeni/react/app/lib/inbox";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { BillingInboxSection } from "../components/billing-inbox";
-import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 
 const KIND_WORD: Record<InboxEntry["kind"], string> = {
   question: "Question",
@@ -357,7 +356,6 @@ function InboxSkeleton() {
 
 export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
-  const showPurchasePrompts = useShowPurchasePrompts();
   const navigate = useNavigate();
   const inbox = useInbox({ pollMs: 10_000, workspaceId });
   const [scope, setScope] = useState<"all" | "workspace">("all");
@@ -375,9 +373,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     [context.workspaces],
   );
   const workspacesWithItems = new Set(items.map((item) => item.workspaceId));
-  const allBillingNotifications = showPurchasePrompts
-    ? (inbox.data?.billingNotifications ?? [])
-    : [];
+  const allBillingNotifications = inbox.data?.billingNotifications ?? [];
   // Billing belongs to the organization, not this workspace. Keep the way
   // back to the all-workspaces view even when the last chat item disappears.
   const showScope =
@@ -714,7 +710,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         icon={<InboxIcon />}
         title="Nothing is waiting on you"
         description={
-          scope === "workspace" || !showPurchasePrompts
+          scope === "workspace"
             ? "Questions, approvals and agent updates in this workspace show up here."
             : "Questions, approvals, agent updates and billing notices show up here."
         }

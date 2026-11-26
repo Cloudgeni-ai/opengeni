@@ -135,6 +135,7 @@ describe("credit required prompt", () => {
       ),
     );
     expect(container.textContent).toContain("No credits left");
+    expect(container.textContent).toContain("Couldn’t start the request");
     expect(container.textContent).toContain("Use your own provider account");
     expect(container.textContent).not.toMatch(/add a card|add credits|have a code|stripe/i);
     expect(getBillingCardVerification).not.toHaveBeenCalled();

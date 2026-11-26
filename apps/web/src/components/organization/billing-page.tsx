@@ -428,7 +428,7 @@ function BillingOverview({
         </Section>
       </section>
 
-      {showPurchasePrompts && canReadBilling && accountId ? (
+      {canReadBilling && accountId ? (
         <Suspense fallback={null}>
           <CreditProtectionSettings
             key={`protection:${identityKey}`}

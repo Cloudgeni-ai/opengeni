@@ -52,10 +52,12 @@ function phone(): Promise<BrowserContext> {
 const onboarding = "/dev/onboarding?view=models";
 const billing = "/test/credit-billing-preview.html?plans";
 const composer = "/test/credit-billing-preview.html?plans&composer";
+const inbox = "/test/credit-billing-preview.html?inbox";
+const refusal = "/test/credit-billing-preview.html?refusal";
 const organizationFixture = "/test/organization-workspace-administration.html";
 const peoplePath = "#/workspaces/22222222-2222-4222-8222-222222222222/organization?section=people";
 const purchaseCopy =
-  /get pro|get max|start with pro|\$20\s*\/\s*month|have a code|open stripe|promo code|manage billing|add (a card|credits)|automatic top-up|talk to us|upgrade (the|your|to)|ask .* to (add|buy|upgrade)/i;
+  /get pro|get max|start with pro|\$20\s*\/\s*month|have a code|open stripe|promo code|manage billing|add (a card|credits)|set up card|update card|(turn on|save) automatic top-up|talk to us|upgrade (the|your|to)|ask .* to (add|buy|upgrade)/i;
 
 async function capture(page: Page, name: string): Promise<void> {
   if (process.env.OPENGENI_IOS_PURCHASE_SCREENSHOTS) {
@@ -92,7 +94,13 @@ test("hosted iOS entry removes offers, keeps setup and balance, and lasts across
     await page.getByText("$25.00", { exact: true }).first().waitFor();
     await page.getByRole("heading", { name: "Workspace budgets" }).waitFor();
     await page.getByRole("button", { name: "Open Insights" }).waitFor();
+    const disable = page.getByRole("button", { name: "Turn off automatic top-up", exact: true });
+    await disable.waitFor();
     await capture(page, "billing-ios");
+    await disable.scrollIntoViewIfNeeded();
+    await capture(page, "billing-stop-topup-ios");
+    await disable.click();
+    await page.getByText("Automatic top-up is off.", { exact: true }).waitFor();
     expect(await page.locator("body").innerText()).not.toMatch(purchaseCopy);
     expect(await page.locator('a[href*="stripe"]').count()).toBe(0);
     await page.reload();
@@ -102,6 +110,28 @@ test("hosted iOS entry removes offers, keeps setup and balance, and lasts across
     const newTab = await context.newPage();
     await newTab.goto(origin + onboarding);
     await newTab.getByRole("button", { name: "Get Pro", exact: true }).waitFor();
+  } finally {
+    await context.close();
+  }
+}, 45_000);
+
+test("the iOS inbox keeps spending warnings without purchase remedies", async () => {
+  const context = await phone();
+  try {
+    const page = await context.newPage();
+    await page.goto(origin + inbox);
+    await page.getByRole("link", { name: "Manage billing" }).first().waitFor();
+    await capture(page, "inbox-unmarked");
+    await page.goto(`${origin}${inbox}&client=ios`);
+    await page.getByText("Spending is higher than usual", { exact: true }).waitFor();
+    await page
+      .getByText("$18.50 used in the last hour. Review your recent usage.", { exact: true })
+      .waitFor();
+    await page.getByText("No credits were added.", { exact: true }).waitFor();
+    expect(await page.locator("body").innerText()).not.toMatch(
+      /manage billing|review your payment method|review your top-up limit/i,
+    );
+    await capture(page, "inbox-ios");
   } finally {
     await context.close();
   }
@@ -117,6 +147,10 @@ test("the iOS composer omits card verification and members can still be invited"
     await page.goto(`${origin}${organizationFixture}${peoplePath}`);
     await page.getByText("Ada Member", { exact: true }).first().waitFor();
     await capture(page, "organization-unmarked");
+    await page.goto(origin + refusal);
+    await page.getByRole("button", { name: "Ask about the meeting" }).click();
+    await page.getByRole("dialog").waitFor();
+    await capture(page, "meeting-refusal-unmarked");
 
     await page.goto(`${origin}${composer}&client=ios`);
     await page.getByText("No credits left", { exact: true }).waitFor();
@@ -133,6 +167,13 @@ test("the iOS composer omits card verification and members can still be invited"
     await page.getByRole("checkbox", { name: "Product engineering" }).check();
     await page.getByRole("button", { name: "Send invitation", exact: true }).click();
     await page.getByText("Invited new-member@example.test", { exact: true }).waitFor();
+    await page.goto(origin + refusal);
+    await page.getByRole("button", { name: "Ask about the meeting" }).click();
+    await page.getByRole("heading", { name: "Couldn’t start the request" }).waitFor();
+    expect(await page.getByRole("dialog").innerText()).not.toMatch(purchaseCopy);
+    await capture(page, "meeting-refusal-ios");
+    await page.getByRole("button", { name: "Done" }).click();
+    await page.getByRole("dialog").waitFor({ state: "hidden" });
   } finally {
     await context.close();
   }

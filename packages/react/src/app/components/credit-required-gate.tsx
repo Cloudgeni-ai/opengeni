@@ -38,15 +38,11 @@ export function CreditRequiredGate(props: {
   setCreditRequired: (value: CreditRequired | null) => void;
   accessContext: AccessContext | null;
 }) {
-  return useShowPurchasePrompts() ? <PurchaseGate {...props} /> : null;
-}
-
-function PurchaseGate(props: Parameters<typeof CreditRequiredGate>[0]) {
   const { creditRequired, setCreditRequired, accessContext } = props;
-  useCheckoutPageReturn();
+  const showPurchasePrompts = useShowPurchasePrompts();
   return (
     <>
-      <CardRequiredGate />
+      {showPurchasePrompts ? <CheckoutReturnAndCardGate /> : null}
       {creditRequired ? (
         <Suspense fallback={null}>
           <CreditRequiredPrompt
@@ -66,6 +62,11 @@ function PurchaseGate(props: Parameters<typeof CreditRequiredGate>[0]) {
       ) : null}
     </>
   );
+}
+
+function CheckoutReturnAndCardGate() {
+  useCheckoutPageReturn();
+  return <CardRequiredGate />;
 }
 
 /**

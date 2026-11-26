@@ -666,9 +666,11 @@ export function ModelAccessOnboardingPanel({
       return (
         <div className="grid gap-3">
           <p className="m-0 text-xs leading-relaxed text-fg-muted">
-            {kind === "codex"
-              ? "Sign in with the ChatGPT account whose plan should pay for new chats."
-              : "Sign in with the xAI account whose SuperGrok plan should pay for Grok models."}
+            {showPurchasePrompts
+              ? kind === "codex"
+                ? "Sign in with the ChatGPT account whose plan should pay for new chats."
+                : "Sign in with the xAI account whose SuperGrok plan should pay for Grok models."
+              : `Sign in with the ${name} account you want to use.`}
           </p>
           {showPurchasePrompts && ownSubscriptionPlan ? (
             <p

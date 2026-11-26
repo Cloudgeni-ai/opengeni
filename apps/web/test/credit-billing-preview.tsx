@@ -3,12 +3,20 @@ import "./preview-host-setup";
 import { createRoot } from "react-dom/client";
 import { createRootRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { BillingCreditNotification } from "@opengeni/sdk";
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { PurchasePresentationProvider } from "@opengeni/react/app/lib/purchase-presentation";
 import { EmptyCreditsNotice } from "@opengeni/react/app/components/credit-required-prompt";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { SectionVariantProvider } from "@opengeni/react/ui/section";
+import { useState } from "react";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  CreditRequiredGate,
+  type CreditRequired,
+} from "@opengeni/react/app/components/credit-required-gate";
 import { OrganizationBillingPage } from "../src/components/organization/billing-page";
+import { BillingInboxSection } from "../src/components/billing-inbox";
 import { OrganizationDirectoryProvider } from "../src/components/organization/organization-directory";
 import { previewPlan, previewPlans, previewReceipts } from "../src/dev/subscription-plans-preview";
 import { iosAppContext } from "../src/lib/ios-app-context-boot";
@@ -21,12 +29,29 @@ document.documentElement.classList.toggle("dark", theme === "dark");
 const scenario = params.get("scenario") ?? "ready";
 const withPlans = params.has("plans");
 const composer = params.has("composer");
+const inbox = params.has("inbox");
+const refusal = params.has("refusal");
 const plan = composer
   ? { ...previewPlan("free"), creditGrantedMicros: 0, creditRemainingMicros: 0 }
   : previewPlan("free");
 const canManage = scenario !== "readonly";
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
+const inboxNotices: BillingCreditNotification[] = (
+  ["unusual_spend", "topup_failed", "cap_reached"] as const
+).map((kind) => ({
+  id: kind,
+  accountId,
+  kind,
+  eventType: `billing.credits.${kind}`,
+  read: false,
+  details: { availableBalanceMicros: 0, lastHourSpendMicros: 18_500_000 },
+  createdAt: "2026-11-26T12:00:00Z",
+  action: {
+    label: "Manage billing",
+    path: `/workspaces/${workspaceId}/organization?section=billing`,
+  },
+}));
 const identity = {
   organizationId: accountId,
   workspaceId,
@@ -153,6 +178,24 @@ const context = {
   workspaces: [{ id: workspaceId, accountId, name: "Preview" }],
 } as AppContextValue;
 Object.assign(window, { creditBillingPreview: { calls } });
+function RefusedRequestPreview() {
+  const [creditRequired, setCreditRequired] = useState<CreditRequired | null>(null);
+  return (
+    <>
+      <Button
+        onClick={() => setCreditRequired({ workspaceId, accountId, code: "api_credits_required" })}
+      >
+        Ask about the meeting
+      </Button>
+      <CreditRequiredGate
+        creditRequired={creditRequired}
+        setCreditRequired={setCreditRequired}
+        accessContext={context.accessContext}
+      />
+    </>
+  );
+}
+
 const rootRoute = createRootRoute({
   component: () => (
     <AppContext.Provider value={context}>
@@ -174,10 +217,19 @@ const rootRoute = createRootRoute({
                 Implementation preview · Sample data · No payments
               </p>
               <h1 className="mb-6 text-xl font-semibold">
-                {composer ? "New chat" : "Billing & usage"}
+                {refusal ? "Meeting" : composer ? "New chat" : inbox ? "Inbox" : "Billing & usage"}
               </h1>
               <SectionVariantProvider variant="group">
-                {composer ? (
+                {refusal ? (
+                  <RefusedRequestPreview />
+                ) : inbox ? (
+                  <BillingInboxSection
+                    notifications={inboxNotices}
+                    workspaces={[{ id: workspaceId, accountId }]}
+                    markRead={async () => {}}
+                    onManageBilling={() => {}}
+                  />
+                ) : composer ? (
                   <EmptyCreditsNotice
                     accountId={accountId}
                     workspaceId={workspaceId}
