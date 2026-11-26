@@ -161,6 +161,7 @@ import {
   startDesktopConnectWatch,
   type DesktopConnectWatch,
 } from "@/lib/desktop-connect-watch";
+import { catalogConnectReturnPath } from "@/lib/integrations-callback-return";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -1308,8 +1309,10 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
           connectReturnUrl: window.location.href,
           returnPathFor: (id) => {
             returnItemId = id;
+            // Back to this item, keeping the way back to Enable.
+            const path = catalogConnectReturnPath(window.location.pathname, id);
             const back = new URLSearchParams(returnToSearch(returnTo) as Record<string, string>);
-            return `${window.location.pathname}?connect_item=${encodeURIComponent(id)}${back.size > 0 ? `&${back.toString()}` : ""}`;
+            return back.size > 0 ? `${path}&${back.toString()}` : path;
           },
           redirect: (url) => {
             watchDesktopConnect(targetItem, returnItemId, action);

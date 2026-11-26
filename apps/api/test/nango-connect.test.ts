@@ -206,6 +206,72 @@ describe("Nango Connect", () => {
     expect(html).toContain(`"contractRevision":"${OPENGENI_API_CONTRACT_REVISION}"`);
   });
 
+  test("on connect the page removes Nango's frame before it navigates back", async () => {
+    const response = await nangoConnectPage(
+      {
+        db: unreachableDb,
+        settings,
+        fetchImpl: fakeNango([]).fetchImpl,
+        nangoBackends: async () => backends,
+      },
+      {
+        state: await startedState(),
+        browser: { bindingDigests: [], signedInSubjectId: null },
+        requestUrl: "https://api.opengeni.test/v1/integrations/nango/connect",
+      },
+    );
+    const html = await response.text();
+    const json = /<script type="application\/json" id="nango-connect">(.*?)<\/script>/su.exec(
+      html,
+    )![1]!;
+    const script = /<script>(.*?)<\/script>/su.exec(html)![1]!;
+    const data = JSON.parse(json) as { connectOrigin: string };
+    const frameWindow = { postMessage() {} };
+    const frame = {
+      isConnected: true,
+      contentWindow: frameWindow,
+      remove() {
+        frame.isConnected = false;
+      },
+    };
+    const status = { textContent: "" };
+    const elements = new Map<string, unknown>([
+      ["nango-connect", { textContent: json }],
+      ["status", status],
+      ["nango-frame", frame],
+    ]);
+    let listener: ((event: unknown) => void) | undefined;
+    const replaced: string[] = [];
+    let resolveFetch: (value: unknown) => void = () => {};
+    const redirectTo = `/workspaces/${WORKSPACE}/integrations?open=item%3Amcp%3Agmail`;
+    const fakeWindow = {
+      addEventListener: (_type: string, handler: (event: unknown) => void) => {
+        listener = handler;
+      },
+      location: { replace: (url: string) => replaced.push(url) },
+    };
+    const fakeFetch = () =>
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+    new Function("window", "document", "fetch", "setTimeout", "clearTimeout", script)(
+      fakeWindow,
+      { getElementById: (id: string) => elements.get(id) },
+      fakeFetch,
+      () => 1,
+      () => {},
+    );
+    listener!({ origin: data.connectOrigin, source: frameWindow, data: { type: "connect" } });
+    // Nango's success screen (and its Finish button) is gone before navigation.
+    expect(frame.isConnected).toBe(false);
+    expect(status.textContent).toBe("Finishing connection…");
+    expect(replaced).toEqual([]);
+    resolveFetch({ ok: true, status: 200, json: async () => ({ status: "complete", redirectTo }) });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(replaced).toEqual([redirectTo]);
+    expect(status.textContent).toBe("Connected. Returning to Opengeni…");
+  });
+
   test("completion stores nothing until Nango has a connection with this attempt's tags", async () => {
     const token = await startedState();
     const state = readNangoConnectState(settings, token);

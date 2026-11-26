@@ -23,6 +23,14 @@ import { oneLine, type NormalizedEventInput } from "./normalize";
  * chain depth. App data changes (migration 1519) come from the same table:
  * records added, changed or removed in an App's collection and App SQL
  * writes, with the same causation and chain depth.
+ *
+ * Every event says in `data.visibility` whether everyone in the workspace may
+ * see what it is about (`workspace`) or only the source's owner may
+ * (`private`: their private meeting or chat, an Only me App, a member's
+ * usage). A run caused by a private event is an Only me chat for the
+ * automation's owner, whatever the automation's own visibility, and the run
+ * history hides what it was about from everyone else (event-triggers.ts in
+ * @opengeni/db, `ownerOnly`).
  */
 
 /** One recording fact as the feed keeps it in a delivery body. */
@@ -34,6 +42,8 @@ export type WorkspaceRecordingFact = {
   occurredAt: string;
   title: string | null;
   purpose: string | null;
+  /** Absent in bodies stored before it existed: then `data.visibility` decides. */
+  sharedWithWorkspace?: boolean | undefined;
 };
 
 type CatalogEntry = { description: string; summary: string };
@@ -57,7 +67,13 @@ type ActivityEventType = Exclude<WorkspaceEventType, RecordingEventType | keyof 
 
 type Field = [string, string];
 
+const VISIBILITY_FIELD: Field = [
+  "data.visibility",
+  "workspace when everyone in the workspace may see it, otherwise private; a private event runs in an Only me chat",
+];
+
 const CHAT_FIELDS: Field[] = [
+  VISIBILITY_FIELD,
   ["data.sessionId", "The chat, for the chat tools"],
   ["data.turnId", "The turn in that chat"],
   ["data.chatTitle", "The chat's title"],
@@ -70,6 +86,7 @@ const CHAT_FIELDS: Field[] = [
 ];
 
 const USAGE_FIELDS: Field[] = [
+  VISIBILITY_FIELD,
   ["data.scope", "workspace for the workspace's limit, member for one member's"],
   ["data.forYou", "true when it is about your own limit"],
   ["data.usedCredits", "Credits used in this period"],
@@ -84,6 +101,7 @@ const THRESHOLD_FIELD: Field = [
 ];
 
 const APP_FIELDS: Field[] = [
+  VISIBILITY_FIELD,
   ["data.appId", "The app, for the app tools"],
   ["data.appTitle", "The app's title"],
   [
@@ -226,7 +244,10 @@ const RECORDING_FIELDS: Array<[string, string]> = [
   ["data.title", "The recording's title"],
   ["data.purpose", "meeting, or browser for a browser tab an agent recorded"],
   ["data.recordingId", "The recording, for the meeting tools"],
-  ["data.visibility", "private, or workspace when it is shared with the workspace"],
+  [
+    "data.visibility",
+    "workspace when it is shared with the workspace, otherwise private; a private meeting runs in an Only me chat",
+  ],
   ["data.ownerSubjectId", "Who recorded it"],
   ["data.recordedByYou", "true when you recorded it, false when someone shared it with you"],
   ["data.externalRef", "The id the recording app gave it, if any"],
@@ -295,6 +316,16 @@ function madeByOpengeni(fact: WorkspaceRecordingFact): boolean {
 }
 
 /**
+ * An event's data with its `visibility` first, so it survives when the
+ * stored data has to be cut down to its first scalars; a value the fact's
+ * own data carried never overrides it.
+ */
+function withVisibility(shared: boolean, data: Record<string, unknown>): Record<string, unknown> {
+  const { visibility: _ignored, ...rest } = data;
+  return { visibility: shared ? "workspace" : "private", ...rest };
+}
+
+/**
  * One recording fact as a normalized event for the person whose source read
  * it: `viewerSubjectId` is that source's owner.
  */
@@ -304,6 +335,7 @@ export function workspaceRecordingEvent(
 ): NormalizedEventInput {
   const what = recordingEntry(fact.type)?.summary ?? fact.type;
   const title = fact.title ? oneLine(fact.title, 300) : null;
+  const shared = fact.sharedWithWorkspace ?? fact.data.visibility === "workspace";
   return {
     externalId: fact.id,
     type: fact.type,
@@ -312,13 +344,13 @@ export function workspaceRecordingEvent(
     summary: title ? `${what}: ${title}` : what,
     url: null,
     actor: { kind: madeByOpengeni(fact) ? "opengeni" : "unknown", name: null },
-    data: {
+    data: withVisibility(shared, {
       ...fact.data,
       recordingId: fact.recordingId,
       ...(title ? { title } : {}),
       ...(fact.purpose ? { purpose: fact.purpose } : {}),
       recordedByYou: viewerSubjectId !== null && fact.data.ownerSubjectId === viewerSubjectId,
-    },
+    }),
   };
 }
 
@@ -349,6 +381,8 @@ export type WorkspaceActivityFact = {
   /** The App an app.* fact is about, and its title the reader saw. */
   appId?: string | null;
   appTitle?: string | null;
+  /** Everyone in the workspace may see what it is about; absent (older bodies) is private. */
+  sharedWithWorkspace?: boolean | undefined;
 };
 
 function percent(value: unknown): string | null {
@@ -384,6 +418,7 @@ export function workspaceActivityEvent(
   const mine = viewerSubjectId !== null && fact.subjectId === viewerSubjectId;
   const what = activityEntry(fact.type)?.summary ?? fact.type;
   const occurredAt = new Date(fact.occurredAt);
+  const shared = fact.sharedWithWorkspace === true;
   if (fact.type.startsWith("usage.")) {
     return {
       externalId: fact.id,
@@ -393,11 +428,11 @@ export function workspaceActivityEvent(
       summary: usageSummary(fact, mine),
       url: null,
       actor: { kind: "unknown", name: null },
-      data: { ...fact.data, forYou: mine },
+      data: withVisibility(shared, { ...fact.data, forYou: mine }),
       chainDepth: 0,
     };
   }
-  if (fact.type.startsWith("app.")) return appActivityEvent(fact, mine, what, occurredAt);
+  if (fact.type.startsWith("app.")) return appActivityEvent(fact, mine, what, occurredAt, shared);
   const title = fact.chatTitle ? oneLine(fact.chatTitle, 300) : null;
   const byAutomation = fact.automationRunId !== null || fact.turnId === null;
   const forYou =
@@ -414,7 +449,7 @@ export function workspaceActivityEvent(
     actor: byAutomation
       ? { kind: "opengeni", name: fact.automationName }
       : { kind: "person", name: fact.subjectLabel },
-    data: {
+    data: withVisibility(shared, {
       ...fact.data,
       sessionId: fact.sessionId,
       turnId: fact.turnId,
@@ -423,7 +458,7 @@ export function workspaceActivityEvent(
       ...(fact.automationId ? { automationId: fact.automationId } : {}),
       ...(fact.automationRunId ? { automationRunId: fact.automationRunId } : {}),
       ...forYou,
-    },
+    }),
     chainDepth: fact.chainDepth,
   };
 }
@@ -438,6 +473,7 @@ function appActivityEvent(
   mine: boolean,
   what: string,
   occurredAt: Date,
+  shared: boolean,
 ): NormalizedEventInput {
   const appTitle = fact.appTitle ? oneLine(fact.appTitle, 200) : null;
   const collection = text(fact.data.collection);
@@ -456,14 +492,14 @@ function appActivityEvent(
       : fact.subjectId !== null
         ? { kind: "person", name: fact.subjectLabel }
         : { kind: "unknown", name: null },
-    data: {
+    data: withVisibility(shared, {
       ...fact.data,
       ...(fact.appId ? { appId: fact.appId } : {}),
       ...(appTitle ? { appTitle } : {}),
       writtenByYou: mine,
       ...(fact.automationId ? { automationId: fact.automationId } : {}),
       ...(fact.automationRunId ? { automationRunId: fact.automationRunId } : {}),
-    },
+    }),
     chainDepth: fact.chainDepth,
   };
 }
@@ -513,6 +549,7 @@ function activityFact(entry: unknown): WorkspaceActivityFact | null {
     url: nullableText(fact.url),
     appId: nullableText(fact.appId),
     appTitle: nullableText(fact.appTitle),
+    sharedWithWorkspace: fact.sharedWithWorkspace === true,
   };
 }
 
@@ -569,6 +606,9 @@ export function workspaceDeliveryEvents(
           occurredAt,
           title: text(fact.title),
           purpose: text(fact.purpose),
+          ...(typeof fact.sharedWithWorkspace === "boolean"
+            ? { sharedWithWorkspace: fact.sharedWithWorkspace }
+            : {}),
         },
         viewerSubjectId,
       ),

@@ -11,6 +11,7 @@ import {
 } from "@opengeni/contracts";
 import {
   eventSourceVisibleTo,
+  eventSummariesForReader,
   getEventSource,
   getScheduledTaskEvents,
   getScheduledTaskRunEventOccurrences,
@@ -275,10 +276,15 @@ export async function withScheduledTaskEvents(
   });
 }
 
-/** Attach the events an event run carried. */
+/**
+ * Attach the events an event run carried, as `reader` may see them: an event
+ * only the automation's owner may see (their private meeting or chat) keeps
+ * only which event it was for anyone else.
+ */
 export async function withScheduledTaskRunEventOccurrences(
   db: Database,
   runs: ScheduledTaskRun[],
+  reader: { ownerSubjectId: string | null; readerSubjectId: string | null },
 ): Promise<ScheduledTaskRun[]> {
   const eventRuns = runs.filter((run) => run.triggerType === "event");
   const workspaceId = eventRuns[0]?.workspaceId;
@@ -288,9 +294,14 @@ export async function withScheduledTaskRunEventOccurrences(
     workspaceId,
     eventRuns.map((run) => run.id),
   );
-  return runs.map((run) =>
-    run.triggerType === "event"
-      ? { ...run, eventOccurrence: occurrences.get(run.id) ?? null }
-      : run,
-  );
+  return runs.map((run) => {
+    if (run.triggerType !== "event") return run;
+    const occurrence = occurrences.get(run.id);
+    return {
+      ...run,
+      eventOccurrence: occurrence
+        ? { ...occurrence, events: eventSummariesForReader(occurrence.events, reader) }
+        : null,
+    };
+  });
 }

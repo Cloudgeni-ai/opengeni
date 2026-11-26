@@ -14586,8 +14586,10 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `session_usage_limit` (an existing-session task reached its per-task usage
  * limit; admitted again once a person raises or clears it)
  * (transient), and for event runs `chain_limit` (too deep a chain of
- * automations) and `duplicate_agent_run` (another automation of the same
- * agent took the delivery). `scheduled_dispatch_exhausted` records a failed
+ * automations), `duplicate_agent_run` (another automation of the same
+ * agent took the delivery) and `owner_only_event` (an event only the
+ * automation's owner may see, such as their private meeting, would have run in
+ * a chat shared with the workspace). `scheduled_dispatch_exhausted` records a failed
  * occurrence whose dispatch retries have run out; it is `retryable: true`
  * because later occurrences can still start. Readers must tolerate new reasons.
  */

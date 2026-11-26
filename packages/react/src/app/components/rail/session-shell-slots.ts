@@ -15,6 +15,11 @@ export type SessionShellSlots = Readonly<{
   /** Primary navigation after "New session" (inbox, workspace shortcuts). */
   primaryNav?: ReactNode;
   /**
+   * The primary navigation renders "New session" itself (RailNewSessionLink),
+   * among its entries, so the person can order it; the rail leaves out its own.
+   */
+  primaryNavPlacesNewSession?: boolean;
+  /**
    * The workspace's customizable links and groups (docs/sidebar-layout.md),
    * under the primary navigation and above the sessions.
    */

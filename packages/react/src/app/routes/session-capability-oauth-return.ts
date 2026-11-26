@@ -12,6 +12,11 @@ import {
   attachSessionCapability,
   continueAfterCapabilitySetup,
 } from "../components/capabilities/attach-session-capability";
+import {
+  completeDriveConnectReturn,
+  DRIVE_MCP_URL,
+  resolveDriveConnectReturn,
+} from "../lib/drive-connect-return";
 
 export type McpCapabilityOAuthReturn = {
   name: string;
@@ -71,4 +76,46 @@ export async function finishMcpCapabilityOAuthReturn(input: {
   await attachSessionCapability(t, client, workspaceId, sessionId, connected);
   continueAfterCapabilitySetup(client, workspaceId, sessionId, connected.id);
   return { name: item.name, needsPersonalReview: false };
+}
+
+/**
+ * Finish a Google Drive connect started from a chat. Drive returns to the
+ * exact chat URL with only its `drive_connect_return` nonce, so the account
+ * comes from the saved Connect attempt; the rest is an ordinary OAuth return.
+ */
+export async function finishDriveConnectReturnInChat(input: {
+  client: ChatClient<OpenGeniClient>;
+  workspaceId: string;
+  sessionId: string;
+  nonce: string;
+  storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+  refreshCatalog: (workspaceId: string) => Promise<unknown>;
+}): Promise<McpCapabilityOAuthReturn> {
+  const { client, workspaceId, nonce, storage } = input;
+  const { itemId, connectionId } = await resolveDriveConnectReturn({
+    client,
+    workspaceId,
+    nonce,
+    storage,
+  });
+  // The card may have just created the catalog entry; read it fresh.
+  const catalog = (await client.listCapabilities(workspaceId)).items;
+  const item = catalog.find((candidate) => candidate.id === itemId);
+  if ((item?.mcpUrl ?? item?.endpointUrl) !== DRIVE_MCP_URL)
+    throw new Error("The Google Drive connector changed. Open Drive to finish setup.");
+  const finished = await finishMcpCapabilityOAuthReturn({
+    client,
+    workspaceId,
+    sessionId: input.sessionId,
+    capabilityId: itemId,
+    params: new URLSearchParams({
+      connectionId,
+      providerDomain: new URL(DRIVE_MCP_URL).hostname,
+      ownership: "personal",
+    }),
+    catalog,
+    refreshCatalog: input.refreshCatalog,
+  });
+  completeDriveConnectReturn(workspaceId, nonce, storage);
+  return finished;
 }

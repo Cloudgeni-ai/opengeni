@@ -70,6 +70,7 @@ import {
   withScheduledTaskRunAccessFailures,
   withScheduledTaskEvents,
   withScheduledTaskRunEventOccurrences,
+  scheduledTaskViewerSubjectForGrant,
 } from "@opengeni/core";
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
@@ -656,7 +657,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       settings: deps.settings,
       grant,
       task,
-      runs: await withScheduledTaskRunEventOccurrences(db, taskRuns),
+      runs: await withScheduledTaskRunEventOccurrences(db, taskRuns, {
+        ownerSubjectId: task.ownerSubjectId,
+        readerSubjectId: await scheduledTaskViewerSubjectForGrant(db, grant),
+      }),
     });
     return c.json(runs.map((run) => scheduledTaskRunForGrant(run, grant)));
   });

@@ -23,6 +23,7 @@ import {
   openSuffixApprovedCallIds,
   settleOpenSuffixResumeIfNeeded,
 } from "../src/activities/open-suffix-resume";
+import { turnExecutionInterrupted } from "../src/activities/run-input";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -238,6 +239,27 @@ test("an earlier turn's approval never resumes a later paused turn", async () =>
   expect(answered).toMatchObject({ kind: "approval-pending", triggerEventId: decisionB.id });
   const resumedB = await world.claimed({ kind: "approval", triggerEventId: decisionB.id });
   expect(resumedB.id).toBe(world.turnB.id);
+});
+
+test("resuming from an answered approval is not told an execution was interrupted", async () => {
+  // Staging, 26 Nov 2026 (session a7bb0c8f): the recovery note on an approval
+  // resume made the model repeat a completed listing to "check state".
+  const world = await queuedTurnPausedAfterEarlierApproval();
+  expect(world.turnB.resumedFromPause).toBeUndefined();
+  expect(turnExecutionInterrupted(world.turnB)).toBe(false);
+  const decisionB = await world.approve(world.callB);
+  const resumedB = await world.claimed({ kind: "approval", triggerEventId: decisionB.id });
+  expect(resumedB.executionGeneration).toBe(world.turnB.executionGeneration + 1);
+  expect(resumedB.resumedFromPause).toBe(true);
+  expect(turnExecutionInterrupted(resumedB)).toBe(false);
+});
+
+test("a re-claim after a cut-off execution is still told to check before repeating", () => {
+  expect(turnExecutionInterrupted({ executionGeneration: 1 })).toBe(false);
+  expect(turnExecutionInterrupted({ executionGeneration: 2 })).toBe(true);
+  expect(turnExecutionInterrupted({ executionGeneration: 3, resumedFromPause: undefined })).toBe(
+    true,
+  );
 });
 
 test("an answer recorded for no turn never resumes a paused turn", async () => {
