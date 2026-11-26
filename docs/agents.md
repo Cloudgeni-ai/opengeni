@@ -828,7 +828,8 @@ of suggestions (never the workspace default), from one preset file per
 answer (`apps/web/src/components/onboarding/presets/`): **Software
 engineer** gets Engineering (PR reviewer, Bug fixer, Dependency updater,
 Connect GitHub, Slack and Linear), **Not an engineer** gets Your work
-(Feedback board, Connect Slack, Google Drive, Gmail and Google Calendar).
+(Feedback board, Connect Slack, Google Drive and more, which opens
+Connections for Slack, Google Drive, Gmail and Google Calendar).
 Presets list only ready-mades that exist. The links open Get started, an
 agent's ready-made preview (Add leads to Enable), an app's Enable or
 Connections, so nothing is added until the person turns it on. It

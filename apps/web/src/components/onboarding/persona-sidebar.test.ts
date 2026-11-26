@@ -47,9 +47,10 @@ describe("persona first run", () => {
       "https://app.example/workspaces/w/plugins",
     ]);
     expect(items.at(-1)).toMatchObject({ label: "Connect GitHub, Slack and Linear" });
-    expect(
-      personaSidebarGroup("everyday", { origin: "https://a", workspaceId: "w" }),
-    ).toMatchObject({ label: "Your work" });
+    const everyday = personaSidebarGroup("everyday", { origin: "https://a", workspaceId: "w" });
+    expect(everyday).toMatchObject({ label: "Your work" });
+    const everydayItems = everyday && everyday.type === "group" ? (everyday.items ?? []) : [];
+    expect(everydayItems.at(-1)).toMatchObject({ label: "Connect Slack, Google Drive and more" });
     expect(personaSidebarGroup("embed", { origin: "https://a", workspaceId: "w" })).toBeNull();
     expect(
       personaSidebarGroup("cloud", { origin: "http://localhost", workspaceId: "w" }),

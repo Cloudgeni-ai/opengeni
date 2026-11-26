@@ -37,9 +37,10 @@ export const PERSONA_PRESETS: Record<"cloud" | "everyday", PersonaPreset> = {
 
 type Suggestion = { label: string; path: string; icon: SidebarItemIcon };
 
-/** "GitHub, Slack and Linear". */
+/** "GitHub, Slack and Linear"; past three, "Slack, Google Drive and more" so it fits the rail. */
 function listInWords(names: readonly string[]): string {
   if (names.length <= 1) return names.join("");
+  if (names.length > 3) return `${names.slice(0, 2).join(", ")} and more`;
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
