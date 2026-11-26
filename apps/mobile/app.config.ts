@@ -1,5 +1,7 @@
 import type { ConfigContext, ExpoConfig } from "expo/config";
 
+const appStoreBundleId = "ai.opengeni.ios";
+
 // First-party data collected by the native client and its hosted service. Review the
 // archive's SDK manifests and deployed services separately when filing App Privacy.
 const appPrivacyData = [
@@ -51,11 +53,19 @@ export function buildExpoConfig(
     ...(appStore && {
       ios: {
         ...config.ios,
+        bundleIdentifier: appStoreBundleId,
         appleTeamId,
         buildNumber,
         entitlements: { ...config.ios?.entitlements, "aps-environment": "production" },
         infoPlist: {
           ...config.ios?.infoPlist,
+          UIApplicationShortcutItems: [
+            {
+              UIApplicationShortcutItemType: `${appStoreBundleId}.call`,
+              UIApplicationShortcutItemTitle: "Call your agent",
+              UIApplicationShortcutItemIconSymbolName: "phone.fill",
+            },
+          ],
           NSMotionUsageDescription:
             "Opengeni uses motion to detect shakes when you turn on shake to send feedback.",
         },

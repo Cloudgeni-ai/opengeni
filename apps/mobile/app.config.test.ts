@@ -12,20 +12,25 @@ test("only an explicit iOS store build changes the native configuration", () => 
   const { OPENGENI_IOS_APP_STORE: _, ...credentials } = store;
   const config = buildExpoConfig(app.expo, credentials);
   expect(config.ios).toEqual(app.expo.ios);
+  expect(config.ios?.bundleIdentifier).toBe("ai.opengeni.app");
   expect(config.plugins).toEqual(app.expo.plugins);
 
   const production = buildExpoConfig(app.expo, store);
   expect(production.version).toBe(app.expo.version);
   expect(production.ios).toMatchObject({
-    bundleIdentifier: "ai.opengeni.app",
+    bundleIdentifier: "ai.opengeni.ios",
     appleTeamId: "ABCDE12345",
     buildNumber: "23",
     entitlements: {
       "aps-environment": "production",
       "com.apple.developer.usernotifications.time-sensitive": true,
     },
+    infoPlist: {
+      UIApplicationShortcutItems: [{ UIApplicationShortcutItemType: "ai.opengeni.ios.call" }],
+    },
   });
   expect(production.android).toEqual(app.expo.android);
+  expect(production.scheme).toBe(config.scheme);
   expect(production.ios?.privacyManifests?.NSPrivacyAccessedAPITypes).toHaveLength(1);
   expect(production.ios?.privacyManifests?.NSPrivacyCollectedDataTypes).toContainEqual({
     NSPrivacyCollectedDataType: "NSPrivacyCollectedDataTypeAudioData",

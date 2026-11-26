@@ -236,10 +236,11 @@ xcodebuild -workspace ios/Opengeni.xcworkspace -scheme Opengeni \
 
 The marketing version is `expo.version` in `app.json`. Choose a fresh build
 number for every App Store upload; prebuild applies it to both the app and
-the embedded control. Provision `ai.opengeni.app` with Push Notifications
-and Time Sensitive Notifications and `ai.opengeni.app.CallControl` as a
-separate App ID without those capabilities. Use the same team for both
-targets. Export the archive locally using Xcode's App Store Connect distribution
+the embedded control. The App Store profile uses `ai.opengeni.ios` with Push
+Notifications and Time Sensitive Notifications, and `ai.opengeni.ios.CallControl`
+as a separate App ID without those capabilities. The development defaults and
+Android package are unchanged. Use the same team for both targets. Export the
+archive locally using Xcode's App Store Connect distribution
 option, or `xcodebuild -exportArchive` with an `app-store-connect` export
 options plist and the appropriate signing assets for both IDs.
 
@@ -250,4 +251,7 @@ the required-reason declarations do not substitute for App Store Connect's
 data collection and tracking answers. Run the Release app in the simulator
 without Metro, then on a physical device verify real sign-in, notifications,
 and locked-device incoming calls. For production APNs delivery, the public
-server needs APNs credentials for the distribution team (see Notifications).
+server needs `ai.opengeni.ios` in `OPENGENI_NATIVE_APP_IDS` alongside any
+existing app IDs, and APNs credentials for the distribution team (see
+Notifications). The server has one APNs credential set: don't replace it if
+that would break another iOS app served by the same deployment.
