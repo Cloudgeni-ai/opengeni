@@ -87,6 +87,7 @@ type Grant = Awaited<ReturnType<typeof workspace>>;
 async function transcriptWatcher(
   grant: Grant,
   runMode: "new_session_per_run" | "reusable_session" = "new_session_per_run",
+  visibility: "private" | "workspace" = "workspace",
 ) {
   const { source } = await createEventSource(client.db, {
     accountId: grant.accountId,
@@ -101,6 +102,7 @@ async function transcriptWatcher(
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     ownerSubjectId: grant.subjectId,
+    visibility: visibility === "private" ? "user_private" : "workspace_shared",
     createdBy: { kind: "subject", subjectId: grant.subjectId },
     name: "Summarize meetings",
     status: "active",
@@ -111,7 +113,7 @@ async function transcriptWatcher(
     agentConfig: { prompt: "Summarize the meeting", resources: [], tools: [], metadata: {} },
     metadata: {},
   } as Parameters<typeof createScheduledTask>[1]);
-  expect(task.visibility).toBe("workspace");
+  expect(task.visibility).toBe(visibility);
   await setScheduledTaskEvents(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -247,5 +249,22 @@ describe("an event only the automation's owner may see", () => {
     );
     expect(result).toMatchObject({ action: "start" });
     expect((await chatOf(run.sessionId!)).visibility).toBe("workspace_shared");
+  });
+
+  test("an Only me automation that keeps one Only me chat runs on the private meeting", async () => {
+    if (!available) return;
+    const grant = await workspace();
+    const { source, task } = await transcriptWatcher(grant, "reusable_session", "private");
+    const { result, run } = await fire(
+      grant,
+      source.id,
+      task.id,
+      transcriptReady("Salary talk", "private"),
+    );
+    expect(result).toMatchObject({ action: "start" });
+    expect(await chatOf(run.sessionId!)).toEqual({
+      visibility: "user_private",
+      owner_subject_id: grant.subjectId,
+    });
   });
 });

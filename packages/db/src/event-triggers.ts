@@ -1776,6 +1776,7 @@ type DispatchFacts = {
   oldest_recent_occurrence_at: Date | string | null;
   task_owner: string | null;
   sync_owner: string | null;
+  /** The stored value: `user_private` (Only me) or `workspace_shared`. */
   task_visibility: string;
   task_run_mode: string;
   /** The visibility of the chat the automation continues, when it has one. */
@@ -1961,7 +1962,7 @@ export async function claimEventTriggerDispatch(
       // per streak.
       const ownerOnlyHere =
         facts.task_run_mode === "new_session_per_run" ||
-        (facts.task_visibility === "private" &&
+        (facts.task_visibility === "user_private" &&
           (facts.kept_chat_visibility === null || facts.kept_chat_visibility === "user_private"));
       const withheld = ownerOnlyHere
         ? []
