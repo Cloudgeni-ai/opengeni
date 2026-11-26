@@ -129,7 +129,18 @@ describe.skipIf(!realDatabase)("1302-1310 Ultrafast latency mode", () => {
       }),
     ).rejects.toThrow("sessions_latency_mode_check");
 
-    await migrate(owned!.ownerUrl);
+    // Check the original trigger at the historical feature boundary: later
+    // releases replace its metadata fallback with the stored session columns.
+    for (const name of MIGRATIONS) {
+      await copyFile(join(source, name), join(prefix!, name));
+    }
+    await migrate(owned!.ownerUrl, undefined, { migrationsDirectory: prefix! });
+    const [row] = await owned!.admin<{ definition: string }[]>`
+      select pg_get_functiondef('admit_scheduled_agent_run_execution()'::regprocedure) as definition`;
+    expect(row?.definition).toContain(
+      `IN (${LatencyMode.options.map((mode) => `'${mode}'`).join(",")})`,
+    );
+    expect(row?.definition).not.toContain("IN ('standard','priority','fast')");
 
     const after = await constraints();
     expect(after.map(({ name, valid }) => ({ name, valid }))).toEqual(
@@ -140,6 +151,8 @@ describe.skipIf(!realDatabase)("1302-1310 Ultrafast latency mode", () => {
     for (const { definition } of after) {
       for (const mode of LatencyMode.options) expect(definition).toContain(`'${mode}'`);
     }
+    // The runtime fixture uses today's session columns, not the historical schema.
+    await migrate(owned!.ownerUrl);
     for (const mode of LatencyMode.options) {
       expect((await session(mode)).latencyMode).toBe(mode);
     }
@@ -147,13 +160,4 @@ describe.skipIf(!realDatabase)("1302-1310 Ultrafast latency mode", () => {
       select latency_mode from sessions where id = ${existingSessionId}`;
     expect(existing?.latency_mode).toBe("fast");
   }, 600_000);
-
-  test("scheduled-run admission reads every mode from session metadata", async () => {
-    const [row] = await owned!.admin<{ definition: string }[]>`
-      select pg_get_functiondef('admit_scheduled_agent_run_execution()'::regprocedure) as definition`;
-    expect(row?.definition).toContain(
-      `IN (${LatencyMode.options.map((mode) => `'${mode}'`).join(",")})`,
-    );
-    expect(row?.definition).not.toContain("IN ('standard','priority','fast')");
-  });
 });

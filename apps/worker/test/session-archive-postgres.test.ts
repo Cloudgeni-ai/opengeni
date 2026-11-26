@@ -840,6 +840,62 @@ describe("restoring an archived chat from long-term storage", () => {
     });
   }, 180_000);
 
+  test("a restored update that carries a turn's subscription authority gets its record back", async () => {
+    const activities = inMemoryArchive(new Map(), 14);
+    const scope = await idleSession();
+    const [turn] = await shared.admin<{ id: string }[]>`select id::text as id from session_turns
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
+    const updateId = crypto.randomUUID();
+    const commandId = crypto.randomUUID();
+    const payload = {
+      type: "background_command_result",
+      commandId,
+      state: "exited",
+      exitCode: 0,
+      reason: "exited",
+      outputLocator: { eventType: "sandbox.command.output.delta", commandId },
+    };
+    // The turn was accepted before the drained Claude cutover, so it holds a
+    // legacy record, and an update caused by that turn copies the record.
+    const legacy = { personal: [], shared_pool: "none", legacy_scope: "missing" };
+    await shared.admin.begin(async (sql) => {
+      await sql`insert into opengeni_private.subscription_authority_compat (
+          account_id, workspace_id, provider, carrier_kind, turn_id, personal, shared_pool,
+          legacy_scope)
+        values (${scope.accountId}, ${scope.workspaceId}, 'claude', 'session_turn', ${turn!.id},
+          ${sql.json(legacy.personal)}, ${legacy.shared_pool}, ${legacy.legacy_scope})`;
+      await sql`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, classification, source_id, dedupe_key,
+          summary, payload, state, lineage)
+        values (${updateId}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+          ${payload.type}, 'info', ${commandId}, ${crypto.randomUUID()}, 'pending input',
+          ${sql.json(payload)}, 'pending', ${sql.json({ causalTurnId: turn!.id })})`;
+      await sql`insert into opengeni_private.subscription_authority_compat (
+          account_id, workspace_id, provider, carrier_kind, system_update_id, personal,
+          shared_pool, legacy_scope)
+        values (${scope.accountId}, ${scope.workspaceId}, 'claude', 'session_system_update',
+          ${updateId}, ${sql.json(legacy.personal)}, ${legacy.shared_pool}, ${legacy.legacy_scope})`;
+    });
+    const updateRecord = async () =>
+      await shared.admin<{ personal: unknown; shared_pool: string; legacy_scope: string }[]>`
+        select personal, shared_pool, legacy_scope from opengeni_private.subscription_authority_compat
+        where workspace_id = ${scope.workspaceId} and system_update_id = ${updateId}`;
+    expect(await updateRecord()).toHaveLength(1);
+
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    expect((await contentState(scope.sessionId)).content_archive_state).toBe("archived");
+    // The purge took the update and, with it, its record.
+    expect(await updateRecord()).toEqual([]);
+
+    expect((await unarchiveSession(client.db, scope))?.outcome).toBe("restoring");
+    expect(await activities.restoreArchivedSessions(scope)).toEqual({ restored: 1 });
+    expect((await contentState(scope.sessionId)).content_archive_state).toBeNull();
+    expect((await restorableRows(scope)).session_system_updates).toMatchObject([
+      { id: updateId, state: "pending" },
+    ]);
+    expect(await updateRecord()).toEqual([legacy]);
+  }, 180_000);
+
   test("a stored chat and its sub-chat come back with every row they had, and stay live", async () => {
     const objects = new Map<string, Uint8Array>();
     const activities = inMemoryArchive(objects);

@@ -170,6 +170,10 @@ export type ArtifactLabels = Readonly<{
   siteUnpublished: string;
   siteReferenceInvalid: string;
   siteLoadFailed: string;
+  /** A chat preview's frame could not be loaded. */
+  previewLoadFailed: string;
+  /** Announced while a chat preview loads. */
+  preparingPreview: string;
   retry: string;
   tryAgain: string;
   toolCount: (count: number) => string;
@@ -209,6 +213,8 @@ export const DEFAULT_ARTIFACT_LABELS = (t: OpenGeniText): ArtifactLabels =>
     siteUnpublished: t("artifacts.artifactChrome.thisSiteIsArchivedOr"),
     siteReferenceInvalid: t("artifacts.artifactChrome.thisSiteReferenceIsInvalid"),
     siteLoadFailed: t("artifacts.artifactChrome.couldnTLoadThisSite"),
+    previewLoadFailed: t("artifacts.artifactChrome.couldnTLoadThisPreview"),
+    preparingPreview: t("previewLoading.preparingPreview"),
     retry: t("artifacts.artifactChrome.retry"),
     tryAgain: t("artifacts.artifactChrome.tryAgain"),
     toolCount: (count: number) => t("counts.tools", { count }),

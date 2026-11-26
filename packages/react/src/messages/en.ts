@@ -72,6 +72,7 @@ export const englishMessages = {
   "artifacts.artifactChrome.couldNotOpenThisArtifact": "Could not open this artifact",
   "artifacts.artifactChrome.couldnTLoadThisSite": "Couldn’t load this app.",
   "artifacts.artifactChrome.couldnTLoadThisSite2": "Couldn't load this app",
+  "artifacts.artifactChrome.couldnTLoadThisPreview": "Couldn’t load this preview.",
   "artifacts.artifactChrome.countvalueWorkspaceToolsAvailableTo":
     "{countValue} workspace tools available to this app",
   "artifacts.artifactChrome.edit": "Edit",
@@ -5798,6 +5799,7 @@ export const englishMessages = {
   "timeline.noticePresentation.youRejectedTitle": "You declined “{title}”.",
   "timeline.noticePresentation.youRejectedTitleWithDetail": "You declined “{title}” ({detail}).",
   "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
+  "timeline.noticePresentation.notAnswered": "Not answered.",
   "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
   "timeline.patchApplyCommand.copiedPasteItInA":

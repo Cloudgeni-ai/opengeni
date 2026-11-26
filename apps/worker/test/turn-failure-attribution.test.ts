@@ -62,6 +62,15 @@ test("model response instrumentation separates customer HTTP quota from platform
 });
 
 test("settlement uses frozen payer rather than external metering and actual terminal evidence", () => {
+  // The organization's plan refusing a sandbox is not a platform failure,
+  // even on a deployment-paid model.
+  for (const code of ["sandbox_compute_unavailable", "sandbox_card_required"]) {
+    expect(
+      settledTurnFailureOrigin({ upstreamPayer: "deployment", metering: "external" }, "failed", [
+        { type: "turn.failed", payload: { code } },
+      ]),
+    ).toBe("customer_plan");
+  }
   const events = [{ type: "turn.failed", payload: { code: "provider_quota_exhausted" } }];
   for (const metering of ["external", "opengeni_credits"] as const) {
     expect(

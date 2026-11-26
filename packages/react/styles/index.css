@@ -71,6 +71,13 @@
   background-size: 18px 18px;
 }
 .og-preview-loading canvas[data-painted="true"] { background-image: none; }
+/* Covering a preview frame until it paints: fill the frame's box. */
+.og-preview-loading[data-fill] {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+}
+.og-preview-loading[data-fill] canvas { height: 100%; }
 .og-preview-loading-label {
   position: absolute;
   left: 16px;

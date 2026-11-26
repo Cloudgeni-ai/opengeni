@@ -51,13 +51,14 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
 
   const projection = state.projection;
   // Ordinary retry is disclosed only after a current read rules out this lane.
+  // A failure that did not involve the sandbox keeps its ordinary remedies:
+  // checkpoint recovery (or a Connected Machine's lack of it) is not about it.
   const recoveryNotRequired =
     projection?.status === "unsupported" ||
     (projection?.status === "blocked" &&
       projection.reason === "historical_checkpoint_not_required");
   if (
     recoveryNotRequired &&
-    projection?.reason !== "connected_machine_selected" &&
     !props.structuralFailure &&
     !state.request &&
     !projection?.target &&

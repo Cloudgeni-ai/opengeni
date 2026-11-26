@@ -2046,7 +2046,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
-      ...projectKnowledgeIndexDiagnosticAttributes(attributes),
+      ...projectSqlStateDiagnosticAttributes(attributes),
       ...projectIndependentSessionTitleDiagnosticAttributes(attributes),
       ...projectTemporalSdkDiagnosticAttributes(attributes),
       ...projectContextCompactionAttributes(attributes),
@@ -2282,8 +2282,18 @@ function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes
   return projected;
 }
 
-function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attributes {
-  if (attributes.errorClass !== "KnowledgeIndexOperationError") return {};
+/** Error classes whose logs may name the SQLSTATE of the database step that failed. */
+const SQLSTATE_DIAGNOSTIC_ERROR_CLASSES = new Set([
+  "KnowledgeIndexOperationError",
+  "SessionArchiveOperationError",
+]);
+
+function projectSqlStateDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (
+    typeof attributes.errorClass !== "string" ||
+    !SQLSTATE_DIAGNOSTIC_ERROR_CLASSES.has(attributes.errorClass)
+  )
+    return {};
   const sqlState = attributes.sqlState;
   // A SQLSTATE is a five-character protocol code, never message or SQL text.
   return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};

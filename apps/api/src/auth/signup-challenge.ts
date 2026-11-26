@@ -49,10 +49,15 @@ export async function verifySignupChallenge(
   settings: Settings,
   token: unknown,
   fetcher: typeof fetch = fetch,
+  options: { requiredMessage?: string } = {},
 ): Promise<void> {
   if (!settings.signupChallengeEnabled) return;
   if (typeof token !== "string" || !token.trim() || token.length > 2048) {
-    throw challengeError(403, "SIGNUP_CHALLENGE_REQUIRED", "Complete the signup verification.");
+    throw challengeError(
+      403,
+      "SIGNUP_CHALLENGE_REQUIRED",
+      options.requiredMessage ?? "Complete the signup verification.",
+    );
   }
   let value: unknown;
   try {
@@ -111,6 +116,28 @@ export async function verifySignupChallenge(
       "Verification expired or failed. Please try again.",
     );
   }
+}
+
+/** Email sign-in needs the challenge only when both settings are on. */
+export function emailSignInChallengeRequired(settings: Settings): boolean {
+  return settings.signupChallengeEnabled && settings.signInChallengeEnabled === true;
+}
+
+/**
+ * Email sign-in carries the same challenge as email sign-up, from the same
+ * widget and with the same error shape, so password guessing from scripts
+ * needs a solved challenge per attempt. Passkeys, Google, GitHub and the
+ * session-set login window are separate routes and are unaffected.
+ */
+export async function verifyEmailSignInChallenge(
+  settings: Settings,
+  token: unknown,
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  if (!emailSignInChallengeRequired(settings)) return;
+  await verifySignupChallenge(settings, token, fetcher, {
+    requiredMessage: "Complete the verification to sign in.",
+  });
 }
 
 /**

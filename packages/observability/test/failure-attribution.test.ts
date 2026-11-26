@@ -2,6 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { failureOrigin, isCustomerManagedMetricProvider } from "../src/failure-attribution";
 
 describe("failure ownership", () => {
+  test("the organization's plan refusing a sandbox is customer_plan whoever pays for the model", () => {
+    for (const code of ["sandbox_compute_unavailable", "sandbox_card_required"]) {
+      for (const customerManaged of [false, true]) {
+        expect(failureOrigin({ customerManaged, outcome: "failed", code })).toBe("customer_plan");
+        expect(failureOrigin({ customerManaged, outcome: "completed", code })).toBe("none");
+      }
+    }
+    // Shared unpaid capacity is the platform's fleet, not the organization's plan.
+    expect(
+      failureOrigin({
+        customerManaged: false,
+        outcome: "failed",
+        code: "sandbox_capacity_unpaid_busy",
+      }),
+    ).toBe("platform");
+  });
   test("closed provider-account refusals count only on customer-managed providers", () => {
     for (const providerAccountRefusal of [
       "byok_capacity_restricted",

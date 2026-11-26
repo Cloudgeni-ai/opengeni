@@ -543,8 +543,16 @@ retain only their value kind.
 
 `opengeni_turns_total`, `opengeni_model_calls_total`, and the canonical startup
 milestone histogram carry bounded `failure_origin` values: `none`, `platform`,
-and `customer_provider`. Platform includes unclassified failures: missing
+and `customer_provider`; the turn and startup milestone series also carry
+`customer_plan`.
+Platform includes unclassified failures: missing
 labels from older workers also remain in platform alerts during rolling updates.
+
+`customer_plan` is a turn that failed because the organization's own plan
+refused a sandbox (`sandbox_compute_unavailable` or `sandbox_card_required`:
+no paid plan or credit, a card to verify, or the Free plan's daily box time
+spent), whoever pays for the model. Shared unpaid capacity
+(`sandbox_capacity_unpaid_busy`) stays platform.
 
 Turn attribution uses the accepted execution policy's upstream payer identity
 and the typed failure committed by the winning settlement. It never infers
@@ -574,9 +582,10 @@ body that does not arrive within five seconds is counted as an unclassified 404.
 does not change retries, copy, billing, history or session outcomes.
 
 The canonical turn-failure, model-call-failure and first-byte-availability alerts
-exclude `failure_origin="customer_provider"` from both sides of their ratios
-and their traffic gates. Runtime Failures keeps all outcomes and a separate
-customer-provider failure series. Customer connection problems still belong in
+exclude `failure_origin` values `customer_provider` and `customer_plan` from
+both sides of their ratios and their traffic gates.
+Runtime Failures keeps all outcomes and a separate customer provider or plan
+failure series. Customer connection problems still belong in
 the session and connection UI; they are not proof of a platform outage.
 
 Custom dashboards and locally installed alert rules must adopt the same filter

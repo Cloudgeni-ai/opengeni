@@ -129,6 +129,7 @@ function InlineHtml({ content, toolBridge, theme }: ChatInteractiveBlockProps) {
       height={INLINE_PREVIEW_HEIGHT}
       autoHeight
       maxAutoHeight={INLINE_PREVIEW_MAX_HEIGHT}
+      loadingUntilPainted
       theme={theme}
     />
   );

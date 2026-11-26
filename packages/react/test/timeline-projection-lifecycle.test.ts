@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import { toolRowPresentation } from "../src/timeline/tool-presentation";
-import { approvalHistoryTitle, noticeDisplayText } from "../src/timeline/notice-presentation";
+import {
+  approvalHistoryTitle,
+  noticeApprovalAnswered,
+  noticeDisplayText,
+} from "../src/timeline/notice-presentation";
 import type {
   NoticeItem,
   SessionStatusItem,
@@ -106,7 +110,7 @@ describe("an answered approval", () => {
   };
   const notice = (items: ReturnType<typeof buildTimeline>) =>
     items.find((item): item is NoticeItem => item.kind === "notice" && item.approval === true)!;
-  // Decisions carry no turn id on the wire.
+  // Older decisions carry no turn id; current ones carry their turn's.
   const decide = (sequence: number, approvalId: string, decision: "approve" | "reject") =>
     event(sequence, "user.approvalDecision", { approvalId, decision }, null as unknown as string);
 
@@ -149,14 +153,308 @@ describe("an answered approval", () => {
     expect(noticeDisplayText(englishText, notice(answered))).toBe("You approved 1 and declined 1.");
   });
 
-  test("without a recorded decision, says only that it was answered", () => {
+  test("without a recorded decision, never says the person answered", () => {
     const item = notice(
       buildTimeline(englishText, [
         ...asking([sendEmail]),
         event(4, "session.status.changed", { status: "running" }),
       ]),
     );
-    expect(noticeDisplayText(englishText, item)).toBe("You responded to this approval.");
+    expect(noticeDisplayText(englishText, item)).toBe("Not answered.");
+    expect(noticeApprovalAnswered(item)).toBe(false);
+  });
+
+  test("an earlier turn's decision never reads as a later turn's answer", () => {
+    // The staging incident: a message queued while turn 1 waited became turn 2;
+    // turn 1's decision was recorded, then turn 2 paused for its own approval
+    // and resumed without one.
+    const deploy = { id: "call-2", name: "deploy", rawItem: { callId: "call-2" } };
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "user.approvalDecision", { approvalId: "call-1", decision: "approve" }),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "turn.completed"),
+      event(7, "turn.started", {}, "turn-2"),
+      event(8, "session.requiresAction", { approvals: [deploy] }, "turn-2"),
+      event(9, "session.status.changed", { status: "requires_action" }, "turn-2"),
+      event(10, "session.status.changed", { status: "running" }, "turn-2"),
+    ]);
+    const [first, second] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, first!)).toBe("You approved “Send email”.");
+    expect(second!.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, second!)).toBe("Not answered.");
+    expect(noticeApprovalAnswered(second!)).toBe(false);
+  });
+
+  test("a request without its approvals list reads as answered only once a decision is recorded", () => {
+    const bare = [
+      event(1, "turn.started"),
+      event(2, "session.requiresAction", { approvalId: "approval-1" }),
+      event(3, "session.status.changed", { status: "requires_action" }),
+    ];
+    const running = event(5, "session.status.changed", { status: "running" });
+    const answered = notice(
+      buildTimeline(englishText, [...bare, decide(4, "approval-1", "approve"), running]),
+    );
+    expect(noticeDisplayText(englishText, answered)).toBe("You responded to this approval.");
+    expect(noticeApprovalAnswered(answered)).toBe(true);
+    const refused = notice(
+      buildTimeline(englishText, [
+        ...bare,
+        { ...decide(4, "approval-1", "reject"), clientEventId: "system:approval-expired:1" },
+        running,
+      ]),
+    );
+    expect(noticeDisplayText(englishText, refused)).toBe("Declined automatically.");
+    const unanswered = notice(buildTimeline(englishText, [...bare, running]));
+    expect(noticeDisplayText(englishText, unanswered)).toBe("Not answered.");
+    // Another turn's decision is not this request's answer.
+    const elsewhere = notice(
+      buildTimeline(englishText, [
+        ...bare,
+        event(4, "user.approvalDecision", { approvalId: "x", decision: "approve" }, "turn-0"),
+        running,
+      ]),
+    );
+    expect(noticeDisplayText(englishText, elsewhere)).toBe("Not answered.");
+    // Nor is a decision for a different approval than the one the request named.
+    const other = notice(
+      buildTimeline(englishText, [...bare, decide(4, "approval-2", "approve"), running]),
+    );
+    expect(noticeDisplayText(englishText, other)).toBe("Not answered.");
+  });
+
+  test("an approval asked again before it is answered reads as answered on every notice", () => {
+    // A restarted worker asks the same approval again with no resume between.
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "turn.preempted"),
+      event(5, "session.requiresAction", { approvals: [sendEmail] }),
+      decide(6, "call-1", "approve"),
+      event(7, "session.status.changed", { status: "running" }),
+    ]);
+    const asked = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(asked).toHaveLength(2);
+    for (const each of asked) {
+      expect(noticeDisplayText(englishText, each)).toBe("You approved “Send email”.");
+      expect(noticeApprovalAnswered(each)).toBe(true);
+    }
+  });
+
+  test("a re-asked approval answered after a resume still reads as answered on both notices", () => {
+    const deploy = {
+      id: "call-2",
+      name: "deploy",
+      display: { title: "Deploy" },
+      rawItem: { callId: "call-2" },
+    };
+    const both = (items: ReturnType<typeof buildTimeline>) =>
+      items
+        .filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true)
+        .map((item) => noticeDisplayText(englishText, item));
+    // Asked, asked again by a restarted worker, a resume, then the answer.
+    expect(
+      both(
+        buildTimeline(englishText, [
+          ...asking([sendEmail]),
+          event(4, "turn.preempted"),
+          event(5, "session.requiresAction", { approvals: [sendEmail] }),
+          event(6, "session.status.changed", { status: "running" }),
+          decide(7, "call-1", "approve"),
+        ]),
+      ),
+    ).toEqual(["You approved “Send email”.", "You approved “Send email”."]);
+    // Both asked twice; one answered before a resume, the other after.
+    expect(
+      both(
+        buildTimeline(englishText, [
+          ...asking([sendEmail, deploy]),
+          event(4, "turn.preempted"),
+          event(5, "session.requiresAction", { approvals: [sendEmail, deploy] }),
+          decide(6, "call-1", "approve"),
+          event(7, "session.status.changed", { status: "running" }),
+          decide(8, "call-2", "reject"),
+        ]),
+      ),
+    ).toEqual([
+      "You approved “Send email”.\nYou declined “Deploy”.",
+      "You approved “Send email”.\nYou declined “Deploy”.",
+    ]);
+    // A wait that ended before the ask came again is a separate ask.
+    expect(
+      both(
+        buildTimeline(englishText, [
+          ...asking([sendEmail, deploy]),
+          decide(4, "call-1", "approve"),
+          event(5, "session.status.changed", { status: "running" }),
+          event(6, "session.requiresAction", { approvals: [deploy] }),
+          decide(7, "call-2", "approve"),
+        ]),
+      ),
+    ).toEqual(["You approved “Send email”.", "You approved “Deploy”."]);
+  });
+
+  test("an approval asked again after its answer was recorded keeps that answer", () => {
+    const deploy = {
+      id: "call-2",
+      name: "deploy",
+      display: { title: "Deploy" },
+      rawItem: { callId: "call-2" },
+    };
+    const asked = (items: ReturnType<typeof buildTimeline>) =>
+      items.filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true);
+    // Approved, then a restarted worker asks again before applying it.
+    const again = asked(
+      buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        decide(4, "call-1", "approve"),
+        event(5, "turn.preempted"),
+        event(6, "session.requiresAction", { approvals: [sendEmail] }),
+        event(7, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(again.map((item) => noticeDisplayText(englishText, item))).toEqual([
+      "You approved “Send email”.",
+      "You approved “Send email”.",
+    ]);
+    expect(again.every(noticeApprovalAnswered)).toBe(true);
+    // Both answered quickly; the resume asks again about the one answered
+    // after it started and then applies the recorded answer.
+    const quick = asked(
+      buildTimeline(englishText, [
+        ...asking([sendEmail, deploy]),
+        decide(4, "call-2", "approve"),
+        event(5, "session.status.changed", { status: "running" }),
+        decide(6, "call-1", "approve"),
+        event(7, "session.requiresAction", { approvals: [sendEmail] }),
+        event(8, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(quick.map((item) => noticeDisplayText(englishText, item))).toEqual([
+      "You approved “Send email”.\nYou approved “Deploy”.",
+      "You approved “Send email”.",
+    ]);
+  });
+
+  test("answering an older notice leaves a newer one that asks more still waiting", () => {
+    const deploy = {
+      id: "call-2",
+      name: "deploy",
+      display: { title: "Deploy" },
+      rawItem: { callId: "call-2" },
+    };
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "session.requiresAction", { approvals: [sendEmail, deploy] }),
+      decide(5, "call-1", "approve"),
+    ]);
+    const [older, newer] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(older!.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, older!)).toBe("You approved “Send email”.");
+    expect(newer!.resolvedAt).toBeUndefined();
+    const done = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "session.requiresAction", { approvals: [sendEmail, deploy] }),
+      decide(5, "call-1", "approve"),
+      decide(6, "call-2", "reject"),
+    ]).filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true);
+    expect(done.every((item) => item.resolvedAt !== undefined)).toBe(true);
+    expect(noticeDisplayText(englishText, done[1]!)).toBe(
+      "You approved “Send email”.\nYou declined “Deploy”.",
+    );
+  });
+
+  test("a new MCP question round on the same call waits for its own answer", () => {
+    const question = (round: number) => ({
+      ...sendEmail,
+      elicitation: { server: "linear", round, requests: [] },
+    });
+    const items = buildTimeline(englishText, [
+      ...asking([question(1)]),
+      event(4, "user.approvalDecision", {
+        approvalId: "call-1",
+        decision: "approve",
+        elicitationRound: 1,
+      }),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "session.requiresAction", { approvals: [question(2)] }),
+      event(7, "session.status.changed", { status: "requires_action" }),
+    ]);
+    const [first, second] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, first!)).toBe("You approved “Send email”.");
+    expect(second!.resolvedAt).toBeUndefined();
+    const answered = buildTimeline(englishText, [
+      ...asking([question(1)]),
+      event(4, "user.approvalDecision", {
+        approvalId: "call-1",
+        decision: "approve",
+        elicitationRound: 1,
+      }),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "session.requiresAction", { approvals: [question(2)] }),
+      event(7, "user.approvalDecision", {
+        approvalId: "call-1",
+        decision: "reject",
+        elicitationRound: 2,
+      }),
+    ]).filter((item): item is NoticeItem => item.kind === "notice" && item.approval === true);
+    expect(answered.map((item) => noticeDisplayText(englishText, item))).toEqual([
+      "You approved “Send email”.",
+      "You declined “Send email”.",
+    ]);
+  });
+
+  test("a later turn's answer to a reused call id is not an earlier turn's answer", () => {
+    const items = buildTimeline(englishText, [
+      ...asking([sendEmail]),
+      event(4, "turn.cancelled"),
+      event(5, "turn.started", {}, "turn-2"),
+      event(6, "session.requiresAction", { approvals: [sendEmail] }, "turn-2"),
+      event(7, "user.approvalDecision", { approvalId: "call-1", decision: "approve" }, "turn-2"),
+    ]);
+    const [first, second] = items.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, first!)).toBe("Not answered.");
+    expect(noticeDisplayText(englishText, second!)).toBe("You approved “Send email”.");
+  });
+
+  test("a turn cancelled while it waits ends its approval unanswered", () => {
+    const item = notice(
+      buildTimeline(englishText, [...asking([sendEmail]), event(4, "turn.cancelled")]),
+    );
+    expect(item.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, item)).toBe("Not answered.");
+    expect(noticeApprovalAnswered(item)).toBe(false);
+    const steered = notice(
+      buildTimeline(englishText, [
+        ...asking([sendEmail]),
+        event(4, "turn.superseded", { reason: "steer", targetTurnId: "turn-2" }),
+        event(5, "turn.started", {}, "turn-2"),
+        event(6, "turn.completed", {}, "turn-2"),
+      ]),
+    );
+    expect(steered.resolvedAt).toBeDefined();
+    expect(noticeDisplayText(englishText, steered)).toBe("Not answered.");
+  });
+
+  test("an older decline saved without its MCP question round still answers it", () => {
+    const item = notice(
+      buildTimeline(englishText, [
+        ...asking([{ ...sendEmail, elicitation: { server: "linear", round: 1, requests: [] } }]),
+        event(4, "user.approvalDecision", { approvalId: "call-1", decision: "reject" }),
+        event(5, "session.status.changed", { status: "running" }),
+      ]),
+    );
+    expect(noticeDisplayText(englishText, item)).toBe("You declined “Send email”.");
   });
 
   test("parallel app-action approvals say what was decided, one line each, told apart", () => {

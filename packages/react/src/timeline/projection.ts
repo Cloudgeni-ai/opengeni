@@ -311,9 +311,70 @@ export function buildTimeline(
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
   };
-  // Open approval waits by the approval ids they ask about, so the person's
-  // answer is on the wait the moment it is recorded, before work resumes.
-  const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
+  // An approval wait whose every action has an answer is over. The rest of
+  // the turn's waits end with it only once none of them still asks about an
+  // action without an answer: a newer wait can ask more than this one did.
+  const resolveAnsweredApprovalWait = (
+    event: SessionEvent,
+    notice: NoticeItem,
+    turnId: string | null,
+  ) => {
+    if (event.duplicateOfEventId || (event.turnAssociation && event.turnAssociation !== "current"))
+      return;
+    notice.resolvedAt = event.occurredAt;
+    const key = turnId ?? presentationTurnId;
+    const rest = (presentationWaits.get(key) ?? []).filter((wait) => wait !== notice);
+    const stillAsking = rest.some(
+      (wait) =>
+        wait.kind === "notice" &&
+        !wait.resolvedAt &&
+        wait.approvalActions?.some((action) => action.decision === undefined),
+    );
+    if (stillAsking) presentationWaits.set(key, rest);
+    else resolvePresentationWait(event, key);
+  };
+  // A turn that ends while it waits for approval ends that wait unanswered.
+  const endApprovalWaits = (event: SessionEvent, turnId: string | null) => {
+    if (event.duplicateOfEventId || (event.turnAssociation && event.turnAssociation !== "current"))
+      return;
+    const key = turnId ?? presentationTurnId;
+    const waits = presentationWaits.get(key);
+    if (!waits) return;
+    const rest = waits.filter((wait) => {
+      if (wait.kind !== "notice" || !wait.approval) return true;
+      wait.resolvedAt ??= event.occurredAt;
+      return false;
+    });
+    if (rest.length > 0) presentationWaits.set(key, rest);
+    else presentationWaits.delete(key);
+  };
+  // An approval is one question: its id, asked in one turn (call ids repeat
+  // across turns), in one MCP question round (a server can ask again about
+  // the same call). The server keys its answers the same way.
+  const approvalKey = (turnId: string | null, id: string, round: number | undefined) =>
+    `${turnId ?? ""}\u0000${id}\u0000${round ?? ""}`;
+  // Open approval waits by the question they ask, so the person's answer is
+  // on the wait the moment it is recorded, before work resumes. A restarted
+  // worker can ask the same question again before it is answered: a question
+  // names every wait still open when it was asked again, oldest first, and an
+  // answer is on all of them.
+  const approvalWaitsByKey = new Map<
+    string,
+    Array<{ notice: NoticeItem; turnId: string | null }>
+  >();
+  // Every recorded answer by question. A worker can ask a question again after
+  // it was answered but before the answer was applied; the answer is known
+  // then, and no new decision will be recorded.
+  const approvalDecisions = new Map<
+    string,
+    NonNullable<NonNullable<NoticeItem["approvalActions"]>[number]["decision"]>
+  >();
+  // Each turn's latest approval wait, for a decision that names none of its
+  // actions, with the one approval id an older request may carry instead.
+  const latestApprovalWaitByTurn = new Map<
+    string | null,
+    { notice: NoticeItem; approvalId: string }
+  >();
   // How each approval was first worded: a later wait that asks again about
   // the ones still open may carry no display of its own, or other words, and
   // history keeps the question the person first saw.
@@ -1556,10 +1617,19 @@ export function buildTimeline(
 
       case "session.requiresAction": {
         finalizeOpen(turnId, "complete", event.occurredAt);
+        const askedIn = turnId ?? presentationTurnId;
+        const rounds = approvalRoundsOf(payload);
+        const decidedAlready = (id: string) =>
+          approvalDecisions.get(approvalKey(askedIn, id, rounds.get(id)));
         // The calls named here have not run: they wait for the person.
         for (const callId of approvalCallIds(payload)) {
           const call = callsById.get(callId);
-          if (call?.kind === "tool-call" && call.status === "complete" && call.output == null) {
+          if (
+            call?.kind === "tool-call" &&
+            call.status === "complete" &&
+            call.output == null &&
+            !decidedAlready(callId)
+          ) {
             call.awaitingApproval = true;
           }
         }
@@ -1586,8 +1656,34 @@ export function buildTimeline(
           ...(approvalActions.length > 0 ? { approvalActions } : {}),
           occurredAt: event.occurredAt,
         };
-        for (const action of approvalActions) approvalWaitsById.set(action.id, { notice, turnId });
-        rememberPresentationWait(notice, turnId);
+        for (const action of approvalActions) {
+          const known = decidedAlready(action.id);
+          if (known) {
+            action.decision = known;
+            continue;
+          }
+          // A wait that had already ended is a separate ask, not this one again.
+          const key = approvalKey(askedIn, action.id, rounds.get(action.id));
+          const waits = (approvalWaitsByKey.get(key) ?? []).filter(
+            (wait) => !wait.notice.resolvedAt,
+          );
+          waits.push({ notice, turnId });
+          approvalWaitsByKey.set(key, waits);
+        }
+        latestApprovalWaitByTurn.set(askedIn, {
+          notice,
+          approvalId: stringValue(payload.approvalId),
+        });
+        if (
+          approvalActions.length > 0 &&
+          approvalActions.every((action) => action.decision !== undefined)
+        ) {
+          // Everything it asks was already answered: it is history at once.
+          notice.resolvedAt = event.occurredAt;
+          items.push(notice);
+        } else {
+          rememberPresentationWait(notice, turnId);
+        }
         break;
       }
 
@@ -1603,6 +1699,22 @@ export function buildTimeline(
           payload.decision === "reject" &&
           (payload.refusal !== undefined || event.clientEventId?.startsWith("system:") === true);
         const decision = automatic ? "automatic_reject" : payload.decision;
+        const round =
+          typeof payload.elicitationRound === "number" ? payload.elicitationRound : undefined;
+        let key = approvalKey(turnId ?? presentationTurnId, approvalId, round);
+        if (!approvalWaitsByKey.has(key) && (turnId === null || round === undefined)) {
+          // An older decision can lack its turn or its MCP question round: it
+          // answers the latest open question with its id that matches what it
+          // does carry.
+          for (const asked of approvalWaitsByKey.keys()) {
+            const [askedTurn, askedId, askedRound] = asked.split("\u0000");
+            if (askedId !== approvalId) continue;
+            if (turnId !== null && askedTurn !== turnId) continue;
+            if (round !== undefined && askedRound !== String(round)) continue;
+            key = asked;
+          }
+        }
+        approvalDecisions.set(key, decision);
         // The call it names stops waiting too: an approved call runs now, a
         // rejected one never will.
         const call = callsById.get(approvalId);
@@ -1611,13 +1723,28 @@ export function buildTimeline(
           if (decision === "approve") call.status = "running";
           else call.approvalRejected = automatic ? "automatic" : "person";
         }
-        const open = approvalWaitsById.get(approvalId);
-        if (!open) break;
-        approvalWaitsById.delete(approvalId);
-        const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
-        if (action) action.decision = decision;
-        if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
-          resolvePresentationWait(event, turnId ?? open.turnId);
+        const waits = approvalWaitsByKey.get(key);
+        if (!waits) {
+          // An older request lists no actions: a decision for its turn answers
+          // it, unless the request named another approval. Another turn's
+          // decision never does.
+          const latest = latestApprovalWaitByTurn.get(turnId ?? presentationTurnId);
+          if (
+            latest &&
+            !latest.notice.approvalActions?.length &&
+            (!latest.approvalId || latest.approvalId === approvalId)
+          ) {
+            latest.notice.unmatchedDecision = automatic ? "automatic" : "person";
+          }
+          break;
+        }
+        approvalWaitsByKey.delete(key);
+        for (const open of waits) {
+          const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
+          if (action) action.decision = decision;
+          if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
+            resolveAnsweredApprovalWait(event, open.notice, turnId ?? open.turnId);
+          }
         }
         break;
       }
@@ -1947,6 +2074,7 @@ export function buildTimeline(
 
       case "turn.failed": {
         steerBubblesAwaitingHandover = [];
+        endApprovalWaits(event, turnId);
         takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
@@ -2053,6 +2181,9 @@ export function buildTimeline(
         if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
+        // Cancelled or replaced (a Steer while it waited): its approvals were
+        // never answered for it.
+        endApprovalWaits(event, turnId);
         // The turn handed over to a Steer at a safe boundary: its next model
         // step, right after a context compaction, or while it only waited (an
         // approval, a question or capacity; those supersessions name their
@@ -4417,6 +4548,21 @@ function approvalActionsOf(
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+/** The MCP question round each approval asks about, by the id it is answered by. */
+function approvalRoundsOf(payload: Record<string, unknown>): Map<string, number> {
+  const rounds = new Map<string, number>();
+  for (const approval of Array.isArray(payload.approvals) ? payload.approvals : []) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    const round = asRecord(record.elicitation).round;
+    if (id && typeof round === "number") rounds.set(id, round);
+  }
+  return rounds;
 }
 
 function stringValue(value: unknown): string {

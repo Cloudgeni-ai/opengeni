@@ -983,7 +983,7 @@ function renderDeploymentScope(
     .replaceAll("{{ $environment | quote }}", JSON.stringify(scope.environment));
 }
 
-test("platform reliability ratios exclude customer-provider failures consistently", async () => {
+test("platform reliability ratios exclude customer-provider and customer-plan failures consistently", async () => {
   const template = await readFile(
     new URL("../templates/prometheusrule.yaml", import.meta.url),
     "utf8",
@@ -996,7 +996,7 @@ test("platform reliability ratios exclude customer-provider failures consistentl
     const selectors = metricSelectors(alertExpression(template, name));
     expect(selectors.length).toBeGreaterThan(2);
     for (const selector of selectors)
-      expect(selector).toContain('failure_origin!="customer_provider"');
+      expect(selector).toContain('failure_origin!~"customer_provider|customer_plan"');
   }
   // Recovery/exhaustion and other system signals are not suppressed by provider choice.
   expect(alertExpression(template, "OpenGeniTurnRecoveryRatioHigh")).not.toContain(
