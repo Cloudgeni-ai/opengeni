@@ -6,7 +6,12 @@
  */
 import { useEffect, useState } from "react";
 import { CheckIcon, CircleIcon, PlusIcon } from "lucide-react";
-import { agentInitialsAvatar, type Agent, type AgentTemplate } from "@opengeni/contracts";
+import {
+  agentInitialsAvatar,
+  type Agent,
+  type AgentTemplate,
+  type SetupReadiness,
+} from "@opengeni/contracts";
 
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
@@ -22,6 +27,7 @@ import { ErrorMessage } from "../../../ui/error-message";
 import { MetaChip } from "../../../ui/meta-chip";
 import { Section } from "../../../ui/section";
 import { SettingRow } from "../../../ui/setting-row";
+import { StatusBadge } from "../../../ui/status-badge";
 import { useAppContext } from "../../app-context";
 import { t } from "../../lib/console-text";
 import { toast } from "../../lib/toast";
@@ -29,10 +35,14 @@ import { SessionAvatar } from "../session/session-avatar";
 import { readyMadeAgentSetup } from "./ready-made-agent-setup";
 import { agentTriggerSentence, agentTriggerShapeOfSuggestion } from "./agent-trigger-words";
 
-/** Reads one ready-made agent by its key: undefined while loading, null when there is none. */
+/**
+ * Reads one ready-made agent by its key, and the names of the others (for
+ * Works well with): undefined while loading, null when there is none.
+ */
 export function useReadyMadeAgentTemplate(workspaceId: string, templateKey: string) {
   const { client } = useAppContext();
   const [template, setTemplate] = useState<AgentTemplate | null | undefined>(undefined);
+  const [names, setNames] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [error, setError] = useState<unknown>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -40,7 +50,11 @@ export function useReadyMadeAgentTemplate(workspaceId: string, templateKey: stri
     setTemplate(undefined);
     setError(null);
     client.listAgentTemplates(workspaceId).then(
-      (list) => live && setTemplate(list.find((entry) => entry.key === templateKey) ?? null),
+      (list) => {
+        if (!live) return;
+        setNames(new Map(list.map((entry) => [entry.key, entry.name])));
+        setTemplate(list.find((entry) => entry.key === templateKey) ?? null);
+      },
       (reason: unknown) => {
         if (!live) return;
         setError(reason);
@@ -51,7 +65,32 @@ export function useReadyMadeAgentTemplate(workspaceId: string, templateKey: stri
       live = false;
     };
   }, [attempt, client, templateKey, workspaceId]);
-  return { template, error, reload: () => setAttempt((count) => count + 1) };
+  return {
+    template,
+    nameOf: (key: string) => names.get(key) ?? null,
+    error,
+    reload: () => setAttempt((count) => count + 1),
+  };
+}
+
+/** The server's readiness check of a ready-made agent for this viewer; null until read or when unavailable. */
+function useTemplateReadiness(workspaceId: string, templateKey: string) {
+  const { client } = useAppContext();
+  const [readiness, setReadiness] = useState<SetupReadiness | null>(null);
+  useEffect(() => {
+    let live = true;
+    setReadiness(null);
+    // An older client or server has no check: the needs show without their state.
+    if (typeof client.getAgentTemplateReadiness !== "function") return;
+    client.getAgentTemplateReadiness(workspaceId, templateKey).then(
+      (next) => live && setReadiness(next),
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, templateKey, workspaceId]);
+  return readiness;
 }
 
 export function ReadyMadeAgentPreview({
@@ -67,7 +106,8 @@ export function ReadyMadeAgentPreview({
   onAdded: (agent: Agent) => void;
 }) {
   const { client } = useAppContext();
-  const { template, error, reload } = useReadyMadeAgentTemplate(workspaceId, templateKey);
+  const { template, nameOf, error, reload } = useReadyMadeAgentTemplate(workspaceId, templateKey);
+  const readiness = useTemplateReadiness(workspaceId, templateKey);
   const [adding, setAdding] = useState(false);
   const back = { label: "Agents", onClick: onBack };
   if (template === undefined) {
@@ -100,7 +140,12 @@ export function ReadyMadeAgentPreview({
       </DetailPage>
     );
   }
-  const setup = readyMadeAgentSetup(template);
+  const setup = readyMadeAgentSetup(template, nameOf);
+  const connected = new Set(
+    (readiness?.connections ?? [])
+      .filter((connection) => connection.connected)
+      .map((connection) => connection.provider),
+  );
   const now = new Date();
   const add = async () => {
     if (adding) return;
@@ -151,13 +196,9 @@ export function ReadyMadeAgentPreview({
       <DetailPageBody
         aside={
           <DetailAside>
-            {setup.costPerRun ? (
-              <DetailAsideItem label="Cost">
-                <span className="tabular-nums" data-ready-made-cost="">
-                  {setup.costPerRun}
-                </span>
-              </DetailAsideItem>
-            ) : null}
+            <DetailAsideItem label="Cost">
+              <span data-ready-made-cost="">Model usage per run, shown in Usage</span>
+            </DetailAsideItem>
             <DetailAsideItem label="Nothing runs until">
               You turn it on after adding
             </DetailAsideItem>
@@ -224,6 +265,11 @@ export function ReadyMadeAgentPreview({
                   <span className="flex flex-wrap items-center gap-2">
                     {need.label}
                     <MetaChip variant="soft">{need.required ? "Required" : "Optional"}</MetaChip>
+                    {connected.has(need.key) ? (
+                      <StatusBadge variant="dot" status="ready">
+                        Connected
+                      </StatusBadge>
+                    ) : null}
                   </span>
                 }
                 description={need.detail ?? undefined}
