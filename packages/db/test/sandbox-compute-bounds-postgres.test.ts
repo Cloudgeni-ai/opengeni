@@ -325,53 +325,46 @@ describe("free compute bounds (real PostgreSQL)", () => {
 
   test("waking a sleeping compute box no turn holds is admitted like a new box", async () => {
     const org = await organization({ plan: "free" });
-    const [first, second] = [crypto.randomUUID(), crypto.randomUUID()];
+    const groups = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+    const [first, second, third] = groups as [string, string, string];
     const holderOf = (group: string) => `direct-${group}`;
-    for (const group of [first, second]) {
+    for (const group of groups) {
       expect(
         (await acquire(org, "direct", { group, holderId: holderOf(group), backend: "compute" }))
           .role,
       ).toBe("spawner");
       await warm(org, group);
-    }
-    const asleep = (group: string, value: boolean) =>
-      admin`update sandbox_leases set compute_asleep_since = ${value ? admin`now()` : null}
+      // Each chat's box sleeps before the next one starts.
+      await admin`update sandbox_leases set compute_asleep_since = now()
         where workspace_id = ${org.workspaceId} and sandbox_group_id = ${group}`;
-    await asleep(first, true);
-    await asleep(second, true);
-    // One new box runs; the budget of two has room for one wake.
-    expect((await acquire(org, "turn")).role).toBe("spawner");
-    const turnHolder = `turn-${crypto.randomUUID()}`;
-    expect(
-      (await acquire(org, "turn", { group: first, holderId: turnHolder, backend: "compute" })).role,
-    ).toBe("attached");
-    await asleep(first, false);
-    // At the limit, a chat that would wake the other sleeping box waits, and
-    // any other new holder is refused.
-    expect(await acquire(org, "turn", { group: second, backend: "compute" })).toMatchObject({
+    }
+    // Turns wake two of the three sleeping chats one after another, before
+    // the gateway records either awake: each counts from its own admission,
+    // so the third waits at the budget of two.
+    for (const group of [first, second]) {
+      expect((await acquire(org, "turn", { group, backend: "compute" })).role).toBe("attached");
+    }
+    expect(await acquire(org, "turn", { group: third, backend: "compute" })).toMatchObject({
       role: "fenced",
       reason: "organization_sandbox_capacity",
       organizationBoxLimit: 2,
     });
-    const refused = await refusal(acquire(org, "direct", { group: second, backend: "compute" }));
+    // Any other holder that would wake it is refused, and so is a new box,
+    // although both boxes the turns hold are still napping.
+    const refused = await refusal(acquire(org, "direct", { group: third, backend: "compute" }));
     expect([refused.reason, refused.limit]).toEqual(["running", 2]);
+    expect((await refusal(acquire(org, "direct"))).reason).toBe("running");
     // A holder the box already has replays without being counted again.
     expect(
       (
         await acquire(org, "direct", {
-          group: second,
-          holderId: holderOf(second),
+          group: third,
+          holderId: holderOf(third),
           backend: "compute",
         })
       ).role,
     ).not.toBe("fenced");
-    // A box a turn holds is in use even while its sandbox naps: joining it
-    // adds no running box, even at the limit.
-    await asleep(first, true);
-    expect((await acquire(org, "direct")).role).toBe("spawner");
-    expect(
-      (await refusal(acquire(org, "direct", { group: second, backend: "compute" }))).reason,
-    ).toBe("running");
+    // Joining a box a turn holds adds no running box, even at the limit.
     expect((await acquire(org, "direct", { group: first, backend: "compute" })).role).toBe(
       "attached",
     );

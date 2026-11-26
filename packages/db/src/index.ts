@@ -53589,8 +53589,8 @@ async function acquireLeaseOnce(
         // stays warm (or draining, until its group ends). Waking it with no
         // turn on it adds a running box. Replaying a holder it already has
         // does not wake it any more than it already is.
-        // A woken box counts from when the gateway records it awake; until
-        // then concurrent wakes of other boxes do not see it (seconds).
+        // A turn's wake counts at once (its turn holder, migration 1572); a
+        // woken box no turn holds counts once the gateway records it awake.
         const wakesSleepingComputeBox = async () =>
           backend !== "selfhosted" &&
           row.backend === "compute" &&

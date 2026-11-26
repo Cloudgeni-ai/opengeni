@@ -13,7 +13,7 @@
 -- This redefines the three counting definers with the same signatures,
 -- security, search path and grants (CREATE OR REPLACE keeps the ACL), so the
 -- running release reads the corrected numbers at once. Each one now leaves out
--- a compute lease whose sandbox is asleep:
+-- a compute lease whose sandbox is asleep and that no turn holds:
 --
 --   organization_warm_sandbox_counts_v1  every count (1475)
 --   sandbox_unpaid_fleet_v1              the running count (1486); the day's
@@ -22,11 +22,16 @@
 --   sandbox_fleet_warm_boxes_v1          the warm count fleet pressure reads
 --                                        (1492)
 --
--- A woken box counts again from the moment the gateway records it awake, and
--- the runtime admits waking one like a new box (acquireLease), so the limits
--- still bound how many boxes run. A draining compute lease with
--- compute_asleep_since set is a sleeping box being ended, not a running one,
--- so the running count leaves it out too.
+-- The runtime admits waking such a box like a new one (acquireLease), so the
+-- limits still bound how many boxes run. A box a turn holds counts even while
+-- it naps, so a turn that wakes a sleeping box counts from its own admitting
+-- transaction (it adds the turn holder under the organization lock), and the
+-- turn's next tool call can wake it again without a check. A woken box no turn
+-- holds counts once the gateway records it awake; until then a concurrent
+-- non-turn wake (terminal, viewer, Browser/ComputerSession) of another box does
+-- not see it, a window of seconds. A draining compute lease asleep with no
+-- turn is a sleeping box being ended, not a running one, so the running count
+-- leaves it out too.
 --
 -- Rolling: read-only definers keep their signatures and grants; the previous
 -- release calls them unchanged and only gets lower counts.
@@ -80,8 +85,9 @@ BEGIN
         FROM sandbox_leases lease
         WHERE lease.account_id = p_account AND lease.workspace_id = member.id
           AND lease.id IS DISTINCT FROM p_exclude_lease
-          -- A sleeping compute sandbox runs nothing (1572).
-          AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL);
+          -- A sleeping compute sandbox no turn holds runs nothing (1572).
+          AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL
+            AND lease.turn_holders = 0);
         viewer_only := viewer_only + part_viewer_only;
         subject_viewer_only := subject_viewer_only + part_subject;
         running := running + part_running;
@@ -124,8 +130,9 @@ BEGIN
       WHERE lease.liveness IN ('warming', 'warm')
         AND lease.compute_unpaid
         AND lease.backend <> 'selfhosted'
-        -- A sleeping compute sandbox runs nothing (1572).
-        AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL)
+        -- A sleeping compute sandbox no turn holds runs nothing (1572).
+        AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL
+          AND lease.turn_holders = 0)
         AND lease.id IS DISTINCT FROM p_exclude_lease;
 
       IF p_with_box_seconds THEN
@@ -189,8 +196,9 @@ BEGIN
       FROM sandbox_leases lease
       WHERE lease.liveness IN ('warming', 'warm')
         AND lease.backend <> 'selfhosted'
-        -- A sleeping compute sandbox runs nothing (1572).
-        AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL);
+        -- A sleeping compute sandbox no turn holds runs nothing (1572).
+        AND NOT (lease.backend = 'compute' AND lease.compute_asleep_since IS NOT NULL
+          AND lease.turn_holders = 0);
 
       IF opened = 1 THEN
         DELETE FROM opengeni_private.modal_inventory_read_capabilities capability

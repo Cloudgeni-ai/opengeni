@@ -303,11 +303,12 @@ skips sandbox enrollments, and machine routes list machines only.
   Its lease stays warm while it sleeps, so every box count that bounds new
   boxes (the organization and person running-box limits, viewer-only limits,
   the unpaid fleet cap and fleet pressure) leaves out a compute lease with
-  `compute_asleep_since` set (migration 1572); it counts again once the
-  gateway records it awake. Waking one is admitted like starting a new box:
-  a turn, viewer or operation that would wake a sleeping box no turn holds
-  is refused (a turn parks as `organization_sandbox_capacity`) while the
-  organization is at its running-box limit.
+  `compute_asleep_since` set that no turn holds (migration 1572); it counts
+  again once the gateway records it awake. A box a turn holds always counts,
+  napping or not. Waking a sleeping box no turn holds is admitted like
+  starting a new box: while the organization is at its running-box limit, a
+  turn that would wake it parks as `organization_sandbox_capacity` and a
+  viewer or operation is refused.
 - **Group end**: deleting the chat or workspace marks the lease
   (`group_end_requested_at`, migration 0861) and drains it at once. The reaper
   then deletes the sandbox through the control service without a tar capture and revokes its
