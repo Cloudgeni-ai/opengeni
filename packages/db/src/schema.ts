@@ -8068,7 +8068,7 @@ export const sessionTurns = pgTable(
       table.position,
     ),
     // A session's person/API turns, for the effective-policy fallback after a
-    // settings write, without visiting every automated turn (migration 1576).
+    // settings write, without visiting every automated turn (migration 1580).
     sessionPersonApi: index("session_turns_session_person_api_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.source} in ('user','api')`),

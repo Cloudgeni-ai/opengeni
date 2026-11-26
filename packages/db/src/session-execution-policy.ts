@@ -18,22 +18,29 @@ export function latestStartedSessionTurnQuery(
  * Original queue admission, not the mutable approval/recovery trigger, orders
  * that choice. Actual latest-started identity is unchanged.
  *
- * Cost is bounded by recent history, not session length. The newest
- * `turn.started` events after the boundary are read by a backward walk of
+ * Cost follows the history since the last settings write, not the session's
+ * length, and stays near constant when a person or API caller drives the
+ * chat. The newest `turn.started` events after the boundary are read by a
+ * backward walk of
  * session_events_workspace_session_type_sequence_idx that probes each
  * candidate's turn by primary key and stops at the first eligible one. An
  * eligible turn was queued after the boundary and so started after it.
  *
- * After a settings write the walk reads at most {@link RECENT_START_PROBES} starts. After a settings
- * write only person/API turns are eligible, so a session that a schedule or
- * trigger keeps running would otherwise visit every automated start since the
- * write (thousands of turn probes, seconds per read in production). When the
- * newest starts are all ineligible and more exist, the answer is computed
- * from the session's person/API turns instead, through
- * session_turns_session_person_api_idx: the eligible turn with the newest
- * start after the boundary. Both paths pick the same turn. Without a write
- * every started turn is eligible, so the walk is not limited: it stops at the
- * newest start whose turn exists.
+ * After a settings write only person/API turns are eligible, so a session that
+ * a schedule or trigger keeps running would otherwise visit every automated
+ * start since the write (thousands of turn probes, seconds per read in
+ * production). So after a write the walk first reads at most
+ * {@link RECENT_START_PROBES} starts. When those are all ineligible and more
+ * exist, the answer comes from the cheaper of two exact reads:
+ * - a session with at most {@link PERSON_API_TURN_CAP} person/API turns
+ *   (counted through session_turns_session_person_api_idx) reads those turns:
+ *   the eligible one with the newest start after the boundary;
+ * - a session with more (a long API-driven chat) continues the start-by-start
+ *   walk, whose cost follows the starts since the write, not its whole
+ *   person/API history.
+ * All paths pick the same turn. Without a write every started turn is
+ * eligible, so the walk is not limited: it stops at the newest start whose
+ * turn exists.
  * Joining all start events to all turns instead would hash the whole session
  * per read.
  *
@@ -84,8 +91,8 @@ function startedSessionTurnQuery(
   // Newest starts after the boundary, newest first; the first eligible one
   // is the answer. Without a write every started turn is eligible and the
   // walk is unlimited, so it stops at the newest start whose turn exists.
-  // After a write it reads at most the newest few starts.
-  const recentWalk = sql`(
+  // After a write the first walk reads at most the newest few starts.
+  const startWalk = (limit: SQL) => sql`(
     select recent.turn_id from (
       select started.turn_id, started.sequence from ${schema.sessionEvents} started
       where started.workspace_id = ${workspaceId}
@@ -93,7 +100,7 @@ function startedSessionTurnQuery(
         and started.type = 'turn.started'
         and started.sequence > ${settingsBoundary}
       order by started.sequence desc
-      limit case when ${settingsBoundary} >= 0 then ${sql.raw(String(RECENT_START_PROBES))} end
+      ${limit}
     ) recent
     where (
       select true from ${schema.sessionTurns} candidate
@@ -112,6 +119,10 @@ function startedSessionTurnQuery(
     order by recent.sequence desc
     limit 1
   )`;
+  const recentWalk = startWalk(
+    sql`limit case when ${settingsBoundary} >= 0 then ${sql.raw(String(RECENT_START_PROBES))} end`,
+  );
+  const fullWalk = startWalk(sql``);
   // True only when starts beyond the probed ones exist after the boundary.
   const olderStartsRemain = sql`exists (
     select 1 from ${schema.sessionEvents} started
@@ -121,6 +132,18 @@ function startedSessionTurnQuery(
       and started.sequence > ${settingsBoundary}
     offset ${sql.raw(String(RECENT_START_PROBES))}
   )`;
+  // True when the person/API read is the cheaper exact path: it costs one
+  // lookup per person/API turn of the whole session, before or after the
+  // write, so a long API-driven chat walks the starts instead.
+  const fewPersonApiTurns = sql`(
+    select pg_catalog.count(*) from (
+      select 1 from ${schema.sessionTurns} person
+      where person.workspace_id = ${workspaceId}
+        and person.session_id = ${sessionId}
+        and person.source in ('user', 'api')
+      limit ${sql.raw(String(PERSON_API_TURN_CAP + 1))}
+    ) counted
+  ) <= ${sql.raw(String(PERSON_API_TURN_CAP))}`;
   // After a write only person/API turns queued after it are eligible; take the
   // one whose newest start is the newest, if that start is after the write.
   // Same predicate as the walk, driven from the few person/API turns instead
@@ -153,7 +176,7 @@ function startedSessionTurnQuery(
   // primary-key bound.
   const latestStartedTurnId = sql`(
     select coalesce(${recentWalk}, case when ${settingsBoundary} >= 0 and ${olderStartsRemain}
-      then ${personApiTurn} end)
+      then case when ${fewPersonApiTurns} then ${personApiTurn} else ${fullWalk} end end)
     from (
       select coalesce(max(boundary.sequence), -1) as sequence from ${schema.sessionEvents} boundary
       where boundary.workspace_id = ${workspaceId}
@@ -168,10 +191,14 @@ function startedSessionTurnQuery(
     .limit(1);
 }
 
-/** Starts read newest-first before the person/API fallback; see
- * {@link startedSessionTurnQuery}. A person's newest turn is almost always
- * among them. */
+/** Starts read newest-first before a fallback read; see
+ * {@link startedSessionTurnQuery}. After a write, a person's newest turn is
+ * usually among them unless a schedule or trigger keeps running the chat. */
 const RECENT_START_PROBES = 16;
+
+/** Most person/API turns a session may have for the person/API read; see
+ * {@link startedSessionTurnQuery}. */
+const PERSON_API_TURN_CAP = 1000;
 
 const turnPolicyColumns = {
   id: schema.sessionTurns.id,

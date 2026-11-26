@@ -18,20 +18,6 @@ afterAll(async () => {
 
 const CALLS = 4000;
 
-type PlanNode = {
-  "Node Type": string;
-  "Relation Name"?: string;
-  "Index Name"?: string;
-  "Shared Hit Blocks"?: number;
-  "Shared Read Blocks"?: number;
-  "Actual Loops"?: number;
-  Plans?: PlanNode[];
-};
-
-function planNodes(node: PlanNode): PlanNode[] {
-  return [node, ...(node.Plans ?? []).flatMap(planNodes)];
-}
-
 // The calls page prices each listed call by summing its ledger debits. Without an index
 // keyed by the debit's source, every listed row re-read all of the account's debits, so a
 // page of 100 calls cost 100 scans of the whole ledger.
@@ -94,6 +80,16 @@ test("pricing a page of calls reads only each call's own debits", async () => {
   await shared.admin`analyze model_call_facts`;
   await shared.admin`analyze credit_ledger_entries`;
 
+  // The real read, through the application role: the pricing subquery must
+  // probe the debit-source index, not scan the account's ledger per call.
+  const indexScans = async () => {
+    await shared.admin`select pg_stat_clear_snapshot()`;
+    const [row] = await shared.admin<{ scans: string }[]>`
+      select idx_scan::text as scans from pg_stat_user_indexes
+      where indexrelname = 'credit_ledger_entries_model_debit_source_idx'`;
+    return Number(row!.scans);
+  };
+  const scansBefore = await indexScans();
   const page = await readInsightsCalls(client.db, {
     accountId: grant.accountId,
     workspaceId,
@@ -106,33 +102,12 @@ test("pricing a page of calls reads only each call's own debits", async () => {
     const n = index + 1;
     expect(call.chargedMicros).toBe(n % 3 === 0 ? 2 * n : n);
   }
-
-  // The function prices calls with exactly this subquery; plan it at the same shape.
-  const [definition] = await shared.admin<{ body: string }[]>`
-    select pg_get_functiondef('opengeni_private.insights_scoped_calls_rows'::regproc) as body`;
-  expect(definition!.body.replace(/\s+/g, " ")).toContain(
-    "WHERE c.account_id=a AND c.workspace_id=w.id AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0 AND c.source_id=f.turn_id::text||':'||f.source_key",
-  );
-  const [explained] = await shared.admin.unsafe<{ "QUERY PLAN": [{ Plan: PlanNode }] }[]>(
-    `explain (analyze, buffers, format json)
-     select f.id, (select coalesce(-sum(c.amount_micros), 0) from public.credit_ledger_entries c
-       where c.account_id = $1 and c.workspace_id = $2 and c.type = 'model_usage_debit'
-         and c.source_type = 'model_response' and c.amount_micros < 0
-         and c.source_id = f.turn_id::text || ':' || f.source_key)
-     from public.model_call_facts f
-     where f.account_id = $1 and f.workspace_id = $2
-     order by f.occurred_at desc, f.id desc limit 101`,
-    [grant.accountId, workspaceId],
-  );
-  const nodes = planNodes(explained!["QUERY PLAN"][0].Plan);
-  const ledgerScans = nodes.filter((node) => node["Relation Name"] === "credit_ledger_entries");
-  expect(ledgerScans.map((node) => node["Index Name"])).toEqual([
-    "credit_ledger_entries_model_debit_source_idx",
-  ]);
-  const ledgerBlocks = ledgerScans.reduce(
-    (sum, node) => sum + (node["Shared Hit Blocks"] ?? 0) + (node["Shared Read Blocks"] ?? 0),
-    0,
-  );
-  // A handful of blocks per call; the account-wide scan read thousands per call.
-  expect(ledgerBlocks).toBeLessThan(101 * 8);
+  // Index statistics reach other sessions when the reading backend flushes them.
+  let scans = scansBefore;
+  for (let attempt = 0; attempt < 50 && scans - scansBefore < page.calls.length; attempt += 1) {
+    await Bun.sleep(100);
+    scans = await indexScans();
+  }
+  // At least one probe per priced call.
+  expect(scans - scansBefore).toBeGreaterThanOrEqual(page.calls.length);
 }, 300_000);

@@ -446,6 +446,7 @@ type ScheduledTaskTargetToolConfig = Pick<Session, "id" | "tools" | "toolPolicy"
 export type ScheduledTaskAccessReadCache = {
   registries: Map<string, Promise<Settings>>;
   connections: Map<string, Promise<ConnectionMetadata[]>>;
+  /** Keyed by {@link targetKey}. */
   targets: Map<string, Promise<ScheduledTaskTargetToolConfig | null>>;
 };
 
@@ -453,11 +454,17 @@ export function scheduledTaskAccessReadCache(): ScheduledTaskAccessReadCache {
   return { registries: new Map(), connections: new Map(), targets: new Map() };
 }
 
+function targetKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}:${sessionId}`;
+}
+
 /**
  * Read the target chats of every listed schedule that runs in one, in a single
  * query, so decorating a list costs one read rather than one full session read
  * per schedule. A failed read fails each schedule that uses it, as a per-task
- * read would, and only omits that schedule's advisory fields.
+ * read would, and only omits that schedule's advisory fields. One failed
+ * batched read therefore drops the plan and drift fields of every listed
+ * schedule with a target chat; they are advisory, so the list still loads.
  */
 function primeScheduledTaskTargets(
   db: Database,
@@ -471,14 +478,14 @@ function primeScheduledTaskTargets(
         task.runMode === "existing_session" && task.targetSessionId ? [task.targetSessionId] : [],
       ),
     ),
-  ].filter((id) => !cache.targets.has(id));
+  ].filter((id) => !cache.targets.has(targetKey(workspaceId, id)));
   if (ids.length === 0) return;
   const read = getSessionToolConfigs(db, workspaceId, ids);
   for (const id of ids) {
     const target = read.then((configs) => configs.get(id) ?? null);
     // Observed by the schedule that awaits it; never an unhandled rejection.
     target.catch(() => undefined);
-    cache.targets.set(id, target);
+    cache.targets.set(targetKey(workspaceId, id), target);
   }
 }
 
@@ -545,7 +552,7 @@ export async function computeScheduledTaskAccessPlan(input: {
   const targetSessionId =
     task.runMode === "existing_session" ? (task.targetSessionId ?? null) : null;
   const target = targetSessionId
-    ? await cached(cache.targets, targetSessionId, () =>
+    ? await cached(cache.targets, targetKey(task.workspaceId, targetSessionId), () =>
         getSessionToolConfigs(db, task.workspaceId, [targetSessionId]).then(
           (configs) => configs.get(targetSessionId) ?? null,
         ),
