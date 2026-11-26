@@ -1582,14 +1582,15 @@ export function recordCreditLedgerTotalsCheck(
 
 export function recordSessionTurnCreditTotalsCheck(
   observability: Observability,
-  check: { checked: number; mismatchedTurnIds: string[] },
+  /** Null when the check failed: the gauge reads -1, never "no drift". */
+  check: { checked: number; mismatchedTurnIds: string[] } | null,
 ): void {
   observability.setGauge({
     name: "opengeni_session_turn_credit_totals_mismatched_turns",
-    help: "Sampled turns whose kept credit totals give a different usage than a full recount.",
-    value: check.mismatchedTurnIds.length,
+    help: "Sampled turns whose kept credit totals give a different usage than a full recount; -1 when the check failed.",
+    value: check ? check.mismatchedTurnIds.length : -1,
   });
-  if (check.mismatchedTurnIds.length > 0) {
+  if (check && check.mismatchedTurnIds.length > 0) {
     observability.warn("session turn credit totals differ from a full recount", {
       checked: check.checked,
       turnIds: check.mismatchedTurnIds.join(","),

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtemp, readdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -892,14 +892,17 @@ test("the runtime writes totals only through the triggers; updates mark a turn f
       where turn_id = ${turn.turnId}::uuid returning turn_id`),
   ).toEqual([]);
   expect(
-    await failure(
-      asRuntime(sql`delete from session_turn_credit_totals where turn_id = ${turn.turnId}::uuid`),
-    ),
-  ).toContain("permission denied");
+    await asRuntime(sql`delete from session_turn_credit_totals
+      where turn_id = ${turn.turnId}::uuid returning turn_id`),
+  ).toEqual([]);
+  expect(
+    await asRuntime(sql`delete from session_turn_credit_calls
+      where turn_id = ${turn.turnId}::uuid returning turn_id`),
+  ).toEqual([]);
   expect(
     await failure(
       asRuntime(sql`select opengeni_private.session_turn_credit_apply_call(${turn.turnId}::uuid, 'usage',
-        ${`${turn.turnId}:x`}, ${turn.accountId}::uuid, null, null, 5)`),
+        ${`${turn.turnId}:x`}, ${turn.accountId}::uuid, ${turn.workspaceId}::uuid, null, null, 5)`),
     ),
   ).toContain("row-level security");
   expect(
@@ -929,6 +932,7 @@ test("the runtime writes totals only through the triggers; updates mark a turn f
       app_select: boolean;
       app_insert_update: boolean;
       app_delete: boolean;
+      foreign_keys_beyond_workspace: number;
     }[]
   >`
     select bool_and(c.relforcerowsecurity) as force,
@@ -936,12 +940,15 @@ test("the runtime writes totals only through the triggers; updates mark a turn f
         where n.nspname = 'opengeni_private' and p.proname like 'session_turn_credit%' and p.prosecdef) as definers,
       (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'opengeni_private' and (p.proname like 'session_turn_credit%'
-          or p.proname = 'clear_session_turn_credit_totals')
+          or p.proname in ('clear_session_turn_credit_totals', 'forget_session_turn_credit_totals'))
           and has_function_privilege('public', p.oid, 'EXECUTE')) as public_execute,
       bool_and(has_table_privilege('opengeni_app', c.oid, 'SELECT')) as app_select,
       bool_and(has_table_privilege('opengeni_app', c.oid, 'INSERT')
         and has_table_privilege('opengeni_app', c.oid, 'UPDATE')) as app_insert_update,
-      bool_or(has_table_privilege('opengeni_app', c.oid, 'DELETE')) as app_delete
+      bool_and(has_table_privilege('opengeni_app', c.oid, 'DELETE')) as app_delete,
+      (select count(*)::int from pg_constraint fk where fk.contype = 'f'
+        and fk.conrelid in ('session_turn_credit_totals'::regclass, 'session_turn_credit_calls'::regclass)
+        and fk.confrelid <> 'workspaces'::regclass) as foreign_keys_beyond_workspace
     from pg_class c
     where c.oid in ('session_turn_credit_totals'::regclass, 'session_turn_credit_calls'::regclass)`;
   expect(posture).toEqual({
@@ -950,8 +957,125 @@ test("the runtime writes totals only through the triggers; updates mark a turn f
     public_execute: 0,
     app_select: true,
     app_insert_update: true,
-    app_delete: false,
+    // DELETE serves the session-delete trigger only (its policy needs a trigger).
+    app_delete: true,
+    foreign_keys_beyond_workspace: 0,
   });
+});
+
+test("the backfill never waits for a session event writer holding the turn", async () => {
+  if (!owned) return;
+  const scope = await seedSession("lock order");
+  const turn = await seedTurn(scope);
+  await writeEvents(newHistory(turn), [
+    { type: "agent.model.usage", turnId: turn.turnId, payload: productionCall(prng(20), "before") },
+  ]);
+  await owned.admin`update session_turn_credit_totals set ready = false where turn_id = ${turn.turnId}`;
+  // Session event writers lock their turns FOR UPDATE (lockSessionEventWriteRows)
+  // before they append and wait for the turn's events row. The backfill holds
+  // that row while it rebuilds the call rows: a foreign key from them to the
+  // turn would make it wait for the writer's turn lock (a deadlock).
+  let turnLocked!: () => void;
+  const locked = new Promise<void>((resolve) => (turnLocked = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const eventWriter = withRlsContext(db(), turn, async (tx) => {
+    await tx.execute(sql`select id from session_turns where id = ${turn.turnId}::uuid for update`);
+    turnLocked();
+    await released;
+    await appendSessionEvents(tx, turn.workspaceId, turn.sessionId, [
+      {
+        type: "agent.model.usage",
+        turnId: turn.turnId,
+        payload: productionCall(prng(21), "shared"),
+      },
+    ]);
+  });
+  await locked;
+  const backfill = await readFile(
+    join(SHIPPED, "1600_session_turn_credit_totals_backfill.sql"),
+    "utf8",
+  );
+  const owner = postgres(owned.ownerUrl, { max: 1 });
+  let backfillError: string | null = null;
+  try {
+    await owner.begin(async (tx) => {
+      await tx`set local lock_timeout = '3s'`;
+      // As the migrator's batched backfill runs each batch.
+      await tx`select pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+      const done = await tx.unsafe(backfill);
+      // Both of the turn's rows completed, within the lock timeout.
+      expect(done.map((row) => row.turn_id)).toEqual([turn.turnId, turn.turnId]);
+    });
+  } catch (error) {
+    backfillError = String((error as { message?: string }).message ?? error);
+  } finally {
+    release();
+    await owner.end();
+  }
+  await eventWriter;
+  expect(backfillError).toBeNull();
+  const history = newHistory(turn);
+  await terminal(prng(22), history);
+  expect((await keptAgainstFull([turn])).kept).toBe(1);
+  const compared = await terminalMismatches([turn.turnId]);
+  expect(compared.compared).toBe(1);
+  expect(compared.differ).toEqual([]);
+});
+
+test("direct reads see a turn's totals only in its scope and for a session the person may see", async () => {
+  if (!owned) return;
+  const scope = await seedSession("privacy");
+  const turn = await seedTurn(scope);
+  await writeEvents(newHistory(turn), [
+    { type: "agent.model.usage", turnId: turn.turnId, payload: productionCall(prng(23), "seen") },
+  ]);
+  const other = await seedSession("privacy other");
+  const visible = (context: { accountId: string; workspaceId?: string }, subjectId?: string) =>
+    withRlsContext(db(), context, async (tx) => {
+      if (subjectId)
+        await tx.execute(sql`select set_config('opengeni.subject_id', ${subjectId}, true)`);
+      const [row] = rowsOf<{ totals: number; calls: number; sessions: number }>(
+        await tx.execute(sql`select
+          (select count(*)::int from session_turn_credit_totals where turn_id = ${turn.turnId}::uuid) as totals,
+          (select count(*)::int from session_turn_credit_calls where turn_id = ${turn.turnId}::uuid) as calls,
+          (select count(*)::int from sessions where id = ${turn.sessionId}::uuid) as sessions`),
+      );
+      return row!;
+    });
+  expect(await visible(turn)).toEqual({ totals: 2, calls: 1, sessions: 1 });
+  // The account scope alone (the sampled drift check) sees them.
+  expect(await visible({ accountId: turn.accountId })).toMatchObject({ totals: 2, calls: 1 });
+  expect(await visible(other)).toMatchObject({ totals: 0, calls: 0 });
+  // Another person sees them exactly when they see the session.
+  const stranger = await visible(turn, `user:${crypto.randomUUID()}`);
+  expect({ totals: stranger.totals, calls: stranger.calls }).toEqual(
+    stranger.sessions === 1 ? { totals: 2, calls: 1 } : { totals: 0, calls: 0 },
+  );
+  const checked = await checkSessionTurnCreditTotals(db(), [turn.accountId], 10);
+  expect(checked).toEqual({ checked: 1, mismatchedTurnIds: [] });
+});
+
+test("deleting a session deletes its turns' kept rows", async () => {
+  if (!owned) return;
+  const scope = await seedSession("forget");
+  const turn = await seedTurn(scope);
+  const kept = await seedTurn(await seedSession("forget other"));
+  for (const each of [turn, kept]) {
+    await writeEvents(newHistory(each), [
+      { type: "agent.model.usage", turnId: each.turnId, payload: productionCall(prng(24), "gone") },
+    ]);
+  }
+  await owned.admin`delete from sessions where id = ${scope.sessionId}`;
+  const left = await owned.admin<{ turn_id: string; totals: number; calls: number }[]>`
+    select t.turn_id, count(distinct t.side)::int as totals, count(distinct c.source_id)::int as calls
+    from session_turn_credit_totals t left join session_turn_credit_calls c on c.turn_id = t.turn_id
+    where t.turn_id in (${turn.turnId}, ${kept.turnId}) group by t.turn_id`;
+  expect([...left]).toEqual([{ turn_id: kept.turnId, totals: 2, calls: 1 }]);
+  const [orphans] = await owned.admin<{ calls: number }[]>`
+    select count(*)::int as calls from session_turn_credit_calls where turn_id = ${turn.turnId}`;
+  expect(orphans?.calls).toBe(0);
 });
 
 test("terminal insert at production shape: kept totals against the previous full sum", async () => {

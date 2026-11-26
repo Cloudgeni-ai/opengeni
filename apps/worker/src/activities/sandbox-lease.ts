@@ -4450,6 +4450,7 @@ async function refreshQueueLeaseAndCreditGauges(
           await checkSessionTurnCreditTotals(db, sampleAccountIds(accountIds, 4)),
         );
       } catch (error) {
+        recordSessionTurnCreditTotalsCheck(observability, null);
         observability.warn("sandbox reaper: session turn credit totals check failed", {
           error: errorMessage(error),
         });

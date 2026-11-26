@@ -2920,6 +2920,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_title_operations",
   "session_turn_app_action_grants",
   "session_turn_attempts",
+  // 1599_session_turn_credit_totals: written and deleted only by the
+  // session_events, usage_events and sessions invoker triggers (RLS admits
+  // runtime writes at pg_trigger_depth() > 0).
+  "session_turn_credit_calls",
+  "session_turn_credit_totals",
   "session_turns",
   "session_workflow_wake_outbox",
   "sessions",
@@ -3247,11 +3252,6 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "scheduled_tasks",
   "session_attempt_codemode_calls",
   "session_attempt_model_context_snapshots",
-  // 1599_session_turn_credit_totals: written only by the session_events and
-  // usage_events invoker triggers (RLS admits runtime writes at
-  // pg_trigger_depth() > 0).
-  "session_turn_credit_calls",
-  "session_turn_credit_totals",
   "session_turn_startup_milestones",
   "site_auth_connections",
   // 1557_sticky_tool_data_marks: when a manager last reset a target.

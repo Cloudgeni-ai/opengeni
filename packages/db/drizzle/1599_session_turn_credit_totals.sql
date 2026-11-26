@@ -52,14 +52,24 @@
 -- events row adds no wait for them; usage writers of one turn now serialize
 -- on the usage row until commit. The only new cross-family edge is the call
 -- row of one model call, whose usage event commits before its settlement.
+-- Neither table references session_turns or sessions: a foreign key there
+-- would take KEY SHARE on the turn, which session event writers hold FOR
+-- UPDATE while they wait for these rows (a deadlock). Their only foreign key
+-- is the workspace, which both writer families already KEY SHARE through
+-- their own rows' keys; deleting a session deletes its rows by trigger.
+--
+-- Reads: outside the triggers a runtime role sees a turn's rows in its
+-- account and workspace scope, and only for a session visible to the
+-- request's person (as session_events); the triggers read and write their
+-- own account's rows (pg_trigger_depth() > 0).
 --
 -- Nobody sets a total directly: every routine is SECURITY INVOKER with a
 -- pinned search_path (a definer trigger needs an earlier binary's contract),
--- the runtime's INSERT and UPDATE policies admit its own account's rows only
--- from inside a trigger (pg_trigger_depth() > 0), and the owner policy serves
--- foreign-key cascades and the backfill.
+-- the runtime's INSERT, UPDATE and DELETE policies admit its own account's
+-- rows only from inside a trigger (pg_trigger_depth() > 0), and the owner
+-- policy serves workspace cascades and the backfill.
 --
--- Rolling: new FORCE RLS tables (runtime SELECT, INSERT, UPDATE), invoker
+-- Rolling: new FORCE RLS tables (runtime SELECT, INSERT, UPDATE, DELETE), invoker
 -- routines and triggers. The previous release writes the same records and
 -- keeps the totals current through the triggers; the replaced terminal
 -- function returns the same `usage`.
@@ -67,11 +77,11 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
 CREATE TABLE session_turn_credit_totals (
-  turn_id uuid NOT NULL REFERENCES session_turns(id) ON DELETE CASCADE,
+  turn_id uuid NOT NULL,
   -- 'events': kept by session_events writers; 'usage': by usage_events writers.
   side text NOT NULL CHECK (side IN ('events', 'usage')),
   account_id uuid NOT NULL,
-  workspace_id uuid NOT NULL,
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   session_id uuid NOT NULL,
   -- Holds the turn's whole records (new turns; 1600 for earlier ones).
   ready boolean NOT NULL DEFAULT false,
@@ -100,13 +110,17 @@ CREATE INDEX session_turn_credit_totals_pending_idx ON session_turn_credit_total
   WHERE side = 'events' AND NOT ready AND exact;
 CREATE INDEX session_turn_credit_totals_account_idx ON session_turn_credit_totals (account_id, turn_id)
   WHERE side = 'events';
+-- Deleting a session or a workspace deletes its rows.
+CREATE INDEX session_turn_credit_totals_session_idx ON session_turn_credit_totals (session_id);
+CREATE INDEX session_turn_credit_totals_workspace_idx ON session_turn_credit_totals (workspace_id);
 
 CREATE TABLE session_turn_credit_calls (
-  turn_id uuid NOT NULL REFERENCES session_turns(id) ON DELETE CASCADE,
+  turn_id uuid NOT NULL,
   -- turn_id || ':' || sourceKey for a recorded call; a model.cost row's
   -- source_resource_id otherwise.
   source_id text NOT NULL,
   account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   -- The first recorded usage of the call, by session sequence; null until one.
   call_sequence integer,
   has_settlement boolean,
@@ -127,32 +141,53 @@ COMMENT ON TABLE session_turn_credit_calls IS
 CREATE INDEX session_turn_credit_calls_probe_idx ON session_turn_credit_calls (turn_id)
   WHERE ((call_sequence IS NOT NULL OR has_cost) AND has_settlement IS NOT TRUE)
     OR hosted_credit_micros IS NOT NULL;
+CREATE INDEX session_turn_credit_calls_workspace_idx ON session_turn_credit_calls (workspace_id);
 
 ALTER TABLE session_turn_credit_totals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE session_turn_credit_totals FORCE ROW LEVEL SECURITY;
 ALTER TABLE session_turn_credit_calls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE session_turn_credit_calls FORCE ROW LEVEL SECURITY;
-CREATE POLICY session_turn_credit_totals_account_read ON session_turn_credit_totals
-  FOR SELECT USING (account_id = opengeni_private.current_account_id());
+-- Direct reads: the account and workspace scope, and a session the request's
+-- person may see (no person: the scope alone, as session_events).
+CREATE POLICY session_turn_credit_totals_scoped_read ON session_turn_credit_totals
+  FOR SELECT USING (opengeni_private.optional_workspace_rls_visible(account_id, workspace_id)
+    AND (nullif(current_setting('opengeni.subject_id', true), '') IS NULL
+      OR EXISTS (SELECT 1 FROM sessions session_row
+        WHERE session_row.id = session_turn_credit_totals.session_id
+          AND session_row.account_id = session_turn_credit_totals.account_id
+          AND session_row.workspace_id = session_turn_credit_totals.workspace_id OFFSET 0)));
+-- The triggers keep their own account's rows whoever writes the source row.
+CREATE POLICY session_turn_credit_totals_trigger_read ON session_turn_credit_totals
+  FOR SELECT USING (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
 CREATE POLICY session_turn_credit_totals_trigger_insert ON session_turn_credit_totals
   FOR INSERT WITH CHECK (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
 CREATE POLICY session_turn_credit_totals_trigger_update ON session_turn_credit_totals
   FOR UPDATE USING (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0)
   WITH CHECK (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
-CREATE POLICY session_turn_credit_calls_account_read ON session_turn_credit_calls
-  FOR SELECT USING (account_id = opengeni_private.current_account_id());
+CREATE POLICY session_turn_credit_totals_trigger_delete ON session_turn_credit_totals
+  FOR DELETE USING (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
+-- A call row is visible where its turn's events row is.
+CREATE POLICY session_turn_credit_calls_scoped_read ON session_turn_credit_calls
+  FOR SELECT USING (EXISTS (SELECT 1 FROM session_turn_credit_totals total
+    WHERE total.turn_id = session_turn_credit_calls.turn_id AND total.side = 'events'
+      AND total.account_id = session_turn_credit_calls.account_id
+      AND total.workspace_id = session_turn_credit_calls.workspace_id OFFSET 0));
+CREATE POLICY session_turn_credit_calls_trigger_read ON session_turn_credit_calls
+  FOR SELECT USING (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
 CREATE POLICY session_turn_credit_calls_trigger_insert ON session_turn_credit_calls
   FOR INSERT WITH CHECK (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
 CREATE POLICY session_turn_credit_calls_trigger_update ON session_turn_credit_calls
   FOR UPDATE USING (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0)
   WITH CHECK (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
+CREATE POLICY session_turn_credit_calls_trigger_delete ON session_turn_credit_calls
+  FOR DELETE USING (account_id = opengeni_private.current_account_id() AND pg_trigger_depth() > 0);
 REVOKE ALL ON TABLE session_turn_credit_totals FROM PUBLIC;
 REVOKE ALL ON TABLE session_turn_credit_calls FROM PUBLIC;
 
 DO $session_turn_credit_totals$
 DECLARE data_schema text := current_schema(); owner_name text := current_user;
 BEGIN
-  -- Cascades from session_turns, owner writes and the 1600 backfill.
+  -- Workspace cascades, owner writes and the 1600 backfill.
   EXECUTE format(
     'CREATE POLICY session_turn_credit_totals_owner ON %1$I.session_turn_credit_totals '
     'TO %2$I USING (CURRENT_USER = %3$L::name) WITH CHECK (CURRENT_USER = %3$L::name)',
@@ -251,14 +286,15 @@ BEGIN
   -- `p_side` row. The caller holds that row's lock.
   EXECUTE format($create$
     CREATE FUNCTION opengeni_private.session_turn_credit_apply_call(p_turn_id uuid, p_side text,
-      p_source_id text, p_account_id uuid, p_sequence integer, p_recorded jsonb, p_cost numeric)
+      p_source_id text, p_account_id uuid, p_workspace_id uuid, p_sequence integer, p_recorded jsonb,
+      p_cost numeric)
     RETURNS void
     LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, %1$I, pg_temp AS $body$
     DECLARE prior %1$I.session_turn_credit_calls; next %1$I.session_turn_credit_calls;
       was record; now record; fields record;
     BEGIN
-      INSERT INTO %1$I.session_turn_credit_calls (turn_id, source_id, account_id)
-      VALUES (p_turn_id, p_source_id, p_account_id) ON CONFLICT (turn_id, source_id) DO NOTHING;
+      INSERT INTO %1$I.session_turn_credit_calls (turn_id, source_id, account_id, workspace_id)
+      VALUES (p_turn_id, p_source_id, p_account_id, p_workspace_id) ON CONFLICT (turn_id, source_id) DO NOTHING;
       SELECT * INTO prior FROM %1$I.session_turn_credit_calls
       WHERE turn_id = p_turn_id AND source_id = p_source_id FOR UPDATE;
       IF NOT FOUND THEN RETURN; END IF;
@@ -322,7 +358,8 @@ BEGIN
       IF total.turn_id IS NULL OR total.workspace_id IS DISTINCT FROM NEW.workspace_id
         OR total.session_id IS DISTINCT FROM NEW.session_id THEN RETURN NEW; END IF;
       PERFORM opengeni_private.session_turn_credit_apply_call(NEW.turn_id, 'events',
-        NEW.turn_id::text || ':' || (recorded ->> 'sourceKey'), total.account_id, NEW.sequence, recorded, NULL);
+        NEW.turn_id::text || ':' || (recorded ->> 'sourceKey'), total.account_id, total.workspace_id,
+        NEW.sequence, recorded, NULL);
       RETURN NEW;
     END $body$;
   $create$, data_schema);
@@ -343,7 +380,7 @@ BEGIN
       ELSIF NEW.event_type = 'model.cost' THEN
         IF NEW.source_resource_id IS NOT NULL THEN
           PERFORM opengeni_private.session_turn_credit_apply_call(NEW.turn_id, 'usage',
-            NEW.source_resource_id, total.account_id, NULL, NULL, NEW.quantity::numeric);
+            NEW.source_resource_id, total.account_id, total.workspace_id, NULL, NULL, NEW.quantity::numeric);
         END IF;
       ELSE
         UPDATE %1$I.session_turn_credit_totals SET
@@ -403,6 +440,20 @@ BEGIN
     BEGIN
       DELETE FROM %1$I.session_turn_credit_calls;
       DELETE FROM %1$I.session_turn_credit_totals;
+      RETURN NULL;
+    END $body$;
+  $create$, data_schema);
+
+  -- A deleted session: its turns' rows go with it (the workspace foreign key
+  -- covers a deleted workspace). Calls first, by the turn's events row.
+  EXECUTE format($create$
+    CREATE FUNCTION opengeni_private.forget_session_turn_credit_totals() RETURNS trigger
+    LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, %1$I, pg_temp AS $body$
+    BEGIN
+      DELETE FROM %1$I.session_turn_credit_calls kc
+      USING %1$I.session_turn_credit_totals total
+      WHERE total.session_id = OLD.id AND total.side = 'events' AND kc.turn_id = total.turn_id;
+      DELETE FROM %1$I.session_turn_credit_totals WHERE session_id = OLD.id;
       RETURN NULL;
     END $body$;
   $create$, data_schema);
@@ -613,10 +664,11 @@ BEGIN
           AND u.unit = 'usd_micros' AND u.event_type = 'model.cost' AND u.source_resource_id IS NOT NULL
         GROUP BY u.source_resource_id
       )
-      INSERT INTO %1$I.session_turn_credit_calls (turn_id, source_id, account_id, call_sequence,
+      INSERT INTO %1$I.session_turn_credit_calls (turn_id, source_id, account_id, workspace_id, call_sequence,
         has_settlement, charges_credits, settlement_credit_micros, settlement_fee_micros,
         priced_micros, hosted_credit_micros, input_tokens, output_tokens, has_cost, charged_micros)
-      SELECT p_turn_id, coalesce(c.source_id, m.source_resource_id), scope.account_id, c.sequence,
+      SELECT p_turn_id, coalesce(c.source_id, m.source_resource_id), scope.account_id, scope.workspace_id,
+        c.sequence,
         f.has_settlement, f.charges_credits, f.settlement_credit_micros, f.settlement_fee_micros,
         f.priced_micros, f.hosted_credit_micros, coalesce(f.input_tokens, 0), coalesce(f.output_tokens, 0),
         m.source_resource_id IS NOT NULL, m.quantity
@@ -646,11 +698,13 @@ BEGIN
   -- The same `usage` from the kept rows, or null when the turn has no ready,
   -- exact rows (or a refund row) and must be recounted. The fee and owed
   -- hosted-search probes read exactly what 1514 reads, for only those calls.
+  -- STABLE: every statement reads the calling statement's one snapshot, so
+  -- the sums, the call rows and the probes see the same committed records.
   EXECUTE format($create$
     CREATE FUNCTION opengeni_private.session_turn_credit_usage_kept_v1(
       p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid)
     RETURNS jsonb
-    LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, %1$I, pg_temp AS $body$
+    LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = pg_catalog, %1$I, pg_temp AS $body$
     DECLARE kept record; probed_fees numeric := 0; probed_search numeric := 0;
     BEGIN
       SELECT count(*) AS sides, bool_and(total.ready AND total.exact) AS usable,
@@ -751,12 +805,13 @@ END $session_turn_credit_totals$;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_call_fields(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_call_terms(session_turn_credit_calls) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_totals_lock(uuid, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_apply_call(uuid, text, text, uuid, integer, jsonb, numeric) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_apply_call(uuid, text, text, uuid, uuid, integer, jsonb, numeric) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_record_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_record_usage() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_start_turn() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_mark_inexact() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.clear_session_turn_credit_totals() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.forget_session_turn_credit_totals() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_usage_full_v1(uuid, uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_usage_kept_v1(uuid, uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_totals_recount(uuid) FROM PUBLIC;
@@ -798,9 +853,11 @@ CREATE TRIGGER usage_events_turn_credit_totals_truncate_v1 AFTER TRUNCATE ON usa
 
 CREATE TRIGGER session_turns_credit_totals_start_v1 AFTER INSERT ON session_turns
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.session_turn_credit_start_turn();
+CREATE TRIGGER sessions_turn_credit_totals_forget_v1 AFTER DELETE ON sessions
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.forget_session_turn_credit_totals();
 
--- Every configured application role, as provisioning does. INSERT and UPDATE
--- serve only the invoker triggers (the policies admit nothing else).
+-- Every configured application role, as provisioning does. INSERT, UPDATE
+-- and DELETE serve only the invoker triggers (the policies admit nothing else).
 DO $session_turn_credit_totals_grant$
 DECLARE application_role text;
 BEGIN
@@ -816,13 +873,13 @@ BEGIN
     EXECUTE pg_catalog.format('REVOKE ALL ON TABLE session_turn_credit_totals, session_turn_credit_calls FROM %I',
       application_role);
     EXECUTE pg_catalog.format(
-      'GRANT SELECT, INSERT, UPDATE ON TABLE session_turn_credit_totals, session_turn_credit_calls TO %I',
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE session_turn_credit_totals, session_turn_credit_calls TO %I',
       application_role);
     EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION '
       'opengeni_private.session_turn_credit_call_fields(jsonb), '
       'opengeni_private.session_turn_credit_call_terms(session_turn_credit_calls), '
       'opengeni_private.session_turn_credit_totals_lock(uuid, text), '
-      'opengeni_private.session_turn_credit_apply_call(uuid, text, text, uuid, integer, jsonb, numeric), '
+      'opengeni_private.session_turn_credit_apply_call(uuid, text, text, uuid, uuid, integer, jsonb, numeric), '
       'opengeni_private.session_turn_credit_usage_full_v1(uuid, uuid, uuid, uuid), '
       'opengeni_private.session_turn_credit_usage_kept_v1(uuid, uuid, uuid, uuid) TO %I', application_role);
   END LOOP;

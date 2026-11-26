@@ -151,6 +151,12 @@ describe("turn lifecycle metrics", () => {
     metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_session_turn_credit_totals_mismatched_turns\{[^}]*\} 0/);
     expect(warnings).toHaveLength(1);
+
+    // A check that could not run is never read as "no drift".
+    recordSessionTurnCreditTotalsCheck(observability, null);
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_session_turn_credit_totals_mismatched_turns\{[^}]*\} -1/);
+    expect(warnings).toHaveLength(1);
   });
 
   test("records sampled credit ledger totals drift as a gauge", async () => {
