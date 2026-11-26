@@ -165,7 +165,8 @@ export function WorkspaceShortcutLinks({
         ? groupOpen
           ? visible(key)
           : surfacedKeys.includes(key)
-        : visible(key);
+        : // A hidden Inbox shows only while something waits there; step past it.
+          visible(key) && !(key === "inbox" && hiddenEntries.inbox);
   const [moved, setMoved] = useState("");
   const labelOf = (key: string) =>
     key === NAV_GROUP_KEY
@@ -175,7 +176,9 @@ export function WorkspaceShortcutLinks({
     const next = stepNavEntry(arrangement, key, direction, groupOpen, onScreen);
     if (!next) return;
     order.save(next);
-    setMoved(`Moved ${labelOf(key)} ${direction < 0 ? "up" : "down"}.`);
+    // A changed text each time, so the same move twice is announced twice.
+    const text = `Moved ${labelOf(key)} ${direction < 0 ? "up" : "down"}.`;
+    setMoved((current) => (current === text ? `${text}\u200b` : text));
   };
   const entry = (key: string) => {
     const content = entries?.[key] ?? (items.has(key) ? link(items.get(key)!) : null);
