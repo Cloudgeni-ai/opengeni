@@ -705,8 +705,13 @@ describe("missing quiescence-receipt wake repair", () => {
     await shared.admin.begin(async (tx) => {
       const [scope] = await tx<{ schema: string }[]>`select current_schema() as schema`;
       const schema = `"${scope!.schema.replaceAll('"', '""')}"`;
+      // Replaying a historical CREATE OR REPLACE resets the routine's settings
+      // to its search path, dropping 1671's plan reuse setting; authority is
+      // the search path among them.
       const readPosture = () => tx`
-        select proowner, proacl::text, prosecdef, provolatile, proconfig,
+        select proowner, proacl::text, prosecdef, provolatile,
+          array(select setting from unnest(proconfig) setting
+            where setting like 'search_path=%') as proconfig,
           proargtypes::text, proallargtypes::text, proargmodes, proargnames, prorettype
         from pg_proc where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
       const initialPosture = await readPosture();
