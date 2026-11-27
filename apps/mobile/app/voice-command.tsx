@@ -4,7 +4,6 @@
  * from a chat's ⋯ menu to make one, and from Settings › Calls to rename or
  * remove it.
  */
-import { wakePhraseSetupAvailable } from "@opengeni/react-native";
 import { Icon, fontStyle, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { Stack, router, useLocalSearchParams } from "expo-router";
@@ -36,7 +35,7 @@ import {
   renameVoiceCommand,
   useVoiceCommands,
 } from "@/voice-commands";
-import { callAssistantName, voiceCommandRequest } from "@/wake-phrase";
+import { callAssistantName, offerWakePhraseSetup, voiceCommandRequest } from "@/wake-phrase";
 
 export default function VoiceCommandScreen() {
   return (
@@ -90,6 +89,8 @@ function VoiceCommandSheet() {
   const renamed = Boolean(command && name !== command.name);
   const canSave = !problem && (!command || renamed);
   const ios = Platform.OS === "ios";
+  const offerWakePhrase = ios && offerWakePhraseSetup();
+  const offerPin = !ios && Boolean(sharedCallAdapter()?.pinCallCommand);
 
   const close = () => {
     if (router.canGoBack()) router.back();
@@ -136,7 +137,9 @@ function VoiceCommandSheet() {
     Alert.alert(
       `Remove “${command.name}”?`,
       ios
-        ? `Siri stops calling this chat by name. A “Hey ${command.name}” shortcut you set up stops working too.`
+        ? offerWakePhrase
+          ? `Siri stops calling this chat by name. A “Hey ${command.name}” shortcut you set up stops working too.`
+          : "Siri stops calling this chat by name."
         : "Its launcher and home screen shortcuts stop working.",
       [
         { text: "Cancel", style: "cancel" },
@@ -348,9 +351,9 @@ function VoiceCommandSheet() {
           </View>
         )}
 
-        {command && !command.missing ? (
+        {command && !command.missing && (offerWakePhrase || offerPin) ? (
           <View style={{ ...card, overflow: "hidden" }}>
-            {ios && wakePhraseSetupAvailable() ? (
+            {offerWakePhrase ? (
               <ActionRow
                 icon="mic"
                 title={`Set up “Hey ${wakeName}”`}
@@ -359,7 +362,7 @@ function VoiceCommandSheet() {
                 testID="voice-command-wake-phrase"
               />
             ) : null}
-            {!ios && sharedCallAdapter()?.pinCallCommand ? (
+            {offerPin ? (
               <ActionRow
                 icon="smartphone"
                 title="Add to home screen"
