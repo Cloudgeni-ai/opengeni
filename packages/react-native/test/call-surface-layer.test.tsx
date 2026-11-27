@@ -7,7 +7,7 @@ registerDom();
 type Finish = (result: { finished: boolean }) => void;
 const platform = { OS: "ios" };
 const animations: { toValue: number; finish: Finish | null; stopped: boolean }[] = [];
-const backListeners = new Set<() => boolean>();
+const modals: { visible: boolean; onRequestClose(): void }[] = [];
 let keyboardDismissals = 0;
 
 mock.module("react-native", () => {
@@ -25,11 +25,9 @@ mock.module("react-native", () => {
         keyboardDismissals++;
       },
     },
-    BackHandler: {
-      addEventListener(_event: string, listener: () => boolean) {
-        backListeners.add(listener);
-        return { remove: () => backListeners.delete(listener) };
-      },
+    Modal: (props: { visible: boolean; onRequestClose(): void; children?: ReactNode }) => {
+      modals.push(props);
+      return props.visible ? createElement("dialog", null, props.children) : null;
     },
     Animated: {
       Value,
@@ -82,7 +80,7 @@ describe("call surface layer", () => {
   beforeEach(() => {
     platform.OS = "ios";
     animations.length = 0;
-    backListeners.clear();
+    modals.length = 0;
     keyboardDismissals = 0;
   });
 
@@ -136,22 +134,20 @@ describe("call surface layer", () => {
     await rendered.unmount();
   });
 
-  test("on Android it is drawn in place and Back minimizes", async () => {
+  test("on Android it is the dialog window Modal, and Back minimizes", async () => {
     platform.OS = "android";
     let closes = 0;
     const close = () => closes++;
     const rendered = await renderComponent(app(true, close));
     expect(rendered.container.querySelector("[data-window-overlay]")).toBeNull();
-    expect(rendered.container.querySelector("[data-layer]")?.textContent).toBe("Call screen");
-    const handled = [...backListeners].map((listener) => listener());
-    expect(handled).toEqual([true]);
+    expect(rendered.container.querySelector("dialog")?.textContent).toBe("Call screen");
+    modals.at(-1)!.onRequestClose();
     expect(closes).toBe(1);
 
     await rendered.rerender(app(false, close));
-    // Hidden, Back belongs to the app again.
-    expect(backListeners.size).toBe(0);
-    await finishLatest();
-    expect(rendered.container.querySelector("[data-layer]")).toBeNull();
+    expect(modals.at(-1)!.visible).toBe(false);
+    expect(rendered.container.querySelector("dialog")).toBeNull();
+    expect(rendered.container.textContent).toBe("Screen underneath");
     await rendered.unmount();
   });
 });

@@ -15,12 +15,13 @@ mock.module("react-native", () => ({
   View: host,
   Text: host,
   Pressable: host,
+  Modal: (props: { visible: boolean; children?: ReactNode }) =>
+    props.visible ? host(props) : null,
   Alert: { alert() {} },
   StyleSheet: { create: (value: unknown) => value, absoluteFill: {} },
   Platform: { OS: "ios" },
   useWindowDimensions: () => ({ width: 400, height: 800 }),
   Keyboard: { dismiss() {} },
-  BackHandler: { addEventListener: () => ({ remove() {} }) },
   Animated: {
     Value: class {
       interpolate() {
